@@ -52,16 +52,20 @@ LIMITS_TTL_S = 600.0
 USER_AGENT = "tandem-conductor/1"
 # the question id being asked (classify, packages, ...), set by the router around a cascade
 ASKING: contextvars.ContextVar = contextvars.ContextVar("asking", default=None)
+# VIS-60: the request the router is planning; its question to the engine names it in
+# `X-Tandem-Parent`, so the ledger row of the question points at the turn it served
+PARENT: contextvars.ContextVar = contextvars.ContextVar("parent", default=None)
 
 
 class Answer:
-    __slots__ = ("label", "confidence", "probs", "ms", "error", "model", "stage")
+    __slots__ = ("label", "confidence", "probs", "ms", "error", "model", "stage", "guard")
 
     def __init__(self, stage: str, label=None, confidence=0.0, probs=None, ms=0.0, error=None,
                  model=None):
         self.stage, self.label, self.confidence = stage, label, float(confidence or 0.0)
         self.probs = probs or {}
         self.ms, self.error, self.model = round(float(ms), 2), error, model
+        self.guard = None                # SRV-189: the code guard's change (router._code_guard)
 
     def as_dict(self) -> dict:
         return {"stage": self.stage, "label": self.label, "confidence": round(self.confidence, 4),
@@ -74,6 +78,9 @@ def _post(url: str, body: dict, timeout_s: float, headers: dict | None = None) -
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", USER_AGENT)
+    parent = PARENT.get()
+    if parent:
+        req.add_header("X-Tandem-Parent", str(parent)[:80])
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout_s) as r:
@@ -249,6 +256,30 @@ def decider_for(endpoint: str, model: str, timeout_ms: int) -> Decider | None:
     return None
 
 
+def distribution(toks: list, ids: list[str], label: str, conf: float) -> dict[str, float]:
+    """SRV-189: every option's probability from the answer's first token and its alternatives
+    (`top_logprobs`, under the grammar only an option's prefix can come first): an alternative
+    goes to the options its text starts, shared evenly when it starts several (`d` of `debug` and
+    `design_ui`); the chosen option keeps the probability of its whole path. Before, the stage
+    returned the chosen option alone, so 0.57 for code_edit hid chat at 0.29 and writing at
+    0.10 (the UT2 essay, 2026-10-06)."""
+    out = {label: conf}
+    first = toks[0] if toks else {}
+    alts = first.get("top_logprobs") or []
+    chosen = str(first.get("token") or "")
+    for a in alts:
+        t = str(a.get("token") or "").strip()
+        if not t or t == chosen.strip():
+            continue
+        hit = [o for o in ids if o.startswith(t) and o != label]
+        if not hit:
+            continue
+        p = math.exp(float(a.get("logprob", -1e9))) / len(hit)
+        for o in hit:
+            out[o] = out.get(o, 0.0) + p
+    return out
+
+
 class Qwen:
     """The classifier role: the engine itself on the raw model name, thinking off."""
 
@@ -265,7 +296,8 @@ class Qwen:
                              {"role": "user", "content": state[:max_chars]}],
                 "chat_template_kwargs": {"enable_thinking": False},
                 "structured_outputs": {"choice": ids},
-                "logprobs": True, "top_logprobs": 3}
+                # SRV-189: the first token's alternatives give every class its probability
+                "logprobs": True, "top_logprobs": min(20, max(3, len(ids)))}
         try:
             r = _post(self.endpoint + "/v1/chat/completions", body, self.timeout_ms / 1000,
                       {"X-Tandem": "raw"})
@@ -279,7 +311,8 @@ class Qwen:
             if label not in ids:
                 return Answer("qwen", None, 0.0, {}, (time.perf_counter() - t0) * 1e3,
                               error="qwen_unknown_label", model=r.get("model"))
-            return Answer("qwen", label, conf, {label: conf}, (time.perf_counter() - t0) * 1e3,
+            probs = distribution(toks, ids, label, conf)
+            return Answer("qwen", label, conf, probs, (time.perf_counter() - t0) * 1e3,
                           model=r.get("model"))
         except Exception as exc:                                   # noqa: BLE001
             return Answer("qwen", ms=(time.perf_counter() - t0) * 1e3,

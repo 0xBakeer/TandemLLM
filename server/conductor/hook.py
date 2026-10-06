@@ -118,8 +118,8 @@ class Conductor:
         _, settings = self.store.get("settings")
         return [{"id": COMPOSITE, "object": "model", "created": created, "owned_by": "tandemllm",
                  "profile": settings["default_profile"],
-                 "description": "Qwen3.8-27B with the conductor: per-turn task routing, effort "
-                                "and hidden skills, under a profile"}]
+                 "description": f"{schema.model_name()} with the conductor: per-turn task "
+                                "routing, effort and hidden skills, under a profile"}]
 
     def model_card(self, name: str, raw_model: str, created: int) -> dict | None:
         """`/v1/models/{id}`: the card of `TandemLLM` for its own name and for the hidden alias,

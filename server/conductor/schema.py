@@ -66,6 +66,72 @@ CLIENT_WORDS = ("ceiling", "ignore")
 # 4-gram is ordinary code: indentation, `", "`, a sprite's pixel row), the server's own default
 # stays (server/app.py)
 CODE_CLASSES = ("code_edit", "debug", "design_ui", "drawing", "three_d")
+# SRV-189 (the UT2 self-test, 2026-10-06): "Write a detailed 700-word essay about the history of
+# tides" went to code_edit at 0.5708 (chat 0.29, writing 0.10 behind it) in an Open WebUI agent
+# chat: the coding package, xhigh, 8.3 s of prefill. A code class below `accept` for a request that
+# names nothing of code (`cues`) and names a piece of prose (`prose`) is not taken: the stage's best
+# class outside CODE_CLASSES is, and the stage row says `guard`. Measured on the router's labelled
+# sets plus prose_prompts.jsonl (live Qwen stage, 374 prompts): 2 prose prompts no longer routed
+# as code, 0 changes on the other 342 (the FX2 note in Memo).
+CODE_GUARD = {
+    "accept": 0.7,
+    "cues": (r"```|(?i:\b[\w-]+\.(?:py|js|jsx|ts|tsx|html?|css|scss|json|ya?ml|toml|md|sh|go|"
+             r"rs|rb|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sql|vue|svelte|ipynb|csv|txt|env|lock|"
+             r"xml)\b)|"
+             r"(?i:\b(?:code|coding|program\w*|script\w*|function\w*|method|class(?:es)?|bug\w*|"
+             r"errors?|exception|traceback|stack ?trace|crash\w*|compil\w*|tests?|testing|"
+             r"repo\w*|git|commit|branch|merge|html|css|javascript|typescript|python|java|rust|"
+             r"golang|sql|api|endpoint|json|yaml|regex|cli|terminal|bash|shell|npm|pip|docker\w*|"
+             r"kubernetes|react|vue|svelte|node(?:\.js)?|app|apps|website|web ?page|webpage|page|"
+             r"game|ui|ux|button|server|database|schema|refactor\w*|implement\w*|deploy\w*|"
+             r"debug\w*|lint\w*|install\w*|file|files|folder|directory|path|variable|module|"
+             r"package|library|framework|component|widget|canvas|svg|three\.js|webgl|shader|"
+             r"sprite|frontend|backend|query|migration|config\w*|log|logs)\b)|"
+             r"\b[a-z]+_[a-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z0-9]*\b|\w+\(\)|</?[a-z]+>"),
+    # ... and that names a piece of prose (an essay, a letter, "700 words"): without this second
+    # condition the guard sent six design, drawing and 3D requests of the labelled set to chat
+    "prose": (r"(?i)\b(?:essay|story|stories|poem|sonnet|haiku|letter|e-?mail|article|blog|post|"
+              r"speech|toast|eulogy|memoir|novel|chapter|newsletter|press release|cover letter|"
+              r"note|description|opinion piece|op-ed|\d+[- ]words?)\b"),
+}
+
+
+# SRV-191 (the owner, 2026-10-06): asked who or what it is, the model said "I'm Qwen". It names the
+# served model and says that it runs in TandemLLM. A hidden note at the usual place (the end of the
+# last message, replayed there on every later turn of the session: router.Router._identity), on
+# the turn whose message asks (IDENTITY_ASK), under every profile that runs the conductor; raw and
+# bench never see it, and a session that never asks carries nothing new. QWEN38_MODEL_NAME
+# overrides the name for a box that serves another checkpoint.
+MODEL_NAME = "Qwen3.8-27B"
+IDENTITY_NOTE = ("About you: you are {model}, running in TandemLLM, the engine and harness that "
+                 "serves you here. When someone asks who or what you are or which model this is, "
+                 "say that in one short sentence in their language, and add details about the "
+                 "engine only when asked.")
+
+
+# the turn that asks (the note goes in there, then replays at its place on every later turn of the
+# session): who or what it is, which model, its name, who made it, in English, German, French,
+# Spanish, Italian and Dutch; "are you ChatGPT/Claude/an AI"
+IDENTITY_ASK = (
+    r"(?i)\b(?:who|what)\s+(?:are|r)\s+(?:you|u)\b(?!\s+(?:doing|working|up\s+to|talking|saying|"
+    r"thinking|going|trying|planning|looking))|\bwhich\s+(?:model|llm|ai)\b|"
+    r"\bwhat\s+(?:model|llm|ai)\b|\byour\s+(?:name|model)\b|\babout\s+yourself\b|"
+    r"\bwho\s+(?:made|built|created|trained|developed)\s+you\b|"
+    r"\bare\s+you\s+(?:chatgpt|gpt|claude|gemini|qwen|llama|an?\s+(?:ai|bot|llm|language model))\b|"
+    r"\bwer\s+bist\s+du\b|\bwas\s+bist\s+du\b|\bwelches\s+(?:modell|sprachmodell|llm|ki)\b|"
+    r"\bwie\s+hei(?:ss|ß)t\s+du\b|\bwer\s+hat\s+dich\b|\bwer\s+sind\s+sie\b|"
+    r"\bqui\s+es[- ]tu\b|\bquel\s+mod[eè]le\b|\bqui[eé]n\s+eres\b|\bqu[eé]\s+modelo\b|"
+    r"\bchi\s+sei\b|\bwie\s+ben\s+je\b")
+
+
+def model_name() -> str:
+    from engine.settings import SETTINGS as _S
+    return (_S.get("MODEL_NAME") or "").strip() or MODEL_NAME
+
+
+def identity_text() -> str:
+    return IDENTITY_NOTE.replace("{model}", model_name())
+
 DECISIONS = ("classify", "effort", "packages", "rules")
 CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",

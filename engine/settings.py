@@ -116,6 +116,8 @@ KNOBS: dict[str, tuple] = {
     # empty: ~/.qwen38-spark-engine/models/<QWEN38_NARRATOR_MODEL> (N2)
     'NARRATOR_DIR': ('', 'server/conductor/narrator.py'),
     'NARRATOR_MODEL': ('', 'server/conductor/narrator.py'),
+    # SRV-191: the served model's name in the identity note and /v1/models ('' = Qwen3.8-27B)
+    'MODEL_NAME': ('', 'server/conductor/schema.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),

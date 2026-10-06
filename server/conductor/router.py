@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import re
 import threading
 import time
 
@@ -52,7 +53,7 @@ from server.conductor import incontext, inject, libsearch, outcomes, schema, sig
 from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
-from server.conductor.classify import ASKING, Answer, Qwen, decider_for
+from server.conductor.classify import ASKING, PARENT, Answer, Qwen, decider_for
 from server.conductor.store import ConfigError
 
 COMPOSITE = "TandemLLM"
@@ -178,6 +179,27 @@ def session_key(body: dict, headers, sh: signals.Shape) -> str:
         if v:
             return "c:" + v[:120]
     return "h:" + (sh.first_hash or "empty")
+
+
+def _code_guard(ans: Answer, text: str, options: dict) -> Answer:
+    """SRV-189: a code class below `CODE_GUARD.accept` for a request that names nothing of code and
+    names a piece of prose becomes the stage's best class outside the code classes, at its own
+    probability (journaled as `guard`). Everything else passes as the stage answered."""
+    g = schema.CODE_GUARD
+    if ans.error is not None or ans.label not in schema.CODE_CLASSES or \
+            ans.confidence >= float(g["accept"]):
+        return ans
+    if re.search(g["cues"], text or "") or not re.search(g["prose"], text or ""):
+        return ans
+    rest = {k: v for k, v in (ans.probs or {}).items()
+            if k in options and k not in schema.CODE_CLASSES}
+    if not rest:
+        return ans
+    best = max(rest, key=rest.get)
+    out = Answer(ans.stage, best, rest[best], ans.probs, ans.ms, model=ans.model)
+    out.guard = {"was": ans.label, "confidence": round(ans.confidence, 4), "to": best,
+                 "why": "no_code_cue"}
+    return out
 
 
 class Plan:
@@ -556,12 +578,16 @@ class Router:
                 ans = a.choice(signals.digest(text, chars, line),
                                clf["qwen_prompt"].replace("{classes}", listing), options,
                                max_chars=chars)
+            if st["kind"] == "qwen" and question is None:
+                ans = _code_guard(ans, text, options)    # SRV-189
             d = ans.as_dict()
+            if getattr(ans, "guard", None):
+                d["guard"] = ans.guard
             need = accept if accept is not None else float(st["accept"])
             d["accept"] = need
             if ans.error is None and ans.label not in options:
                 d["error"] = f"{st['kind']}_unknown_label"
-            elif ans.error is None and ans.confidence < need:
+            elif ans.error is None and ans.confidence < need and not ans.guard:
                 d["below"] = True
             elif ans.error is None:
                 accepted = ans
@@ -618,6 +644,8 @@ class Router:
         needs it. `caps` (proxy P4): decision type -> the highest mode it may have for this
         request (the harness's switches per backend and model), and `side` for the side-request
         shapes; None for the engine's own requests."""
+        if not dry:
+            PARENT.set(request_id)                # VIS-60: the router's question names this turn
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
                       self.raw_model(), headers, client_kind, self.global_mode())
         # `{tandem_url}` in a package's text: the address this request came in on
@@ -990,6 +1018,7 @@ class Router:
         except Exception as exc:                                   # noqa: BLE001
             row["extra"].setdefault("errors", []).append(f"memory:{type(exc).__name__}")
             print(f"[conductor] memory failed: {type(exc).__name__}: {exc}", flush=True)
+        self._identity(plan, sh, row)
         if dry:
             return plan
         self.journal.open_row(row)
@@ -1492,6 +1521,26 @@ class Router:
         name = cfg["cards"]["pitfalls"].get(client)
         pit = self.library.text(packages, name)[0] if name else None
         return outcomes.tool_card(body, cfg, pit, client)
+
+    @staticmethod
+    def _identity(plan, sh, row) -> None:
+        """SRV-191: who the model is, on the turn whose message asks (schema.IDENTITY_ASK), once
+        a session; first among the turn's extra notes. Its own decision type, on under a profile
+        that is on on every turn, so the note replays where it sat; a shadow profile journals
+        it."""
+        if plan.res.mode == "on":
+            plan.decisions["identity"] = "on"            # the replay of an earlier turn's note
+        if sh.compaction or sh.tool_turn or plan.res.mode not in ("on", "shadow") or \
+                not re.search(schema.IDENTITY_ASK, sh.user_text or ""):
+            return
+        text = schema.identity_text()
+        if plan.res.mode == "shadow":
+            row["shadow"] = dict(row.get("shadow") or {}, identity={"chars": len(text)})
+            return
+        plan.extras.insert(0, {"key": f"identity:{hashlib.sha256(text.encode()).hexdigest()[:16]}",
+                               "text": text, "parts": [{"kind": "identity", "name": "identity"}],
+                               "kinds": {"identity"}, "reason": "identity",
+                               "unless": ("identity", "identity")})
 
     def _cards(self, plan, body, router, prof, packages, sh, cls, row) -> None:
         """The client tool card (B1) and the harness card (B2) for a coding class with tools:

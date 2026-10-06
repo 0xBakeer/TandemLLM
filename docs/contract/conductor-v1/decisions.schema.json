@@ -270,7 +270,8 @@
                       "enum": [
                         "effort",
                         "package",
-                        "rules"
+                        "rules",
+                        "identity"
                       ]
                     },
                     "name": {
@@ -290,7 +291,8 @@
                   "enum": [
                     "effort",
                     "packages",
-                    "rules"
+                    "rules",
+                    "identity"
                   ]
                 }
               },
@@ -602,7 +604,8 @@
                 "enum": [
                   "effort",
                   "package",
-                  "rules"
+                  "rules",
+                  "identity"
                 ]
               },
               "name": {
@@ -622,7 +625,8 @@
             "enum": [
               "effort",
               "packages",
-              "rules"
+              "rules",
+              "identity"
             ]
           }
         },
