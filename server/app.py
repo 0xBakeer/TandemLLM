@@ -508,6 +508,17 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 
 
+def _continues_resident(valid: int, common: int, chunk: int) -> bool:
+    """Does a request whose prompt shares `common` leading tokens with slot 0's resident rows
+    (`valid` of them) continue that conversation, so that it waits for slot 0 and resumes in place?
+    Yes when it shares (nearly) all of the rows (within one prefill chunk) AND at least one chunk of
+    them: below a chunk, waiting for slot 0 saves less prefill than the wait costs. Until
+    0.3.44-test only the first test ran, and a resident conversation shorter than a chunk
+    (valid - chunk <= 0) made every request "continue" it, so no request took a side slot (PL1)."""
+    chunk = max(1, int(chunk))
+    return valid > 0 and common >= valid - chunk and common >= chunk
+
+
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images (side slots are text only),
@@ -525,7 +536,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind) -> 
     if res is not None:
         try:
             valid = int(getattr(res, "valid", 0) or 0)
-            if valid and res.common(ids) >= valid - max(1, int(getattr(res, "chunk", 1) or 1)):
+            chunk = int(getattr(res, "chunk", 1) or 1)
+            if valid and _continues_resident(valid, res.common(ids), chunk):
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
                 return None

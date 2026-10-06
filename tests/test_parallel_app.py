@@ -194,6 +194,21 @@ def test_side_graphs_off_builds_no_graph_pool_and_estimates_less():
     assert slot.report()["graphs"] is False and S.Slot(0, 262144).report()["graphs"] is None
 
 
+def test_a_short_resident_conversation_does_not_hold_every_request_on_slot_0():
+    """PL1 (2026-10-06, live on the box): after a 450-token raw request, both requests of a c2 pair
+    were counted `resident_waits` and decoded one after the other. A request continues slot 0's
+    conversation only when it shares the rows within a chunk AND at least one chunk of them."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from server import app as A
+    c = A._continues_resident
+    assert not c(450, 5, 1024), "a short resident and an unrelated prompt: take the side slot"
+    assert not c(450, 450, 1024), "a short conversation continued: cheap to prefill elsewhere"
+    assert c(100_000, 99_500, 1024), "a long conversation continued: wait and resume in place"
+    assert not c(100_000, 40_000, 1024), "a long shared head but not the conversation"
+    assert c(2048, 1100, 1024) and not c(2048, 900, 1024)
+    assert not c(0, 0, 1024)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):
