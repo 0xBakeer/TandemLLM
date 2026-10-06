@@ -60,7 +60,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-from server import app  # noqa: E402
+from server import app, queue_wait as qwait  # noqa: E402
 from server.conductor import narrator, states  # noqa: E402
 import test_ui_states as tu  # noqa: E402
 
@@ -334,6 +334,9 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
             app.STATE["queue_timeout"] = 1.5
             rt = app.STATE.get("request_timeout")
             app.STATE["request_timeout"] = 1.5
+            # the line at once (0.3.41-test waits QUIET_S, 2 s, before the first one: longer than
+            # this test's whole limit)
+            qwait.QUIET_S = 0.0
             wait_body = dict(busy_body, messages=[{"role": "user", "content": "me next"}])
             waiter, box = sc._bg(wait_body, {"User-Agent": tu.OPENCODE_UA, "x-session-id": "b"})
             waiter.join(30)
@@ -342,6 +345,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
         tu.quiet = real
         app.STATE["queue_timeout"] = 120.0
         app.STATE["request_timeout"] = rt
+        qwait.QUIET_S = 2.0
     ds = list(deltas(box["raw"]))
     assert ds[0].get("role") == "assistant" and ds[1] == {"tool_calls": []}, ds[:3]
     assert ds[2] == {"reasoning_content": states.inline(

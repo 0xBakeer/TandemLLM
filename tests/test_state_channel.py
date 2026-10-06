@@ -52,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from server import app  # noqa: E402
+from server import app, queue_wait as qwait  # noqa: E402
 from server.conductor import states  # noqa: E402
 import test_ui_states as tu  # noqa: E402
 
@@ -288,6 +288,9 @@ def test_a_waiting_request_opens_its_stream_and_a_timeout_closes_it():
             app.STATE["queue_timeout"] = 1.5
             rt = app.STATE.get("request_timeout")
             app.STATE["request_timeout"] = 1.5
+            # the line at once (0.3.41-test waits QUIET_S, 2 s, before the first one: longer than
+            # this test's whole limit)
+            qwait.QUIET_S = 0.0
             wait_body = dict(busy_body, messages=[{"role": "user", "content": "me next"}])
             waiter, box = _bg(wait_body, {"User-Agent": tu.OPENCODE_UA, "x-session-id": "b"})
             waiter.join(30)
@@ -296,6 +299,7 @@ def test_a_waiting_request_opens_its_stream_and_a_timeout_closes_it():
         tu.quiet = real
         app.STATE["queue_timeout"] = 120.0
         app.STATE["request_timeout"] = rt
+        qwait.QUIET_S = 2.0
     assert "200 OK" in box["head"].splitlines()[0], box["head"]
     events = [json.loads(ln[6:]) for ln in box["raw"].splitlines() if ln.startswith("data: {")]
     text = "".join((c.get("delta") or {}).get("content") or "" for e in events
