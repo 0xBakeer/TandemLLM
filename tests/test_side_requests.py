@@ -343,7 +343,7 @@ def test_the_queue_puts_a_short_side_request_first_and_says_so():
         _wait_until(lambda: len(order) == 1)
         turn, turn_box = _bg(tu_body("the waiting turn", tools))
         _wait_until(lambda: app.INFLIGHT["waiting"] == 1)
-        time.sleep(1.2)                         # its first waiting line goes out
+        time.sleep(2.4)               # its first waiting line goes out (after QUIET_S, SRV-177)
         side, side_box = _bg(opencode_title())
         for t in (busy, turn, side):
             t.join(60)

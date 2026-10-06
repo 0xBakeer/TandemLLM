@@ -238,10 +238,12 @@ def _names(names: list[str], lang: str, most: int = 4) -> str:
 
 #: the waiting line's reasons for TandemLLM's own work (server/app.py OWN_WAIT), in German
 OWN_WAIT_DE = {
-    "the conductor's question to Qwen runs first": "TandemLLM stellt Qwen zuerst eine eigene Frage",
-    "the shadow model reads the conversation first": "das Schattenmodell liest zuerst das Gespräch",
-    "the summary prepared ahead runs first": "zuerst läuft die vorbereitete Zusammenfassung",
-    "the engine's own work runs first": "die Engine erledigt zuerst eigene Arbeit",
+    "TandemLLM decides how to handle the request first":
+        "TandemLLM entscheidet zuerst, wie es die Anfrage bearbeitet",
+    "TandemLLM finishes its background work first": "TandemLLM beendet zuerst Hintergrundarbeit",
+    "TandemLLM finishes a summary it prepared first":
+        "TandemLLM beendet zuerst eine vorbereitete Zusammenfassung",
+    "TandemLLM finishes its own work first": "TandemLLM beendet zuerst eigene Arbeit",
 }
 
 

@@ -346,11 +346,27 @@ def _place(me: dict) -> tuple[dict | None, int]:
 
 
 #: what a waiter waits for when the engine's holder is TandemLLM's own work, not a client's
-#: request (the waiting line said "another request is running" for all of them)
-OWN_WAIT = {"question": "the conductor's question to Qwen runs first",
-            "shadow": "the shadow model reads the conversation first",
-            "prepare": "the summary prepared ahead runs first",
-            "engine": "the engine's own work runs first"}
+#: request (the waiting line said "another request is running" for all of them). SRV-177 (UT1,
+#: 2026-10-06): in plain words, without the roles' internal names ("the shadow model"); the
+#: technical holder stays in the journal and the live view
+OWN_WAIT = {"question": "TandemLLM decides how to handle the request first",
+            "shadow": "TandemLLM finishes its background work first",
+            "prepare": "TandemLLM finishes a summary it prepared first",
+            "engine": "TandemLLM finishes its own work first"}
+
+
+def _own_holder() -> int | None:
+    """SRV-177: the rank of TandemLLM's own work that holds the engine now (the shadow or
+    prepare job; -1 for the conductor's own question or a lock no request took), else None."""
+    with QUEUE:
+        who = HOLDER["who"]
+    if who is None:
+        return -1 if LOCK.locked() else None
+    if who.get("own"):
+        return -1
+    if who.get("rank") in (RANK_SHADOW, RANK_PREP):
+        return int(who["rank"])
+    return None
 
 
 def _wait_reason(me: dict) -> tuple[str, int]:
@@ -4721,6 +4737,8 @@ class Handler(BaseHTTPRequestHandler):
             (before the lock nobody knows yet whether a `tags` answer opens a block)."""
             reason, pos = _wait_reason(me)
             now = time.monotonic()
+            if now - me["t"] < qwait.QUIET_S:
+                return                         # SRV-177: a short wait shows no line
             if ((reason, pos) == last_place[0]
                     and now - last_place[1] < qwait.LINE_EVERY_S):
                 return
@@ -4764,6 +4782,7 @@ class Handler(BaseHTTPRequestHandler):
             INFLIGHT["waiting"] += 1
             WAITERS.append(me)
         left = False
+        own_wait, own_rank = [0.0], None          # SRV-177: the wait behind TandemLLM's own work
         try:
             # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
@@ -4782,6 +4801,7 @@ class Handler(BaseHTTPRequestHandler):
             t_wait = time.monotonic()
             wait_until = t_wait + wait_s
             next_ping = t_wait + qwait.OPEN_AFTER_S
+            own_rank = _own_holder()
             got = _take(me, None)
             if not got and side_need is not None:
                 side = par.take_side(side_need, owner=cid)
@@ -4808,7 +4828,12 @@ class Handler(BaseHTTPRequestHandler):
                         left = True
                         rec.client_gone_at = time.perf_counter()
                         break
+                t_slice, holder_own = time.monotonic(), _own_holder()
                 got = _take(me, slice_s if side_need is None else min(slice_s, 0.25))
+                if holder_own is not None:
+                    # SRV-177: the time this request waited behind TandemLLM's own work
+                    own_wait[0] += time.monotonic() - t_slice
+                    own_rank = holder_own
                 if not got and side_need is not None:
                     side = par.take_side(side_need, owner=cid)
                     got = side is not None
@@ -4820,6 +4845,10 @@ class Handler(BaseHTTPRequestHandler):
             with QUEUE:
                 INFLIGHT["waiting"] -= 1
                 WAITERS.remove(me)
+        if own_wait[0] > 0:
+            rec.wait_own_ms = round(own_wait[0] * 1e3, 1)          # the ledger's `wait_own_ms`
+            if got and own_rank in (RANK_SHADOW, RANK_PREP):
+                CLOCK.yielded(own_rank, own_wait[0])               # the estimate's basis
         if left:
             with QUEUE:
                 INFLIGHT["abandoned"] += 1

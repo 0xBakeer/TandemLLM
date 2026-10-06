@@ -20,9 +20,16 @@ side request too long for the lane). For the request that holds the engine now, 
 seconds, the remaining time is the median of `d - e` over the recorded times `d` longer than `e`:
 how much longer requests that ran this long went on running. A waiter ahead adds its rank's
 median. Fewer than `MIN_SAMPLES` recorded times, or fewer than `MIN_LONGER` that ran longer than
-the holder has, and there is no estimate: the line says only what is known. The prepare and shadow
-jobs that take the lock between requests yield to a waiter at their next chunk, so they add
-nothing. Nothing here reads the engine or takes its lock.
+the holder has, and there is no estimate: the line says only what is known. Nothing here reads the
+engine or takes its lock.
+
+TandemLLM's own work (SRV-177, 2026-10-06). The prepare and shadow jobs that take the lock between
+requests yield to a waiter at their next chunk. Until 0.3.41-test they counted as 0 s, and `about`
+rounded every estimate up to "10 s", so the line behind them always read "about 10 s left" (9 of 9
+lines in UT1's opencode runs) while the waits measured in the ledger were 0.1 to 3 s (18 of 60 turns
+over 1 s, 9 over 2 s). Now the wait a request really spent behind such a job is recorded per rank
+(`yielded`), the estimate is the median of those that lasted longer than the wait so far, there is
+no estimate before `MIN_SAMPLES` of them, and a wait under `QUIET_S` shows no line at all.
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ KEEP = 200
 MIN_SAMPLES = 5
 #: no estimate for the holder unless this many recorded times ran longer than it has
 MIN_LONGER = 3
+#: SRV-177: a request that has waited less than this shows no waiting line
+QUIET_S = 2.0
+#: the recorded waits behind a yielding job are kept under rank + this (a rank's hold times stay apart)
+YIELD_KEY = 100
 
 
 class TurnClock:
@@ -63,6 +74,11 @@ class TurnClock:
     def _samples(self, rank: int) -> list[float]:
         with self._lock:
             return list(self._held.get(int(rank)) or ())
+
+    def yielded(self, rank: int, waited_s: float) -> None:
+        """SRV-177: a request waited `waited_s` seconds behind a yielding job of `rank` (the
+        prepare or shadow job) before it got the engine."""
+        self.done(YIELD_KEY + int(rank), waited_s)
 
     def remaining(self, rank: int, elapsed: float) -> float | None:
         """Seconds the holder of `rank`, `elapsed` seconds in, still holds the engine; None: no
@@ -87,8 +103,10 @@ class TurnClock:
         A rank in `yields` (the prepare and shadow jobs) counts as 0. None: no basis for one of
         them."""
         total = 0.0
-        if holder is not None and holder[0] not in yields:
-            r = self.remaining(holder[0], holder[1])
+        if holder is not None:
+            # a yielding holder: what waiters behind that job really waited (SRV-177), never 0
+            r = self.remaining(YIELD_KEY + holder[0] if holder[0] in yields else holder[0],
+                               holder[1])
             if r is None:
                 return None
             total += r
@@ -105,6 +123,8 @@ class TurnClock:
 def about(seconds: float) -> str:
     """`40 s`, `5 min`: the estimate in the waiting line, rounded so it does not read as exact."""
     s = max(0.0, float(seconds))
+    if s < 10:
+        return f"{max(1, int(round(s)))} s"   # SRV-177: no longer rounded up to "10 s"
     if s < 90:
         return f"{max(1, int(round(s / 10.0))) * 10} s"
     return f"{max(2, int(round(s / 60.0)))} min"

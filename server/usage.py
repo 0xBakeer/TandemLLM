@@ -168,6 +168,9 @@ class RequestRecord:
         self.lane_job = None
         self.lane = None
         self.queue_limit_s = None   # how long this request may wait for the engine
+        # SRV-177: ms this request waited behind TandemLLM's own work (the shadow or prepare job,
+        # the conductor's question); None when it waited behind none
+        self.wait_own_ms = None
         # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills
         # these and overrides the fields it cannot see); `user` is the proxy key's label, also on
         # an engine row
@@ -405,6 +408,7 @@ class RequestRecord:
             "cost_micros": self.cost_micros, "proxy_ms": r2(self.proxy_ms),
             "retries": self.retries, "fallback_from": self.fallback_from,
             "upstream_status": self.upstream_status, "user": self.user,
+            "wait_own_ms": self.wait_own_ms,
         }
 
 

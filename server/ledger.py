@@ -77,7 +77,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -91,7 +91,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "conductor_hidden_tokens", "conductor_acted", "lane", "backend", "backend_kind",
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
-           "engine_finish", "corrupted", "l2_join")
+           "engine_finish", "corrupted", "l2_join", "wait_own_ms")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -108,7 +108,10 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("fallback_from", "TEXT"), ("upstream_status", "INTEGER"), ("user", "TEXT"),
          # schema version 4 (the proxy, P6): what a plugin inside vLLM or SGLang reported
          ("preemptions", "INTEGER"), ("engine_finish", "TEXT"), ("corrupted", "INTEGER"),
-         ("l2_join", "TEXT"))
+         ("l2_join", "TEXT"),
+         # schema version 5 (SRV-177, 0.3.41-test): ms a request waited behind TandemLLM's own
+         # work (the shadow or prepare job, the conductor's question)
+         ("wait_own_ms", "REAL"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",

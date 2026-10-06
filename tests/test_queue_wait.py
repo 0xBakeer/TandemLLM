@@ -58,13 +58,22 @@ def test_1_the_holder_s_remaining_time_is_conditional_on_how_long_it_ran():
     for x in (1, 1, 2, 2, 3):
         c.done(0, x)
     assert c.estimate((1, 50.0), [0, 1]) == 70.0 + 2.0 + 5.0
-    assert c.estimate((3, 5.0), [4], yields=frozenset((3, 4))) == 0.0
+    # SRV-177: a yielding holder (the prepare or shadow job) has no estimate until waits behind
+    # it were measured, then the median of those longer than the wait so far; a yielding waiter
+    # ahead still adds nothing (it yields to this request too)
+    assert c.estimate((3, 0.5), [4], yields=frozenset((3, 4))) is None
+    for x in (0.4, 1.2, 1.8, 2.6, 3.0):
+        c.yielded(3, x)
+    # the waits longer than 0.5 s: 1.2 1.8 2.6 3.0, less 0.5, median 1.7
+    assert abs(c.estimate((3, 0.5), [4], yields=frozenset((3, 4))) - 1.7) < 1e-9
+    assert c.estimate((3, 2.0), [], yields=frozenset((3, 4))) is None   # 2 longer: too few
     assert c.estimate((1, 50.0), [2]) is None   # no basis for rank 2
 
 
 def test_1_the_line_and_the_comment():
+    # SRV-177: below 10 s the seconds themselves (every estimate used to round up to "10 s")
     assert [qw.about(s) for s in (0, 4, 14, 26, 89, 95, 400)] == \
-        ["10 s", "10 s", "10 s", "30 s", "90 s", "2 min", "7 min"]
+        ["1 s", "4 s", "10 s", "30 s", "90 s", "2 min", "7 min"]
     assert qw.comment(2, 41.0, 12.3) == b": waiting, position 2, about 40 s, 12 s so far\n\n"
     assert qw.comment(1, None, 3.0) == b": waiting, position 1, 3 s so far\n\n"
 
@@ -146,9 +155,10 @@ def test_3_the_waiting_line_carries_the_estimate():
         qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
     got = [ln[len(states.MARKER):] for ln in box["out"]["content"].split("\n")
            if ln.startswith(states.MARKER)]
-    # the holder had run well under 2 s when the line went out: the median of all 7 recorded
-    # times (4 s) less what it had run, rounded up to 10 s
-    assert got[0] == "waiting: another request is running, position 1, about 10 s", got
+    # SRV-177: no line in the first 2 s of the wait; then the median of the recorded times
+    # longer than the holder has run (about 2 s: 2.5 3 4 20 30 40 -> 12 s) less what it has run
+    assert got[0].startswith("waiting: another request is running, position 1, about "), got
+    assert got[0].endswith(" s"), got
 
 
 def test_4_the_clock_records_each_hold_by_rank():
@@ -182,7 +192,8 @@ def test_5_the_waiting_line_names_tandemllm_s_own_work():
         qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
     got = [ln[len(states.MARKER):] for ln in box["out"]["content"].split("\n")
            if ln.startswith(states.MARKER)]
-    assert got[0] == "waiting: the conductor's question to Qwen runs first, position 1", got
+    assert got[0] == "waiting: TandemLLM decides how to handle the request first, position 1", got
+    assert "shadow" not in " ".join(app.OWN_WAIT.values()), "SRV-177: no internal role names"
     # the holder kinds without a request: the shadow's burst, the summary written ahead, a lock
     # taken by nobody's request (the drain, a cache clear); a client's request stays "another"
     me = {"rank": app.RANK_TURN, "t": time.monotonic(), "side": None}
@@ -208,6 +219,44 @@ def test_5_the_waiting_line_names_tandemllm_s_own_work():
         assert reason in voice.OWN_WAIT_DE
         de = voice.natural("queue", {"reason": reason, "n": 1}, "de")
         assert de == f"wartet: {voice.OWN_WAIT_DE[reason]}, Platz 1", de
+
+
+def test_6_a_short_wait_shows_no_line_and_own_work_is_measured():
+    """SRV-177 (UT1, 2026-10-06): "waiting while the shadow model reads the conversation, 1st in
+    line, about 10 s left" was the line 9 times of 9, while the ledger's waits were 0.1 to 3 s.
+    A request that waits less than `QUIET_S` gets no line; one that waited behind TandemLLM's own
+    work records how long (`wait_own_ms`, the ledger), and those waits are the estimate's basis."""
+    app, sr, order = _serve({"states": "on", "states_channel": "content"})
+    import test_ui_states as tu
+    from server.conductor import states
+    old = _patched(open_after=30.0)
+    try:
+        with sr.threads_quiet():
+            # FAKE_SLOW with 8 tokens: the engine is held under a second
+            busy, _ = sr._bg(sr.tu_body("FAKE_SLOW one", tu.TOOLS, 8), {"x-session-id": "ses_a"})
+            sr._wait_until(lambda: len(order) == 1)
+            turn, box = sr._bg(sr.tu_body("the waiting turn", tu.TOOLS, 50),
+                               {"x-session-id": "ses_b"})
+            for t in (busy, turn):
+                t.join(60)
+    finally:
+        qw.OPEN_AFTER_S, qw.PING_EVERY_S = old
+    got = [ln for ln in box["out"]["content"].split("\n") if ln.startswith(states.MARKER)
+           and "waiting" in ln]
+    assert got == [], got
+    # the time behind TandemLLM's own work: the holder kinds, and the record's field
+    try:
+        for who, want in (({"rank": app.RANK_SHADOW, "t": 0.0, "side": None}, app.RANK_SHADOW),
+                          ({"rank": app.RANK_PREP, "t": 0.0, "side": None}, app.RANK_PREP),
+                          ({"rank": app.RANK_TURN, "t": 0.0, "side": None, "own": True}, -1),
+                          ({"rank": app.RANK_TURN, "t": 0.0, "side": None}, None)):
+            app.HOLDER["who"] = who
+            assert app._own_holder() == want, (who, want)
+    finally:
+        app.HOLDER["who"] = None
+    from server import ledger, usage
+    assert "wait_own_ms" in ledger.COLUMNS and "wait_own_ms" in usage.RequestRecord(
+        "x", "chat", False).row()
 
 
 def _needs_torch() -> bool:
