@@ -59,8 +59,11 @@ sys.path.insert(0, ROOT)
 from server.conductor.packages import literal_api_hosts  # noqa: E402
 
 NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch {tandem_scratch} excluded "
-        "from git and deleted before done; state hooks removed; no downloads; deliverable first, "
-        "test budget, servers in the background, playtest stop rule")
+        "from git and deleted before done; state hooks removed; no downloads")
+# the store keeps a version note under 200 characters; a box that had the first edits gets this one
+ROUND2 = ("testing: order", "laya-playtest: a check", "laya-playtest: the stop", "test-web: the")
+NOTE_343 = ("0.3.43-test: deliverable first, a test budget, servers in the background and stopped, a cut "
+            "run's scratch cleaned, the playtest stop rule (SRV-179, SRV-181)")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -309,7 +312,9 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE, "base_version": cur.get("version")})
+                    {"doc": new, "note": NOTE_343 if any(
+                        c.startswith(ROUND2) for ch in rep.values() for c in ch) else NOTE,
+                     "base_version": cur.get("version")})
         print(f"[packages_migrate] stored packages v{got.get('version')} (was v{cur.get('version')})")
     return 0
 
