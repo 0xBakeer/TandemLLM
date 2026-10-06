@@ -129,6 +129,14 @@
             },
             "maxItems": 12
           },
+          "core": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+            },
+            "maxItems": 4
+          },
           "rules": {
             "type": "array",
             "items": {

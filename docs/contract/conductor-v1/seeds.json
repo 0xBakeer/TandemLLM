@@ -427,7 +427,7 @@
   }
  },
  "monitor": {
-  "version": 6,
+  "version": 7,
   "caps": {
    "acts_per_request": 2,
    "acts_per_session_hour": 6,
@@ -853,7 +853,10 @@
     "hard_minutes": 18,
     "again_minutes": 4,
     "wrap_text": "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), what you verified and how, and what is untested.",
-    "again_text": "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested."
+    "again_text": "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested.",
+    "verify_s": 90,
+    "verify_scratch_writes": 2,
+    "verify_text": "Runtime note: what the user asked for exists, and your last {steps} tool steps ({minutes} minutes) changed only test tooling, not the deliverable. Stop building test tools. If you have not checked it yet, run one check with a tool that already works here (for a page the kit's page check, laya_drive.py page URL, from the testing package; for code the real test command), then answer: what you built and where it is, what you verified and how, and what is untested."
    }
   }
  },
@@ -1297,7 +1300,7 @@
      "thresholds": {}
     },
     "E1": {
-     "mode": "off",
+     "mode": "act",
      "cap": 1,
      "thresholds": {
       "tries": 2
@@ -2343,6 +2346,11 @@
          "minLength": 8,
          "maxLength": 600
         },
+        "reading": {
+         "type": "string",
+         "minLength": 3,
+         "maxLength": 120
+        },
         "policy": {
          "type": "object",
          "properties": {
@@ -2396,6 +2404,14 @@
             "pattern": "^[a-z][a-z0-9_-]{0,39}$"
            },
            "maxItems": 12
+          },
+          "core": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+           },
+           "maxItems": 4
           },
           "rules": {
            "type": "array",
@@ -2488,6 +2504,42 @@
         "type": "string",
         "minLength": 10,
         "maxLength": 4000
+       },
+       "package_prompt": {
+        "type": "string",
+        "minLength": 10,
+        "maxLength": 4000
+       },
+       "reading": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "on"
+          ]
+         },
+         "below": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+         },
+         "other": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+         },
+         "text": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 1000
+         }
+        },
+        "required": [
+         "mode"
+        ],
+        "additionalProperties": false
        },
        "context_stage": {
         "type": "object",
@@ -3580,6 +3632,14 @@
           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
          },
          "maxItems": 12
+        },
+        "core": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+         },
+         "maxItems": 4
         },
         "rules": {
          "type": "array",
@@ -6136,6 +6196,21 @@
            "type": "string",
            "minLength": 1,
            "description": "wall_clock's later notes: {minutes}"
+          },
+          "verify_s": {
+           "type": "number",
+           "minimum": 0,
+           "description": "verify: seconds after the last product write, with scratch writes"
+          },
+          "verify_scratch_writes": {
+           "type": "integer",
+           "minimum": 1,
+           "description": "verify: scratch-only writes since the last product write"
+          },
+          "verify_text": {
+           "type": "string",
+           "minLength": 1,
+           "description": "verify's note: {minutes}, {steps}"
           }
          },
          "required": [

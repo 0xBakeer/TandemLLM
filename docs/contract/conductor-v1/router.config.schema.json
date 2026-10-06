@@ -23,6 +23,11 @@
             "minLength": 8,
             "maxLength": 600
           },
+          "reading": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
           "policy": {
             "type": "object",
             "properties": {
@@ -76,6 +81,14 @@
                   "pattern": "^[a-z][a-z0-9_-]{0,39}$"
                 },
                 "maxItems": 12
+              },
+              "core": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+                },
+                "maxItems": 4
               },
               "rules": {
                 "type": "array",
@@ -168,6 +181,42 @@
           "type": "string",
           "minLength": 10,
           "maxLength": 4000
+        },
+        "package_prompt": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "reading": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "on"
+              ]
+            },
+            "below": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "other": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "text": {
+              "type": "string",
+              "minLength": 10,
+              "maxLength": 1000
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
         },
         "context_stage": {
           "type": "object",

@@ -254,7 +254,8 @@ def _live_names(sess) -> set[str]:
                 if p.get("kind") == "library"}
 
 
-def _ask(router, plan, cands, text, line, cfg, router_doc, roles) -> tuple[list, str, list]:
+def _ask(router, plan, cands, text, line, cfg, router_doc, roles,
+         about: str | None = None) -> tuple[list, str, list]:
     """The package question over the candidates, `max_picks` times (each time without the picks
     before it), until it answers none. (picks, how, the stages' answers)."""
     if plan.locked:
@@ -271,7 +272,8 @@ def _ask(router, plan, cands, text, line, cfg, router_doc, roles) -> tuple[list,
         opts = {e.name: e.description for e in left}
         opts[NONE_OPTION] = "None of these fits the request."
         ans, st = router.cascade(text, opts, router_doc, roles, question=cfg["question"],
-                                 accept=float(cfg["accept"]), qid="packages", line=line)
+                                 accept=float(cfg["accept"]), qid="packages", line=line,
+                                 about=about)
         asked.append(st)
         if ans is None:
             how = how if picks else "no_answer"
@@ -310,7 +312,9 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
     t0 = time.perf_counter()
     router.index.ensure(v, packages, cfg)
     query = signals.digest(sh.user_text or "", int(cfg["digest_chars"]), line)
-    live = _live_names(sess) | set(sh.loaded_skills)
+    # FX6: a package this turn's note already carries (a class's core skill) is not picked again
+    live = _live_names(sess) | set(sh.loaded_skills) | {
+        p["name"] for p in ((plan.block or {}).get("parts") or ()) if p.get("kind") == "package"}
     hits = router.index.search(query, int(cfg["candidates"]), cls if cfg["class_filter"] else None,
                                exclude=live, min_score=float(cfg["min_score"]))
     info = {"mode": mode, "trigger": trigger, "query_chars": len(query),
@@ -328,8 +332,9 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
         picks, how = hit
         info["cached"] = True
     else:
+        from server.conductor.router import _about
         picks, how, asked = _ask(router, plan, hits, sh.user_text or "", line, cfg, router_doc,
-                                 roles)
+                                 roles, _about(cls, {c["id"]: c for c in router_doc["classes"]}))
         info["stages"] = asked
         if how not in ("no_answer", "locked") and not dry:
             if len(sess.package_pick) > 32:

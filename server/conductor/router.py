@@ -194,6 +194,28 @@ def session_key(body: dict, headers, sh: signals.Shape) -> str:
     return "h:" + (sh.first_hash or "empty")
 
 
+def _qwen_prompt(router: dict, question: str | None, qid: str, about: str | None,
+                 listing: str) -> str:
+    """The Qwen stage's system prompt: the class question's (`qwen_prompt`) for the class and, by
+    default, for the package question too (its options as the classes); a router's own
+    `package_prompt` (FX6) for the package question, with the routed class and the question; any
+    other question as it is, with its options."""
+    clf = router["classifier"]
+    own = schema.package_prompt(router) if qid == "packages" else None
+    if question is None or (qid == "packages" and own is None):
+        return clf["qwen_prompt"].replace("{classes}", listing)
+    if own is not None:
+        return (own.replace("{class}", about or "not known")
+                .replace("{question}", question).replace("{classes}", listing))
+    return f"{question} Answer with the id of the one option that fits best.\n\nOptions:\n{listing}"
+
+
+def _about(cls: str, classes: dict) -> str:
+    """The routed class as the package prompt names it: `id: label, description`."""
+    c = classes.get(cls) or {}
+    return f"{cls}: {c.get('label', cls)}, {c.get('description', '')}".rstrip(", ")
+
+
 def _code_guard(ans: Answer, text: str, options: dict) -> Answer:
     """SRV-189: a code class below `CODE_GUARD.accept` for a request that names nothing of code and
     names a piece of prose becomes the stage's best class outside the code classes, at its own
@@ -591,19 +613,24 @@ class Router:
 
     def cascade(self, text: str, options: dict[str, str], router: dict, roles: dict, *,
                 question: str | None = None, accept: float | None = None,
-                qid: str = "classify", line: str | None = None) -> tuple:
+                qid: str = "classify", line: str | None = None,
+                about: str | None = None) -> tuple:
         """Ask the enabled stages in order until one answers an option at or above its threshold.
         Returns (the accepted Answer or None, every stage's answer as dicts). `text` is the user's
         message; each stage gets its own digest of it (the decider's sized to its `limits()`,
         Qwen's to `digest_chars`), with the context `line` at its end when given. `qid`: the
-        question id (`classify`, `packages`) the `deciders` document maps to a decision model."""
+        question id (`classify`, `packages`) the `deciders` document maps to a decision model.
+        The Qwen stage asks the package question with the class question's prompt and the options
+        as the classes, unless the router has a `package_prompt` (FX6), which gets `about`, the
+        class the turn was routed to."""
         token = ASKING.set(qid)
         try:
-            return self._cascade(text, options, router, roles, question, accept, qid, line)
+            return self._cascade(text, options, router, roles, question, accept, qid, line, about)
         finally:
             ASKING.reset(token)
 
-    def _cascade(self, text, options, router, roles, question, accept, qid, line) -> tuple:
+    def _cascade(self, text, options, router, roles, question, accept, qid, line,
+                 about=None) -> tuple:
         clf = router["classifier"]
         chars = int(clf.get("digest_chars", 2000))
         stages, accepted = [], None
@@ -621,7 +648,7 @@ class Router:
             else:
                 listing = "\n".join(f"- {k}: {v}" for k, v in options.items())
                 ans = a.choice(signals.digest(text, chars, line),
-                               clf["qwen_prompt"].replace("{classes}", listing), options,
+                               _qwen_prompt(router, question, qid, about, listing), options,
                                max_chars=chars)
             if st["kind"] == "qwen" and question is None:
                 ans = _code_guard(ans, text, options)    # SRV-189
@@ -1023,6 +1050,8 @@ class Router:
             if sh.compaction:
                 sess.compacted = True
             follow = dec["classify"] != "off" and model_source != "structural"
+            # FX6: the reading line goes in on the turn a class starts, not on every later one
+            plan.class_new = model_cls != sess.cls
             if follow and model_cls != sess.cls:
                 sess.history.append({"at": time.time(), "from": sess.cls, "to": model_cls,
                                      "confidence": model_conf, "source": model_source})
@@ -1036,6 +1065,7 @@ class Router:
         ov = prof["routing"].get(cls) or {}
         policy = {"effort": ov.get("effort") or base.get("effort") or prof["thinking"]["default"],
                   "packages": list(ov["packages"] if "packages" in ov else base.get("packages", [])),
+                  "core": list(ov["core"] if "core" in ov else base.get("core", [])),
                   "rules": list(ov["rules"] if "rules" in ov else base.get("rules", [])),
                   "note": ov.get("note") or base.get("note") or "",
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
@@ -1049,7 +1079,7 @@ class Router:
                                   "name": stops[-1].get("name")}
         level = self._turn_level(plan, router, prof, sh, policy, row)
         self._effort(plan, body, router, prof, sh, self._outcome_level(plan, level, row), row)
-        self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row)
+        self._block(plan, body, router, roles, packages, sh, sess, cls, policy, row, classes)
         if not dry:
             self._cards(plan, body, router, prof, packages, sh, cls, row)
             self._outcome_note(plan, body, router, prof, packages, sh, sess, row)
@@ -1241,9 +1271,14 @@ class Router:
             if dec == "shadow":
                 row["shadow"] = dict(row.get("shadow") or {}, effort=would)
 
-    def _block(self, plan, body, router, roles, packages, sh, sess, cls, policy, row) -> None:
-        """The note this class wants in the prompt: its effort sentence, its package, its rules.
-        Parts whose decision type is on go into `plan.block`; shadow parts are journaled."""
+    def _block(self, plan, body, router, roles, packages, sh, sess, cls, policy, row,
+               classes=None) -> None:
+        """The note this class wants in the prompt: its effort sentence, the reading line (FX6),
+        its packages, its rules. Parts whose decision type is on go into `plan.block`; shadow
+        parts are journaled.
+        Packages: the general ones and the class's `core` (FX6) go in whole, in the class's
+        order; the package question picks among the rest, told which class the turn is."""
+        classes = classes or {}
         dec = plan.decisions
         parts: list[tuple[str, dict]] = []                # (decision type, part)
         base_level = policy["effort"]
@@ -1253,13 +1288,18 @@ class Router:
             row["extra"].setdefault("notes", []).append("effort_note_skipped:client_off")
         elif dec["effort"] != "off" and note:
             parts.append(("effort", {"kind": "effort", "name": base_level, "text": note}))
+        reading = self._reading(plan, router, cls, classes, row)
+        if reading is not None:
+            parts.append(reading)
         cands = [p for p in policy["packages"] if p not in sh.loaded_skills]
         skipped = [p for p in policy["packages"] if p in sh.loaded_skills]
         if skipped:
             row["extra"].setdefault("notes", []).append(f"already_loaded:{','.join(skipped)}")
         # a general package (the coding package, 2026-10-02) goes in whole and first; the router
         # picks among the rest, the task skills, as before
-        general = [p for p in cands if (packages["packages"].get(p) or {}).get("general")]
+        core = [p for p in policy.get("core", []) if p in policy["packages"]]
+        general = [p for p in cands if (packages["packages"].get(p) or {}).get("general")
+                   or p in core]
         cands = [p for p in cands if p not in general]
         if dec["packages"] != "off":
             for g in general:
@@ -1268,8 +1308,11 @@ class Router:
                     row["extra"].setdefault("notes", []).append(f"{err}:{g}")
                 else:
                     parts.append(("packages", {"kind": "package", "name": g, "text": text}))
-            if general:
-                row["extra"]["package_general"] = general
+            flagged = [g for g in general if g not in core]
+            if flagged:
+                row["extra"]["package_general"] = flagged
+            if [g for g in general if g in core]:
+                row["extra"]["package_core"] = [g for g in general if g in core]
         if dec["packages"] != "off" and cands:
             chosen, how = None, None
             if len(cands) == 1:
@@ -1286,7 +1329,8 @@ class Router:
                     ans, st = self.cascade(
                         sh.user_text or "", opts, router, roles,
                         question=router["classifier"]["package_question"],
-                        accept=float(router["classifier"]["package_accept"]), qid="packages")
+                        accept=float(router["classifier"]["package_accept"]), qid="packages",
+                        about=_about(cls, classes))
                     row["extra"]["package_stages"] = st
                     if ans is not None and ans.label != NONE_OPTION:
                         chosen, how = ans.label, ans.stage
@@ -1328,6 +1372,37 @@ class Router:
         plan.block = {"key": key, "text": "\n\n".join(p["text"] for _, p in on),
                       "parts": [it["part"] for it in items], "shas": [it["sha"] for it in items],
                       "kinds": {k for k, _ in on}, "reason": reason, "items": items}
+
+    def _reading(self, plan, router, cls, classes, row) -> tuple | None:
+        """FX6: the reading line, as a `classify` part, or None. A class a model stage picked on
+        the turn it starts, below `reading.below`, with another class with a `reading` at
+        `reading.other` or more: build the picked one and say so in one short line, never a
+        blocking question. The numbers come from the classifier's own answer; no word decides."""
+        cfg = schema.reading(router)
+        if cfg["mode"] == "off" or plan.decisions.get("classify") != "on":
+            return None
+        mine = (classes.get(cls) or {}).get("reading")
+        conf = row.get("confidence")
+        if not mine or not getattr(plan, "class_new", False) or conf is None or \
+                row.get("source") not in ("qwen", "decider") or conf >= float(cfg["below"]):
+            return None
+        probs = next((s.get("probs") or {} for s in reversed(row.get("stages") or [])
+                      if s.get("label") == cls and not s.get("error") and not s.get("below")), {})
+        others = sorted(((p, c) for c, p in probs.items()
+                         if c != cls and (classes.get(c) or {}).get("reading")
+                         and float(p) >= float(cfg["other"])), reverse=True)
+        if not others:
+            return None
+        p, other = others[0]
+        row["extra"]["reading"] = {"class": cls, "confidence": round(float(conf), 4),
+                                   "other": other, "other_p": round(float(p), 4),
+                                   "mode": cfg["mode"]}
+        text = cfg["text"].replace("{reading}", mine).replace(
+            "{other}", classes[other]["reading"])
+        if cfg["mode"] == "shadow":
+            row["shadow"] = dict(row.get("shadow") or {}, reading=text)
+            return None
+        return ("classify", {"kind": "reading", "name": cls, "text": text})
 
     # ---------------------------------------------------------------- J1: snapshots, outcomes
     def _observe(self, plan, body, router, prof, sh, sess, row) -> None:

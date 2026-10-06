@@ -2,6 +2,17 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.48-test, 2026-10-07
+
+0.3.47-test with one router fix (SRV-205; QA SRV-206). Raw and bench text are unchanged; under a conductor plan a three_d turn now always carries the 3D skill, and an unsure visual class adds one sentence to the note.
+
+### A routed class brings its own skill
+
+- A class's policy takes `core`: packages that go in whole on every turn of the class, like a `general` package but for that class alone (journal `extra.package_core`). On 2026-10-06 "Create a new folder and create there a pagoda garden" went to three_d at 0.464; the 3D skill was only one of the package question's options beside `none`, the question answered `none` at 0.747, and the model built a flat SVG page. The box's router v15 makes threejs-scene three_d's core; the shipped router also makes coding the core of code_edit and debug (the shipped packages document has no `general` flag on it, so a new box offered it to the question).
+- A router may give the package question's Qwen stage its own prompt, `classifier.package_prompt`, with the class the turn was routed to (`{class}`). The default stays the class question's prompt with the packages as the classes: three prompts that name the class (n = 1, 51 prompts) cost 8 to 27 test-skill picks on code_edit and debug and still left three of four unsure 3D prompts under the 0.6 accept. The library no longer picks a package the turn's note already carries.
+- The reading line (`classifier.reading`, under the profile's `classify` decision): a class a model stage picked on the turn the class starts, below 0.8, with another class at 0.15 or more, both with a `reading` phrase (three_d "a 3D three.js scene", design_ui "a flat web page", drawing "a 2D drawing"), tells the model to build the picked kind and to open its answer with one short line such as "Building it as a 3D three.js scene. Say if you wanted a flat web page.", without asking first. `mode: shadow` journals it only.
+- Measured with `tools/class_core_eval.py` on the live class question (router v14, n = 1): on the labelled sets (308 prompts) the class answers and every class's package picks are the same as before, and the three_d turns that get the 3D skill go from 6 of 22 to 22 of 22; on 13 ambiguous prompts (`tests/fixtures/conductor/ambiguous_prompts.jsonl`) from 3 of 7 to 7 of 7. The reading line fires on 7 of the 13 ambiguous prompts and on none of the 308 labelled ones.
+
 ## 0.3.47-test, 2026-10-06
 
 0.3.46-test (6f985a4) with the fix for a new user message that read a long conversation again (SRV-207, SRV-209; QA SRV-208, SRV-210). Raw and bench text are unchanged.

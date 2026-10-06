@@ -1,5 +1,5 @@
 {
- "from": "router v13, the box, 2026-10-03",
+ "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading",
  "doc": {
   "classes": [
    {
@@ -19,6 +19,9 @@
       "test-api",
       "test-data",
       "test-lib"
+     ],
+     "core": [
+      "coding"
      ],
      "effort_by_size": {
       "small": "high",
@@ -48,6 +51,9 @@
       "test-data",
       "test-lib"
      ],
+     "core": [
+      "coding"
+     ],
      "rules": [
       "Reproduce the failure first, change one thing at a time, and quote the result line of the check."
      ]
@@ -57,6 +63,7 @@
     "id": "design_ui",
     "label": "UI design",
     "description": "The look of a web page or an app: layout, visual style, colours, typography, UI and UX.",
+    "reading": "a flat web page",
     "policy": {
      "effort": "high",
      "packages": [
@@ -72,6 +79,7 @@
     "id": "drawing",
     "label": "Drawing",
     "description": "Draw, paint or animate a picture or a portrait with code: a sketch, line art, SVG or canvas art.",
+    "reading": "a 2D drawing",
     "policy": {
      "effort": "high",
      "packages": [
@@ -89,14 +97,19 @@
     "id": "three_d",
     "label": "3D scene",
     "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
+    "reading": "a 3D three.js scene",
     "policy": {
      "effort": "high",
      "packages": [
       "testing",
       "laya-testing",
       "laya-playtest",
+      "threejs-scene",
       "photo-to-3d",
       "voxel-seasons"
+     ],
+     "core": [
+      "threejs-scene"
      ],
      "rules": []
     }
@@ -173,6 +186,12 @@
    "package_question": "Which of these instructions fits this request best?",
    "package_accept": 0.6,
    "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}",
+   "reading": {
+    "mode": "on",
+    "below": 0.8,
+    "other": 0.15,
+    "text": "Build it as {reading}. The request could also mean {other}, so start your answer with one short line that says how you read it, for example: \"Building it as {reading}. Say if you wanted {other}.\" Then go straight on; do not stop to ask first."
+   },
    "context_stage": {
     "mode": "off",
     "min_tokens": 8192,

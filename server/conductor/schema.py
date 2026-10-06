@@ -236,6 +236,30 @@ CONTEXT_STAGE: dict = {"mode": "off", "min_tokens": 8192, "followups": True, "ac
 # decides under the engine lock (the in-context stage), the probe answers first and the question
 # is asked only below `accept`. Off by default
 PROBE_STAGE: dict = {"mode": "off", "file": "", "accept": 0.9}
+# FX6 (2026-10-06, the pagoda turn: three_d at 0.464, the package question answered `none` at
+# 0.747 and no 3D skill went in): the Qwen stage of the package question gets the class question's
+# prompt ("You sort requests ... into task classes") with the packages as the classes, and not the
+# class the turn was routed to. A router's `classifier.package_prompt` replaces it: `{class}` is
+# the routed class (`id: label, description`), `{question}` the classifier's `package_question`,
+# `{classes}` the options. None by default: three prompts that name the class (this one among
+# them, 2026-10-06, n = 1 on 51 prompts whose pick it changed) lost 8 to 27 test-skill picks on
+# code_edit and debug (test-api at 0.98 became none) and still left three of four unsure 3D
+# prompts under the 0.6 accept. The pagoda turn is fixed by the class's `core` instead
+PACKAGE_PROMPT_CLASS = ("A request to a coding assistant was sorted into this task class: "
+                        "{class}\n{question} The instructions below are extra recipes for parts "
+                        "of that class of work. Answer with the id of the one the request needs, "
+                        "or none when it needs none of them.\n\nInstructions:\n{classes}")
+# FX6: the reading line. A class the classifier picked on a fresh turn below `below` (a class
+# switch needs 0.8, router.stickiness), with another class that has a `reading` at `other` or
+# more, gets one sentence in its note: build what the class says, and open the answer with one
+# short line that names the reading, never a blocking question. `{reading}` and `{other}` are the
+# two classes' `reading` phrases. Only classes with a `reading` take part (the deliverable kinds:
+# a web page, a 2D drawing, a 3D scene). Under the profile's `classify` decision
+READING_TEXT = ("Build it as {reading}. The request could also mean {other}, so start your "
+                "answer with one short line that says how you read it, for example: \"Building "
+                "it as {reading}. Say if you wanted {other}.\" Then go straight on; do not stop "
+                "to ask first.")
+READING: dict = {"mode": "on", "below": 0.8, "other": 0.15, "text": READING_TEXT}
 # S1 (2026-10-02): a client's side request (opencode's title or summary call, Hermes' title call)
 # is detected structurally (signals.side_shape: no tools and the client's fixed instruction) and
 # served without the classifier, a package or a note, thinking off unless the client asked for a
@@ -414,31 +438,40 @@ SHIPPED_ROUTER: dict = {
         {"id": "code_edit", "label": "Code edit",
          "description": "Write, change, refactor or extend code or files in a software project.",
          # SRV-157: eval round 1 (2026-10-01), minicalc took 7.4 against 6.5 minutes at xhigh
-         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES),
+         # FX6: the coding package is the coding classes' core (the shipped packages document
+         # has no `general` flag on it, so a fresh box offered it to the package question)
+         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES), "core": ["coding"],
                     "effort_by_size": {"small": "high", "medium": "xhigh", "large": "xhigh"},
                     "rules": [
              "Read a file before you change it, and run the project's check or tests after each "
              "change."]}},
         {"id": "debug", "label": "Debug",
          "description": "Find and fix a bug, a failing test, an error message or a crash.",
-         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES), "rules": [
+         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES), "core": ["coding"],
+                    "rules": [
              "Reproduce the failure first, change one thing at a time, and quote the result line "
              "of the check."]}},
         {"id": "design_ui", "label": "UI design",
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
+         "reading": "a flat web page",
          "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design"], "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
+         "reading": "a 2D drawing",
          "policy": {"effort": "high",
                     "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
                                                   "one-line-portrait"],
                     "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
-         "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["photo-to-3d", "voxel-seasons"],
-                    "rules": []}},
+         "reading": "a 3D three.js scene",
+         # FX6: the 3D skill is the class's core, in on every three_d turn; the package question
+         # picks among the special recipes alone
+         "policy": {"effort": "high",
+                    "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons"],
+                    "core": ["threejs-scene"], "rules": []}},
         # 2026-10-03 10:12 (the owner's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",
@@ -486,6 +519,7 @@ SHIPPED_ROUTER: dict = {
         "qwen_prompt": ("You sort requests to a coding assistant into task classes. Read the "
                         "request and answer with the id of the one class that fits it best.\n\n"
                         "Classes:\n{classes}"),
+        "reading": dict(READING),
         # Qwen decides inside the conversation it already holds (2026-10-02): a long prompt or a
         # follow-up is classified by the engine itself on the prompt as the client sent it (the
         # resident prefix and its anchors hit, only the tail and this question are prefilled),
@@ -1163,6 +1197,18 @@ def library(router: dict) -> dict:
     return {**copy.deepcopy(LIBRARY), **copy.deepcopy(router.get("library") or {})}
 
 
+def reading(router: dict) -> dict:
+    """The classifier's `reading` section over the defaults (FX6); a router stored before it has
+    none and gets the defaults."""
+    return {**copy.deepcopy(READING), **copy.deepcopy(router["classifier"].get("reading") or {})}
+
+
+def package_prompt(router: dict) -> str | None:
+    """The router's own Qwen prompt for the package question (FX6), None when it has none (the
+    class question's prompt then, as always)."""
+    return router["classifier"].get("package_prompt") or None
+
+
 def profile_library(profile: dict) -> str:
     """A profile's `library` switch (R1): off when absent."""
     return profile.get("library", "off")
@@ -1232,6 +1278,9 @@ POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
                # L1: 12 (was 8): a coding class lists two general packages more, the Laya ones
                "packages": {"type": "array", "items": _ID, "maxItems": 12},
+               # FX6: the class's core skills, always in on a turn of the class (like a general
+               # package, but for this class alone); one not in `packages` is ignored
+               "core": {"type": "array", "items": _ID, "maxItems": 4},
                "rules": {"type": "array", "items": {"type": "string", "maxLength": 2000},
                          "maxItems": 16},
                "note": {"type": "string", "maxLength": 4000}},
@@ -1303,7 +1352,10 @@ SCHEMAS: dict[str, dict] = {
         "classes": {"type": "array", "maxItems": 20, "items": _obj({
             "id": _ID, "label": {"type": "string", "minLength": 1, "maxLength": 60},
             "description": {"type": "string", "minLength": 8, "maxLength": 600},
-            "policy": POLICY})},
+            # FX6: what the class builds, in a few words ("a 3D three.js scene"), for the
+            # reading line; a class without it never takes part
+            "reading": {"type": "string", "minLength": 3, "maxLength": 120},
+            "policy": POLICY}, required=("id", "label", "description", "policy"))},
         "classifier": _obj({
             "stages": {"type": "array", "maxItems": 4, "items": _obj({
                 "kind": {"enum": ["decider", "qwen"]}, "enabled": {"type": "boolean"},
@@ -1314,6 +1366,12 @@ SCHEMAS: dict[str, dict] = {
             "package_question": {"type": "string", "minLength": 4, "maxLength": 400},
             "package_accept": _PROB,
             "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
+            "package_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
+            "reading": _obj({
+                "mode": {"enum": ["off", "shadow", "on"]},
+                "below": _PROB, "other": _PROB,
+                "text": {"type": "string", "minLength": 10, "maxLength": 1000}},
+                required=("mode",)),
             "context_stage": _obj({
                 "mode": {"enum": ["off", "on"]},
                 "min_tokens": {"type": "integer", "minimum": 0, "maximum": 262144},
@@ -1642,6 +1700,9 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             for p in c["policy"].get("packages", []):
                 if p not in pkg_names:
                     errs.append(f"$.classes[{i}].policy.packages: no package {p!r}")
+            for p in c["policy"].get("core", []):
+                if p not in pkg_names:
+                    errs.append(f"$.classes[{i}].policy.core: no package {p!r}")
         sides = [x["id"] for x in doc["structural"].get("side_shapes") or []]
         if len(set(sides)) != len(sides):
             errs.append("$.structural.side_shapes: two shapes share an id")
@@ -1652,6 +1713,11 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
             errs.append("$.injection.wrapper: must contain {text}")
         if "{classes}" not in doc["classifier"]["qwen_prompt"]:
             errs.append("$.classifier.qwen_prompt: must contain {classes}")
+        if "{classes}" not in doc["classifier"].get("package_prompt", "{classes}"):
+            errs.append("$.classifier.package_prompt: must contain {classes}")
+        rd = doc["classifier"].get("reading") or {}
+        if "text" in rd and "{reading}" not in rd["text"]:
+            errs.append("$.classifier.reading.text: must contain {reading}")
         cs = doc["classifier"].get("context_stage") or {}
         if "question" in cs and "{classes}" not in cs["question"]:
             errs.append("$.classifier.context_stage.question: must contain {classes}")
