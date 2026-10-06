@@ -140,6 +140,25 @@ def test_5_the_scan():
     assert _scan(call + "\n</think>\n\nHere is the answer.", fake_engine.THINK_CLOSE) is None
 
 
+def test_6_the_state_line_says_what_happened():
+    """The lift's line, under the `continue` switch: not "asking it to go on"."""
+    from server.conductor import states as S, voice as V
+    ev = {"decision": "CONTINUE_HIDDEN", "task": "E1", "reason": "empty_turn(case=C)",
+          "detail": {"case": "C", "calls": ["run_command"], "act": 1}}
+    st = S.States()
+    st.monitor(ev)
+    assert [(e["kind"], e["text"]) for e in st.log] == [
+        ("continue", "tool call written in the thinking, sending it")], st.log
+    assert "lift" not in S.KINDS, "the switch is continue's"
+    off = S.States(kinds={"continue": False})
+    off.monitor(ev)
+    assert off.log == [], "continue off: no line for the lift either"
+    f = st.log[0]["f"] if "f" in st.log[0] else {"lift": True, "tools": ["run_command"]}
+    assert V.natural("continue", f, "en") == "the run_command call was written in the thinking, sending it"
+    assert V.natural("continue", f, "de").startswith("der run_command-Aufruf stand im Denken")
+    assert V.natural("continue", {}, "en") == "stopped without an answer, asking it to go on"
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

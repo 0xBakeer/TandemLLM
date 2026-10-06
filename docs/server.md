@@ -262,7 +262,7 @@ A client shows Qwen's reasoning and its answer; what the conductor did around th
 | `backstop` | `thinking closed at the 32,768 backstop` | D2 closes it |
 | `loop` | `loop detected, steering` | D1 closes a reasoning loop |
 | `close` | `closing reasoning` | any other close |
-| `continue` | `empty answer, continuing` | SP2's hidden continue (E1) |
+| `continue` | `empty answer, continuing` | SP2's hidden continue (E1); for E1's lift of calls written inside the thinking: `tool call written in the thinking, sending it` |
 | `check` | `checking the tool call` (`checking 3 tool calls`) | SP3 checks the held calls |
 | `repair` | `repairing the tool call` | C4 repairs a call |
 | `regenerate` | `asking for the tool call again` | SP3 has the model write the calls again |

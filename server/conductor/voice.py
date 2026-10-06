@@ -307,6 +307,12 @@ def natural(kind: str, facts: dict, lang: str = "en") -> str | None:
                 else "the thinking went in circles, steering it out")
     if kind == "close":
         return "beendet das Denken" if de else "closing the thinking"
+    if kind == "continue" and f.get("lift"):
+        # SRV-199: E1's lift, the calls written inside the thinking sent as the answer
+        what = _names([str(t) for t in f.get("tools") or []], lang)
+        return (f"der {what + '-' if what else 'Tool-'}Aufruf stand im Denken, wird gesendet" if de
+                else f"the {what + ' ' if what else 'tool '}call was written in the thinking, "
+                     f"sending it")
     if kind == "continue":
         return ("keine Antwort, macht weiter" if de
                 else "stopped without an answer, asking it to go on")

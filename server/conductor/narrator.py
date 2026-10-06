@@ -114,7 +114,9 @@ EVENTS = {
     "backstop": "the reasoning reached the hard backstop and was closed",
     "loop": "the reasoning started repeating itself, so the engine steered it",
     "close": "the engine closed the reasoning",
-    "continue": "the model stopped without writing an answer, so the engine makes it go on",
+    "continue": "the model stopped without writing an answer, so the engine makes it go on (with "
+                "`lift`: it had written its tool calls inside its thinking, and they are sent as "
+                "its answer)",
     "check": "the engine checks the model's tool call before the client runs it",
     "checks": "the engine checks the model's tool calls before the client runs them",
     "repair": "a tool call was malformed and the engine fixed it",

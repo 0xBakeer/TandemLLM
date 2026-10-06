@@ -93,6 +93,8 @@ TEXTS = {
     "loop": "loop detected, steering",
     "close": "closing reasoning",
     "continue": "empty answer, continuing",
+    # SRV-199: E1's lift, under the `continue` switch: the calls were written inside the thinking
+    "lift": "tool call written in the thinking, sending it",
     "check": "checking the tool call",
     "checks": "checking {n} tool calls",
     "repair": "repairing the tool call",
@@ -110,7 +112,7 @@ TEXTS = {
     "thought": "thought {elapsed}, {n} tokens",
 }
 # the profile's per-kind switches (`ui.kinds`) name these; `check` covers `checks`
-KINDS = tuple(k for k in TEXTS if k not in ("checks", "queue_eta")) + ("tool", "plan")
+KINDS = tuple(k for k in TEXTS if k not in ("checks", "queue_eta", "lift")) + ("tool", "plan")
 PROGRESS = ("queue", "queue_eta", "prefill", "thinking")
 # where the lines go (`ui.states_channel`): the reasoning, as they always did and as every profile
 # stored before S1 keeps them, the content, outside the thinking (a new profile's default), or
@@ -291,12 +293,14 @@ class States:
         base = {"checks": "check", "queue_eta": "queue"}.get(kind, kind)
         return bool(self.kinds.get(base, True))
 
-    def add(self, kind: str, extra: dict | None = None, **facts) -> None:
-        """One step: its template filled with `facts`; `extra` are facts for the narrator only."""
+    def add(self, kind: str, extra: dict | None = None, *, text_of: str | None = None,
+            **facts) -> None:
+        """One step: its template filled with `facts`; `extra` are facts for the narrator only;
+        `text_of`: another template under this kind's switch (E1's lift under `continue`)."""
         if not self.on(kind):
             return
         try:
-            text = TEXTS[kind].format(**facts)
+            text = TEXTS[text_of or kind].format(**facts)
         except (KeyError, IndexError, ValueError):
             return
         e = {"kind": kind, "text": text, "summary": None,
@@ -454,6 +458,9 @@ class States:
         elif d == "CONTINUE_HIDDEN" and task == "E2":
             # the claim check's note: a steer, not an empty answer
             self.add("steer", label=schema_label(task) or task)
+        elif d == "CONTINUE_HIDDEN" and detail.get("case") == "C":
+            # SRV-199: the calls the model wrote inside its thinking go out as its answer
+            self.add("continue", dict(extra, lift=True, tools=detail.get("calls")), text_of="lift")
         elif d == "CONTINUE_HIDDEN":
             self.add("continue")
         elif d == "REPAIR_CALL":
