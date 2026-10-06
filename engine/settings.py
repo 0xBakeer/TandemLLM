@@ -132,6 +132,11 @@ KNOBS: dict[str, tuple] = {
     # FX5: Open WebUI's live working directory moves from run_command's description (the system
     # prompt) into a router note (`note`), so a `cd` no longer re-reads the conversation; `off`
     'CLIENT_CWD': ('note', 'server/conductor/router.py'),
+    # FX5b (2026-10-06): a class's note carries only the parts (effort sentence, packages, rules)
+    # no live note of the session holds with the same text (`parts`); `block`: the whole note
+    # whenever any part changed, as 0.3.47-test (the general packages went in again at every
+    # user message whose task skill differed, and the replay budget then cut the oldest note)
+    'NOTE_DEDUP': ('parts', 'server/conductor/router.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),
     'SHADOW_DIR': ('', 'server/conductor/shadow.py'),

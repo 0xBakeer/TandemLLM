@@ -146,11 +146,12 @@ def degradations(backend: dict, caps: dict) -> dict:
 
 
 class MsgNote:
-    __slots__ = ("idx", "hash", "text", "key", "kinds", "parts", "tokens", "at")
+    __slots__ = ("idx", "hash", "text", "key", "kinds", "parts", "tokens", "at", "shas")
 
-    def __init__(self, idx, hsh, text, key, kinds, parts):
+    def __init__(self, idx, hsh, text, key, kinds, parts, shas=None):
         self.idx, self.hash, self.text, self.key = idx, hsh, text, key
         self.kinds, self.parts = set(kinds or ()), list(parts or [])
+        self.shas = list(shas or [])     # each part's text hash (router.Plan._fresh_block)
         self.tokens = im.est_tokens(text)
         self.at = time.time()
 
@@ -672,8 +673,13 @@ class Turn:
             keys = {n.key for n in live}
             parts = {(p.get("kind"), p.get("name")) for n in live for p in n.parts}
             todo = []
-            if plan.block is not None and plan.block["key"] not in keys:
-                todo.append((plan.block, plan.block.get("reason")))
+            blk = plan.block
+            if blk is not None and blk["key"] not in keys:
+                # only the parts no live note holds with the same text (the engine's rule,
+                # server/conductor/router.py `Plan._fresh_block`)
+                blk = plan._fresh_block(blk, live)
+            if blk is not None and blk["key"] not in keys:
+                todo.append((blk, blk.get("reason")))
             for x in plan.extras:
                 if x["key"] in keys or (x.get("unless") and tuple(x["unless"]) in parts):
                     continue
@@ -685,7 +691,7 @@ class Turn:
                         f"note_too_long:{im.est_tokens(text)}")
                     continue
                 n = MsgNote(at, hashes.get(at), text, blk["key"], blk.get("kinds"),
-                            blk.get("parts"))
+                            blk.get("parts"), blk.get("shas"))
                 adds.append((n, reason))
                 parts |= {(p.get("kind"), p.get("name")) for p in n.parts}
         notes = live + [n for n, _ in adds]

@@ -62,6 +62,9 @@ from engine.settings import SETTINGS as _S
 CWD_LINE = re.compile(r"\n\nThe current working directory is: ([^\n]+)\s*\Z")
 CWD_NOTE = "The current working directory of the terminal (the run_command tool) is: {path}"
 CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
+#: FX5b: `parts`: a class's note leaves out the parts a live note already holds with the same text
+#: (`Plan._fresh_block`); `block`: the whole note whenever its key is new (0.3.47-test)
+NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
 
 COMPOSITE = "TandemLLM"
 RANK = {"raw": 0, "off": 0, "shadow": 1, "on": 2}
@@ -139,11 +142,13 @@ def resolve(store, model: str, raw_model: str, headers, client_kind: str,
 class Injection:
     """One note in a session: where it sits in the client's prompt and what it is."""
 
-    __slots__ = ("pos", "hash", "ids", "text", "parts", "kinds", "key", "turn", "at", "row")
+    __slots__ = ("pos", "hash", "ids", "text", "parts", "kinds", "key", "turn", "at", "row",
+                 "shas")
 
-    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row):
+    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None):
         self.pos, self.hash, self.ids, self.text = pos, hsh, ids, text
         self.parts, self.kinds, self.key, self.turn, self.row = parts, kinds, key, turn, row
+        self.shas = shas          # each part's text hash, in `parts`' order (`Plan._fresh_block`)
         self.at = time.time()
 
 
@@ -333,16 +338,20 @@ class Plan:
                 live, hashes = self._live(ids, at)
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
                 keys = {n.key for n in live}
-                if self.block is not None and self.block["key"] not in keys:
-                    text = cfg["injection"]["wrapper"].replace("{text}", self.block["text"])
+                block = self.block
+                if block is not None and block["key"] not in keys:
+                    block = self._fresh_block(block, live)
+                if block is not None and block["key"] not in keys:
+                    text = cfg["injection"]["wrapper"].replace("{text}", block["text"])
                     nids = list(tok(text, add_special_tokens=False).input_ids)
                     if len(nids) > cap:
                         self.row["extra"].setdefault("errors", []).append(
                             f"note_too_long:{len(nids)}")
                     else:
-                        adds.append((Injection(at, hashes[at], nids, text, self.block["parts"],
-                                               self.block["kinds"], self.block["key"], sess.turns,
-                                               self.row["id"]), self.block["reason"]))
+                        adds.append((Injection(at, hashes[at], nids, text, block["parts"],
+                                               block["kinds"], block["key"], sess.turns,
+                                               self.row["id"], shas=block.get("shas")),
+                                     block["reason"]))
                 # J1: the outcome's note and the cards, after the class's block; a card goes in
                 # only while no live note carries the same card (the first turn, after a
                 # compaction), an outcome's note once
@@ -387,6 +396,34 @@ class Plan:
         self.changed = True
         self.row["changed"] = 1
         return torch.tensor(out, dtype=prompt.dtype, device=prompt.device), in_think
+
+    def _fresh_block(self, block: dict, live: list) -> dict | None:
+        """The class's note without the parts a live note of the session already holds with the
+        same text (kind, name and text hash): None when every part is live. A user message whose
+        task skill differs from the last one's used to bring the whole note again, the general
+        packages included (about 4,800 tokens each time), and the third copy pushed the replayed
+        notes over `max_replay_tokens`: the oldest note went, the prompt changed at its position
+        and the turn read the conversation after it again (FX5b, 2026-10-06: 35,442 tokens, 49 s,
+        in an Open WebUI agent chat). `QWEN38_NOTE_DEDUP=block` keeps the whole note."""
+        items = block.get("items")
+        if NOTE_DEDUP != "parts" or not items:
+            return block
+        held = {(p.get("kind"), p.get("name"), h) for n in live
+                for p, h in zip(n.parts or (), getattr(n, "shas", None) or ()) if h}
+        fresh = [it for it in items if (it["part"]["kind"], it["part"]["name"],
+                                        it["sha"]) not in held]
+        if len(fresh) == len(items):
+            return block
+        self.row["extra"].setdefault("notes", []).append(
+            "parts_live:" + ",".join(it["part"]["name"] for it in items if it not in fresh))
+        if not fresh:
+            return None
+        key = hashlib.sha256((block["key"] + repr([(it["part"]["kind"], it["part"]["name"],
+                                                   it["sha"]) for it in fresh])
+                              ).encode()).hexdigest()[:20]
+        return dict(block, key=key, text="\n\n".join(it["text"] for it in fresh),
+                    parts=[it["part"] for it in fresh], shas=[it["sha"] for it in fresh],
+                    kinds={it["kind"] for it in fresh}, items=fresh)
 
     def _live(self, ids: list[int], at: int) -> tuple[list, dict]:
         """The session's earlier notes this prompt still carries the text before (their
@@ -1284,9 +1321,13 @@ class Router:
         reason = (f"class {cls} ({row.get('source')}"
                   + (f", {row['confidence']:.2f}" if row.get("confidence") is not None else "")
                   + ")")
+        # each part with its text's hash: a later note leaves out a part a live note holds
+        # (`Plan._fresh_block`)
+        items = [{"kind": k, "text": p["text"], "part": {"kind": p["kind"], "name": p["name"]},
+                  "sha": hashlib.sha256(p["text"].encode()).hexdigest()[:12]} for k, p in on]
         plan.block = {"key": key, "text": "\n\n".join(p["text"] for _, p in on),
-                      "parts": [{"kind": p["kind"], "name": p["name"]} for _, p in on],
-                      "kinds": {k for k, _ in on}, "reason": reason}
+                      "parts": [it["part"] for it in items], "shas": [it["sha"] for it in items],
+                      "kinds": {k for k, _ in on}, "reason": reason, "items": items}
 
     # ---------------------------------------------------------------- J1: snapshots, outcomes
     def _observe(self, plan, body, router, prof, sh, sess, row) -> None:
