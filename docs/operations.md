@@ -33,7 +33,7 @@ The FP8 profile needs about 27.5 GiB of weights on the device instead of 16.4. T
 
 | script | what it does |
 |-|-|
-| `ops/make-secrets.sh` | creates `secrets.env` with the admin and metrics tokens (mode 600), once; `--rotate` replaces both |
+| `ops/make-secrets.sh` | creates `secrets.env` with the metrics token (mode 600), once; `--admin` adds the admin password (`QSE_ADMIN_TOKEN`), which turns the admin rule on; `--rotate` replaces what is there |
 | `ops/start.sh` | starts the engine on the port from `serve.env` and waits for `/health`; refuses if an engine is alive or the port is held |
 | `ops/stop.sh [seconds]` | sends SIGTERM, waits for the drain (60 s by default), and kills only after that |
 | `ops/watchdog.sh` | one health check, for cron every minute; restarts after 3 failures in a row |

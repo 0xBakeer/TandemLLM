@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh 
 
 Afterwards, `~/TandemLLM/bin/tandem start|stop|status|smoke|logs` controls the engine.
 
-The dashboard at `http://<host>:8000/dashboard/` opens without a sign-in, so anyone who can reach the port can read it. To require the admin token, put `QSE_DASHBOARD_LOGIN=on` in `~/TandemLLM/run/local.env`, create the token with `QSE_STATE_DIR=~/TandemLLM/state bash ~/TandemLLM/src/ops/make-secrets.sh`, run `~/TandemLLM/bin/tandem restart`, and read it with `grep QSE_ADMIN_TOKEN ~/TandemLLM/state/secrets.env`. [docs/dashboard.md](docs/dashboard.md#signing-in) says what the dashboard shows and has the steps.
+The dashboard at `http://<host>:8000/dashboard/` asks for no password. Until an admin password is set, anyone who can reach the port can read and change what it shows, the memory included, so keep the engine on a trusted network. [docs/dashboard.md](docs/dashboard.md#no-password) says what it shows.
 
 The installer builds its lookup corpus from public text: one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens. The served corpus is not published, and the paper's numbers come from it. With the installer's corpus, or with `--no-corpus`, the lookup drafter proposes different continuations, so speeds can differ from the paper's. We haven't measured by how much. Other CUDA GPUs are best effort: the installer turns off the sm_121a-only skinny kernel there, and StairCut's cost tables come from the Spark.
 

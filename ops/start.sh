@@ -59,11 +59,10 @@ status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || tru
     --engine-port "$PORT" 2>&1 | tail -1
 T_START=$(date +%s)
 status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
-# The access tokens: QSE_ADMIN_TOKEN (cache routes, and the dashboard when serve.env sets
-# QSE_DASHBOARD_LOGIN=on) and QSE_METRICS_TOKEN (Prometheus), made by ops/make-secrets.sh, mode 600,
-# never in this repository. Without the file /metrics answers only the box itself, and with the
-# login on the dashboard API does not exist (404). QSE_DASHBOARD_LOGIN reaches the server
-# exported from serve.env (set -a above); the server reads it as --dashboard-login's default.
+# The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
+# when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
+# token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
+# rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above).
 SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from

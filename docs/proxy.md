@@ -248,7 +248,7 @@ Under Backends, Users, the admin makes a key per person or tool. The key is show
 
 ## Who may change the configuration
 
-Reading `/v1/config` follows the dashboard's rule. Every write needs the admin token or a dashboard session, or comes from the machine itself. With no admin token set, only the machine itself can change the configuration. The default bind is 127.0.0.1; the page is meant for a local network. Never put it on the internet without the login on and TLS in front.
+Reading and writing `/v1/config` follow the admin rule ([server.md](server.md#the-admin-rule)). With no admin password (`TANDEM_ADMIN_TOKEN`) set, the default, anyone who reaches the port can change the configuration from the Backends and Setup screens, which ask for no password. With one set, a write needs it as a bearer header or a dashboard session, or comes from the machine itself. The default bind is 127.0.0.1; the page is meant for a trusted network. Never put it on the internet.
 
 ## Terms, in short
 

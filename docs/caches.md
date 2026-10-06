@@ -185,7 +185,7 @@ In a hold on 2026-10-01 the engine held 67.25 GiB with every cache filled the wa
 
 ## Routes and knobs
 
-`GET /v1/cache/stats` reports every cache's counters. `POST /v1/cache/clear` empties them, and needs the admin token.
+`GET /v1/cache/stats` reports every cache's counters. `POST /v1/cache/clear` empties them; with an admin password set it needs that token as a bearer header.
 
 | knob | what |
 |-|-|

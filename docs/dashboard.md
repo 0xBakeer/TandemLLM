@@ -57,53 +57,29 @@ A tick costs 410 to 470 µs of CPU at 4 Hz. Each tick is encoded once and sends 
 | `GET /v1/dashboard/system` | settings, memory, caches, ledger and disk |
 | `GET /v1/dashboard/logs` | the server log, as JSON or as a stream |
 | `GET /v1/dashboard/metrics` | the `/metrics` page, for the Performance view's 5-minute figures |
-| `GET /v1/dashboard/session` | whether the login is on, and the session's expiry |
-| `POST /v1/dashboard/session` | sign in with the admin token (login on only) |
+| `GET /v1/dashboard/session` | whether an admin password is set (`password_set`), whether the login is on, and the session's expiry |
+| `POST /v1/dashboard/session` | a session cookie for the admin token (only with a password set and the login on; the page has no sign-in screen yet) |
 
 ## Access
 
-### Signing in
+### No password
 
-The dashboard login is off by default. Open `http://<host>:8000/dashboard/` and the dashboard shows its views, with no token and no sign-in page. It works without a `secrets.env`.
+The dashboard asks for no password anywhere: no sign-in screen, no sign-out button, no token dialog. Open `http://<host>:8000/dashboard/` and every view works, the Conductor's editors and the Memory screen (notes, transcripts, the disk tier) included. You can read and edit them straight away.
 
-With the login off, anyone who can reach the port can read the dashboard:
+This holds while no admin password is set on the server, which is the default ([server.md](server.md#the-admin-rule)). Then anyone who can reach the port can read and change everything the dashboard shows:
 
 - per-request counts and timings from the usage ledger: tokens, speeds, cache hits, finish reasons, the kind of client and a short hash of its API key;
 - what runs now: each request's state, its client, the names of the tools it calls (not their arguments), and the last 20 stops;
 - the server log. No line carries prompt or answer text, unless the server runs with `--log-content`, which lets exception messages quote a request;
-- the engine's settings: its command line and every `QWEN38_*` and `QSE_*` variable, with the home directory written as `~`. Variables named like a token, key, secret or password show `<redacted>`, `QSE_ADMIN_TOKEN` among them;
-- memory, GPU, cache and disk state, and the Prometheus counters of `/metrics`.
+- the engine's settings: its command line and every `QWEN38_*` and `QSE_*` variable, with the home directory written as `~`. Variables named like a token, key, secret or password show `<redacted>`;
+- memory, GPU, cache and disk state, and the Prometheus counters of `/metrics`;
+- the conductor's documents, the memory notes and the session transcripts, which it can also edit, archive and delete.
 
-The Playground sends requests through the OpenAI API, which is open with or without the login.
+Keep the server on a trusted network. Never put it behind a reverse proxy that faces the internet while no password is set.
 
-To turn the login on:
+### With a password set
 
-1. Set `QSE_DASHBOARD_LOGIN=on`. On an installer setup, add the line to `~/TandemLLM/run/local.env`, which the generated `serve.env` reads last. On a checkout of this repository, set it in `ops/serve.env`.
-2. Create the tokens, once, and restart the engine. On an installer setup:
-
-   ```bash
-   QSE_STATE_DIR=~/TandemLLM/state bash ~/TandemLLM/src/ops/make-secrets.sh
-   ~/TandemLLM/bin/tandem restart
-   ```
-
-   On a checkout, `bash ops/make-secrets.sh` writes `~/.qwen38-spark-engine/secrets.env`; restart the engine afterwards. With the login on and no token file, the dashboard API does not exist (404).
-3. Read the admin token:
-
-   ```bash
-   grep QSE_ADMIN_TOKEN ~/TandemLLM/state/secrets.env        # installer setup
-   grep QSE_ADMIN_TOKEN ~/.qwen38-spark-engine/secrets.env   # checkout
-   ```
-4. Open the dashboard and paste the value after `QSE_ADMIN_TOKEN=` into the sign-in field. The browser keeps the session for 400 days (`QSE_SESSION_S`).
-
-`bash ops/make-secrets.sh --rotate` (with the same `QSE_STATE_DIR`) replaces the token and signs every browser out; restart the engine and sign in with the new one.
-
-### What the login protects
-
-The login decides `/v1/dashboard/*` and nothing else. The static files are public in both modes and hold no data. With the login on, everything under `/v1/dashboard/` needs the admin token or a session. Signing in with the token sets an HttpOnly, SameSite=Strict cookie, signed with a key derived from the token, so rotating the token (`ops/make-secrets.sh --rotate`) ends every session. Five failed sign-ins a minute from one address get a 429.
-
-In both modes, `/metrics` and the full `/health` need the metrics or the admin token, and `GET /v1/cache/stats` the admin token; a dashboard session opens them too, when the login is on. The one route that writes, `POST /v1/cache/clear`, takes only the admin token as a bearer header, never the cookie. Requests from the box itself (loopback, no proxy headers) need none of these tokens. The dashboard API only reads.
-
-This page is meant for a local network. Behind a reverse proxy that faces the internet, turn the login on.
+Setting `QSE_ADMIN_TOKEN` in `secrets.env` and restarting turns the admin rule back on for every admin route. The dashboard has no sign-in for that yet: with the login off its read-only views keep working, while edits and the Memory screen show the server's 401 as an error, and a banner says a password is set. Unset the token and restart to open the dashboard again. API clients send the token as `Authorization: Bearer <token>`.
 
 ## Usage ledger
 

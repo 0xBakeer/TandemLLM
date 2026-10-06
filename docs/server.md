@@ -9,23 +9,30 @@
 | `POST /v1/chat/completions` | anyone | chat, streamed or not |
 | `POST /v1/completions` | anyone | plain text completion |
 | `GET /v1/models` | anyone | the served model name, and `TandemLLM` when the conductor is on |
-| `GET /health` | anyone gets the status; the full body needs a token | status, queue counters, cache report, memory |
-| `GET /metrics` | the metrics or admin token | Prometheus metrics ([server/METRICS.md](../server/METRICS.md)) |
-| `GET /v1/cache/stats` | the admin token | the caches' counters |
-| `POST /v1/cache/clear` | the admin token, as a bearer header | empty the caches in RAM; `?tier=disk` the disk tier, `?tier=all` both |
+| `GET /health` | anyone gets the status; the full body follows the admin rule | status, queue counters, cache report, memory |
+| `GET /metrics` | the metrics token when one is set, else the admin rule | Prometheus metrics ([server/METRICS.md](../server/METRICS.md)) |
+| `GET /v1/cache/stats` | the admin rule | the caches' counters |
+| `POST /v1/cache/clear` | the admin rule; with a password set, only as a bearer header | empty the caches in RAM; `?tier=disk` the disk tier, `?tier=all` both |
 | `GET /dashboard/` | anyone | the dashboard's static files, which hold no data |
-| `/v1/dashboard/*` | anyone by default; the admin token or a dashboard session with `--dashboard-login on` | the dashboard's data ([dashboard.md](dashboard.md)) |
+| `/v1/dashboard/*` | anyone by default; with a password set and `--dashboard-login on`, the admin token or a dashboard session | the dashboard's data ([dashboard.md](dashboard.md)) |
 | `GET /v1/conductor/*` | as `/v1/dashboard/*` | the conductor's config, decisions, sessions and reports (below) |
-| `PUT`/`POST /v1/conductor/*` | the admin token or a dashboard session, or the box itself | new config versions, restores, labels, decision-model loads |
-| `POST /v1/systemone`, `/v1/predict` | the admin token or a dashboard session, or the box itself | typed decisions from the engine's own decision models (below); only with `QWEN38_DECIDER_MODELS` set |
+| `PUT`/`POST /v1/conductor/*`, every `/v1/conductor/memory/*` route | the admin rule | new config versions, restores, labels, decision-model loads |
+| `POST /v1/systemone`, `/v1/predict` | the admin rule | typed decisions from the engine's own decision models (below); only with `QWEN38_DECIDER_MODELS` set |
 | `GET /readyz` | anyone | whether a decision model is loaded and warm; only with `QWEN38_DECIDER_MODELS` set |
 | `POST /v1/laya/ask`, `GET /v1/laya` | anyone, as the chat API | Laya for the model's own scripts: a typed verdict on a short text (below); only with `QWEN38_DECIDER_MODELS` set and the `deciders` document's `api.mode` on |
 | `POST /v1/laya/drive/end`, `GET /v1/laya/kit/<file>` | anyone, as the chat API | X1: a playtest driver session's end (its journal row) and the playtest kit (below); the same conditions |
 | `GET /v1/library`, `/v1/library/search`, `/v1/library/{name}` | anyone, as the chat API | the package library for the model's own scripts: search it, read a skill and its reference (below) |
 
-The admin and metrics tokens live in a `secrets.env` file that `ops/make-secrets.sh` writes (mode 600, never in the repository). Without an admin token the admin routes answer 404. Requests from the box itself (loopback, no proxy headers) need no token for the read-only admin routes. The watchdog and the measurement tools depend on that.
+### The admin rule
 
-The dashboard login is off by default (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`): the dashboard's read API, `/v1/dashboard/*`, answers anyone who reaches the port, even without a `secrets.env`, and the page opens without a sign-in screen. With `QSE_DASHBOARD_LOGIN=on` it needs the admin token or a session, and without an admin token it answers 404. The login changes nothing else: `/metrics`, the full `/health` and both cache routes keep the rules in the table, and `POST /v1/cache/clear` takes only the admin token as a bearer header. [dashboard.md](dashboard.md#access) says what the dashboard shows and how to turn the login on.
+The admin password is the admin token, `QSE_ADMIN_TOKEN` in `secrets.env` (mode 600, never in the repository). It is the one switch, and by default it is not set.
+
+- With no password set, the default, every route in the table answers anyone who reaches the port: the dashboard, the conductor's writes, the memory (notes, transcripts, the disk tier), the decision models, both cache routes and the full `/health`. The dashboard asks for no password anywhere. Keep the server on a trusted network: anyone on it can read and change the configuration and the memory. Only `/metrics` keeps its own token when `QSE_METRICS_TOKEN` is set, for Prometheus.
+- With a password set, the admin routes need the admin token as a bearer header or a dashboard session. `POST /v1/cache/clear` takes only the bearer header. Requests from the box itself (loopback, no proxy headers) need no token; the watchdog and the measurement tools depend on that. A bad password stops the start: it must be at least 32 characters.
+
+The dashboard has no sign-in screen in this release. With a password set, its reads still work while the login is off, but its edits and the memory views show the server's 401 as an error and the page shows a banner. The sign-in for that case comes later; until then, use the API with the bearer header or leave the password unset.
+
+The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by default) matters only with a password set: then `on` makes `/v1/dashboard/*` need the token or a session too. With no password it changes nothing. [dashboard.md](dashboard.md#access) says what the dashboard shows.
 
 ## What the API supports
 

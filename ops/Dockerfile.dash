@@ -7,8 +7,8 @@
 # Everything the proxy keeps (the config database, the usage ledger, the key file when no
 # TANDEM_SECRETS_KEY is given) lives in the /data volume. The server binds 0.0.0.0 inside the
 # container; what is reachable from outside is what `-p` publishes. Publish it to 127.0.0.1 or a
-# LAN address, never to the internet without TANDEM_DASHBOARD_LOGIN=on, TANDEM_ADMIN_TOKEN and
-# TLS in front (docs/proxy.md).
+# trusted LAN address, never to the internet: with no TANDEM_ADMIN_TOKEN set every route is open
+# (docs/proxy.md).
 #
 # The System view's host collector sees the container, not the machine. For the machine and the
 # processes behind backends on it, run the container with `--pid=host` (and `--gpus all` for
