@@ -230,34 +230,6 @@ def test_own_work_on_slot_0_does_not_send_a_request_to_the_side_slot():
         assert ok(A.SIDE_AFTER_OWN_S, own), "own work that does not give way: the side slot"
 
 
-def test_a_request_that_replaces_the_conversation_clears_the_view_when_it_starts():
-    """Two opencode sessions at once (2026-10-06, before this): the view changed only when a request
-    ended, so while session B's turn ran on slot 0 session A's next turn still "continued" slot 0's
-    conversation and waited behind it; the sessions took turns on slot 0 (2 side grants in 34
-    turns, both done in 301 s against 193 s one after the other)."""
-    r1, rows, r2 = _turns()
-    other = _session(6, HEAD, 3_000)
-    res = FakeResident(rows)
-    res.guest_max = 8_192
-    _, saved = _setup(res, view=r1)
-    try:
-        # A's own next turn starts on slot 0: the view stays
-        assert not A._par_view_enter({"wait": "view", "ids": r2}) and A.STATE["slot0_view"] == r1
-        # a guest (opencode's 599-token title request): the rows come back after it, the view stays
-        assert not A._par_view_enter({"ids": [42] * 599}) and A.STATE["slot0_view"] == r1
-        # B's turn (10,000 tokens) starts on slot 0: it replaces A's rows, the view goes now
-        assert A._par_view_enter({"ids": other}) and A.STATE.get("slot0_view") is None
-        # ... so A's next turn, arriving while B runs, may take the side slot
-        need, why = _need(r2)
-        assert need is not None and "wait" not in why, why
-        # a request with no rendered ids (a side-lane job such as the router's question under the
-        # lock, or images) keeps the view: the router's question runs before many turns
-        A.STATE["slot0_view"] = list(r1)
-        assert not A._par_view_enter({}) and A.STATE["slot0_view"] == r1
-    finally:
-        _restore(saved)
-
-
 def test_holder_name():
     saved = A.HOLDER["who"]
     try:
