@@ -15,8 +15,8 @@ The errors keep arbiter's body, `{"type": "error", "error": {"type", "message"}}
 reason as the type (`warming`, `loading`, `refused`, `failed`, `not_loaded`, `busy_decoding`).
 
 Auth (the owner, 2026-10-01 13:00: on :8000 from stage A, LAN only, behind the engine's bearer
-auth): the `decider` rule of server/auth.py, the admin token or the dashboard session, or a tool
-on the box itself; 404 with no admin token configured.
+auth): the `decider` rule of server/auth.py. With no admin password set every caller is let in
+(VIS-56, AU1); with one set, the admin token, the dashboard session or a tool on the box itself.
 
 Stage A asks only in the idle window: a caller that arrives while a completion holds the engine
 waits for it up to its deadline (`X-Decider-Deadline-Ms`, default 30 s, at most 120 s), then gets

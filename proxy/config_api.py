@@ -1,9 +1,9 @@
 """`/v1/config/*`: the Backends and Setup screens' API over the config database.
 
 Reads follow the dashboard's rule (open with the login off, the admin token or session with it on).
-Writes need the admin bearer token or a dashboard session, or a tool on the machine itself (auth
-rule `conductor_write`, server/auth.py): with no admin token configured, only the machine itself
-can change the configuration. No answer ever holds a key: a backend shows `key_set`, the last 4
+Writes follow auth rule `conductor_write` (server/auth.py): with no admin password set, every caller
+that reaches the port may change the configuration (VIS-56, AU1); with one set, the admin bearer
+token, a dashboard session or a tool on the machine itself. No answer ever holds a key: a backend shows `key_set`, the last 4
 characters and a 6-hex-digit hash prefix. A user's key is in the answer to its creation, once.
 
     GET    /v1/config                                 everything the screens show, in one answer

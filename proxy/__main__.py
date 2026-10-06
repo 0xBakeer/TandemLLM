@@ -67,8 +67,9 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--env-file", default=None,
                     help="KEY=VALUE lines read before the start; the process environment wins")
     ap.add_argument("--host", default=env.get("TANDEM_HOST", "127.0.0.1"),
-                    help="the address to bind (default 127.0.0.1; the page is for a local "
-                         "network: never put it on the internet without a login and TLS)")
+                    help="the address to bind (default 127.0.0.1; the page has no sign-in "
+                         "screen: keep it on loopback, or behind a reverse proxy with its own "
+                         "sign-in and TLS)")
     ap.add_argument("--port", type=int, default=int(env.get("TANDEM_PORT", "8080")))
     ap.add_argument("--usage-ledger", default=env.get("TANDEM_USAGE_LEDGER",
                                                       "~/.tandemllm/ledger.sqlite3"),

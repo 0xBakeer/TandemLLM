@@ -10,6 +10,8 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, describeError, engineAway, onApi } from './api/client';
 import { awayText } from './lib/away';
+import { config } from './api/config';
+import { perfEngineNote } from './lib/perf-note';
 import type { Summary, LiveStatus } from './api/types';
 import { duration, shortHash } from './lib/format';
 import { modeWord } from './lib/supervisor';
@@ -47,14 +49,14 @@ const loadParallel = () => (parallelChunk ??= import('./views/parallel'));
 
 /** The two pages of Performance: the engine's own (the Live panel, the scatter, the history) and
  *  every request in flight on every backend at once. */
-function perfTabs(on: 'engine' | 'parallel'): TemplateResult {
+function perfTabs(on: 'engine' | 'parallel', parallel: number | null = null): TemplateResult {
   const go = (tab: string | null) => navigate('performance', tab ? { tab } : {});
   return html`<div class="perf-tabs" role="tablist" aria-label="Performance pages">
     <div class="seg">
       <button class="seg-btn ${on === 'engine' ? 'is-on' : ''}" role="tab" aria-selected=${on === 'engine'} @click=${() => go(null)}>Engine</button>
       <button class="seg-btn ${on === 'parallel' ? 'is-on' : ''}" role="tab" aria-selected=${on === 'parallel'} data-tab="parallel" @click=${() => go('parallel')}>Parallel</button>
     </div>
-    <span class="perf-tabs-note">${on === 'parallel' ? 'every request in flight, on every backend' : 'the engine, one request at a time'}</span>
+    <span class="perf-tabs-note">${on === 'parallel' ? 'every request in flight, on every backend' : perfEngineNote(parallel)}</span>
   </div>`;
 }
 
@@ -68,6 +70,9 @@ export class QseApp extends LightElement {
   @state() private offline = false;
   @state() private version: string | null = null;
   @state() private codeHash: string | null = null;
+  /** the engine's parallel sequences (/v1/config engine.parallel.n), read once for the subtitle */
+  @state() private engineParallel: number | null = null;
+  private parallelAsked = false;
   private summaryPoll: Poller | null = null;
   private unsub: (() => void)[] = [];
   private tz = browserTz();
@@ -95,6 +100,26 @@ export class QseApp extends LightElement {
     for (const u of this.unsub) u();
     this.summaryPoll?.stop();
     super.disconnectedCallback();
+  }
+
+  /** once per page load: how many requests the engine runs at once (SRV-221). The engine's own
+   *  /v1/dashboard/parallel answers on every server (proxy on or off); its `engine_slots` is
+   *  absent without side slots, so an answer without it means one. A server without that route
+   *  falls back to /v1/config's engine block (proxy on); with neither, no number is claimed. */
+  private askParallel(): void {
+    if (this.parallelAsked) return;
+    this.parallelAsked = true;
+    api
+      .parallel()
+      .then((p) => (this.engineParallel = p.engine_slots?.n ?? 1))
+      .catch(() =>
+        config
+          .overview()
+          .then((o) => (this.engineParallel = o.engine?.embedded && o.engine.parallel ? o.engine.parallel.n : null))
+          .catch(() => {
+            /* no number: the subtitle says none */
+          }),
+      );
   }
 
   private start(): void {
@@ -172,7 +197,8 @@ export class QseApp extends LightElement {
           void loadParallel();
           return html`${perfTabs('parallel')}<qse-parallel></qse-parallel>`;
         }
-        return html`${perfTabs('engine')}<qse-performance .params=${this.route.params}></qse-performance>`;
+        this.askParallel();
+        return html`${perfTabs('engine', this.engineParallel)}<qse-performance .params=${this.route.params}></qse-performance>`;
       case 'dev':
         return html`<qse-dev .params=${this.route.params}></qse-dev>`;
       case 'playground':

@@ -26,6 +26,20 @@ test.describe('performance', () => {
     await expect.poll(() => metricsCalls.length, { timeout: 12_000 }).toBeGreaterThanOrEqual(2);
   });
 
+  test('the Engine subtitle names the engine\'s sequences, "one request at a time" only with one (SRV-221)', { tag: '@mock' }, async ({ page, request }) => {
+    // the mock engine's sequence slots: POST /__mock/parallel {engine_slots}
+    try {
+      await request.post('/__mock/parallel', { data: { reset: true, streams: 0, engine_slots: 2 } });
+      await login(page, '#/performance');
+      await expect(page.locator('.perf-tabs-note')).toHaveText('the engine, 2 requests at once');
+      await request.post('/__mock/parallel', { data: { reset: true, streams: 0, engine_slots: 1 } });
+      await page.reload();
+      await expect(page.locator('.perf-tabs-note')).toHaveText('the engine, one request at a time');
+    } finally {
+      await request.post('/__mock/parallel', { data: { reset: true, streams: 14, engine_slots: 1 } });
+    }
+  });
+
   test('feature off: without speculation families the tiles say "not reported"', { tag: '@mock' }, async ({ page, request }) => {
     test.skip(!IS_MOCK, 'needs the mock failure switch');
     await setMode(request, 'nospec');
