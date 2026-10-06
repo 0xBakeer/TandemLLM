@@ -1,5 +1,5 @@
 {
- "from": "profiles/chat v2, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice)",
+ "from": "profiles/chat v2, the box, 2026-10-03; ui as 0.3.28-test stores it (the voice); E1 act as 0.3.46-test sets it (SRV-199)",
  "doc": {
   "description": "Open WebUI and the Playground: class-aware effort, no tool gate.",
   "mode": "on",
@@ -60,7 +60,7 @@
     "thresholds": {}
    },
    "E1": {
-    "mode": "off",
+    "mode": "act",
     "cap": 1,
     "thresholds": {
      "tries": 2

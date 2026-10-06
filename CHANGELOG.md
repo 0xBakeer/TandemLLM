@@ -2,6 +2,19 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.46-test, 2026-10-06
+
+0.3.45-test (04ada2a) with two fixes (SRV-197, SRV-199; QA SRV-198, SRV-200). Raw and bench text are unchanged.
+
+### Parallel requests keep an agent's cache
+
+- A turn that continues slot 0's conversation waits for slot 0 (SRV-197), judged on the client's rendered tokens against the last prompt whose rows stayed resident. The old test compared the request with the resident rows, which under a conductor plan hold the router's notes and the end of the last generation: no agent turn ever counted as a continuation, and a turn that met slot 0 held for a moment by the shadow reader took the side slot and read its whole conversation again. `QWEN38_SIDE_CONTINUE=resident` restores the old test.
+- The `[parallel]` log line says which slot a request took, on which numbers and who held slot 0; `[req]` has `slot=`; the usage ledger moves to schema 7 with a `slot` column (null without parallel requests), also in the dashboard's request rows.
+
+### A call written inside the thinking
+
+- E1 case C (SRV-199): a turn that ends with complete tool calls inside its reasoning and no answer gets those calls, the model's own tokens, as its answer, when each parses and names an offered tool; otherwise E1's hidden close or nudge, and GIVE_UP's sentence after two tries. E1 now acts in the `chat` and `general` profiles too.
+
 ## 0.3.45-test, 2026-10-06
 
 0.3.44-test (d33967a) with the two follow-ups of the second self-test round (SRV-193, SRV-195; QA SRV-194, SRV-196). Raw and bench text are unchanged; under a conductor plan Open WebUI's reasoning moves from `<think>` tags in the content to `reasoning_content`.
