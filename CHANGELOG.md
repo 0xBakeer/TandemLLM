@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.45-test, 2026-10-06
+
+0.3.44-test (d33967a) with the two follow-ups of the second self-test round (SRV-193, SRV-195; QA SRV-194, SRV-196). Raw and bench text are unchanged; under a conductor plan Open WebUI's reasoning moves from `<think>` tags in the content to `reasoning_content`.
+
+### Open WebUI
+
+- Open WebUI gets `reasoning_content` when it names no `reasoning_format` (SRV-193, `QWEN38_CLIENT_REASONING`, default `open-webui=reasoning_content`; empty restores `tags`; a request's own format wins; the raw path keeps the server's). Open WebUI 0.11.3 forwards the stream piece that carries `</think>` to its live view raw, as the text of a new message, until the round's stream ends: in a long agent chat 15 of 70 page scans showed a literal `</think>`. The template's blank lines go out as one content piece where the reasoning ends, so every tool round's block is closed and timed ("Thought for N seconds"), also when the round goes straight to a tool call.
+
+### Testing a page
+
+- `laya_drive.py page URL --step ...`, the kit's one-command check of a page (SRV-195): its own headless Chrome, real clicks and keys, values read back, screenshots at 1280 and 390 px, console errors, uncaught exceptions and failed loads, Laya's verdict, Chrome closed on every path, about 5 s. opencode had found no node, npx or Chrome on its PATH, only Firefox, and spent seven minutes on a Marionette driver of its own after the page was written.
+- The kit starts Chrome with `--password-store=basic --use-mock-keychain`: every start (playtests too) had waited about 25 s for the desktop keyring at the first network request.
+- The testing packages (`tools/packages_migrate.py`, edits 9 to 11): a page is checked with the page check, never with a driver of one's own; NO BROWSER or two failed checks mean reading the code and saying so; after the deliverable exists: check, fix, check, then the report; a one-screen tool (a timer, a form, a calculator) needs no Laya playtest.
+- S5 gains a fourth arm, `verify` (policy 7): a build turn whose steps since its last product write wrote only scratch files, two of them test tools (scripts or pages, not logs or data), 90 s or more after that write -> "your last N tool steps changed only test tooling ... Stop building test tools ... run one check ... then answer". On the recorded runs: FX2's pomodoro gets the note at 347 s (the run went on to its 600 s limit), four clean opencode runs get none. `tools/monitor_migrate.py` adds the new keys to a box's stored S5 and keeps its own values.
+
 ## 0.3.44-test, 2026-10-06
 
 0.3.43-test (a3bf8a5) with parallel requests made workable beside the small models, and no in-flight limit from the proxy on other backends (OPS-69, QA OPS-70). The owner's decision: "--parallel yes 4 or 2 but by default must laya and narrator describer must be there, so 3 models." With `--parallel 1` (the shipped default) a request is served as before, and the text is unchanged.
