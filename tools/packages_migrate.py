@@ -23,6 +23,17 @@ The edits:
      model removes before "done" (unless the user asked for one), and that it never downloads a
      runtime or an executable.
 
+The edits of 0.3.43-test (SRV-179, SRV-181; the UT2 self-test, 2026-10-06: an Open WebUI agent tuned
+its own playtest bot for 18 minutes after the game worked and never answered; an opencode page was
+written at 642 s of 733 s, after a Firefox rig and three hung servers):
+
+  5  testing: "Order and budget": a scratch directory left by a cut run is cleaned first, the
+     deliverable before any test tooling, a tool that fails twice is dropped, servers in the background with a time limit and killed before "done",
+     what is enough, never change the product for one's own test, the final report.
+  6  laya-playtest: a playtest when the kit runs here, a check and not a deliverable; a spot only
+     the bot fails is not a bug; two runs ending at the same spot end the playtest.
+  7  test-web: write the page first, the server rule, and the same stop rule for the bot.
+
 Every edit is idempotent: a text already migrated comes out unchanged.
 
   python tools/packages_migrate.py --repo                 # rewrite packages/ in this checkout
@@ -48,7 +59,8 @@ sys.path.insert(0, ROOT)
 from server.conductor.packages import literal_api_hosts  # noqa: E402
 
 NOTE = ("TandemLLM's routes via {tandem_url}; Laya helper fails fast; scratch {tandem_scratch} excluded "
-        "from git and deleted before done; state hooks removed; no downloads")
+        "from git and deleted before done; state hooks removed; no downloads; deliverable first, "
+        "test budget, servers in the background, playtest stop rule")
 
 # 2: the helper's call and its command line (after edit 3 renamed its path)
 HELPER_OLD = '''    return json.load(urllib.request.urlopen(req, timeout=90))
@@ -93,6 +105,40 @@ RUNTIME_RULE = ('''- Runtimes: use what is installed (`command -v node npx pytho
                 '''browser tool or `npx playwright`). Never download a runtime or any executable (no curl or '''
                 '''wget of a binary, no install script) unless the user asks; if nothing can run the code, '''
                 '''say so and test what you can.''')
+
+
+# 5: the testing package's order and budget
+BUDGET_ANCHOR = "Never test by writing to the state you then read. Input in, state out."
+BUDGET = """
+Order and budget (the user waits for the deliverable, not for your test rig):
+- A {tandem_scratch} left by an earlier run that was cut off: stop the server its server.pid names (`kill $(cat {tandem_scratch}/server.pid) 2>/dev/null`) and delete it before you start.
+- First the deliverable: write the files the user asked for before any test tooling (test pages, servers, browser rigs, installs).
+- Verify with what already works here: your browser tool, else `npx playwright` or the Laya kit when `command -v` finds them; else read the code and say which check was not possible. A tool that fails twice (a browser that does not start, an image you cannot read, a server that hangs) is dropped: say so in one sentence and go on.
+- A server you start runs in the background with a time limit and its pid in scratch: `timeout 600 python3 -m http.server 8765 >{tandem_scratch}/server.log 2>&1 & echo $! > {tandem_scratch}/server.pid`. Stop it (`kill $(cat {tandem_scratch}/server.pid)`) before "done"; never run a server in the foreground.
+- Enough is: the deliverable loads or runs, zero console errors, and one run with real input passes (a game: start, move, jump; a page: the main controls; code: the tests). A bot that plays a whole game is optional. When your own test tool fails the same way twice, stop tuning it: it is not the deliverable; report that spot as untested.
+- Never change the product only to make your own test pass; if a test made you change its behaviour, say so in the final message.
+- Finish with what you built and where it is (paths), what you verified and how, and what is untested."""
+# 6: laya-playtest's stop rule
+PLAY_OLD = 'Playtest every game, UI flow, CLI or API flow you build this way before "done":'
+PLAY_NEW = ('Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, '
+            'not a deliverable; the testing package\'s budget applies):')
+REPORT_OLD = ("4. Report: deaths with place, cause and the decisions before them; stuck spots. An unavoidable "
+              "death, a stuck spot or a crash is a bug: fix, rerun, quote the report.")
+REPORT_NEW = ("4. Report: deaths with place, cause and the decisions before them; stuck spots. A crash, or a "
+              "death or stuck spot that a player with real keys cannot avoid either, is a bug: fix the build, "
+              "rerun, quote the report. A spot where only the bot fails is not a bug: report it. Two runs that "
+              "end at the same spot with no change to the build: stop playtesting and report what works and "
+              "what is untested.")
+# 7: test-web
+WEB1_OLD = "1. Serve it, open it in the browser tool; zero console errors first."
+WEB1_NEW = ("1. Write the page first. Serve it in the background with a time limit (the testing package's "
+            "server rule), open it in the browser tool; zero console errors first.")
+WEB8_OLD = ("8. A game or a UI flow: let Laya play it, 3 episodes or more (laya-playtest: "
+            "`{tandem_scratch}/laya_drive.py browser`); every death it could not avoid and every stuck spot "
+            "is a bug.")
+WEB8_NEW = ("8. A game or a UI flow: let Laya play it, 3 episodes or more (laya-playtest: "
+            "`{tandem_scratch}/laya_drive.py browser`); a death or stuck spot that real keys cannot avoid "
+            "either is a bug. Two runs that end at the same spot: stop and report it as untested.")
 
 
 def _once(text: str, anchor: str, add: str, changes: list, what: str) -> str:
@@ -143,6 +189,15 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         out = out.replace(STATE_OLD, STATE_NEW, 1)
         changes.append("testing: the state hook is scaffolding")
     out = _once(out, TESTS_ANCHOR, RUNTIME_RULE, changes, "testing: no downloads")
+    # 5, 6, 7: the round-2 budget (SRV-179, SRV-181)
+    out = _once(out, BUDGET_ANCHOR, BUDGET, changes, "testing: order and budget")
+    for old, new, what in ((PLAY_OLD, PLAY_NEW, "laya-playtest: a check, not a deliverable"),
+                           (REPORT_OLD, REPORT_NEW, "laya-playtest: the stop rule"),
+                           (WEB1_OLD, WEB1_NEW, "test-web: the page first, the server rule"),
+                           (WEB8_OLD, WEB8_NEW, "test-web: the stop rule")):
+        if old in out:
+            out = out.replace(old, new, 1)
+            changes.append(what)
     return out, changes
 
 
@@ -178,18 +233,23 @@ def migrate_files(root: str, dry: bool) -> dict:
 
 
 def _token(path: str) -> str:
-    with open(os.path.expanduser(path)) as f:
-        for line in f:
-            if line.startswith("QSE_ADMIN_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit(f"no QSE_ADMIN_TOKEN in {path}")
+    """The admin password from the secrets file; "" when none is set (the admin routes are open
+    then, VIS-56)."""
+    try:
+        with open(os.path.expanduser(path)) as f:
+            for line in f:
+                if line.startswith("QSE_ADMIN_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
 
 
 def _call(method: str, url: str, token: str, body=None):
     req = urllib.request.Request(url, method=method, data=json.dumps(body).encode()
                                  if body is not None else None,
-                                 headers={"Authorization": f"Bearer {token}",
-                                          "Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          **({"Authorization": f"Bearer {token}"} if token else {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read() or b"{}")

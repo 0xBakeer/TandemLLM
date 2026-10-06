@@ -14,3 +14,12 @@ Every edit is followed by a run that produces one of these. A change with no vis
 When a <runtime-note> gives a verdict (no change, regression, error, surprise, test faked), answer it first: what you expected, what the evidence shows, the one cause. Then act.
 
 Never test by writing to the state you then read. Input in, state out.
+
+Order and budget (the user waits for the deliverable, not for your test rig):
+- A {tandem_scratch} left by an earlier run that was cut off: stop the server its server.pid names (`kill $(cat {tandem_scratch}/server.pid) 2>/dev/null`) and delete it before you start.
+- First the deliverable: write the files the user asked for before any test tooling (test pages, servers, browser rigs, installs).
+- Verify with what already works here: your browser tool, else `npx playwright` or the Laya kit when `command -v` finds them; else read the code and say which check was not possible. A tool that fails twice (a browser that does not start, an image you cannot read, a server that hangs) is dropped: say so in one sentence and go on.
+- A server you start runs in the background with a time limit and its pid in scratch: `timeout 600 python3 -m http.server 8765 >{tandem_scratch}/server.log 2>&1 & echo $! > {tandem_scratch}/server.pid`. Stop it (`kill $(cat {tandem_scratch}/server.pid)`) before "done"; never run a server in the foreground.
+- Enough is: the deliverable loads or runs, zero console errors, and one run with real input passes (a game: start, move, jump; a page: the main controls; code: the tests). A bot that plays a whole game is optional. When your own test tool fails the same way twice, stop tuning it: it is not the deliverable; report that spot as untested.
+- Never change the product only to make your own test pass; if a test made you change its behaviour, say so in the final message.
+- Finish with what you built and where it is (paths), what you verified and how, and what is untested.

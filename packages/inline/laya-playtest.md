@@ -2,12 +2,12 @@
 
 Laya can play interactive software: per step the kit reads a small state, asks Laya for an action, applies it as real input and logs it.
 
-Playtest every game, UI flow, CLI or API flow you build this way before "done":
+Playtest a game, UI flow, CLI or API flow you build this way when the kit runs here (a check, not a deliverable; the testing package's budget applies):
 
 1. Kit: `mkdir -p {tandem_scratch} && curl -sf {tandem_url}/v1/laya/kit/laya_drive.py -o {tandem_scratch}/laya_drive.py`
 2. A short state: what the next move depends on (distance to the next gap or enemy) plus `lives`, `x`, `over`, `won`, `cause`; in a page `window.tandem_state()` and `tandem_reset()`.
 3. Actions with meanings, 3+ episodes: `python3 {tandem_scratch}/laya_drive.py browser URL --actions "run=move right,jump=jump forward" --keys run=ArrowRight,jump=Space --episodes 3` (`proc`, `cmd` for programs).
-4. Report: deaths with place, cause and the decisions before them; stuck spots. An unavoidable death, a stuck spot or a crash is a bug: fix, rerun, quote the report.
+4. Report: deaths with place, cause and the decisions before them; stuck spots. A crash, or a death or stuck spot that a player with real keys cannot avoid either, is a bug: fix the build, rerun, quote the report. A spot where only the bot fails is not a bug: report it. Two runs that end at the same spot with no change to the build: stop playtesting and report what works and what is untested.
 
 Recipes: `curl -s {tandem_url}/v1/library/laya-playtest`
 
