@@ -45,6 +45,7 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   "short answers"; FAKE_MEMORY_PROJECT a project gotcha instead; FAKE_MEMORY_BAD
                   a block of a kind that does not exist; FAKE_MEMORY_OPEN one that never closes;
                   with FAKE_CALL_JSON the block sits before the call
+    FAKE_STRAY_CLOSE  the answer starts with a sentence and a bare `</think>` line (SRV-187)
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
@@ -234,6 +235,9 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
                   + row * 3000)
     if "FAKE_MEMORY" in user:
         answer = _memory_block(user, answer)
+    if "FAKE_STRAY_CLOSE" in user:
+        # SRV-187: the model closes its reasoning a second time in the answer
+        answer = "Next I run it.\n</think>\n\n" + answer
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
     if "FAKE_LOOP" in user and think:
         para = ("I am going to try a completely different approach. The pagoda roof needs the "

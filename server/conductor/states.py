@@ -71,6 +71,10 @@ import re
 import time
 
 MARKER = "› "
+# SRV-185: the lines about the user's own notes (written, proposed, forgotten). They go into the
+# content in every channel but `inline` (whose reasoning parts opencode shows): a client that shows
+# no reasoning, or `tags` after its block closed, would drop them, and the user must see a write
+MEMORY_KINDS = ("remembered", "proposed", "forgot")
 # one line's text: no newline, at most this long
 MAX_CHARS = 200
 # what each kind of step says; `{...}` are the step's facts
@@ -246,9 +250,14 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
     all of them at the head of the content, in their order."""
     if where in ("content", "inline"):
         return "".join(ui.shown(e) for e in ui.log) + content, reasoning
-    cut = len(ui.log) if ui.head is None else ui.head
-    head = "".join(ui.shown(e) for e in ui.log[:cut])
-    tail = "".join(ui.shown(e) for e in ui.log[cut:])
+    # SRV-185: the memory lines go after the answer, in the content (as the stream sends them)
+    mem = "".join(ui.shown(e) for e in ui.log if e["kind"] in MEMORY_KINDS)
+    log = [e for e in ui.log if e["kind"] not in MEMORY_KINDS]
+    cut = len(log) if ui.head is None else len([e for e in ui.log[:ui.head]
+                                                 if e["kind"] not in MEMORY_KINDS])
+    head = "".join(ui.shown(e) for e in log[:cut])
+    tail = "".join(ui.shown(e) for e in log[cut:])
+    content = content + mem
     if fmt in ("reasoning_content", "both"):
         reasoning = head + (reasoning or "") + tail
     opener = "<think>\n"

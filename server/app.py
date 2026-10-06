@@ -46,7 +46,8 @@ from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
-    CLOSE_THINK, OPEN_THINK, Detokenizer, Reasoning, StopStrings, opens_think, split_full,
+    CLOSE_THINK, OPEN_THINK, Detokenizer, Reasoning, StopStrings, StrayClose, drop_stray_close,
+    opens_think, split_full,
 )
 from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
                              answer_items, parse_tool_calls, schema_types, strip_blocks)
@@ -4344,6 +4345,10 @@ class Handler(BaseHTTPRequestHandler):
         if STATE.get("conductor") is not None:
             rec.model_served = served_name()       # from the start: the Live view shows it in flight
         rec.client_id, rec.client_kind = ledger_mod.client_of(self.headers, body)
+        if rec.client_kind == "internal":
+            # VIS-60: the turn this question served (server/conductor/classify.py PARENT)
+            par = self.headers.get(ledger_mod.PARENT_HEADER)
+            rec.parent_request = par[:80] if isinstance(par, str) and par else None
         rec.user = getattr(self, "_proxy_user", None)       # the proxy key's label (--backends)
         # a proxy in front of this engine names its own lane for the request (server/parallel.py)
         rid = self.headers.get("X-Tandem-Relay-Id")
@@ -5426,6 +5431,10 @@ class Handler(BaseHTTPRequestHandler):
                                if d["lpr"] is not None else None)
                     if chat:
                         content, reasoning = split_full(d["text"], fmt, in_think=in_think)
+                        if plan is not None and plan.active:
+                            content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
+                            if n_stray and plan.row is not None:
+                                plan.row["extra"]["stray_close"] = n_stray
                         if ui is not None and ui.log:
                             # the steps before the generation at the reasoning's head, the rest
                             # at its end (a non-streamed answer has no moment to show them at)
@@ -5486,6 +5495,9 @@ class Handler(BaseHTTPRequestHandler):
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
             mf = [_memory_filter(plan, chat, n_choices, ui)]
+            # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
+            # client (a conductor plan only: the raw path is the release's, byte for byte)
+            stray = [StrayClose() if chat and plan is not None and plan.active else None]
             # 0.3.26-test: the tool-argument loop guard reads the open call's arguments
             aguard = (argloop_mod.ArgLoopGuard(
                 context_chars=argloop_mod.longest_message_chars(body.get("messages")))
@@ -5537,6 +5549,10 @@ class Handler(BaseHTTPRequestHandler):
                 for field, piece in pairs:
                     if not piece:
                         continue
+                    if stray[0] is not None and field == "content" and not split.in_think:
+                        piece = stray[0].push(piece)     # SRV-187: no bare `</think>` line
+                        if not piece:
+                            continue
                     if mf[0] is not None and field == "content" and not split.in_think:
                         piece = mf[0].feed(piece)        # a memory block stays on the server
                         if not piece:
@@ -5585,6 +5601,13 @@ class Handler(BaseHTTPRequestHandler):
                     # buffer's, never content
                     put(_chunk(cid, model, created, {"tool_calls": []}))
                     put(_chunk(cid, model, created, {"reasoning_content": states_mod.inline(line)}))
+                    w.flush()
+                    return
+                if lines_in != "content" and kind in states_mod.MEMORY_KINDS:
+                    # SRV-185: a note written, changed or forgotten is the user's data: its line
+                    # goes into the answer, where every client shows it (`tags` has no place for
+                    # a line after the block, and a reasoning line after the answer is not seen)
+                    put(_chunk(cid, model, created, {"content": line}))
                     w.flush()
                     return
                 if lines_in != "content":
@@ -5726,6 +5749,11 @@ class Handler(BaseHTTPRequestHandler):
                     send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
+                if stray[0] is not None:
+                    sc, stray[0] = stray[0], None
+                    send([("content", sc.finish())])
+                    if sc.dropped and plan.row is not None:
+                        plan.row["extra"]["stray_close"] = sc.dropped
                 if mf[0] is not None:
                     # an unclosed block goes out as the text it was (the honest fallback)
                     mem_filter, mf[0] = mf[0], None

@@ -325,3 +325,99 @@ def split_full(text: str, fmt: str = "tags", *, in_think: bool = True) -> tuple[
     if fmt == "both":
         return OPEN_THINK + "\n" + text, reasoning
     return answer, reasoning
+
+
+class StrayClose:
+    """SRV-187 (the UT2 self-test, 2026-10-06): a `</think>` the model writes in its ANSWER, after
+    the reasoning block closed, reaches the client as text. Open WebUI's tag parser closes a block
+    at the first `</think>` and puts the rest of the text into a message, so a second one shows as
+    the literal line `</think>` between two tool rows (the Mario chat, minute 38). The answer is
+    filtered here, in `tags` and `reasoning_content` alike: a `</think>` alone on its line (spaces
+    around it allowed) is dropped with its newline. Everything else passes as it came, the tag in
+    a sentence, in inline code, inside a fenced code block, a `<tool_call>` or a `<tandem_memory>`
+    block included, so a program that prints the tag keeps it.
+
+    Streaming: only the start of a line that can still become the tag is held back (at most its
+    eight characters and the spaces before them); the first character that cannot belongs to it
+    sends the held text on. `dropped` counts the tags taken out (the request's journal row)."""
+
+    TAG = "</think>"
+    OPENS = ("<tool_call>", "<tandem_memory")
+    CLOSES = ("</tool_call>", "</tandem_memory>")
+
+    def __init__(self):
+        self.hold: str | None = ""          # "" at a line start; None inside a line
+        self.line = ""                       # the current line as sent (fence and block marks)
+        self.fence = False
+        self.depth = 0
+        self.opened = 0                      # `<think>` lines the answer opened itself
+        self.dropped = 0
+
+    def _line_done(self, line: str) -> None:
+        if line.strip(" \t") == "<think>" and not self.fence and self.depth == 0:
+            self.opened += 1                 # its `</think>` is a pair, not a stray
+        if line.lstrip().startswith("```"):
+            self.fence = not self.fence
+        for o in self.OPENS:
+            self.depth += line.count(o)
+        for c in self.CLOSES:
+            self.depth = max(0, self.depth - line.count(c))
+
+    def push(self, piece: str) -> str:
+        out = []
+        for ch in piece:
+            if self.hold is not None and not self.fence and self.depth == 0:
+                h = self.hold + ch
+                core = (self.hold if ch == "\n" else h).strip(" \t")
+                if ch == "\n" and core == self.TAG and self.opened:
+                    self.opened -= 1             # it closes a block the answer opened: keep
+                    out.append(h)
+                    self.hold, self.line = "", ""
+                    continue
+                if ch == "\n" and core == self.TAG:
+                    self.dropped += 1            # the bare tag and its newline go
+                    self.hold, self.line = "", ""
+                    continue
+                if ch != "\n" and self.TAG.startswith(core):
+                    self.hold = h                # it may still become the tag
+                    continue
+                out.append(h)                    # it cannot: send what was held
+                self.line += h
+                self.hold = None
+                if ch == "\n":
+                    self._line_done(self.line)
+                    self.line, self.hold = "", ""
+                continue
+            out.append(ch)
+            if ch == "\n":
+                self._line_done(self.line)
+                self.line, self.hold = "", ""
+            else:
+                self.line += ch
+                if self.hold is not None:
+                    self.hold = None
+        return "".join(out)
+
+    def finish(self) -> str:
+        """The end of the answer: a held bare tag goes, anything else is sent."""
+        h, self.hold = self.hold or "", None
+        if h.strip(" \t") == self.TAG and not self.opened:
+            self.dropped += 1
+            return ""
+        return h
+
+
+def drop_stray_close(text: str, fmt: str = "reasoning_content", in_think: bool = False
+                     ) -> tuple[str, int]:
+    """A non-streamed answer's content through `StrayClose`: (text, tags dropped). In `tags` and
+    `both` the content starts with the reasoning block when the prompt opened one; the block's
+    own closing tag is the model's split point and stays, the answer after it is filtered."""
+    head, rest = "", text
+    if fmt in ("tags", "both") and in_think:
+        i = text.find(CLOSE_THINK)
+        if i < 0:
+            return text, 0                   # the block never closed: there is no answer yet
+        head, rest = text[:i + len(CLOSE_THINK)], text[i + len(CLOSE_THINK):]
+    f = StrayClose()
+    out = f.push(rest) + f.finish()
+    return head + out, f.dropped
