@@ -21,6 +21,11 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - The state store's served budget is 2 GiB with 1 GiB a snapshot everywhere (two places said 8 GiB); the guest rule names both conditions (at most 8,192 tokens and under a quarter of the resident prompt); 49.89 tok/s is the mean of the requests' own rates, not 4.58 tokens / 93.4 ms (49.0); the spill's re-read of 58,278 tokens costs about 83 s at the ~700 tok/s the ledger shows for cold prefills that long (it said 57 s). `tests/test_docs_defaults.py` checks the documented budgets against the flags and `ops/serve.env`; parallel-requests.md says which settings the reference box changes from the shipped serve.env.
 
+### A build request that the router is unsure about (SRV-255)
+
+- Khaled's "Create a new folder and create there a pagoda garden" went to chat on router v17: the chat class's wider description (SRV-235) moved three_d from 0.464 to 0.378, under the 0.45 bar, and a first message under the bar always took chat. No 3D skill, an ASCII pagoda in a file, and the argument loop guard stopped the write twice (it was right: one 28-character row 151 times).
+- `classifier.below_accept` (shipped: `build`, margin 0.1; router v18 on the box): a first message under the bar keeps its top class when that class builds something (its policy names packages) and leads the second by 0.1. 341 labelled prompts on v17's answers: 307 -> 309 right, none newly wrong; "Reply with just: OK" stays chat at 0.999.
+
 ### The dashboard on a phone, and the speed check (VIS-66, VIS-68)
 
 - An editor's save bar no longer floats over the conductor's cards when nothing is unsaved (Deciders at 390 px hid "a load now: refused"; Monitor too, also at 768 px, Chromium and WebKit): idle bars sit in the page's flow; unsaved edits keep Save above the tab bar. e2e "an idle save bar covers nothing" (6 screens, 390 and 768 px).
