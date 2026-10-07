@@ -70,6 +70,9 @@ def test_registered_and_uncut():
     pk = schema.SHIPPED_PACKAGES
     assert "{repo}/packages/everyday" in pk["skill_dirs"]
     lib = packages_mod.Library()
+    # the repository's own texts: a box's skill copies (~/.qwen38-spark-engine/conductor/skills,
+    # earlier in skill_dirs) hold the installed copies and would answer first (PKG3)
+    pk = dict(pk, skill_dirs=[d for d in pk["skill_dirs"] if d.startswith(packages_mod.REPO_TOKEN)])
     for n in names():
         p = pk["packages"].get(n)
         assert p is not None, f"{n} not in the shipped packages"
