@@ -2,6 +2,30 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.51-test, 2026-10-07
+
+0.3.50-test (77e4542) with the polish items of the normal-user scenario run (SRV-229, SRV-237, SRV-249, OPS-77; QA SRV-230, SRV-238, SRV-251, OPS-78) and two dashboard items from the owner's phone (VIS-66, VIS-68; QA VIS-67, VIS-69). Raw and bench text are unchanged.
+
+### Open WebUI's "Thought for" is the thinking (SRV-237, SRV-249)
+
+- Open WebUI 0.11.4 times a reasoning block from its first `reasoning_content` delta to its first content delta. The reading and waiting lines went out as reasoning, so a summary with thinking off that read 12,874 tokens showed "Thought for 14 seconds" (its block held only the two reading lines) and a one-line answer that waited 35.8 s showed "Thought for 34 seconds".
+- For the client kinds in `QWEN38_STATUS_CLIENTS` (default `open-webui`; empty restores the profile's channel) every line said before the model's first generated token goes out as an Open WebUI `status` event (`{"choices": [], "event": {"type": "status", ...}}`), the line under the model's name that its tools use; at the first token one `done` event says what the wait was ("Read 12,874 tokens in 14 s", "Waited 31 s, then read ..."). The reasoning opens with the model's own first piece; a turn that does not think shows no "Thought for". A refusal after a wait closes the status line first.
+- The waiting line's estimate reads the holder's own work (`queue_wait.Live`): the prefill it still has to read at its live rate, plus the 75th percentile of what earlier requests of its kind (thinking or not) wrote past the tokens it has written, at its own decode rate, capped by its `max_tokens`. Replayed over the box's ledger (3,716 client requests, the waiter arriving at 10 to 90 % of each hold): for waits of 10 to 60 s the old estimate was a median 0.52 of the real wait (78 % too low), the new one 1.06 (42 %); over a minute 0.17 against 0.59. Waits under 10 s now read about twice their length. Without a view of the holder the hold-time median stays.
+
+### Final answers for the user (SRV-229)
+
+- A01's answer to "create a pagoda garden" quoted "Laya says fix_first (p=0.596, sure: false)", "the kit's page check", "renderer.info: 56 draw calls" and the removed test hook, and the page kept an "fps · calls · tris" line. The texts asked for it ("quote Laya's verdicts", "say in your final message that you removed it", "Report: ... Laya's verdicts", "fps reported").
+- Package edits 15-23 (`tools/packages_migrate.py`, applied to the shipped texts, a box's packages document and its skill files): the final message says what was built, where, how to open and use it, one plain sentence on how it was checked, what is untested; Laya, its labels and probabilities, the page check, hooks, scratch, draw calls and fps stay out unless the user asks; anything added only for the check (an fps or stats readout, a debug panel) goes before "done" or behind `?debug`. The S5 and E2 notes ask for the same in plain words (`tools/monitor_migrate.py`, ops/supervisor.yaml).
+
+### Docs (OPS-77)
+
+- The state store's served budget is 2 GiB with 1 GiB a snapshot everywhere (two places said 8 GiB); the guest rule names both conditions (at most 8,192 tokens and under a quarter of the resident prompt); 49.89 tok/s is the mean of the requests' own rates, not 4.58 tokens / 93.4 ms (49.0); the spill's re-read of 58,278 tokens costs about 83 s at the ~700 tok/s the ledger shows for cold prefills that long (it said 57 s). `tests/test_docs_defaults.py` checks the documented budgets against the flags and `ops/serve.env`; parallel-requests.md says which settings the reference box changes from the shipped serve.env.
+
+### The dashboard on a phone, and the speed check (VIS-66, VIS-68)
+
+- An editor's save bar no longer floats over the conductor's cards when nothing is unsaved (Deciders at 390 px hid "a load now: refused"; Monitor too, also at 768 px, Chromium and WebKit): idle bars sit in the page's flow; unsaved edits keep Save above the tab bar. e2e "an idle save bar covers nothing" (6 screens, 390 and 768 px).
+- The speed guard is no warning banner on the Conductor view any more. System → Engine and the Dev tab's model card carry one neutral "speed check" line ("passed for <build> · <date>", "not run for this build"); a one-run short gate whose mean and p50 dropped no more than 5 % reads as passed; Compare keeps the numbers in a muted line. A release tree ships its report as `release/speed-guard.json` (`tools/speed_guard.py ship`), listed by `GET /v1/conductor/evals`.
+
 ## 0.3.50-test, 2026-10-07
 
 0.3.49-test (e6970f5) with seven fixes from the normal-user scenario run and FX7's measurements (SRV-243, SRV-239, SRV-245 with SRV-219, SRV-247, SRV-233, SRV-250, SRV-235; QA SRV-244, SRV-240, SRV-246, SRV-220, SRV-248, SRV-234, SRV-236). Raw and bench text are unchanged. Under a conductor profile an API client that names no `reasoning_format` now gets `reasoning_content` (a changed default), and the follow-up of an answer that thought is served with that answer's reasoning.
