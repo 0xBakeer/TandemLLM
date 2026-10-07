@@ -632,6 +632,36 @@ def test_srv269_a_chat_without_its_reasoning_comes_back_from_the_nvme():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_srv269_the_switch_save_never_evicts_the_entry_it_reads_next():
+    """SRV-269 (found in FX11's live check, 2026-10-07): with the budget full, the restore's
+    switch save of the resident conversation swept the least recently used entry -- the one the
+    restore was about to read -- and the read then failed into a cold prefill. The entry asked for
+    is kept; the resident conversation is not written when it does not fit."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res = _state()
+        sp, t = _spill(d, res)
+        a = tokens(150, seed=95)
+        out_a, _, _ = turn(a, 24, session="A")
+        sp.save_resident(res, app.STATE["engine"], None, "evict")
+        (ea,) = list(sp.entries.values())
+        res.clear()
+        b = tokens(140, seed=96)
+        turn(b, 24, session="B")
+        assert res.valid >= sp.min_tokens
+        # room for A alone: B's switch save can only fit by evicting A
+        sp.cfg["budget_gb"] = (ea.bytes + ea.bytes // 2) / spill.GB
+        assert sp.budget < ea.bytes * 2
+        copy = a + out_a + TOOL
+        got = sp.maybe_restore(res, app.STATE["engine"], None, copy, len(copy) - 1)
+        assert got is not None and got["eid"] == ea.eid, (got, sp.stats["evicted"])
+        assert ea.eid in sp.entries and sp.stats["refused"].get("room", 0) >= 1, sp.stats
+        assert res.tokens[:res.valid] == ea.tokens[:res.valid] and res.valid == ea.valid
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _main():
     import inspect
     fails = 0

@@ -253,6 +253,9 @@ class SessionSpill:
         # SRV-269: (tokens, end, extra, keys) -> whether the server's end alignment serves `keys`
         # from an entry's end anchor (a copy that left the earlier answers' reasoning out)
         self.offer_align = None
+        # SRV-269: the entry a restore is about to read; no sweep evicts it (the switch save of
+        # the resident conversation before the read used to, at a full budget)
+        self._keep: set[str] = set()
         self.stats = {"saves": 0, "save_ms": 0.0, "blocks_written": 0, "blocks_kept": 0,
                       "bytes_written": 0, "restores": 0, "restore_ms": 0.0, "blocks_read": 0,
                       "blocks_in_place": 0, "bytes_read": 0, "tokens_restored": 0,
@@ -341,8 +344,9 @@ class SessionSpill:
         the floor free. False when they cannot."""
         now = self.clock()
         ttl = float(self.cfg["ttl_hours"]) * 3600.0
+        keep = {protect} | self._keep
         for eid, e in list(self.entries.items()):
-            if eid != protect and now - float(e.man.get("used", 0)) > ttl:
+            if eid not in keep and now - float(e.man.get("used", 0)) > ttl:
                 self._drop(eid, "ttl")
         while True:
             over = self._bytes() + room > self.budget
@@ -350,7 +354,7 @@ class SessionSpill:
             if not (over or low):
                 return True
             olds = sorted((float(e.man.get("used", 0)), eid) for eid, e in self.entries.items()
-                          if eid != protect)
+                          if eid not in keep)
             if not olds:
                 return False
             self._drop(olds[0][1], "budget" if over else "floor")
@@ -791,7 +795,13 @@ class SessionSpill:
         e, line, here = got
         if (res.valid >= self.min_tokens and (res.owner is None or res.owner != e.man.get("owner"))
                 and _common(res.tokens[:res.valid], e.tokens) < res.valid):
-            self.save_resident(res, eng, drafter, "switch")
+            # SRV-269: the save's sweep must not evict the entry read next; at a full budget the
+            # resident conversation is then not written (`refused.room`), the one asked for is read
+            self._keep.add(e.eid)
+            try:
+                self.save_resident(res, eng, drafter, "switch")
+            finally:
+                self._keep.discard(e.eid)
         return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here)
 
     def restore(self, res, eng, drafter, e: Entry, disk=None, line: int = 0,
