@@ -17,7 +17,7 @@ set, and the answers each rule changes against the current one:
                    0.4.0
     top            the top class always
     build_top      below the bar the top class when it is a class that builds something (its
-                   policy names packages: the classes whose turns write code or files), else chat
+                   policy names files-care: the classes whose turns write code or files), else chat
     build_margin   build_top, and only when the top class leads the second by `--margin`
 
 Nothing is written to the box.
@@ -73,7 +73,9 @@ def ask(a) -> int:
     accept = next(float(s["accept"]) for s in clf["stages"] if s["kind"] == "qwen")
     out = {"tool": "class_fallback_eval", "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "doc": os.path.basename(a.doc), "accept": accept, "default": "chat",
-           "build": sorted(c["id"] for c in doc["classes"] if (c.get("policy") or {}).get("packages")),
+           # PKG3: a class builds when it lists files-care (SRV-227), as Router._below_build
+           "build": sorted(c["id"] for c in doc["classes"]
+                           if "files-care" in ((c.get("policy") or {}).get("packages") or [])),
            "rows": rows}
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
