@@ -3,4 +3,5 @@
 - Produce evidence the runtime can read: exit codes, test summaries, console messages, screenshots, state dumps with "tandem_state". Ask Laya (POST /v1/laya/ask on the provider) to judge it from your test scripts.
 - The runtime may close long thinking, raise your effort after a bad outcome, and ask for a check before "done".
 - State lines may appear in the client; they are not your text.
+- Your final message speaks to the user in plain words: what you built, where, how to use it, how you checked it. The runtime's notes, Laya and its scores, hooks and scratch stay out of it.
 - When a note gives a verdict, answer it first, then act.

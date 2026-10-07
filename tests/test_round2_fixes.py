@@ -395,6 +395,12 @@ def test_package_texts_round2():
             text = f.read()
         assert pm.migrate_text(name, text) == (text, []), name       # idempotent
     # a box before edit 5 (edits 9-10 of 0.3.45 reword two of its lines: undone first)
+    # (and edits 15-17 of 0.3.51 reword the hook's end and the final line: undone too)
+    shipped = testing
+    testing = (testing.replace(pm.FINISH_NEW + "\n" + pm.OVERLAY_RULE, pm.FINISH_OLD)
+               .replace(pm.STATE_SAY_NEW, pm.STATE_SAY_OLD))
+    r351 = ["testing: the state hook goes without a word", "testing: the final message is for the user",
+            "testing: check-only overlays go before done"]
     v43 = (testing.replace(pm.CHECK_ONE_NEW, pm.CHECK_ONE_OLD).replace(pm.QUOTE_NEW, pm.QUOTE_OLD)
            .replace(pm.PAGE_CMD_NEW, pm.PAGE_CMD_OLD)
            .replace(pm.VERIFY_NEW, pm.VERIFY_OLD)
@@ -407,11 +413,11 @@ def test_package_texts_round2():
                   "testing: a page runs in the page check",
                   "testing: one page check with every control, no test copies",
                   "testing: the page check asks Laya at {tandem_url}",
-                  "testing: a page-check step in single quotes"], ch
-    assert new.splitlines() == testing.splitlines()        # the shipped text, line for line
+                  "testing: a page-check step in single quotes"] + r351, ch
+    assert new.splitlines() == shipped.splitlines()        # the shipped text, line for line
     assert new.count("Order and budget") == 1 and pm.migrate_text("testing", new)[1] == []
     five = testing.replace("\n" + pm.TMP_RULE, "")     # a box that has edit 5 and not 8
-    assert pm.migrate_text("testing", five) == (testing, ["testing: nothing outside the project"])
+    assert pm.migrate_text("testing", five) == (shipped, ["testing: nothing outside the project"] + r351)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,29 @@ Marionette driver of its own until the run's limit; the kit's headless Chrome wa
      (an Open WebUI agent's `expect:... === '$101.40'` reached the kit as '01.40' and it blamed
      the kit).
 
+The edits of 0.3.51-test (SRV-229; the UX2 normal-user run, 2026-10-07: A01's answer to "create a
+pagoda garden" quoted "Laya says fix_first (p=0.596, sure: false)", "the kit's page check",
+"renderer.info: 56 draw calls", "I removed the tandem_state/tandem_reset test hook ... deleted the
+.tandem scratch folder", and the page kept an "fps · calls · tris" line for the check; the texts
+asked for it: "quote Laya's verdicts", "say in your final message that you removed it", "Report:
+... Laya's verdicts", "fps reported"):
+
+ 15  testing: the state hook goes without a word in the final message.
+ 16  testing: the final message is for the user (what was built, where, how to open and use it, one
+     plain sentence on how it was checked, what is untested, one next step); Laya, its labels and
+     probabilities, the page check, the kit, hooks, scratch, draw calls and fps stay out of it
+     unless the user asks how it was tested; nothing named that the result does not show.
+ 17  testing: what was added only for the check (an fps or stats readout, a debug panel, per-frame
+     logging) goes before "done", or stays behind a `?debug` flag.
+ 18  laya-testing: Laya's verdicts are read, not quoted; they are the model's, not the user's.
+ 19  test-web, test-cli, test-api, test-data, test-lib: their "Report:" line is the evidence the
+     model keeps for itself; the final message says it in plain words.
+ 20  laya-playtest: the report is read, not quoted.
+ 21  design-review: Laya's verdict on the score table is read, not quoted.
+ 22  threejs-scene, threejs-product-render, canvas-2d: draw calls, triangles and fps are read
+     (through the state hook), never an on-screen readout in the delivered page.
+ 23  tandem-harness: the final message speaks to the user in plain words.
+
 Every edit is idempotent: a text already migrated comes out unchanged.
 
   python tools/packages_migrate.py --repo                 # rewrite packages/ in this checkout
@@ -94,6 +117,11 @@ ROUND3 = ("testing: the kit's page check", "testing: a page runs", "test-web: th
           "test-web: real input", "test-web: the page check", "test-web: Laya plays", "laya-playtest: a one-screen",
           "laya-testing: the page check", "testing: one page check", "testing: the page check asks",
           "test-web: the page check asks", "testing: a page-check step in single quotes")
+NOTE_351 = ("0.3.51-test: the final message speaks to the user (no Laya scores, kit, hooks or scratch); "
+            "check-only overlays removed before done (SRV-229)")
+ROUND4 = ("testing: the state hook goes", "testing: the final message", "testing: check-only overlays",
+          "laya-testing: verdicts read", "test-*: the report", "laya-playtest: the report is read",
+          "design-review: Laya's verdict read", "skills: fps read", "tandem-harness: the final message")
 NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome, Laya at "
             "{tandem_url}), never a driver of one's own; one check, fix, check, report (SRV-195)")
 
@@ -255,6 +283,43 @@ REPORT_NEW = ("4. Report: deaths with place, cause and the decisions before them
               "rerun, quote the report. A spot where only the bot fails is not a bug: report it. Two runs that "
               "end at the same spot with no change to the build: stop playtesting and report what works and "
               "what is untested.")
+# 15-23 (SRV-229): the final message speaks to the user
+STATE_SAY_OLD = "unless the user asked for a debug or state API; say in your final message that you removed it."
+STATE_SAY_NEW = ("unless the user asked for a debug or state API. It is yours: the final message does not "
+                 "mention it.")
+FINISH_OLD = "- Finish with what you built and where it is (paths), what you verified and how, and what is untested."
+FINISH_NEW = ('- The final message is for the user, who never saw your tools: what you built and where it is (the '
+              'path, how to open or run it), how to use it, one plain sentence on how you checked it ("I opened '
+              'it in a browser: it loads with no errors and the controls respond"), what is untested, and at '
+              'most one next step; for a build about 250 words or fewer. Laya and its labels and '
+              'probabilities, the page check, the kit, state hooks, the scratch folder, draw calls and fps are '
+              'your tools: leave them out unless the user asks how you tested. Describe what the result shows, '
+              'never a feature the check did not show.')
+OVERLAY_RULE = ('- Anything you added only for your check (an fps, draw-call or stats readout on screen, a debug '
+                'panel, logging every frame) comes out before "done", or stays behind a `?debug` URL flag: the '
+                'delivered page shows only what the user asked for.')
+LAYA_QUOTE_OLD = "(the report's `laya` field): quote it, write no Laya script of your own for it."
+LAYA_QUOTE_NEW = "(the report's `laya` field): read it, write no Laya script of your own for it."
+LAYA_DONE_OLD = "- Before \"done\", run the check script and quote Laya's verdicts."
+LAYA_DONE_NEW = ("- Before \"done\", run the check script and read Laya's verdicts. They are for you: the final "
+                 "message says in plain words what was checked, never a label or a probability.")
+PLAY_QUOTE_OLD = "fix the build, rerun, quote the report."
+PLAY_QUOTE_NEW = "fix the build, rerun, read the report."
+REVIEW_OLD = "and Laya's verdict on the table is quoted."
+REVIEW_NEW = ("and Laya's verdict on the table is read (it is yours: the final answer says in plain words how "
+              "the page was checked).")
+HARNESS_ANCHOR = "- State lines may appear in the client; they are not your text."
+HARNESS_RULE = ("- Your final message speaks to the user in plain words: what you built, where, how to use it, how "
+                "you checked it. The runtime's notes, Laya and its scores, hooks and scratch stay out of it.")
+SKILL_FPS = (("- [ ] Draw calls, triangles and fps reported from `renderer.info`.",
+              "- [ ] Draw calls, triangles and fps read from `renderer.info` (through the state hook; the "
+              "delivered page shows no fps or stats readout)."),
+             ("`renderer.info.render` reported; fps 55 or more.",
+              "`renderer.info.render` read; fps 55 or more (read, never shown on the page)."),
+             ("- [ ] Measured fps at 1280x800 and at 390x844 reported (target 55 or more).",
+              "- [ ] Measured fps at 1280x800 and at 390x844 (target 55 or more), read through the state hook, "
+              "no fps readout left on screen."))
+REPORT_LINE = "Report (the evidence you keep; the final message says it in plain words): "
 # 7: test-web
 WEB1_OLD = "1. Serve it, open it in the browser tool; zero console errors first."
 WEB1_NEW = ("1. Write the page first. Serve it in the background with a time limit (the testing package's "
@@ -315,7 +380,7 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     if LOGS_OLD in out and SCRATCH_RULE not in out:
         out = out.replace(LOGS_OLD, SCRATCH_RULE + "\n" + LOGS_OLD, 1)
         changes.append("testing: the scratch rule")
-    if STATE_OLD in out and STATE_NEW not in out:
+    if STATE_OLD in out and STATE_NEW not in out and "tandem-test-hook:start" not in out:  # 15 rewords it
         out = out.replace(STATE_OLD, STATE_NEW, 1)
         changes.append("testing: the state hook is scaffolding")
     if "Never download a runtime or any executable" not in out:    # edit 9 rewords its page part
@@ -355,14 +420,35 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
                            (WEB5_OLD, WEB5_NEW, "test-web: the page check's screenshots"),
                            (WEB8_V2, WEB8_V3, "test-web: Laya plays games and long flows"),
                            (PLAY_V2, PLAY_V3, "laya-playtest: a one-screen tool needs the page check"),
-                           (LAYA_RUN_OLD, LAYA_RUN_NEW, "laya-testing: the page check carries Laya's verdict"),
+                           (LAYA_RUN_OLD, LAYA_RUN_NEW.replace(LAYA_QUOTE_OLD, LAYA_QUOTE_NEW),
+                            "laya-testing: the page check carries Laya's verdict"),
                            (CHECK_ONE_OLD, CHECK_ONE_NEW, "testing: one page check with every control, no test copies"),
                            (PAGE_CMD_OLD, PAGE_CMD_NEW, "testing: the page check asks Laya at {tandem_url}"),
                            (WEB_CMD_OLD, WEB_CMD_NEW, "test-web: the page check asks Laya at {tandem_url}"),
                            (QUOTE_OLD, QUOTE_NEW, "testing: a page-check step in single quotes")):
-        if old in out and new not in out:          # 12's new text begins with its old one
+        if old in out and new not in out and not (old == LAYA_RUN_OLD and LAYA_RUN_NEW in out):
+            # 12's new text begins with its old one (and 18 rewords its end: either form counts)
             out = out.replace(old, new, 1)
             changes.append(what)
+    # 15-23 (SRV-229): the final message speaks to the user; check-only overlays go
+    for old, new, what in ((STATE_SAY_OLD, STATE_SAY_NEW, "testing: the state hook goes without a word"),
+                           (FINISH_OLD, FINISH_NEW, "testing: the final message is for the user"),
+                           (LAYA_QUOTE_OLD, LAYA_QUOTE_NEW, "laya-testing: verdicts read, not quoted"),
+                           (LAYA_DONE_OLD, LAYA_DONE_NEW, "laya-testing: verdicts read before done"),
+                           (PLAY_QUOTE_OLD, PLAY_QUOTE_NEW, "laya-playtest: the report is read"),
+                           (REVIEW_OLD, REVIEW_NEW, "design-review: Laya's verdict read"),
+                           *((o, n, "skills: fps read, no readout") for o, n in SKILL_FPS)):
+        if old in out and new not in out:
+            out = out.replace(old, new, 1)
+            changes.append(what)
+    if FINISH_NEW in out:
+        out = _once(out, FINISH_NEW, OVERLAY_RULE, changes, "testing: check-only overlays go before done")
+    out = _once(out, HARNESS_ANCHOR, HARNESS_RULE, changes, "tandem-harness: the final message")
+    # 19: a test package's "Report:" line is the model's own evidence, not the user's message
+    got = re.sub(r"(?m)^Report: ", REPORT_LINE, out)
+    if got != out:
+        out = got
+        changes.append("test-*: the report is the model's evidence")
     return out, changes
 
 
@@ -458,7 +544,8 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE_345 if any(
+                    {"doc": new, "note": NOTE_351 if any(
+                        c.startswith(ROUND4) for ch in rep.values() for c in ch) else NOTE_345 if any(
                         c.startswith(ROUND3) for ch in rep.values() for c in ch) else NOTE_343 if any(
                         c.startswith(ROUND2) for ch in rep.values() for c in ch) else NOTE,
                      "base_version": cur.get("version")})

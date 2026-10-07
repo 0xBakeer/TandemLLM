@@ -23,6 +23,11 @@
      own, check-fix-check, a one-screen tool without a playtest; every command the texts give
      for the page check parses with the kit's own argument parser; a second run changes nothing
                                                         test_the_page_check_edits
+  8  SRV-229: the final message speaks to the user: no shipped text asks to quote Laya, report
+     its verdicts or say that the hook went; the testing package has the final-message and the
+     overlay rules; the box's v16 shape migrates, idempotent      test_the_final_message_edits
+  9  SRV-229: the S5 and E2 notes in plain words, in the YAML, its JSON copy and a box's document
+                                                        test_the_monitor_notes_in_plain_words
 
 Run: python tests/test_package_texts.py
 """
@@ -179,7 +184,8 @@ def test_the_kit_and_the_log_tail():
 def test_the_page_check_edits():
     # the box's v11 texts (0.3.43-test): the shipped texts with edits 9-11 undone
     doc = _seed()
-    undo = ((M.CHECK_ONE_NEW, M.CHECK_ONE_OLD), (M.LAYA_RUN_NEW, M.LAYA_RUN_OLD),
+    undo = ((M.CHECK_ONE_NEW, M.CHECK_ONE_OLD),
+            (M.LAYA_RUN_NEW.replace(M.LAYA_QUOTE_OLD, M.LAYA_QUOTE_NEW), M.LAYA_RUN_OLD),
             (M.QUOTE_NEW, M.QUOTE_OLD), (M.PAGE_CMD_NEW, M.PAGE_CMD_OLD), (M.WEB_CMD_NEW, M.WEB_CMD_OLD),
             (M.VERIFY_NEW, M.VERIFY_OLD), (M.RUNTIME_NEW_PAGE, M.RUNTIME_OLD_PAGE), (M.WEB1_V3, M.WEB1_V2),
             (M.WEB3_NEW, M.WEB3_OLD), (M.WEB5_NEW, M.WEB5_OLD), (M.WEB8_V3, M.WEB8_V2), (M.PLAY_V3, M.PLAY_V2))
@@ -220,6 +226,82 @@ def test_the_page_check_edits():
             ap_err.append(exc.code)
         assert ap_err in ([], [0], [1]), (c, ap_err)
     return f"{len(report)} packages migrated to the page check; {len(cmds)} command(s) parse; idempotent"
+
+
+def test_the_final_message_edits():
+    """SRV-229 (UX2, 2026-10-07): A01's final answer quoted "Laya says fix_first (p=0.596, sure:
+    false)", "the kit's page check", renderer.info and the removed test hook, and the page kept an
+    fps line; the texts asked for each of them. The box's v16 texts (the shipped texts with edits
+    15-23 undone, plus the box-only design-review and threejs-product-render lines) migrate to the
+    user-facing final message, the overlay rule and read (not quoted) verdicts."""
+    old_phrases = (M.STATE_SAY_OLD, M.FINISH_OLD, M.LAYA_QUOTE_OLD, M.LAYA_DONE_OLD,
+                   M.PLAY_QUOTE_OLD, M.REVIEW_OLD, *(o for o, _ in M.SKILL_FPS))
+    # the shipped texts ask for none of it any more, and say what the final message is
+    files = glob.glob(os.path.join(ROOT, "packages", "**", "*.md"), recursive=True)
+    for path in files:
+        with open(path) as f:
+            text = f.read()
+        for o in old_phrases:
+            assert o not in text, (path, o)
+        assert not re.search(r"(?m)^Report: ", text), path
+        assert not re.search(r"(?i)\bquote (?:it|laya|the report)", text), path
+    with open(os.path.join(ROOT, "packages", "inline", "testing.md")) as f:
+        t = f.read()
+    assert M.FINISH_NEW in t and M.OVERLAY_RULE in t and M.STATE_SAY_NEW in t
+    assert t.index(M.FINISH_NEW) < t.index(M.OVERLAY_RULE)
+    # the box's v16 shape: the shipped texts with the edits undone, and the box-only skills
+    doc = _seed()
+    undo = ((M.STATE_SAY_NEW, M.STATE_SAY_OLD), (M.FINISH_NEW + "\n" + M.OVERLAY_RULE, M.FINISH_OLD),
+            (M.LAYA_QUOTE_NEW, M.LAYA_QUOTE_OLD), (M.LAYA_DONE_NEW, M.LAYA_DONE_OLD),
+            (M.PLAY_QUOTE_NEW, M.PLAY_QUOTE_OLD), ("\n" + M.HARNESS_RULE, ""), (M.REPORT_LINE, "Report: "))
+    for name, p in doc["packages"].items():
+        if isinstance(p.get("body"), str):
+            for new, old in undo:
+                p["body"] = p["body"].replace(new, old)
+    assert M.FINISH_OLD in doc["packages"]["testing"]["body"]
+    new, report = M.migrate_doc(doc)
+    assert {"testing", "laya-testing", "laya-playtest", "tandem-harness", "test-web", "test-cli",
+            "test-api", "test-data", "test-lib"} <= set(report), report
+    t = new["packages"]["testing"]["body"]
+    assert t.count(M.FINISH_NEW) == 1 and t.count(M.OVERLAY_RULE) == 1 and M.FINISH_OLD not in t
+    assert "say in your final message that you removed it" not in t
+    assert M.LAYA_DONE_NEW in new["packages"]["laya-testing"]["body"]
+    assert M.HARNESS_RULE in new["packages"]["tandem-harness"]["body"]
+    assert new["packages"]["test-web"]["body"].count(M.REPORT_LINE) == 1
+    assert M.migrate_doc(new)[1] == {}, "a second run changes nothing"
+    assert any(c.startswith(M.ROUND4) for ch in report.values() for c in ch) and len(M.NOTE_351) < 200
+    # box-only skill lines (design-review, threejs-product-render)
+    review = "- [ ] The audit JSON at both widths passes every line of the checklist, " + M.REVIEW_OLD
+    product = "Check: screenshot at 1440; `renderer.info.render` reported; fps 55 or more."
+    for text, want in ((review, M.REVIEW_NEW), (product, M.SKILL_FPS[1][1])):
+        out, ch = M.migrate_text("skill", text)
+        assert want in out and ch, (out, ch)
+        assert M.migrate_text("skill", out)[1] == []
+    return f"{len(report)} packages migrated; no old phrase shipped; idempotent"
+
+
+def test_the_monitor_notes_in_plain_words():
+    """SRV-229: the S5 and E2 notes ask for the answer in plain words (tools/monitor_migrate.py),
+    in ops/supervisor.yaml, its JSON copy, and a box's stored document with the old texts."""
+    from tools import monitor_migrate as MM
+    from server.conductor.monitor import policy as mpolicy
+    data = mpolicy.load().data
+    with open(mpolicy.DEFAULT_JSON) as f:
+        assert json.load(f) == data, "policy.default.json is stale: tools/conductor_policy.py --json"
+    with open(os.path.join(ROOT, "ops", "supervisor.yaml")) as f:
+        yml = f.read()
+    for _, _, old, phrase in MM.TEXT_EDITS:
+        assert old not in yml and phrase in yml, old
+    # a box's v4: the same document with the old phrases
+    old_doc = json.loads(json.dumps(data))
+    for tid, key, old, phrase in MM.TEXT_EDITS:
+        box = old_doc["tasks"][tid]["notes"] if tid == "E2" else old_doc["tasks"][tid]
+        box[key] = box[key].replace(phrase, old)
+    new, ch = MM.migrate_doc(old_doc, tasks=())
+    assert len([c for c in ch if c.startswith("text ")]) == len(MM.TEXT_EDITS), ch
+    assert new["tasks"] == data["tasks"]
+    assert MM.migrate_doc(new, tasks=())[1] == []
+    return f"{len(MM.TEXT_EDITS)} note texts in plain words; idempotent"
 
 
 if __name__ == "__main__":

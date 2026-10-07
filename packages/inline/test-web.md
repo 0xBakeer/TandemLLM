@@ -7,4 +7,4 @@
 6. After each scenario, ask Laya from the page (evaluate script): `return await (await fetch("{tandem_url}/v1/laya/ask", {method: "POST", body: JSON.stringify({question: "Did the player move right and stay alive?", text: JSON.stringify(window.__state())})})).json()`. A "no" is a bug.
 7. A surprise (lives gone in 2 s, a blank canvas) is a bug: name the line before the next edit.
 8. A game, or a flow of many steps toward a goal: let Laya play it, 3 episodes or more (laya-playtest: `{tandem_scratch}/laya_drive.py browser`); a death or stuck spot that real keys cannot avoid either is a bug. Two runs that end at the same spot: stop and report it as untested. A one-screen tool (a timer, a form, a calculator) needs the page check only.
-Report: console count, scenarios, states, Laya's verdicts.
+Report (the evidence you keep; the final message says it in plain words): console count, scenarios, states, Laya's verdicts.

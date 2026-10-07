@@ -108,10 +108,10 @@ tasks:
       surprise_unexplained: "a result shows something nobody would expect (all lives lost within seconds, a game over right after the start, a blank canvas, an empty output) and the message calls it fine"
       test_faked: "the test set internal state instead of using real input: a flag or a variable set in a script, the player moved to the goal, or a value checked that the same script set"
     notes:
-      no_run_after_last_write: "Runtime note: your message says the work is verified, but nothing was run after the last change. Run the use test now, the way the user will use it (a game: play it with real key events through real frames, read the state, walk to the goal; a page: load it and read the console; code: run the tests and the command). Fix what you find, then report what you ran and what you saw."
-      errors_in_evidence: "Runtime note: your message says the work is done, but a tool result shows an error or a failure that the message does not mention. Read it, find the line that causes it, fix it, run the same check again, and report what you ran and what you saw."
-      surprise_unexplained: "Runtime note: your message calls a result fine that nobody would expect, such as all lives lost within seconds. A surprise is a bug until the code explains it. Find the cause and fix it, run the use test again (a game: real key events through real frames, read the state, walk to the goal), and explain any surprise in your report."
-      test_faked: "Runtime note: your test set internal state instead of using input (a flag set in code, the player moved to the goal), so it did not test what the user will do. Play it with real key events through real frames, read the state after, walk from the start to the goal with inputs only, fix what you find, and report what you ran and what you saw."
+      no_run_after_last_write: "Runtime note: your message says the work is verified, but nothing was run after the last change. Run the use test now, the way the user will use it (a game: play it with real key events through real frames, read the state, walk to the goal; a page: load it and read the console; code: run the tests and the command). Fix what you find, then tell the user in plain words what you ran and what it showed."
+      errors_in_evidence: "Runtime note: your message says the work is done, but a tool result shows an error or a failure that the message does not mention. Read it, find the line that causes it, fix it, run the same check again, and tell the user in plain words what you ran and what it showed."
+      surprise_unexplained: "Runtime note: your message calls a result fine that nobody would expect, such as all lives lost within seconds. A surprise is a bug until the code explains it. Find the cause and fix it, run the use test again (a game: real key events through real frames, read the state, walk to the goal), and explain any surprise to the user in plain words."
+      test_faked: "Runtime note: your test set internal state instead of using input (a flag set in code, the player moved to the goal), so it did not test what the user will do. Play it with real key events through real frames, read the state after, walk from the start to the goal with inputs only, fix what you find, and tell the user in plain words what you ran and what it showed."
     claim_at: 0.85
     admit_at: 0.6
     per_session: 2
@@ -265,7 +265,7 @@ tasks:
     similar: 0.4
     window: 8
     cue: '(?i)\b(?:stuck|still|fails?|failing|failed|errors?|wrong|broken|missing|undefined|crash\w*|timed? ?out|cannot|can''t|doesn''t|does not|didn''t|did not|won''t|isn''t|not (?:working|moving|reaching|passing|loading))\b'
-    repeat_text: "Runtime note: you have now stated the same problem {count} times (\"{quote}\") and the changes in between did not move it. Stop tuning it. If what fails is your own test tool (a bot, a script, a harness) and not what the user asked for, drop that test. Deliver what works: answer the user with what you built and where it is, what you verified and how, and what is still untested or failing. Do not change the product only to make your own test pass; if you did, say so."
+    repeat_text: "Runtime note: you have now stated the same problem {count} times (\"{quote}\") and the changes in between did not move it. Stop tuning it. If what fails is your own test tool (a bot, a script, a harness) and not what the user asked for, drop that test. Deliver what works: answer the user with what you built and where it is, how you checked it in plain words (no tool names, verdicts or scores), and what is still untested or failing. Do not change the product only to make your own test pass; if you did, say so."
     classes: [code_edit, design_ui, drawing, three_d]
     first_write_s: 180
     first_write_steps: 5
@@ -278,10 +278,10 @@ tasks:
     quiet_minutes: 4
     hard_minutes: 18
     again_minutes: 4
-    wrap_text: "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), what you verified and how, and what is untested."
-    again_text: "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, what you verified, what is untested."
+    wrap_text: "Runtime note: you have worked {minutes} minutes on this request and the user is waiting in a chat for your answer. Finish now: make sure the deliverable is saved, run one quick check only if it is ready, build no more test tools, and answer the user with what you built and where it is (the path), how you checked it in plain words (no tool names, verdicts or scores), and what is untested."
+    again_text: "Runtime note: {minutes} minutes. Answer the user now, without another tool call: what you built and where it is, how you checked it in plain words (no tool names, verdicts or scores), what is untested."
     # verify (SRV-195): the deliverable exists and the steps since its last change built test tools
     # (verify_scratch_writes scripts or pages in scratch, not logs or data, verify_s after it)
     verify_s: 90
     verify_scratch_writes: 2
-    verify_text: "Runtime note: what the user asked for exists, and your last {steps} tool steps ({minutes} minutes) changed only test tooling, not the deliverable. Stop building test tools. If you have not checked it yet, run one check with a tool that already works here (for a page the kit's page check, laya_drive.py page URL, from the testing package; for code the real test command), then answer: what you built and where it is, what you verified and how, and what is untested."
+    verify_text: "Runtime note: what the user asked for exists, and your last {steps} tool steps ({minutes} minutes) changed only test tooling, not the deliverable. Stop building test tools. If you have not checked it yet, run one check with a tool that already works here (for a page the kit's page check, laya_drive.py page URL, from the testing package; for code the real test command), then answer: what you built and where it is, how you checked it in plain words (no tool names, verdicts or scores), and what is untested."

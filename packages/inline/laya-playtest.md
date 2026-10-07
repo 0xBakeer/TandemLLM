@@ -7,7 +7,7 @@ Playtest a game, or a UI, CLI or API flow of many steps toward a goal, this way 
 1. Kit: `mkdir -p {tandem_scratch} && curl -sf {tandem_url}/v1/laya/kit/laya_drive.py -o {tandem_scratch}/laya_drive.py`
 2. A short state: what the next move depends on (distance to the next gap or enemy) plus `lives`, `x`, `over`, `won`, `cause`; in a page `window.tandem_state()` and `tandem_reset()`.
 3. Actions with meanings, 3+ episodes: `python3 {tandem_scratch}/laya_drive.py browser URL --actions "run=move right,jump=jump forward" --keys run=ArrowRight,jump=Space --episodes 3` (`proc`, `cmd` for programs).
-4. Report: deaths with place, cause and the decisions before them; stuck spots. A crash, or a death or stuck spot that a player with real keys cannot avoid either, is a bug: fix the build, rerun, quote the report. A spot where only the bot fails is not a bug: report it. Two runs that end at the same spot with no change to the build: stop playtesting and report what works and what is untested.
+4. Report: deaths with place, cause and the decisions before them; stuck spots. A crash, or a death or stuck spot that a player with real keys cannot avoid either, is a bug: fix the build, rerun, read the report. A spot where only the bot fails is not a bug: report it. Two runs that end at the same spot with no change to the build: stop playtesting and report what works and what is untested.
 
 Recipes: `curl -s {tandem_url}/v1/library/laya-playtest`
 

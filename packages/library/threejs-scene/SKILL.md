@@ -19,7 +19,7 @@ Check: run 3 s, read `renderer.info.render` (calls, triangles) and the measured 
 
 Done when:
 - [ ] Screenshot shows the lit subject centered at both widths.
-- [ ] Draw calls, triangles and fps reported from `renderer.info`.
+- [ ] Draw calls, triangles and fps read from `renderer.info` (through the state hook; the delivered page shows no fps or stats readout).
 - [ ] Orbit or key input through the browser tool moves the camera; position read back.
 
 ## Reference

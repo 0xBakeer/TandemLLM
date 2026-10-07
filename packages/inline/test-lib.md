@@ -5,4 +5,4 @@
 4. Run the public example from the README on real input.
 5. Counts: the failed count must be 0 and the passed count at or above the start. Fewer tests than before is a regression.
 6. Let Laya read the suite's tail as a second check: `pytest -q 2>&1 | tail -n 30 | python3 {tandem_scratch}/laya.py "Did every test pass?" passed,failed`.
-Report: the summary lines before and after, Laya's verdict, the tests added, the example run.
+Report (the evidence you keep; the final message says it in plain words): the summary lines before and after, Laya's verdict, the tests added, the example run.

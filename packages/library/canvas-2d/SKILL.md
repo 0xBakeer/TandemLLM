@@ -19,7 +19,7 @@ What goes wrong:
 Check: run for 3 s, count frames, read fps (frames/3) and the positions of two entities after the run; screenshot at start and end; console errors 0.
 
 Done when:
-- [ ] Measured fps at 1280x800 and at 390x844 reported (target 55 or more).
+- [ ] Measured fps at 1280x800 and at 390x844 (target 55 or more), read through the state hook, no fps readout left on screen.
 - [ ] Screenshot after 3 s shows the scene moved as expected, not a blank or static frame.
 - [ ] `window.__state()` returns the frame count and entity positions after real time passed.
 

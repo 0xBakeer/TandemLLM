@@ -5,4 +5,4 @@
 4. State after writes: create, then read back, then /__state. Numbers must agree.
 5. Stop the server you started at the end; say that you did.
 6. Let Laya judge every response: `(echo "expected: 404 with an error body"; curl -s -w '\nHTTP %{http_code}' localhost:8080/items/999) | python3 {tandem_scratch}/laya.py "Is this response what the request should get?" right,wrong`.
-Report: the routes called with their codes, Laya's verdicts, the read-back checks, the log tail.
+Report (the evidence you keep; the final message says it in plain words): the routes called with their codes, Laya's verdicts, the read-back checks, the log tail.
