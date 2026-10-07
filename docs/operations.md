@@ -19,9 +19,11 @@ What the served stack costs:
 | the whole stack at load, 262,144-token context | 53.45 GB (measured with `tools/mem_audit.py`) |
 | the served engine at load, 262,144-token context (2026-10-01, `memory.split`) | 57.0 GiB allocated (weights 16.35, KV pool 16.00, the drafters' context caches 10.00, GDN state 0.14, vision 0.86, the rest 13.7: drafter weights and buffers about 5.9, verify graphs 5.4, warm-up workspace 2.2), 58.2 GiB for the process, 62.7 GiB of `MemAvailable` |
 | the same at 131,072 tokens | 44.0 GiB allocated, 45.2 GiB for the process: halving the window frees 13.0 GiB (KV pool 8, drafter caches 5) |
-| the caches as they fill | state store up to 4 GiB (8 GiB budget less the 4 GiB pin), resident prefix up to 10 GiB (4 GiB anchors, 2 GiB stash, 4 GiB pin); 75.0 GiB for the process after a short session |
-| state store | 8 GiB budget, at most a quarter of it per snapshot |
-| resident prefix | 4 GiB of anchors and a 2 GiB guest stash |
+| the caches as they fill (2026-10-01, with that day's budgets: an 8 GiB state store, 4 GiB of anchors, a 2 GiB stash) | state store up to 4 GiB (its budget less the 4 GiB pin), resident prefix up to 10 GiB (anchors, stash and the 4 GiB pin); 75.0 GiB for the process after a short session |
+| state store | 2 GiB budget (`CACHE_GB`), at most 1 GiB a snapshot (`STORE_ENTRY_GB`, about 7,000 tokens) |
+| resident prefix | 2.5 GiB of anchors (`RESIDENT_GB`), a 1 GiB guest stash (`RESIDENT_STASH_GB`), a 4 GiB pin (`RESIDENT_PIN_GB`), 4 GiB for a parked session (`RESIDENT_PARK_GB`) |
+
+The last two rows are the shipped `ops/serve.env`, which the box these figures come from also runs; its serve.env differs only in running two parallel sequences ([parallel-requests.md](parallel-requests.md#switching-it-on)). `tests/test_docs_defaults.py` checks both rows against the server's flag defaults and `ops/serve.env`.
 
 Page cache counts as available memory but is not always given back in time. After a load, the engine never reads the weight files again, and `ops/start.sh` drops their page cache (`tools/drop_page_cache.py`, `posix_fadvise` with `DONTNEED`, no root needed). Without that drop, an 8,192-row prefill took free memory to 1 GB and the driver logged `NV_ERR_NO_MEMORY`. With it, the same request left 53 GB free.
 

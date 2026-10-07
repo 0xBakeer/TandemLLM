@@ -47,7 +47,7 @@ Speed is one fraction:
 
 A round starts from the last committed token. Next, the drafters propose a tree of guesses after it. One forward pass then runs over the whole tree through all 64 layers. The engine reads the model's own choice at every node and keeps the longest path where the model agrees with the guesses. It always keeps one more token, the model's own choice after the last accepted guess, so a round yields at least one token. Then it commits the state of that path and starts again.
 
-On the served profile (the published NVFP4 set, StairCut on) a round on the benchmark row takes 93.4 ms and commits 4.58 tokens, which gives 49.89 tok/s. Without speculation, the same box writes 13.69 tok/s at 72.8 ms a token (measured on 28 September on an earlier build, whose path with speculation off is unchanged).
+On the served profile (the published NVFP4 set, StairCut on) a round on the benchmark row takes 93.4 ms and commits 4.58 tokens, and the row's rate is 49.89 tok/s. The rate is the mean of the 50 requests' own rates ([measurement.md](measurement.md#the-row)), not the quotient of the two means (4.58 tokens in 93.4 ms is 49.0 tok/s). Without speculation, the same box writes 13.69 tok/s at 72.8 ms a token (measured on 28 September on an earlier build, whose path with speculation off is unchanged).
 
 ```mermaid
 sequenceDiagram

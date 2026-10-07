@@ -31,6 +31,8 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 
 Tested up to 4 slots.
 
+The shipped `ops/serve.env` keeps one sequence (`QSE_PARALLEL=1`). The box the measurements on these pages come from runs two (`QSE_PARALLEL=2`) with `QSE_SIDE_GRAPHS=off` and `QSE_SIDE_SLOT_CONST_GB=1.5`; every cache and memory setting it uses is the shipped one.
+
 ## What a slot costs
 
 A side slot holds its own KV, recurrent state and verify graphs: about 104 KiB a token of window plus 7.5 GiB, most of it the pools of its 121 verify graphs. An 8,192-token slot took 6.9 to 7.5 GiB on the box; a 65,536-token slot is about 14 GiB (arithmetic). On a 128 GB DGX Spark next to the engine's own caches, `--parallel 2` with the default window fits; four slots need shorter windows (the measurements below used 8,192).

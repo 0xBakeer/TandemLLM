@@ -13,7 +13,7 @@ Each round has four steps.
 3. Accept. Walk down from the root. At each node take the model's token, and move to the child that carries it. Stop where no child carries it. The model's token at the stopping point is kept too, so a round yields at least one token.
 4. Commit. Keep the KV rows and the recurrent state of the accepted path, and drop the rest.
 
-On the benchmark row a StairCut round takes 93.4 ms and commits 4.58 tokens.
+On the benchmark row a StairCut round takes 93.4 ms and commits 4.58 tokens (both means over the row; the row's 49.89 tok/s is the mean of the requests' own rates, [measurement.md](measurement.md#the-row)).
 
 ```mermaid
 flowchart LR
