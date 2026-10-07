@@ -79,6 +79,16 @@ INDEX_HEAD = ("Your memory: notes the runtime keeps for this user{project}. The 
               "edit them. Provisional notes are yours, not confirmed by the user. Read one in "
               "full: GET {tandem_url}/v1/memory/<id>; search: "
               "GET {tandem_url}/v1/memory/search?q=<words>.")
+# SRV-247 (UX2, 2026-10-07): a client without a shell cannot GET the routes above; told them, the
+# model called a tool named `tool` with a GET on its own memory search, and the engine handed that
+# call to a curl client that had offered no tools (the answer ended at "Let me check my memory").
+# Such a request gets the index without the routes: the matching notes come with the message
+# (the bodies below), and a question no note answers is answered as such
+INDEX_HEAD_NO_SHELL = ("Your memory: notes the runtime keeps for this user{project}. The user can "
+                       "read and edit them. Provisional notes are yours, not confirmed by the "
+                       "user. The notes that match a message are given to you in full with it; "
+                       "there is no tool to read or search them here, so when no note answers a "
+                       "question, say that you have no note about it.")
 BODIES_HEAD = ("Notes from your memory that match this message. When one answers it, answer from "
                "the note and say it comes from your notes; a ratified note is confirmed by the "
                "user. Read files only for what the notes do not say, and when they disagree with "
@@ -291,8 +301,10 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
     t0 = time.perf_counter()
     statuses = notes_mod.STATUSES if cfg["provisional"] else ("ratified",)
     # the index, once a session (the `unless` keeps it out while a live note carries it)
+    shell = "shell" in getattr(plan, "tool_caps", ()) or not getattr(plan, "active", False)
     idx = index_text(mem.store, user, project, sess.key, cfg, statuses,
-                     getattr(router.library._req, "url", None))
+                     getattr(router.library._req, "url", None), shell=shell)
+    info["routes"] = shell
     if idx is not None:
         text, ids = idx
         plan.extras.append({"key": f"memory_index:{_h(text)}", "text": text,
@@ -351,6 +363,9 @@ def _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info) -> No
         row["shadow"] = dict(row.get("shadow") or {}, memory_skill=SKILL)
         return
     text = _text(router, packages, SKILL)
+    if text and getattr(plan, "active", False) and "shell" not in getattr(plan, "tool_caps", ()):
+        info["skill"] = "tools_missing"      # SRV-247: the skill reads the notes with curl
+        return
     if text:
         plan.extras.append({"key": f"memory_skill:{_h(text)}", "text": text,
                             "parts": [{"kind": "memory_skill", "name": SKILL}],
@@ -359,15 +374,18 @@ def _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info) -> No
         info["skill"] = True
 
 
-def index_text(store, user, project, session, cfg, statuses, url) -> tuple[str, list] | None:
+def index_text(store, user, project, session, cfg, statuses, url, shell: bool = True
+               ) -> tuple[str, list] | None:
     """The index note: the pinned ratified rules in full, then the index lines, within their
-    token caps. None when the user has no note this request may see."""
+    token caps. None when the user has no note this request may see. `shell` False (SRV-247): a
+    request that cannot reach the memory's routes gets the head without them."""
     groups = store.index_lines(user, project, session)
     if not groups:
         return None
     pinned = [n for n in store.notes(user) if n.pinned and n.status == "ratified" and
               store.visible(n, project, session)]
-    parts = [INDEX_HEAD.replace("{project}", f" and the project {project}" if project else "")
+    head = INDEX_HEAD if shell else INDEX_HEAD_NO_SHELL
+    parts = [head.replace("{project}", f" and the project {project}" if project else "")
              .replace("{tandem_url}", url or packages_mod.URL_DEFAULT)]
     ids = []
     room = int(cfg["pinned_tokens"])
@@ -388,7 +406,7 @@ def index_text(store, user, project, session, cfg, statuses, url) -> tuple[str, 
         keep = []
         for ln in lines:
             if _tokens(ln) > room:
-                keep.append("... more notes; search them")
+                keep.append("... more notes; search them" if shell else "... more notes")
                 room = 0
                 break
             room -= _tokens(ln)

@@ -138,6 +138,8 @@ class Admission:
 
     @staticmethod
     def describe(d: dict) -> str:
+        if d.get("alone"):
+            return "admitted alone (nothing else in flight; the engine's memory policy decides)"
         if d.get("avail") is None:
             return "no /proc/meminfo: not checked"
         g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731

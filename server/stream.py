@@ -301,6 +301,74 @@ class StopStrings:
         return min(hits) if hits else None
 
 
+class AnswerStops:
+    """SRV-245 (UX2, 2026-10-07): a request's `stop` strings apply to the ANSWER, never to the
+    reasoning. They were matched on the raw text before it was split, so `stop: ["\\n\\n"]` ended a
+    response at the first blank line of the thinking: 55 tokens of reasoning, no answer.
+
+    Fed the `(field, text)` pieces `Reasoning.push` returns: only `content` goes through the stop
+    strings; `reasoning` and `tagged` (the block in `tags` and `both`) pass as they are. The blank
+    lines the template writes after `</think>` (and any an answer starts with) are not matched
+    either: they are the tag's, and a stop on a blank line would cut every answer before its
+    first word. After a match, `hit` is set and nothing more passes."""
+
+    def __init__(self, stops: list[str]):
+        self.stopper = StopStrings(stops)
+        self.lead = True                      # the answer has not written a character yet
+
+    @property
+    def hit(self) -> bool:
+        return self.stopper.hit
+
+    def push(self, parts: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        if not self.stopper.stops:
+            return parts
+        out: list[tuple[str, str]] = []
+        for field, text in parts:
+            if self.stopper.hit:
+                break
+            if field != "content":
+                out.append((field, text))
+                continue
+            if self.lead:
+                body = text.lstrip("\n")
+                if len(body) < len(text):
+                    out.append(("content", text[:len(text) - len(body)]))
+                if not body:
+                    continue
+                self.lead, text = False, body
+            sent = self.stopper.push(text)
+            if sent:
+                out.append(("content", sent))
+        return out
+
+    def finish(self) -> list[tuple[str, str]]:
+        """The held tail of the answer at the end of the generation."""
+        tail = self.stopper.finish() if self.stopper.stops else ""
+        return [("content", tail)] if tail else []
+
+
+def answer_stops(text: str, stops: list[str], in_think: bool) -> tuple[str, bool]:
+    """SRV-245: a non-streamed generation cut at the first stop string in its answer: the text
+    through the first `</think>` (when the prompt opened the block) is never matched, nor the
+    blank lines that start the answer. `(text, cut)`."""
+    hits = [s for s in stops if s]
+    if not hits:
+        return text, False
+    head = ""
+    if in_think:
+        i = text.find(CLOSE_THINK)
+        if i < 0:
+            return text, False                # still thinking: there is no answer to cut
+        head, text = text[:i + len(CLOSE_THINK)], text[i + len(CLOSE_THINK):]
+    body = text.lstrip("\n")
+    lead = text[:len(text) - len(body)]
+    found = [j for j in (body.find(s) for s in hits) if j >= 0]
+    if not found:
+        return head + text, False
+    return head + lead + body[:min(found)], True
+
+
 def _tag_prefix_len(text: str) -> int:
     """How many trailing characters of `text` could still grow into `</think>`."""
     n = min(len(text), len(CLOSE_THINK) - 1)

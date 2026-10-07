@@ -247,16 +247,22 @@ def answer_format(body: dict, fmt: str, json_constrained: bool, client_kind: str
     own field, the content the JSON alone). A client's own `reasoning_format` always wins.
 
     SRV-193 (FX2's live check, 2026-10-06): a client kind can get its own format when it names
-    none and the server's is `tags` (`per_client`, `QWEN38_CLIENT_REASONING`; default Open WebUI
-    -> `reasoning_content`). Open WebUI 0.11.3 folds `<think>` blocks after the fact: the piece
+    none and the server's is `tags` (`per_client`, `QWEN38_CLIENT_REASONING`, `*` for every other
+    kind; default since SRV-245 every kind -> `reasoning_content`). Open WebUI 0.11.3 folds `<think>` blocks after the fact: the piece
     that carries `</think>` reaches its live view raw, as the text of a new message item, and stays
     there until the round's stream ends (15 of 70 page scans of a long agent chat showed a literal
     `</think>`). Its `reasoning_content` path has no tag to show."""
     if json_constrained and not body.get("reasoning_format") and fmt in ("tags", "both"):
         return "reasoning_content"
     if not body.get("reasoning_format") and fmt == "tags" and client_kind:
-        return (client_formats() if per_client is None else per_client).get(client_kind, fmt)
+        per = client_formats() if per_client is None else per_client
+        return per.get(client_kind, per.get("*", fmt))
     return fmt
+
+
+#: SRV-245: the client kinds that are plain API callers (server/ledger.py `client_of`): no
+#: reasoning display of their own, so a state line in `content` becomes part of their answer
+PLAIN_CLIENTS = ("openai-sdk", "curl", "other")
 
 
 def top_logprobs(body: dict, chat: bool) -> int | None:

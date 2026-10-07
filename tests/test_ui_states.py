@@ -274,10 +274,14 @@ def opencode(text, history=(), stream=True, **extra):
     return _go(body, {"User-Agent": OPENCODE_UA, "x-session-id": "ses_ui1"})
 
 
-def hermes(text, history=(), **extra):
+def hermes(text, history=(), system=None, **extra):
+    """The Hermes agent: an OpenAI SDK client whose system message opens with its identity
+    (server/ledger.py HERMES_IDENTITY), which the server reads as client kind `hermes`. Before
+    SRV-245 this sent "You are Hermes." (read as `openai-sdk`), which got the same `tags` then."""
+    system = system or ("You are Hermes Agent, built by Nous Research. You are Hermes.")
     body = {"model": "TandemLLM", "stream": True, "max_tokens": 24000, "tools": TOOLS,
             "reasoning_effort": "medium",
-            "messages": [{"role": "system", "content": "You are Hermes."}, *history,
+            "messages": [{"role": "system", "content": system}, *history,
                          {"role": "user", "content": text}], **extra}
     return _go(body, {"User-Agent": HERMES_UA})
 

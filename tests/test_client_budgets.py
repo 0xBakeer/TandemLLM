@@ -559,8 +559,9 @@ def test_over_the_handler_the_reserve_closes_hidden_and_is_journaled():
 def test_over_the_handler_n2_and_shadow_close_with_the_phrase():
     """`n` > 1 and a monitor in shadow cannot close hidden: ThinkBudget's phrase, per choice."""
     for mode, n in (("shadow", 1), ("on", 2), (None, 2)):
+        # tags asked for: since SRV-245 a client that names no format gets reasoning_content
         body = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 160,
-                "reasoning": {"max_tokens": 4}, "n": n}
+                "reasoning": {"max_tokens": 4}, "n": n, "reasoning_format": "tags"}
         raw, calls, _ = _handler(body, mode=mode, cond=_Conductor(None))
         got = json.loads(raw)
         assert len(got["choices"]) == n

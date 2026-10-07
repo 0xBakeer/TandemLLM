@@ -72,9 +72,15 @@ def test_the_rule():
     assert compat.client_formats("open-webui=reasoning_content, hermes=both,x=nonsense,=tags") == \
         {"open-webui": "reasoning_content", "hermes": "both"}
     from engine.settings import KNOBS
-    assert KNOBS["CLIENT_REASONING"][0] == "open-webui=reasoning_content"
-    assert compat.client_formats() == {"open-webui": "reasoning_content"} or \
+    # SRV-245 (2026-10-07): every kind under a plan, Hermes on tags; Open WebUI as before
+    assert KNOBS["CLIENT_REASONING"][0] == "*=reasoning_content,hermes=tags"
+    assert compat.client_formats() == {"*": "reasoning_content", "hermes": "tags"} or \
         os.environ.get("QWEN38_CLIENT_REASONING") is not None
+    dflt = compat.client_formats("*=reasoning_content,hermes=tags")
+    assert f({}, "tags", False, "open-webui", dflt) == "reasoning_content"
+    assert f({}, "tags", False, "curl", dflt) == "reasoning_content"
+    assert f({}, "tags", False, "hermes", dflt) == "tags"
+    assert f({"reasoning_format": "tags"}, "tags", False, "curl", dflt) == "tags"
     return "Open WebUI -> reasoning_content under a plan; its own format, SRV-169, raw kept"
 
 

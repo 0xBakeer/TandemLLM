@@ -16,6 +16,7 @@ It refuses the production ledger (it is a test run).
 Words in the last user message steer it, for the e2e's error and edge states:
 
     FAKE_ERROR    the generation raises after five tokens (finish_reason error)
+    FAKE_CALL_NOTOOLS  the answer calls a tool named `tool`, offered or not (SRV-247)
     FAKE_SLOW     ten tokens a second
     FAKE_SLOW_PREFILL  the prefill runs in 512-token chunks at `--fake-prefill-tps` (default 2,000)
                   and calls the handler's chunk hook after each, as the real prefill does, so the
@@ -241,6 +242,9 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         answer = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/tmp/mario.html\n"
                   "</parameter>\n<parameter=content>\n" + head + "const LEVEL = [\n"
                   + row * 3000)
+    if "FAKE_CALL_NOTOOLS" in user:
+        # SRV-247: a call the request did not offer a tool for (the memory search as `tool`)
+        answer = "Let me check my memory for that.\n\n" + _call("tool", user)
     if "FAKE_MEMORY" in user:
         answer = _memory_block(user, answer)
     if "FAKE_STRAY_CLOSE" in user:

@@ -276,7 +276,8 @@ def _over_the_handler(mode, budget, n=1):
         app.STATE["monitor"] = frame.monitor(mode)
     with frame.quiet():
         _, raw = Req("/v1/chat/completions", {"messages": [
-            {"role": "user", "content": "hello"}], "max_tokens": 160, "n": n}).response()
+            {"role": "user", "content": "hello"}], "max_tokens": 160, "n": n,
+            "reasoning_format": "tags"}).response()   # SRV-245: the default is reasoning_content
     return json.loads(raw)
 
 

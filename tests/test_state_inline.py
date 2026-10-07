@@ -60,7 +60,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-from server import app, queue_wait as qwait  # noqa: E402
+from server import app, ledger, queue_wait as qwait  # noqa: E402
 from server.conductor import narrator, states  # noqa: E402
 import test_ui_states as tu  # noqa: E402
 
@@ -291,9 +291,11 @@ def _norm(raw):
 
 def test_4_hermes_inline_is_the_content_channel():
     serve(INLINE)
-    on = tu.hermes("Explain the lexer.", max_reasoning_tokens=12)
+    # the Hermes agent itself (tags); a plain SDK client gets reasoning_content since SRV-245
+    on = tu.hermes("Explain the lexer.", max_reasoning_tokens=12, system=ledger.HERMES_IDENTITY)
     serve(CONTENT)
-    ref = tu.hermes("Explain the lexer.", max_reasoning_tokens=12)
+    ref = tu.hermes("Explain the lexer.", max_reasoning_tokens=12,
+                    system=ledger.HERMES_IDENTITY)
     assert on["content"] == ref["content"] and lines_of(on["content"]), on["content"][:200]
     assert '"tool_calls": []' not in on["raw"]
 

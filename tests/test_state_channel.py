@@ -52,7 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from server import app, queue_wait as qwait  # noqa: E402
+from server import app, ledger, queue_wait as qwait  # noqa: E402
 from server.conductor import states  # noqa: E402
 import test_ui_states as tu  # noqa: E402
 
@@ -233,7 +233,9 @@ def test_a_long_thinking_says_its_time_and_tokens():
         [THINKING.match(g).group(2) for g in got]
     # tags in the content channel: only the newest waits for the block to close
     serve(dict(CONTENT, progress=prog))
-    h = tu.hermes("FAKE_LOOP think on")
+    # the Hermes agent itself (tags, its lines in the content); a plain SDK client gets none
+    # there since SRV-245
+    h = tu.hermes("FAKE_LOOP think on", system=ledger.HERMES_IDENTITY)
     _, _, rest = h["content"].partition("<think>\n")
     block, _, after = rest.partition("</think>")
     assert M not in block

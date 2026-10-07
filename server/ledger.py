@@ -65,6 +65,11 @@ SCHEMA VERSION 7 (SRV-197, 0.3.46-test): `slot`, the engine's sequence slot a re
 `--parallel N` (0 the main slot with the resident conversation, 1 and up a side slot); null without
 parallel requests, for a side-lane job and on a relayed row.
 
+SCHEMA VERSION 8 (SRV-233, SRV-250, 0.3.50-test): `engine_cached`, the prompt tokens the engine
+read from a cache, the router's hidden notes included (`cached_tokens` is the client's tokens
+among them since SRV-233); `forwarded_tokens`, what the prefill forwarded, hidden tokens included;
+`wait_mem_ms`, how long the parallel memory admission held the request (inside `queue_ms`).
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -88,7 +93,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -103,7 +108,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
            "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request",
-           "slot")
+           "slot", "engine_cached", "forwarded_tokens", "wait_mem_ms")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -128,7 +133,10 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          # router's question to the engine names the turn it routes)
          ("parent_request", "TEXT"),
          # schema version 7 (SRV-197, 0.3.46-test): the sequence slot (`--parallel N`)
-         ("slot", "INTEGER"))
+         ("slot", "INTEGER"),
+         # schema version 8 (SRV-233, SRV-250, 0.3.50-test): the engine's own cache figure and
+         # forwarded tokens (hidden notes included), the memory admission's wait
+         ("engine_cached", "INTEGER"), ("forwarded_tokens", "INTEGER"), ("wait_mem_ms", "REAL"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",

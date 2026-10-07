@@ -171,6 +171,13 @@ class RequestRecord:
         # SRV-177: ms this request waited behind TandemLLM's own work (the shadow or prepare job,
         # the conductor's question); None when it waited behind none
         self.wait_own_ms = None
+        # SRV-250: ms the parallel memory admission held this request after it took its slot
+        # (inside `queue_ms`, never `prompt_ms`)
+        self.wait_mem_ms: float | None = None
+        # SRV-233: where the served prompt holds tokens the client did not send, as
+        # `[(start, end)]` in served positions (the router's notes, the end anchor's replay, a
+        # reasoning the client left out, SP4's note); None: not known (the clamp of SRV-165)
+        self.hidden_at: list | None = None
         # VIS-60: an internal row's request (the turn the router's question served)
         self.parent_request = None
         # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills
@@ -311,10 +318,19 @@ class RequestRecord:
     def client_cached(self) -> int:
         """SRV-165: `cached_tokens` as a share of what the client sent: the prompt's tokens read
         from a cache, at most `prompt_tokens` (the cache also holds the hidden notes, which the
-        client's count leaves out). The engine's own figure stays in `timings.cache_n`."""
+        client's count leaves out). The engine's own figure stays in `timings.cache_n`.
+
+        SRV-233 (UX2, 2026-10-07): the clamp alone counted the hidden rows INSIDE the cached span
+        as client tokens: an opencode turn whose engine prompt was 24,706 client + 5,745 note
+        tokens, resumed at 26,624 and forwarded 3,827, reported 24,706 of 24,706 cached. With the
+        hidden tokens' positions known (`hidden_at`), the client's cached tokens are the cached
+        span less the hidden tokens in it: 26,624 - 5,745 = 20,879."""
         c = int(self.cached_tokens or 0)
         if not self.hidden_prompt or self.prompt_tokens is None:
             return c                        # the client's prompt is the whole prompt
+        if self.hidden_at is not None and self.prompt_client is None:
+            below = sum(max(0, min(int(b), c) - int(a)) for a, b in self.hidden_at if int(a) < c)
+            return max(0, min(c - below, int(self.prompt_tokens)))
         return min(c, int(self.prompt_tokens))
 
     def timings(self) -> dict:
@@ -413,6 +429,9 @@ class RequestRecord:
             "wait_own_ms": self.wait_own_ms,
             "parent_request": self.parent_request,
             "slot": self.slot,
+            "engine_cached": int(self.cached_tokens or 0) if ran else None,
+            "forwarded_tokens": int(self.forwarded) if ran else None,
+            "wait_mem_ms": r2(self.wait_mem_ms),
         }
 
 

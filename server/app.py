@@ -46,8 +46,8 @@ from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
 from server.tokcache import SegmentCache, opens_think_ids  # noqa: E402
 from server.stream import (  # noqa: E402
-    CLOSE_THINK, OPEN_THINK, Detokenizer, Reasoning, StopStrings, StrayClose, drop_stray_close,
-    opens_think, split_full,
+    CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
+    answer_stops, drop_stray_close, opens_think, split_full,
 )
 from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
                              answer_items, parse_tool_calls, schema_types, strip_blocks)
@@ -2082,7 +2082,7 @@ def _answer(ctx, start: int, extra, think) -> str:
 
 
 def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
-              mm=None, hidden=(), delta: int = 0) -> None:
+              mm=None, hidden=(), delta: int = 0, served_hidden=None) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
     The resident prefix keeps the end of the generation as its end anchor (0.3.14-test,
@@ -2151,6 +2151,12 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         if mm is None and not delta:
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                list(hidden) + list(STATE.get("hidden_spans") or []))
+            if why == "kept" and res.end is not None:
+                # SRV-233: where this served prompt held what its client did not send, for the
+                # next turn's count of the client's cached tokens
+                n_p = int(STATE.get("last_prompt_n") or 0)
+                res.end["served_hidden"] = [(int(a), int(b)) for a, b in (served_hidden or ())
+                                            if int(b) <= n_p]
             al = STATE.get("end_align")
             if al is not None:
                 al.kept(res, int(STATE.get("last_prompt_n") or 0), why)
@@ -4249,31 +4255,47 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return self._reader_gone()
 
-    def _par_admit(self, pool, cid: str, prompt) -> bool:
-        """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's worst
-        case -- its prefill's workspace (engine/cache.py `Budget.workspace`) plus one state-store
-        entry -- is reserved while it runs; with other requests in flight it waits, in one-second
-        slices with the GPU turn given up, while MemAvailable less the caches' growth, the other
+    def _par_admit(self, pool, cid: str, prompt, rec=None, say=None) -> bool:
+        """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
+        worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) -- is reserved
+        while it runs; with other requests in flight it waits, in one-second slices with the GPU
+        turn given up, while MemAvailable less the engine's growth (`_par_growth`), the other
         requests' reservations and its own would fall under the floor, and gets a 503 when the
-        queue's timeout runs out. False: refused, the response is sent."""
+        queue's timeout runs out. False: refused, the response is sent.
+
+        SRV-250 (FX7, 2026-10-07): every request was counted as 2.1 GiB (the workspace's 1.15 GiB
+        floor plus a whole state-store entry, 1 GiB, whatever its length) against 6.4 to 8.4 GiB of
+        cache growth: with MemAvailable at the box's idle 27 GiB, a 576-token title request waited
+        63 and 83 s beside a 9,000-token one, and two requests rarely ran at once. The store's
+        snapshot asks the engine's memory policy first (`Budget.admit`), inside its ceiling, so it
+        is in the growth the policy allows, not in this request's need. The wait is the queue's
+        (`rec.t_lock` moves to the admission, `wait_mem_ms` books it) and `say(short_gib)` gives
+        the client its waiting line."""
         adm = pool.admission
         if adm is None:
             return True
         n = int(prompt.numel())
         mem = dict.get(STATE, "mem")
-        store = dict.get(STATE, "state_store")
-        need = ((mem.workspace(n) if mem is not None else n * cache.WORKSPACE_PER_TOKEN)
-                + (int(store.max_entry) if store is not None else 0))
+        need = mem.workspace(n) if mem is not None else max(
+            cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
         ok, d = adm.reserve(cid, need)
         if ok:
             return True
         print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
         adm.stats["waits"] += 1
+        t0 = time.perf_counter()
         i = _par_index()
         until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
+        said = -1e9
         while time.monotonic() < until:
             if self._client_gone():
                 raise ClientGone("client left while waiting for memory")
+            if say is not None and time.monotonic() - said >= qwait.LINE_EVERY_S:
+                said = time.monotonic()
+                try:
+                    say(max(0.0, (d.get("floor", 0) - (d.get("after") or 0)) / slots_mod.GiB))
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()
             held = pool.turn is not None and pool.turn.held_by(i)
             if held:
                 pool.turn.release(i)
@@ -4284,7 +4306,13 @@ class Handler(BaseHTTPRequestHandler):
                     pool.turn.acquire(i)
             ok, d = adm.reserve(cid, need)
             if ok:
-                print(f"[parallel] {cid} admitted: {slots_mod.Admission.describe(d)}", flush=True)
+                waited = time.perf_counter() - t0
+                if rec is not None:
+                    rec.wait_mem_ms = round(waited * 1e3, 1)
+                    if rec.t_lock is not None:
+                        rec.t_lock += waited            # the wait is the queue's, not prefill
+                print(f"[parallel] {cid} admitted after {waited:.1f} s: "
+                      f"{slots_mod.Admission.describe(d)}", flush=True)
                 return True
         adm.stats["refused"] += 1
         print(f"[parallel] {cid} REFUSED: {slots_mod.Admission.describe(d)}", flush=True)
@@ -4979,7 +5007,10 @@ class Handler(BaseHTTPRequestHandler):
             by_client = compat.answer_format(body, fmt, False, rec.client_kind,
                                              STATE.get("client_reasoning"))
             if by_client != fmt:
-                fmt, fmt_boundary = by_client, "\n\n"
+                # the blank-line boundary is Open WebUI's (it times a round's reasoning at the
+                # first content); an API client's answer starts with its first character (SRV-245)
+                fmt, fmt_boundary = by_client, ("\n\n" if rec.client_kind == "open-webui"
+                                                else "")
                 if plan.row is not None:
                     plan.row["extra"]["reasoning_format"] = fmt
         if STATE.get("conductor") is not None:
@@ -5043,6 +5074,13 @@ class Handler(BaseHTTPRequestHandler):
         tool_mode = compat.tool_choice(body)[0] if chat else "none"
         parse_calls = chat and tool_mode != "none"
         tool_names = compat.tool_names(body) if parse_calls else []
+        # SRV-247 (UX2, 2026-10-07): a call the model writes in an answer to a request that offered
+        # no tools is read out of the text and dropped, never handed over: a curl client with
+        # memory on received the model's own `tool` call (a GET on the memory search, with the
+        # session's share address) and finish `tool_calls`. Under a conductor plan only: the raw
+        # path is the release's, byte for byte
+        refuse_calls = bool(parse_calls and not body.get("tools") and plan is not None
+                            and plan.active)
         max_calls = 1 if body.get("parallel_tool_calls") is False else None
         # a value the model writes as text goes back as the JSON type its schema asks for
         # (`"offset": 150`, not `"150"`) -- clients validate the arguments against the schema and
@@ -5107,6 +5145,12 @@ class Handler(BaseHTTPRequestHandler):
                 labels=narrator_mod.class_labels(STATE) if vlang is not None else None)
         # X1: `inline` (a reasoning part a line) on a `reasoning_content` stream, else `content`
         lines_in = states_mod.channel(ui_doc, fmt)
+        # SRV-245 (UX2's P06, 2026-10-07): a plain API client (curl, an SDK) stores what `content`
+        # carries as the answer; the progress lines went there inside the `tags` block. Such a
+        # client gets its lines in `reasoning_content` when its format has one, else none
+        # (a memory line still goes into the answer: SRV-185)
+        plain_lines = rec.client_kind in compat.PLAIN_CLIENTS and (
+            lines_in == "content" or fmt in ("tags", "both"))
         prog = states_mod.progress(ui_doc)
         live_lines = ui is not None and stream and prog["mode"] == "on"
         last_place: list = [None, 0.0]
@@ -5131,11 +5175,35 @@ class Handler(BaseHTTPRequestHandler):
                 ui.add("queue", reason=reason, n=pos)
             if not ui.pending:
                 return
+            if plain_lines and fmt != "reasoning_content":
+                ui.take_kinds()                  # SRV-245: never in a plain client's content
+                return
             self._open_early(cid, model, created, plan)
-            key = "content" if lines_in == "content" else "reasoning_content"
+            key = ("content" if lines_in == "content" and not plain_lines
+                   else "reasoning_content")
             for _, line in ui.take_kinds():
                 if lines_in == "inline":
                     # X1: the open reasoning part ends, the line opens the next (states.INLINE)
+                    self._early_write(_chunk(cid, model, created, {"tool_calls": []}))
+                    line = states_mod.inline(line)
+                self._early_write(_chunk(cid, model, created, {key: line}))
+
+        def mem_wait(short: float) -> None:
+            """SRV-250: the waiting line while the parallel admission holds this request for
+            memory (the other request runs first)."""
+            if ui is None or not live_lines:
+                return
+            ui.add("queue", reason=f"memory for a second request, {short:.1f} GiB short", n=1)
+            if not ui.pending:
+                return
+            if plain_lines and fmt != "reasoning_content":
+                ui.take_kinds()
+                return
+            self._open_early(cid, model, created, plan)
+            key = ("content" if lines_in == "content" and not plain_lines
+                   else "reasoning_content")
+            for _, line in ui.take_kinds():
+                if lines_in == "inline":
                     self._early_write(_chunk(cid, model, created, {"tool_calls": []}))
                     line = states_mod.inline(line)
                 self._early_write(_chunk(cid, model, created, {key: line}))
@@ -5300,7 +5368,8 @@ class Handler(BaseHTTPRequestHandler):
                 # never "a prefill needs at least one token" as a 500
                 return self._json(400, compat.Refusal(
                     "messages" if chat else "prompt", "the prompt is empty").body())
-            if par is not None and not micro and not self._par_admit(par, cid, prompt):
+            if par is not None and not micro and not self._par_admit(par, cid, prompt, rec=rec,
+                                                                       say=mem_wait):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -5373,6 +5442,13 @@ class Handler(BaseHTTPRequestHandler):
             # with images is served as rendered
             # the side lane leaves the resident rows alone: they are lent and given back
             replayed, aligned, res_ = [], 0, None if micro else STATE.get("resident")
+            # SRV-233: where the served prompt holds the router's notes (its own positions), and
+            # the tokens of the closed think block at the tail when the plan turned thinking off
+            hid_at = [(int(a), int(b)) for a, b, *_ in
+                      (getattr(plan, "spans", ()) if plan is not None and getattr(
+                          plan, "changed", False) else ())]
+            hid_tail = max(0, plan_hidden - sum(b - a for a, b in hid_at))
+            s1_len = int(prompt.numel())
             if res_ is not None and not images and not (comp and comp["prepared"] is not None):
                 # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
@@ -5390,6 +5466,17 @@ class Handler(BaseHTTPRequestHandler):
                         plan.row["extra"]["end_replayed"] = len(ids_) - len(before)
                         if aligned:
                             plan.row["extra"]["end_aligned"] = aligned
+                    # SRV-233: below the end anchor the rows hold what the client's copy lacks
+                    # (the earlier notes the end anchor kept, the hidden spans, a reasoning the
+                    # copy left out); above it, this prompt's own notes moved by what came in
+                    e_at, d = int(res_.end["at"]), len(ids_) - len(before)
+                    al_ = STATE.get("end_align")
+                    hid_at = ([(int(a), int(b)) for a, b in (res_.end.get("served_hidden") or ())
+                               if int(b) <= e_at]
+                              + [(int(p), int(p) + len(h)) for p, h in replayed]
+                              + list(al_.last_omitted if al_ is not None and aligned else ())
+                              + [(a + d, b + d) for a, b in hid_at if a >= e_at - d])
+                    s1_len += d
             # the router's state lines, now that the plan is applied
             if ui is not None:
                 ui.route(plan.row, plan.injected,
@@ -5448,6 +5535,14 @@ class Handler(BaseHTTPRequestHandler):
                     spliced, in_think = sup.apply_request(client_ids, bool(in_think), acts)
                     prompt = torch.tensor(spliced, dtype=torch.long, device=prompt.device)
                     hidden_prompt += len(spliced) - len(client_ids)
+                    ins = _inserted(client_ids, spliced)        # SRV-233: SP4's note
+                    if ins is None:
+                        hid_at = None
+                    elif hid_at is not None:
+                        k_ = len(ins[1])
+                        hid_at = [(a + k_, b + k_) if a >= ins[0] else (a, b) for a, b in hid_at]
+                        hid_at.append((ins[0], ins[0] + k_))
+                        s1_len += k_
                     span = (_inserted(client_ids, spliced)
                             if res_ is not None and res_.end_on else None)
                     if span is not None:
@@ -5470,6 +5565,8 @@ class Handler(BaseHTTPRequestHandler):
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
             rec.prompt_tokens, rec.thinking = n_prompt - hidden_prompt, bool(in_think)
             rec.hidden_prompt = max(0, int(hidden_prompt))
+            rec.hidden_at = _hidden_positions(hid_at, hid_tail, s1_len, n_prompt,
+                                              rec.hidden_prompt, plan)
             if comp is not None:
                 # what the client sent; the tokens the continuation reused count as cached
                 rec.prompt_tokens = rec.prompt_client = comp["client_n"]
@@ -5760,7 +5857,8 @@ class Handler(BaseHTTPRequestHandler):
                     if (cached_ids is None or ci) and not micro:
                         _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
-                                  delta=comp["record"].delta if comp is not None else 0)
+                                  delta=comp["record"].delta if comp is not None else 0,
+                                  served_hidden=rec.hidden_at)
                         if rkey is not None and not ci and not (sup is not None and sup.acted) \
                                 and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
@@ -5772,7 +5870,10 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         finish = "stop" if (ids and ids[-1] in eos) else (
                             "timeout" if deadline.hit else "length")
-                    text, cut = _apply_stops(text, stops)
+                    if plan is not None and plan.active:
+                        text, cut = answer_stops(text, stops, in_think)     # SRV-245
+                    else:
+                        text, cut = _apply_stops(text, stops)
                     if cut:
                         finish = "stop"
                     if mem_taken[0]:
@@ -5800,6 +5901,9 @@ class Handler(BaseHTTPRequestHandler):
                             if sup is not None and last_choice and not sup.checked and calls:
                                 # shadow: an answer cut short is still checked, and journaled
                                 sup.check_answer(calls, final=True)
+                        if refuse_calls and calls:
+                            _refused(plan, cid, calls)
+                            calls = []
                         if max_calls is not None and len(calls) > max_calls:
                             calls, dropped = calls[:max_calls], len(calls) - max_calls
                         text = head + answer
@@ -5844,11 +5948,17 @@ class Handler(BaseHTTPRequestHandler):
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
                                 plan.row["extra"]["stray_close"] = n_stray
-                        if ui is not None and ui.log:
+                        if ui is not None and ui.log and not (plain_lines
+                                                               and fmt != "reasoning_content"):
                             # the steps before the generation at the reasoning's head, the rest
-                            # at its end (a non-streamed answer has no moment to show them at)
+                            # at its end (a non-streamed answer has no moment to show them at);
+                            # a plain API client's never in its content (SRV-245)
                             content, reasoning = states_mod.into_full(
-                                content, reasoning, fmt, in_think, ui, lines_in)
+                                content, reasoning, fmt, in_think, ui,
+                                "reasoning" if plain_lines else lines_in)
+                        elif ui is not None and ui.log:
+                            content += "".join(ui.shown(e) for e in ui.log    # SRV-185's
+                                               if e["kind"] in states_mod.MEMORY_KINDS)
                         message = {"role": "assistant", "content": content}
                         if d["calls"]:
                             message["tool_calls"] = d["calls"]
@@ -5893,11 +6003,16 @@ class Handler(BaseHTTPRequestHandler):
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
+            # SRV-245: under a conductor plan the stop strings read the answer alone (`AnswerStops`,
+            # after the split); the raw path matches them on the text as the release did
+            astop = AnswerStops(stops) if plan is not None and plan.active and stops else None
+            if astop is not None:
+                stopper = astop.stopper            # one `hit` for the loop and the logs
 
             # with stop strings, no call streams live: one can cut a block whose arguments were
             # already sent, and the client is left with a call that is not JSON
             tbuf = (ToolCallBuffer(names=tool_names or None, max_calls=max_calls, types=tool_types,
-                                   hold=sup is not None and sup.holds_calls,
+                                   hold=(sup is not None and sup.holds_calls) or refuse_calls,
                                    live=not any(stops))
                     if parse_calls else None)
             rec.live_refs = (think, tbuf)
@@ -6004,6 +6119,10 @@ class Handler(BaseHTTPRequestHandler):
 
             def say(kind: str, line: str) -> None:
                 """One state line, in the profile's channel."""
+                if plain_lines and kind not in states_mod.MEMORY_KINDS:
+                    if fmt == "reasoning_content":
+                        send([("reasoning", line)])   # SRV-245: its own field, not the answer
+                    return
                 if lines_in == "inline":
                     # X1: an empty `tool_calls` delta ends opencode's open reasoning part, the
                     # line opens the next one as its title (states.INLINE); never the tool-call
@@ -6134,7 +6253,10 @@ class Handler(BaseHTTPRequestHandler):
                     piece = det.push(ids)
                     if not piece:
                         continue                   # a byte-level token that is not a character yet
-                    send(split.push(stopper.push(piece)))
+                    if astop is not None:
+                        send(astop.push(split.push(piece)))
+                    else:
+                        send(split.push(stopper.push(piece)))
                     if stopper.hit:
                         finish, cut = "stop", True
                         break
@@ -6155,7 +6277,10 @@ class Handler(BaseHTTPRequestHandler):
                         sh_inline.tick(ids)        # SR1: the shadow reads in its share
                 _finishing(rec, "flush")                 # the token loop has ended
                 if not cut:
-                    send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
+                    if astop is not None:
+                        send(astop.push(split.push(det.flush(ids))) + astop.finish())
+                    else:
+                        send(split.push(stopper.push(det.flush(ids)) + stopper.finish()))
                     if stopper.hit:
                         finish = "stop"
                 if stray[0] is not None:
@@ -6191,13 +6316,20 @@ class Handler(BaseHTTPRequestHandler):
                         # sent a second time as content (the next prompt would carry it twice)
                         print(f"[toolcall] {cid} ended inside a live call ({finish}): the block's "
                               "text is not sent again as content", flush=True)
-                    if tbuf.hold:
+                    if tbuf.hold and refuse_calls and not (sup is not None and sup.holds_calls):
+                        # SRV-247: held because the request offered no tools; never sent
+                        _refused(plan, cid, [c for c in tbuf.take_held() if "bad" not in c])
+                        tbuf.cut_block, sweep = None, []
+                    elif tbuf.hold:
                         left += _sp3(sup, tbuf, stopped=stopper.hit)
                         sweep = tbuf.drain_deltas() + sweep
                         tell()                           # the checks of the held calls
                     elif sup is not None and not sup.checked and tbuf.calls:
                         # shadow: an answer cut short is still checked, and journaled
                         sup.check_answer(tbuf.calls, final=True)
+                    if refuse_calls and (tbuf.calls or sweep):
+                        _refused(plan, cid, tbuf.calls)
+                        tbuf.calls, sweep = [], []
                     if left:
                         put(_chunk(cid, model, created, {"content": left},
                                    **(lp_take() if lpr is not None else NO_LP)))
@@ -6263,7 +6395,8 @@ class Handler(BaseHTTPRequestHandler):
                 _finishing(rec, "saving_state")
                 _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
                           hidden=hidden_spans + mem_taken[1],
-                          delta=comp["record"].delta if comp is not None else 0)
+                          delta=comp["record"].delta if comp is not None else 0,
+                          served_hidden=rec.hidden_at)
                 if rkey is not None and not (sup is not None and sup.acted) and \
                         not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
@@ -6539,6 +6672,42 @@ def _memory_row(plan, failed: list[str]) -> None:
                            for w in ctx["written"]]
     if failed:
         info["failed"] = list(failed)
+
+
+def _hidden_positions(hid_at, tail: int, s_len: int, n_prompt: int, hidden: int, plan):
+    """SRV-233: the served prompt's hidden tokens as merged `[(start, end)]`, the closed think
+    block at the tail included; None when they are not known (an insertion that was not one run,
+    a prompt changed after, or a count that does not add up to the hidden total within the
+    whitespace the end alignment moves), and `usage` falls back to the clamp."""
+    if hid_at is None or s_len != n_prompt:
+        return None
+    spans = sorted((max(0, a), min(n_prompt, b)) for a, b in hid_at if b > a)
+    if tail:
+        spans.append((n_prompt - tail, n_prompt))
+    out: list[list[int]] = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    total = sum(b - a for a, b in out)
+    if abs(total - int(hidden)) > max(64, int(hidden) // 50):
+        if plan is not None and plan.row is not None:
+            plan.row["extra"]["hidden_at_off"] = [total, int(hidden)]
+        return None
+    return [(a, b) for a, b in out]
+
+
+def _refused(plan, cid: str, calls: list) -> None:
+    """SRV-247: calls read out of an answer to a request that offered no tools, dropped; the
+    journal row names them."""
+    names = [str(((c or {}).get("function") or {}).get("name") or "?") for c in calls or ()]
+    if not names:
+        return
+    if plan is not None and plan.row is not None:
+        plan.row["extra"].setdefault("calls_refused", []).extend(names[:8])
+    print(f"[toolcall] {cid} the request offered no tools: {len(names)} call(s) dropped "
+          f"({', '.join(names[:4])})", flush=True)
 
 
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
@@ -7412,8 +7581,9 @@ def _load(a) -> None:
     if resident is not None:
         resident.glue = glue_ids(tok)
         if resident.end_on:
-            STATE["end_align"] = endalign.EndAlign(endalign.token_bytes(tok),
-                                                   on=a.end_align == "on")
+            STATE["end_align"] = endalign.EndAlign(
+                endalign.token_bytes(tok), on=a.end_align == "on",
+                reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off")
         mem.register("anchors", resident.shed_anchors)
         mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)
@@ -7507,6 +7677,24 @@ def _load(a) -> None:
 
 
 def _par_growth() -> int:
+    """What the engine may still take while a second request runs: the long-lived caches' budgets
+    less what they hold, but never more than the engine's memory policy lets it grow (SRV-250):
+    every cache asks `Budget.admit`, which keeps the allocated bytes under `--mem-ceiling-gib`
+    less the slack and the allocator's reservation plus a prefill's workspace under
+    `--mem-peak-gib`. So the room to the peak bounds the growth; the budgets alone counted
+    6.4 to 8.4 GiB of caches the policy would never have let grow."""
+    g = _par_cache_growth()
+    mem = dict.get(STATE, "mem")
+    if mem is None or not getattr(mem, "on", False):
+        return g
+    try:
+        _, reserved = mem.memory()
+        return min(g, max(0, int(mem.peak) - int(reserved)))
+    except Exception:                                              # noqa: BLE001
+        return g
+
+
+def _par_cache_growth() -> int:
     """What the long-lived caches may still take: each one's budget less what it holds."""
     g = 0
     store, res, rc = (dict.get(STATE, "state_store"), dict.get(STATE, "resident"),
