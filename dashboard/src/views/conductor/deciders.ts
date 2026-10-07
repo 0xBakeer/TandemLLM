@@ -10,7 +10,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
 import { conductor, type DeciderApi, type DeciderLoad, type DeciderModel, type DecidersDoc, type DecidersStatus, type SystemOneResult } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
-import { choiceQuestion, limitsWords, loadWho, picksWords, plannerValue, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
+import { choiceQuestion, limitsWords, loadWho, picksWords, plannerValue, plannerWarn, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
 import { exact, ms } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { gib, gibOf } from '../../lib/residency';
@@ -127,7 +127,7 @@ export class QseCondDeciders extends LightElement {
       <div class="stats" data-decider-tiles>
         ${statTile({ label: 'loaded', value: `${loaded.length} / ${s.models.length}`, sub: loaded.length ? loaded.map((m) => m.name).join(', ') : 'none: questions fail open', warn: !loaded.length })}
         ${statTile({ label: 'on the device', value: gib(loaded.reduce((a, m) => a + m.device_bytes, 0)), sub: `${s.device ?? 'no device'} · own stream and memory pool` })}
-        ${statTile({ label: 'a load now', value: plannerValue(s.planner), sub: plannerWords(s.planner), warn: !s.planner?.allowed && s.planner?.reason !== 'refused_memory' })}
+        ${statTile({ label: 'a load now', value: plannerValue(s.planner), sub: plannerWords(s.planner), warn: plannerWarn(s.planner) })}
         ${statTile({ label: 'when they run', value: 'idle', sub: 'only while no request holds the engine (stage A)' })}
       </div>
       ${this.renderModels(s)}
@@ -189,7 +189,7 @@ export class QseCondDeciders extends LightElement {
           ${p?.engine_growth_gib != null ? html`<div class="stat"><div class="stat-label">engine growth to its peak</div><div class="stat-value num">${gibOf(p.engine_growth_gib)}</div></div>` : nothing}
           <div class="stat"><div class="stat-label">decider claim</div><div class="stat-value num">${gibOf(p?.claim_gib)}</div></div>
           <div class="stat"><div class="stat-label">floor + margin</div><div class="stat-value num">${gibOf(p?.floor_gib)} + ${gibOf(p?.margin_gib)}</div></div>
-          <div class="stat ${p?.allowed ? '' : 'is-warn'}"><div class="stat-label">a load now</div><div class="stat-value num small">${plannerWords(p)}</div></div>
+          <div class="stat ${plannerWarn(p) ? 'is-warn' : ''}" data-decider-load-now><div class="stat-label">a load now</div><div class="stat-value num">${plannerValue(p)}</div><div class="stat-sub">${plannerWords(p)}</div></div>
         </div>
         <p class="small" data-decider-last-refusal>${ref
           ? html`Last engine load not made: ${loadWho(ref)}, ${refusalWords(ref)}`

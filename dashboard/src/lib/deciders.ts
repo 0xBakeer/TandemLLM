@@ -63,6 +63,12 @@ export function plannerValue(d: DeciderDecision | null | undefined): string {
   return d.allowed ? 'fits' : d.reason === 'refused_memory' ? 'kept free' : 'refused';
 }
 
+/** Whether an "a load now" tile takes the warning colour: a refusal other than memory (a hold, a load
+ * running). A memory refusal is the planner keeping room for requests, not a fault (VIS-70). */
+export function plannerWarn(d: DeciderDecision | null | undefined): boolean {
+  return !d?.allowed && d?.reason !== 'refused_memory';
+}
+
 /** Who a journaled engine load was for: "the shadow reader (qwen3.5-0.8b)" for role `shadow`,
  * else the model the source names. */
 export function loadWho(d: DeciderDecision | null | undefined): string {

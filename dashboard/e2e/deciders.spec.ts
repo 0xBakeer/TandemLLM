@@ -51,6 +51,11 @@ test.describe('the Deciders screen @mock', () => {
     await request.post('/__mock/conductor', { data: { deciderMem: 28 } });
     await login(page, '#/conductor?screen=deciders');
     await expect(page.locator('[data-decider-memory]')).toContainText('not loaded: kept free for requests', { timeout: 10_000 });
+    // VIS-70: the Memory panel's tile reads "kept free" without the warning colour; the sentence wraps below it
+    const now = page.locator('[data-decider-load-now]');
+    await expect(now.locator('.stat-value')).toHaveText('kept free');
+    await expect(now).not.toHaveClass(/is-warn/);
+    await expect(now.locator('.stat-sub')).toContainText('not loaded: kept free for requests (MemAvailable 28.0 GiB');
     await row(page, 'laya-typed-decisions').locator('[data-load]').click();
     const note = page.locator('[data-decider-note="laya-typed-decisions"]');
     await expect(note.locator('[data-refusal]')).toContainText('not loaded: kept free for requests (MemAvailable 28.0 GiB, less 7.0 GiB the engine may still take for a long request and the 8.2 GiB claim, leaves 12.8 GiB; the box keeps 21.0 GiB free (a 15.0 GiB floor and a 6.0 GiB margin))', { timeout: 8_000 });

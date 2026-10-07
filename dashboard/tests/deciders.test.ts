@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { MockConductor } from '../mock/conductor.ts';
-import { choiceQuestion, loadWho, picksWords, plannerValue, plannerWords, probsOf, refusalWords, stateBadge } from '../src/lib/deciders';
+import { choiceQuestion, loadWho, picksWords, plannerValue, plannerWarn, plannerWords, probsOf, refusalWords, stateBadge } from '../src/lib/deciders';
 import { splitSegments } from '../src/lib/residency';
 
 const DIR = join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1');
@@ -135,6 +135,10 @@ describe('the screen’s words', () => {
     expect(plannerValue({ allowed: false, reason: 'refused_hold' })).toBe('refused');
     expect(plannerValue({ allowed: true, reason: null })).toBe('fits');
     expect(refusalWords({ allowed: false, reason: 'refused_memory' })).toBe('not loaded: kept free for requests (MemAvailable not read)');
+    // VIS-70 (FX10b, live at 390 px): a memory refusal never takes the warning colour; a hold does
+    expect(plannerWarn(shadow)).toBe(false);
+    expect(plannerWarn({ allowed: true, reason: null })).toBe(false);
+    expect(plannerWarn({ allowed: false, reason: 'refused_hold' })).toBe(true);
   });
   it('the test box question', () => {
     expect(choiceQuestion('Which?', 'a, b\nc')).toEqual({ type: 'choice', instructions: 'Which?', criteria: { a: null, b: null, c: null } });
