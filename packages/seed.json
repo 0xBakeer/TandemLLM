@@ -91,7 +91,10 @@
    "max_tokens": 400,
    "enabled": true,
    "general": true,
-   "body_from": "inline/files-care.md"
+   "body_from": "inline/files-care.md",
+   "requires_tools": [
+    "write"
+   ]
   },
   "testing": {
    "title": "Testing with TandemLLM",
