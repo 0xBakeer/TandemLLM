@@ -14,7 +14,7 @@
    },
    "disk_cache": {
     "mode": "on",
-    "budget_gb": 50,
+    "budget_gb": 16,
     "ttl_days": 7,
     "admit_after": 2,
     "min_free_gb": 50
@@ -2187,6 +2187,46 @@
          "admit_after",
          "min_free_gb"
         ],
+        "additionalProperties": false
+       },
+       "session_spill": {
+        "type": "object",
+        "properties": {
+         "budget_gb": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 4000
+         },
+         "codec": {
+          "enum": [
+           "zstd",
+           "off"
+          ]
+         },
+         "ttl_hours": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 720
+         },
+         "min_tokens": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576
+         }
+        },
+        "required": [],
+        "additionalProperties": false
+       },
+       "disk_writes": {
+        "type": "object",
+        "properties": {
+         "budget_gb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100000
+         }
+        },
+        "required": [],
         "additionalProperties": false
        },
        "notes": {

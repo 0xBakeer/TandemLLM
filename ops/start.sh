@@ -107,6 +107,11 @@ done
 # Live conversations to the NVMe at a planned stop and before an eviction (needs the
 # disk tier, QSE_DISK_CACHE); on unless serve.env says off
 [ "${SESSION_SPILL:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --session-spill off"
+# 0.4.3-test: the spill's budget and codec, and the day's NVMe write budget (unset: the server's
+# defaults, 64 GB, zstd, 200 GB a day; settings.memory.session_spill / disk_writes override live)
+[ -n "${SESSION_SPILL_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-gb $SESSION_SPILL_GB"
+[ -n "${SESSION_SPILL_CODEC:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-codec $SESSION_SPILL_CODEC"
+[ -n "${DISK_WRITE_BUDGET_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --disk-write-budget-gb $DISK_WRITE_BUDGET_GB"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"

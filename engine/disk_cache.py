@@ -334,7 +334,7 @@ PREFILL_TOK_S = 740.0
 #: The read rate assumed until the tier has measured its own: the box's O_DIRECT read is 7.35
 #: GB/s and crc32 5.6 (tools/disk_cache_bench.py, 2026-10-02); serial, about 3.2.
 READ_BPS = 3.0e9
-SETTINGS = {"mode": "on", "budget_gb": 50, "ttl_days": 7, "admit_after": 2, "min_free_gb": 50}
+SETTINGS = {"mode": "on", "budget_gb": 16, "ttl_days": 7, "admit_after": 2, "min_free_gb": 50}
 COUNT_MAX = 200_000
 SESSIONS_MAX = 4096
 #: the branch lines a prefill may anchor (the longest of them)
@@ -406,6 +406,8 @@ class DiskTier:
         self._saved = 0.0
         self._thread: threading.Thread | None = None
         self._pool = None
+        # the day's NVMe write budget (WriteGuard), shared with the session spill
+        self.guard: WriteGuard | None = None
 
     # --- settings ----------------------------------------------------------------------------
     def apply(self, settings: dict) -> list[str]:
@@ -725,6 +727,9 @@ class DiskTier:
         lines = [L for L in range((start // C + 1) * C, lim, C) if L >= self.min_tokens]
         if not lines:
             return None
+        if self.guard is not None and not self.guard.allow("tier", kind or "prefix", n):
+            self.stats["dropped"]["write_budget"] = self.stats["dropped"].get("write_budget", 0) + 1
+            return None
         now = self.clock()
         sh = hashlib.sha256(session.encode()).hexdigest()[:16] if session else None
         with self.lock:
@@ -923,6 +928,8 @@ class DiskTier:
             self._thread.join(timeout=30)
             self._thread = None
         self._save_index(force=True)
+        if self.guard is not None:
+            self.guard.save()
 
     def _drop(self, why: str, **detail) -> None:
         self.stats["dropped"][why] = self.stats["dropped"].get(why, 0) + 1
@@ -995,6 +1002,8 @@ class DiskTier:
         self.stats["bytes_written"] += nbytes
         self.stats["write_ms"] += s * 1e3
         self.stats["direct"] = bool(direct)
+        if self.guard is not None:
+            self.guard.add(nbytes, "tier")
         if s > 0 and nbytes >= (1 << 24):
             self.stats["last_write_gbs"] = round(nbytes / s / GB, 3)
         self._dirty = True
@@ -1445,6 +1454,126 @@ def _unlink(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+
+
+# --------------------------------------------------------------------------- the write budget
+#: what the engine may write to the NVMe in one local day before optional writes stop (GB)
+WRITE_BUDGET_GB = 200.0
+#: an eviction save of a conversation this long still goes past the budget (re-reading it costs
+#: more than a minute of prefill); under the hard line only a planned stop's drain goes
+GUARD_BIG_TOKENS = 32768
+GUARD_HARD = 1.5
+
+
+class WriteGuard:
+    """The engine's NVMe writes per local day, and the line past which optional writes stop.
+
+    WHY (2026-10-07, the owner: "take care that we don't kill the SSD"). The box's 1 TB TLC drive
+    (SMART: 11.6 TB written in 1,534 hours, 1 % used) took 137 to 282 GB a day from the disk tier
+    and the session spill alone, most of it on days of many restarts and test chats. Every write
+    here is a cache: skipping one costs a later prefill, never an answer. So past `budget_gb` a
+    day the tier writes nothing and the spill writes only a planned stop's drain and evictions of
+    conversations of at least `GUARD_BIG_TOKENS`; past `GUARD_HARD` times the budget only the
+    drain. Each skip is counted and logged. The day's count survives a restart (`writes.json`
+    beside the tier, written at most once a minute and at close)."""
+
+    def __init__(self, root: str, budget_gb: float = WRITE_BUDGET_GB, clock=time.time,
+                 on_event=None):
+        self.path = os.path.join(os.path.realpath(os.path.expanduser(root)), "writes.json")
+        self.budget_gb = float(budget_gb)
+        self.clock = clock
+        self.on_event = on_event
+        self.lock = threading.Lock()
+        self.days: dict[str, dict] = {}
+        self._saved = 0.0
+        try:
+            with open(self.path) as f:
+                self.days = {str(k): dict(v) for k, v in (json.load(f).get("days") or {}).items()}
+        except (OSError, ValueError, AttributeError):
+            self.days = {}
+
+    def _day(self) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(self.clock()))
+
+    def _row(self) -> dict:
+        d = self.days.setdefault(self._day(), {"bytes": 0, "tier": 0, "spill": 0, "skipped": {}})
+        for k in [k for k in sorted(self.days)[:-14]]:
+            self.days.pop(k, None)
+        return d
+
+    @property
+    def budget(self) -> int:
+        return int(self.budget_gb * GB)
+
+    def today(self) -> int:
+        with self.lock:
+            return int(self._row()["bytes"])
+
+    def add(self, nbytes: int, who: str) -> None:
+        if nbytes <= 0:
+            return
+        with self.lock:
+            r = self._row()
+            r["bytes"] += int(nbytes)
+            r[who] = r.get(who, 0) + int(nbytes)
+            due = self.clock() - self._saved > 60.0
+        if due:
+            self.save()
+
+    def allow(self, who: str, reason: str = "", tokens: int = 0) -> bool:
+        """Whether an optional write of `who` (tier, spill) for `reason` may go now."""
+        if self.budget_gb <= 0:
+            return True
+        with self.lock:
+            used = self._row()["bytes"]
+        if used < self.budget:
+            return True
+        hard = used >= GUARD_HARD * self.budget
+        ok = (who == "spill" and (reason == "drain" or
+                                  (not hard and reason in ("evict", "switch")
+                                   and tokens >= GUARD_BIG_TOKENS)))
+        if not ok:
+            key = f"{who}:{reason or '-'}"
+            with self.lock:
+                sk = self._row()["skipped"]
+                sk[key] = sk.get(key, 0) + 1
+            if self.on_event is not None:
+                try:
+                    self.on_event("skip", {"who": who, "reason": reason, "tokens": tokens,
+                                           "today_gb": round(used / GB, 1),
+                                           "budget_gb": self.budget_gb, "hard": hard})
+                except Exception:                                  # noqa: BLE001
+                    pass
+        return ok
+
+    def save(self) -> None:
+        with self.lock:
+            doc = {"days": self.days}
+            self._saved = self.clock()
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(doc, f, separators=(",", ":"))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def report(self) -> dict:
+        with self.lock:
+            r = dict(self._row())
+            days = {k: round(v.get("bytes", 0) / GB, 2) for k, v in sorted(self.days.items())}
+        past = [v for k, v in days.items() if k != self._day()]
+        return {"budget_gb": self.budget_gb, "today_gb": round(r["bytes"] / GB, 2),
+                "today_tier_gb": round(r.get("tier", 0) / GB, 2),
+                "today_spill_gb": round(r.get("spill", 0) / GB, 2),
+                "skipped_today": dict(r.get("skipped") or {}),
+                "level": ("hard" if self.budget_gb > 0 and r["bytes"] >= GUARD_HARD * self.budget
+                          else "over" if self.budget_gb > 0 and r["bytes"] >= self.budget
+                          else "ok"),
+                "per_day_gb": days,
+                "mean_gb_per_day": round(sum(past) / len(past), 1) if past else None}
 
 
 def _statvfs_free(path: str) -> int:

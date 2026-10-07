@@ -102,7 +102,7 @@ def test_a_new_settings_version_applies_at_the_next_request():
         assert diskcache.refresh(state) == []                 # the same version: nothing
         state["conductor"].store = Store(4, _doc(mode="off"))
         changed = diskcache.refresh(state)
-        assert "mode=off" in changed and not t.on and "budget_gb=50" in changed
+        assert "mode=off" in changed and not t.on and "budget_gb=16" in changed
         t.close()
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -390,7 +390,7 @@ def test_the_routes_on_the_fake_engine():
         st, _, got = _call(port, "GET", "/v1/conductor/memory/disk")
         assert st == 200 and got["running"] is False, got        # the fake engine runs none
         _check(got, "memory-disk")
-        assert got["settings"]["budget_gb"] == 50 and got["flag"] == os.path.join(root, "disk")
+        assert got["settings"]["budget_gb"] == 16 and got["flag"] == os.path.join(root, "disk")
         assert _call(port, "POST", "/v1/conductor/memory/disk/clear", {})[0] == 409
         assert _call(port, "GET", "/v1/conductor/memory/disk", headers=PROXY, token=None)[0] == 401
         st, _, stats = _call(port, "POST", "/v1/cache/clear?tier=disk", {})

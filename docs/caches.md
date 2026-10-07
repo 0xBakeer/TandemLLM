@@ -22,8 +22,8 @@ The recurrent part is the hard one. A KV row depends only on the tokens up to it
 | state store | whole state snapshots at prompt boundaries (session cache) and chunk boundaries (prefix cache) | device memory | on, 2 GiB (`CACHE_GB`), at most 1 GiB a snapshot (`STORE_ENTRY_GB`) |
 | persistent suffix store | token ids the engine read and wrote, with a suffix array | disk, outside the repository | on |
 | response cache | the tokens of an identical greedy request | memory | off |
-| disk tier | rows and recurrent-state anchors of prefixes prefilled more than once, and of a session's first long request | NVMe | off in the code, on in the served profile from 0.3.13-test, 50 GB |
-| session spill | whole live conversations: at a planned stop, and before another session evicts them | NVMe | on with the disk tier from 0.3.22-test, 40 GB |
+| disk tier | rows and recurrent-state anchors of prefixes prefilled more than once, and of a session's first long request | NVMe | off in the code, on in the served profile from 0.3.13-test, 16 GB (50 GB until 0.4.2-test) |
+| session spill | whole live conversations: at a planned stop, and before another session evicts them | NVMe | on with the disk tier from 0.3.22-test, 64 GB (40 GB until 0.4.2-test), compressed from 0.4.3-test |
 
 ## Resident prefix
 
@@ -137,7 +137,7 @@ The writer and CUDA graph captures (0.3.14-test). The writer is the one thread t
 
 Crash safety: each file is written to `<name>.tmp`, fsynced and renamed, and the directory fsynced; the files are the index (their headers), so a crash leaves at most a `.tmp`, which the next start deletes. A file written under another fingerprint (the weight files, the engine's code, the arithmetic flags in the environment, the grid, the torch and Triton versions) is swept at the start: the rows of another arithmetic are not a cold prefill's.
 
-The disk: the dashboard sets the budget (50 GB by default), how long an entry nobody used is kept (7 days) and the free space the tier leaves the file system, never under 50 GB whatever is set. When it is full, the least valuable entry goes first: its hits plus one, times the tokens it saves per byte it holds alone (its file and its share of each chunk it reads), halved for every day unused. Chunks no anchor reads go with the last anchor that read them. Nothing goes through the page cache (O_DIRECT, or fadvise where the file system refuses it).
+The disk: the dashboard sets the budget (16 GB by default from 0.4.3-test, 50 GB before), how long an entry nobody used is kept (7 days) and the free space the tier leaves the file system, never under 50 GB whatever is set. When it is full, the least valuable entry goes first: its hits plus one, times the tokens it saves per byte it holds alone (its file and its share of each chunk it reads), halved for every day unused. Chunks no anchor reads go with the last anchor that read them. Nothing goes through the page cache (O_DIRECT, or fadvise where the file system refuses it).
 
 Memory: the staging buffer (two anchor slots and two chunk slots, 0.5 GB on the served stack) is the tier's whole host footprint. It is allocated at the first disk read or write, page-aligned and pinned, and the residency planner counts it in the engine's declared peak until then.
 
@@ -157,7 +157,7 @@ It is read where a prompt continues an entry further than every cache in RAM (th
 
 Incremental by content. The rows are written in blocks of 1,024 rows, each with two 64-bit sums per buffer computed on the device (a plain sum of its 32-bit words and a position-weighted one). A block whose tokens and sums equal the entry's file is not written again: a conversation evicted a second time writes the turn's new blocks. A block already in place is not read. Every block read is summed again in place before the engine resumes from it, and each anchor too; a file that fails costs the entry, and the prefill starts from what is in place.
 
-Crash safety: the manifest is written last and removed first, so an entry without one is a write that did not finish, deleted at the next open. An entry of another fingerprint is deleted too. The fingerprint is the tier's without `engine/cache.py`, `engine/disk_cache.py`, `engine/spill.py` and `engine/capture_lock.py`, the files that keep state rather than compute it, so a deploy that changes only those still finds its conversations. The layout of every buffer is checked before a byte is read. The budget is the spill's own (`--session-spill-gb`, 40 GB: a 256k conversation is about 27 GB) under the tier's 50 GB free-space floor; an entry unused for 48 hours goes, and the least recently used first. Token ids and engine state only.
+Crash safety: the manifest is written last and removed first, so an entry without one is a write that did not finish, deleted at the next open. An entry of another fingerprint is deleted too. The fingerprint is the tier's without `engine/cache.py`, `engine/disk_cache.py`, `engine/spill.py` and `engine/capture_lock.py`, the files that keep state rather than compute it, so a deploy that changes only those still finds its conversations. The layout of every buffer is checked before a byte is read. The budget is the spill's own (`--session-spill-gb`, 64 GB from 0.4.3-test: a 256k conversation is about 27 GB in the engine and about 16 GB compressed) under the tier's 50 GB free-space floor; an entry unused for 48 hours goes, and the least recently used first. Token ids and engine state only.
 
 `tests/test_session_spill.py` checks it on the small random model: a drain and a new process on the same weights with every row, the end anchor and the anchors equal bit for bit and the same next turn; an eviction and the next turn read back with the same tokens; the incremental write and read; the hidden spans; a corrupted block; a fingerprint; the budget; the parked conversation. `tools/session_spill_check.py` does the same on the served engine in a hold, and again in a fresh process.
 
@@ -166,6 +166,38 @@ Its own I/O path (0.3.23-test). The first eviction on the live box wrote 5.20 GB
 The drive itself (0.3.24-test). One eviction on 0.3.23 still wrote 7.0 GB in 4.5 s, right after the tier had written 17.6 GB, where the same path wrote 5.2 GB in 1.03 s otherwise. The cause is the NVMe's write cache, not the code. `tools/spill_io_probe.py` writes files as the two writers do (O_DIRECT, the spill's 122 MB blocks, the tier's chunk files with an fsync each) and runs the real save from GPU buffers. On the box's 1 TB drive a sustained write goes at 4-5.6 GB/s for the first 16 to 24 GB and then at 0.3 to 1.3 GB/s; after 30 s of rest it writes at 0.76 GB/s, after 120 s at 2.6 GB/s, after 300 s at 5.2 GB/s. The real save of a 58,278-token conversation (7.77 GB) took 1.46 s on a rested drive and 4.9 s right after 17.5 GB of tier-shaped files, the live case reproduced. Pacing the tier's files (17.5 GB over 190 s) did not help: the save after it took 8.2 s, because a drive written to the whole time never gets the rest it needs. So nothing in the tier was changed. The bound: at the slowest rate measured (0.36 GB/s) the 7.0 GB save takes about 20 s, while reading those 58,278 tokens again costs about 83 s of prefill (cold prefills of 57,000 to 60,000 tokens in the ledger ran at about 700 tokens a second: 57,008 in 80.8 s), so the write still pays. Every save now logs where its time went (`parts`: lock, staging, sums, copy, waits for the writer, anchors, fsync, manifest, in ms, and `writer_ms`).
 
 The end anchor through an eviction (0.3.24-test). On 0.3.23 a conversation read back at the start (end anchor on) was written again by the next eviction without its end anchor, because a request served from the store or the disk tier dropped the end before `begin`, whose eviction then wrote the rows without it, and the old `end.anc` was deleted with the rewrite. Its next turn re-read the 759 tokens above its last grid anchor. The end is now dropped after `begin`. And a save that finds every block unchanged and the same tokens keeps the end anchor already on the disk when the engine no longer holds one (a cache level gave its buffers back): its state is still the state at those rows.
+
+## Size on the disk, and the drive (0.4.3-test)
+
+Why a chat of 100,000 tokens is gigabytes on the NVMe when its text is a few hundred kilobytes: the spill does not keep the text, it keeps what the model computed for every token, so that the next turn does not compute it again. On 2026-10-07 the 182,000-row Open WebUI chat was a 20.16 GB entry, and reading its 130,000-token copy again from cold took about 4 minutes. From an entry's manifest (the buffers' dtypes and shapes), a row is 106,496 bytes:
+
+| part | per token | share |
+|-|-|-|
+| the 16 attention layers' K and V: 4 KV heads of 256 numbers each, BF16 | 64 KiB | 61.5 % |
+| the two DFlash2 drafters' own K and V: 5 layers, 8 heads of 128, BF16 | 40 KiB | 38.5 % |
+| the token id | 8 B | |
+
+and an entry adds 5 recurrent-state anchors (the newest 4 grid lines and the end), each the 48 GDN layers' fp32 state (48 heads of 128 x 128, 144 MiB) and convolution tails (2.8 MiB): 153.9 MB each, 0.77 GB an entry. 182,000 x 106,496 B + 0.77 GB = 20.15 GB. Reasoning the client never sends back is rows like any other: the Open WebUI copy of that chat was 130,000 tokens and the engine's rows 182,000, so about 5.5 GB of the entry were hidden reasoning.
+
+What shrinks it, measured on copies of real entries on the box (CPU, `nice -n 15`):
+
+| option | measured | kept? |
+|-|-|-|
+| byte planes + zstd level 1 (lossless) | target KV 1.45x (high bytes 2.66x, low bytes 1.00x), drafter KV 2.15x, 1.71x over whole blocks: 5.20 -> 3.04 GB for 48,853 tokens; compress 3.4 GB/s, decompress 10.8 GB/s on 4 threads | yes, 0.4.3-test |
+| plain zstd level 1, no planes | target 1.27x, drafter 1.89x | no: the planes add 15 % |
+| zstd level 3 | 1.40x target with planes, slower | no |
+| the recurrent state (fp32) with 4 planes | 1.17x | no: 0.77 GB an entry, not worth a slower anchor path |
+| 2 grid anchors instead of 4 | -308 MB an entry (1.5 % at 182k, 16 % at 12k) | no: they serve a resume below the end |
+| the drafters' rows recomputed at the restore | they are made from 5 target hidden states, so recomputing them is the prefill | no |
+| the drafters' projected context (10 KiB a drafter) instead of their K and V (20 KiB) | about -19 % of a row, estimated; recomputed K and V are not shown bit-identical | ticket only |
+| one copy of a head shared with the disk tier | Open WebUI's ~6k-token head 0.65 GB an entry, opencode's 25-30k 2.7-3.2 GB | ticket only |
+| FP8 (e4m3) KV, BF16 recurrent state (LOSSY) | 2x on rows, 2x on anchors | never: lossless only, the KV unquantized; FP8 KV changed the text (VIS-5) |
+
+The codec (`engine/spill.py`, `SETTINGS["codec"]`). A block's rows are cut into byte planes on the device (all first bytes of the block, then all second bytes; a BF16 number's high byte, its sign and 7 exponent bits, takes few values) and copied to the host; the writer thread compresses the planes in frames of 8 MiB on `codec_threads` (4) threads and writes the header (with each frame's length) and the frames with one O_DIRECT write. The restore reads a block whole, decompresses its frames into the staging buffer on the same threads while the engine copies the block before it, and joins the planes on the device. It is lossless by construction and checked as before: every block's two sums are taken from the engine's rows before the save, and every block read back is summed again on the device; a block that differs, or a frame that does not decode, fails the restore and the entry goes (the prefill is cold, as for any bad file). Blocks already on the disk are read the way they were written, so a 0.4.2 entry written again keeps its unchanged blocks and compresses the new ones. On the 48,853-token entry the restore read 3.04 GB instead of 5.20 GB: 0.93 s with read and decompression one after the other, against 0.97 s for the raw O_DIRECT read. `tests/test_spill_codec.py` checks the planes, a compressed conversation against an uncompressed one (rows, end anchor, anchors and the next turn's tokens), a mixed entry, and a bad block.
+
+The drive. SMART on 2026-10-07 (the box's 1 TB TLC, Phison controller): 11.6 TB written in 1,534 power-on hours, 1 % of its rated life used, no media errors, all spare left. The box wrote 2.55 TB in the 12.55 days since its last boot (203 GB a day), almost all of it the disk tier and the spill: 212, 137, 144 and 282 GB on 10-04 to 10-07 (from the engine's logs; the 282 a day of many restarts, whose drains wrote 69 GB, and test chats). Saves were already incremental by content: the 48,853-token chat evicted a second time wrote 231 MB (one block and its end anchor) of 5.97 GB, and 81 of 186 saves in four days kept blocks, 52 wrote nothing. The large writes are a new chat's first save and a restart's drain. At 200 GB a day a 600 TBW drive (the usual rating of a 1 TB TLC; this one does not report its own) lasts about 8 years; the codec takes about 40 % off the spill's bytes.
+
+The day's write budget (`engine/disk_cache.py::WriteGuard`, `--disk-write-budget-gb`, 200). The tier and the spill add every byte they write to the local day's count (`writes.json` beside the tier, kept across restarts). Past the budget the tier plans nothing and the spill writes only a planned stop's drain and evictions of conversations of 32,768 tokens or more; past 1.5 times the budget only the drain. Every skip is a cache not written, never an answer changed: it is logged (`[disk-guard] skip`), journaled and counted. `/health` shows `cache.disk_writes`: today's GB (tier and spill), the budget, the level (ok, over, hard), the skips and the last 14 days.
 
 ## Compaction as a continuation
 
@@ -210,7 +242,9 @@ In a hold on 2026-10-01 the engine held 67.25 GiB with every cache filled the wa
 | `--suffix-store`, `--suffix-store-mb`, `--suffix-store-scope`, `--suffix-store-readonly` | the persistent suffix store |
 | `--response-cache`, `--response-cache-mb`, `--response-cache-ttl` | the response cache |
 | `--disk-cache` (`QSE_DISK_CACHE`), `--disk-cache-min-tokens`, `--disk-cache-head-anchors` | the disk tier's directory (or off), the shortest prefix it writes, a session head's anchors; its budget, TTL, admission and on/off are `settings.memory.disk_cache` |
-| `--session-spill` (`SESSION_SPILL`), `--session-spill-gb`, `--session-spill-min-tokens` | live conversations on the NVMe (on, needs the disk tier), their budget (40 GB), the shortest resident conversation an eviction writes (16,384) |
+| `--session-spill` (`SESSION_SPILL`), `--session-spill-gb` (`SESSION_SPILL_GB`), `--session-spill-min-tokens` | live conversations on the NVMe (on, needs the disk tier), their budget (64 GB), the shortest resident conversation an eviction writes (16,384); `settings.memory.session_spill` overrides the budget live |
+| `--session-spill-codec` (`SESSION_SPILL_CODEC`) | `zstd` (0.4.3-test): new blocks as byte planes compressed with zstd, lossless; `off`: as they are. Blocks on the disk are read either way |
+| `--disk-write-budget-gb` (`DISK_WRITE_BUDGET_GB`) | the engine's NVMe writes a local day past which optional writes stop (200 GB; 0: none); `settings.memory.disk_writes.budget_gb` overrides it live |
 | `QWEN38_SPILL_PARK` | `on`: the parked conversation a new park gives up goes to the spill first (0.4.1); `off`: given up |
 
 `POST /v1/cache/clear?tier=disk` empties the disk tier, `?tier=all` the disk and the caches in RAM.

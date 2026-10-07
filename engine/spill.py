@@ -77,8 +77,12 @@ FORMAT = 1
 MAGIC = b"QSESPIL1"
 GB = dc.GB
 ALIGN = dc.ALIGN
-SETTINGS = {"budget_gb": 40.0, "ttl_hours": 48.0, "min_tokens": 16384,
-            "drain_min_tokens": 4096, "anchors": 4}
+SETTINGS = {"budget_gb": 64.0, "ttl_hours": 48.0, "min_tokens": 16384,
+            "drain_min_tokens": 4096, "anchors": 4, "codec": "zstd", "codec_threads": 4}
+#: a compressed block's frames: each section's byte planes cut into pieces of this size, one zstd
+#: frame each, so a block's frames compress and decompress on `codec_threads` threads at once
+CODEC_FRAME = 8 << 20
+CODEC_NAME = "zs1"
 #: engine files that change how state is kept, not the arithmetic that writes it
 NOT_ARITHMETIC = ("cache.py", "disk_cache.py", "spill.py", "capture_lock.py")
 #: the drained conversation is read back at the next start only when the stop was this recent
@@ -147,6 +151,97 @@ def _common(a, b) -> int:
             return i
         i = j
     return n
+
+
+# --- the lossless codec (0.4.3-test) ----------------------------------------------------------
+# WHY. A row is 104 KiB (the target's 16 attention layers' K and V in BF16, 64 KiB, and the two
+# drafters' own K and V, 40 KiB): the 182k-row Open WebUI chat of 2026-10-07 was a 20.16 GB entry.
+# BF16 numbers are not random bytes: the high byte of each (the sign and 7 exponent bits) takes few
+# values, the low byte (one exponent bit and the mantissa) is close to noise. Split into byte planes
+# (all low bytes, then all high bytes) and zstd at level 1 compresses the target's rows 1.45x and
+# the drafters' 2.15x, 1.71x over whole blocks of a real entry (5.20 -> 3.04 GB): the row is about
+# 61 KiB on the disk. The recurrent-state anchors (fp32) compress only 1.17x and stay as they are.
+# LOSSLESS by construction: zstd returns the bytes it was given, and every block read is summed
+# again on the device and compared with the sums taken from the engine's rows before the save
+# (`block_sums_views`), as for an uncompressed block; a mismatch fails the restore.
+# WHERE THE TIME GOES. The planes are cut on the device (a transpose of the block's bytes, a few
+# ms) and joined there on the way back; the host only runs zstd: 3.4 GB/s compressing and
+# 10.8 GB/s decompressing on 4 threads on the box, against 5.4-6.4 GB/s O_DIRECT reads, so a
+# restore reads 40 % fewer bytes and is no slower (0.93 s against 0.97 s for the 48,853-token
+# entry measured serially; the reader overlaps the next block's read with this block's copy).
+
+def _planes_to_host(src, dst_u8, non_blocking: bool) -> None:
+    """The bytes of `src` (any layout, on its device) into `dst_u8` (host, uint8, the same
+    number of bytes) as byte planes: byte 0 of every element, then byte 1, ..."""
+    import torch
+    w = src.element_size()
+    x = src.contiguous().view(torch.uint8).view(-1, w)
+    if w == 1:
+        dst_u8.copy_(x.view(-1), non_blocking=non_blocking)
+    else:
+        dst_u8.view(w, -1).copy_(x.t().contiguous(), non_blocking=non_blocking)
+
+
+def _planes_from_host(src_u8, dst, non_blocking: bool) -> None:
+    """`_planes_to_host` undone: byte planes on the host into `dst` (a view, on its device)."""
+    import torch
+    w = dst.element_size()
+    y = src_u8.to(dst.device, non_blocking=non_blocking)
+    if w > 1:
+        y = y.view(w, -1).t().contiguous()
+    dst.copy_(y.view(-1).view(dst.dtype).view(dst.shape))
+
+
+def _join(pieces, ax: int, device):
+    """A block given in pieces ((at, rows) along `ax`, as `rows_from` returns them) as one
+    tensor on `device`."""
+    import torch
+    parts = [x.to(device) for _, x in sorted(pieces, key=lambda p: int(p[0]))]
+    return parts[0] if len(parts) == 1 else torch.cat(parts, dim=ax)
+
+
+def _frames(secs, fr: int = CODEC_FRAME) -> list[tuple[int, int]]:
+    """(offset, bytes) of every frame of a block whose sections are `secs`."""
+    out = []
+    for off, nb in secs:
+        for s in range(off, off + nb, fr):
+            out.append((s, min(fr, off + nb - s)))
+    return out
+
+
+_tl = threading.local()
+
+
+def _zc(mv) -> bytes:
+    import zstandard as zstd
+    c = getattr(_tl, "c", None)
+    if c is None:
+        c = _tl.c = zstd.ZstdCompressor(level=1)
+    return c.compress(mv)
+
+
+def _zd(args) -> int:
+    import zstandard as zstd
+    src, dst = args
+    d = getattr(_tl, "d", None)
+    if d is None:
+        d = _tl.d = zstd.ZstdDecompressor()
+    o = 0
+    with d.stream_reader(src) as r:
+        while o < len(dst):
+            k = r.readinto(dst[o:])
+            if not k:
+                break
+            o += k
+    return o
+
+
+def codec_ok() -> bool:
+    try:
+        import zstandard  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 class _Shim:
@@ -245,6 +340,12 @@ class SessionSpill:
         self._abuf = None
         self._pool = None
         self._wpool = None
+        self._zpool = None
+        self._obufs: list = []                 # a compressed block on its way to the disk
+        self._cbufs: list = []                 # a compressed block on its way from the disk
+        self.zratio = 1.5                      # bytes in the engine / bytes on the disk, measured
+        # the day's NVMe write budget (engine/disk_cache.py WriteGuard), the tier's
+        self.guard = None
         self.read_bps = dc.READ_BPS
         self.prefill_tok_s = dc.PREFILL_TOK_S
         # what the caller's server adds to an entry (the end alignment's regions) and reads back
@@ -260,6 +361,7 @@ class SessionSpill:
                       "bytes_written": 0, "restores": 0, "restore_ms": 0.0, "blocks_read": 0,
                       "blocks_in_place": 0, "bytes_read": 0, "tokens_restored": 0,
                       "failed": {}, "refused": {}, "evicted": {}, "last_save": None,
+                      "bytes_raw_written": 0, "blocks_compressed": 0,
                       "last_restore": None, "swept": 0}
         self.events: list[dict] = []
 
@@ -275,6 +377,12 @@ class SessionSpill:
     def apply(self, settings: dict) -> None:
         self.cfg.update({k: v for k, v in (settings or {}).items() if k in SETTINGS
                          and v is not None})
+
+    @property
+    def codec(self) -> str | None:
+        """The codec new blocks are written with (None: as they are). Blocks already on the disk
+        are read whichever way they were written."""
+        return CODEC_NAME if str(self.cfg.get("codec")) == "zstd" and codec_ok() else None
 
     def open(self) -> "SessionSpill":
         os.makedirs(self.root, mode=0o700, exist_ok=True)
@@ -412,6 +520,78 @@ class SessionSpill:
             self._pool = ThreadPoolExecutor(1, thread_name_prefix="spill-read")
         return self._pool
 
+    def _zp(self):
+        if self._zpool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._zpool = ThreadPoolExecutor(max(1, int(self.cfg.get("codec_threads") or 4)),
+                                             thread_name_prefix="spill-zstd")
+        return self._zpool
+
+    def _cbuf(self, pool: list, i: int, need: int):
+        while len(pool) <= i:
+            pool.append(None)
+        b = pool[i]
+        if b is None or b.nbytes < need:
+            if b is not None:
+                b.close()
+            b = pool[i] = dc._Buf(need, False)
+        return b
+
+    def _write_z(self, path: str, meta: dict, buf, secs, slot: int, rec: dict) -> bool:
+        """The writer's half of a compressed block: zstd over the block's planes (frames on
+        `codec_threads` threads), the header with the frames' lengths, one O_DIRECT write.
+        Fills `rec` (the manifest's record of the block) with its size on the disk."""
+        frames = _frames(secs)
+        mv = buf.view(0, secs[-1][0] + secs[-1][1]) if secs else buf.view(0, 0)
+        zs = list(self._zp().map(_zc, [mv[o:o + n] for o, n in frames]))
+        total = sum(len(z) for z in zs)
+        payload = sum(n for _, n in frames)
+        out = self._cbuf(self._obufs, slot, dc.align(ALIGN + payload + payload // 64 + (1 << 20)))
+        meta = dict(meta, z={"c": CODEC_NAME, "fr": CODEC_FRAME, "zl": [len(z) for z in zs]})
+        self._put_header(out, meta)
+        o = ALIGN
+        om = out.view(0, out.nbytes)
+        for z in zs:
+            om[o:o + len(z)] = z
+            o += len(z)
+        size = dc.align(o)
+        om[o:size] = b"\0" * (size - o)
+        direct = dc.write_file(path, [out.view(0, size)], False)
+        rec["bytes"] = size
+        rec["z"] = meta["z"]
+        rec["raw"] = ALIGN + payload
+        return direct
+
+    def _read_block(self, p: str, bl: dict, slot: int, buf, secs) -> tuple[int, dict]:
+        """The reader's half of one block into staging slot `slot`: (bytes read, its header).
+        A compressed block is read whole and its frames decompressed into the staging buffer
+        as byte planes (`_planes_from_host` joins them on the device)."""
+        z = bl.get("z")
+        if not z:
+            hb = self._hdr(slot)
+            n = dc.read_into(p, 0, hb.view(0, ALIGN))
+            n += dc.read_into(p, ALIGN, buf.view(0, int(bl["bytes"]) - ALIGN))
+            return n, self._get_header(hb)
+        size = int(bl["bytes"])
+        cb = self._cbuf(self._cbufs, slot, size)
+        n = dc.read_into(p, 0, cb.view(0, size))
+        meta = self._get_header(cb)
+        if meta.get("z") != z or [list(x) for x in meta["sections"]] != [list(x) for x in secs]:
+            raise ValueError("codec header")
+        frames = _frames(secs, int(z["fr"]))
+        if len(frames) != len(z["zl"]):
+            raise ValueError("codec frames")
+        cm = cb.view(0, size)
+        sm = buf.view(0, buf.nbytes)
+        args, o = [], ALIGN
+        for (off, ln), zl in zip(frames, z["zl"]):
+            args.append((cm[o:o + zl], sm[off:off + ln]))
+            o += zl
+        got = list(self._zp().map(_zd, args))
+        if got != [ln for _, ln in frames]:
+            raise ValueError("codec length")
+        return n, meta
+
     def close(self) -> None:
         if self._pool is not None:
             self._pool.shutdown(wait=True)
@@ -419,9 +599,14 @@ class SessionSpill:
         if self._wpool is not None:
             self._wpool.shutdown(wait=True)
             self._wpool = None
-        for b in self._bufs + self._hbufs:
+        if self._zpool is not None:
+            self._zpool.shutdown(wait=True)
+            self._zpool = None
+        if self.guard is not None:
+            self.guard.save()
+        for b in self._bufs + self._hbufs + self._obufs + self._cbufs:
             b.close()
-        self._bufs, self._hbufs = [], []
+        self._bufs, self._hbufs, self._obufs, self._cbufs = [], [], [], []
         if self._abuf is not None:
             self._abuf.close()
             self._abuf = None
@@ -536,9 +721,14 @@ class SessionSpill:
         S, conv = eng.state.S, eng.state.conv
         (oS, nS), (oc, nc) = dc._sections([dc._nb(S), dc._nb(conv)])[0]
         anc_size = ALIGN + dc.align(oc + nc)
+        if self.guard is not None and not self.guard.allow("spill", reason, n):
+            self._count("refused", "write_budget")
+            self._event("refused", why="write_budget", tokens=n, reason=reason)
+            return None
+        codec = self.codec
         eid = self._eid_for(owner, tokens)
         old = self.entries.get(eid)
-        want = (n * per_row + -(-n // C) * 2 * ALIGN
+        want = (int(n * per_row / (max(1.0, self.zratio) if codec else 1.0)) + -(-n // C) * 2 * ALIGN
                 + (len(keep) + (end is not None)) * anc_size)
         if not self._sweep("save", room=max(0, want - (old.bytes if old else 0)), protect=eid):
             self._count("refused", "room")
@@ -554,6 +744,7 @@ class SessionSpill:
         old_blocks = {int(b["b"]): b for b in old.man["blocks"]} if same else {}
         cuda = any(t.is_cuda for t, _ in views)
         blocks, written, kept, nbytes, wbytes = [], 0, 0, 0, 0
+        zrecs: list[dict] = []                 # compressed blocks: their sizes come from the writer
         carried = None
         # Where a save's time goes, in ms (`info["parts"]`; the 0.3.23 live case of
         # 7.0 GB in 4.5 s had no breakdown)
@@ -566,6 +757,13 @@ class SessionSpill:
             a = time.perf_counter()
             try:
                 return dc.write_file(p, views_, fs)
+            finally:
+                tw[0] += time.perf_counter() - a
+
+        def _write_z(*args):
+            a = time.perf_counter()
+            try:
+                return self._write_z(*args)
             finally:
                 tw[0] += time.perf_counter() - a
         try:
@@ -612,6 +810,15 @@ class SessionSpill:
                         buf = bufs[slot]
                         dsts = []
                         for i, ((t, ax), (off, nb)) in enumerate(zip(views, secs)):
+                            if codec:
+                                # byte planes, cut on the device; the sums of a block in two
+                                # pieces from the joined rows there
+                                src = (t.narrow(ax, b, r) if pieces is None
+                                       else _join(pieces[i], ax, t.device))
+                                _planes_to_host(src, buf.tensor()[off:off + nb],
+                                                cuda and buf.pinned)
+                                dsts.append((src, ax))
+                                continue
                             dst = buf.typed(off, t.dtype, dc._row_shape(t, ax, r))
                             if pieces is None:
                                 dst.copy_(t.narrow(ax, b, r), non_blocking=cuda and buf.pinned)
@@ -627,8 +834,16 @@ class SessionSpill:
                             # a block in two pieces: its sums are the whole block's, as a restore
                             # reads them in place (on the host here, once)
                             sums = [block_sums(dst, ax, 0, r) for dst, ax in dsts]
-                        hdr = self._put_header(self._hdr(slot), {"b": b, "rows": r, "sums": sums,
-                                                                 "sections": secs})
+                        meta = {"b": b, "rows": r, "sums": sums, "sections": secs}
+                        if codec:
+                            rec = {"b": b, "rows": r, "sums": sums, "bytes": 0}
+                            pending[slot] = self._writer().submit(
+                                _write_z, os.path.join(path, fname), meta, buf, secs, slot, rec)
+                            blocks.append(rec)
+                            zrecs.append(rec)
+                            written += 1
+                            continue
+                        hdr = self._put_header(self._hdr(slot), meta)
                         size = ALIGN + payload
                         pending[slot] = self._writer().submit(
                             _write, os.path.join(path, fname), [hdr, buf.view(0, payload)], False)
@@ -641,6 +856,10 @@ class SessionSpill:
                         f.result()
                     pending = {}
                     tm["tail"] += (time.perf_counter() - q) * 1e3
+                    zraw = sum(int(rec["raw"]) for rec in zrecs)
+                    zdisk = sum(int(rec["bytes"]) for rec in zrecs)
+                    nbytes += zdisk
+                    wbytes += zdisk
                 finally:
                     for f in list(pending.values()):
                         try:
@@ -727,12 +946,21 @@ class SessionSpill:
                 "blocks_kept": kept, "bytes_written": wbytes, "bytes": nbytes,
                 "ms": round(s * 1e3, 1), "end": end is not None or carried is not None,
                 "anchors": len(keep), **({"end_carried": True} if carried is not None else {}),
+                **({"codec": codec, "blocks_raw_bytes": zraw, "blocks_disk_bytes": zdisk}
+                   if zrecs else {}),
                 "parts": {k: round(v, 1) for k, v in tm.items()}, "writer_ms": round(tw[0] * 1e3, 1)}
         self.stats["saves"] += 1
         self.stats["save_ms"] += s * 1e3
         self.stats["blocks_written"] += written
         self.stats["blocks_kept"] += kept
         self.stats["bytes_written"] += wbytes
+        if zrecs:
+            self.stats["blocks_compressed"] += len(zrecs)
+            self.stats["bytes_raw_written"] += zraw
+            if zdisk:
+                self.zratio = 0.7 * self.zratio + 0.3 * (zraw / zdisk)
+        if self.guard is not None:
+            self.guard.add(wbytes, "spill")
         self.stats["last_save"] = info
         self._event("save", **info)
         return info
@@ -847,19 +1075,18 @@ class SessionSpill:
                         if j < len(todo):
                             bl = todo[j]
                             p = os.path.join(e.path, f"r{int(bl['b']):07d}.blk")
-                            size = int(bl["bytes"]) - ALIGN
-                            futs[j] = (pool.submit(dc.read_into, p, 0, self._hdr(j % 2).view(0, ALIGN)),
-                                       pool.submit(dc.read_into, p, ALIGN,
-                                                   bufs[j % 2].view(0, size)))
+                            r_ = int(bl["rows"])
+                            secs = dc._sections([dc._row_bytes(t, ax) * r_ for t, ax in views])[0]
+                            futs[j] = pool.submit(self._read_block, p, bl, j % 2, bufs[j % 2],
+                                                  secs)
                     submit(0)
                     submit(1)
                     for j, bl in enumerate(todo):
                         b, r = int(bl["b"]), int(bl["rows"])
                         buf = bufs[j % 2]
                         try:
-                            fh, fb = futs.pop(j)
-                            nread += fh.result() + fb.result()
-                            meta = self._get_header(self._hdr(j % 2))
+                            k, meta = futs.pop(j).result()
+                            nread += k
                             if meta["b"] != b or meta["rows"] != r:
                                 raise ValueError("block")
                         except Exception:                          # noqa: BLE001
@@ -867,6 +1094,10 @@ class SessionSpill:
                             return self._failed(e, "read", res, low)
                         low = b if low is None else min(low, b)
                         for (t, ax), (off, nb) in zip(views, meta["sections"]):
+                            if bl.get("z"):
+                                _planes_from_host(buf.tensor()[off:off + nb], t.narrow(ax, b, r),
+                                                  cuda and buf.pinned)
+                                continue
                             t.narrow(ax, b, r).copy_(
                                 buf.typed(off, t.dtype, dc._row_shape(t, ax, r)),
                                 non_blocking=cuda and buf.pinned)
@@ -973,6 +1204,8 @@ class SessionSpill:
         return {"root": self.root, "settings": dict(self.cfg), "entries": len(rows),
                 "bytes": sum(r["bytes"] for r in rows), "budget": self.budget,
                 "fingerprint": self.fp[:16], "read_bps": round(self.read_bps),
+                "codec": self.codec, "zratio": round(self.zratio, 3),
+                "writes": self.guard.report() if self.guard is not None else None,
                 "list": rows[:10], "events": self.events[-10:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
 

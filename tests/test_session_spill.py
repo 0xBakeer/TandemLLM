@@ -257,7 +257,10 @@ def test_a_file_that_fails_its_sums_fails_the_restore_and_the_prefill_is_cold():
         res.clear()
         _, pre, _ = turn(prompt + out1 + TOOL, 4, session="A")
         assert pre["kind"] is None and pre["reused"] == 0, pre
-        assert sp.stats["failed"].get("sums") == 1 and not sp.entries, (sp.stats, sp.events)
+        # an uncompressed block fails its sums; a compressed one its sums, or its frame (0.4.3)
+        failed = sp.stats["failed"]
+        assert failed.get("sums", 0) + failed.get("read", 0) == 1 and not sp.entries, (
+            sp.stats, sp.events)
         t.close()
     finally:
         shutil.rmtree(d, ignore_errors=True)

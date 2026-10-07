@@ -2,6 +2,26 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.3-test, 2026-10-07
+
+0.4.2-test (6fee8d3) with the spill compressed, the disk budgets of SRV-271's option A and a daily NVMe write budget, deployed on the box as 0.4.3-test. `~/rollback-0.4.3.sh` returns the box to 0.4.2-test. The text is the same: every cache restores exact state, and the codec is lossless.
+
+### The spill entries compressed losslessly (SRV-275; QA SRV-276)
+
+- A spill entry is the model's computed state, not text: 104 KiB a token (the target's 16 attention layers' K and V, 64 KiB, and the two drafters' K and V, 40 KiB, all BF16) and 0.77 GB of recurrent-state anchors an entry. The 182,000-row Open WebUI chat of 2026-10-07 was a 20.16 GB entry.
+- New blocks are written as byte planes compressed with zstd level 1 (`engine/spill.py`, `--session-spill-codec`, `SESSION_SPILL_CODEC`, on): the planes are cut and joined on the device, the host compresses 8 MiB frames on 4 threads. On a real 48,853-token entry the rows go 5.20 -> 3.04 GB (1.71x; target 1.45x, drafters 2.39x), the entry 5.97 -> 3.81 GB; compress 3.4 GB/s, decompress 10.8 GB/s; the read of the compressed blocks plus their decompression took 0.93 s against 0.97 s for the raw O_DIRECT read. `tools/spill_codec_check.py` ran every block of two real entries through the codec: bit for bit. The block sums are checked on the device after every read, as before.
+- Entries on the disk are read either way; a 0.4.2 entry written again keeps its unchanged blocks and compresses the new ones. The fingerprint skips the spill's files, so the deploy keeps every entry.
+- Measured and not taken: plain zstd (1.27x target), zstd level 3, the fp32 recurrent state (1.17x), 2 anchors instead of 4. Lossy storage (FP8 KV, BF16 recurrent state) is reported in docs/caches.md and not implemented.
+- To verify live: a long chat evicted and read back: the save line shows `codec=zs1` and about 0.6x bytes, the restore line, cached 0.95 or more, TTFT within 1.5x of 0.4.2's restore.
+
+### The disk budgets: spill 64 GB, head cache 16 GB (SRV-271 option A)
+
+- The session spill's budget 40 -> 64 GB (`--session-spill-gb`, now passed by `ops/start.sh` from `SESSION_SPILL_GB`, and `settings.memory.session_spill.budget_gb` live); the disk tier's 50 -> 16 GB (code and schema default; the box's settings document was set live before this deploy). The 50 GB free-space floor stays. Compressed, a 182k chat is about 12.1 GB: 64 GB holds about five.
+
+### A daily NVMe write budget (SRV-273; QA SRV-274)
+
+- SMART on the box's 1 TB drive: 11.6 TB written, 1 % used. The disk tier and the spill wrote 137 to 282 GB a day (10-04 to 10-07). `engine/disk_cache.py::WriteGuard` counts both per local day (kept across restarts in `writes.json`); past `--disk-write-budget-gb` (200, `DISK_WRITE_BUDGET_GB`, `settings.memory.disk_writes.budget_gb` live) the tier writes nothing and the spill only a drain and evictions of 32,768 tokens or more; past 1.5x only the drain. Skips are logged (`[disk-guard] skip`) and counted; `/health` `cache.disk_writes` shows the day's GB, the level and 14 days.
+
 ## 0.4.2-test, 2026-10-07
 
 0.4.1-test (585856d) and one fix, deployed on the box as 0.4.2-test. `~/rollback-0.4.2.sh` returns the box to 0.4.1-test.

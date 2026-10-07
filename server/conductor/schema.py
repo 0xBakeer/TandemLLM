@@ -911,7 +911,7 @@ SETTINGS: dict = {"default_profile": "chat",
                   "journal": {"retention_days": 30, "digest": "tools"},
                   "memory": {"transcripts": {"scope": "tools", "retention_days": 30,
                                              "clip_chars": 4000, "loop_chars": 200},
-                             "disk_cache": {"mode": "on", "budget_gb": 50, "ttl_days": 7,
+                             "disk_cache": {"mode": "on", "budget_gb": 16, "ttl_days": 7,
                                             "admit_after": 2, "min_free_gb": 50}}}
 
 
@@ -1347,6 +1347,18 @@ SCHEMAS: dict[str, dict] = {
                               "ttl_days": {"type": "integer", "minimum": 1, "maximum": 90},
                               "admit_after": {"type": "integer", "minimum": 1, "maximum": 10},
                               "min_free_gb": {"type": "number", "minimum": 50, "maximum": 4000}}),
+                          # 0.4.3-test: the session spill's settings over its flags, and the
+                          # day's NVMe write budget (absent: the command line's, 64 GB, zstd,
+                          # 200 GB a day)
+                          "session_spill": _obj({
+                              "budget_gb": {"type": "number", "minimum": 1, "maximum": 4000},
+                              "codec": {"enum": ["zstd", "off"]},
+                              "ttl_hours": {"type": "number", "minimum": 1, "maximum": 720},
+                              "min_tokens": {"type": "integer", "minimum": 1024,
+                                             "maximum": 1048576}}, required=()),
+                          "disk_writes": _obj({
+                              "budget_gb": {"type": "number", "minimum": 0, "maximum": 100000}},
+                              required=()),
                           # 2026-10-05: the memory notes' reads and write rules (NOTES)
                           "notes": _obj({
                               "index_tokens": {"type": "integer", "minimum": 0, "maximum": 8000},

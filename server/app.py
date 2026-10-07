@@ -6871,6 +6871,8 @@ def cache_stats() -> dict:
     disk = STATE.get("disk_cache")
     # the counts only: the entries' previews are the admin's (GET /v1/conductor/memory/disk)
     out["disk_cache"] = disk.report(top=10) if disk is not None else None
+    g = getattr(disk, "guard", None) if disk is not None else None
+    out["disk_writes"] = g.report() if g is not None else None
     seg = STATE.get("segments")
     out["prompt_tokens_cache"] = seg.report() if seg is not None else None
     tower = STATE.get("vision")
@@ -7370,9 +7372,19 @@ def parser() -> argparse.ArgumentParser:
                          "disk tier's directory: written whole at a planned stop and read back at "
                          "the next start, written before another client's request evicts it, read "
                          "back at its next turn. Needs --disk-cache; off = 0.3.21-test")
-    ap.add_argument("--session-spill-gb", type=float, default=40.0,
+    ap.add_argument("--session-spill-gb", type=float, default=64.0,
                     help="the session spill's own budget on the NVMe (a 256k conversation is "
-                         "about 27 GB); the disk tier's free-space floor holds for both")
+                         "about 27 GB as it is in the engine, about 16 GB compressed); the disk "
+                         "tier's free-space floor holds for both; settings.memory.session_spill "
+                         "overrides it live")
+    ap.add_argument("--session-spill-codec", default="zstd", choices=("zstd", "off"),
+                    help="0.4.3-test: new spill blocks as byte planes compressed with zstd "
+                         "(lossless, 1.71x on a real entry; blocks on the disk are read either way)")
+    ap.add_argument("--disk-write-budget-gb", type=float, default=200.0,
+                    help="0.4.3-test: the engine's NVMe writes a local day past which optional "
+                         "writes stop (the tier's, and the spill's but a drain and evictions of "
+                         "32k+ tokens; past 1.5x only the drain); 0 = no budget; "
+                         "settings.memory.disk_writes.budget_gb overrides it live")
     ap.add_argument("--session-spill-min-tokens", type=int, default=16384,
                     help="the shortest resident conversation an eviction writes to the NVMe "
                          "(shorter ones are the RAM park's)")

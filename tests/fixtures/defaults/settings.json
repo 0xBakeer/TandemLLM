@@ -15,7 +15,7 @@
    },
    "disk_cache": {
     "mode": "on",
-    "budget_gb": 50,
+    "budget_gb": 16,
     "ttl_days": 7,
     "admit_after": 2,
     "min_free_gb": 50

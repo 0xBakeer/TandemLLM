@@ -34,6 +34,26 @@ def settings_of(settings: dict | None) -> dict:
     return {**dc.SETTINGS, **{k: v for k, v in got.items() if k in dc.SETTINGS}}
 
 
+def spill_of(settings: dict | None) -> dict:
+    """`settings.memory.session_spill` (budget_gb, codec, ttl_hours, min_tokens): the session
+    spill's settings that the document overrides, live from the next request (0.4.3-test). Keys
+    the document does not set keep the command line's."""
+    from engine import spill as sp
+    got = ((settings or {}).get("memory") or {}).get("session_spill") or {}
+    return {k: v for k, v in got.items()
+            if k in ("budget_gb", "codec", "ttl_hours", "min_tokens") and v is not None
+            and k in sp.SETTINGS}
+
+
+def writes_of(settings: dict | None, a) -> dict:
+    """`settings.memory.disk_writes.budget_gb` over `--disk-write-budget-gb` (None: not set)."""
+    got = ((settings or {}).get("memory") or {}).get("disk_writes") or {}
+    b = got.get("budget_gb")
+    if b is None and a is not None:
+        b = float(getattr(a, "disk_write_budget_gb", dc.WRITE_BUDGET_GB))
+    return {"budget_gb": b}
+
+
 def _settings_doc(state) -> tuple:
     cond = state.get("conductor")
     if cond is None:
@@ -139,6 +159,15 @@ def start(state, a, journal=None):
                        min_tokens=int(getattr(a, "disk_cache_min_tokens", 4096)),
                        on_event=on_event, preview=preview)
     tier.plan_staging(eng, drafter)
+
+    def on_guard(kind: str, detail: dict) -> None:
+        if journal is not None:
+            journal.note("memory", "disk_writes", decision=kind, detail=detail)
+        print(f"[disk-guard] {kind} " + " ".join(f"{k}={v}" for k, v in detail.items()),
+              flush=True)
+
+    # The day's NVMe write budget (0.4.3-test): the tier's writes and the spill's count against it
+    tier.guard = dc.WriteGuard(root, budget_gb=writes_of(doc, a)["budget_gb"], on_event=on_guard)
     tier.open()
     state["disk_cache_version"] = None
     refresh(state, tier)
@@ -172,9 +201,12 @@ def start_spill(state, a, tier, journal=None):
 
     spill = sp.SessionSpill(os.path.join(tier.root, "sessions"), chunk=tier.chunk,
                             fingerprint=fp, tier=tier, on_event=on_event,
-                            settings={"budget_gb": float(getattr(a, "session_spill_gb", 40.0)),
+                            settings={"budget_gb": float(getattr(a, "session_spill_gb", 64.0)),
                                       "min_tokens": int(getattr(a, "session_spill_min_tokens",
-                                                                16384))}).open()
+                                                                16384)),
+                                      "codec": str(getattr(a, "session_spill_codec", "zstd")),
+                                      **spill_of(_settings_doc(state)[1])}).open()
+    spill.guard = getattr(tier, "guard", None)
     al = state.get("end_align")
     if al is not None:
         wire_end_align(spill, al)
@@ -182,7 +214,8 @@ def start_spill(state, a, tier, journal=None):
     rep = spill.report()
     print(f"[spill] on: {spill.root}, {rep['entries']} conversations, "
           f"{rep['bytes'] / dc.GB:.1f} of {rep['budget'] / dc.GB:g} GB, evictions from "
-          f"{spill.min_tokens} tokens; fingerprint {fp[:12]}", flush=True)
+          f"{spill.min_tokens} tokens, codec {spill.codec or 'none'}; fingerprint {fp[:12]}",
+          flush=True)
     return spill
 
 
@@ -207,6 +240,17 @@ def refresh(state, tier=None) -> list[str]:
         return []
     state["disk_cache_version"] = v
     changed = tier.apply(settings_of(doc))
+    sp = state.get("spill")
+    if sp is not None:
+        before = dict(sp.cfg)
+        sp.apply(spill_of(doc))
+        changed += [f"spill.{k}={sp.cfg[k]}" for k in sp.cfg if sp.cfg[k] != before.get(k)]
+    g = getattr(tier, "guard", None)
+    if g is not None:
+        b = writes_of(doc, None)["budget_gb"]
+        if b is not None and float(b) != g.budget_gb:
+            g.budget_gb = float(b)
+            changed.append(f"disk_writes.budget_gb={b}")
     if changed:
         print(f"[disk-cache] settings v{v}: " + ", ".join(changed), flush=True)
     return changed

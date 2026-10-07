@@ -187,7 +187,7 @@ def test_a_new_box_serves_the_live_configuration():
         assert h.get("X-Tandem-Profile") == "general", h
         # ---- 4 the disk tier's settings
         st, _, s = _call(port, "GET", "/v1/conductor/settings")
-        assert s["doc"]["memory"]["disk_cache"] == {"mode": "on", "budget_gb": 50, "ttl_days": 7,
+        assert s["doc"]["memory"]["disk_cache"] == {"mode": "on", "budget_gb": 16, "ttl_days": 7,
                                                     "admit_after": 2, "min_free_gb": 50}
     finally:
         proc.terminate()
