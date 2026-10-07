@@ -536,6 +536,11 @@ SHIPPED_ROUTER: dict = {
         "context_line": False,
         "package_question": "Which of these instructions fits this request best?",
         "package_accept": 0.6,
+        # a first message under the accept bar keeps its top class when that class builds
+        # something and leads the second by 0.1 (Router._below_build). On 341 labelled prompts
+        # (router v17): 307 -> 309 right, 0 answers newly wrong; Khaled's pagoda (three_d 0.378,
+        # design_ui 0.256) and the aquarium (three_d 0.446) no longer fall back to chat
+        "below_accept": {"mode": "build", "margin": 0.1},
         "qwen_prompt": ("You sort requests to a coding assistant into task classes. Read the "
                         "request and answer with the id of the one class that fits it best.\n\n"
                         "Classes:\n{classes}"),
@@ -1398,6 +1403,11 @@ SCHEMAS: dict[str, dict] = {
                 "below": _PROB, "other": _PROB,
                 "text": {"type": "string", "minLength": 10, "maxLength": 1000}},
                 required=("mode",)),
+            # a first message under the accept bar: the default class, or the top class when it
+            # builds something and leads by `margin` (Router._below_build)
+            "below_accept": _obj({
+                "mode": {"enum": ["default", "build"]},
+                "margin": _PROB}, required=("mode",)),
             "context_stage": _obj({
                 "mode": {"enum": ["off", "on"]},
                 "min_tokens": {"type": "integer", "minimum": 0, "maximum": 262144},

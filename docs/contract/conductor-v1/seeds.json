@@ -2541,6 +2541,26 @@
         ],
         "additionalProperties": false
        },
+       "below_accept": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "default",
+           "build"
+          ]
+         },
+         "margin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+         }
+        },
+        "required": [
+         "mode"
+        ],
+        "additionalProperties": false
+       },
        "context_stage": {
         "type": "object",
         "properties": {

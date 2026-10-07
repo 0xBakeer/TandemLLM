@@ -1113,12 +1113,42 @@ class Router:
         """The class from the accepted answer (or none): the session's when nobody was sure or
         the answer is below the switch, else the answer's."""
         if ans is None:
+            below = self._below_build(stages, router, sess, classes)
+            if below is not None:
+                return below
             return (sess.cls if sess.cls in classes else default), None, "fallback", (
                 "fail_open" if stages and all(s.get("error") for s in stages) else "no_answer")
         if sess.cls in classes and sess.cls != ans.label and \
                 ans.confidence < float(router["stickiness"]["switch"]):
             return sess.cls, sess.conf, "sticky", "below_switch"
         return ans.label, ans.confidence, ans.stage, None
+
+    @staticmethod
+    def _below_build(stages, router, sess, classes):
+        """A session's first classified message whose answer stayed under the accept bar
+        (`classifier.below_accept`, mode `build`): the top class when it builds something (its
+        policy names packages: code, a page, a scene, a drawing) and leads the second by at least
+        `margin`, else None (the default class, as before). Khaled's "Create a new folder and
+        create there a pagoda garden" read three_d 0.378 under a router whose chat class had just
+        grown (0.464 before) and fell back to chat: no 3D skill, an ASCII pagoda written into a
+        file until the argument loop guard stopped it. The class's reading line still says what
+        was built when a second build class is close (`_reading`)."""
+        rule = (router["classifier"].get("below_accept") or {})
+        if rule.get("mode", "default") != "build" or sess.cls in classes:
+            return None
+        st = next((s for s in reversed(stages) if s.get("probs") and not s.get("error")), None)
+        if st is None:
+            return None
+        top = sorted(st["probs"].items(), key=lambda kv: -kv[1])
+        if not top or top[0][0] not in classes:
+            return None
+        cls, p = top[0]
+        if not (classes[cls].get("policy") or {}).get("packages"):
+            return None
+        lead = p - (top[1][1] if len(top) > 1 else 0.0)
+        if lead < float(rule.get("margin", 0.0)):
+            return None
+        return cls, p, st.get("stage") or "qwen", "below_build"
 
     def _conclude(self, plan, t0, cls, conf, source, kept, stages, body, router, prof, packages,
                   roles, sh, sess, classes, default, dec, dry) -> Plan:

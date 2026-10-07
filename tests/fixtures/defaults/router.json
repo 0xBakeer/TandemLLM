@@ -190,6 +190,10 @@
    "context_line": false,
    "package_question": "Which of these instructions fits this request best?",
    "package_accept": 0.6,
+   "below_accept": {
+    "mode": "build",
+    "margin": 0.1
+   },
    "qwen_prompt": "You sort requests to a coding assistant into task classes. Read the request and answer with the id of the one class that fits it best.\n\nClasses:\n{classes}",
    "reading": {
     "mode": "on",
