@@ -1,4 +1,4 @@
-"""The end anchor for a copy whose whitespace is not the rows' (0.3.21-test).
+"""The end anchor for a copy whose whitespace is not the rows'.
 
 THE MEASUREMENT. Within an opencode session some tool turns resumed at the previous prompt's last
 1,024 line instead of the end of the last generation (2026-10-03 09:33: 73,374 prompt tokens,
@@ -18,7 +18,7 @@ that part inside a generation, the place is a tool call's parameter (220) or the
 The rest (33) were a boolean the parser typed (`True` -> `true`) and calls of one turn sent back in
 another order: not whitespace, served as sent.
 
-THE FIX. `EndAlign.replay` comes after `ResidentPrefix.replay` (the hidden spans, 0.3.15-test): when
+THE FIX. `EndAlign.replay` comes after `ResidentPrefix.replay` (the hidden spans): when
 the client's copy parts from the rows inside a generation the engine wrote -- the last one, or an
 earlier one this alignment already served -- and the two are the same text once every ASCII
 whitespace byte is taken out of both, the prompt is served with the rows' tokens up to the end
@@ -50,12 +50,12 @@ order. The prompt is then served with the rows' tokens up to the end anchor, the
 engine wrote included -- the template's own default, which renders an earlier answer's reasoning
 when the client sends it -- and the turn resumes at the end anchor. A client that sends the
 reasoning back (opencode) aligns on the first pass as before. `QWEN38_END_ALIGN_REASONING=off`:
-the first pass alone (0.3.49-test).
+the first pass alone.
 
 Exactness: what is served up to the end anchor is the context the engine had, the session cache's
 resume, held to the greedy gate as every end-anchor resume is (docs/caches.md). The alignment
 reads token ids and the tokenizer's bytes; it writes nothing the client sees. Off (`--end-align
-off`): `ResidentPrefix.replay` alone, as 0.3.20-test.
+off`): `ResidentPrefix.replay` alone, as before.
 """
 
 from __future__ import annotations

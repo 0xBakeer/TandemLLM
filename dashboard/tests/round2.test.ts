@@ -1,4 +1,4 @@
-// FX2 (0.3.43-test, the UT2 self-test round 2): VIS-58, the Live row's cached share never reads
+// FX2 (the UT2 self-test round 2): VIS-58, the Live row's cached share never reads
 // above the client's prompt and TandemLLM's own notes show as their own figure; VIS-60, the Usage
 // and Requests calls leave TandemLLM's own calls out unless the "show internal" switch asks.
 import { afterEach, describe, expect, it, vi } from 'vitest';

@@ -1,4 +1,4 @@
-"""Which client sent a request, and so which profile it gets with no header (0.3.21-test).
+"""Which client sent a request, and so which profile it gets with no header.
 
 The recorded shapes below are the clients' own: opencode 1.18.34's User-Agent as its requests carry
 it, its tool names as the box's disk tier holds a session's head (2026-10-03); the Hermes agent

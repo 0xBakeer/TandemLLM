@@ -395,7 +395,7 @@ class DiskTier:
         self._slots = threading.Condition()
         self._free_anchor: list[int] = []
         self._io = threading.Lock()           # the chunk slots: a restore or the writer
-        # 0.3.23-test: a session spill writing (engine/spill.py): the writer waits between files
+        # A session spill writing (engine/spill.py): the writer waits between files
         self.spill_active = 0
         self.staging_planned = 0
         self._est = (0, 0)                    # (anchor, chunk) bytes before the slots exist
@@ -860,7 +860,7 @@ class DiskTier:
                     job.limit = int(safe)
 
     def guard_rows(self, n: int) -> int:
-        """0.3.27-test, the side lane (server/preempt.py): a short request is about to write the
+        """The side lane (server/preempt.py): a short request is about to write the
         engine's rows below `n` in the middle of another generation, and give them back after. An
         open job that has not copied its chunks below `n` yet would copy the guest's rows: it stops
         where it is (what it copied is written). Returns how many jobs stopped; waits at most for
@@ -1022,7 +1022,7 @@ class DiskTier:
                     job.drop(why, len(todo) - j)
                     self._event("drop", why=why, tokens=b, what="chunk")
                     break
-                # 0.3.23-test: a session spill writing now (an eviction the request waits for)
+                # A session spill writing now (an eviction the request waits for)
                 # has the disk to itself; this file waits, at most SPILL_WAIT_S
                 t_w = time.monotonic()
                 while self.spill_active and time.monotonic() - t_w < SPILL_WAIT_S:

@@ -391,7 +391,7 @@ class Supervisor:
         sent again ends in calls it stopped (`argloop.trailing_stops`: the markers the handler's
         `collapse_history` left) -> the hidden note at the end of this prompt, once; it names the
         tool and the piece, and after an identical stop says so. After `GIVE_UP_IDENTICAL`
-        identical stops in a row, or `GIVE_UP_ANY` of one tool (0.3.40-test, the Open WebUI retry
+        identical stops in a row, or `GIVE_UP_ANY` of one tool (the Open WebUI retry
         storm of 2026-10-06: five byte-identical attempts), A1's GIVE_UP instead: no generation,
         the client gets `argloop.final_text` and its tool loop ends. Not on a request without
         tools (a title, a compaction); a new user message starts the streak over."""

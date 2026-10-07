@@ -385,7 +385,7 @@ def test_policy_and_migration():
     assert new["tasks"]["S5"] == p.data["tasks"]["S5"] and new["tasks"]["D1"]["mode"] == "shadow"
     again, ch2 = monitor_migrate.migrate_doc(new)
     assert ch2 == [] and again == new
-    # 0.3.45-test: a box at policy 6 has S5 without the verify arm, and its own threshold
+    # A box at policy 6 has S5 without the verify arm, and its own threshold
     box = json.loads(json.dumps(p.data))
     for k in ("verify_s", "verify_scratch_writes", "verify_text"):
         del box["tasks"]["S5"][k]

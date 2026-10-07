@@ -1,5 +1,5 @@
 """Server-side compaction: a client's compaction served as a continuation of the conversation the
-engine holds, and a summary prepared before it is asked for (0.3.23-test).
+engine holds, and a summary prepared before it is asked for.
 
 THE MEASURED CASES (the owner's ~/rrr6 session, opencode 1.18.34, 2026-10-03). A manual /compact at
 111,636 tokens: 63,614 prompt tokens read cold (90 s), 2,116 reasoning tokens, 189.8 s in all. An

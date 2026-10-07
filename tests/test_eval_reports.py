@@ -1,7 +1,7 @@
 """The suite reports the Compare screen reads (VIS-42 follow-ups, OPS-63), on a CPU.
 
   1  a night with a suffix is kept: eval night 2 of 2026-10-01 is `2026-10-01-r2`, and the live
-     server (0.3.7-test) answered its --publish with a 422 ("report.night: YYYY-MM-DD")
+     server answered its --publish with a 422 ("report.night: YYYY-MM-DD")
   2  a report another one supersedes is listed with `superseded_by`, also when its own file was
      never marked (kept files are not rewritten); a marked one keeps its own words
   3  VIS-68: a release tree's shipped speed-guard report (release/speed-guard.json) is listed

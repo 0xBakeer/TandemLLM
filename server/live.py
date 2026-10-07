@@ -94,7 +94,7 @@ from server.activity import REPLAY
 
 
 def _own_blocks(rec, bs):
-    """The block counts a row reads: a side-lane job's own (0.3.27-test, server/preempt.py), else
+    """The block counts a row reads: a side-lane job's own (server/preempt.py), else
     the running generation's."""
     job = getattr(rec, "lane_job", None)
     return job.blocks if job is not None else bs
@@ -339,7 +339,7 @@ class LiveRegistry:
                 "tokens": int(rec.completion_tokens or rec.n_live or 0),
                 "elapsed_ms": _r((end - rec.t_arrival) * 1e3, 1),
                 "ttft_ms": _r(rec.ttft_ms),
-                # a replay decoded nothing: no rate (0.3.27-test)
+                # a replay decoded nothing: no rate
                 "decode_tps": None if rec.cache_source in REPLAY else _r(rec.decode_tps),
                 "tool_names": list(getattr(rec, "tool_names", None) or []),
                 "lane": getattr(rec, "lane", None),
@@ -347,7 +347,7 @@ class LiveRegistry:
 
     @staticmethod
     def _cache_of(rec) -> dict:
-        """0.3.21-test: where the prompt came from and what it reused and forwarded, as the ledger
+        """Where the prompt came from and what it reused and forwarded, as the ledger
         row has them; None for a request that never ran a prefill."""
         if rec.prompt_tokens is None or rec.t_first is None:
             return {"prompt_tokens": None, "cached_tokens": None, "forwarded_tokens": None,

@@ -126,21 +126,21 @@ KNOBS: dict[str, tuple] = {
     'CLIENT_REASONING': ('*=reasoning_content,hermes=tags', 'server/compat.py'),
     # SRV-237/249: the client kinds whose state lines before the first generated token (the
     # router's, the waiting and reading lines) go out as Open WebUI `status` events, outside the
-    # reasoning it times as "Thought for N seconds" ('' = in the profile's channel, as 0.3.49-test)
+    # reasoning it times as "Thought for N seconds" ('' = in the profile's channel, as before)
     'STATUS_CLIENTS': ('open-webui', 'server/conductor/states.py'),
     # SRV-197: which test says a request continues slot 0's conversation with --parallel N:
     # `view` (the client's rendered tokens, then the resident rows) or `resident` (the rows alone,
-    # the 0.3.45-test rule, for an A/B)
+    # the old rule, for an A/B)
     'SIDE_CONTINUE': ('view', 'server/app.py'),
     # FX5 (2026-10-06): a short request unrelated to slot 0's conversation (the router's own
     # questions, a client's title or tags task) takes an idle side slot first; off: slot 0 as a
-    # guest with the stash, as 0.3.46-test
+    # guest with the stash, as before
     'SIDE_GUESTS': ('on', 'server/app.py'),
-    # 0.3.49-test: a request continues slot 0's conversation only when the part it shares reaches
-    # past its first user message (`on`); `off`: a client's fixed head alone may count (0.3.48-test)
+    # A request continues slot 0's conversation only when the part it shares reaches
+    # past its first user message (`on`); `off`: a client's fixed head alone may count
     'SIDE_CONV': ('on', 'server/app.py'),
-    # 0.3.49-test: a side slot reads the disk tier (`read`: a new chat's head from the NVMe, writes
-    # stay slot 0's); `off`: a side slot prefills its whole prompt (0.3.48-test)
+    # A side slot reads the disk tier (`read`: a new chat's head from the NVMe, writes
+    # stay slot 0's); `off`: a side slot prefills its whole prompt
     'SIDE_DISK': ('read', 'server/app.py'),
     # FX10 (0.4.1): a parked conversation a new park gives up is written to the NVMe spill first
     # (`on`); `off` gives it up as 0.4.0 did
@@ -148,7 +148,7 @@ KNOBS: dict[str, tuple] = {
     # FX10 (0.4.1, SRV-213): the next turn of a conversation that ran on a side slot is carried
     # into slot 0 from the side slot's rows (`on`); `off` re-reads it on slot 0 as 0.4.0 did
     'SIDE_CARRY': ('on', 'server/app.py'),
-    # SRV-225 (0.3.49-test): a client that sends no conversation id (Open WebUI): chats that open
+    # SRV-225: a client that sends no conversation id (Open WebUI): chats that open
     # with the same message are separate conductor sessions (`on`); `off`: one session per head
     'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),
     # FX5: Open WebUI's live working directory moves from run_command's description (the system
@@ -156,16 +156,16 @@ KNOBS: dict[str, tuple] = {
     'CLIENT_CWD': ('note', 'server/conductor/router.py'),
     # FX5b (2026-10-06): a class's note carries only the parts (effort sentence, packages, rules)
     # no live note of the session holds with the same text (`parts`); `block`: the whole note
-    # whenever any part changed, as 0.3.47-test (the general packages went in again at every
+    # whenever any part changed, as before (the general packages went in again at every
     # user message whose task skill differed, and the replay budget then cut the oldest note)
     'NOTE_DEDUP': ('parts', 'server/conductor/router.py'),
     # SRV-243 (2026-10-07): a class's packages whose steps need a tool the request does not offer
     # (a shell, a file write) stay out of the turn, their `fallback` goes in, and the note says
-    # which tools the chat has (`on`); `off` keeps the packages whatever the tools (0.3.49-test)
+    # which tools the chat has (`on`); `off` keeps the packages whatever the tools
     'TOOL_FIT': ('on', 'server/conductor/router.py'),
     # SRV-239 (2026-10-07): the end alignment's second pass, for a copy that left an answer's
     # reasoning out (Open WebUI sends none back): `on` serves the rows' reasoning and resumes at
-    # the end anchor; `off` re-reads from the grid line below the answer (0.3.49-test)
+    # the end anchor; `off` re-reads from the grid line below the answer
     'END_ALIGN_REASONING': ('on', 'server/endalign.py'),
     # SR1 (2026-10-04): the shadow reader (server/conductor/shadow.py, engine/shadow.py)
     'SHADOW_MODEL': ('', 'server/conductor/shadow.py'),

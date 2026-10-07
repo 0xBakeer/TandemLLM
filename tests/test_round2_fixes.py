@@ -1,4 +1,4 @@
-"""The UT2 round-2 fixes (0.3.43-test) through the real handler with the fake engine in process,
+"""The UT2 round-2 fixes through the real handler with the fake engine in process,
 and their pure parts. Needs CPU torch (the box's CPU suite). QA tickets: SRV-186, SRV-188,
 SRV-190, SRV-192, VIS-59, VIS-61, OPS-68 (SRV-180/182: tests/test_turn_budget.py).
 

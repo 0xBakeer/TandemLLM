@@ -53,7 +53,7 @@ def test_1_the_o03_turn():
     notes = [(7407, 7407 + 1915), (13203, 13203 + 1915), (20711, 20711 + 1915)]
     r.prompt_tokens, r.hidden_prompt = 24706, 5745
     r.absorb_prefill({"reused": 26624, "forwarded": 3827, "kind": "resident"})
-    assert r.client_cached == 24706                    # 0.3.49-test: the clamp, 1.00
+    assert r.client_cached == 24706                    # The clamp, 1.00
     r.hidden_at = notes
     assert r.client_cached == 20879, r.client_cached
     assert r.usage()["prompt_tokens_details"]["cached_tokens"] == 20879
@@ -122,7 +122,7 @@ def test_3_the_need_and_the_engines_room():
                                                      max_entry=GiB)
     assert app._par_growth() == 8 * GiB                      # the caches' budgets left
     assert abs(app._par_room() - int(7.2 * GiB)) < GiB // 100  # the engine's room to its peak
-    # FX7's live case on 0.3.49-test: MemAvailable 25.0, growth 6.6, in flight 2.1, need 2.1 ->
+    # FX7's live case on MemAvailable 25.0, growth 6.6, in flight 2.1, need 2.1 ->
     # 14.1 (< 15): the 576-token request waited 63 s. Now its need is its workspace and the
     # engine's room caps what all of it may take
     adm = slots_mod.Admission(int(15 * GiB), meminfo=lambda: {"MemAvailable": int(22.7 * GiB)},

@@ -1,4 +1,4 @@
-// The side lane (0.3.27-test, server/preempt.py): a short request -- a client's title or summary
+// The side lane (server/preempt.py): a short request -- a client's title or summary
 // call, the router's own question to Qwen -- served between two blocks (or two prefill chunks) of
 // the generation that holds the engine, which gets the engine back exactly as it was. The words a
 // row shows for it, so such a request reads as served beside a turn and not as a refusal.

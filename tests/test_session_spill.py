@@ -1,4 +1,4 @@
-"""Live sessions on the NVMe (engine/spill.py, 0.3.22-test), on the random 4-layer model.
+"""Live sessions on the NVMe (engine/spill.py), on the random 4-layer model.
 
 THE CLAIM. A conversation written to the disk and read back is the conversation that was in the
 engine, byte for byte: every row of every position-indexed buffer, the recurrent state and the
@@ -22,7 +22,7 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      the prefill is a cold one; an entry of another fingerprint is swept at open
   6  the budget: least recently used first; a conversation that does not fit is not written
   7  the parked conversation is written at the drain with its head from the rows in place
-  8  (0.3.24-test) a conversation evicted by a request served from the store keeps its end anchor
+  8 a conversation evicted by a request served from the store keeps its end anchor
      on the disk (the request used to drop it before the eviction wrote it); and written again
      with unchanged rows after its end anchor's buffers went, the end anchor already on the disk
      stays
@@ -394,10 +394,10 @@ def test_fx10_park_spill_off_gives_it_up_as_before():
         shutil.rmtree(d, ignore_errors=True)
 
 
-# ------------------------------------------------------------------ 0.3.23-test: its own I/O path
+# ------------------------------------------------------------------ its own I/O path
 
 def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():
-    """0.3.23-test: a save takes neither the tier's lock nor its chunk slots (the tier's writer
+    """A save takes neither the tier's lock nor its chunk slots (the tier's writer
     holding its lock does not stop it), the tier's writer waits while it runs, a block's sums over
     every buffer are `block_sums`' integers, and a second save of an unchanged conversation writes
     no anchor again."""
@@ -450,7 +450,7 @@ def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():
 def _store_evict_run(with_other: bool, d):
     """A, then B (not a guest: A goes to the disk), A's turn 2 (read back), then, with
     `with_other`, C, which shares B's head and starts from the store's grid entry (kind
-    prefix) and evicts A again; then A's turn 3. The live case (0.3.23-test, 13:34): the drained
+    prefix) and evicts A again; then A's turn 3. The live case (13:34): the drained
     conversation read back at the start, then a 104k request from the disk tier evicted it."""
     store = cache.StateStore(BIG, chunk=CH)
     res = _state(store=store, park_bytes=0, guest_max=40)

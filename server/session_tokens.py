@@ -1,4 +1,4 @@
-"""Which session an out-of-band call belongs to (0.3.23-test; the design: Memo "Session
+"""Which session an out-of-band call belongs to (the design: Memo "Session
 identity", 2026-10-03).
 
 THE GAP. The model fetches a library skill (`GET /v1/library/<name>`) or asks Laya

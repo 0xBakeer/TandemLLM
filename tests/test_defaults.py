@@ -1,6 +1,6 @@
-"""A new box's defaults are what the live box was configured to on 2026-10-03 (0.3.21-test).
+"""A new box's defaults are what the live box was configured to on 2026-10-03.
 
-0.3.22-test: the shipped documents are schema.py's SHIPPED_* (the built-in version 0 stays the
+The shipped documents are schema.py's SHIPPED_* (the built-in version 0 stays the
 minimal one the tests build on); a server with `--conductor-defaults shipped` (ops/start.sh) stores
 each one its directory has no version of as version 1 at its start (server/conductor/shipped.py).
 
@@ -51,8 +51,8 @@ import subprocess  # noqa: E402
 FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 # what the store fills in a stored document that lacks it, keyed by the document
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
-          # 0.3.22-test: opencode's word is ignored (the deploy stores it on the live box too)
-          # 0.3.25-test: the shadow reader's block (the deploy stores it on the live box too)
+          # Opencode's word is ignored (the deploy stores it on the live box too)
+          # The shadow reader's block (the deploy stores it on the live box too)
           "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow"},
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
           "profiles/chat": {"thinking.by_size", "ui"},
@@ -147,7 +147,7 @@ def test_a_new_box_serves_the_live_configuration():
         for k in ("default_class", "decisions", "routing", "tasks", "toolgate", "outcomes",
                   "library", "thinking", "caps", "context"):
             if k == "thinking":
-                # Hermes's effort word is a ceiling, opencode's is ignored (0.3.22-test)
+                # Hermes's effort word is a ceiling, opencode's is ignored
                 assert hermes[k].get("client_word", "ceiling") == "ceiling"
                 assert {**hermes[k], "client_word": "x"} == {**coding[k], "client_word": "x"}
                 continue

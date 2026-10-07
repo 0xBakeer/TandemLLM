@@ -1,5 +1,5 @@
 """A compaction served as the continuation of the conversation the engine holds, and the summary
-prepared ahead (0.3.23-test, server/compaction.py), on the random 4-layer model.
+prepared ahead (server/compaction.py), on the random 4-layer model.
 
 THE MEASURED CASES (the owner's ~/rrr6 session, opencode 1.18.34): a manual /compact read 63,614 tokens
 cold in 189.8 s, an automatic one 129,643 tokens in 270 s, while the conversation (110k, 194k
@@ -347,7 +347,7 @@ def test_the_preparer_takes_the_box_lock_and_a_held_one_stops_it():
 
 
 def test_the_preparer_yields_to_a_lock_waiter_and_to_another_gpu_program():
-    """0.3.24-test: a process waiting in `flock` for the box lock (a hold's `flock -w`) or another
+    """A process waiting in `flock` for the box lock (a hold's `flock -w`) or another
     program on the GPU stops the summary written ahead, as a waiting request does; nothing of the
     conversation moves."""
     import shutil

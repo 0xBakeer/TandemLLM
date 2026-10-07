@@ -475,7 +475,7 @@ class _Plan:
     def __init__(self, budget, decides=True):
         self.res, self.active, self.session, self.changed = _Res(), True, None, True
         self.budget, self.clean_ids, self.decides_effort = budget, None, decides
-        self.client_word = _Conductor.client_word    # 0.3.22-test: ceiling, or ignore
+        self.client_word = _Conductor.client_word    # Ceiling, or ignore
         self.row = {"extra": {}}
         self.transcript = None                       # SRV-137: no session transcript here
         self.context = None                          # no in-context stage due
@@ -592,7 +592,7 @@ def test_over_the_handler_a_word_yields_to_the_routers_level():
 
 
 def test_over_the_handler_a_word_is_a_ceiling_by_default():
-    """0.3.22-test (the owner, 2026-10-03 12:30): under a router that decides the effort, a client's
+    """The owner (2026-10-03 12:30): under a router that decides the effort, a client's
     word is a ceiling: a class below it keeps its own cap, a class above it (high, or xhigh with
     no cap) is held to the word's cap; the answer reserve then applies as before. Hermes sends
     `medium` with 24,000 tokens. The journal row says when the word held the router down."""
@@ -655,7 +655,7 @@ def test_the_router_a_client_word_yields_to_the_class():
 
 
 def test_the_router_a_client_off_form_is_the_clients():
-    """0.3.40-test: an explicit off is the client's (the template closes the block), and the row
+    """An explicit off is the client's (the template closes the block), and the row
     says so: `off_client`, no budget, `extra.client_thinking` -- never the class's level as if it
     thought (Open WebUI's `none` against xhigh's row and note, 2026-10-06 06:11)."""
     for kw in ({"reasoning_effort": "none"}, {"thinking": {"type": "disabled"}},
@@ -682,7 +682,7 @@ def test_the_router_no_effort_sentence_in_a_turn_the_client_turned_off():
 
 
 class _ClassConductor(_Conductor):
-    """A plan whose row carries a router class (0.3.40-test's penalty rule reads it)."""
+    """A plan whose row carries a router class (the penalty rule reads it)."""
 
     def __init__(self, cls):
         super().__init__(None)
@@ -695,7 +695,7 @@ class _ClassConductor(_Conductor):
 
 
 def test_over_the_handler_no_repeat_is_dropped_on_code_and_tool_turns():
-    """0.3.40-test: a client's `no_repeat_ngram_size` is not for code (every repeated n-gram pays
+    """A client's `no_repeat_ngram_size` is not for code (every repeated n-gram pays
     4 nats; repeated n-grams are code). Under the conductor it is dropped on the code classes'
     turns and on turns that offer tools, and the row and the log say so; a chat turn without
     tools and a raw request keep it."""

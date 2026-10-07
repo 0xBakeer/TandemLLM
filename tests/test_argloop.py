@@ -1,4 +1,4 @@
-"""0.3.26-test: the tool-argument loop guard (server/argloop.py).
+"""The tool-argument loop guard (server/argloop.py).
 
 The 2026-10-04 16:18 shape: a `write` whose content falls into one 97-character tile-map row
 repeated until the token limit (65,536 tokens, 327 s, nothing written). Here:
@@ -17,7 +17,7 @@ repeated until the token limit (65,536 tokens, 327 s, nothing written). Here:
 2026-10-05: a live call the token limit cuts (no guard involved) is not sent again as
 content (5).
 
-0.3.40-test (the Open WebUI retry storm, 2026-10-06 06:11: the stopped 6,400-token arguments
+The case (the Open WebUI retry storm, 2026-10-06 06:11: the stopped 6,400-token arguments
 replayed in the history, five byte-identical attempts, the prompt 17k -> 46k):
 
   7  a long unit fires at about three copies, a short one as before; two identical frames do not

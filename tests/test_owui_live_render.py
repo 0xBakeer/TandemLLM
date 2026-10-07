@@ -1,6 +1,6 @@
 """SRV-193 (QA: SRV-194): Open WebUI's live view shows no reasoning tag. CPU only.
 
-FX2's live check of 0.3.43-test (2026-10-06): in a long Open WebUI agent chat, 15 of 70 page scans
+FX2's live check of a 0.4.0 test build (2026-10-06): in a long Open WebUI agent chat, 15 of 70 page scans
 showed a literal `</think>` while the answer streamed; the saved chat was clean. The engine's
 stream was well formed. The cause is Open WebUI 0.11.3's live path (backend
 `open_webui/utils/middleware.py`, frontend `structuredOutput.ts`, read in the container): it folds

@@ -1,4 +1,4 @@
-"""tools/lane_check.py's verdict under the near-tie rule (0.3.39-test, docs/exactness.md "Two runs
+"""tools/lane_check.py's verdict under the near-tie rule (docs/exactness.md "Two runs
 of the same request"): two runs agree when their tokens are the same up to the first fork and the
 fork is a near tie (each run took the other's runner-up, the top-2 gap within --tie-nats in both
 rows). No server, no torch.

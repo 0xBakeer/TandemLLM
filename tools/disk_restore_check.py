@@ -3,7 +3,7 @@
     python -u tools/disk_restore_check.py --phase write --dir DIR --out A.json -- <server flags>
     python -u tools/disk_restore_check.py --phase read  --dir DIR --ref A.json --out B.json -- <server flags>
 
-THE QUESTION (2026-10-02 22:08, 0.3.14-test). tools/disk_cache_live.py found the disk hit working
+THE QUESTION (2026-10-02 22:08). tools/disk_cache_live.py found the disk hit working
 (15,360 tokens restored, 1.79 GB in 334 ms) and its `same_text` gate false. Two explanations: the
 restored state is not the cold prefill's (rows, recurrent states, convolution tails or the drafters'
 rows written or read wrong, a layout or dtype that differs between the write and the read, Triton's

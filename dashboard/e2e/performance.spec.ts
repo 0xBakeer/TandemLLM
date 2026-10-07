@@ -50,7 +50,7 @@ test.describe('performance', () => {
   });
 
   test('scatter never plots a replay; the switch lists them with TTFT only', async ({ page }) => {
-    // 0.3.27-test: a replay (the response cache, a summary written ahead) decoded nothing, so it
+    // A replay (the response cache, a summary written ahead) decoded nothing, so it
     // is never a point on the decode chart; the switch lists the replays with their TTFT
     await login(page, '#/performance');
     const dots = page.locator('#scatter .dot');
@@ -65,7 +65,7 @@ test.describe('performance', () => {
     }
   });
 
-  // NP1 #6 (0.3.36-test): this ran alone failed on webkit at 390 px. The first dot was whichever
+  // NP1 #6: this ran alone failed on webkit at 390 px. The first dot was whichever
   // the ledger listed first: every seventh mock row is relayed through the proxy, which draws no
   // timing bar, and a forced click lands on the topmost dot at that point, which at 390 px is
   // often a neighbour. Which one it was depended on the rows earlier specs had added. The specs

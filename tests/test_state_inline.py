@@ -336,7 +336,7 @@ def test_6_a_waiting_request_opens_with_a_titled_part():
             app.STATE["queue_timeout"] = 1.5
             rt = app.STATE.get("request_timeout")
             app.STATE["request_timeout"] = 1.5
-            # the line at once (0.3.41-test waits QUIET_S, 2 s, before the first one: longer than
+            # the line at once (an earlier build waited QUIET_S, 2 s, before the first one: longer than
             # this test's whole limit)
             qwait.QUIET_S = 0.0
             wait_body = dict(busy_body, messages=[{"role": "user", "content": "me next"}])

@@ -1,4 +1,4 @@
-"""After a client compacts a conversation, the class packages come back (0.3.21-test).
+"""After a client compacts a conversation, the class packages come back.
 
 The owner's opencode session in ~/rrr6 (2026-10-03): every turn before /compact carried the design
 packages (conductor_hidden_tokens 6,502); the compaction request itself was routed as a design turn

@@ -1,6 +1,6 @@
 """Plain API clients get a clean answer (SRV-245, SRV-247; UX2's normal-user run, 2026-10-07).
 
-On 0.3.48-test an OpenAI SDK or curl client that named no `reasoning_format` got the thinking in
+On a 0.4.0 test build an OpenAI SDK or curl client that named no `reasoning_format` got the thinking in
 `content` as `<think>...</think>`; `stop: ["\\n\\n"]` ended a response at the first blank line of
 the reasoning (55 tokens, no answer); a 60k-token prompt's progress lines went into `content`; and
 a memory question from a client that offered no tools ended with the model's own `tool` call

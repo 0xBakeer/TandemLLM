@@ -54,18 +54,18 @@ then also carry the engine's own `queue_ms`, `prompt_ms` (prefill), `decode_ms`,
 `draft_accepted`. The plugin's numbers usually arrive after the row: `amend()` sets them on the
 row in place, on the writer thread, after every row queued before it.
 
-SCHEMA VERSION 6 (VIS-60, 0.3.43-test): `parent_request`, the request an internal row served. A
+SCHEMA VERSION 6 (VIS-60): `parent_request`, the request an internal row served. A
 request whose agent starts with `tandem-` (the router's question to the engine, `tandem-conductor/1`)
 is `client_kind = 'internal'`; the dashboard leaves those rows out of every view unless asked. The
 migration relabels the router's question rows written before (client `other`, a model other than
 TandemLLM, `max_tokens` 24, at most 24 tokens out) once, and records the count in
 `meta.relabel_internal`.
 
-SCHEMA VERSION 7 (SRV-197, 0.3.46-test): `slot`, the engine's sequence slot a request ran on with
+SCHEMA VERSION 7 (SRV-197): `slot`, the engine's sequence slot a request ran on with
 `--parallel N` (0 the main slot with the resident conversation, 1 and up a side slot); null without
 parallel requests, for a side-lane job and on a relayed row.
 
-SCHEMA VERSION 8 (SRV-233, SRV-250, 0.3.50-test): `engine_cached`, the prompt tokens the engine
+SCHEMA VERSION 8 (SRV-233, SRV-250): `engine_cached`, the prompt tokens the engine
 read from a cache, the router's hidden notes included (`cached_tokens` is the client's tokens
 among them since SRV-233); `forwarded_tokens`, what the prefill forwarded, hidden tokens included;
 `wait_mem_ms`, how long the parallel memory admission held the request (inside `queue_ms`).
@@ -115,7 +115,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
 ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INTEGER"),
          ("conductor_mode", "TEXT"), ("conductor_acts", "INTEGER"),
          ("conductor_hidden_tokens", "INTEGER"), ("conductor_acted", "INTEGER"),
-         # 0.3.27-test: served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
+         # Served in the side lane (server/preempt.py) -- `decode` or `prefill` (at a
          # safe point of another request's generation) or `self` (under the lock, none running)
          ("lane", "TEXT"),
          # schema version 3 (the proxy, P1): a request relayed to another backend
@@ -126,15 +126,15 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          # schema version 4 (the proxy, P6): what a plugin inside vLLM or SGLang reported
          ("preemptions", "INTEGER"), ("engine_finish", "TEXT"), ("corrupted", "INTEGER"),
          ("l2_join", "TEXT"),
-         # schema version 5 (SRV-177, 0.3.41-test): ms a request waited behind TandemLLM's own
+         # schema version 5 (SRV-177): ms a request waited behind TandemLLM's own
          # work (the shadow or prepare job, the conductor's question)
          ("wait_own_ms", "REAL"),
-         # schema version 6 (VIS-60, 0.3.43-test): the request an internal row served (the
+         # schema version 6 (VIS-60): the request an internal row served (the
          # router's question to the engine names the turn it routes)
          ("parent_request", "TEXT"),
-         # schema version 7 (SRV-197, 0.3.46-test): the sequence slot (`--parallel N`)
+         # schema version 7 (SRV-197): the sequence slot (`--parallel N`)
          ("slot", "INTEGER"),
-         # schema version 8 (SRV-233, SRV-250, 0.3.50-test): the engine's own cache figure and
+         # schema version 8 (SRV-233, SRV-250): the engine's own cache figure and
          # forwarded tokens (hidden notes included), the memory admission's wait
          ("engine_cached", "INTEGER"), ("forwarded_tokens", "INTEGER"), ("wait_mem_ms", "REAL"))
 
@@ -200,7 +200,7 @@ PARENT_HEADER = "X-Tandem-Parent"
 # (`relabel_internal`), the one step of a migration that touches rows: they are the server's own
 _OLD_INTERNAL = ("client_kind = 'other' AND max_tokens = 24 AND model IS NOT NULL "
                  "AND model != 'TandemLLM' AND COALESCE(completion_tokens, 0) <= 24")
-# D3 (0.3.21-test): the Hermes agent (NousResearch hermes-agent 0.21.0) talks to a custom endpoint
+# D3: the Hermes agent (NousResearch hermes-agent 0.21.0) talks to a custom endpoint
 # through the OpenAI Python SDK and adds no header of its own (`OpenAI/Python 2.24.0`, read off
 # its venv on the Pi, 2026-10-03), so its requests are told by their shape: the tools it offers
 # name its own skill and session tools, which no other client here offers (its `hermes-cli`

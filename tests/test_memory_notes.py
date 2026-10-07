@@ -25,7 +25,7 @@ The test matrix:
                                                         test_archive_nightly_export
      the model's archive of a ratified note keeps it, provisional again with the reason in its
      changelog; its own provisional notes it archives; Memory.take writes no state line for
-     it (0.3.39-test)                                   test_model_archive_of_a_ratified_note
+     it                                   test_model_archive_of_a_ratified_note
   9  the block parser: attributes and head lines, defaults, schema errors
                                                         test_block_parse
  10  the stream filter: a block split over many pieces is held back, the text around it goes

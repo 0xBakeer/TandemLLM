@@ -1,4 +1,4 @@
-"""The end anchor for a copy whose whitespace is not the rows' (0.3.21-test, server/endalign.py).
+"""The end anchor for a copy whose whitespace is not the rows' (server/endalign.py).
 
 THE MEASUREMENT (the box's suffix store, 2026-10-03, the last 4,000 documents, token ids only).
 Of the follow-ups whose copy parted inside the previous generation, 220 parted in a tool call's
@@ -13,7 +13,7 @@ Such a turn resumed at the previous prompt's last 1,024 line and re-read the who
      as a cold prefill of the served prompt (the end anchor's gate)
   2  anything but whitespace, a difference inside the prompt (not a generation), a copy that
      stops at the end anchor: served as the client sent it, the prompt's line as before
-  3  off: `ResidentPrefix.replay` alone, as 0.3.20-test
+  3  off: `ResidentPrefix.replay` alone, as before
   4  the regions travel: the turn after an aligned turn is aligned again, its own generation too
   5  a hidden span and a whitespace difference in one generation
   6  the bytes of a byte-level BPE tokenizer's tokens
@@ -21,7 +21,7 @@ Such a turn resumed at the previous prompt's last 1,024 line and re-read the who
   8  SRV-239: a copy that leaves an answer's reasoning out (Open WebUI sends none back; the
      template renders `<think>\n\n</think>`) resumes at the end anchor, served with the rows'
      reasoning; two turns of it in a row; anything else in the answer changed is served as sent;
-     `reasoning` off (QWEN38_END_ALIGN_REASONING=off) refuses it as 0.3.49-test did
+     `reasoning` off (QWEN38_END_ALIGN_REASONING=off) refuses it as before
 
 Run: python tests/test_end_align.py
 """
@@ -166,7 +166,7 @@ def test_off_is_the_hidden_spans_replay_alone():
     assert al.regions(res) == []
     _, pre, _ = turn(copy, 4)
     assert pre["kind"] == "resident", pre
-    # without an aligner at all: the server as 0.3.20-test
+    # without an aligner at all: the server as before
     app.STATE.pop("end_align")
     assert app._end_replay(res, copy) == (copy, [], 0)
 
@@ -272,7 +272,7 @@ def _thinking(prompt, n=60):
 
 
 def test_srv239_a_copy_without_the_reasoning_resumes_at_the_end():
-    """W02 (UX2, 0.3.48-test): 'Explain how a heat pump works' thought, the follow-up resumed at
+    """W02 (UX2): 'Explain how a heat pump works' thought, the follow-up resumed at
     the head's 6,144 instead of the end. The prompt ends `<think>\n` (its last token whitespace),
     the copy writes `<think>\n\n</think>\n\n` + the answer: one whitespace token where the rows
     have the newline and the reasoning, then the tag and the answer as the rows hold them."""
@@ -296,7 +296,7 @@ def test_srv239_off_and_a_changed_answer_are_served_as_sent():
     prompt = tokens(99, seed=91) + [NL]
     res, al, out, k = _thinking(prompt)
     copy = prompt[:-1] + [SP] + out[k:] + TOOL
-    al.reasoning = False                       # QWEN38_END_ALIGN_REASONING=off: 0.3.49-test
+    al.reasoning = False                       # QWEN38_END_ALIGN_REASONING=off: a 0.4.0 test build
     assert app._end_replay(res, copy) == (copy, [], 0)
     al.reasoning = True
     j = next(i for i in range(k + 2, len(out) - 2) if out[i] not in (NL, SP))

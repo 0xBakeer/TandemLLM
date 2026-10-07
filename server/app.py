@@ -533,8 +533,8 @@ def _par_health() -> dict:
 
 def _slot_disk():
     """The disk tier a prefill asks: slot 0's own; on a side slot (`--parallel N`) the read-only
-    view of it (server/diskcache.py `SideReader`, 0.3.49-test), or None with `QWEN38_SIDE_DISK=off`
-    (0.3.48-test: a side slot had no disk tier, `OVERLAY` makes `disk_cache` None there)."""
+    view of it (server/diskcache.py `SideReader`), or None with `QWEN38_SIDE_DISK=off`
+    (a side slot had no disk tier, `OVERLAY` makes `disk_cache` None there)."""
     if slots_mod.current() is None:
         return STATE.get("disk_cache")
     return diskcache_mod.side_reader(STATE)
@@ -565,14 +565,14 @@ def _continues_resident(valid: int, common: int, chunk: int, conv: int | None = 
     """Does a request whose prompt shares `common` leading tokens with slot 0's resident rows
     (`valid` of them) continue that conversation, so that it waits for slot 0 and resumes in place?
     Yes when it shares (nearly) all of the rows (within one prefill chunk) AND at least one chunk of
-    them: below a chunk, waiting for slot 0 saves less prefill than the wait costs. Until
-    0.3.44-test only the first test ran, and a resident conversation shorter than a chunk
+    them: below a chunk, waiting for slot 0 saves less prefill than the wait costs. In an
+    earlier test build only the first test ran, and a resident conversation shorter than a chunk
     (valid - chunk <= 0) made every request "continue" it, so no request took a side slot (PL1).
 
     `conv` (`_conv_start`): where the request's conversation starts to be its own, past the end of
     its first user message. A client's fixed head (Open WebUI's system prompt and tool block, about
     6,700 tokens; opencode's, about 7,400) is the same for every chat of that client, so sharing it
-    is not continuing a conversation: the shared part must reach past it (0.3.49-test). Until then a
+    is not continuing a conversation: the shared part must reach past it. Until then a
     new chat beside a conversation shorter than the head plus one chunk counted as its next turn
     and waited for slot 0 while the side slot was idle (W18: 6,675 of 7,096 rows shared, 35.8 s in
     the queue for '17 x 23'). None (no first user message found): the rule above alone."""
@@ -656,7 +656,7 @@ def _continues_view(view_len: int, common: int, chunk: int, conv: int | None = N
     the router's notes, this turn's at the tail and the earlier turns' replayed where they were
     put, and after a generation also its end anchor's rows. The rendered ids part from those rows
     at the first note, often in the conversation's first turn, so no conductor request ever
-    counted as continuing it (0.3.44-test and 0.3.45-test: `resident_waits` 0 over ~100 opencode
+    counted as continuing it (`resident_waits` 0 over ~100 opencode
     turns), and a turn that met slot 0 held for a moment (the shadow reader's read, a summary
     being prepared) took the side slot and read its whole conversation again (SRV-197).
 
@@ -668,17 +668,17 @@ def _continues_view(view_len: int, common: int, chunk: int, conv: int | None = N
 
 #: which test decides that a request continues slot 0's conversation and waits for it: `view`
 #: (the client's rendered tokens against the last resident prompt's, `_continues_view`, then the
-#: resident rows' test) or `resident` (the rows' test alone, 0.3.44-test/0.3.45-test; kept for the
+#: resident rows' test) or `resident` (the rows' test alone, the old rule; kept for the
 #: A/B that measured SRV-197)
 SIDE_CONTINUE = (_S.get("SIDE_CONTINUE") or "view").strip().lower()
 
-#: 0.3.49-test: `on`: a request continues slot 0's conversation only when the shared part reaches
-#: past its first user message (`_conv_start`); `off`: the client's head alone may count (0.3.48-test,
+#: `on`: a request continues slot 0's conversation only when the shared part reaches
+#: past its first user message (`_conv_start`); `off`: the client's head alone may count (a 0.4.0 test build,
 #: kept for the A/B)
 SIDE_CONV = (_S.get("SIDE_CONV") or "on").strip().lower()
 
 #: FX5: whether a guest of slot 0's conversation (`_guest_of_slot0`) takes an idle side slot before
-#: slot 0: `on`, or `off` (slot 0 with the stash, 0.3.46-test; kept for the A/B)
+#: slot 0: `on`, or `off` (slot 0 with the stash, the old rule; kept for the A/B)
 SIDE_GUESTS = (_S.get("SIDE_GUESTS") or "on").strip().lower()
 
 #: FX10 (SRV-213): `on`: the next turn of a conversation whose last request ran on a side slot is
@@ -777,7 +777,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     why["ids"] = ids
     res = dict.get(STATE, "resident")
     chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
-    # 0.3.49-test: past the client's head, or it is a new conversation (`_continues_resident`)
+    # Past the client's head, or it is a new conversation (`_continues_resident`)
     conv = _conv_start(ids) if SIDE_CONV == "on" else None
     if conv is not None:
         why["conv"] = conv
@@ -1126,7 +1126,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     -- its client, the notes spliced into its prompt, where its last user message starts. The
     tier itself is `STATE["disk_cache"]`; None (`--disk-cache off`) is the prefill without it.
 
-    `pos_delta`, `end_mm` (0.3.23-test, server/compaction.py): a text prompt that continues a
+    `pos_delta`, `end_mm` (server/compaction.py): a text prompt that continues a
     conversation with images: the rotary offset its rows take and leave to the end anchor kept
     after those images. `scratch`: a summary prepared in the background, whose rows are nobody's.
     """
@@ -1278,7 +1278,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 _par_block(par, tree_mode)
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
-                # 0.3.27-test: a short request waits (server/preempt.py). A block boundary: the
+                # A short request waits (server/preempt.py). A block boundary: the
                 # proposal in flight lands first, the engine is lent and given back as it was
                 if ahead is not None:
                     ahead = (None, _collect(*ahead))
@@ -2134,10 +2134,10 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
               mm=None, hidden=(), delta: int = 0, served_hidden=None) -> None:
     """After a turn: keep the state it ended in, and add its tokens to the suffix store.
 
-    The resident prefix keeps the end of the generation as its end anchor (0.3.14-test,
-    `ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
+    The resident prefix keeps the end of the generation as its end anchor
+    (`ResidentPrefix.keep_end`): `hidden` are the spans of the served prompt the client did not
     send (the end anchor's replay, SP4's note), with the generation's own (`_force_close`). For a
-    request with images (0.3.23-test) the end is kept with its rotary offset and offered only to a
+    request with images the end is kept with its rotary offset and offered only to a
     compaction served as the conversation's continuation (server/compaction.py); `delta` is that
     offset for a continuation's own generation, which wrote its rows after the images.
 
@@ -2186,7 +2186,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             # every conversation small enough for the store (under about 7,400 tokens on the served
             # stack) lost its end anchor whenever its generation stopped inside a block, and the
             # next turn re-read the answer from the last grid line (5 of 45 non-streamed first
-            # turns on 0.3.50-test, `engine-20261007-060639.log`). Nothing is cloned now.
+            # turns on a 0.4.0 test build, `engine-20261007-060639.log`). Nothing is cloned now.
             store.stats["declined_short"] = store.stats.get("declined_short", 0) + 1
             why = "the engine is ahead of the committed tokens"
         else:
@@ -2254,7 +2254,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             pad = mm.tower.cfg.image_token_id
             prompt_ids = [t for t in prompt_ids if t != pad]
         elif delta:
-            # 0.3.23-test: a compaction's continuation of a conversation with images carries the
+            # A compaction's continuation of a conversation with images carries the
             # images' key ids (engine/vision.py `key_id`, outside the vocabulary and past 32 bits:
             # the store's packing raised on them, live, and the stream lost its last chunk)
             vocab = int(eng.cfg.vocab_size)
@@ -2435,7 +2435,7 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
 
 
 def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
-    """0.3.22-test: a conversation on the NVMe (engine/spill.py) that this prompt continues further
+    """A conversation on the NVMe (engine/spill.py) that this prompt continues further
     than every cache in RAM is read back into the engine's buffers before the end anchor's replay,
     the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
     request: the prefill then starts from what is in place."""
@@ -2559,7 +2559,7 @@ def _session_header(headers) -> str | None:
 
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
                      row: dict | None) -> dict | None:
-    """0.3.23-test: a compaction request served as the continuation of the conversation the engine
+    """A compaction request served as the continuation of the conversation the engine
     holds for its session (server/compaction.py), or None to serve it as the client sent it. Under
     the engine lock: the record is the rows in place or an entry on the NVMe."""
     cfg, prep = STATE.get("compaction"), STATE.get("prepared")
@@ -2607,7 +2607,7 @@ def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client
     return out
 
 
-# 0.3.23-test: the summary prepared in the background takes the engine last, behind every waiter
+# The summary prepared in the background takes the engine last, behind every waiter
 RANK_PREP = 3
 #: how often the preparer looks whether the engine is idle
 PREPARE_EVERY_S = 2.0
@@ -2691,7 +2691,7 @@ def _gpu_others() -> list[int]:
 
 
 class _Yield:
-    """0.3.24-test: the summary written ahead gives the box back. It stops (like a request that
+    """The summary written ahead gives the box back. It stops (like a request that
     waits for the engine) when another process waits in `flock` for the box lock it holds, or when
     another program runs on the GPU; both are looked at on a clock, not every token."""
 
@@ -3257,7 +3257,7 @@ def _shadow_loop() -> None:
                 logbuf.print_exc()
 
 
-# 0.3.34-test: the shadow reader's first load, ahead of its first turn. It loaded with the first
+# The shadow reader's first load, ahead of its first turn. It loaded with the first
 # turn of a profile with shadow.mode on: after a restart that turn's class question waited out its
 # 8 s behind the load's copies and gave up, and the load landed on full caches (NP1's open issue 3,
 # 2026-10-04 21:41 and 2026-10-05 06:18). Now, as the narrator's keeper does, the first load runs in
@@ -4595,7 +4595,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- routes
     def _strip_session(self) -> bool:
-        """0.3.23-test: `/s/<token>/v1/library...` and `/s/<token>/v1/laya...`, the addresses the
+        """`/s/<token>/v1/library...` and `/s/<token>/v1/laya...`, the addresses the
         runtime notes give the model (server/session_tokens.py): the prefix off, the session the
         token names on the handler (`_sess`, None for an unknown token). True when the request is
         answered here (a session address of any other route is a 404)."""
@@ -5048,7 +5048,7 @@ class Handler(BaseHTTPRequestHandler):
         stripped = 0
         if chat and STATE.get("conductor") is not None and isinstance(body.get("messages"), list):
             body["messages"], stripped = states_mod.strip_messages(body["messages"])
-        # 0.3.40-test: a call the loop guard (or the token limit) stopped, sent back in the history
+        # A call the loop guard (or the token limit) stopped, sent back in the history
         # (Open WebUI's tool loop replays its arguments: 2026-10-06, five byte-identical retries,
         # the prompt 17k -> 46k), is cut down to its head and one marker before anything reads the
         # messages: the model never copies its own loop again, and the router and the monitor read
@@ -5265,7 +5265,7 @@ class Handler(BaseHTTPRequestHandler):
                         and pen_spec.no_repeat != base.no_repeat
                         and (plan.row.get("class_id") in conductor_schema.CODE_CLASSES
                              or bool(body.get("tools")))):
-                    # 0.3.40-test: the client's no-repeat n-gram mask is not for code: every
+                    # The client's no-repeat n-gram mask is not for code: every
                     # repeated n-gram pays 4 nats, and in code (and in a tool call's arguments)
                     # repeated n-grams are the text itself. Dropped on the code classes' turns and
                     # on turns that offer tools; the server's own default stays. Journaled and
@@ -5287,7 +5287,7 @@ class Handler(BaseHTTPRequestHandler):
                     max_new = min(max_new, int(plan.side["max_tokens"]))
                 if (plan.active and rec.client_kind == "opencode"
                         and STATE.get("skill_canon") is not None):
-                    # 0.3.22-test: opencode's synced skills as their first-seen copies, so a new
+                    # Opencode's synced skills as their first-seen copies, so a new
                     # session's head is the last one's (server/skillcanon.py)
                     body, n_canon = STATE["skill_canon"].apply(body)
                     if n_canon and plan.row is not None:
@@ -5343,7 +5343,7 @@ class Handler(BaseHTTPRequestHandler):
                 short = True                   # the render fails again under the lock, as a 400
             rank = RANK_SIDE if short else RANK_SIDE_LONG
             plan.side["first"] = short
-        # 0.3.27-test: the side lane (server/preempt.py). A short raw request (the conductor's own
+        # The side lane (server/preempt.py). A short raw request (the conductor's own
         # questions to Qwen) or a client's side request (S1), thinking off, does not wait for a
         # turn to end: a holder serves it at its next safe point. Decided here, before the lock,
         # from the prompt's length and whether it ends inside `<think>` (host work only).
@@ -5498,7 +5498,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             # in one-second slices, so a client that gave up while queued -- opencode
             # cancels and re-sends -- does not get a generation nobody reads ahead of its retry
-            # 0.3.27-test: a client's side request is never refused for its wait: one too long for
+            # A client's side request is never refused for its wait: one too long for
             # the lane (opencode's summary) waits for the engine as long as a request may run,
             # its client's socket watched as before
             # 2026-10-05: a streamed chat request is never refused after minutes either.
@@ -5597,7 +5597,7 @@ class Handler(BaseHTTPRequestHandler):
                                                           "res_common", "conv", "need", "guest")
                             if k in par_why)
             if side is not None:
-                # 0.3.49-test: a request that shares only the client's head with slot 0's
+                # A request that shares only the client's head with slot 0's
                 # conversation is a new conversation, and says so
                 head = max(int(par_why.get("view_common") or 0), int(par_why.get("res_common") or 0))
                 conv = par_why.get("conv")
@@ -5680,7 +5680,7 @@ class Handler(BaseHTTPRequestHandler):
                     conductor_memory.mark_injected(STATE["conductor"].memory, plan)
                     STATE["conductor"].memory.writer.seen(conv_id, plan.memory,
                                                           plan.memory.get("text"))
-            # 0.3.23-test: a compaction as the continuation of the session's conversation
+            # A compaction as the continuation of the session's conversation
             comp = None
             if (chat and plan is not None and plan.active and getattr(plan, "compaction", False)
                     and not images
@@ -5701,7 +5701,7 @@ class Handler(BaseHTTPRequestHandler):
                     and (self.headers.get("X-Tandem-Probe") or "").lower() != "off"):
                 snaps = rec.probe = STATE["probe"].capture(plan.probe_row(prompt, STATE["tok"]),
                                                            int(prompt.numel()))
-            # 0.3.14-test: the tokens the monitor hid in earlier answers, put back where the
+            # The tokens the monitor hid in earlier answers, put back where the
             # resident rows hold them when the prompt then starts with all of the last
             # generation, so it resumes at its end anchor (engine/cache.py `replay`); a request
             # with images is served as rendered
@@ -5719,7 +5719,7 @@ class Handler(BaseHTTPRequestHandler):
                     # FX10 (SRV-213): a conversation that ran on a side slot is carried over first
                     with torch.no_grad():
                         _carry_from_side(prompt.tolist(), conv_id)
-                # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
+                # A conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
                 _spill_before_replay(prompt.tolist(), mm_ok=comp is not None)
             if res_ is not None and res_.end is not None and not images and comp is None:
@@ -6005,7 +6005,7 @@ class Handler(BaseHTTPRequestHandler):
                                                  on_prefill=watch, **kw))
 
             def lane_source(samp, guard, recorder):
-                """0.3.27-test: the side lane's tokens (server/preempt.py): served at a safe point
+                """The side lane's tokens (server/preempt.py): served at a safe point
                 of the generation that holds the engine, or under the lock when none runs."""
                 job = rec.lane_job = preempt.Job(
                     prompt_ids, max_new, eos, sampler=samp, pen=pen, lpr=recorder, pstop=guard,
@@ -6291,7 +6291,7 @@ class Handler(BaseHTTPRequestHandler):
             # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
             # client (a conductor plan only: the raw path is the release's, byte for byte)
             stray = [StrayClose() if chat and plan is not None and plan.active else None]
-            # 0.3.26-test: the tool-argument loop guard reads the open call's arguments
+            # The tool-argument loop guard reads the open call's arguments
             aguard = (argloop_mod.ArgLoopGuard(
                 context_chars=argloop_mod.longest_message_chars(body.get("messages")))
                 if tbuf is not None and STATE.get("argloop", "on") != "off" else None)
@@ -6815,7 +6815,7 @@ def _memory() -> dict:
                     break
     except Exception:
         pass
-    # 0.3.37-test: the interpreter singletons' reference counts now (server/refwatch.py); a count
+    # The interpreter singletons' reference counts now (server/refwatch.py); a count
     # that falls from one look to the next is a C extension dropping references (bool_dealloc)
     out["python_refs"] = {name: sys.getrefcount(obj) for name, obj in refwatch_mod.WATCH}
     w = STATE.get("refwatch")
@@ -7849,7 +7849,7 @@ def _load(a) -> None:
                                       int(a.reserve_slack_gib * gib),
                                       exclude=lambda: memlimits.role_exclude(STATE),
                                       on_event=_memory_event)
-    # 0.3.26-test: the roles' pools. Their free segments count in `reserved` and only dropping
+    # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
     # the stale-reserve rule leaves them out of what the engine's allocator holds free
     mem.register("roles", _release_roles)
@@ -8196,7 +8196,7 @@ def _serve(a, led) -> None:
     """What every server does once its engine is loaded, the real one or the fake one."""
     STATE.update(identity())
     STATE["args"] = vars(a)
-    # 0.3.27-test: the side lane (server/preempt.py); the fake engine brings its own runner
+    # The side lane (server/preempt.py); the fake engine brings its own runner
     side = getattr(a, "side_lane", "off")
     STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run, room=_lane_room,
                                   prompt_max=int(getattr(a, "side_lane_prompt_max",
@@ -8243,14 +8243,14 @@ def _serve(a, led) -> None:
     STATE["port"] = a.port
     root = conductor_root(a)
     if root is not None and getattr(a, "conductor_defaults", "builtin") == "shipped":
-        # 0.3.22-test: the shipped documents a box has no version of yet, as version 1
+        # The shipped documents a box has no version of yet, as version 1
         from server.conductor import shipped
         for line in shipped.install_at(root):
             print(f"[conductor] shipped default stored: {line}", flush=True)
-    # 0.3.22-test: one location per skill in opencode's skills list (server/skillcanon.py)
+    # One location per skill in opencode's skills list (server/skillcanon.py)
     STATE["skill_canon"] = (skillcanon_mod.SkillCanon(os.path.join(root, "skill-locations.json"))
                             if root is not None else None)
-    # 0.3.23-test: a token per session on the addresses the runtime notes give the model
+    # A token per session on the addresses the runtime notes give the model
     STATE["session_tokens"] = session_tokens_mod.SessionTokens(
         os.path.join(root, "session-tokens.json") if root is not None else None)
     # One journal for the router and the monitor (SRV-115): the table `conductor_events` in the
@@ -8322,11 +8322,11 @@ def _serve(a, led) -> None:
         raise SystemExit(f"[probe] {exc}")
     # C1: the disk tier under the caches in RAM (None, nothing opened, with --disk-cache off)
     STATE["disk_cache"] = diskcache_mod.start(STATE, a, journal)
-    # 0.3.22-test: live conversations on the NVMe (engine/spill.py), and the one the last planned
+    # Live conversations on the NVMe (engine/spill.py), and the one the last planned
     # stop wrote read back before the first request
     STATE["spill"] = diskcache_mod.start_spill(STATE, a, STATE["disk_cache"], journal)
     spill_startup()
-    # 0.3.23-test: compaction as a continuation, and the summary prepared ahead
+    # Compaction as a continuation, and the summary prepared ahead
     STATE["compaction"] = dict(compaction_mod.SETTINGS, mode=a.compaction,
                                prepare=a.compaction_prepare, idle_s=a.compaction_idle_s,
                                min_tokens=a.compaction_min_tokens)
@@ -8426,7 +8426,7 @@ def serve_until_drained(httpd) -> None:
             time.sleep(0.2)
         # The usage ledger is the one thing that does persist: what is queued is flushed now,
         # after the last request's row was handed over -- and the conductor's journal with it.
-        # 0.3.22-test: the live conversations to the NVMe, read back by the next start
+        # The live conversations to the NVMe, read back by the next start
         spill_drain()
         shadow_drain()
         led = STATE.get("ledger")

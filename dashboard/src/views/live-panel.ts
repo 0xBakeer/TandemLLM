@@ -497,7 +497,7 @@ export class QseLivePanel extends LightElement {
   }
 
   /** Where the prompt came from (RAM resident, the end anchor, the NVMe, cold) and what it reused
-   * and forwarded; empty for a row from a server before 0.3.21-test, which sends neither. */
+   * and forwarded; empty for a row from a server before 0.4.0, which sends neither. */
   private cacheCell(x: LiveRecent): TemplateResult {
     if (x.prompt_tokens == null || x.cache_source === undefined) return html`<span class="muted rc-unit">—</span>`;
     const tier = cacheTier(x.cache_source);

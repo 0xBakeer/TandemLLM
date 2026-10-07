@@ -63,18 +63,18 @@ CWD_LINE = re.compile(r"\n\nThe current working directory is: ([^\n]+)\s*\Z")
 CWD_NOTE = "The current working directory of the terminal (the run_command tool) is: {path}"
 CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
 #: FX5b: `parts`: a class's note leaves out the parts a live note already holds with the same text
-#: (`Plan._fresh_block`); `block`: the whole note whenever its key is new (0.3.47-test)
+#: (`Plan._fresh_block`); `block`: the whole note whenever its key is new
 NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
 #: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
-#: `off`: the packages as 0.3.49-test chose them, whatever the tools
+#: `off`: the packages chosen as before, whatever the tools
 TOOL_FIT = (_S.get("TOOL_FIT") or "on").strip().lower()
 
 #: SRV-225: the `h:` heads whose conversations `Router._generation` tells apart, and the
 #: conversations kept per head (the oldest go first)
 GEN_HEADS_MAX = 256
 GEN_PER_HEAD = 8
-#: `off`: every request with the same head is one session, as until 0.3.48-test (the A/B)
+#: `off`: every request with the same head is one session, as before (the A/B)
 SESSION_GENERATIONS = (_S.get("SESSION_GENERATIONS") or "on").strip().lower()
 
 COMPOSITE = "TandemLLM"
@@ -575,7 +575,7 @@ class Router:
         self._texts: collections.OrderedDict = collections.OrderedDict()
         self._adapters: dict = {}
         self._lock = threading.Lock()
-        # 0.3.23-test (server/session_tokens.py): the session's token on the addresses the notes
+        # server/session_tokens.py: the session's token on the addresses the notes
         # give the model (set by the server), and `h:` keys that continue a compacted session
         self.session_tokens = None
         self.aliases = session_tokens_mod.Aliases()
@@ -699,7 +699,7 @@ class Router:
             return s
 
     def _generation(self, base: str, sh: signals.Shape) -> tuple[str, str]:
-        """SRV-225 (0.3.49-test): which conversation with the head `base` (an `h:` key: the client
+        """SRV-225: which conversation with the head `base` (an `h:` key: the client
         sent no id) a request belongs to, as `(session key, how)`.
 
         Open WebUI sends no chat id by default, so every chat that opened with the same message
@@ -897,7 +897,7 @@ class Router:
         elif sh.user_hash is not None and sh.user_hash == sess.user_hash and sess.cls in classes:
             cls, conf, source = sess.cls, sess.conf, "sticky"
         elif sess.compacted and sess.cls in classes:
-            # 0.3.21-test: the first user message after a compaction ("continue", opencode's own
+            # The first user message after a compaction ("continue", opencode's own
             # "Continue if you have next steps ...") goes on with the work the compaction carried
             # over: the session's class, not a new one read from those few words (2026-10-03, ~/rrr6:
             # "continue" became chat at 0.998 and the design packages never came back). The block
@@ -1318,7 +1318,7 @@ class Router:
         class's, so the prompt the session's notes sit in does not change."""
         want = schema.tool_turn_effort(router, prof)
         if plan.argloop_retry is not None:
-            # 0.3.40-test: a retry after the loop guard stopped the last call thinks at the
+            # A retry after the loop guard stopped the last call thinks at the
             # class's level at least (`_effort` raises it), never the tool turn's lower one
             return policy["effort"]
         if want == "inherit" or not sh.tool_turn or sh.compaction or \
@@ -1341,7 +1341,7 @@ class Router:
             raised = True
         retry = plan.argloop_retry
         if retry is not None:
-            # 0.3.40-test: the retry after a stopped looping call is not the same turn again:
+            # The retry after a stopped looping call is not the same turn again:
             # one level up, at least medium (thinking on), unless the client turned thinking off
             # (its word is a ceiling, the owner 2026-10-03); the stronger note goes in either way
             want = EFFORT_ORDER[min(EFFORT_ORDER.index(level) + 1, len(EFFORT_ORDER) - 1)]
@@ -1362,7 +1362,7 @@ class Router:
         if client_budget is not None:
             source = "client"
         if client_off:
-            # 0.3.40-test: the client turned thinking off (OWUI's `reasoning_effort: "none"`,
+            # The client turned thinking off (OWUI's `reasoning_effort: "none"`,
             # `enable_thinking: false`, ...): the template closes the block, so the row says so
             # instead of the class's level (it said "on" with xhigh's note, 2026-10-06 06:11)
             thinking_on, budget, source = "off_client", None, "client"
@@ -1406,7 +1406,7 @@ class Router:
         base_level = policy["effort"]
         note = router["effort"]["levels"][base_level]["note"]
         if dec["effort"] != "off" and note and plan.client_off:
-            # 0.3.40-test: no "think carefully" sentence in a turn that cannot think
+            # No "think carefully" sentence in a turn that cannot think
             row["extra"].setdefault("notes", []).append("effort_note_skipped:client_off")
         elif dec["effort"] != "off" and note:
             parts.append(("effort", {"kind": "effort", "name": base_level, "text": note}))
@@ -1861,7 +1861,7 @@ class Router:
         live working directory (`\n\nThe current working directory is: <path>`, fetched again for
         every user message). The description sits in the system prompt's tool block, so the first
         `cd` of an agent changed the prompt about 4,800 tokens in and the next user message read
-        the whole conversation again (41,749 tokens, 56 s, live on 0.3.46-test). Under a profile
+        the whole conversation again (41,749 tokens, 56 s, on a 0.4.0 test build). Under a profile
         that is on, the sentence leaves the description and the same sentence goes into the turn as
         a note, when the directory differs from the last one noted (the first turn, a `cd`): the
         tool block stays the same for the session, and the note replays where it sat. Off

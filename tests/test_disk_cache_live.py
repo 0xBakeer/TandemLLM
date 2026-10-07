@@ -6,7 +6,7 @@ three routes (it runs on the box after the deploy and cannot run here against th
   * the text differing is a FAIL, a disk hit shorter than the written head is a FAIL;
   * TandemLLM's step lines (`› reading ...`, `› waiting: ...`), which differ between two identical
     answers, and the ids the server draws for tool calls are not the text: the 22:08 run of
-    2026-10-02 (0.3.14-test) failed `same_text` on them alone, and a call's arguments that differ
+    2026-10-02 failed `same_text` on them alone, and a call's arguments that differ
     still fail;
   * a server whose tier does not run, and a box whose lock is held, are refused before a request.
 

@@ -1,9 +1,9 @@
-"""The session spill on the live service, from the box (0.3.22-test): an eviction, then a restart.
+"""The session spill on the live service, from the box: an eviction, then a restart.
 
     python3 tools/spill_live.py --phase evict  --state S.json [--head-tokens 70000]
     (restart :8000 through ops/stop.sh and ops/start.sh: the drain writes, the start reads back)
     python3 tools/spill_live.py --phase after  --state S.json
-    python3 tools/spill_live.py --phase endcheck --state S.json   (0.3.24-test, instead of `after`)
+    python3 tools/spill_live.py --phase endcheck --state S.json   (instead of `after`)
 
 One conversation of its own (a synthetic opencode-shaped head nothing else holds, about 45,000 tokens with no tool block: longer than the RAM park holds, `X-Tandem: raw`
 so no note moves the prompt, thinking off, greedy, bearer `d4-test` so the idle check does not
@@ -15,7 +15,7 @@ restart. `after` sends turn 4 and reports what it reused and its TTFT. Prints `[
 the state file keeps the conversation and the numbers. Run it only inside an idle window: the other
 request evicts whatever is resident.
 
-`endcheck` (0.3.24-test; `evict` before the restart with `--other-tokens` between the guest size
+`endcheck` (`evict` before the restart with `--other-tokens` between the guest size
 and the spill's 16,384, so the other conversation is never on the spill): the other session's
 prompt again under a new session (cold: it evicts the conversation, and its second cold prefill
 admits its head to the disk tier), turn 4 (read back from the spill), the same prompt under a third

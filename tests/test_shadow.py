@@ -351,7 +351,7 @@ def test_the_cap_and_the_disk():
 
 
 def test_the_pool_is_released_past_its_slack_and_the_sessions_come_back():
-    """0.3.26-test: the model's own pool keeps every free segment while it lives; past
+    """The model's own pool keeps every free segment while it lives; past
     POOL_SLACK_GIB free after a burst the sessions go to the disk and the model unloads (the
     pool with it), and the next turn loads it again and reads on from the disk."""
     from server.conductor import shadow as shadow_mod
@@ -387,7 +387,7 @@ def test_the_pool_is_released_past_its_slack_and_the_sessions_come_back():
 
 
 def test_the_release_yields_to_a_waiting_request_between_sessions():
-    """0.3.27-test: the release parks sessions under the engine lock; a request that waits stops
+    """The release parks sessions under the engine lock; a request that waits stops
     it before the next session, the parked ones stay on the disk, the model stays loaded."""
     d = tempfile.mkdtemp()
     svc = service(disk_dir=d)

@@ -718,7 +718,7 @@ def test_stats_count_only_the_stages_that_were_asked():
 
 
 def test_two_chats_that_open_the_same_way_are_two_sessions():
-    """SRV-225 (UX2 run, 0.3.48-test): Open WebUI sends no chat id, so the session key is the hash
+    """SRV-225 (UX2 run): Open WebUI sends no chat id, so the session key is the hash
     of the head up to the first user message, and every chat that opened with the same sentence
     was one session (A01's new chat: turns 27, 21,216 session tokens, four notes replayed at its
     first message). A conversation's very first turn now starts its own session, and its later
@@ -770,7 +770,7 @@ def test_two_chats_that_open_the_same_way_are_two_sessions():
 
 
 def test_without_generations_the_second_chat_joins_the_first():
-    """The A side of the A/B (`QWEN38_SESSION_GENERATIONS=off`, 0.3.48-test): the bug."""
+    """The A side of the A/B (`QWEN38_SESSION_GENERATIONS=off`): the bug."""
     from server.conductor import router as R
     was = R.SESSION_GENERATIONS
     R.SESSION_GENERATIONS = "off"

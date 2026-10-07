@@ -3,7 +3,7 @@
     python -u tools/session_spill_check.py --phase write --dir DIR --out A.json -- <server flags>
     python -u tools/session_spill_check.py --phase read  --dir DIR --ref A.json --out B.json -- <server flags>
 
-THE QUESTION (0.3.22-test). engine/spill.py writes a live conversation to the NVMe (at a planned
+THE QUESTION. engine/spill.py writes a live conversation to the NVMe (at a planned
 stop, before another client's request evicts it) and reads it back. Its claim is not a cold
 prefill's equality: the bytes read back are the bytes that were in the engine, so the next turn
 resumes where it would have resumed had they never left. This checks that on the served engine,

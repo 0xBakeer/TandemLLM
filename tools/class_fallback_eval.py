@@ -13,8 +13,8 @@ stops when ~/BOX-HOLD appears.
 `rules` replays the answers through the fallback rules and prints the accuracy per rule and per
 set, and the answers each rule changes against the current one:
 
-    chat           below the accept bar the turn takes the default class (chat), the rule up to
-                   0.3.51-test
+    chat           below the accept bar the turn takes the default class (chat), the rule before
+                   0.4.0
     top            the top class always
     build_top      below the bar the top class when it is a class that builds something (its
                    policy names packages: the classes whose turns write code or files), else chat

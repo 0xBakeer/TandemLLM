@@ -93,7 +93,7 @@ BODIES_HEAD = ("Notes from your memory that match this message. When one answers
                "the note and say it comes from your notes; a ratified note is confirmed by the "
                "user. Read files only for what the notes do not say, and when they disagree with "
                "a note, tell the user both.")
-# The bodies' own frame (0.3.39-test). The router's wrapper says "do not mention it", which kept
+# The bodies' own frame. The router's wrapper says "do not mention it", which kept
 # the model from naming a note it was given: CLIP1's fresh session (2026-10-05 21:35) had the note
 # attached and answered from the files. The notes are the user's, so this frame lets the model
 # say what a note says. Same shape as the wrapper: two newlines first, one runtime-note.
@@ -466,7 +466,7 @@ def mark_injected(mem: "Memory | None", plan) -> None:
                                                    "user": ctx["user"]},
                          session_key=ctx.get("session"), request_id=ctx.get("request_id"))
     # each read counted as itself: a first turn carries the index and the bodies, and counting
-    # both as the index read "body_notes 0" for a session whose note body went in (0.3.39-test)
+    # both as the index read "body_notes 0" for a session whose note body went in
     if went.get("memory_index"):
         mem.stats["index_notes"] += len(ctx.get("index_ids") or [])
     if went.get("memory"):

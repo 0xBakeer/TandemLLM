@@ -126,7 +126,7 @@ describe('the screen’s words', () => {
     expect(plannerWords(null)).toBe('—');
     expect(refusalWords({ allowed: false, reason: 'refused_hold' })).toBe('refused: a hold owns the board');
     expect(refusalWords({ allowed: true, reason: null })).toBeNull();
-    // FX10: REL1's live numbers (0.3.51-test, 2026-10-07): the shadow reader and a second decider
+    // FX10: REL1's live numbers (2026-10-07): the shadow reader and a second decider
     const shadow = { allowed: false, reason: 'refused_memory' as const, role: 'shadow', source: 'engine:qwen3.5-0.8b', mem_available_gib: 28.97, engine_growth_gib: 8.25, claim_gib: 6.5, after_gib: 14.22, need_gib: 19, floor_gib: 15, margin_gib: 4 };
     expect(refusalWords(shadow)).toBe('not loaded: kept free for requests (MemAvailable 29.0 GiB, less 8.3 GiB the engine may still take for a long request and the 6.5 GiB claim, leaves 14.2 GiB; the box keeps 19.0 GiB free (a 15.0 GiB floor and a 4.0 GiB margin))');
     expect(loadWho(shadow)).toBe('the shadow reader (qwen3.5-0.8b)');

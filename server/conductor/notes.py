@@ -475,7 +475,7 @@ class NoteStore:
                     # the user confirmed it: the model's doubt makes it provisional again, with the
                     # reason in its changelog, and the user archives it on the Notes tab. A
                     # fresh session that checked the files archived the demo's ratified note
-                    # (0.3.39-test); ratify, pin and delete are the dashboard's
+                    #; ratify, pin and delete are the dashboard's
                     self._doubt(user, n, reason, writer)
                     self.stats["doubted"] += 1
                     return {"op": "archive", "id": n.id, "title": n.title, "scope": n.scope,

@@ -149,7 +149,7 @@ def test_the_put_names_the_size_cap():
 
 
 def test_over_the_cap_is_said_once_per_conversation():
-    """FX10: 165 of 245 requests on 0.3.51-test printed the decline, every turn of every
+    """FX10: 165 of 245 requests on a 0.4.0 test build printed the decline, every turn of every
     conversation past about 7,400 tokens; the counter still counts each one."""
     store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1, said="a", conv="a")
     assert store.stats.get("declined_big") == 1 and "per-entry cap" not in log, log

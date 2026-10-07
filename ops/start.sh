@@ -100,11 +100,11 @@ for kv in MEM_CEILING_GIB:--mem-ceiling-gib MEM_PEAK_GIB:--mem-peak-gib \
     [ -n "$v" ] && MEM_FLAGS="$MEM_FLAGS $f $v"
 done
 [ "${NARROW_ARM:-1}" = "0" ] && MEM_FLAGS="$MEM_FLAGS --narrow-arm off"
-# 0.3.14-test: the resident prefix's end anchor, on unless serve.env says off
+# The resident prefix's end anchor, on unless serve.env says off
 [ "${END_ANCHOR:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --end-anchor off"
-# 0.3.21-test: a copy whose whitespace is not the rows' resumes at the end anchor too
+# A copy whose whitespace is not the rows' resumes at the end anchor too
 [ "${END_ALIGN:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --end-align off"
-# 0.3.22-test: live conversations to the NVMe at a planned stop and before an eviction (needs the
+# Live conversations to the NVMe at a planned stop and before an eviction (needs the
 # disk tier, QSE_DISK_CACHE); on unless serve.env says off
 [ "${SESSION_SPILL:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --session-spill off"
 SAMPLE_FLAGS=""

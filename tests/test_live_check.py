@@ -1,6 +1,6 @@
 """tools/live_check.py sends text no run has sent before (OPS-63 follow-up, 2026-10-01).
 
-On 0.3.6-test, "a live decode rate from token 50 on" failed: the persistent suffix store had
+On a 0.4.0 test build, "a live decode rate from token 50 on" failed: the persistent suffix store had
 learned the four fixed prompts' answers from the day's earlier runs, so every request decoded at
 about 186 tok/s and ended in about 1.3 s, too short for a "now" rate. The prompts are now drawn
 per run from a seeded generator with the run's nonce in the text and in the asked-for answer.

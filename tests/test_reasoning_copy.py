@@ -1,7 +1,7 @@
 """SRV-239 (UX2, 2026-10-07): where an Open WebUI follow-up parts from the rows of an answer that
 thought, on the served template and tokenizer (server/endalign.py, THE REASONING).
 
-W02, W03, W04, W15, W16, W17 on 0.3.48/0.3.49-test: the first follow-up of a chat whose first
+W02, W03, W04, W15, W16, W17 on two 0.4.0 test builds: the first follow-up of a chat whose first
 answer thought resumed at the head's 6,144 (cached 0.71 to 0.89, TTFT 2.5 to 5.0 s); W05 and W06,
 whose first turn did not think, resumed at the end (1.00). Open WebUI sends an answer back without
 its reasoning, and the Qwen3.8 template (`preserve_thinking` on unless a request turns it off)
@@ -126,7 +126,7 @@ def test_the_copy_parts_at_the_think_newline_and_the_second_pass_resumes_at_the_
     al.kept(res, n1, "kept")
     assert al.regions(res)[0][2] > n1          # the region knows where its reasoning ends
     out, spans, aligned = al.replay(res, copy)
-    assert out == copy and aligned == 0        # 0.3.49-test: served as sent, resumes below c
+    assert out == copy and aligned == 0        # Served as sent, resumes below c
     al.reasoning = True
     out, spans, aligned = al.replay(res, copy)
     assert out[:e] == rows[:e] and aligned > 0, (aligned, len(out))

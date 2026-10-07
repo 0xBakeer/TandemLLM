@@ -104,7 +104,7 @@ def start(state, a, journal=None):
         print(f"[disk-cache] off: {root} is inside the git work tree {repo}", flush=True)
         return None
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # 0.3.23-test: the files that keep state rather than compute it are left out, as the session
+    # The files that keep state rather than compute it are left out, as the session
     # spill leaves them out: a deploy that changes only them keeps the tier's heads (0.3.22's swept
     # 49 GB for a change in engine/cache.py alone)
     from engine import spill as spill_mod
@@ -153,7 +153,7 @@ def start(state, a, journal=None):
 
 
 def start_spill(state, a, tier, journal=None):
-    """The session spill (engine/spill.py, 0.3.22-test) under the tier's directory, or None
+    """The session spill (engine/spill.py) under the tier's directory, or None
     (`--session-spill off`, no disk tier, no resident prefix). Its fingerprint leaves out the
     engine files that keep state rather than compute it, so a deploy that changes only those
     still reads its sessions back."""
@@ -203,9 +203,9 @@ def refresh(state, tier=None) -> list[str]:
 
 
 class SideReader:
-    """A side slot's view of slot 0's disk tier (0.3.49-test, `QWEN38_SIDE_DISK=read`).
+    """A side slot's view of slot 0's disk tier (`QWEN38_SIDE_DISK=read`).
 
-    A side slot has no resident prefix, no park and, until 0.3.48-test, no disk tier: a new chat
+    A side slot has no resident prefix, no park and, until 0.4.0, no disk tier: a new chat
     sent there read its client's whole head again (Open WebUI's 6,687 tokens in 9.0 s, opencode's
     7,414 in 19.1 s against 10.7 s on slot 0, where the tier held the head). Through this view a
     side slot's prefill asks the tier as slot 0's does and reads a hit into ITS OWN buffers

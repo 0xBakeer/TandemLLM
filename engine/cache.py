@@ -329,7 +329,7 @@ class Budget:
     THE ORDER things are given back in, cheapest to lose first: `LEVELS`. The state store served 0
     hits on 2026-10-01; the anchors in the body of a prompt serve only a divergence in its middle
     (none in a night's ledger); the end anchor saves the next turn a re-read of the last answer
-    (`ResidentPrefix.keep_end`, 0.3.14-test); the guest stash saves one session from a short
+    (`ResidentPrefix.keep_end`); the guest stash saves one session from a short
     request, and without it the end anchor's rows are gone too; the parked session saves a
     re-read of a whole other session; the pinned head saved 253 s in a day.
 
@@ -344,7 +344,7 @@ class Budget:
     tests can run the policy on a fake allocator.
     """
 
-    # `roles` last (0.3.26-test): an in-process role whose own pool holds free segments that
+    # `roles` last: an in-process role whose own pool holds free segments that
     # only dropping the pool returns (the shadow reader after a long conversation)
     LEVELS = ("store", "anchors", "end", "stash", "park", "pin", "roles")
 
@@ -502,8 +502,8 @@ class Budget:
             if (res + ws > self.peak and alloc + ws <= self.peak
                     and ws <= res - alloc - foreign):
                 # a stale reserve: the workspace fits in what the allocator already holds free,
-                # so the prefill takes no new memory from the box. Never refuse it (0.3.26-test:
-                # a 12-token prompt refused for 25 minutes on a reserve nothing could give back)
+                # so the prefill takes no new memory from the box. Never refuse it
+                # (a 12-token prompt refused for 25 minutes on a reserve nothing could give back)
                 self.stats["stale_admits"] += 1
                 self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws)
                 g["stale"] = True
@@ -820,8 +820,8 @@ _BORROW_ATTRS = ("mm", "pos_delta", "_rope_rows", "_trace", "hidden_pre_norm", "
 
 
 class Borrow:
-    """The engine lent to a short request in the middle of another one's generation (0.3.27-test,
-    the side lane, server/preempt.py), and given back exactly as it was.
+    """The engine lent to a short request in the middle of another one's generation
+    (the side lane, server/preempt.py), and given back exactly as it was.
 
     A generation stopped at a block boundary is the engine's KV rows below `kv.length`, the
     recurrent state and convolution tails, the commit a folding verify left pending (`_pend` and
@@ -968,7 +968,7 @@ class ResidentPrefix:
     has to be in place (it is the head both sessions share); the rows and anchors are a grid
     prefill's bytes, so the resume is as exact as the pin's.
 
-    THE END OF A GENERATION (`end`, 0.3.14-test). Anchors come from prefill chunks only, so the
+    THE END OF A GENERATION (`end`). Anchors come from prefill chunks only, so the
     next turn of an agent conversation re-read the whole previous answer: 33,172 tokens, about
     44 s, after a 32,773-token thinking (rrr2, 2026-10-02). `keep_end` keeps ONE more anchor when
     a generation ends: the recurrent state and convolution tails at the last position the engine
@@ -1060,7 +1060,7 @@ class ResidentPrefix:
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
                       "park_spills": 0, "park_given_up": 0, "side_carries": 0,
                       "carry_vacated": 0}
-        # the session spill (engine/spill.py, 0.3.22-test): a long conversation another one
+        # the session spill (engine/spill.py): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
         self.lock = threading.Lock()
@@ -1136,7 +1136,7 @@ class ResidentPrefix:
         the spans `(position, ids)` of tokens in it the client's copy will not carry. Returns what
         happened, for the log: kept, off, guest, not_resident, ahead or memory.
 
-        `mm` (0.3.23-test): the prompt had images (its tokens are their key ids) and `delta` is the
+        `mm`: the prompt had images (its tokens are their key ids) and `delta` is the
         rotary offset every row after them takes. Such an end is offered only to a request that
         says so (`end_offer(mm_ok=True)`: a compaction served as this conversation's continuation,
         server/compaction.py); every other request resumes at the anchors in place, as before."""
@@ -1269,7 +1269,7 @@ class ResidentPrefix:
         much of the resident prompt `ids` shares. A guest keeps the resident prompt and stashes the
         rows it can reach; anything else becomes the resident prompt from here on. `session` is
         the request's session key; `compacting` says it is that session's compaction, whose old
-        rows nobody asks for again (they are not parked). `scratch` (0.3.23-test, a summary
+        rows nobody asks for again (they are not parked). `scratch` (a summary
         prepared in the background): the rows this prefill writes are nobody's, no anchor is taken
         of them; the caller puts the resident prompt's bookkeeping back afterwards. `reach`: the
         prompt's length plus the request's token budget, the highest row its generation can
@@ -1295,7 +1295,7 @@ class ResidentPrefix:
         keep = min(start, c)
         parked = self.stats["parks"]
         other = session is None or session != self.owner
-        # 0.3.22-test: a conversation longer than the RAM park holds above `keep` goes whole to
+        # A conversation longer than the RAM park holds above `keep` goes whole to
         # the disk (engine/spill.py) before this prefill writes a row; it is not parked or pinned
         spilled = (self.spiller is not None and self.valid > keep and not compacting and other
                    and self.valid >= self.spiller.min_tokens
@@ -2042,7 +2042,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     prefill, and one from an anchor above the resident's `taint`, writes a session's rows: no
     prefix snapshot and no disk write is taken of it, and the disk reads over those rows.
 
-    `end_mm` (0.3.23-test): this prompt may resume at an end anchor kept after images
+    `end_mm`: this prompt may resume at an end anchor kept after images
     (`ResidentPrefix.keep_end`); the caller has set the engine's rotary offset to that end's.
     `scratch`: the rows written are nobody's (`ResidentPrefix.begin`); no prefix snapshot is taken.
     """
@@ -2123,9 +2123,9 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
                   scratch=scratch, reach=reach)
         if kind in ("prefix", "disk"):
-            # the restore writes over the rows below it. 0.3.24-test: dropped after `begin`, whose
+            # the restore writes over the rows below it. dropped after `begin`, whose
             # eviction writes the conversation to the NVMe with its end anchor first; dropped
-            # before it (0.3.23-test), the conversation went to the disk without its end and its
+            # before it, the conversation went to the disk without its end and its
             # next turn re-read the tokens above its last grid anchor (live 13:34: 759 tokens)
             res._drop_end()
     if hit is not None:

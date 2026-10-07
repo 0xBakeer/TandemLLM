@@ -1,10 +1,10 @@
-// Where a request's prompt came from (0.3.21-test): the ledger's and the live view's
+// Where a request's prompt came from: the ledger's and the live view's
 // `cache_source`, as the engine names it, read as the tier it sits in. RAM: the rows in place
 // (`resident`, a pinned head or a parked session come back as resident too), the end of the last
 // generation (`end`), the state store (`prefix`, `session`); the NVMe (`disk`, and `spill`: a whole
-// conversation read back from it, 0.3.22-test); the response cache
+// conversation read back from it); the response cache
 // (`response`, an identical greedy request answered from memory); `none` is a cold prefill.
-// 0.3.23-test: a compaction served as its conversation's continuation (`continuation`, read as the
+// A compaction served as its conversation's continuation (`continuation`, read as the
 // end anchor it resumes at) or answered from a summary written ahead (`prepared`, read as the
 // response cache: no prefill).
 

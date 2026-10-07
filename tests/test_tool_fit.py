@@ -1,6 +1,6 @@
 """A class's packages fit the tools the request offers (SRV-243, server/conductor/router.py `_fit`).
 
-UX2's normal-user run (2026-10-07, 0.3.48-test): a plain Open WebUI chat whose only tools were
+UX2's normal-user run (2026-10-07): a plain Open WebUI chat whose only tools were
 search_web and fetch_url asked for a landing page and got the testing and Laya packages. They tell
 the model to run a shell and write files: it called `terminal` and `write_file` ('Tool not found'),
 tried to fetch the library's address with fetch_url, wrote the page into a failed call and printed

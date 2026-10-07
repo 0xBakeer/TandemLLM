@@ -1,7 +1,7 @@
 """A short request between two turns of a long conversation leaves slot 0's conversation in place
 (FX5, 2026-10-06). CPU only.
 
-THE LIVE CASE (0.3.46-test, `--parallel 2`): an Open WebUI agent chat held 41,474 tokens on slot 0.
+THE LIVE CASE (`--parallel 2`): an Open WebUI agent chat held 41,474 tokens on slot 0.
 A new user message made the router ask Qwen its class and its package first, two short requests
 (410 and 169 tokens) over the engine's own port; each ran on slot 0 as a guest of the
 conversation. A guest's rows are copied aside first (the stash) and put back after it, but the
@@ -217,7 +217,7 @@ def test_a_guest_of_slot_0_takes_an_idle_side_slot_first():
         A.STATE["resident"], A.STATE["slot0_view"] = Res(conv[:1500]), conv[:1500]
         need, why = need_for(question)
         assert "guest" not in why
-        # off: the 0.3.46-test behaviour (slot 0 with the stash)
+        # off: the old behaviour (slot 0 with the stash)
         A.STATE["resident"], A.STATE["slot0_view"] = Res(conv), conv
         was, A.SIDE_GUESTS = A.SIDE_GUESTS, "off"
         try:

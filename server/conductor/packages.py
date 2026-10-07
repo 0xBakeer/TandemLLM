@@ -11,7 +11,7 @@ A library skill (R1, `library: true`, server/conductor/libsearch.py) is a SKILL.
 its `## Reference` heading is what goes in; the reference is read only on request
 (`GET /v1/library/{name}`).
 
-THE SHIPPED TEXTS (0.3.21-test). The repository carries the packages a new box starts with
+THE SHIPPED TEXTS. The repository carries the packages a new box starts with
 (`packages/` at its root: `inline/` the inline bodies the seed document holds, `skills/` and
 `library/` the SKILL.md files): a `skill_dirs` entry may start with `{repo}`, the directory of the
 running code, so the seed finds them without an install step. A text that tells the model to call

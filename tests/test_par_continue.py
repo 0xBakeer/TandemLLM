@@ -2,7 +2,7 @@
 SRV-198). CPU only: `_par_side_need` and `_par_view_keep` with a stand-in for the resident rows and
 the prompt renderer.
 
-The shape is the live box's (0.3.44-test and 0.3.45-test, `--parallel 2`, a 65,536-token side
+The shape is the live box's (`--parallel 2`, a 65,536-token side
 slot): an opencode session under the conductor. The rows slot 0 holds are the served prompt -- the
 client's messages with the router's note in turn 1 replayed where it was put and this turn's note
 at the tail -- plus the generation (the end anchor). The next turn's rendered ids (no notes) part
@@ -245,7 +245,7 @@ def test_holder_name():
         A.HOLDER["who"] = saved
 
 
-# ------------------------------------------------------------------ 0.3.49-test: a shared head is not a conversation
+# ------------------------------------------------------------------ a shared head is not a conversation
 IM_S, USER, IM_E, NL, ASSIST = 151_644, 872, 151_645, 198, 77_091
 
 
@@ -283,7 +283,7 @@ def test_conv_start_is_past_the_first_user_message():
 
 
 def test_w18_a_new_chat_that_shares_only_the_head_takes_the_side_slot():
-    """W18 (0.3.48-test, the UX2 run): slot 0 held tab A's essay chat, 7,096 rows of which tab B's
+    """W18 (the UX2 run): slot 0 held tab A's essay chat, 7,096 rows of which tab B's
     new chat shared 6,675 (Open WebUI's system and tool head); the resident test called it a
     continuation and tab B waited 35.8 s while slot 1 was idle. With the conversation's start
     known, sharing the head is not continuing it."""

@@ -23,7 +23,7 @@ import torch
 # tuple it is handed: `(pool id high, pool id low, include_traces)`. Each call of
 # `MemPool.snapshot()` or `torch.cuda.memory_snapshot()` takes one reference off `True` (or
 # `False`) and one off each pool-id int, which are interpreter singletons on Python 3.11 (`True`,
-# and the small ints). Called for every `/metrics` collector since 0.3.34-test, it drained `True`
+# and the small ints). Called for every `/metrics` collector since 0.4.0, it drained `True`
 # in about three hours and the engine died with "Fatal Python error: bool_dealloc" (2026-10-05
 # 13:12, the first time). Measured on the box's CPU: 1000 calls of `MemPool.snapshot()` take
 # 1000 references off `True` and off each id int; a call with `None` takes none. So the pools

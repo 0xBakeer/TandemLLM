@@ -49,7 +49,7 @@ K1, B = 1.2, 0.75
 WEIGHTS = {"name": 3, "description": 2, "body": 1}
 RECHECK_S = 1.0
 # the repository's copy of the library's INDEX.md (packages/library), read when the configured one
-# is not on the box: a new box serves the shipped library without an install step (0.3.21-test)
+# is not on the box: a new box serves the shipped library without an install step
 SHIPPED_INDEX = os.path.join(SHIPPED_ROOT, "packages", "library", "INDEX.md")
 NONE_OPTION = "none"
 _WORD = re.compile(r"[a-z0-9]+")

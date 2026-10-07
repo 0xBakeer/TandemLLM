@@ -1,6 +1,6 @@
-"""SRV-227 (QA SRV-228, 0.3.49-test): a new folder never replaces the user's work.
+"""SRV-227 (QA SRV-228): a new folder never replaces the user's work.
 
-The live case (the UX2 run of 2026-10-07, A01 on 0.3.48-test): asked 'Create a new folder and
+The live case (the UX2 run of 2026-10-07, A01 on a 0.4.0 test build): asked 'Create a new folder and
 create there a pagoda garden', the Open WebUI agent ran `mkdir -p /home/user/pagoda-garden` on a
 folder that existed with the owner's own page and wrote a new index.html over it without reading
 it; the answer never said a file was replaced. The tools run in the client (Open WebUI's
@@ -13,7 +13,7 @@ answer says so. Guidance, not routing: no word of the request decides anything h
      design_ui, drawing, three_d) and on no other; the package is general, enabled, and its text
      carries the four rules                           test_shipped_documents
   2  the pagoda turn of an Open WebUI agent (profile chat: packages on, rules off) gets the text
-     in its note beside the 3D skill; the same documents without the package (0.3.48-test) do not
+     in its note beside the 3D skill; the same documents without the package do not
                                                       test_the_pagoda_turn_carries_the_rules
   3  a later user message of the same session does not bring it again (part-level dedup)
                                                       test_not_injected_again
@@ -103,7 +103,7 @@ def test_the_pagoda_turn_carries_the_rules():
     for r in RULES:
         assert r in text, r
     assert "# threejs-scene" in text, "beside the class's core skill"
-    # the documents of 0.3.48-test: nothing about the user's files
+    # the documents of nothing about the user's files
     old = _ask(_cond(with_package=False), [{"role": "system", "content": "You are an agent."},
                                            {"role": "user", "content": PAGODA}], sid="old")
     assert old.row["class_id"] == "three_d" and not any(r in _note(old) for r in RULES)

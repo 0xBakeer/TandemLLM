@@ -1,4 +1,4 @@
-"""The in-process roles' memory beside the engine's ceiling (0.3.34-test, NP1's open issue 3).
+"""The in-process roles' memory beside the engine's ceiling (NP1's open issue 3).
 
 After a restart the shadow reader's first load landed on full caches: its own pool counted as the
 engine's (only the decision models and the narrator's model tensors were left out), the next

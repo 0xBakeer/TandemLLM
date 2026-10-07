@@ -60,7 +60,7 @@ def test_heartbeat_comments_before_the_first_event_pass():
 
 
 def test_heartbeat_comments_after_step_lines_pass():
-    # 0.3.15-test's smoke (2026-10-02 23:28): S1's progress line opened the stream before the
+    # a test build's smoke (2026-10-02 23:28): S1's progress line opened the stream before the
     # prefill ended, and the old check failed on "a comment after the first event"
     got = read_heartbeat(_sse(_ev(role="assistant", content="\n› deciding: chat, low\n\n"),
                               _ev(content="\n› reading 24,016 tokens at ~750 tok/s, about 30 s "

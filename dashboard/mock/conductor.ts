@@ -7,7 +7,7 @@
 //
 // Test switches, POST /__mock/conductor: {requireToken: true} makes writes take only the admin
 // bearer token (as a server with the dashboard login off), {guard: true} adds a speed-guard report that passed, {guard: 'single'} one of a short gate
-// (one run a side, the noise unknown, as 0.3.4-test's)
+// (one run a side, the noise unknown, as before)
 // for the serving build, {reset: true} starts over, {roleDown: "decider"} takes a role offline.
 
 import { readFileSync } from 'node:fs';

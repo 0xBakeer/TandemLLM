@@ -1,6 +1,6 @@
 """The lock between CUDA graph captures and the disk tier's writer, and a head whose chunks failed.
 
-THE INCIDENT (2026-10-02 21:09, 0.3.13-test, the first request after the restart; engine log and
+THE INCIDENT (2026-10-02 21:09, the first request after the restart; engine log and
 results/disk/live-20261002210930.json). The disk tier's writer thread copied the session head's
 rows out of the engine's buffers while the drafter captured its CUDA graph on the engine thread.
 The copy failed (`cudaErrorStreamCaptureUnsupported`) after 1 of the head's 15 chunks, the

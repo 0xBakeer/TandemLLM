@@ -1,4 +1,4 @@
-"""A real opencode compaction replayed on the live service (0.3.23-test): the session's last turn,
+"""A real opencode compaction replayed on the live service: the session's last turn,
 then its compaction request, timed.
 
     python3 tools/compaction_live.py --turn T.json --compaction C.json --session ID --phase continue

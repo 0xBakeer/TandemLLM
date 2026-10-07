@@ -157,7 +157,7 @@ describe('series', () => {
     const r = { effort: 'xhigh', thinking: 'on', injected: [{ tokens: 1204, parts: [{ kind: 'effort', name: 'xhigh' }, { kind: 'package', name: 'ui-design' }] }], replayed: null, mode: 'on', shadow: null } as unknown as DecisionRow;
     expect(didWhat(r)).toBe('xhigh · ui-design (1,204 tokens)');
     expect(didWhat({ ...r, effort: 'off', thinking: 'off_template', injected: [] })).toBe('thinking off');
-    // 0.3.40-test: the client turned thinking off; the class's xhigh is not what ran
+    // The client turned thinking off; the class's xhigh is not what ran
     expect(didWhat({ ...r, effort: 'xhigh', thinking: 'off_client', injected: [] })).toBe('thinking off (client)');
     expect(didWhat({ ...r, thinking: 'off_client', injected: [], extra: { argloop_retry: { stops: 2 } } })).toBe('thinking off (client) · retry after 2 stopped calls');
   });

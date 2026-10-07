@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The NVMe under the session spill and the disk tier, measured without the engine.
 
-Why (0.3.23-test, 2026-10-04 12:59): one eviction wrote 7.0 GB in 4.5 s right after the disk tier
+Why (2026-10-04 12:59): one eviction wrote 7.0 GB in 4.5 s right after the disk tier
 had written 17.6 GB, where the same path wrote 5.2 GB in 1.03 s otherwise. This writes files the
 way both writers do (engine/disk_cache.py `write_file`, O_DIRECT, the spill's 1,024-row blocks
 without an fsync each and the files fsynced at the end; the tier's chunk files with one fsync

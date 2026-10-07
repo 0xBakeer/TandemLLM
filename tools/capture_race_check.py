@@ -2,7 +2,7 @@
 
     python tools/capture_race_check.py [--captures 60] [--dir ~/.qwen38-spark-engine/race-check]
 
-On 2026-10-02 at 21:09 (0.3.13-test) the writer copied a session head's rows while the drafter
+On 2026-10-02 at 21:09 the writer copied a session head's rows while the drafter
 captured a graph: the copy failed with `cudaErrorStreamCaptureUnsupported`, the capture with it, and
 the request ended in an error (engine/capture_lock.py). This runs the real `DiskTier` writer over
 CUDA buffers shaped like the engine's (a fake engine: recurrent state, convolution tails, KV rows),

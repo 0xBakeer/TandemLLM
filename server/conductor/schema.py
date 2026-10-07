@@ -61,7 +61,7 @@ TOOL_TURN_EFFORT_DEFAULT = "inherit"
 # a client's effort word under a profile that decides the effort (the owner, 2026-10-03 12:30):
 # `ceiling` (absent = ceiling) the router may go lower, never higher; `ignore` the router alone
 CLIENT_WORDS = ("ceiling", "ignore")
-# 0.3.40-test: the classes whose answers are code; under the conductor a client's
+# The classes whose answers are code; under the conductor a client's
 # `no_repeat_ngram_size` is dropped on their turns and on any turn that offers tools (a repeated
 # 4-gram is ordinary code: indentation, `", "`, a sprite's pixel row), the server's own default
 # stays (server/app.py)
@@ -332,7 +332,7 @@ OUTCOMES: dict = {
         "console_level": (r"(?im)^\s*(?:msgid=\S+\s+)?\[(error|warn|warning|info|log|debug|"
                           r"verbose|issue)\]"),
         # a log tail the model printed: the session's scratch directory (SRV-171: `{tandem_scratch}`
-        # is /tmp/tandem-<token>), or `.tandem/` inside a project from before 0.3.41-test
+        # is /tmp/tandem-<token>), or `.tandem/` inside a project from before 0.4.0
         "log_tail": r"\btail\b[^\n]*(?:\.tandem/|/tmp/tandem[\w-]*/)",
     },
     "limits": {"calls": 8, "result_chars": 1200, "files": 20, "shots_kept": 5,
@@ -443,7 +443,7 @@ LIBRARY: dict = {
 # The packages every class that builds something carries (J1, R1, X1; the live router v13 of
 # 2026-10-03): the coding classes get the coding package, the test skills and Laya's; the visual
 # classes the testing and Laya packages before their own skills
-# 0.3.49-test (SRV-227): every class that writes files carries `files-care` (never overwrite the
+# SRV-227: every class that writes files carries `files-care` (never overwrite the
 # user's files: a new folder gets a free name, a file is read before it changes), a general package
 BUILD_PACKAGES = ["files-care", "testing", "laya-testing", "laya-playtest"]
 CODING_PACKAGES = ("coding", "files-care", "testing", "laya-testing", "laya-playtest", "laya-scripts",
@@ -591,7 +591,7 @@ SHIPPED_ROUTER: dict = {
     },
 }
 
-# The packages a new box starts with (0.3.21-test): the live packages document of 2026-10-03 (v5),
+# The packages a new box starts with: the live packages document of 2026-10-03 (v5),
 # shipped with the repository. `packages/seed.json` is the document; an inline package's body is
 # the file its `body_from` names under `packages/` (`inline/<name>.md`), a skill's SKILL.md sits in
 # `packages/skills/` or `packages/library/`, which `skill_dirs` reaches through `{repo}` after the
@@ -937,7 +937,7 @@ NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "
                           "ban_tool_call": True, "prefill": ""}}
 
 
-# the shipped settings (server/conductor/shipped.py): `general` (0.3.21-test) for a client no
+# the shipped settings (server/conductor/shipped.py): `general` for a client no
 # profile names -- an OpenAI SDK, curl, a script
 SHIPPED_SETTINGS: dict = copy.deepcopy(SETTINGS)
 SHIPPED_SETTINGS["default_profile"] = "general"
@@ -988,12 +988,12 @@ PROFILES: dict[str, dict] = {
                           shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), packs=True,
                           notify=True),
 }
-# 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
+# Opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
 # so its profiles ignore the word (the owner, 2026-10-03 12:30); every other profile caps at it
 for _n in ("coding", "overnight"):
     PROFILES[_n]["thinking"]["client_word"] = "ignore"
 
-# The profiles a new box starts with (0.3.21-test, D3; server/conductor/shipped.py stores each one a
+# The profiles a new box starts with (D3; server/conductor/shipped.py stores each one a
 # box has no version of at its first start, so the Hermes agent finds `hermes` on a box that has
 # its own coding profile already). The built-in PROFILES above stay the minimal ones.
 SHIPPED_PROFILES: dict[str, dict] = {
@@ -1014,14 +1014,14 @@ SHIPPED_PROFILES: dict[str, dict] = {
                           "on", (), "code_edit", ("on",) * 4,
                           act=("D1", "D1b", "D2", "E1", "C3", "C4", "S1", "S2", "S4"),
                           shadow=("D3", "E2", "C1", "C2", "S3"), caps=(3, 12), notify=True),
-    # 0.3.21-test: the Hermes agent (server/ledger.py `is_hermes`) gets coding's policy, and the
+    # The Hermes agent (server/ledger.py `is_hermes`) gets coding's policy, and the
     # state lines in the reasoning: Hermes shows a reasoning line as one plain line (X1's inline
     # titles are opencode's parts)
     "hermes": _profile("The Hermes agent: coding's routing, tasks and packages, the steps in the "
                        "reasoning.", "on", ("hermes",), "code_edit", ("on",) * 4,
                        act=("D1", "D1b", "D2", "E1", "C3", "C4", "E2"),
                        shadow=("D3", "C1", "C2", "S3")),
-    # 0.3.21-test: every other client (an OpenAI SDK, curl, a script; settings' default_profile):
+    # Every other client (an OpenAI SDK, curl, a script; settings' default_profile):
     # class-aware effort, a class's packages only when the classifier picked it, the steps in the
     # reasoning, where a client that shows none drops them and the answer stays clean
     "general": _profile("Any other client: class-aware effort and packages, the steps in the "
@@ -1042,7 +1042,7 @@ for _n in ("coding", "hermes", "overnight"):
 for _n in ("coding", "hermes"):
     SHIPPED_PROFILES[_n]["library"] = "shadow"
 SHIPPED_PROFILES["coding"]["ui"] = {"states": "on", "states_channel": "inline"}
-# 0.3.22-test: opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
+# Opencode sends `reasoning_effort: medium` on every turn, whatever the user picked,
 # so its profiles ignore the word (the owner, 2026-10-03 12:30); every other profile caps at it
 for _n in ("coding", "overnight"):
     SHIPPED_PROFILES[_n]["thinking"]["client_word"] = "ignore"
@@ -1053,7 +1053,7 @@ SHIPPED_PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasonin
 SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], narrator="live")
 SHIPPED_PROFILES["chat"]["ui"] = {"states": "on", "states_channel": "reasoning", "narrator": "live",
                                   "kinds": {"route": False, "package": False}}
-# 0.3.25-test (SR1): the shadow reader keeps coding sessions and asks the router's question in
+# SR1: the shadow reader keeps coding sessions and asks the router's question in
 # shadow mode on long turns; inert while QWEN38_SHADOW_MODEL is empty
 SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router": "shadow",
                                         "router_min_tokens": 8192}

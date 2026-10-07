@@ -1,4 +1,4 @@
-"""The resident prefix's end anchor (0.3.14-test), on the random 4-layer model.
+"""The resident prefix's end anchor, on the random 4-layer model.
 
 THE MEASUREMENT. rrr2 (2026-10-02, opencode): turn 1 prefilled 34,038 tokens and thought 32,773;
 turn 2's 66,964-token prompt resumed at 33,792, the previous prompt's last 1,024 line, and re-read
@@ -23,7 +23,7 @@ back where they sit (`replay`), as the router replays its notes.
   3  hidden tokens: a hidden close's span (`_force_close`) and SP4's note (`_inserted`); the
      client's copy without them resumes at the end only through the replay, the replay carries
      over to the turn after, and the in-context stage's prompt gets it as well; the copy the
-     template re-renders (0.3.15-test): whitespace next to the phrase aligned to the rows' own
+     template re-renders: whitespace next to the phrase aligned to the rows' own
      (`glue`), anything else served as sent
   4  a copy that parts inside the generation resumes at the prompt's last line, bit for bit as a
      cold prefill, and the end anchor goes
@@ -245,7 +245,7 @@ def _remember_ahead(store, m: int = 1, conv="ses"):
 
 
 def test_srv253_a_session_put_the_engine_is_ahead_of_leaves_the_end_anchor_kept():
-    """SRV-253 (0.3.50-test, 5 of 45 non-streamed turns): the session put came first, and for a
+    """SRV-253 (5 of 45 non-streamed turns): the session put came first, and for a
     conversation under the store's per-entry cap it cloned a snapshot -- `capture` settles the
     block's pending commit -- and then declined it as ahead of its key. The end anchor after it
     found the commit absorbed and was not kept. The put now declines before anything is cloned."""

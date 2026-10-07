@@ -253,7 +253,7 @@ export interface RequestRow {
   cache_source: CacheSource | null;
   error_type: string | null;
   conductor?: RequestConductor | null;
-  /** 0.3.27-test: served in the side lane between another request's blocks or prefill chunks */
+  /** served in the side lane between another request's blocks or prefill chunks */
   lane?: SideLane | null;
   /** SRV-197: the engine's sequence slot with parallel requests (0 main, 1+ side), else null */
   slot?: number | null;
@@ -341,7 +341,7 @@ export interface SystemInfo {
   };
   caches: Record<string, unknown> | null;
   /** 1.3: the proxy on this server */
-  /** `off` (0.3.41-test, VIS-54): the engine without --backends; /v1/config is a 404 there */
+  /** `off` (VIS-54): the engine without --backends; /v1/config is a 404 there */
   proxy?: { mode: 'embedded' | 'standalone' | 'off'; backends: BackendStatus[] } | null;
   queue: {
     running: number;
@@ -349,7 +349,7 @@ export interface SystemInfo {
     max_queue: number | null;
     queue_timeout_s: number | null;
     request_timeout_s: number | null;
-    /** 0.3.27-test: short requests in the side lane now, and the lane's counts (null: off) */
+    /** short requests in the side lane now, and the lane's counts (null: off) */
     lane?: number;
     side_lane?: SideLaneReport | null;
   };
@@ -701,7 +701,7 @@ export interface LiveRecent {
   tool_names: string[];
   stop: LiveStop;
   lane?: SideLane | null;
-  /** 0.3.21-test: the prompt, what came out of a cache, what was forwarded and from where */
+  /** the prompt, what came out of a cache, what was forwarded and from where */
   prompt_tokens?: number | null;
   cached_tokens?: number | null;
   forwarded_tokens?: number | null;

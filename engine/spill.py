@@ -1,5 +1,5 @@
 """Live sessions on the NVMe: a conversation's rows, anchors and end anchor written whole and read
-back byte for byte (0.3.22-test).
+back byte for byte.
 
 THE TWO RE-READS (the owner, 2026-10-03). (1) The 15:35 deploy restarted the engine and the next turn
 of his 130k opencode conversation re-read 120,102 tokens: TTFT 158 s. The disk tier
@@ -41,7 +41,7 @@ equal the entry's file is not written again, and on a restore a block whose rows
 hold the file's bytes is not read. The same sums are checked after every block is copied in:
 a file that does not hold what was written fails the restore before the engine resumes from it.
 
-ITS OWN I/O PATH (0.3.23-test). 0.3.22's first eviction wrote 5.20 GB in 7.23 s while
+ITS OWN I/O PATH. 0.3.22's first eviction wrote 5.20 GB in 7.23 s while
 a drain of the same size had taken 0.88 s: the save took the disk tier's I/O lock and staging
 buffers, and the tier's writer was writing that conversation's head (1.8 GB, fsync per file) at
 the same moment. Now an entry has its own lock and its own two staging buffers, the tier's writer
@@ -341,7 +341,7 @@ class SessionSpill:
 
     # --- the staging buffers ------------------------------------------------------------------
     def _io(self):
-        """This object's own lock (0.3.23-test): a save or a restore never waits for the tier."""
+        """This object's own lock: a save or a restore never waits for the tier."""
         return self._own_io
 
     def _tier_hold(self, d: int) -> None:
@@ -357,7 +357,7 @@ class SessionSpill:
         return self._wpool
 
     def _staging(self, views):
-        """Two block buffers of `chunk` rows of every view, this object's own (0.3.23-test: never
+        """Two block buffers of `chunk` rows of every view, this object's own (never
         the tier's chunk slots, which its writer fills at the same time)."""
         payload = dc._sections([dc._row_bytes(t, ax) * self.chunk for t, ax in views])[1]
         if not self._bufs or self._bufs[0].nbytes < payload:
@@ -524,7 +524,7 @@ class SessionSpill:
         cuda = any(t.is_cuda for t, _ in views)
         blocks, written, kept, nbytes, wbytes = [], 0, 0, 0, 0
         carried = None
-        # 0.3.24-test: where a save's time goes, in ms (`info["parts"]`; the 0.3.23 live case of
+        # Where a save's time goes, in ms (`info["parts"]`; the 0.3.23 live case of
         # 7.0 GB in 4.5 s had no breakdown)
         tm = {"prep": (time.perf_counter() - t0) * 1e3, "lock": 0.0, "alloc": 0.0, "sums": 0.0,
               "copy": 0.0, "wait": 0.0, "tail": 0.0, "anchors": 0.0, "fsync": 0.0,
@@ -626,7 +626,7 @@ class SessionSpill:
                     pairs.append(("end.anc", int(end["at"]), end["pair"]))
                 old_files = ({f["file"]: f for f in old.man.get("anchor_files") or []}
                              if same else {})
-                # 0.3.24-test: an end anchor already on the disk stays when the rows under it did
+                # An end anchor already on the disk stays when the rows under it did
                 # not move (every block kept, the same tokens) and the engine no longer holds it
                 # (a cache level gave its buffers back, or the request that evicts this
                 # conversation dropped it first): its state is still the state at those rows
@@ -644,7 +644,7 @@ class SessionSpill:
                     of = old_files.get(fname)
                     if (of is not None and of["b"] == b and of["sums"] == sums
                             and os.path.exists(os.path.join(path, fname))):
-                        files.append(of)           # 0.3.23-test: an anchor already on the disk
+                        files.append(of)           # An anchor already on the disk
                         nbytes += anc_size
                         continue
                     abuf.typed(oS, S.dtype, S.shape).copy_(aS, non_blocking=cuda and abuf.pinned)

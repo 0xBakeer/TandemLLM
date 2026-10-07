@@ -371,7 +371,7 @@ def decode(raw: bytes, param: str, lim: Limits):
         raise ImageRefusal(param, f"could not decode the image ({type(exc).__name__})") from None
 
 
-# The image processor's backend, pinned (0.3.36-test). transformers 5.12 picks the torchvision
+# The image processor's backend, pinned. transformers 5.12 picks the torchvision
 # backend (`Qwen2VLImageProcessor`, torchvision.transforms.v2) when torchvision >= 0.27 is
 # installed and the PIL one (`Qwen2VLImageProcessorPil`) otherwise, and the two are not the same
 # numbers: after a resize a patch value differs by up to two 8-bit levels (measured on the box,

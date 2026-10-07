@@ -1,4 +1,4 @@
-"""opencode's synced skills as their first-seen copies (server/skillcanon.py, 0.3.22-test).
+"""opencode's synced skills as their first-seen copies (server/skillcanon.py).
 
 The case D3 measured: the same 32-entry skills list, 11 entries in two synced folders, the copy
 opencode keeps flipping between sessions. After the fix every session's system message is the
@@ -75,7 +75,7 @@ def test_a_folder_unseen_for_a_week_gives_way_and_nothing_else_changes():
 
 
 def test_a_copy_outside_synced_is_canonical_too_and_an_edit_is_learned():
-    """0.3.23-test: the captured case, a removed skill's copy under `.trash/` against the synced
+    """The captured case, a removed skill's copy under `.trash/` against the synced
     one, alternating between two opencode processes; the chosen copy's own description edit is
     learned, never undone; `<built-in>` entries are left alone."""
     def lst(where, desc="Brand rules."):

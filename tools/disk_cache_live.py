@@ -34,7 +34,7 @@ What is compared is what the model wrote: the stream's text without TandemLLM's 
 `› reading 16,427 tokens at ~800 tok/s, about 18 s left`, `› waiting: ...`, which say how long
 something took and differ between two identical answers; server/conductor/states.py `strip_text`),
 and each tool call's name and arguments, not the call id the server draws per request. On
-2026-10-02 at 22:08 (0.3.14-test) the gate compared the raw stream: the cold run's reading lines
+2026-10-02 at 22:08 the gate compared the raw stream: the cold run's reading lines
 and the disk run's waiting line, and two calls' ids, made `same_text` false on the same answer
 and the same calls. The server's TTFT is the one that counts: the client's first piece is a step
 line.

@@ -4,7 +4,7 @@ THE MEASUREMENT. With `--parallel 2` a new chat or agent session that starts whi
 long conversation is a guest of it (at most 8,192 tokens and under a quarter of it) and runs on
 the idle side slot (SRV-207). A side slot keeps no conversation: when the session outgrew the guest
 limit it moved to slot 0 and read everything past the client's head on the NVMe again -- UX2 O07
-on 0.3.49-test: 15,910 tokens, 7,168 from the disk, 8.7k re-read in 18.3 s; UX1 W11 on 0.3.51-test
+on 15,910 tokens, 7,168 from the disk, 8.7k re-read in 18.3 s; UX1 W11 on a 0.4.0 test build
 beside an 80k resident: cached 0.44, TTFT 17.0 s.
 
 THE FIX. At the end of a request on a side slot the server notes what the slot's rows hold

@@ -276,7 +276,7 @@ export function didWhat(r: DecisionRow): string {
     return side ? `${side.client}'s ${side.kind} request · at most ${side.max_tokens.toLocaleString('en-US')} tokens · thinking ${side.thinking === 'off' ? 'off' : "the client's"}${r.mode === 'shadow' || r.shadow ? ' · shadow' : ''}` : 'side request';
   }
   const parts: string[] = [];
-  // 0.3.40-test: `off_client` -- the client turned thinking off (its word is a ceiling); the
+  // `off_client` -- the client turned thinking off (its word is a ceiling); the
   // class's level is not what ran
   if (r.thinking === 'off_client') parts.push('thinking off (client)');
   else if (r.effort) parts.push(r.thinking && r.thinking.startsWith('off') ? 'thinking off' : r.effort);

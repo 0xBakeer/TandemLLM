@@ -12,7 +12,7 @@ positive measurement (that is tools/argloop_fp.py).
 
     python tools/argloop_live.py --owui [--attempts 5] [--effort none]
 
-`--owui` (0.3.40-test): Open WebUI's agent shape (aiohttp's user agent, the chat profile, a
+`--owui`: Open WebUI's agent shape (aiohttp's user agent, the chat profile, a
 `write_file` tool, `reasoning_effort` as given): the write asks for one 12-row sprite frame of about
 400 characters written out 40 times (a long unit), and every answer that carries a call is
 answered as Open WebUI's tool loop does -- the tool's error, the conversation sent again with the
@@ -201,8 +201,8 @@ def main() -> int:
     except Exception as exc:                                       # noqa: BLE001
         rep["a1_rows"] = f"{type(exc).__name__}: {exc}"
     print(json.dumps(rep, indent=1))
-    # a held call never reaches the client; a call that streams live (opencode's coding profile,
-    # 0.3.28-test) keeps the one call it was sent part of, and the block is never sent again as
+    # a held call never reaches the client; a call that streams live (opencode's coding profile)
+    # keeps the one call it was sent part of, and the block is never sent again as
     # content
     live = any(isinstance(r, dict) and (r.get("detail") or {}).get("streamed")
                for r in rep["a1_rows"] if isinstance(rep["a1_rows"], list))

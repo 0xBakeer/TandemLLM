@@ -155,7 +155,7 @@ def test_image_rows_are_capped_per_request():
     return "16 + 16 rows: 32 fits, 31 is a 400 naming the second image"
 
 
-# ------------------------------------------------------------------ left-out images (0.3.21-test)
+# ------------------------------------------------------------------ left-out images
 def test_left_out_count_rule():
     # over the cap, whole steps of half the cap, never the newest message's images
     lo = I.left_out

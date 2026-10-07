@@ -1,4 +1,4 @@
-"""The package texts' migration of 0.3.41-test (SRV-163, SRV-171; the UT1 self-test, 2026-10-06).
+"""The package texts' migration (SRV-163, SRV-171; the UT1 self-test, 2026-10-06).
 
 One set of text edits, applied to the texts the repository ships (`--repo`), to a box's skill
 copies (`--skills DIR`) and to a box's saved `packages` document (`--doc FILE`, or `--put URL`
@@ -23,7 +23,7 @@ The edits:
      model removes before "done" (unless the user asked for one), and that it never downloads a
      runtime or an executable.
 
-The edits of 0.3.43-test (SRV-179, SRV-181; the UT2 self-test, 2026-10-06: an Open WebUI agent tuned
+The second round (SRV-179, SRV-181; the UT2 self-test, 2026-10-06: an Open WebUI agent tuned
 its own playtest bot for 18 minutes after the game worked and never answered; an opencode page was
 written at 642 s of 733 s, after a Firefox rig and three hung servers):
 
@@ -36,7 +36,7 @@ written at 642 s of 733 s, after a Firefox rig and three hung servers):
   8  testing: everything the model creates stays inside the project, browser profiles included,
      never /tmp (opencode's run mode refuses a path outside the project and ends the run).
 
-The edits of 0.3.45-test (SRV-195; FX2's live check, 2026-10-06: opencode wrote a pomodoro page at
+The third round (SRV-195; FX2's live check, 2026-10-06: opencode wrote a pomodoro page at
 176 s, found no node, npx or Chrome on its PATH, only Firefox, and spent seven minutes on a
 Marionette driver of its own until the run's limit; the kit's headless Chrome was there all along):
 
@@ -59,7 +59,7 @@ Marionette driver of its own until the run's limit; the kit's headless Chrome wa
      (an Open WebUI agent's `expect:... === '$101.40'` reached the kit as '01.40' and it blamed
      the kit).
 
-The edits of 0.3.51-test (SRV-229; the UX2 normal-user run, 2026-10-07: A01's answer to "create a
+The fourth round (SRV-229; the UX2 normal-user run, 2026-10-07: A01's answer to "create a
 pagoda garden" quoted "Laya says fix_first (p=0.596, sure: false)", "the kit's page check",
 "renderer.info: 56 draw calls", "I removed the tandem_state/tandem_reset test hook ... deleted the
 .tandem scratch folder", and the page kept an "fps · calls · tris" line for the check; the texts
@@ -89,7 +89,7 @@ asked for it: "quote Laya's verdicts", "say in your final message that you remov
      hooks stay out of it (opencode answers named Laya, `.tandem` and the scratch folder 26 to 43
      times in three refinements of one session).
 
-The edits of 0.4.1 (FX10; UX1 O03 on 0.3.51-test, opencode "refactor report.py": the final answer
+The fifth round, 0.4.1 (FX10; UX1 O03 on a 0.4.0 test build, opencode "refactor report.py": the final answer
 listed "Evidence: ... Laya second check on the suite tail -> passed (p=0.99, sure)" and "Scratch
 `.tandem/` removed", 24 internal terms, 14 of them Laya; edit 19 had kept "Laya's verdict" in the
 very list the model reports from, test-lib called the call "a second check", and the always-on

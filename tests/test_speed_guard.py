@@ -2,7 +2,7 @@
 
 The Conductor view's guard line read "speed guard not run" for every build, because nothing wrote
 a speed_guard report. This writes one from two row3 reports and says what one run a side can and
-cannot say (0.3.4-test's short gate: mean 49.98 -> 50.54, TTFT 424.9 -> 425.6 ms, 1 run each).
+cannot say (a test build's short gate: mean 49.98 -> 50.54, TTFT 424.9 -> 425.6 ms, 1 run each).
 
 Run: python tests/test_speed_guard.py
 """

@@ -441,7 +441,7 @@ def test_a_block_closed_by_eos_is_a_call_and_one_cut_short_is_content():
 
 
 def test_a_live_call_cut_by_the_token_limit_is_not_sent_again_as_content():
-    # 2026-10-05 (an open item of 0.3.26-test): a `write` that streamed live and was cut by the token limit
+    # 2026-10-05 (an open item): a `write` that streamed live and was cut by the token limit
     # went out twice, once as arguments and once as text in `finish`, and the next prompt was
     # 157,806 tokens. The client keeps the call as it was sent; nothing of the block is content.
     head = "Writing it.\n"

@@ -1,4 +1,4 @@
-"""Add the session monitor's new tasks to a box's saved `monitor` document (0.3.43-test).
+"""Add the session monitor's new tasks to a box's saved `monitor` document.
 
 A box that edited its monitor policy (the Conductor view's Monitor screen, or a migration) runs
 its stored document, not ops/supervisor.yaml, so a task the file gains never reaches it. This
@@ -6,10 +6,10 @@ copies the named tasks (default: S5, the turn budget of SRV-179 and SRV-181) fro
 into the current document when the document lacks them, raises the document's `version` to the
 file's when lower, and stores the result as a new version with a note; the old versions stay and
 `restore` brings one back. A task the document has already keeps every value it has (the box's
-own edit wins) and gains only the parameters the file has and it lacks (0.3.45-test: S5's verify
+own edit wins) and gains only the parameters the file has and it lacks (S5's verify
 arm, `verify_s`, `verify_scratch_writes`, `verify_text`). Idempotent.
 
-0.3.51-test (SRV-229; the UX2 normal-user run, 2026-10-07): the S5 notes asked for "what you
+SRV-229 (the UX2 normal-user run, 2026-10-07): the S5 notes asked for "what you
 verified and how" and the E2 notes to "report what you ran and what you saw"; read beside the
 testing packages' old wording (quote Laya's verdicts) the final answers became test logs ("Laya
 says fix_first (p=0.596, sure: false)", "the kit's page check", "renderer.info: 56 draw calls").

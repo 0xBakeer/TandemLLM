@@ -123,7 +123,7 @@ def test_7_the_holder_s_remaining_tokens_at_its_rate():
 
 
 def test_7_the_w18_shape_is_not_read_as_twenty_seconds():
-    """0.3.48-test, W18: tab B waited 35.8 s behind a thinking turn (1,479 tokens, 48 s of
+    """W18: tab B waited 35.8 s behind a thinking turn (1,479 tokens, 48 s of
     decode at ~30 tok/s) that had run 14.8 s (1.5 s of prefill, ~400 tokens written). The hold
     times said "about 20 s"."""
     c = qw.TurnClock()

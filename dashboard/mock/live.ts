@@ -323,7 +323,7 @@ export class MockLive {
       decode_tps: this.decodeTps(r, now),
       tool_names: [...r.toolNames],
       stop: r.stop,
-      // 0.3.21-test: the prompt and where it came from; none for a request whose prefill never
+      // The prompt and where it came from; none for a request whose prefill never
       // finished (the server's rule: no first token, no source)
       prompt_tokens: r.firstAt != null ? r.row.prompt_tokens : null,
       cached_tokens: r.firstAt != null ? (r.row.cached_tokens ?? 0) : null,

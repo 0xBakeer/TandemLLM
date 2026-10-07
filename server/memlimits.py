@@ -261,7 +261,7 @@ def role_exclude(state: dict) -> tuple[int, int]:
     back. A role without a pool or a claim (the CPU, a slot loaded without the planner) leaves out
     its model's device bytes, as before 0.3.34.
 
-    0.3.34-test: before it, the shadow reader's own slot was not left out at all and the
+    Before it, the shadow reader's own slot was not left out at all and the
     narrator's only by its model's tensors; the shadow's first load after a restart pushed the
     engine over its ceiling and the gate shed the anchors, the end, the stash and the park
     (6.3 GB on 2026-10-05 06:18, for a 1.47 GiB model)."""

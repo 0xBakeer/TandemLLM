@@ -42,7 +42,7 @@ _NAME = re.compile(r"([A-Za-z_][A-Za-z0-9_ .-]*?)\s+(-?\d+(?:\.\d+)?)\s*(?:<=|>=
 # opencode's compaction request: no tools, no system text, the history as one user message
 # (docs/caches.md). The length floor keeps a short one-line request without a system prompt out.
 COMPACTION_MIN_CHARS = 2000
-# 0.3.21-test: opencode 1.18.34 sends its compaction request with its `compaction` agent's prompt as
+# Opencode 1.18.34 sends its compaction request with its `compaction` agent's prompt as
 # the system message (system + the history as one user message, no tools), which the shape above
 # rules out: the request was routed as a design turn (7 packages, high effort, 2,116 reasoning
 # tokens) and the session never knew it had been compacted. The agent's prompt opens with this
@@ -375,7 +375,7 @@ def shape(body: dict, skill_names: tuple = (), client_kind: str | None = None) -
     s.first_hash = hashlib.sha256(json.dumps(
         [(m.get("role"), _text(m.get("content"))[:4096]) for m in first],
         ensure_ascii=False).encode()).hexdigest()[:24] if first else None
-    # SRV-225 (0.3.49-test): which conversation of that head this is, for a client that sends no
+    # SRV-225: which conversation of that head this is, for a client that sends no
     # id (Open WebUI): how many messages a person wrote (not tool responses, not tool media),
     # whether the request is a conversation's very first turn (its one user message is the last
     # message: a new chat, or that turn regenerated), and from the second user message on a hash

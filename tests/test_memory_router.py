@@ -23,7 +23,7 @@ The test matrix:
                                                         test_hidden_span
   8  shadow: the card and the write, no index and no bodies
                                                         test_shadow
-  9  CLIP1's fresh session (2026-10-05 21:35, live 0.3.37-test): a ratified project note, opencode's
+  9  CLIP1's fresh session (2026-10-05 21:35, live): a ratified project note, opencode's
      title request, then the question in a new session. The body goes in on the first turn
      beside the index, in its own frame (the user's notes: no "do not mention it", answer from
      the note and name it), and the stats count it as a body (they read body_notes 0 before)

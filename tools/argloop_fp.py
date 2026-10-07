@@ -14,7 +14,7 @@ and for the legit set the largest periodic stretch (tokens, repeats) and window 
 saw, so a threshold can be set above them with a margin. For the loops, the token at which the
 guard fires.
 
-0.3.40-test: the legit set's largest stretches per tier (a unit shorter than `long_period`, and
+The legit set's largest stretches per tier (a unit shorter than `long_period`, and
 one at least that long, which fires at `long_repeats` copies), and `--synthetic`: legit shapes
 that repeat on purpose (sprite pixel rows, identical animation frames, tile maps with blank rows,
 tables, zero buffers) that must not fire, and loops of one unit of 20 to 4,000 characters after

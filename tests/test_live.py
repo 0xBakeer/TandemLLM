@@ -597,7 +597,7 @@ def test_recent_keeps_twenty_for_fifteen_minutes():
 
 
 def test_a_recent_row_says_where_its_prompt_came_from():
-    """0.3.21-test: the Last 20 table's cache cell -- the prompt, what came out of a cache, what
+    """The Last 20 table's cache cell -- the prompt, what came out of a cache, what
     the prefill forwarded and the source, as the ledger row has them; none for a request whose
     prefill never finished."""
     c = Clock()

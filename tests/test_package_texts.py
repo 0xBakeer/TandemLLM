@@ -183,7 +183,7 @@ def test_the_kit_and_the_log_tail():
 
 
 def test_the_page_check_edits():
-    # the box's v11 texts (0.3.43-test): the shipped texts with edits 9-11 undone
+    # the box's v11 texts: the shipped texts with edits 9-11 undone
     doc = _seed()
     undo = ((M.CHECK_ONE_NEW, M.CHECK_ONE_OLD),
             (M.LAYA_RUN_NEW.replace(M.LAYA_QUOTE_OLD, M.LAYA_QUOTE_NEW), M.LAYA_RUN_OLD),
@@ -302,7 +302,7 @@ def _undo_041(text: str, report: str) -> str:
 
 
 def test_fx10_opencode_answers_keep_laya_out():
-    """FX10 (UX1 O03 on 0.3.51-test, opencode): the final answer listed "Evidence: ... Laya second
+    """FX10 (UX1 O03 on a 0.4.0 test build, opencode): the final answer listed "Evidence: ... Laya second
     check on the suite tail -> passed (p=0.99, sure)"; 24 internal terms, 14 of them Laya. The box's
     v21 texts (edits 15-25 in, 26-29 not) migrate to evidence lines that keep Laya's verdict for the
     model, test-lib's check for the model, the done message in the user's words and a failed Laya

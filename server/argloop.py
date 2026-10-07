@@ -1,4 +1,4 @@
-"""The tool-argument loop guard (0.3.26-test): a tool call whose arguments repeat one unit.
+"""The tool-argument loop guard: a tool call whose arguments repeat one unit.
 
 On 2026-10-04 at 16:18 Qwen opened a `write` of a 3.5 KB game, wrote 3 KB of it, then the same
 97-character row of a tile map 12,866 times: 65,536 tokens, 1.26 MB, 327 s, until the token
@@ -13,7 +13,7 @@ rules, either fires:
     periodic   the block's last `span_tokens` tokens are one unit of at most `max_period`
                characters repeated, exactly, at least `min_repeats` times; a unit of at least
                `long_period` characters needs only `long_repeats` copies over `long_span_tokens`
-               (0.3.40-test: a long unit repeated three times is a loop, not code). The check
+               (a long unit repeated three times is a loop, not code). The check
                takes the tail's last `probe` characters, finds where they occurred before (the
                nearest is the smallest period that fits them), and compares the whole span against
                itself shifted by that period: one string compare, at C speed.
@@ -224,7 +224,7 @@ NOTE = ("Runtime note: your last tool call was stopped and not run. Its argument
         "every copy, and split a large file into parts: write the first part, then add the rest "
         "with edits.")
 
-# the retry's note (0.3.40-test): the history showed the call stopped already; the note names
+# the retry's note: the history showed the call stopped already; the note names
 # the tool and the piece, and after an identical stop says the same output came again
 RETRY_NOTE = ("Runtime note: your last {calls} stopped and not run, because the arguments fell "
               "into a loop: {why}.{again} Do not write that piece again copy by copy. Generate "
@@ -232,7 +232,7 @@ RETRY_NOTE = ("Runtime note: your last {calls} stopped and not run, because the 
               "or String.repeat, or write a small first part of the file now and add the rest "
               "with further calls.")
 
-# the give-up (0.3.40-test): what the client gets in place of another identical attempt
+# the give-up: what the client gets in place of another identical attempt
 FINAL = ("[TandemLLM stopped retrying: the last {n} attempts at the `{name}` call fell into the "
          "same loop (one {period}-character piece written over and over) and were stopped "
          "before anything ran. Nothing more is tried automatically. Ask again with a smaller "

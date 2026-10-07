@@ -1,5 +1,5 @@
-"""Which session an out-of-band call belongs to, and a key that survives a compaction (0.3.23-test,
-server/session_tokens.py).
+"""Which session an out-of-band call belongs to, and a key that survives a compaction
+(server/session_tokens.py).
 
   1  the registry: one token a key, one key a token, 12 random characters; kept across a restart in
      a 0600 file; gone 48 h after its last use

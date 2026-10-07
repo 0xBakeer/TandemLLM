@@ -740,7 +740,7 @@ def _main():
     print(f"\n{len(fns)} passed")
 
 
-# ------------------------------------------------------------------ 0.3.49-test: a side slot reads the tier
+# ------------------------------------------------------------------ a side slot reads the tier
 
 def _side_engine(max_len=320, seed=3):
     """A side slot's engine: the same weights, its own (shorter) window and buffers."""
@@ -783,7 +783,7 @@ def test_a_side_slot_reads_the_head_into_its_own_buffers_bit_for_bit():
 
 
 def test_without_the_reader_a_side_slot_prefills_cold():
-    """The A side of the A/B (`QWEN38_SIDE_DISK=off`, 0.3.48-test): no tier, every token read."""
+    """The A side of the A/B (`QWEN38_SIDE_DISK=off`): no tier, every token read."""
     head = tokens(150, seed=21)
     with tempfile.TemporaryDirectory() as d:
         t = tier(d, settings={"admit_after": 1})

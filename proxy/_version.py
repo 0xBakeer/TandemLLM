@@ -1,7 +1,7 @@
 """The release's version: the repository's VERSION file in a checkout, the installed
 distribution's metadata in a wheel.
 
-VERSION holds the release name as the project writes it (`0.3.29-test`, `0.4.0`); `PEP440` is the
+VERSION holds the release name as the project writes it (`0.4.1-test`, `0.4.0`); `PEP440` is the
 same name as a Python package version (`0.3.29.dev0`, `0.4.0`), which `pyproject.toml` reads. A
 `-test` build is a development release; `-rcN` a release candidate.
 """

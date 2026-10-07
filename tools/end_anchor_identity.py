@@ -14,7 +14,7 @@ resident prefix's rows, anchors, pin and park.
   * the candidate with `--end-anchor off` must equal the base on every record;
   * the candidate with it on must differ (the negative control: the check sees the end anchor),
     and its turns that continue the last generation must resume at its end;
-  * with `--on-base` (a base that has the end anchor itself, 0.3.14-test 7954241 for 0.3.15-test):
+  * with `--on-base` (a base that has the end anchor itself, a commit such as 7954241):
     the candidate with it on must equal the base with it on, every record.
 
 Exit 0 when both hold. Nothing here touches a GPU, a server or a file outside a temporary

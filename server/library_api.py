@@ -156,7 +156,7 @@ def handle_get(handler, cond) -> None:
                   ms=round((time.perf_counter() - t0) * 1e3, 3))
     if err is not None:
         detail.update(error=err.kind, param=err.param)
-    # 0.3.23-test: the session the address's token names (server/session_tokens.py)
+    # The session the address's token names (server/session_tokens.py)
     sess = getattr(handler, "_sess", None)
     if getattr(handler, "_stok", None) is not None:
         detail["session_key"] = sess

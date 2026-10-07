@@ -16,7 +16,7 @@ waiting, and then nothing. A streamed chat request now waits as long as one requ
 A request without a stream cannot show it is alive; it keeps `--queue-timeout` and its 429.
 
 The holder's live work (SRV-249, 2026-10-07). The hold-time median knew nothing about where the
-holder was: on 0.3.48-test a one-line question waited 35.8 s behind a thinking turn that had run
+holder was: on a 0.4.0 test build a one-line question waited 35.8 s behind a thinking turn that had run
 14.8 s, and the line said "about 20 s". Replayed over the box's ledger (3,716 client requests since
 2026-10-04, the waiter arriving at 10, 25, 50, 75 and 90 % of each hold), the hold-time median was
 a median 0.52 of the real wait for waits of 10 to 60 s (78 % of them under) and 0.17 for waits over
@@ -39,7 +39,7 @@ the holder has, and there is no estimate: the line says only what is known. Noth
 engine or takes its lock.
 
 TandemLLM's own work (SRV-177, 2026-10-06). The prepare and shadow jobs that take the lock between
-requests yield to a waiter at their next chunk. Until 0.3.41-test they counted as 0 s, and `about`
+requests yield to a waiter at their next chunk. Until 0.4.0 they counted as 0 s, and `about`
 rounded every estimate up to "10 s", so the line behind them always read "about 10 s left" (9 of 9
 lines in UT1's opencode runs) while the waits measured in the ledger were 0.1 to 3 s (18 of 60 turns
 over 1 s, 9 over 2 s). Now the wait a request really spent behind such a job is recorded per rank

@@ -38,9 +38,9 @@ LLAMA_KEYS = ("cache_n", "prompt_n", "prompt_ms", "prompt_per_token_ms", "prompt
               "predicted_n", "predicted_ms", "predicted_per_token_ms", "predicted_per_second",
               "draft_n", "draft_n_accepted")
 #: The cache sources whose answer came out of memory with no decode: the response cache
-#: (`response`, an identical greedy request) and a summary written ahead (`prepared`, 0.3.23-test).
+#: (`response`, an identical greedy request) and a summary written ahead (`prepared`).
 #: Their "decode rate" is the speed of a replay; no speed view, average or histogram reads it, and
-#: the ledger records none (0.3.27-test).
+#: the ledger records none.
 REPLAY = ("response", "prepared")
 
 ENGINE_KEYS = ("ttft_ms", "queue_ms", "total_ms", "blocks", "tokens_per_block", "reasoning_n",
@@ -113,7 +113,7 @@ class RequestRecord:
         self.hidden_prompt = 0
         self.cached_tokens = 0
         self.prompt_n: int | None = None          # forwarded; None = the prompt's whole length
-        # 0.3.23-test: a compaction served as a continuation reads a prompt longer than the one
+        # A compaction served as a continuation reads a prompt longer than the one
         # the client sent; its cached tokens are the client's prompt less what was forwarded
         self.prompt_client: int | None = None
         self.completion_tokens = 0
@@ -145,7 +145,7 @@ class RequestRecord:
         self.end_state = None          # the state the token loop ended in
         self.stop_detail = None        # refines the stop reason (eos, stop_string, queue_full, ...)
         self.argloop = None            # the tool-argument loop guard's verdict (server/argloop.py)
-        self.argloop_history = None    # 0.3.40-test: the stopped calls cut from the history
+        self.argloop_history = None    # The stopped calls cut from the history
         self.tool_names = None
         self.client_gone_at = None     # perf time the server first saw the socket closed
         self.continues = None          # the request this one follows after a tool_calls finish
@@ -164,7 +164,7 @@ class RequestRecord:
         self.conductor_acts = None     # the monitor's executed acts (SRV-115)
         self.conductor_hidden_tokens = None   # tokens the model saw that the client did not send
         self.conductor_acted = None    # 1: the conductor changed what the model saw or wrote
-        # 0.3.27-test: the side lane (server/preempt.py): the job, and where it was served
+        # The side lane (server/preempt.py): the job, and where it was served
         self.lane_job = None
         self.lane = None
         self.queue_limit_s = None   # how long this request may wait for the engine

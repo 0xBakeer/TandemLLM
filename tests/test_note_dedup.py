@@ -1,6 +1,6 @@
 """A class's note carries only the parts no live note of the session holds (QWEN38_NOTE_DEDUP).
 
-Live on 0.3.47-test (an Open WebUI agent chat, 2026-10-06): every user message of the coding class
+Live on a 0.4.0 test build (an Open WebUI agent chat, 2026-10-06): every user message of the coding class
 whose task skill differed from the last one's (test-lib, none, test-cli) brought the whole note
 again, the general packages included (about 4,800 tokens each time). The third copy pushed the
 replayed notes over `max_replay_tokens`, the oldest note went, the prompt changed at its position

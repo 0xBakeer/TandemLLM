@@ -5,7 +5,7 @@ True or False". torch 2.13.0's `torch._C._cuda_memorySnapshot` takes one referen
 item of the tuple it is handed, so each `MemPool.snapshot()` takes one reference off `True` and off
 each of the pool's id ints. `Placement.pool_bytes` called it for the narrator's and the shadow's
 pools on every `Budget.memory()`, which every `/metrics` collector reaches through `cache_stats()`
-(30 a render since 0.3.34-test's `role_exclude`). The matrix:
+(30 a render since 0.4.0's `role_exclude`). The matrix:
 
   1  the upstream call as measured: N calls of `MemPool.snapshot()` take N references off `True`
      and off the id ints; the call with `None` takes none (passes, saying so, on a torch that no
@@ -17,7 +17,7 @@ pools on every `Budget.memory()`, which every `/metrics` collector reaches throu
                                                                   test_pool_bytes_sums_its_own_segments
   4  the watch: a count under half its high is logged once per interval with its fall rate and
      the time to 0; a steady count is not; 3.12+ starts nothing   test_the_refwatch
-  5  `/health`'s memory part carries the counts (0.3.37-test)      test_health_memory_has_the_counts
+  5  `/health`'s memory part carries the counts      test_health_memory_has_the_counts
 
 CPU only: a CUDA build of torch answers `_cuda_memorySnapshot` without a device (empty segments);
 run with CUDA_VISIBLE_DEVICES= on the box. Run: python tests/test_pool_snapshot_refcount.py

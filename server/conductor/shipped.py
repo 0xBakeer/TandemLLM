@@ -1,4 +1,4 @@
-"""The documents a new box starts with (0.3.21-test D3's shipped defaults, stored by 0.3.22-test).
+"""The documents a new box starts with (D3's shipped defaults, stored at a box's first start).
 
 The owner, 2026-10-03: "people will not switch their profiles and set up opencode with default
 settings". The conductor's built-in documents (version 0, schema.py `seed`) are the minimal ones

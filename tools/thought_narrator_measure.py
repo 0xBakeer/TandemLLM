@@ -245,7 +245,7 @@ def _profiles(root: str, on_mode: str = "thoughts") -> None:
         doc.update(description=f"thought_narrator_measure: coding, state lines on, narrator "
                                f"{narr}; reachable by header only", clients=[])
         doc["ui"] = dict(doc.get("ui") or {}, states="on", narrator=narr)
-        # 0.3.24-test: a progress mark every 512 tokens of thinking, on both sides, so the narrator
+        # A progress mark every 512 tokens of thinking, on both sides, so the narrator
         # sums up the open thought three times in a 2,000-token run (0.3.23's runs never closed
         # their thought and the narrator wrote nothing before the turn's end)
         doc["ui"]["progress"] = {"mode": "on", "thinking_every_tokens": PROGRESS_TOKENS,
@@ -316,7 +316,7 @@ def impact(a) -> dict:
         store="off", server_arg=["--conductor=on", f"--conductor-config={root}",
                                  "--reasoning-format=reasoning_content", "--drop-idle",
                                  "--narrow-arm=on",
-                                 # 0.3.24-test: the served price table, not learned: with
+                                 # The served price table, not learned: with
                                  # learning on, one text took 366 to 504 blocks across runs
                                  *([] if a.learn_cost else ["--no-learn-cost"])],
         mem_floor_gb=10.0, tree=True, with_suffix_store=False)
@@ -345,7 +345,7 @@ def impact(a) -> dict:
                                               "took_gib", "device_bytes")}
         print(f"[n2] the narrator on :{a.port}: {out_slot}", flush=True)
         if slot["state"] != "loaded":
-            # 0.3.23-test: an A/B without the model loaded measures nothing of the narrator
+            # An A/B without the model loaded measures nothing of the narrator
             # (0.3.22's hold: refused_hold, because the server ran from the served tree whose
             # .watchdog.off is the hold's own pause file; run this tool from another tree)
             print("[n2] NOT LOADED: no A/B", flush=True)
@@ -367,7 +367,7 @@ def impact(a) -> dict:
     finally:
         row3.stop_server(proc)
     out = {"rows": rows, "server_log": str(log), "slot": out_slot, "loaded": True}
-    # the off runs against each other: the noise the delta has to beat (0.3.23-test); 0.3.24-test:
+    # the off runs against each other: the noise the delta has to beat:
     # the gate is read only when that noise is under it, on the runs that wrote the same text (the
     # most common one): a different text is different work. 0.3.24's hold: the first two runs of
     # the process wrote other texts (398 and 505 blocks), the next six one text in 514 blocks each

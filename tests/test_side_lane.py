@@ -1,4 +1,4 @@
-"""The side lane (0.3.27-test, server/preempt.py): a short request served in the middle of another
+"""The side lane (server/preempt.py): a short request served in the middle of another
 one's generation, and the generation given back exactly as it was.
 
 2026-10-04 16:43-16:48: one opencode turn thought for minutes; opencode's title request of a new

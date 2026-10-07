@@ -4,7 +4,7 @@ A capture runs in CUDA's global mode: while the engine thread captures a graph (
 its first use for a context class, a verify graph), a CUDA call another thread makes that a
 capture cannot hold -- a copy and its synchronize, a pinned allocation -- fails with
 `cudaErrorStreamCaptureUnsupported` and invalidates the capture, whose request then fails. On
-2026-10-02 at 21:09 (0.3.13-test, the first request after the restart) the disk tier's writer
+2026-10-02 at 21:09 (the first request after the restart) the disk tier's writer
 copied a session head's rows while the drafter captured: the writer stopped after one of the
 head's 15 chunks, so the head was never readable, and the request ended in an error from the
 caching allocator (`info.status != cudaStreamCaptureStatusInvalidated`).

@@ -1,5 +1,5 @@
 """Replay a real session's transcript into an engine with memory on, so the background writer
-writes notes from a real session (OPS-55, 0.3.36-test).
+writes notes from a real session (OPS-55).
 
     python tools/memory_replay.py --base http://127.0.0.1:8000 \
         --transcript ~/.qwen38-spark-engine/memory/sessions/2026-10/c-ses_.../transcript.md \

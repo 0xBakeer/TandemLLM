@@ -1,6 +1,6 @@
 """The proxy's background memory writer (M3, 2026-10-05; the design: Memo "Memory for TandemLLM:
-design advice", section 2, "The background write"; the open item of "Live deploy and
-verification 0.3.33-test").
+design advice", section 2, "The background write"; an open item of a live deploy and
+verification).
 
 The engine writes a session's notes with a hidden turn on the KV it holds
 (server/conductor/memwriter.py, `app.memory_once`). A backend behind the proxy (vLLM, SGLang, any

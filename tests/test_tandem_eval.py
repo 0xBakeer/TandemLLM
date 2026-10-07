@@ -678,7 +678,7 @@ def test_a_run_sees_its_own_folder_as_pwd():
 
 # ------------------------------------------------------------------ OPS-63: round 1's reader bugs
 
-# tests/fixtures/tandem-eval-round1 is round 1 (2026-10-01, 0.3.4-test, n = 1 a side) without
+# tests/fixtures/tandem-eval-round1 is round 1 (2026-10-01, n = 1 a side) without
 # private content: the published run records and report, each session's export cut down to its
 # numbers (message roles, times, finishes, tokens; tool names, statuses and end times; for checker
 # calls the command with the folder as {run} and only the checker's header and RESULT lines -- no
@@ -973,7 +973,7 @@ class LedgerEngine(FakeEngine):
 def test_round1_the_report_is_rebuilt_from_the_folders_and_the_ledger():
     """The round-1 report rebuilt with --report --reread: every run re-read from its session, its
     folder's final shot and the engine ledger; both arms pass every suite; the night's own build
-    (0.3.4-test) is kept, not the build the server serves now; the published report it replaces
+ is kept, not the build the server serves now; the published report it replaces
     is named, and the old report and run records are kept beside the new ones."""
     import shutil as sh
     suites_doc = json.load(open(te.SUITES))

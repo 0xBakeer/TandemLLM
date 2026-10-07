@@ -1,4 +1,4 @@
-"""The side lane against a real engine (0.3.27-test, server/preempt.py): short requests served in
+"""The side lane against a real engine (server/preempt.py): short requests served in
 the middle of a long generation, the generation's text held to an uninterrupted run's, byte for
 byte.
 
@@ -22,7 +22,7 @@ log-probabilities) are A1's up to the first fork, and the fork, if there is one,
 the two runs took each other's runner-up and the gap between the two best tokens is at most
 `--tie-nats` in both rows. The length router sizes blocks from timings inside the request, so two
 runs of the same request can part at a near tie with no bug behind it; a byte compare of the texts
-fails there (0.3.39-test). The fork's position and both gaps are printed; `identical` still says
+fails there. The fork's position and both gaps are printed; `identical` still says
 whether the texts are equal byte for byte. It reports each short request's latency and where it was served (the
 server log's `[req] ... lane=` field), the queued one's latency, and the long request's TTFT, decode
 rate and wall time in B against A2.

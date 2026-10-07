@@ -60,7 +60,7 @@ BURST_MS = 2000.0
 INLINE_SHARE = 0.02
 INLINE_SLICE_MS = 150.0
 JOURNAL = "shadow.jsonl"
-# 0.3.26-test: the model's pool keeps every segment it ever reserved (a live MemPool never gives
+# The model's pool keeps every segment it ever reserved (a live MemPool never gives
 # its free segments back). Reading a long conversation grows the KV in steps and every chunk's
 # attention temporaries with the context, each a new segment: after 195,694 tokens on 2026-10-04
 # the pool held ~25 GiB, 17.6 of it free, and the engine's memory gate (which counts it) refused
@@ -305,7 +305,7 @@ class ShadowService:
             self.log(f"[shadow] work failed: {self.last_error}", flush=True)
         res, alloc = self.pool_bytes()
         if res - alloc > pool_slack_gib() * (1 << 30) and not stop():
-            # 0.3.27-test: the release parks every session on the disk under the engine lock
+            # The release parks every session on the disk under the engine lock
             # (10.4 s for two on 2026-10-04): it yields to a request that waits, between sessions,
             # and the next idle burst goes on with the rest
             out["released"] = self.release("pool_slack", stop=stop)

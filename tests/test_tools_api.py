@@ -234,7 +234,7 @@ def test_a_block_the_end_token_closed_is_a_call_and_one_the_limit_cut_is_not():
     assert "<tool_call>" not in content.split("</think>")[-1]
     # Cut by the token limit, the block is content without a stream and the finish is length.
     # A stream has already sent the call's deltas while the model wrote it (rc3's live
-    # arguments), and a delta cannot be taken back. Since 0.3.31-test (c78353e) the block's text
+    # arguments), and a delta cannot be taken back. Since 0.4.0 (c78353e) the block's text
     # is not sent again as content there: the function the stream closed stays the call it was
     # sent as, so the client holds it once.
     content, calls, finish, _ = ask("Reading it.\n" + open_block, False, eos=False)

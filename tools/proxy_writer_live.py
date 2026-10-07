@@ -1,4 +1,4 @@
-"""The proxy's background memory writer against a REAL backend (0.3.36-test, the open item of
+"""The proxy's background memory writer against a REAL backend (the open item of
 0.3.35's release note): a vLLM or SGLang server on this host, or one cloud API.
 
     python tools/proxy_writer_live.py --kind vllm --url http://127.0.0.1:8101/v1 \

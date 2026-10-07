@@ -451,7 +451,7 @@ def stall_watchdog(ev, task, sup):
 #                `minutes` with no product write for `quiet_minutes` (no progress), or for
 #                `hard_minutes` in any case -> finish and answer; then every `again_minutes`
 #                the shorter `again_text`. A turn that keeps writing is let run to the hard cap.
-#   verify       (SRV-195, 0.3.45-test) a build turn whose deliverable exists, and whose steps
+#   verify       (SRV-195) a build turn whose deliverable exists, and whose steps
 #                since the last product write wrote only scratch files, test tools among them
 #                (`verify_scratch_writes` scripts or pages, not logs or data; `verify_s` seconds
 #                or more after that write, 3 steps or more) -> stop
