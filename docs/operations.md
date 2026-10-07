@@ -110,6 +110,16 @@ A claim is the role's peak, not its idle size, and it is what the role takes fro
 
 `ops/roles.sh` does the loading. `ROLES_AUTOLOAD` in `serve.env` names the roles `start.sh` brings up after the engine (none today); each role has `ROLE_<NAME>_START`, `ROLE_<NAME>_HEALTH`, `ROLE_<NAME>_RUNTIME` and `ROLE_<NAME>_WAIT`. A role served by vLLM runs BF16 weights with the KV cache unquantised, and its `--gpu-memory-utilization` is the planner's byte math (claim over the board's total, rounded down), never vLLM's default 0.9, which on this board would be the engine's memory too. The script refuses a command that sets another `--dtype`, `--quantization`, a quantised KV cache or its own memory fraction. Roles never load on the Mac. A hold stops the roles before the engine; after a stop, `hold.sh` and the watchdog wait the settle time (5 s by default) before the next 80 GiB load. Nothing unloads on its own when `MemAvailable` falls after a role loaded: the plan shows it.
 
+## Open WebUI
+
+Open WebUI sends no conversation id unless told to. Without one the conductor tells chats apart by their head and their first turn (docs/server.md, the router's session), which cannot separate a regenerated first message from a new chat that opens the same way. Give TandemLLM's connection the chat id as a header: Admin Settings, Connections, the TandemLLM connection's settings, Headers:
+
+```json
+{"X-OpenWebUI-Chat-Id": "{{CHAT_ID}}"}
+```
+
+The placeholder is filled per request (Open WebUI 0.11 or later, `parse_custom_headers`); the model list and the task requests get it too, which costs nothing (an empty value is ignored, a title request is a side request with no session). Prefer this to `ENABLE_FORWARD_USER_INFO_HEADERS=true`, which sends the same header but also the user's name, id, email and role on every connection, external providers included. The engine reads `X-OpenWebUI-Chat-Id` either way; a decision row with `extra.session` = `id` shows it arrived.
+
 ## Settings
 
 `engine/settings.py` is the one registry of every `QWEN38_*` switch the engine reads (110 of them), with its default and the module that reads it. `tests/test_settings.py` fails if any module reads a switch another way. To see what is in effect:
