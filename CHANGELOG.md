@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (on main, not deployed)
+
+### The dashboard's filter lists by index seeks; a green CPU suite (FX14; SRV-281, QA SRV-282)
+
+- The 365-day usage query over 500,000 rows took 771 ms on the Spark's fast core when SRV-29 set its 1 s bound, and 1,096 ms after VIS-60: `dimensions()`, run on every usage call, read every row twice (the internal-only clients, 165 ms; the proxy's users, 67 ms). The ledger gains two indexes in `migrate()` (`requests_dim_kind` on model, client_id, client_kind; a partial `requests_user`), built once at the next start, no row touched; the lists come from seeks. The cold query is 845 ms again, the warm one 110 ms (was 341).
+- Settings: `QWEN38_REGENERATE`, `QWEN38_REGEN_TEMPERATURE`, `QWEN38_REGEN_TOP_P`, `QWEN38_REGEN_TOP_K`, `QWEN38_MEMORY_PROXIES`, `QWEN38_TANDEM_URL` and `QWEN38_TANDEM_SCRATCH` are in the settings registry (`engine/settings.py`), same defaults; `tests/test_settings.py` also finds a read split over two lines or held in a constant.
+- Tests: the usage bound is the query's CPU time on the box's fastest cores, not the wall clock under load; `test_proxy_gate` uses a longer stream and repeats a run only when the run itself shows load.
+
 ## 0.4.5-test, 2026-10-08
 
 0.4.4-test (dbdd4dd) plus three leftovers from the 0.4.x test runs, deployed on the box as 0.4.5-test; the package texts go in as the box's packages v24 (`tools/packages_migrate.py --put`, edits 30-33). `~/rollback-0.4.5.sh` restores packages v23 and returns the box to 0.4.4-test. Raw and bench text are unchanged.
