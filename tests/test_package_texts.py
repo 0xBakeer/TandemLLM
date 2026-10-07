@@ -128,7 +128,8 @@ def test_the_shipped_texts_are_clean():
     assert M.SCRATCH_RULE in t and "tandem-test-hook:start" in t
     assert M.RUNTIME_RULE.replace(M.RUNTIME_OLD_PAGE, M.RUNTIME_NEW_PAGE) in t
     with open(os.path.join(ROOT, "packages", "inline", "laya-testing.md")) as f:
-        assert M.FAIL_BULLET in f.read()
+        # edit 2's bullet, as edit 29 words its end (FX10)
+        assert M.FAIL_BULLET.replace(M.WRITE_UNAVAIL_OLD, M.WRITE_UNAVAIL_NEW) in f.read()
     return f"{len(files)} files: no .tandem/, no literal host, already migrated"
 
 
@@ -257,6 +258,7 @@ def test_the_final_message_edits():
             ("\n" + M.TOOLS_QUIRK_RULE, ""), (M.DONE_LIST_NEW, M.DONE_LIST_OLD))
     for name, p in doc["packages"].items():
         if isinstance(p.get("body"), str):
+            p["body"] = _undo_041(p["body"], "Report: ")
             for new, old in undo:
                 p["body"] = p["body"].replace(new, old)
     assert M.FINISH_OLD in doc["packages"]["testing"]["body"]
@@ -270,7 +272,7 @@ def test_the_final_message_edits():
     assert "say in your final message that you removed it" not in t
     assert M.LAYA_DONE_NEW in new["packages"]["laya-testing"]["body"]
     assert M.HARNESS_RULE in new["packages"]["tandem-harness"]["body"]
-    assert new["packages"]["test-web"]["body"].count(M.REPORT_LINE) == 1
+    assert new["packages"]["test-web"]["body"].count(M.EVIDENCE_LINE) == 1
     assert M.migrate_doc(new)[1] == {}, "a second run changes nothing"
     assert any(c.startswith(M.ROUND4) for ch in report.values() for c in ch) and len(M.NOTE_351) < 200
     # box-only skill lines (design-review, threejs-product-render)
@@ -281,6 +283,60 @@ def test_the_final_message_edits():
         assert want in out and ch, (out, ch)
         assert M.migrate_text("skill", out)[1] == []
     return f"{len(report)} packages migrated; no old phrase shipped; idempotent"
+
+
+def _undo_041(text: str, report: str) -> str:
+    """The shipped text with edits 26-29 undone: the evidence line back to `report` + its list with
+    Laya's verdict in it, and the old phrases."""
+    out = []
+    for line in text.split("\n"):
+        if line.startswith(M.EVIDENCE_LINE) and line.endswith(M.EVIDENCE_TAIL):
+            items = line[len(M.EVIDENCE_LINE):-len(M.EVIDENCE_TAIL)]
+            line = report + re.sub(r", and (Laya's verdicts?)\.$", r", \1.", items)
+        out.append(line)
+    text = "\n".join(out)
+    for old, new in ((M.SECOND_OLD, M.SECOND_NEW), (M.DONE_EV_OLD, M.DONE_EV_NEW),
+                     (M.SAY_UNAVAIL_OLD, M.SAY_UNAVAIL_NEW), (M.WRITE_UNAVAIL_OLD, M.WRITE_UNAVAIL_NEW)):
+        text = text.replace(new, old)
+    return text
+
+
+def test_fx10_opencode_answers_keep_laya_out():
+    """FX10 (UX1 O03 on 0.3.51-test, opencode): the final answer listed "Evidence: ... Laya second
+    check on the suite tail -> passed (p=0.99, sure)"; 24 internal terms, 14 of them Laya. The box's
+    v21 texts (edits 15-25 in, 26-29 not) migrate to evidence lines that keep Laya's verdict for the
+    model, test-lib's check for the model, the done message in the user's words and a failed Laya
+    call kept from the user. Guidance only: nothing filters the model's output."""
+    files = glob.glob(os.path.join(ROOT, "packages", "**", "*.md"), recursive=True)
+    for path in files:
+        with open(path) as f:
+            text = f.read()
+        assert not re.search(r"(?m)^.*Laya.*second check.*$", text), path
+        assert M.REPORT_LINE not in text, path
+        assert "say Laya was unavailable" not in text and M.WRITE_UNAVAIL_OLD not in text, path
+        for line in text.split("\n"):
+            if "Laya's verdict" in line and "final message" in line:
+                assert "never names Laya" in line or "never a label" in line \
+                    or "not for the final message" in line or "stay out" in line, (path, line)
+    doc = _seed()
+    for p in doc["packages"].values():
+        if isinstance(p.get("body"), str):
+            p["body"] = _undo_041(p["body"], M.REPORT_LINE)
+    assert M.REPORT_LINE + "the summary lines before and after, the tests added, the example run, " \
+        "Laya's verdict." in doc["packages"]["test-lib"]["body"]
+    new, report = M.migrate_doc(doc)
+    assert {"test-web", "test-cli", "test-api", "test-data", "test-lib", "coding", "laya-scripts",
+            "laya-testing"} <= set(report), report
+    lib = new["packages"]["test-lib"]["body"]
+    assert M.SECOND_NEW in lib and (M.EVIDENCE_LINE + "the summary lines before and after, the tests "
+                                    "added, the example run, and Laya's verdict." + M.EVIDENCE_TAIL) in lib
+    assert M.DONE_EV_NEW in new["packages"]["coding"]["body"]
+    assert M.SAY_UNAVAIL_NEW in new["packages"]["laya-scripts"]["body"]
+    lt = new["packages"]["laya-testing"]["body"]
+    assert M.WRITE_UNAVAIL_NEW in lt and lt.count("Laya unavailable") == 1, "edit 2 adds no old bullet"
+    assert M.migrate_doc(new)[1] == {}, "a second run changes nothing"
+    assert any(c.startswith(M.ROUND5) for ch in report.values() for c in ch) and len(M.NOTE_041) < 200
+    return f"{len(report)} packages migrated; idempotent"
 
 
 def test_the_monitor_notes_in_plain_words():

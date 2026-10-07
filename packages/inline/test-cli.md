@@ -5,4 +5,4 @@
 4. Pipe cases: stdin in, stdout out, stderr for errors only.
 5. Keep every run under the bash timeout; long runs go to the background with their log in {tandem_scratch}/run.log and `tail -n 60` after.
 6. Let Laya judge each output against what you expected: `(echo "expected: 3 rows, total 42"; ./tool in.csv 2>&1) | python3 {tandem_scratch}/laya.py "Does the actual output match the expected one?" match,mismatch`.
-Report (the evidence you keep; the final message says it in plain words): the commands run, their exit codes, the outputs compared, Laya's verdicts, the state dump.
+Your evidence, for you: the commands run, their exit codes, the outputs compared, the state dump, and Laya's verdicts. The final message says in plain words what you ran and what it showed; it never names Laya, a verdict or a probability.

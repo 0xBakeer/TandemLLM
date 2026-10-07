@@ -89,6 +89,20 @@ asked for it: "quote Laya's verdicts", "say in your final message that you remov
      hooks stay out of it (opencode answers named Laya, `.tandem` and the scratch folder 26 to 43
      times in three refinements of one session).
 
+The edits of 0.4.1 (FX10; UX1 O03 on 0.3.51-test, opencode "refactor report.py": the final answer
+listed "Evidence: ... Laya second check on the suite tail -> passed (p=0.99, sure)" and "Scratch
+`.tandem/` removed", 24 internal terms, 14 of them Laya; edit 19 had kept "Laya's verdict" in the
+very list the model reports from, test-lib called the call "a second check", and the always-on
+coding text asked for "evidence in the message"):
+
+ 26  test-web, test-cli, test-api, test-data, test-lib: the evidence line is the model's own, with
+     Laya's verdict last, and a sentence that the final message never names Laya, a verdict or a
+     probability.
+ 27  test-lib: Laya reads the suite's tail as a check for the model, not "a second check".
+ 28  coding: the evidence in the done message is in the user's words, Laya's verdicts stay out.
+ 29  laya-scripts and laya-testing: when a call fails, the model notes it in its check output and
+     goes on; it does not tell the user.
+
 Every edit is idempotent: a text already migrated comes out unchanged.
 
   python tools/packages_migrate.py --repo                 # rewrite packages/ in this checkout
@@ -126,6 +140,23 @@ ROUND3 = ("testing: the kit's page check", "testing: a page runs", "test-web: th
           "test-web: the page check asks", "testing: a page-check step in single quotes")
 NOTE_351 = ("0.3.51-test: the final message speaks to the user (no Laya scores, kit, hooks or scratch); "
             "check-only overlays removed before done (SRV-229)")
+NOTE_041 = ("0.4.1: test evidence lines keep Laya's verdicts for the model, the done message is in the "
+            "user's words, a failed Laya call is not news for the user (FX10)")
+ROUND5 = ("test-*: the evidence is the model's", "test-lib: a check for the model", "coding: evidence in the user",
+          "laya: a failed call is not news")
+EVIDENCE_LINE = "Your evidence, for you: "
+EVIDENCE_TAIL = (" The final message says in plain words what you ran and what it showed; it never names "
+                 "Laya, a verdict or a probability.")
+SECOND_OLD = "6. Let Laya read the suite's tail as a second check:"
+SECOND_NEW = "6. Let Laya read the suite's tail, a check for you (not for the final message):"
+DONE_EV_OLD = '"Done" only with evidence in the message: what was run, how long, what state was read, what was seen.'
+DONE_EV_NEW = ('"Done" only with evidence in the message, in the user\'s words: what was run, how long, what state '
+               'was read, what was seen. Laya\'s verdicts are yours and stay out of it.')
+SAY_UNAVAIL_OLD = "continue with your own evidence and say Laya was unavailable."
+SAY_UNAVAIL_NEW = "continue with your own evidence; the user does not need to hear about it."
+WRITE_UNAVAIL_OLD = 'write "Laya unavailable" once and go on with your own evidence.'
+WRITE_UNAVAIL_NEW = ('print "Laya unavailable" once in your check output and go on with your own evidence; it is '
+                     'not news for the user.')
 ROUND4 = ("testing: the state hook goes", "testing: the final message", "testing: check-only overlays",
           "laya-testing: verdicts read", "test-*: the report", "laya-playtest: the report is read",
           "design-review: Laya's verdict read", "skills: fps read", "tandem-harness: the final message",
@@ -387,7 +418,8 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     if CURL_OLD in out:
         out = out.replace(CURL_OLD, CURL_NEW)
         changes.append("curl example has a time limit")
-    out = _once(out, FAIL_ANCHOR, FAIL_BULLET, changes, "laya-testing: what to do when a call fails")
+    if FAIL_BULLET.replace(WRITE_UNAVAIL_OLD, WRITE_UNAVAIL_NEW) not in out:     # 29 rewords it
+        out = _once(out, FAIL_ANCHOR, FAIL_BULLET, changes, "laya-testing: what to do when a call fails")
     # 4: the testing package's rules
     if SCRATCH_RULE_V1 in out:                       # the first wording (outside the project)
         out = out.replace(SCRATCH_RULE_V1, SCRATCH_RULE)
@@ -469,6 +501,27 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     if got != out:
         out = got
         changes.append("test-*: the report is the model's evidence")
+    # 26: the evidence line is the model's, Laya's verdict last, and the final message names none
+    def _evidence(m):
+        items = m.group(1).rstrip()
+        laya = re.search(r",? Laya's verdicts?", items)
+        if laya is None:
+            return EVIDENCE_LINE + items + EVIDENCE_TAIL
+        word = laya.group(0).strip(", ")
+        rest = (items[:laya.start()] + items[laya.end():]).rstrip(" .,")
+        return f"{EVIDENCE_LINE}{rest}, and {word}.{EVIDENCE_TAIL}"
+    got = re.sub(r"(?m)^" + re.escape(REPORT_LINE) + r"(.*)$", _evidence, out)
+    if got != out:
+        out = got
+        changes.append("test-*: the evidence is the model's, Laya's verdict out of the message")
+    # 27, 28, 29
+    for old, new, what in ((SECOND_OLD, SECOND_NEW, "test-lib: a check for the model"),
+                           (DONE_EV_OLD, DONE_EV_NEW, "coding: evidence in the user's words"),
+                           (SAY_UNAVAIL_OLD, SAY_UNAVAIL_NEW, "laya: a failed call is not news (helper)"),
+                           (WRITE_UNAVAIL_OLD, WRITE_UNAVAIL_NEW, "laya: a failed call is not news")):
+        if old in out and new not in out:
+            out = out.replace(old, new, 1)
+            changes.append(what)
     return out, changes
 
 
@@ -564,7 +617,8 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE_351 if any(
+                    {"doc": new, "note": NOTE_041 if any(
+                        c.startswith(ROUND5) for ch in rep.values() for c in ch) else NOTE_351 if any(
                         c.startswith(ROUND4) for ch in rep.values() for c in ch) else NOTE_345 if any(
                         c.startswith(ROUND3) for ch in rep.values() for c in ch) else NOTE_343 if any(
                         c.startswith(ROUND2) for ch in rep.values() for c in ch) else NOTE,
