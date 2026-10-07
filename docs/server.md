@@ -418,6 +418,18 @@ Each request leaves one log line with its token counts, its finish reason and it
 
 Every sampling field works on every path, speculative ones included, and a seeded request reproduces its text exactly ([exactness.md](exactness.md)). Penalties apply to every row before sampling. None is set in the served profile, and a client that sends one gets it, with one exception under the conductor.
 
+**Regenerate (0.4.4-test, SRV-241).** Under TandemLLM a regenerate samples, and every other request keeps the greedy default ([exactness.md](exactness.md#what-changes-output-on-purpose)). Open WebUI sends no flag. Its 0.11.4 source (`Chat.svelte`) shows the shapes:
+
+| client action | what the server receives | here |
+|-|-|-|
+| Regenerate | the same messages as the request that produced the answer (the new, empty answer is left out) | a regenerate: samples |
+| Continue | the messages ending with the partial assistant answer | greedy |
+| Regenerate with a suggestion ("Add details") | the old answer and a new user message | greedy (a new instruction) |
+| Edit a user message | a new user message with the edited text | greedy |
+| a follow-up, a tool round | new messages | greedy |
+
+The match is by session: the conductor's key (`c:` from `X-OpenWebUI-Chat-Id`, `x-session-id` or a body id), or a hash of the conversation's head when there is none. It compares a hash of the non-system messages, so a re-rendered system prompt (a time variable) or a dropped reasoning field does not matter. A regenerate of any earlier answer counts, because Open WebUI can regenerate any answer. So does a regenerate after Stop. Each session keeps its last 32 answered conversations for 24 hours. The sampling is `--regenerate-temperature 0.7`, `--regenerate-top-p 0.95`, `--regenerate-top-k 20` (env `QWEN38_REGEN_TEMPERATURE`, `QWEN38_REGEN_TOP_P`, `QWEN38_REGEN_TOP_K`). That is Qwen's recommendation for thinking mode with the temperature 0.1 warmer, plus a fresh seed per attempt. The class, the effort, the notes and the packages are the turn's as before. A client that sends `temperature`, `top_p`, `top_k`, `min_p` or `seed` gets exactly what it sent. The row still says the request was a regenerate (`client_params`). Other clients can send `X-Tandem-Regenerate: 1`, and `X-Tandem-Regenerate: 0` opts one request out. The server log has a `[regenerate]` line per request. `/health` `sampling.regenerate` has the settings and the counts, and the ledger has `sampling` (`regenerate`, `client`, or null for greedy). `--regenerate off` turns all of this off.
+
 `no_repeat_ngram_size` is HF's rule for prose sampling: every token that would complete an n-gram already in the conversation pays 4 nats (a finite penalty, never a ban). In code repeated n-grams are the text itself (indentation, `", "`, a sprite's pixel row, a tile map's blank row), so under the conductor (0.3.40-test) a client's `no_repeat_ngram_size` is dropped on the turns of the code classes (`code_edit`, `debug`, `design_ui`, `drawing`, `three_d`) and on every turn that offers tools, whose arguments are files. The server's own default (`--no-repeat-ngram`) stays; the journal row gets `extra.penalty_dropped` and the log a `[penalty] ... dropped` line. A raw request (`X-Tandem: raw`, or no conductor) gets the client's mask as before. Whether the mask caused any particular degeneration has not been measured (no A/B); the rule rests on what the mask does to code.
 
 ## The conductor's session monitor

@@ -2,6 +2,16 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.4-test, 2026-10-07
+
+0.4.3-test (2031c24) plus the packages merged on main (1a9ca7a, the section below) and Regenerate, deployed on the box as 0.4.4-test. `~/rollback-0.4.4.sh` returns the box to 0.4.3-test. The text is the same for every request except a regenerate under TandemLLM, which now samples on purpose (Khaled, 2026-10-07: "do the best practice"; [docs/exactness.md](docs/exactness.md#what-changes-output-on-purpose)).
+
+### Regenerate gives a different answer (SRV-241; QA SRV-242)
+
+- Open WebUI's Regenerate sends the same conversation again with no sampling parameter. Under the greedy default it got the same answer word for word (UX2 W03), and on 0.3.49 the same five names in the same order.
+- `server/regenerate.py` recognises a regenerate: under an active TandemLLM plan, the same session sends a conversation that ends with a user message and equals one already answered. The comparison skips system messages and reasoning fields, and the shapes come from Open WebUI 0.11.4's own source. `X-Tandem-Regenerate: 1` also counts as one. Continue, Edit, a suggestion, a follow-up and tool rounds are never regenerates.
+- A regenerate samples with temperature 0.7, top-p 0.95, top-k 20 and a fresh seed, through the engine's exact sampled path (the tree is kept under `--sampled-tree det`). The seed goes into the journal row. Everything else stays greedy, and so do raw and bench requests, side requests and compactions. A client that sends its own sampling parameters is served as it asked.
+- Ledger schema 9: the `sampling` column (`regenerate`, `client`, null). The dashboard's speed sample leaves regenerate rows out, and the Requests API returns `sampling`. `/health` `sampling.regenerate` shows the settings and the counts. Off: `--regenerate off`.
 ## Unreleased (packages merged on main), 2026-10-07
 
 ### The first packages (OPS-39; QA OPS-40)

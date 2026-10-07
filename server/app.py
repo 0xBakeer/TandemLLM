@@ -60,6 +60,7 @@ from server import usage as usage_mod  # noqa: E402
 from server import ledger as ledger_mod  # noqa: E402
 from server import endalign  # noqa: E402
 from server import argloop as argloop_mod  # noqa: E402
+from server import regenerate as regenerate_mod  # noqa: E402
 from server import skillcanon as skillcanon_mod  # noqa: E402
 from server import dashboard_api  # noqa: E402
 from server import live as live_mod  # noqa: E402
@@ -4669,7 +4670,11 @@ class Handler(BaseHTTPRequestHandler):
                 "max_len": STATE.get("max_len"),
                 "sampling": {"temperature": STATE.get("temperature", 0.0),
                              "top_p": STATE.get("top_p", 1.0),
-                             "top_k": STATE.get("top_k", 0)},
+                             "top_k": STATE.get("top_k", 0),
+                             # SRV-241: what a regenerate samples with, and how many there were
+                             "regenerate": (STATE["regenerate"].report()
+                                            if STATE.get("regenerate") is not None
+                                            else {"mode": "off"})},
                 "penalty": {"rep": STATE["pen_spec"].rep,
                             "presence": STATE["pen_spec"].presence,
                             "freq": STATE["pen_spec"].freq,
@@ -5023,6 +5028,10 @@ class Handler(BaseHTTPRequestHandler):
             if rec.finish_reason is None and rec.status in (429, 503):
                 rec.finish_reason = "refused"
             rec.end()
+            if rec.regen is not None and STATE.get("regenerate") is not None and \
+                    regenerate_mod.answered_ok(rec.status, rec.finish_reason,
+                                               rec.completion_tokens):
+                STATE["regenerate"].answered(rec.regen, rec.request_id)   # SRV-241
             live_registry().finish(rec)
             if rec.sup is not None and STATE.get("monitor") is not None:
                 STATE["monitor"].turn_ended(rec.sup)   # the watch's idle time starts here
@@ -5250,6 +5259,37 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:                                      # noqa: BLE001
                 logbuf.print_exc()             # a conductor bug serves the request as raw
                 plan = rec.plan = None
+        # SRV-241: a regenerate (server/regenerate.py) samples with a fresh seed; every other
+        # request keeps the sampler it had (greedy unless the client asked). Under an active plan
+        # only: raw requests (benchmarks) and side requests are never looked at.
+        regen = STATE.get("regenerate")
+        if (regen is not None and chat and plan is not None and plan.active
+                and plan.side is None and not getattr(plan, "compaction", False)):
+            try:
+                rd = rec.regen = regen.decide(body, self.headers)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()             # a bug here serves the request as sent
+                rd = rec.regen = None
+            if rd is not None and rd.how is not None:
+                info = {"how": rd.how, "of": rd.of}
+                if rd.sample:
+                    sp = regen.sampling()
+                    sampler = Sampler(temperature=sp["temperature"], top_p=sp["top_p"],
+                                      top_k=sp["top_k"], seed=sp["seed"],
+                                      draft_temperature=sampler.draft_temperature)
+                    rec.temperature = sampler.temperature
+                    rec.sampling = "regenerate"
+                    info.update(sp)
+                else:
+                    info["client_params"] = True     # the client's own sampling, as sent
+                if plan.row is not None:
+                    plan.row["extra"]["regenerate"] = info
+                print(f"[regenerate] {cid} {rd.how} (of {rd.of}): "
+                      + (f"temperature {sampler.temperature} top_p {sampler.top_p} "
+                         f"top_k {sampler.top_k} seed {sampler.seed}" if rd.sample
+                         else "the client's sampling, as sent"), flush=True)
+        if rec.sampling is None and sampler.on:
+            rec.sampling = "client"
         # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
         # under a conductor plan only (the raw path keeps the release's shape, byte for byte); its
         # reasoning ends with the template's blank lines as content, so each round's block is timed
@@ -7089,6 +7129,18 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--tree", action="store_true",
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see docs/speculative-decoding.md")
+    ap.add_argument("--regenerate", choices=("sample", "off"),
+                    default=os.environ.get("QWEN38_REGENERATE", "sample"),
+                    help="SRV-241: a regenerate (the same conversation again after it was "
+                         "answered, under a TandemLLM plan; or X-Tandem-Regenerate: 1) samples "
+                         "with a fresh seed; every other request keeps its own sampling (greedy "
+                         "by default). `off`: no detection (server/regenerate.py)")
+    ap.add_argument("--regenerate-temperature", type=float,
+                    default=float(os.environ.get("QWEN38_REGEN_TEMPERATURE", "0.7")))
+    ap.add_argument("--regenerate-top-p", type=float,
+                    default=float(os.environ.get("QWEN38_REGEN_TOP_P", "0.95")))
+    ap.add_argument("--regenerate-top-k", type=int,
+                    default=int(os.environ.get("QWEN38_REGEN_TOP_K", "20")))
     ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
                     choices=("", "det", "mixed"),
                     help="let a SAMPLED request keep the tree verify. `det` (the bare "
@@ -8234,6 +8286,10 @@ def _serve(a, led) -> None:
     STATE["log_request_keys"] = bool(a.log_request_keys)
     # the fake engine's writer applies no logit processor, so it cannot honour a constraint
     STATE["structured_outputs"] = bool(getattr(a, "structured_outputs", True)) and not a.fake_engine
+    # SRV-241: a regenerate samples (server/regenerate.py), the real engine and the fake alike
+    STATE["regenerate"] = (regenerate_mod.Regenerates(
+        a.regenerate, a.regenerate_temperature, a.regenerate_top_p, a.regenerate_top_k)
+        if a.regenerate != "off" else None)
     STATE["dashboard_dir"] = a.dashboard_dir
     STATE["live_hz"] = live_mod.hz_from_env(os.environ.get("QSE_LIVE_HZ"))
     STATE["live_activity"] = getattr(a, "live_activity", "on") == "on" and STATE["live_hz"] > 0

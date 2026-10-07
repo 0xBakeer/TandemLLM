@@ -361,7 +361,7 @@ def test_schema_is_the_design_notes():
     meta = dict(con.execute("SELECT key, value FROM meta"))
     # version 2 (SRV-115): the conductor's columns and its journal's two tables; version 3: the
     # proxy's columns; version 4: what the plugins inside vLLM and SGLang report (P6)
-    assert meta["schema_version"] == "8" and int(meta["created_at"]) > 0
+    assert meta["schema_version"] == "9" and int(meta["created_at"]) > 0
     assert "migrated_v3_to_v4" not in meta, "a new file is version 4 from the start"
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"requests", "meta", "conductor_events", "conductor_texts"} <= tables

@@ -449,6 +449,18 @@
               "null"
             ],
             "description": "SRV-197: the engine's sequence slot with parallel requests (0 the main slot, 1 and up a side slot); null without them"
+          },
+          "sampling": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "client",
+              "regenerate",
+              null
+            ],
+            "description": "SRV-241: how the request sampled: null greedy (the default), client the client's own sampling, regenerate a regenerate TandemLLM sampled (server/regenerate.py)"
           }
         },
         "required": [

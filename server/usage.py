@@ -174,6 +174,10 @@ class RequestRecord:
         # SRV-250: ms the parallel memory admission held this request after it took its slot
         # (inside `queue_ms`, never `prompt_ms`)
         self.wait_mem_ms: float | None = None
+        # SRV-241: how the request sampled -- None greedy, `client` the client's own sampling,
+        # `regenerate` the regenerate's (server/regenerate.py); `regen` the detection's decision
+        self.sampling: str | None = None
+        self.regen = None
         # SRV-233: where the served prompt holds tokens the client did not send, as
         # `[(start, end)]` in served positions (the router's notes, the end anchor's replay, a
         # reasoning the client left out, SP4's note); None: not known (the clamp of SRV-165)
@@ -432,6 +436,7 @@ class RequestRecord:
             "engine_cached": int(self.cached_tokens or 0) if ran else None,
             "forwarded_tokens": int(self.forwarded) if ran else None,
             "wait_mem_ms": r2(self.wait_mem_ms),
+            "sampling": self.sampling,
         }
 
 

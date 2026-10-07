@@ -70,6 +70,10 @@ read from a cache, the router's hidden notes included (`cached_tokens` is the cl
 among them since SRV-233); `forwarded_tokens`, what the prefill forwarded, hidden tokens included;
 `wait_mem_ms`, how long the parallel memory admission held the request (inside `queue_ms`).
 
+SCHEMA VERSION 9 (SRV-241): `sampling`, how the request sampled: null for greedy (the default),
+`client` when the client sent its own temperature, `regenerate` when TandemLLM sampled a regenerate
+(server/regenerate.py). The dashboard's speed sample leaves the regenerate rows out.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -93,7 +97,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -108,7 +112,7 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
            "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request",
-           "slot", "engine_cached", "forwarded_tokens", "wait_mem_ms")
+           "slot", "engine_cached", "forwarded_tokens", "wait_mem_ms", "sampling")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -136,7 +140,10 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("slot", "INTEGER"),
          # schema version 8 (SRV-233, SRV-250): the engine's own cache figure and
          # forwarded tokens (hidden notes included), the memory admission's wait
-         ("engine_cached", "INTEGER"), ("forwarded_tokens", "INTEGER"), ("wait_mem_ms", "REAL"))
+         ("engine_cached", "INTEGER"), ("forwarded_tokens", "INTEGER"), ("wait_mem_ms", "REAL"),
+         # schema version 9 (SRV-241): how the request sampled (null greedy, `client`,
+         # `regenerate`)
+         ("sampling", "TEXT"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",
