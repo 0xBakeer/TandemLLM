@@ -25,7 +25,8 @@ What is checked, per package:
   eval       prompts.jsonl parses, ids unique with the package's prefix, the count matches, every
              class is a router class (or `judge`), every check is one the manifest names, a prompt
              with `prompt_terms` carries `terms`; the rubric names every check
-  privacy    no owner name, host, LAN address, home path or client name in any file of the folder
+  privacy    no home path, LAN address, box host name or client name in any file of the folder, nor
+             any word of TANDEM_PRIVATE_WORDS (the operator's names and hosts; the CI sets it)
   documents  the shipped packages and router documents validate (schema.check)
 
 Run: python tools/packages_first.py; tests/test_packages_first.py calls check().
@@ -51,9 +52,14 @@ FIRST = ("creative-coding", "charts", "voxel-worlds", "explainer-video")
 HOUSE_BODY = 350                                      # tools/library_install.py BODY_CAP
 PREFIX = {"tandem-core": "core", "render-tools": "rt", "eval-judge": "judge", "creative-coding": "cc",
           "charts": "ch", "voxel-worlds": "vw", "explainer-video": "ev"}
-# a word that must not be in a public package: the owner, his hosts and LAN, home paths, a client
-PRIVATE = re.compile(r"khaled|bakeer|zeina|\.khaled\.de|/Users/|/home/|192\.168\.|\bdgx\b|claude|"
-                     r"anthropic|opencode|hermes", re.I)
+# text that must not be in a public package: a home path, a LAN address, a box's host name, a
+# client's name (a skill names no client the request did not come from), and the words the
+# operator lists in TANDEM_PRIVATE_WORDS (comma-separated: the owner's names, hosts, domains),
+# which stay out of the repository
+_WORDS = [w.strip() for w in os.environ.get("TANDEM_PRIVATE_WORDS", "").split(",") if w.strip()]
+PRIVATE = re.compile("|".join([r"/Users/\w", r"/home/\w", r"192\.168\.\d", r"10\.\d+\.\d+\.\d+",
+                               r"\.local\b", r"\bdgx\b", r"claude", r"anthropic", r"opencode",
+                               r"hermes"] + [re.escape(w) for w in _WORDS]), re.I)
 REQUIRED = ("name", "version", "title", "kind", "set", "description", "source", "max_tokens",
             "general", "library", "requires_tools", "classes", "files", "eval", "measured")
 
