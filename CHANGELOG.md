@@ -2,6 +2,37 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.1 (unreleased: code and CPU tests, not deployed)
+
+Branch `fixes-041` from 0.3.51-test (3d4768e). Nothing here has run on the box yet; the live checks are listed per item.
+
+### A conversation that ran on a side slot is carried into slot 0 (SRV-213; QA SRV-214)
+
+- A new chat beside a long conversation starts as a guest on the side slot. When it outgrew the guest limit its next turn on slot 0 re-read everything past the disk tier's head: 8.7k tokens in 18.3 s (O07), cached 0.44 and 17.0 s to the first token beside an 80k conversation (W11).
+- A side request's end is noted, and the conversation's next turn on slot 0 copies the side slot's rows and end state into slot 0 (about 104 KiB a token) after slot 0's conversation moves to the NVMe or the park; it resumes there as at any end anchor (`cache_source` `side`). `QWEN38_SIDE_CARRY=off` is 0.4.0.
+- To verify live: W11 with an 80k conversation resident first, cached 0.95 or more and TTFT under 3 s on its follow-up.
+
+### A non-streamed answer keeps its end anchor (SRV-253; QA SRV-254)
+
+- The session put ran before the end anchor. Under the store's 1 GiB entry cap (about 7,400 tokens) it cloned a snapshot, which settles the block's pending commit, then declined it as ahead of its key; the end anchor could no longer be cut back (5 of 45 non-streamed first turns on 0.3.50-test). The put now declines before it clones.
+- To verify live: 20 non-streamed first turns with an Open WebUI-sized head, 0 `not kept (ahead)`.
+
+### The per-entry cap stays; the park writes what it gives up (SRV-257; QA SRV-258)
+
+- A 16,000-token snapshot is about 1.9 GB, the whole store, so the cap stays. A conversation between the cap and the spill's 16,384 tokens lived only in the park, which holds one; a third session dropped it. The park now writes it to the NVMe first (from 4,096 tokens; `QWEN38_SPILL_PARK=off`). The over-the-cap line is said once per conversation (165 of 245 requests printed it on 0.3.51-test).
+
+### The Deciders screen says why a model is not loaded (VIS-70; QA VIS-71)
+
+- MemAvailable 28.97 GiB less the engine's 8.25 GiB of growth leaves the shadow reader (6.5 GiB) at 14.22, under the 15 GiB floor. The growth is not counted twice: a request alone is admitted by the engine's own peak, not by MemAvailable. The screen now says "not loaded: kept free for requests" with the numbers in words and names the shadow reader.
+
+### opencode answers keep Laya out (SRV-259; QA SRV-260)
+
+- Package edits 26-29: the test packages' evidence line keeps Laya's verdict for the model and says the final message names none; test-lib's check is "for you"; the done message is in the user's words; a failed Laya call is not news for the user. O03's answer had listed "Laya second check … passed (p=0.99, sure)".
+
+### Neutral comments (ENG-185; QA ENG-186)
+
+- 300 comments and docstrings that named internal 0.3.x-test builds read in neutral words. No code changed.
+
 ## 0.3.51-test, 2026-10-07
 
 0.3.50-test (77e4542) with the polish items of the normal-user scenario run (SRV-229, SRV-237, SRV-249, OPS-77; QA SRV-230, SRV-238, SRV-251, OPS-78) and two dashboard items from the owner's phone (VIS-66, VIS-68; QA VIS-67, VIS-69). Raw and bench text are unchanged.
