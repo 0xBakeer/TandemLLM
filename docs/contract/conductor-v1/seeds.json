@@ -2443,7 +2443,7 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9_-]{0,39}$"
            },
-           "maxItems": 16
+           "maxItems": 48
           },
           "core": {
            "type": "array",
@@ -3730,7 +3730,7 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
          },
-         "maxItems": 16
+         "maxItems": 48
         },
         "core": {
          "type": "array",

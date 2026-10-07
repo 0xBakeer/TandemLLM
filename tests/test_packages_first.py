@@ -87,7 +87,7 @@ def test_the_caps_on_the_engine_tokenizer():
 def test_the_router_lists_them():
     classes = {c["id"]: c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]}
     for cid, pk in classes.items():
-        assert len(pk) <= 16, (cid, len(pk))
+        assert len(pk) <= 48, (cid, len(pk))
         # summarize never; chat only with the owner's switch (schema.CHAT_CORE, PKG3)
         if cid == "summarize" or (cid == "chat" and not schema.CHAT_CORE):
             assert "tandem-core" not in pk, (cid, pk)
@@ -98,7 +98,7 @@ def test_the_router_lists_them():
     # the prose classes: tandem-core (not chat), then the everyday library (OPS-79)
     for cid in ("writing", "plan", "research", "chat", "summarize"):
         core = {"chat": schema.CHAT_CORE, "summarize": []}.get(cid, ["tandem-core"])
-        want = core + schema.EVERYDAY[cid]
+        want = core + ["everyday-core"] + schema.EVERYDAY_ALL       # PKG3: the whole set
         assert classes[cid] == want, (cid, classes[cid])
     assert "creative-coding" in classes["drawing"] and "creative-coding" in classes["three_d"]
     assert "charts" in classes["drawing"] and "charts" in classes["design_ui"]

@@ -56,6 +56,10 @@ Live on the box (2026-10-08 00:26, 41a5b3d, about 4.5 min down; serve.env, route
 
 - 34 tool-free packages under `packages/everyday/` (a letter, a CV, a trip or a meal plan, a budget, explain simply, compare options, a scam check, health information, a recipe, language practice and more) and `everyday-core` (the user's language, plain words, the whole result in the answer, one question at most, honest limits on health, money and safety), general on writing, plan, research, summarize and chat; the rest are the package question's choices on those classes (`schema.EVERYDAY`), `tech-troubleshoot` also on debug. 210 eval prompts in `packages/everyday/evals/`; nothing is measured yet.
 
+### Every prose class offers the whole everyday set (PKG3, measured 2026-10-08)
+
+- Router v19 sent 106 of the 210 everyday eval prompts to chat (the plan class reads as software planning: 28 plans went to chat; research 49, writing 24), where the package question chose among 9. Over those 9 it picked the prompt's own package 38 times of 106 (none 51, wrong 17); over all 33 everyday packages 94 (none 6, wrong 6). Rewriting the plan, writing and research descriptions routed better (packages offered 122 -> 148-174 of 210) but moved the pagoda prompt from three_d to code_edit and cost 2 to 10 of the 341 labelled prompts, so the descriptions stay and the lists widen: writing, plan, research, summarize and chat list everyday-core and `schema.EVERYDAY_ALL` (33), with tandem-core as before. A class lists up to 48 packages (was 16).
+
 ### Merging the two package sets (PKG3)
 
 - The prose classes carry both: tandem-core, then the everyday packages (writing 11, plan 12, research 12); summarize the everyday ones only. tandem-core on chat is off until it is measured: `schema.CHAT_CORE` is the one-line switch, and on a box the router document's chat class lists it or not (live).

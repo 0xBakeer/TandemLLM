@@ -102,7 +102,9 @@ def test_class_wiring():
             # the package question's list: the candidates minus the general ones
             asked = [p for p in cands if not pk["packages"][p].get("general")
                      and p not in c["policy"].get("core", [])]
-            assert len(asked) <= 11, (c["id"], len(asked))
+            # PKG3 (measured 2026-10-08): over all 33 the question picked the prompt's package
+            # 94 of 106 times, over chat's 9 38 (none 51): every prose class asks the whole set
+            assert asked == schema.EVERYDAY_ALL, (c["id"], asked)
         else:
             assert CORE not in mine, c["id"]
     assert ns <= listed, ns - listed

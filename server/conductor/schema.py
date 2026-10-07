@@ -484,6 +484,16 @@ EVERYDAY: dict[str, list[str]] = {
              "difficult-conversation"],
     "debug": ["tech-troubleshoot"],
 }
+# PKG3 (2026-10-08, measured): router v19 sent 106 of the 210 everyday eval prompts to chat (the
+# plan class reads as software planning: 28 plans went to chat; research 49, writing 24), where
+# the chat list offered 9. The package question over chat's 9 picked the prompt's package 38 times
+# of 106 (none 51, wrong 17); over all 33 everyday packages 94 (none 6, wrong 6). Three class-
+# description rewrites routed better but moved the pagoda prompt to code_edit (SRV-255): the lists
+# widen instead. Every prose class offers the whole everyday set; the home lists above stay as the
+# packages' own classes (manifests, INDEX.md)
+EVERYDAY_ALL: list[str] = list(dict.fromkeys(
+    p for k in ("writing", "plan", "research", "summarize", "chat") for p in EVERYDAY[k]
+    if p != "everyday-core"))
 
 SHIPPED_ROUTER: dict = {
     "classes": [
@@ -537,21 +547,24 @@ SHIPPED_ROUTER: dict = {
         {"id": "writing", "label": "Writing",
          "description": "Write prose in words, not code: an essay, an article, a story, an email, "
                         "a letter, a post or documentation text.",
-         "policy": {"effort": "medium", "packages": CORE_PACKAGES + EVERYDAY["writing"],
+         "policy": {"effort": "medium", "packages": CORE_PACKAGES + ["everyday-core"]
+                    + EVERYDAY_ALL,
                     "rules": []}},
         {"id": "plan", "label": "Plan",
          "description": "Plan an approach, a design or an architecture before building it, or "
                         "break the work into steps.",
-         "policy": {"effort": "high", "packages": CORE_PACKAGES + EVERYDAY["plan"],
+         "policy": {"effort": "high", "packages": CORE_PACKAGES + ["everyday-core"]
+                    + EVERYDAY_ALL,
                     "rules": []}},
         {"id": "research", "label": "Research",
          "description": "Look something up, compare options, or explain how something works.",
-         "policy": {"effort": "medium", "packages": CORE_PACKAGES + EVERYDAY["research"],
+         "policy": {"effort": "medium", "packages": CORE_PACKAGES + ["everyday-core"]
+                    + EVERYDAY_ALL,
                     "rules": []}},
         {"id": "summarize", "label": "Summarize",
          "description": "Summarize, shorten or pull the key points out of text that is given, or "
                         "compress a conversation.",
-         "policy": {"effort": "off", "packages": list(EVERYDAY["summarize"]), "rules": []}},
+         "policy": {"effort": "off", "packages": ["everyday-core"] + EVERYDAY_ALL, "rules": []}},
         {"id": "chat", "label": "Chat",
          # SRV-235: an instruction about the reply itself ("Reply with just: OK") is chat; on 308
          # labelled prompts and 20 short opencode messages the class question went 286 -> 297 of 328
@@ -560,7 +573,8 @@ SHIPPED_ROUTER: dict = {
                          "that asks for no work: no code, files, commands or git."),
          # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
          # an essay
-         "policy": {"effort": "medium", "packages": CHAT_CORE + EVERYDAY["chat"], "rules": []}},
+         "policy": {"effort": "medium", "packages": CHAT_CORE + ["everyday-core"] + EVERYDAY_ALL,
+                    "rules": []}},
     ],
     "classifier": {
         "stages": [
@@ -1356,7 +1370,8 @@ POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
                # L1: 12 (was 8): a coding class lists two general packages more, the Laya ones
                # OPS-39: 16, the coding classes list 13 with tandem-core and render-tools
-               "packages": {"type": "array", "items": _ID, "maxItems": 16},
+               # PKG3: 48, the prose classes offer the whole everyday set (35 with the cores)
+               "packages": {"type": "array", "items": _ID, "maxItems": 48},
                # FX6: the class's core skills, always in on a turn of the class (like a general
                # package, but for this class alone); one not in `packages` is ignored
                "core": {"type": "array", "items": _ID, "maxItems": 4},
