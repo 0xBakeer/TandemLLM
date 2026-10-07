@@ -18,6 +18,10 @@ Such a turn resumed at the previous prompt's last 1,024 line and re-read the who
   5  a hidden span and a whitespace difference in one generation
   6  the bytes of a byte-level BPE tokenizer's tokens
   7  through the handler: `usage.prompt_tokens` is the client's count, the journal's resume `end`
+  8  SRV-239: a copy that leaves an answer's reasoning out (Open WebUI sends none back; the
+     template renders `<think>\n\n</think>`) resumes at the end anchor, served with the rows'
+     reasoning; two turns of it in a row; anything else in the answer changed is served as sent;
+     `reasoning` off (QWEN38_END_ALIGN_REASONING=off) refuses it as 0.3.49-test did
 
 Run: python tests/test_end_align.py
 """
@@ -180,7 +184,8 @@ def test_the_turn_after_an_aligned_turn_is_aligned_again():
     out2, pre2, ctx2 = turn(ids2, 30)
     assert pre2["kind"] == "end"
     e2 = res.end["at"]
-    assert al.regions(res) == [(len(prompt), e1), (len(ids2), e2)], al.regions(res)
+    assert [r[:2] for r in al.regions(res)] == [(len(prompt), e1), (len(ids2), e2)], \
+        al.regions(res)
     # turn 3: the client re-renders turn 1 the same way, and turn 2 with a newline of its own
     copy3 = copy2 + out2[:5] + [NL] + out2[5:] + TOOL2
     ids3, _, a3 = app._end_replay(res, copy3)
@@ -248,6 +253,86 @@ def test_through_the_handler_usage_is_the_clients_and_the_resume_the_end():
     assert last["kind"] == "end" and last["reused"] == e, last
     assert r2["usage"]["prompt_tokens"] == sent, (r2["usage"], sent)
     assert app.cache_stats()["end_align"]["aligned"] == 1
+
+
+# ------------------------------------------------------------------ 8. the reasoning left out
+
+def _thinking(prompt, n=60):
+    """A first turn whose generation holds a `</think>`: a token of the greedy output no earlier
+    token repeats is taken as the tag (the random model writes no real one). Returns (res, al,
+    out, k) with the tag at out[k]."""
+    res, al = _setup()
+    out, _ = _first(prompt, n)
+    k = next(i for i in range(12, 30) if out[i] not in out[:i] and out[i] not in prompt
+             and out[i] not in (NL, SP))
+    res, al = _setup(tb_of({out[k]: endalign.THINK_END}))
+    again, _ = _first(prompt, n)
+    assert again == out
+    return res, al, out, k
+
+
+def test_srv239_a_copy_without_the_reasoning_resumes_at_the_end():
+    """W02 (UX2, 0.3.48-test): 'Explain how a heat pump works' thought, the follow-up resumed at
+    the head's 6,144 instead of the end. The prompt ends `<think>\n` (its last token whitespace),
+    the copy writes `<think>\n\n</think>\n\n` + the answer: one whitespace token where the rows
+    have the newline and the reasoning, then the tag and the answer as the rows hold them."""
+    prompt = tokens(99, seed=90) + [NL]
+    res, al, out, k = _thinking(prompt)
+    e = res.end["at"]
+    assert al.regions(res) == [(len(prompt), e, len(prompt) + k)], al.regions(res)
+    copy = prompt[:-1] + [SP] + out[k:] + TOOL
+    ids, spans, aligned = app._end_replay(res, copy)
+    # the rows' tokens up to the end anchor (the reasoning included), then the copy's own: the
+    # generation's last token (decided, never forwarded) and the new message
+    assert ids == res.tokens[:e] + out[e - len(prompt):] + TOOL, (len(ids), e)
+    assert spans == [] and aligned > 0
+    assert al.stats["aligned_reasoning"] == 1 and al.stats["reasoning_tokens"] == k
+    got, pre, _ = turn(ids, 12)
+    assert pre["kind"] == "end" and pre["reused"] == e, pre
+    assert got == _cold(ids, 12), "the end anchor's gate: the same greedy tokens as cold"
+
+
+def test_srv239_off_and_a_changed_answer_are_served_as_sent():
+    prompt = tokens(99, seed=91) + [NL]
+    res, al, out, k = _thinking(prompt)
+    copy = prompt[:-1] + [SP] + out[k:] + TOOL
+    al.reasoning = False                       # QWEN38_END_ALIGN_REASONING=off: 0.3.49-test
+    assert app._end_replay(res, copy) == (copy, [], 0)
+    al.reasoning = True
+    j = next(i for i in range(k + 2, len(out) - 2) if out[i] not in (NL, SP))
+    other = next(t for t in range(1, 95) if t not in (out[j], out[k]))
+    changed = prompt[:-1] + [SP] + out[k:j] + [other] + out[j + 1:] + TOOL
+    assert app._end_replay(res, changed) == (changed, [], 0)
+    # a copy WITH the reasoning (opencode sends it back) aligns as before, on the first pass
+    assert app._end_replay(res, prompt + out + TOOL)[0] == prompt + out + TOOL
+    assert al.stats["aligned_reasoning"] == 0
+
+
+def test_srv239_two_thinking_turns_in_a_row():
+    """The second follow-up's copy leaves out both answers' reasoning: the first answer's region
+    travels with the end anchor, its reasoning end with it."""
+    prompt = tokens(99, seed=92) + [NL]
+    res, al, out1, k1 = _thinking(prompt, 50)
+    e1 = res.end["at"]
+    copy2 = prompt[:-1] + [SP] + out1[k1:] + TOOL + [NL]
+    ids2, _, a2 = app._end_replay(res, copy2)
+    assert a2 and ids2 == res.tokens[:e1] + out1[e1 - len(prompt):] + TOOL + [NL]
+    out2, pre2, _ = turn(ids2, 40)
+    assert pre2["kind"] == "end"
+    # the second tag: a token neither the first answer's reasoning nor this one's start holds,
+    # and the first tag not before it (each region's first `</think>` is its own)
+    k2 = next(i for i in range(4, 35) if out2[i] not in out2[:i] and out2[i] not in out1[:k1 + 1]
+              and out2[i] not in (NL, SP) and out1[k1] not in out2[:i])
+    over = {out1[k1]: endalign.THINK_END, out2[k2]: endalign.THINK_END}
+    al.tbytes = tb_of(over)
+    e2 = res.end["at"]
+    al._regions = [(a, b, al._think_end(res.tokens, a, b)) for a, b, _ in al._regions]
+    assert [r[2] for r in al.regions(res)] == [len(prompt) + k1, len(ids2) + k2], al.regions(res)
+    copy3 = copy2[:-1] + [SP] + out2[k2:] + TOOL2
+    ids3, _, a3 = app._end_replay(res, copy3)
+    assert a3 and ids3 == res.tokens[:e2] + out2[e2 - len(ids2):] + TOOL2, (len(ids3), e2)
+    _, pre3, _ = turn(ids3, 4)
+    assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
 
 
 if __name__ == "__main__":

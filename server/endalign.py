@@ -36,6 +36,22 @@ were, the prompt starting with the old rows) and the new generation's. A generat
 re-renders the same way every turn is aligned on every turn after it, as the hidden spans are
 replayed.
 
+THE REASONING (SRV-239, 2026-10-07). Six of six Open WebUI chats whose first answer thought
+re-read that answer on their first follow-up (cached 6,144 of 6,882 to 8,621 tokens, TTFT 2.5 to
+5.0 s), while the chats whose first answer did not think resumed at its end. Open WebUI does not
+send an answer's reasoning back, and the Qwen3.8 template (`preserve_thinking` on by default)
+renders such an assistant message as `<think>\n\n</think>\n\n` + the answer: the copy holds an
+empty block where the rows hold the reasoning, it parts from them right after `<think>`, and the
+resume falls back to the grid line below (the head's 6,144). A region therefore remembers where
+its reasoning ends (its first `</think>`, `_think_end`), and when the copy does not align with
+the reasoning in it, a second pass aligns it with every region's reasoning taken out (the
+whitespace before it included): every other non-whitespace byte must still be the rows' own, in
+order. The prompt is then served with the rows' tokens up to the end anchor, the reasoning the
+engine wrote included -- the template's own default, which renders an earlier answer's reasoning
+when the client sends it -- and the turn resumes at the end anchor. A client that sends the
+reasoning back (opencode) aligns on the first pass as before. `QWEN38_END_ALIGN_REASONING=off`:
+the first pass alone (0.3.49-test).
+
 Exactness: what is served up to the end anchor is the context the engine had, the session cache's
 resume, held to the greedy gate as every end-anchor resume is (docs/caches.md). The alignment
 reads token ids and the tokenizer's bytes; it writes nothing the client sees. Off (`--end-align
@@ -45,6 +61,7 @@ off`): `ResidentPrefix.replay` alone, as 0.3.20-test.
 from __future__ import annotations
 
 WS = b" \t\n\r"
+THINK_END = b"</think>"
 
 
 def _byte_decoder() -> dict:
@@ -102,24 +119,39 @@ class EndAlign:
     """The whitespace alignment of a copy against the end anchor's rows, and the regions it may
     use. One per server; called under the engine lock, as the replay is."""
 
-    def __init__(self, tbytes, on: bool = True):
+    def __init__(self, tbytes, on: bool = True, reasoning: bool = True):
         self.tbytes = tbytes
         self.on = bool(on)
+        self.reasoning = bool(reasoning)  # SRV-239: the second pass, without the reasoning
         self._for = None             # the end anchor (the `ResidentPrefix.end` dict) of `_regions`
-        self._regions: list[tuple[int, int]] = []
-        self._carry: list[tuple[int, int]] = []    # the served prompt's, for the next `kept`
-        self.stats = {"aligned": 0, "aligned_tokens": 0, "refused": 0, "regions": 0}
+        # (start, end, the position of the region's first `</think>` or -1): rows positions
+        self._regions: list[tuple[int, int, int]] = []
+        self._carry: list[tuple[int, int, int]] = []    # the served prompt's, for the next `kept`
+        self.stats = {"aligned": 0, "aligned_tokens": 0, "refused": 0, "regions": 0,
+                      "aligned_reasoning": 0, "reasoning_tokens": 0}
+        # the rows ranges the last `replay` served that the client's copy left out (SRV-233)
+        self.last_omitted: list[tuple[int, int]] = []
 
-    def regions(self, res) -> list[tuple[int, int]]:
+    def regions(self, res) -> list[tuple[int, int, int]]:
         """The end anchor's generation regions (rows positions), when they are its."""
         end = getattr(res, "end", None)
         return list(self._regions) if end is not None and end is self._for else []
+
+    def _think_end(self, rows: list, a: int, b: int) -> int:
+        """The position of the first `</think>` in rows [a, b), -1 when the region has none (a turn
+        that did not think: its prompt closed the block)."""
+        tb = self.tbytes
+        for p in range(a, min(b, len(rows))):
+            if tb(rows[p]) == THINK_END:
+                return p
+        return -1
 
     def replay(self, res, ids: list[int]) -> tuple[list[int], list, int]:
         """`(ids, hidden spans put back, tokens aligned)`: `res.replay`'s answer when it has one
         (or when off), else the copy aligned to the rows where only whitespace differs."""
         out, spans = res.replay(ids)
         aligned = 0
+        self.last_omitted = []
         if not spans and self.on and res.end is not None:
             got = self._align(res, ids)
             if got is not None:
@@ -144,7 +176,7 @@ class EndAlign:
         e = int(res.end["at"])
         regs = [r for r in self._carry if r[1] <= int(n_prompt)]
         if self.on and e > int(n_prompt):
-            regs.append((int(n_prompt), e))
+            regs.append((int(n_prompt), e, self._think_end(res.tokens, int(n_prompt), e)))
         self._for, self._regions, self._carry = res.end, regs, []
         self.stats["regions"] = len(regs)
 
@@ -155,12 +187,36 @@ class EndAlign:
             return
         e = int(res.end["at"])
         self._for = res.end
-        self._regions = [(int(a), int(b)) for a, b in regions if int(b) <= e]
+        regs = []
+        for r in regions:
+            a, b = int(r[0]), int(r[1])
+            if b <= e:
+                # an entry written before SRV-239 has no reasoning end: found again in the rows
+                t = int(r[2]) if len(r) > 2 else self._think_end(res.tokens, a, b)
+                regs.append((a, b, t))
+        self._regions = regs
         self._carry = []
         self.stats["regions"] = len(self._regions)
 
     # ------------------------------------------------------------------ the walk
     def _align(self, res, copy: list[int]):
+        """The copy aligned to the rows: first as the rows are, then (SRV-239) with every
+        region's reasoning left out of what the copy must hold."""
+        refused = self.stats["refused"]
+        self.last_omitted = []
+        got = self._walk(res, copy, False)
+        if got is None and self.reasoning and any(r[2] > r[0] for r in self.regions(res)):
+            got = self._walk(res, copy, True)
+            if got is not None:
+                self.stats["aligned_reasoning"] += 1
+                self.stats["reasoning_tokens"] += got[2]
+                self.last_omitted = [(a, t) for a, _, t in self.regions(res) if t > a]
+        # one refusal a copy, whichever pass said it
+        self.stats["refused"] = refused + (0 if got is not None else
+                                           int(self.stats["refused"] > refused))
+        return None if got is None else got[:2]
+
+    def _walk(self, res, copy: list[int], omit: bool):
         end = res.end
         e, rows = int(end["at"]), res.tokens
         regs = self.regions(res)
@@ -171,7 +227,21 @@ class EndAlign:
             return None                                # the copy holds the rows: nothing to align
         hidden = [(int(p), list(h)) for p, h in end["hidden"]]
         hid = set()
-        zones = [tuple(r) for r in regs]
+        zones = [(r[0], r[1]) for r in regs]
+        left = 0
+        if omit:
+            # each region's reasoning (from its start to its `</think>`) is not in the copy; the
+            # whitespace right before it (the prompt's `\n` after `<think>`, which the copy
+            # writes as one `\n\n` token with the empty block's) may differ too
+            for a, b, t in regs:
+                if t <= a:
+                    continue
+                hid.update(range(a, t))
+                left += t - a
+                z = a
+                while z > 0 and not _bare(self.tbytes(rows[z - 1])):
+                    z -= 1
+                zones.append((z, b))
         for p, h in hidden:
             hid.update(range(p, p + len(h)))
             a, b = p, p + len(h)
@@ -214,10 +284,10 @@ class EndAlign:
             return None
         self.stats["aligned"] += 1
         self.stats["aligned_tokens"] += aligned
-        return rows[:e] + copy[j + e - i:], aligned
+        return rows[:e] + copy[j + e - i:], aligned, left
 
     def report(self) -> dict:
-        return {"on": self.on, **self.stats}
+        return {"on": self.on, "reasoning": self.reasoning, **self.stats}
 
 
 def _merge(zones: list[tuple[int, int]]) -> list[tuple[int, int]]:
