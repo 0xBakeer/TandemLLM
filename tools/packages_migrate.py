@@ -84,6 +84,10 @@ asked for it: "quote Laya's verdicts", "say in your final message that you remov
  24  testing: a quirk of the model's own test tools (a kit step, the judge, a screenshot it could not
      open) is not news for the user (the first live run after 15-23: an answer still explained "the
      test kit's type step" and "the judge flagged two scenarios").
+ 25  coding: the done message's list in the user's words: a surprise in the product and its cause,
+     not the test tools'; Laya's labels and probabilities, the kit, the scratch folder and state
+     hooks stay out of it (opencode answers named Laya, `.tandem` and the scratch folder 26 to 43
+     times in three refinements of one session).
 
 Every edit is idempotent: a text already migrated comes out unchanged.
 
@@ -125,7 +129,7 @@ NOTE_351 = ("0.3.51-test: the final message speaks to the user (no Laya scores, 
 ROUND4 = ("testing: the state hook goes", "testing: the final message", "testing: check-only overlays",
           "laya-testing: verdicts read", "test-*: the report", "laya-playtest: the report is read",
           "design-review: Laya's verdict read", "skills: fps read", "tandem-harness: the final message",
-          "testing: test-tool quirks")
+          "testing: test-tool quirks", "coding: the done list")
 NOTE_345 = ("0.3.45-test: a page is checked with the kit's page check (its own headless Chrome, Laya at "
             "{tandem_url}), never a driver of one's own; one check, fix, check, report (SRV-195)")
 
@@ -326,6 +330,10 @@ SKILL_FPS = (("- [ ] Draw calls, triangles and fps reported from `renderer.info`
 TOOLS_QUIRK_RULE = ("- A quirk of your own test tools (a kit step that behaves oddly, the judge's doubt, a screenshot you "
                     "could not open) is yours to work around, not news for the user: leave it out of the final "
                     "message.")
+DONE_LIST_OLD = "what the use test did (inputs, duration, state read, screenshots); every surprise and its cause."
+DONE_LIST_NEW = ("what the use test did (inputs, duration, state read, screenshots), in the user's words; every "
+                 "surprise in the product and its cause. Laya's labels and probabilities, the kit, the scratch "
+                 "folder and state hooks stay out of it, and so do the quirks of your own test tools.")
 REPORT_LINE = "Report (the evidence you keep; the final message says it in plain words): "
 # 7: test-web
 WEB1_OLD = "1. Serve it, open it in the browser tool; zero console errors first."
@@ -452,6 +460,9 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         out = _once(out, FINISH_NEW, OVERLAY_RULE, changes, "testing: check-only overlays go before done")
     if OVERLAY_RULE in out:
         out = _once(out, OVERLAY_RULE, TOOLS_QUIRK_RULE, changes, "testing: test-tool quirks stay out")
+    if DONE_LIST_OLD in out and DONE_LIST_NEW not in out:
+        out = out.replace(DONE_LIST_OLD, DONE_LIST_NEW, 1)
+        changes.append("coding: the done list in the user's words")
     out = _once(out, HARNESS_ANCHOR, HARNESS_RULE, changes, "tandem-harness: the final message")
     # 19: a test package's "Report:" line is the model's own evidence, not the user's message
     got = re.sub(r"(?m)^Report: ", REPORT_LINE, out)

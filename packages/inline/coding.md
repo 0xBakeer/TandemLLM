@@ -54,4 +54,4 @@ A result you did not predict is a defect until the code explains it: lives gone 
 Two failed fixes on one bug: stop, re-read the function from the top, write the bug down in one sentence before the next change.
 
 ## 7. The done message
-"Done" needs this list: files written; commands run; what the use test did (inputs, duration, state read, screenshots); every surprise and its cause. If an item is missing, say "not done: <what is missing>" instead.
+"Done" needs this list: files written; commands run; what the use test did (inputs, duration, state read, screenshots), in the user's words; every surprise in the product and its cause. Laya's labels and probabilities, the kit, the scratch folder and state hooks stay out of it, and so do the quirks of your own test tools. If an item is missing, say "not done: <what is missing>" instead.

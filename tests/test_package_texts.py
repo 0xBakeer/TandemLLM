@@ -253,7 +253,8 @@ def test_the_final_message_edits():
     doc = _seed()
     undo = ((M.STATE_SAY_NEW, M.STATE_SAY_OLD), (M.FINISH_NEW + "\n" + M.OVERLAY_RULE, M.FINISH_OLD),
             (M.LAYA_QUOTE_NEW, M.LAYA_QUOTE_OLD), (M.LAYA_DONE_NEW, M.LAYA_DONE_OLD),
-            (M.PLAY_QUOTE_NEW, M.PLAY_QUOTE_OLD), ("\n" + M.HARNESS_RULE, ""), (M.REPORT_LINE, "Report: "))
+            (M.PLAY_QUOTE_NEW, M.PLAY_QUOTE_OLD), ("\n" + M.HARNESS_RULE, ""), (M.REPORT_LINE, "Report: "),
+            ("\n" + M.TOOLS_QUIRK_RULE, ""), (M.DONE_LIST_NEW, M.DONE_LIST_OLD))
     for name, p in doc["packages"].items():
         if isinstance(p.get("body"), str):
             for new, old in undo:
@@ -261,7 +262,9 @@ def test_the_final_message_edits():
     assert M.FINISH_OLD in doc["packages"]["testing"]["body"]
     new, report = M.migrate_doc(doc)
     assert {"testing", "laya-testing", "laya-playtest", "tandem-harness", "test-web", "test-cli",
-            "test-api", "test-data", "test-lib"} <= set(report), report
+            "test-api", "test-data", "test-lib", "coding"} <= set(report), report
+    assert M.DONE_LIST_NEW in new["packages"]["coding"]["body"] and M.DONE_LIST_OLD not in new["packages"]["coding"]["body"]
+    assert new["packages"]["testing"]["body"].count(M.TOOLS_QUIRK_RULE) == 1
     t = new["packages"]["testing"]["body"]
     assert t.count(M.FINISH_NEW) == 1 and t.count(M.OVERLAY_RULE) == 1 and M.FINISH_OLD not in t
     assert "say in your final message that you removed it" not in t
