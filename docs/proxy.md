@@ -19,6 +19,19 @@ The proxy only observes in this release. It never changes a request's meaning: i
 
 `server/app.py --backends ~/.tandemllm/config.sqlite3` serves the engine's own model as before and relays every request whose model belongs to a backend. A relayed request runs on its own thread and never takes the engine's lock or a place in its queue, so a slow cloud answer cannot hold up the engine and the engine's queue cannot hold up a cloud answer. On the :8000 service, set `QSE_BACKENDS` in `ops/serve.env` and restart; empty means off, and the service is exactly what it was.
 
+First live run, 2026-10-07 on the test board (0.4.1-test), with DeepSeek as the one backend:
+
+    # once: the backend and its key into the config database (the key encrypted, AES-256-GCM;
+    # the master key is secrets.key beside the database, mode 0600), from the Backends screen or
+    # ConfigDB.create_backend({"id": "deepseek", "kind": "deepseek", "key": ...})
+    # ops/serve.env:
+    QSE_BACKENDS=${HOME}/.qwen38-spark-engine/backends/config.sqlite3
+    TANDEM_BACKENDS=deepseek
+    TANDEM_BACKEND_DEEPSEEK_KIND=deepseek
+    TANDEM_BACKEND_DEEPSEEK_URL=https://api.deepseek.com/v1
+
+Setting the kind and the URL in the environment locks them on the Backends screen. Without an admin password anyone who reaches the port can edit a backend, and a URL changed to another host would receive the key in the `Authorization` header; with the URL locked that edit answers 422. The key itself stays in the database, never in serve.env. The start log says `[proxy] on: ..., 1 backends (deepseek); TandemLLM stays the engine's`. Measured through the LAN reverse proxy: `/v1/models` listed `TandemLLM`, `deepseek-flash` and `deepseek-v4-pro`; streamed answers carried the reasoning in `reasoning_content` with `thinking` on and none with it off; time to first token 0.65 to 0.85 s; Open WebUI and opencode picked the DeepSeek models from the same connection as `TandemLLM`; a DeepSeek request sent while the engine was decoding a request of its own got its first token in 0.77 s, as when the engine was idle. Every row is in the ledger with its cost.
+
 ### On its own
 
 Anyone without a GPU runs the same code. It needs Python 3.11 or newer, the standard library and `cryptography`, and never pulls torch. From a checkout:
