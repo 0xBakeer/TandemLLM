@@ -129,7 +129,8 @@ def test_a_new_box_serves_the_live_configuration():
             if kind == "packages":
                 # the shipped directories after the box's own
                 assert got["doc"]["skill_dirs"] == want["skill_dirs"] + [
-                    "{repo}/packages/skills", "{repo}/packages/library"], got["doc"]["skill_dirs"]
+                    "{repo}/packages/skills", "{repo}/packages/library",
+                    "{repo}/packages/everyday"], got["doc"]["skill_dirs"]
                 want = dict(want, skill_dirs=got["doc"]["skill_dirs"])
             _same(want, got["doc"], "", FILLED.get(kind, set()), bad)
             bad = [f"{kind}: {b}" for b in bad] if bad and not bad[0].startswith(kind) else bad

@@ -450,11 +450,40 @@ LIBRARY: dict = {
 # `render-tools` (how to use SRV-105's render tool server, general, `requires_tools: [render]`)
 # on every class that builds something, so the tool fit leaves it out until a chat offers the tool
 CORE_PACKAGES = ["tandem-core"]
+# PKG3 (2026-10-07): tandem-core on the chat class waits for the owner's call (+~290 tokens a
+# plain chat turn); the one-line switch: CHAT_CORE = ["tandem-core"]. On a box, the router
+# document's chat class lists it or not (live, no restart)
+CHAT_CORE: list[str] = []
 BUILD_PACKAGES = ["tandem-core", "files-care", "testing", "laya-testing", "laya-playtest",
                   "render-tools"]
 CODING_PACKAGES = ("tandem-core", "coding", "files-care", "testing", "laya-testing", "laya-playtest",
                    "laya-scripts", "test-web", "test-cli", "test-api", "test-data", "test-lib",
                    "render-tools")
+
+# PKG2 (2026-10-07, the owner: "create many others so they will help in normal life usage of
+# AI"): the everyday library, packages/everyday/<name>/SKILL.md, on the classes a plain chat lands
+# on. `everyday-core` is general on each of them (the user's language, plain words, the whole
+# result in the answer, one question at most); the rest are the class's candidates for the package
+# question, so a message that fits none of them gets none. None needs a tool: the answer carries
+# the result. The chooser's list stays under eleven a class; the debug class carries the one
+# everyday package a non-coder's "it does not work" may land on
+EVERYDAY: dict[str, list[str]] = {
+    "writing": ["everyday-core", "write-message", "formal-letter", "cv-cover-letter",
+                "rewrite-text", "proofread", "translate", "social-post", "creative-writing",
+                "difficult-conversation"],
+    "plan": ["everyday-core", "trip-plan", "weekly-schedule", "meal-plan", "budget-plan",
+             "event-plan", "checklist-builder", "study-plan", "decision-helper", "fitness-sleep",
+             "flashcards-quiz"],
+    "research": ["everyday-core", "explain-simply", "compare-options", "fact-check",
+                 "understand-document", "homework-help", "tech-troubleshoot", "security-scam",
+                 "health-info", "recipe-cooking", "home-howto"],
+    "summarize": ["everyday-core", "summarize-text", "understand-document", "flashcards-quiz",
+                  "rewrite-text"],
+    "chat": ["everyday-core", "explain-simply", "language-practice", "gift-ideas",
+             "parenting-help", "health-info", "security-scam", "translate", "recipe-cooking",
+             "difficult-conversation"],
+    "debug": ["tech-troubleshoot"],
+}
 
 SHIPPED_ROUTER: dict = {
     "classes": [
@@ -470,8 +499,8 @@ SHIPPED_ROUTER: dict = {
              "change."]}},
         {"id": "debug", "label": "Debug",
          "description": "Find and fix a bug, a failing test, an error message or a crash.",
-         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES), "core": ["coding"],
-                    "rules": [
+         "policy": {"effort": "xhigh", "packages": list(CODING_PACKAGES) + EVERYDAY["debug"],
+                    "core": ["coding"], "rules": [
              "Reproduce the failure first, change one thing at a time, and quote the result line "
              "of the check."]}},
         {"id": "design_ui", "label": "UI design",
@@ -508,18 +537,21 @@ SHIPPED_ROUTER: dict = {
         {"id": "writing", "label": "Writing",
          "description": "Write prose in words, not code: an essay, an article, a story, an email, "
                         "a letter, a post or documentation text.",
-         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
+         "policy": {"effort": "medium", "packages": CORE_PACKAGES + EVERYDAY["writing"],
+                    "rules": []}},
         {"id": "plan", "label": "Plan",
          "description": "Plan an approach, a design or an architecture before building it, or "
                         "break the work into steps.",
-         "policy": {"effort": "high", "packages": list(CORE_PACKAGES), "rules": []}},
+         "policy": {"effort": "high", "packages": CORE_PACKAGES + EVERYDAY["plan"],
+                    "rules": []}},
         {"id": "research", "label": "Research",
          "description": "Look something up, compare options, or explain how something works.",
-         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
+         "policy": {"effort": "medium", "packages": CORE_PACKAGES + EVERYDAY["research"],
+                    "rules": []}},
         {"id": "summarize", "label": "Summarize",
          "description": "Summarize, shorten or pull the key points out of text that is given, or "
                         "compress a conversation.",
-         "policy": {"effort": "off", "packages": [], "rules": []}},
+         "policy": {"effort": "off", "packages": list(EVERYDAY["summarize"]), "rules": []}},
         {"id": "chat", "label": "Chat",
          # SRV-235: an instruction about the reply itself ("Reply with just: OK") is chat; on 308
          # labelled prompts and 20 short opencode messages the class question went 286 -> 297 of 328
@@ -528,7 +560,7 @@ SHIPPED_ROUTER: dict = {
                          "that asks for no work: no code, files, commands or git."),
          # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
          # an essay
-         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
+         "policy": {"effort": "medium", "packages": CHAT_CORE + EVERYDAY["chat"], "rules": []}},
     ],
     "classifier": {
         "stages": [

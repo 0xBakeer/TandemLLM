@@ -1,5 +1,5 @@
 {
- "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227); packages-first: the class lists carry tandem-core, render-tools and the first packages (OPS-39)",
+ "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227); packages-first: the class lists carry tandem-core, render-tools and the first packages (OPS-39); PKG2 (2026-10-07): the everyday packages on writing, plan, research, summarize, chat, debug; PKG3: tandem-core off on chat until the owner's call",
  "doc": {
   "classes": [
    {
@@ -55,7 +55,8 @@
       "test-api",
       "test-data",
       "test-lib",
-      "render-tools"
+      "render-tools",
+      "tech-troubleshoot"
      ],
      "core": [
       "coding"
@@ -142,7 +143,17 @@
     "policy": {
      "effort": "medium",
      "packages": [
-      "tandem-core"
+      "tandem-core",
+      "everyday-core",
+      "write-message",
+      "formal-letter",
+      "cv-cover-letter",
+      "rewrite-text",
+      "proofread",
+      "translate",
+      "social-post",
+      "creative-writing",
+      "difficult-conversation"
      ],
      "rules": []
     }
@@ -154,7 +165,18 @@
     "policy": {
      "effort": "high",
      "packages": [
-      "tandem-core"
+      "tandem-core",
+      "everyday-core",
+      "trip-plan",
+      "weekly-schedule",
+      "meal-plan",
+      "budget-plan",
+      "event-plan",
+      "checklist-builder",
+      "study-plan",
+      "decision-helper",
+      "fitness-sleep",
+      "flashcards-quiz"
      ],
      "rules": []
     }
@@ -166,7 +188,18 @@
     "policy": {
      "effort": "medium",
      "packages": [
-      "tandem-core"
+      "tandem-core",
+      "everyday-core",
+      "explain-simply",
+      "compare-options",
+      "fact-check",
+      "understand-document",
+      "homework-help",
+      "tech-troubleshoot",
+      "security-scam",
+      "health-info",
+      "recipe-cooking",
+      "home-howto"
      ],
      "rules": []
     }
@@ -177,7 +210,13 @@
     "description": "Summarize, shorten or pull the key points out of text that is given, or compress a conversation.",
     "policy": {
      "effort": "off",
-     "packages": [],
+     "packages": [
+      "everyday-core",
+      "summarize-text",
+      "understand-document",
+      "flashcards-quiz",
+      "rewrite-text"
+     ],
      "rules": []
     }
    },
@@ -188,7 +227,16 @@
     "policy": {
      "effort": "medium",
      "packages": [
-      "tandem-core"
+      "everyday-core",
+      "explain-simply",
+      "language-practice",
+      "gift-ideas",
+      "parenting-help",
+      "health-info",
+      "security-scam",
+      "translate",
+      "recipe-cooking",
+      "difficult-conversation"
      ],
      "rules": []
     }
