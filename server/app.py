@@ -2295,7 +2295,11 @@ def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
     eng, drafter = STATE["engine"], STATE["drafter"]
     n_prompt = int(STATE.get("last_prompt_n") or 0)
     e, n_c = int(eng.kv.length), len(committed)
-    if n_prompt <= 0 or e < n_prompt or n_c < n_prompt:
+    res0 = dict.get(STATE, "resident")
+    chunk = int(getattr(res0, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
+    if n_prompt <= 0 or e < n_prompt or n_c < n_prompt or min(e, n_c) < 2 * chunk:
+        # a short request (the router's own question, a title task) is no conversation to carry,
+        # and its end must not keep the next guest off the side slot (`Pool.take_side`)
         return "short"
     if e > n_c:
         trim = getattr(eng, "trim_pending", None)
@@ -2387,13 +2391,10 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
         if seng is None:
             return None
         e = int(rec["at"])
-        if drafter is not None and hasattr(drafter, "state_resume"):
-            drafter.state_resume(e)        # builds a draft cache that does not exist yet
-        v0, v1 = cache._kv_views(eng, drafter), cache._kv_views(seng, sdrafter)
-        if (spill_mod._layout(v0) != spill_mod._layout(v1)
-                or e > min(t.shape[ax] for t, ax in v0) or e > min(t.shape[ax] for t, ax in v1)
-                or seng.state.S.shape != eng.state.S.shape
-                or seng.state.conv.shape != eng.state.conv.shape):
+        v1 = cache._kv_views(seng, sdrafter)
+        if (e > min(t.shape[ax] for t, ax in v1) or seng.state.S.shape != eng.state.S.shape
+                or seng.state.conv.shape != eng.state.conv.shape
+                or len(v1) != len(cache._kv_views(eng, drafter))):
             return None
         with torch.no_grad():
             if eng.state.S.is_cuda:
@@ -2401,7 +2402,16 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             disk = STATE.get("disk_cache")
             if disk is not None:
                 spill_mod.cache_fence(disk, 0)
+            # slot 0's conversation leaves first (its rows and its drafter's), as the spill's
+            # restore saves the resident one before it reads (engine/spill.py `maybe_restore`)
             how = res.vacate(eng, drafter, session if session is not None else rec.get("owner"))
+            if drafter is not None and hasattr(drafter, "state_resume"):
+                drafter.state_resume(e)    # builds a draft cache that does not exist yet
+            v0 = cache._kv_views(eng, drafter)
+            if (spill_mod._layout(v0) != spill_mod._layout(v1)
+                    or e > min(t.shape[ax] for t, ax in v0)):
+                res.clear()
+                return None
             for (t, ax), (u, _) in zip(v0, v1):
                 t.narrow(ax, 0, e).copy_(u.narrow(ax, 0, e))
             res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")

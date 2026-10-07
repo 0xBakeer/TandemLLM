@@ -164,6 +164,24 @@ def test_a_guest_does_not_take_a_side_slot_whose_end_is_fresh():
         app.SIDE_CARRY = old
 
 
+def test_a_short_side_request_notes_no_end_and_keeps_no_guest_away():
+    """The router's own questions and a title task (150 to 450 tokens on the box) run on the side
+    slot too: under two chunks their end is no conversation to carry, and noting it would send
+    every following guest to slot 0 for ten minutes."""
+    old = app.SIDE_CARRY
+    try:
+        app.SIDE_CARRY = "on"
+        res, pool, side = _pool()
+        turn(R_PROMPT, 40, session="R")
+        side_turn(pool, tokens(20, seed=95), 5, "q")       # 25 tokens < 2 x CH
+        assert side.carry is None
+        s = pool.take_side(100, owner="g", keep_carry_s=app.CARRY_KEEP_S)
+        assert s is side
+        pool.release_side(s)
+    finally:
+        app.SIDE_CARRY = old
+
+
 def test_the_side_requests_hidden_spans_are_replayed_at_the_carried_end():
     """A router note at the side request's tail is in the side slot's rows, not in the client's
     copy: the carried end lists it and the replay puts it back, as at any end anchor."""
