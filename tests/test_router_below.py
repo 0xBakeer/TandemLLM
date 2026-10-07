@@ -61,7 +61,8 @@ def test_1_the_pagoda_stays_three_d():
 
 def test_2_a_class_that_builds_nothing_falls_back():
     for cls in ("chat", "research", "writing", "plan", "summarize"):
-        assert not (CLASSES[cls]["policy"].get("packages")), cls
+        # PKG3: the prose classes name everyday packages, but no files-care: they build nothing
+        assert "files-care" not in (CLASSES[cls]["policy"].get("packages") or []), cls
         probs = {cls: 0.40, "code_edit": 0.20, "chat": 0.1}
         probs[cls] = 0.40
         assert Router._below_build(stage(probs), router(), NEW, CLASSES) is None, cls

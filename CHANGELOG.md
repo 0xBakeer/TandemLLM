@@ -2,7 +2,7 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased, branch `packages-first`, 2026-10-07
+## Unreleased (packages merged on main), 2026-10-07
 
 ### The first packages (OPS-39; QA OPS-40)
 
@@ -10,6 +10,16 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - Two tool capabilities for the tool fit (SRV-243): `render` (a tool with a string `html` argument) and `render_video` (`scenes` and `cues`), in `requires_tools`; a chat without the tool never sees `render-tools`, and `explainer-video` gives way to `explainer-video-script` (the scene script and cue list as the answer). A class may list 16 packages (was 12).
 - `tools/packages_first.py` checks the folders against seed.json, INDEX.md and the router, measures the texts (the engine's tokenizer with `--tokenizer`), loads the eval sets and refuses private text; `tests/test_packages_first.py` runs it.
 - Raw and bench text are unchanged; the router's class lists changed (tandem-core and render-tools on the classes above, the first packages as choices of the package question on drawing, three_d and design_ui).
+
+### The everyday library (OPS-79; QA OPS-80)
+
+- 34 tool-free packages under `packages/everyday/` (a letter, a CV, a trip or a meal plan, a budget, explain simply, compare options, a scam check, health information, a recipe, language practice and more) and `everyday-core` (the user's language, plain words, the whole result in the answer, one question at most, honest limits on health, money and safety), general on writing, plan, research, summarize and chat; the rest are the package question's choices on those classes (`schema.EVERYDAY`), `tech-troubleshoot` also on debug. 210 eval prompts in `packages/everyday/evals/`; nothing is measured yet.
+
+### Merging the two package sets (PKG3)
+
+- The prose classes carry both: tandem-core, then the everyday packages (writing 11, plan 12, research 12); summarize the everyday ones only. tandem-core on chat is off until it is measured: `schema.CHAT_CORE` is the one-line switch, and on a box the router document's chat class lists it or not (live).
+- The tool-fit note ("This chat can write files but has no shell") speaks of the shell and file tools only: a package that leaves because the chat lacks a tool of its own (render-tools without a render tool) leaves without the note. Before, every opencode turn on a class listing render-tools would have read that it has no shell.
+- A first message under the accept bar is kept on its top class only when that class writes files (lists `files-care`, SRV-227), not when it lists any package: the prose classes name everyday packages now and still fall back to the default class (SRV-255's rule).
 
 ## 0.4.3-test, 2026-10-07
 

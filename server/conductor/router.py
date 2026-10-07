@@ -69,6 +69,10 @@ NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
 #: `off`: the packages chosen as before, whatever the tools
 TOOL_FIT = (_S.get("TOOL_FIT") or "on").strip().lower()
+# the tool capabilities the tool-fit note is about (`_fit`)
+NOTE_CAPS = frozenset({"shell", "write"})
+# the package every class that writes files lists (SRV-227): `_below_build`'s "builds"
+BUILD_MARK = "files-care"
 
 #: SRV-225: the `h:` heads whose conversations `Router._generation` tells apart, and the
 #: conversations kept per head (the oldest go first)
@@ -1127,8 +1131,8 @@ class Router:
     def _below_build(stages, router, sess, classes):
         """A session's first classified message whose answer stayed under the accept bar
         (`classifier.below_accept`, mode `build`): the top class when it builds something (its
-        policy names packages: code, a page, a scene, a drawing) and leads the second by at least
-        `margin`, else None (the default class, as before). Khaled's "Create a new folder and
+        policy names `files-care`: code, a page, a scene, a drawing) and leads the second by at
+        least `margin`, else None (the default class, as before). Khaled's "Create a new folder and
         create there a pagoda garden" read three_d 0.378 under a router whose chat class had just
         grown (0.464 before) and fell back to chat: no 3D skill, an ASCII pagoda written into a
         file until the argument loop guard stopped it. The class's reading line still says what
@@ -1143,7 +1147,10 @@ class Router:
         if not top or top[0][0] not in classes:
             return None
         cls, p = top[0]
-        if not (classes[cls].get("policy") or {}).get("packages"):
+        # PKG3 (2026-10-07): a class builds when it writes files, and every class that writes
+        # files carries `files-care` (SRV-227); since the everyday packages, the prose classes
+        # name packages too and still fall back
+        if BUILD_MARK not in ((classes[cls].get("policy") or {}).get("packages") or []):
             return None
         lead = p - (top[1][1] if len(top) > 1 else 0.0)
         if lead < float(rule.get("margin", 0.0)):
@@ -1526,9 +1533,15 @@ class Router:
         if TOOL_FIT == "off" or fit["mode"] == "off":
             return listed, core, None, set()
         out, dropped, swapped = [], [], {}
+        # PKG3 (2026-10-07): the note speaks of the shell and file tools; a package that leaves
+        # only for a tool of its own (render-tools without a render tool) leaves without it, or an
+        # opencode turn with a shell read "This chat can write files but has no shell"
+        noted = False
         for p in listed:
             use = p
             if not self.fits(plan, packages, p):
+                if (set(self.library.requires(packages, p)) - set(plan.tool_caps)) & NOTE_CAPS:
+                    noted = True
                 fb = self.library.fallback(packages, p)
                 use = fb if fb and fb in packages["packages"] and \
                     self.fits(plan, packages, fb) else None
@@ -1548,6 +1561,11 @@ class Router:
             row["shadow"] = dict(row.get("shadow") or {}, tools={
                 "dropped": dropped, "fallback": swapped})
             return listed, core, None, set()
+        if not noted:
+            core = [swapped.get(p, p) for p in core if p not in dropped]
+            stand_in = {fb for p, fb in swapped.items()
+                        if (packages["packages"].get(p) or {}).get("general")}
+            return out, core, None, stand_in
         names = ", ".join(plan.tool_names[:8])
         tools = f" (its tools: {names})" if names else ""
         key = "note_write" if "write" in caps else "note_none"

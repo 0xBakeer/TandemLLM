@@ -197,6 +197,8 @@ def test_5c_a_package_that_needs_the_render_tool():
     plan, text = _turn(cond, TERMINAL, "fit-render-none")
     assert "render-tools" not in _parts(plan) and "explainer-video" not in _parts(plan), \
         _parts(plan)
+    # PKG3: a shell and files chat is not told it "has no shell" because a render tool is missing
+    assert "fit" not in _parts(plan) and "has no shell" not in text, (_parts(plan), text[-300:])
     t = plan.row["extra"]["tools"]
     assert t["caps"] == ["shell", "write"] and t["dropped"] == ["render-tools",
                                                                 "explainer-video"], t

@@ -187,7 +187,9 @@ def check(tokenizer_dir: str | None = None) -> tuple[list[str], list[dict]]:
                 out.append(f"{name}: INDEX.md classes {index[name]} differ from the manifest's {m['classes']}")
         for c in m.get("classes", []):
             listed = name in classes[c]["policy"]["packages"] if c in classes else False
-            if m.get("general") and not listed:
+            # PKG3: tandem-core on chat waits for the owner's call (schema.CHAT_CORE, off)
+            switched = c == "chat" and name in schema.CORE_PACKAGES and not schema.CHAT_CORE
+            if m.get("general") and not listed and not switched:
                 out.append(f"{name}: general, but class {c} does not list it")
             if m.get("router", {}).get(c) and not listed:
                 out.append(f"{name}: the manifest says class {c} lists it, the router does not")

@@ -88,14 +88,18 @@ def test_the_router_lists_them():
     classes = {c["id"]: c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]}
     for cid, pk in classes.items():
         assert len(pk) <= 16, (cid, len(pk))
-        if cid == "summarize":
-            assert pk == [], pk
+        # summarize never; chat only with the owner's switch (schema.CHAT_CORE, PKG3)
+        if cid == "summarize" or (cid == "chat" and not schema.CHAT_CORE):
+            assert "tandem-core" not in pk, (cid, pk)
         else:
             assert pk and pk[0] == "tandem-core", (cid, pk)
     for cid in ("code_edit", "debug", "design_ui", "drawing", "three_d"):
         assert "render-tools" in classes[cid], cid
-    for cid in ("writing", "plan", "research", "chat"):
-        assert classes[cid] == ["tandem-core"], cid
+    # the prose classes: tandem-core (not chat), then the everyday library (OPS-79)
+    for cid in ("writing", "plan", "research", "chat", "summarize"):
+        core = {"chat": schema.CHAT_CORE, "summarize": []}.get(cid, ["tandem-core"])
+        want = core + schema.EVERYDAY[cid]
+        assert classes[cid] == want, (cid, classes[cid])
     assert "creative-coding" in classes["drawing"] and "creative-coding" in classes["three_d"]
     assert "charts" in classes["drawing"] and "charts" in classes["design_ui"]
     assert "voxel-worlds" in classes["three_d"] and "explainer-video" in classes["drawing"]
