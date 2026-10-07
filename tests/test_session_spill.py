@@ -597,8 +597,11 @@ def test_srv269_a_chat_without_its_reasoning_comes_back_from_the_nvme():
         diskcache.wire_end_align(sp, al)
         e = res.end["at"]
         rows_before = _rows(app.STATE["engine"], e)
-        # the client's copy: the answer without its reasoning (`<think>\n\n</think>\n\n`)
-        copy = prompt[:-1] + [EA.SP] + out[k:] + TOOL
+        # the client's copy: the answer without its reasoning (`<think>\n\n</think>\n\n`), and a
+        # new message shorter than the reasoning, so the copy is shorter than the rows up to the
+        # end anchor (live: 130,381 tokens against an end at 182,053)
+        copy = prompt[:-1] + [EA.SP] + out[k:] + TOOL[:4]
+        assert len(copy) <= res.end["at"], (len(copy), res.end["at"])
         assert res.replay(copy)[1] == [], "the hidden spans alone do not replay this copy"
         sp.save_resident(res, app.STATE["engine"], None, "evict")
         assert sp.entries and next(iter(sp.entries.values())).man["extra"]["end_regions"]
@@ -609,7 +612,7 @@ def test_srv269_a_chat_without_its_reasoning_comes_back_from_the_nvme():
         # anchor of the head it shares at most)
         j = next(i for i in range(k + 2, len(out) - 2) if out[i] not in (EA.NL, EA.SP))
         other = next(x for x in range(1, 95) if x not in (out[j], out[k]))
-        changed = prompt[:-1] + [EA.SP] + out[k:j] + [other] + out[j + 1:] + TOOL
+        changed = prompt[:-1] + [EA.SP] + out[k:j] + [other] + out[j + 1:] + TOOL[:4]
         got = sp.candidate(res, changed, len(changed) - 1, replay=True)
         assert got is None or got[1] < len(prompt), got and got[1]
         got = sp.candidate(res, copy, len(copy) - 1, replay=True)
@@ -620,7 +623,7 @@ def test_srv269_a_chat_without_its_reasoning_comes_back_from_the_nvme():
         assert res.end is not None and res.end["at"] == e
         _same_rows(_rows(app.STATE["engine"], e), rows_before)
         ids, spans, aligned = app._end_replay(res, copy)
-        assert aligned > 0 and ids == res.tokens[:e] + out[e - len(prompt):] + TOOL
+        assert aligned > 0 and ids == res.tokens[:e] + out[e - len(prompt):] + TOOL[:4]
         got, pre, _ = turn(ids, 8)
         assert pre["reused"] == e and pre["kind"] in ("spill", "end"), pre
         t.close()

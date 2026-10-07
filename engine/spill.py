@@ -194,16 +194,20 @@ class Entry:
         end = self.man.get("end")
         if end is not None and end.get("mm") and not mm_ok:
             end = None                     # an end after images: a compaction's alone
-        if end is not None and int(end["at"]) <= max_len:
+        if end is not None:
             e = int(end["at"])
-            if c >= e:
+            if c >= e and e <= max_len:
                 return e
-            if replay and end.get("hidden"):
+            # A replayed or aligned copy is served as the rows up to the end anchor and the copy's
+            # tail after it: that prompt, not the copy, must go past the end. The copy itself is
+            # shorter than the rows by what its client left out (SRV-269: 130,381 tokens against
+            # an end at 182,053), so `max_len` (the copy's last position) does not bound it.
+            if replay and end.get("hidden") and c < e:
                 from engine.cache import ResidentPrefix
                 shim = _Shim({"at": e, "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                               "mark": end.get("mark")}, self.tokens, glue)
-                _, spans = ResidentPrefix.replay(shim, list(keys))
-                if spans:
+                out, spans = ResidentPrefix.replay(shim, list(keys))
+                if spans and len(out) > e:
                     return e
             if replay and align is not None and c < e:
                 try:
