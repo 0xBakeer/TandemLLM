@@ -14,7 +14,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ### A side slot reads the disk tier (SRV-231)
 
-- A side slot had no disk tier, so a new chat there prefilled its client's whole head (0.3.48-test: Open WebUI 6,687 tokens, 9.0 s TTFT; an opencode first turn 19.1 s on slot 1 against 10.7 s on slot 0). It now reads slot 0's tier through a read-only view (server/diskcache.py `SideReader`): find and restore into the side engine's own buffers; no line counted, no write, no fence of slot 0's write-behind jobs. `/health` `parallel.side_disk`; `QWEN38_SIDE_DISK=off` is the old slot. `tests/test_disk_cache.py`: a restore into an engine with a shorter window equals its cold prefill bit for bit.
+- A side slot had no disk tier, so a new chat there prefilled its client's whole head (0.3.48-test: Open WebUI 6,687 tokens, 9.0 s TTFT; an opencode first turn 19.1 s on slot 1 against 10.7 s on slot 0). It now reads slot 0's tier through a read-only view (server/diskcache.py `SideReader`): find and restore into the side engine's own buffers; no line counted, no write, no fence of slot 0's write-behind jobs. `/health` `parallel.side_disk`; `QWEN38_SIDE_DISK=off` is the old slot. A/B on 0.3.49-test with the tier's mode switched (W18 tab B, a new Open WebUI chat on slot 1, n = 2 each): TTFT 9.6/9.8 s off, 1.9/1.9 s on. Across builds (O03's opencode first turn on slot 1, n = 1): 19.1 s with 12,570 tokens forwarded on 0.3.48-test, 10.5 s with 5,603 on 0.3.49-test (what is left is mostly the router's 5,310-token note, which no cache holds on a side slot). `tests/test_disk_cache.py`: a restore into an engine with a shorter window equals its cold prefill bit for bit.
 
 ### One conductor session per Open WebUI chat (SRV-225)
 
