@@ -11,8 +11,8 @@ The test matrix:
      names the write without its text                  test_on_streamed_write
   3  on, a block before a tool call: the block is held back, the call goes out whole
                                                         test_on_block_before_a_call
-  4  a refused block and an unclosed block go out as text; nothing is written
-                                                        test_refused_and_unclosed_go_out
+  4  SRV-277: a refused block is hidden from the answer (streamed and not), an unclosed block
+     goes out as text; nothing is written           test_refused_hidden_unclosed_goes_out
   5  non-streamed: the content without the block, the note on disk
                                                         test_non_streamed_write
   6  the next turns: the card and the index go in once at the tail and replay at their place on
@@ -100,10 +100,13 @@ def test_on_block_before_a_call():
     assert len(ns) == 1 and ns[0].scope == "project" and ns[0].project == "/home/user/pagoda"
 
 
-def test_refused_and_unclosed_go_out():
+def test_refused_hidden_unclosed_goes_out():
     cond, _ = setup()
     out = ask("Keep it short. FAKE_MEMORY_BAD")
-    assert '<tandem_memory op="add" scope="user" kind="poem">' in out["content"]
+    assert BLOCK_OPEN not in out["content"] and "kind=\"poem\"" not in out["content"], out["content"]
+    assert out["content"].strip(), "the answer around the block still goes out"
+    out = ask("Keep it short, no stream. FAKE_MEMORY_BAD", stream=False)
+    assert BLOCK_OPEN not in out["content"] and out["content"].strip(), out["content"]
     out = ask("Keep it short again. FAKE_MEMORY_OPEN")
     assert BLOCK_OPEN in out["content"]
     assert cond.notes.notes("owner") == []
