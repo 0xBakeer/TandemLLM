@@ -65,6 +65,10 @@ CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
 #: FX5b: `parts`: a class's note leaves out the parts a live note already holds with the same text
 #: (`Plan._fresh_block`); `block`: the whole note whenever its key is new (0.3.47-test)
 NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
+#: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
+#: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
+#: `off`: the packages as 0.3.49-test chose them, whatever the tools
+TOOL_FIT = (_S.get("TOOL_FIT") or "on").strip().lower()
 
 #: SRV-225: the `h:` heads whose conversations `Router._generation` tells apart, and the
 #: conversations kept per head (the oldest go first)
@@ -300,6 +304,9 @@ class Plan:
         self.user: str | None = None
         self.caps: dict | None = None
         self.memory: dict | None = None
+        # SRV-243: what the request's tools can do (signals.tool_caps) and their names
+        self.tool_caps: frozenset = frozenset()
+        self.tool_names: list[str] = []
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -815,6 +822,7 @@ class Router:
         plan.decisions = dec
         classes = {c["id"]: c for c in router["classes"]}
         sh = signals.shape(body, tuple(packages["packages"]), client_kind=client_kind)
+        plan.tool_caps, plan.tool_names = signals.tool_caps(body)
         side = schema.side_requests(router)
         side_cap = (caps or {}).get("side")
         shape = (signals.side_shape(body, side["shapes"])
@@ -1375,15 +1383,18 @@ class Router:
         reading = self._reading(plan, router, cls, classes, row)
         if reading is not None:
             parts.append(reading)
-        cands = [p for p in policy["packages"] if p not in sh.loaded_skills]
-        skipped = [p for p in policy["packages"] if p in sh.loaded_skills]
+        # SRV-243: the packages whose steps the request's tools can carry out; a fallback stands
+        # in for one that cannot, the rest stay out and the turn says what its tools are
+        listed, core_in, fit_note, stand_in = self._fit(plan, router, packages, policy, row)
+        cands = [p for p in listed if p not in sh.loaded_skills]
+        skipped = [p for p in listed if p in sh.loaded_skills]
         if skipped:
             row["extra"].setdefault("notes", []).append(f"already_loaded:{','.join(skipped)}")
         # a general package (the coding package, 2026-10-02) goes in whole and first; the router
         # picks among the rest, the task skills, as before
-        core = [p for p in policy.get("core", []) if p in policy["packages"]]
+        core = [p for p in core_in if p in listed]
         general = [p for p in cands if (packages["packages"].get(p) or {}).get("general")
-                   or p in core]
+                   or p in core or p in stand_in]
         cands = [p for p in cands if p not in general]
         if dec["packages"] != "off":
             for g in general:
@@ -1430,6 +1441,8 @@ class Router:
                     row["extra"].setdefault("notes", []).append(f"{err}:{chosen}")
                 else:
                     parts.append(("packages", {"kind": "package", "name": chosen, "text": text}))
+        if fit_note and dec["packages"] != "off":
+            parts.append(("packages", {"kind": "tools", "name": "fit", "text": fit_note}))
         if dec["rules"] != "off" and (policy["rules"] or policy["note"]):
             text = "\n".join(f"- {r}" for r in policy["rules"])
             if policy["note"]:
@@ -1456,6 +1469,63 @@ class Router:
         plan.block = {"key": key, "text": "\n\n".join(p["text"] for _, p in on),
                       "parts": [it["part"] for it in items], "shas": [it["sha"] for it in items],
                       "kinds": {k for k, _ in on}, "reason": reason, "items": items}
+
+    def fits(self, plan, packages: dict, name: str) -> bool:
+        """SRV-243: the request's tools can carry out the package's steps (always with the
+        switch off or on a raw plan)."""
+        if TOOL_FIT == "off" or not plan.active:
+            return True
+        return set(self.library.requires(packages, name)) <= set(plan.tool_caps)
+
+    def _fit(self, plan, router, packages, policy, row) -> tuple[list, list, str | None, set]:
+        """SRV-243 (UX2, 2026-10-07): a plain Open WebUI chat whose only tools were search_web
+        and fetch_url got the testing and Laya packages for a landing page: they tell the model to
+        run a shell and write files, so it called `terminal` and `write_file` ('Tool not found'),
+        tried to fetch the library's address with fetch_url, wrote the page into a failed call and
+        printed it again (518 s for one HTML file; the snake game 423 s, the 3D garden 522 s).
+        Here the class's packages are kept only when the request's tools can do what their steps
+        need (`packages.Library.requires`); a package with a `fallback` gives way to it; and when
+        any had to go, the turn's note says which tools the chat has and to deliver the files in
+        the answer (`schema.tool_fit`). Returns (the class's packages, its core, the note or
+        None). The router's `tool_fit.mode` `shadow` journals what would have gone; the switch
+        `QWEN38_TOOL_FIT=off` keeps the packages as before. The fourth value: the fallbacks that
+        stand in for a general package, general in its place."""
+        fit = schema.tool_fit(router)
+        listed = list(policy["packages"])
+        core = list(policy.get("core", []))
+        if TOOL_FIT == "off" or fit["mode"] == "off":
+            return listed, core, None, set()
+        out, dropped, swapped = [], [], {}
+        for p in listed:
+            use = p
+            if not self.fits(plan, packages, p):
+                fb = self.library.fallback(packages, p)
+                use = fb if fb and fb in packages["packages"] and \
+                    self.fits(plan, packages, fb) else None
+                if use is None:
+                    dropped.append(p)
+                else:
+                    swapped[p] = use
+            if use is not None and use not in out:
+                out.append(use)
+        caps = sorted(plan.tool_caps)
+        row["extra"]["tools"] = {"offered": plan.tool_names[:12], "caps": caps,
+                                 **({"dropped": dropped} if dropped else {}),
+                                 **({"fallback": swapped} if swapped else {})}
+        if not dropped and not swapped:
+            return listed, core, None, set()
+        if fit["mode"] == "shadow":
+            row["shadow"] = dict(row.get("shadow") or {}, tools={
+                "dropped": dropped, "fallback": swapped})
+            return listed, core, None, set()
+        names = ", ".join(plan.tool_names[:8])
+        tools = f" (its tools: {names})" if names else ""
+        key = "note_write" if "write" in caps else "note_none"
+        note = fit[key].replace("{tools}", tools)
+        core = [swapped.get(p, p) for p in core if p not in dropped]
+        stand_in = {fb for p, fb in swapped.items()
+                    if (packages["packages"].get(p) or {}).get("general")}
+        return out, core, note, stand_in
 
     def _reading(self, plan, router, cls, classes, row) -> tuple | None:
         """FX6: the reading line, as a `classify` part, or None. A class a model stage picked on
@@ -1801,6 +1871,8 @@ class Router:
             return
         items = [("tools", self._tool_card(body, cfg, packages, row))]
         harness, err = self.library.text(packages, cc["harness"])
+        if harness is not None and not self.fits(plan, packages, cc["harness"]):
+            harness, err = None, "tools_missing"         # SRV-243: it names Laya's routes
         if harness is not None:
             items.append(("harness", harness))
         elif err:

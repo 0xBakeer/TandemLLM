@@ -978,6 +978,28 @@
       },
       "required": [],
       "additionalProperties": false
+    },
+    "tool_fit": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "note_none": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "note_write": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      },
+      "required": [],
+      "additionalProperties": false
     }
   },
   "required": [

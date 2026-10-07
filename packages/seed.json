@@ -68,7 +68,20 @@
    "description": "How programming work must happen: short plan, small steps, run after each, verify by using it, no fake tests, done only with evidence.",
    "max_tokens": 1500,
    "enabled": true,
-   "body_from": "inline/coding.md"
+   "body_from": "inline/coding.md",
+   "requires_tools": [
+    "shell"
+   ],
+   "fallback": "coding-answer"
+  },
+  "coding-answer": {
+   "title": "Coding without a shell",
+   "kind": "package",
+   "source": "inline",
+   "description": "How to write code in a chat that cannot run it: the whole file in the answer, checked by reading; stands in for the coding package when the request has no shell.",
+   "max_tokens": 600,
+   "enabled": true,
+   "body_from": "inline/coding-answer.md"
   },
   "files-care": {
    "title": "The user's files",
@@ -106,7 +119,10 @@
    "description": "Testing a command-line program - a script with arguments, a tool that reads files or stdin - by running it on real input.",
    "max_tokens": 1200,
    "enabled": true,
-   "body_from": "inline/test-cli.md"
+   "body_from": "inline/test-cli.md",
+   "requires_tools": [
+    "shell"
+   ]
   },
   "test-api": {
    "title": "Testing a backend or API",
@@ -115,7 +131,10 @@
    "description": "Testing a backend or an API - an HTTP service, its routes, a database behind it, a websocket - with real requests against the running server.",
    "max_tokens": 1200,
    "enabled": true,
-   "body_from": "inline/test-api.md"
+   "body_from": "inline/test-api.md",
+   "requires_tools": [
+    "shell"
+   ]
   },
   "test-data": {
    "title": "Testing a data script",
@@ -124,7 +143,10 @@
    "description": "Testing a data script - a transformation, a notebook turned into a script, a report from a file or a query - by proving its numbers.",
    "max_tokens": 1200,
    "enabled": true,
-   "body_from": "inline/test-data.md"
+   "body_from": "inline/test-data.md",
+   "requires_tools": [
+    "shell"
+   ]
   },
   "test-lib": {
    "title": "Testing a library",
@@ -133,7 +155,10 @@
    "description": "Testing a library - a module, a package, functions others call, a public API - with its test suite as the evidence.",
    "max_tokens": 1200,
    "enabled": true,
-   "body_from": "inline/test-lib.md"
+   "body_from": "inline/test-lib.md",
+   "requires_tools": [
+    "shell"
+   ]
   },
   "tools-opencode": {
    "title": "opencode's tools: pitfalls",
@@ -160,7 +185,10 @@
    "description": "The harness card - what the runtime (TandemLLM) is to the model, its notes, its checks and how to give it evidence; goes in on the first turn of a coding session with tools and after a compaction.",
    "max_tokens": 1200,
    "enabled": true,
-   "body_from": "inline/tandem-harness.md"
+   "body_from": "inline/tandem-harness.md",
+   "requires_tools": [
+    "shell"
+   ]
   },
   "laya-testing": {
    "title": "Laya: the test judge you can call",

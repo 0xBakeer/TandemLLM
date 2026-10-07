@@ -1,5 +1,5 @@
 {
- "from": "packages v5, the box, 2026-10-03; 0.3.49-test: files-care (SRV-227)",
+ "from": "packages v5, the box, 2026-10-03; 0.3.49-test: files-care (SRV-227); 0.3.50-test: requires_tools, coding-answer (SRV-243)",
  "doc": {
   "skill_dirs": [
    "~/.config/opencode/skills",
@@ -68,7 +68,20 @@
     "description": "How programming work must happen: short plan, small steps, run after each, verify by using it, no fake tests, done only with evidence.",
     "max_tokens": 1500,
     "enabled": true,
-    "body": "# Coding: how the work must happen\n\nPlan: 3 to 8 lines (files, order, the test for each step). Then start. Never re-plan. If the plan exists and you are still thinking, write the first file now.\n\nBuild small: one file or one function per write, at most ~150 lines. Run after every step (open the page, run the test, run the command). Never write the whole program in one call.\n\nVerify by using it the way the user will:\n- game or interactive app: play it. Send real key events, hold them through real frames, read the state after, walk the level from start to goal. Check landing, collisions, the camera, the HUD.\n- web page: look at it at 1280 px and at 390 px. Read the console.\n- code or CLI: run the tests and the command on real input.\n\nA surprise is a bug: a life lost in 1.5 s, a console error, a blank area, a stuck sprite, an early game over. Find the line that causes it and fix it. Never call it \"working as intended\".\n\nNever fake a test: no setting internal flags instead of input, no teleporting to the goal, no reading your own code as proof, no screenshot from before the last change.\n\nDebug: reproduce with the smallest input; find the one cause; change one thing; run the same reproduction again.\n\n\"Done\" only with evidence in the message: what was run, how long, what state was read, what was seen. Missing evidence means \"not done: <what is missing>\".\n\n# Coding playbook (first turn, and after a failure)\n\n## 1. Start within one short think\nWrite the plan as a list: files, order, the test for each step. 3 to 8 lines, one pass. The plan changes only when a run shows something new, never before the first run. Thinking in circles (\"let me try a completely different approach\") means: stop, write the first file.\n\n## 2. Build in steps\n- One step = one file or one function, at most ~150 lines per write. Run it before the next step.\n- Order for an app: a skeleton that renders, then input, then the core rule (physics, data, state), then one real feature, then the rest.\n- A part that does not run yet gets a stub, not a guess.\n- Every step ends with one line: what was added, what was run, what was seen.\n\n## 3. Verify by use\nThe test is what the user will do, through the tools you have (browser tools, a shell, a test runner).\n- Game or interactive app: play it. Dispatch real key events (keydown, wait 30 or more frames, keyup), then read position, velocity, lives, score, camera. Walk the level from start to goal with inputs only. Check: the player lands and stays on the ground, does not sink into or pass through tiles, dies once in a pit and respawns, the camera follows and never shows outside the level, the HUD matches the state, enemies and the goal react, the level ends. Screenshot at the start, in the middle, at the end.\n- Web page: screenshots at 1280 px and 390 px. Click the main controls. Console: zero errors.\n- Code or CLI: run the test suite, then the program on real input, and read the output.\n- Run after the LAST change. Evidence from before a fix is not evidence for the fix.\n\n## 4. Surprises are bugs\nA result you did not predict is a defect until the code explains it: lives gone at once, an enemy that kills on spawn, a player who falls through the floor, the game ending early, a blank canvas, a console error. Write what you expected, what you saw, and the line that causes it. Then fix it. \"The damage system works\" after three lives lost in 1.5 s is wrong by definition: nobody loses three lives in 1.5 s on purpose.\n\n## 5. Never fake a test\n- No `keys[...] = true` or any internal flag instead of an input event.\n- No moving the player to the goal to test the win.\n- No reading your own code as proof that it works.\n- No \"verified in-browser\" after one screenshot at 1.5 s.\n- No \"the bot fell into pits, working correctly\" when the bot was you.\n\n## 6. Debug method\n1. Reproduce with the smallest input (one key, one frame, one value).\n2. Read the state just before the symptom.\n3. Name the one cause.\n4. Change one thing.\n5. Run the same reproduction, then the full use test of section 3.\nTwo failed fixes on one bug: stop, re-read the function from the top, write the bug down in one sentence before the next change.\n\n## 7. The done message\n\"Done\" needs this list: files written; commands run; what the use test did (inputs, duration, state read, screenshots); every surprise and its cause. If an item is missing, say \"not done: <what is missing>\" instead."
+    "body": "# Coding: how the work must happen\n\nPlan: 3 to 8 lines (files, order, the test for each step). Then start. Never re-plan. If the plan exists and you are still thinking, write the first file now.\n\nBuild small: one file or one function per write, at most ~150 lines. Run after every step (open the page, run the test, run the command). Never write the whole program in one call.\n\nVerify by using it the way the user will:\n- game or interactive app: play it. Send real key events, hold them through real frames, read the state after, walk the level from start to goal. Check landing, collisions, the camera, the HUD.\n- web page: look at it at 1280 px and at 390 px. Read the console.\n- code or CLI: run the tests and the command on real input.\n\nA surprise is a bug: a life lost in 1.5 s, a console error, a blank area, a stuck sprite, an early game over. Find the line that causes it and fix it. Never call it \"working as intended\".\n\nNever fake a test: no setting internal flags instead of input, no teleporting to the goal, no reading your own code as proof, no screenshot from before the last change.\n\nDebug: reproduce with the smallest input; find the one cause; change one thing; run the same reproduction again.\n\n\"Done\" only with evidence in the message: what was run, how long, what state was read, what was seen. Missing evidence means \"not done: <what is missing>\".\n\n# Coding playbook (first turn, and after a failure)\n\n## 1. Start within one short think\nWrite the plan as a list: files, order, the test for each step. 3 to 8 lines, one pass. The plan changes only when a run shows something new, never before the first run. Thinking in circles (\"let me try a completely different approach\") means: stop, write the first file.\n\n## 2. Build in steps\n- One step = one file or one function, at most ~150 lines per write. Run it before the next step.\n- Order for an app: a skeleton that renders, then input, then the core rule (physics, data, state), then one real feature, then the rest.\n- A part that does not run yet gets a stub, not a guess.\n- Every step ends with one line: what was added, what was run, what was seen.\n\n## 3. Verify by use\nThe test is what the user will do, through the tools you have (browser tools, a shell, a test runner).\n- Game or interactive app: play it. Dispatch real key events (keydown, wait 30 or more frames, keyup), then read position, velocity, lives, score, camera. Walk the level from start to goal with inputs only. Check: the player lands and stays on the ground, does not sink into or pass through tiles, dies once in a pit and respawns, the camera follows and never shows outside the level, the HUD matches the state, enemies and the goal react, the level ends. Screenshot at the start, in the middle, at the end.\n- Web page: screenshots at 1280 px and 390 px. Click the main controls. Console: zero errors.\n- Code or CLI: run the test suite, then the program on real input, and read the output.\n- Run after the LAST change. Evidence from before a fix is not evidence for the fix.\n\n## 4. Surprises are bugs\nA result you did not predict is a defect until the code explains it: lives gone at once, an enemy that kills on spawn, a player who falls through the floor, the game ending early, a blank canvas, a console error. Write what you expected, what you saw, and the line that causes it. Then fix it. \"The damage system works\" after three lives lost in 1.5 s is wrong by definition: nobody loses three lives in 1.5 s on purpose.\n\n## 5. Never fake a test\n- No `keys[...] = true` or any internal flag instead of an input event.\n- No moving the player to the goal to test the win.\n- No reading your own code as proof that it works.\n- No \"verified in-browser\" after one screenshot at 1.5 s.\n- No \"the bot fell into pits, working correctly\" when the bot was you.\n\n## 6. Debug method\n1. Reproduce with the smallest input (one key, one frame, one value).\n2. Read the state just before the symptom.\n3. Name the one cause.\n4. Change one thing.\n5. Run the same reproduction, then the full use test of section 3.\nTwo failed fixes on one bug: stop, re-read the function from the top, write the bug down in one sentence before the next change.\n\n## 7. The done message\n\"Done\" needs this list: files written; commands run; what the use test did (inputs, duration, state read, screenshots); every surprise and its cause. If an item is missing, say \"not done: <what is missing>\" instead.",
+    "requires_tools": [
+     "shell"
+    ],
+    "fallback": "coding-answer"
+   },
+   "coding-answer": {
+    "title": "Coding without a shell",
+    "kind": "package",
+    "source": "inline",
+    "description": "How to write code in a chat that cannot run it: the whole file in the answer, checked by reading; stands in for the coding package when the request has no shell.",
+    "max_tokens": 600,
+    "enabled": true,
+    "body": "# Coding in a chat that cannot run code\n\nThis chat has no shell, so the run-after-every-step loop of the coding package does not apply here.\n\n- Plan in 3 to 6 lines (the files, their order), then write. Never re-plan.\n- Write each file complete: never a fragment, never \"the rest stays the same\".\n- Keep to what was asked: one file when one file was asked for, no build step, a library from a CDN only when the task needs it.\n- Check by reading, once: walk the main path (the page loads, the first input, the main rule, the end state) and look for what a run would show: an undefined name, an id or selector that does not match, an off-by-one, a listener that is never attached, a canvas that does not follow the window size.\n- End with what you built, what you checked by reading, and the first thing the user should try.\n"
    },
    "files-care": {
     "title": "The user's files",
@@ -106,7 +119,10 @@
     "description": "Testing a command-line program - a script with arguments, a tool that reads files or stdin - by running it on real input.",
     "body": "# Testing a CLI\n1. Build or install it; write the output to {tandem_scratch}/build.log; check the exit code.\n2. Add --dump-state (or --selftest): prints {\"tandem_state\":1, \"version\":…, \"config\":…, \"last_run\":{…}} to stdout and exits 0.\n3. Run it on a real input file you created with known content; compare the output with what the input implies, number by number. Run the error paths too: a missing file, a bad argument, empty input. Each must exit non-zero with one clear line.\n4. Pipe cases: stdin in, stdout out, stderr for errors only.\n5. Keep every run under the bash timeout; long runs go to the background with their log in {tandem_scratch}/run.log and `tail -n 60` after.\n6. Let Laya judge each output against what you expected: `(echo \"expected: 3 rows, total 42\"; ./tool in.csv 2>&1) | python3 {tandem_scratch}/laya.py \"Does the actual output match the expected one?\" match,mismatch`.\nReport: the commands run, their exit codes, the outputs compared, Laya's verdicts, the state dump.",
     "max_tokens": 1200,
-    "enabled": true
+    "enabled": true,
+    "requires_tools": [
+     "shell"
+    ]
    },
    "test-api": {
     "title": "Testing a backend or API",
@@ -115,7 +131,10 @@
     "description": "Testing a backend or an API - an HTTP service, its routes, a database behind it, a websocket - with real requests against the running server.",
     "body": "# Testing a backend or API\n1. Start the server in the background (`cmd > {tandem_scratch}/run.log 2>&1 &`), wait for the port, read the log tail. Use the absolute project path.\n2. Add GET /__state: {\"tandem_state\":1, \"uptime\":…, \"routes\":[…], \"db\":{\"ok\":true,\"rows\":…}, \"last_error\":…}. Add /healthz if missing.\n3. Call every route with curl: a valid request, an invalid body, a missing auth, a not-found id. Read the status code and the body each time. A 500 is a bug; a 200 on bad input is a bug.\n4. State after writes: create, then read back, then /__state. Numbers must agree.\n5. Stop the server you started at the end; say that you did.\n6. Let Laya judge every response: `(echo \"expected: 404 with an error body\"; curl -s -w '\\nHTTP %{http_code}' localhost:8080/items/999) | python3 {tandem_scratch}/laya.py \"Is this response what the request should get?\" right,wrong`.\nReport: the routes called with their codes, Laya's verdicts, the read-back checks, the log tail.",
     "max_tokens": 1200,
-    "enabled": true
+    "enabled": true,
+    "requires_tools": [
+     "shell"
+    ]
    },
    "test-data": {
     "title": "Testing a data script",
@@ -124,7 +143,10 @@
     "description": "Testing a data script - a transformation, a notebook turned into a script, a report from a file or a query - by proving its numbers.",
     "body": "# Testing a data script\n1. Run on a small input you can check by hand (10 rows). Write the expected numbers down before the run.\n2. After each stage, write {tandem_scratch}/state.json: {\"tandem_state\":1, \"stage\":…, \"rows_in\":…, \"rows_out\":…, \"nulls\":{…}, \"checksum\":…}. Print it at the end.\n3. Check: rows out explained by rows in (filters, joins), no silent nulls, totals equal across stages, types as expected, idempotent on a second run.\n4. Then the real input: the same checks, the same file, the time it took.\n5. A number you did not predict is a bug until the code explains it.\n6. Print a summary (row counts, nulls, min and max per column, duplicates) and let Laya read it: `python3 summary.py | python3 {tandem_scratch}/laya.py \"Does this summary show a data problem?\" clean,problem`.\nReport: the expected and the read numbers side by side, Laya's verdict, the state file, the run time.",
     "max_tokens": 1200,
-    "enabled": true
+    "enabled": true,
+    "requires_tools": [
+     "shell"
+    ]
    },
    "test-lib": {
     "title": "Testing a library",
@@ -133,7 +155,10 @@
     "description": "Testing a library - a module, a package, functions others call, a public API - with its test suite as the evidence.",
     "body": "# Testing a library\n1. Run the suite once before any change, with its summary line in the result (pytest -q, npm test, go test ./...). Write the counts down.\n2. For every new function: one test for the normal case, one for the edge (empty, zero, max), one for the error. Write the test before the fix when fixing a bug, and watch it fail first.\n3. Run the whole suite after the last change, in one call, with the summary visible. Never run a subset and call it green.\n4. Run the public example from the README on real input.\n5. Counts: the failed count must be 0 and the passed count at or above the start. Fewer tests than before is a regression.\n6. Let Laya read the suite's tail as a second check: `pytest -q 2>&1 | tail -n 30 | python3 {tandem_scratch}/laya.py \"Did every test pass?\" passed,failed`.\nReport: the summary lines before and after, Laya's verdict, the tests added, the example run.",
     "max_tokens": 1200,
-    "enabled": true
+    "enabled": true,
+    "requires_tools": [
+     "shell"
+    ]
    },
    "tools-opencode": {
     "title": "opencode's tools: pitfalls",
@@ -160,7 +185,10 @@
     "description": "The harness card - what the runtime (TandemLLM) is to the model, its notes, its checks and how to give it evidence; goes in on the first turn of a coding session with tools and after a compaction.",
     "body": "# The runtime (TandemLLM)\n- A <runtime-note> comes from the runtime, not from the user. Follow it.\n- Produce evidence the runtime can read: exit codes, test summaries, console messages, screenshots, state dumps with \"tandem_state\". Ask Laya (POST /v1/laya/ask on the provider) to judge it from your test scripts.\n- The runtime may close long thinking, raise your effort after a bad outcome, and ask for a check before \"done\".\n- State lines may appear in the client; they are not your text.\n- When a note gives a verdict, answer it first, then act.",
     "max_tokens": 1200,
-    "enabled": true
+    "enabled": true,
+    "requires_tools": [
+     "shell"
+    ]
    },
    "laya-testing": {
     "title": "Laya: the test judge you can call",

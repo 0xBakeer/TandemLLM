@@ -377,6 +377,11 @@ def _card(router, plan, packages, sh, cls, row, cfg, mode) -> None:
     name = cfg.get("card")
     if not name or not sh.tools or cls not in cfg["card_classes"]:
         return
+    fits = getattr(router, "fits", None)
+    if fits is not None and not fits(plan, packages, name):
+        # SRV-243: the library is read with curl from a shell; a chat without one gets no card
+        row["extra"].setdefault("notes", []).append(f"tools_missing:{name}")
+        return
     text, err = router.library.text(packages, name)
     if text is None:
         row["extra"].setdefault("notes", []).append(f"{err}:{name}")

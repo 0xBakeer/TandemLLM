@@ -81,6 +81,18 @@ SIDE_SHAPES = (
 # `filePath`, Claude-style tools `file_path`; `path` is a directory as often as a file (grep, glob,
 # list), so it counts only when its last component has an extension
 FILE_ARGS = ("filePath", "file_path")
+# SRV-243 (UX2, 2026-10-07): what the request's tools can do, read off their schemas -- the
+# client's protocol, never what anybody wrote. A tool with a `command` (or `cmd`) argument runs a
+# shell: opencode's `bash`, Open WebUI's terminal `run_command`, Claude-style `Bash`. A tool with
+# a path argument and a content argument writes a file: opencode's `write` and `edit`, the
+# terminal's `write_file` and `replace_file_content`. Open WebUI's own `search_web` and
+# `fetch_url` do neither. A package names the capabilities its steps need (`requires_tools`) and
+# the router leaves it out of a turn whose tools lack one (router.py `_block`).
+SHELL_ARGS = ("command", "cmd")
+WRITE_PATH_ARGS = ("filePath", "file_path", "path", "filename")
+WRITE_BODY_ARGS = ("content", "contents", "text", "newString", "new_string", "replacements",
+                   "patch", "diff")
+CAPS = ("shell", "write")
 _EXT = re.compile(r"^\.[a-z0-9]{1,8}$")
 _TOOL_NAME = re.compile(r"[^A-Za-z0-9_.-]")
 _MCP = re.compile(r"^[A-Za-z0-9.]+(?:-[A-Za-z0-9.]+)+_(?=.)")     # `server-name_` of an MCP tool
@@ -97,6 +109,32 @@ def _text(content) -> str:
         return "".join(p.get("text", "") for p in content
                        if isinstance(p, dict) and isinstance(p.get("text"), str))
     return ""
+
+
+def tool_caps(body: dict) -> tuple[frozenset, list[str]]:
+    """SRV-243: (the capabilities the request's tools give, their names). Nothing with
+    `tool_choice: none`. A flat tool (`{"name": ..., "parameters": ...}`) counts as the template
+    reads it."""
+    if not isinstance(body, dict) or body.get("tool_choice") == "none":
+        return frozenset(), []
+    caps, names = set(), []
+    for t in body.get("tools") or ():
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        names.append(name)
+        props = (fn.get("parameters") or {}).get("properties") if isinstance(
+            fn.get("parameters"), dict) else None
+        keys = set(props) if isinstance(props, dict) else set()
+        if any(isinstance((props or {}).get(k), dict) and
+               (props[k].get("type") in (None, "string")) for k in SHELL_ARGS if k in keys):
+            caps.add("shell")
+        if keys & set(WRITE_PATH_ARGS) and keys & set(WRITE_BODY_ARGS):
+            caps.add("write")
+    return frozenset(caps), names
 
 
 def _images(content) -> int:

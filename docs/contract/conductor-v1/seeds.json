@@ -3301,6 +3301,28 @@
       },
       "required": [],
       "additionalProperties": false
+     },
+     "tool_fit": {
+      "type": "object",
+      "properties": {
+       "mode": {
+        "enum": [
+         "off",
+         "shadow",
+         "on"
+        ]
+       },
+       "note_none": {
+        "type": "string",
+        "maxLength": 2000
+       },
+       "note_write": {
+        "type": "string",
+        "maxLength": 2000
+       }
+      },
+      "required": [],
+      "additionalProperties": false
      }
     },
     "required": [
@@ -3483,6 +3505,21 @@
         },
         "library": {
          "type": "boolean"
+        },
+        "requires_tools": {
+         "type": "array",
+         "items": {
+          "enum": [
+           "shell",
+           "write"
+          ]
+         },
+         "maxItems": 2
+        },
+        "fallback": {
+         "type": "string",
+         "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+         "maxLength": 80
         }
        },
        "required": [

@@ -194,8 +194,9 @@ class Library:
             self._files[path] = (mt, text)
             return text
 
-    def text(self, doc: dict, name: str) -> tuple[str | None, str | None]:
-        """(the package's instruction text, None) or (None, why it is unavailable)."""
+    def _body(self, doc: dict, name: str) -> tuple[str | None, str | None]:
+        """(the package's text as stored, before `{tandem_url}` is filled in, None) or (None, why
+        it is unavailable)."""
         p = (doc.get("packages") or {}).get(name)
         if p is None:
             return None, "package_missing"
@@ -211,6 +212,32 @@ class Library:
             body = split_frontmatter(raw)[1]
         if p.get("library"):
             body = split_reference(body)[0]
+        return body, None
+
+    def requires(self, doc: dict, name: str) -> tuple[str, ...]:
+        """SRV-243: the tool capabilities the package's steps need (signals.CAPS): its own
+        `requires_tools` when it names them, else a shell when its text calls TandemLLM's own
+        routes (`{tandem_url}`: Laya, the library, the memory are reached with curl from a shell,
+        and a client's fetch tool refuses the address), else none."""
+        p = (doc.get("packages") or {}).get(name) or {}
+        want = p.get("requires_tools")
+        if isinstance(want, list):
+            return tuple(str(w) for w in want)
+        body, _ = self._body(doc, name)
+        return ("shell",) if body and URL_TOKEN in body else ()
+
+    @staticmethod
+    def fallback(doc: dict, name: str) -> str | None:
+        """SRV-243: the package that stands in for `name` when the turn lacks its tools."""
+        fb = ((doc.get("packages") or {}).get(name) or {}).get("fallback")
+        return fb if isinstance(fb, str) and fb else None
+
+    def text(self, doc: dict, name: str) -> tuple[str | None, str | None]:
+        """(the package's instruction text, None) or (None, why it is unavailable)."""
+        p = (doc.get("packages") or {}).get(name)
+        body, err = self._body(doc, name)
+        if body is None:
+            return None, err
         body = with_url(body, getattr(self._req, "url", None)).strip()
         if not body:
             return None, "package_empty"

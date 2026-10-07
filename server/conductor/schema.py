@@ -260,6 +260,20 @@ READING_TEXT = ("Build it as {reading}. The request could also mean {other}, so 
                 "it as {reading}. Say if you wanted {other}.\" Then go straight on; do not stop "
                 "to ask first.")
 READING: dict = {"mode": "on", "below": 0.8, "other": 0.15, "text": READING_TEXT}
+# SRV-243 (UX2, 2026-10-07): when a class's packages need tools the request lacks, the turn's note
+# says what the chat can do instead (router.py `Router._fit`). `{tools}` is " (its tools: a, b)"
+# or nothing. `note_none`: no shell and no file write; `note_write`: a file write, no shell
+TOOL_FIT: dict = {
+    "mode": "on",
+    "note_none": ("This chat has no shell and no file tools{tools}. Call only the tools listed "
+                  "above, and none of them to write or run code. Deliver the work in your answer: "
+                  "each file complete in one fenced code block, its file name on the line above "
+                  "it. You cannot run it here, so read it once for mistakes before you answer, and "
+                  "end with one line on how to open or run it."),
+    "note_write": ("This chat can write files but has no shell{tools}. Write the files with the "
+                   "file tool; do not try to run or test them, and end with one line on how to "
+                   "open or run them."),
+}
 # S1 (2026-10-02): a client's side request (opencode's title or summary call, Hermes' title call)
 # is detected structurally (signals.side_shape: no tools and the client's fixed instruction) and
 # served without the classifier, a package or a note, thinking off unless the client asked for a
@@ -1205,6 +1219,12 @@ def reading(router: dict) -> dict:
     return {**copy.deepcopy(READING), **copy.deepcopy(router["classifier"].get("reading") or {})}
 
 
+def tool_fit(router: dict) -> dict:
+    """The router's `tool_fit` section over the defaults (SRV-243); a router stored before it has
+    none and gets the defaults."""
+    return {**TOOL_FIT, **(router.get("tool_fit") or {})}
+
+
 def package_prompt(router: dict) -> str | None:
     """The router's own Qwen prompt for the package question (FX6), None when it has none (the
     class question's prompt then, as always)."""
@@ -1456,6 +1476,10 @@ SCHEMAS: dict[str, dict] = {
             "card": {"type": "string", "maxLength": 40},
             "card_classes": {"type": "array", "items": _ID, "maxItems": 20},
             "header": {"type": "string", "maxLength": 1000}}, required=()),
+        # SRV-243: what a turn whose tools cannot carry out its packages is told instead
+        "tool_fit": _obj({"mode": {"enum": list(MODES3)},
+                          "note_none": {"type": "string", "maxLength": 2000},
+                          "note_write": {"type": "string", "maxLength": 2000}}, required=()),
     }, required=("classes", "classifier", "structural", "stickiness", "effort", "injection")),
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
@@ -1478,7 +1502,14 @@ SCHEMAS: dict[str, dict] = {
             # R1: a skill of the package library: searched (server/conductor/libsearch.py), its
             # text before `## Reference` is what goes in, the reference only on an explicit read
             # (GET /v1/library/{name}); absent: false
-            "library": {"type": "boolean"}},
+            "library": {"type": "boolean"},
+            # SRV-243: the tool capabilities its steps need (a shell, a file write); a turn whose
+            # tools lack one leaves it out, or puts its `fallback` in. Absent: a shell when the
+            # text calls TandemLLM through `{tandem_url}`, else none (packages.Library.requires)
+            "requires_tools": {"type": "array", "items": {"enum": ["shell", "write"]},
+                               "maxItems": 2},
+            "fallback": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9_.-]*$",
+                         "maxLength": 80}},
             required=("title", "kind", "source", "description", "body", "max_tokens",
                       "enabled"))}}),
     "profiles": _obj({
@@ -1791,6 +1822,10 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
                 if hosts:
                     errs.append(f"$.packages.{n}.body: calls TandemLLM at {', '.join(hosts)}; "
                                 f"write {{tandem_url}} instead (the address the client used)")
+            # SRV-243: a fallback is another package, never itself
+            fb = p.get("fallback")
+            if fb is not None and (fb == n or fb not in doc["packages"]):
+                errs.append(f"$.packages.{n}.fallback: no other package {fb!r}")
     return errs
 
 
