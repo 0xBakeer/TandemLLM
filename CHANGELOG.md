@@ -6,6 +6,14 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 0.3.50-test (77e4542) with the polish items of the normal-user scenario run (SRV-229, SRV-237, SRV-249, OPS-77; QA SRV-230, SRV-238, SRV-251, OPS-78) and two dashboard items from the owner's phone (VIS-66, VIS-68; QA VIS-67, VIS-69). Raw and bench text are unchanged.
 
+### Live (builds 1-3: 103a8bc 08:59, 46a5574 10:04, a8ef6bf 10:15)
+
+- W05: turn 0 (thinking off, 18,338 tokens) shows no "Thought for"; its status line ends "Read 18,338 tokens in 24 s"; follow-ups cached 1.00 six times. W18: "Thought for" 0 s and 2 s.
+- Internal terms in final answers (Laya, p=, the kit, page check, hooks, .tandem, scratch, draw calls, fps ...): A01 21 (0.3.48) / 11 (0.3.49) -> 5; A04 22 -> 2 to 6; W10, W11, W12 0. opencode's O03 still names Laya: 39 (0.3.48), 43 (0.3.49), 26 (0.3.50) -> 24 (open).
+- A01 (build 3): three_d kept below_build, the 3D skill and the reading line; the page renders a three.js pagoda garden (WebGL, 0 errors, no fps readout).
+- Speed check (short gate, store off, one run each, the same hour): release 0.3.0 mean 50.50 / p50 47.45 / TTFT 428 ms, 0.3.51-test 51.38 / 48.48 / 423 ms (+1.7 %, +2.2 %, -1.1 %; no noise estimate by design).
+- W11's follow-up re-read (cached 0.44) is SRV-213's shape (a new chat starts as a guest on the side slot beside an 80k resident), not a 0.3.51 change.
+
 ### Open WebUI's "Thought for" is the thinking (SRV-237, SRV-249)
 
 - Open WebUI 0.11.4 times a reasoning block from its first `reasoning_content` delta to its first content delta. The reading and waiting lines went out as reasoning, so a summary with thinking off that read 12,874 tokens showed "Thought for 14 seconds" (its block held only the two reading lines) and a one-line answer that waited 35.8 s showed "Thought for 34 seconds".
