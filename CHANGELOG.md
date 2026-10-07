@@ -2,6 +2,26 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.5-test, 2026-10-08
+
+0.4.4-test (dbdd4dd) plus three leftovers from the 0.4.x test runs, deployed on the box as 0.4.5-test; the package texts go in as the box's packages v24 (`tools/packages_migrate.py --put`, edits 30-33). `~/rollback-0.4.5.sh` restores packages v23 and returns the box to 0.4.4-test. Raw and bench text are unchanged.
+
+### A memory note the store refuses is never shown (SRV-277; QA SRV-278)
+
+- In an Open WebUI chat (0.4.3-test, W05) the model wrote a `<tandem_memory scope="project">` block. The chat has no working directory, so the store refused it (`no_project`), and the stream filter sent the refused block to the user as text, by design ("a block that is not taken goes out as the text it was").
+- Now every closed block is hidden from the client, written or not: one over 2,000 characters, the fifth of an answer, one the schema or the store refused. The reason goes to the journal (`memory_notes`/`write`, the row's `extra.memory.failed`) and one log line, and the block's tokens are a hidden span like a written block's, so the next turn still resumes at the end anchor. Only text that is not a closed block goes out as written (an unclosed block, one still open after 4,000 characters, `<tandem_memoryx`).
+- A project-scoped note in a conversation without a working directory (every Open WebUI chat, a script) lands at user scope (`rescoped: project`), since every client is the one user and a note is meant to be read back in the next conversation (SRV-173).
+
+### Laya stays out of the progress lines too (SRV-259; QA SRV-260)
+
+- 0.4.1-test took Laya out of opencode's closing message, but 7 lines between tool calls in O03 still named it ("3. Ask Laya about the diff evidence", "Now the Laya verdicts on the key outputs"). The texts said only that the final message keeps Laya out.
+- Packages edits 30-31: the texts that keep Laya out of the final message (test-lib, test-web, test-cli, test-api, test-data, testing, coding, tandem-harness, laya-testing) now say the plan and every line between tool calls reach the user too, and a check is named by what it checks. Guidance only; nothing filters the output.
+
+### A refused Laya request says what was wrong (SRV-279; QA SRV-280)
+
+- In O03 the model piped its evidence into a heredoc script (`tail ... | python3 - <<'EOF'`), so the text was empty and the route answered 422. The helper caught every HTTP error as a network failure ("LAYA unavailable ... your code is not the cause"), and the model told the user "Laya is unavailable on this machine (transport error)".
+- Packages edits 32-33: the helper sends no empty text ("LAYA not asked: the evidence text is empty ...", exit 2), and a 4xx other than 429 prints the route's message and field ("LAYA refused this request (HTTP 422): choices: a label is listed twice (field: choices). The request is wrong, not the network: fix it and ask again", exit 2). A refused connection, TLS, a timeout, 429 or 5xx is still "unavailable" (exit 3). laya-testing says a refused request is the model's to fix. The route's empty-text message says what to send; its `param` is unchanged.
+
 ## 0.4.4-test, 2026-10-07
 
 0.4.3-test (2031c24) plus the packages merged on main (1a9ca7a, the section below) and Regenerate, deployed on the box as 0.4.4-test. `~/rollback-0.4.4.sh` returns the box to 0.4.3-test. The text is the same for every request except a regenerate under TandemLLM, which now samples on purpose (Khaled, 2026-10-07: "do the best practice"; [docs/exactness.md](docs/exactness.md#what-changes-output-on-purpose)).
