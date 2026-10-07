@@ -145,6 +145,9 @@ KNOBS: dict[str, tuple] = {
     # FX10 (0.4.1): a parked conversation a new park gives up is written to the NVMe spill first
     # (`on`); `off` gives it up as 0.4.0 did
     'SPILL_PARK': ('on', 'engine/cache.py'),
+    # FX10 (0.4.1, SRV-213): the next turn of a conversation that ran on a side slot is carried
+    # into slot 0 from the side slot's rows (`on`); `off` re-reads it on slot 0 as 0.4.0 did
+    'SIDE_CARRY': ('on', 'server/app.py'),
     # SRV-225 (0.3.49-test): a client that sends no conversation id (Open WebUI): chats that open
     # with the same message are separate conductor sessions (`on`); `off`: one session per head
     'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),

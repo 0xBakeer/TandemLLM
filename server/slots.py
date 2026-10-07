@@ -39,7 +39,7 @@ MiB = 1 << 20
 #: which a side slot does not have (None)
 OVERLAY = ("engine", "drafter", "max_len", "resident", "disk_cache", "spill", "lane",
            "end_align", "mem", "probe", "last_ctx", "last_prompt_n", "hidden_spans", "blocks",
-           "last_prefill", "spill_restored")
+           "last_prefill", "spill_restored", "side_carried")
 
 
 # ------------------------------------------------------------------ memory
@@ -314,6 +314,11 @@ class Slot:
         self.served = 0
         self.phase = ""
         self.t_start = None
+        # FX10 (SRV-213): `gen` counts the grants; `carry` is the end of the last request this
+        # side slot served (server/app.py `_side_keep_end`), usable while `gen` is unchanged: no
+        # other request has written the slot's buffers since
+        self.gen = 0
+        self.carry: dict | None = None
 
     @property
     def busy(self) -> bool:
@@ -324,6 +329,9 @@ class Slot:
         return {"index": self.index, "max_len": self.max_len, "busy": self.busy,
                 "owner": self.owner, "served": self.served, "phase": self.phase,
                 "kv_length": getattr(getattr(eng, "kv", None), "length", None),
+                # FX10: the conversation end a next turn on slot 0 can carry over (tokens), or None
+                "carry": (int(self.carry["at"]) if self.carry is not None
+                          and self.carry.get("gen") == self.gen else None),
                 # a side slot's own verify graphs (`--side-graphs`); None for slot 0 (always on)
                 "graphs": (None if eng is None else not getattr(eng, "graphs_off", False))}
 
@@ -498,10 +506,22 @@ class Pool:
     def side(self) -> list[Slot]:
         return self.slots[1:]
 
-    def take_side(self, need: int, owner=None) -> Slot | None:
-        """A free side slot whose window holds `need` rows, the smallest that does; None."""
+    def take_side(self, need: int, owner=None, keep_carry_s: float = 0.0) -> Slot | None:
+        """A free side slot whose window holds `need` rows, the smallest that does; None.
+
+        `keep_carry_s` (FX10, SRV-213): skip a slot whose last request's end (`carry`) is younger
+        than this, so a short unrelated request (a guest of slot 0: the router's question before a
+        new user message, a title task) does not write over the rows that conversation's next
+        turn carries into slot 0; the caller then serves it on slot 0 with the stash when slot 0
+        is free, else takes the slot after all."""
+        now = time.monotonic()
         for s in sorted(self.side(), key=lambda s: s.max_len):
+            c = s.carry
+            if (keep_carry_s > 0 and c is not None and c.get("gen") == s.gen
+                    and now - float(c.get("t") or 0.0) < keep_carry_s):
+                continue
             if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
+                s.gen += 1
                 s.owner = owner
                 s.t_start = time.monotonic()
                 with self._lk:

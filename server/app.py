@@ -681,6 +681,15 @@ SIDE_CONV = (_S.get("SIDE_CONV") or "on").strip().lower()
 #: slot 0: `on`, or `off` (slot 0 with the stash, 0.3.46-test; kept for the A/B)
 SIDE_GUESTS = (_S.get("SIDE_GUESTS") or "on").strip().lower()
 
+#: FX10 (SRV-213): `on`: the next turn of a conversation whose last request ran on a side slot is
+#: carried into slot 0 from that slot's rows (`_carry_from_side`); `off`: it reads its prompt again
+#: on slot 0 from what slot 0's caches hold, as 0.4.0 did
+SIDE_CARRY = (_S.get("SIDE_CARRY") or "on").strip().lower()
+
+#: FX10: how long a side slot's last end is kept from a guest of slot 0 (the router's question
+#: before the conversation's next user message, a title task) while slot 0 is free
+CARRY_KEEP_S = 600.0
+
 
 def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
     """FX5: a request of `n` rendered tokens that shares `rc` with slot 0's resident rows is a
@@ -1197,12 +1206,17 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             mm.release()
         # a conversation read back from the NVMe for this request (engine/spill.py) is `spill`
         spilled = where.get("spill") or STATE.pop("spill_restored", None)
+        # FX10: a conversation carried in from a side slot for this request is `side`
+        carried = STATE.pop("side_carried", None)
         STATE["last_prefill"] = {"reused": reused, "forwarded": forwarded,
                                  "ms": (time.perf_counter() - t_pre) * 1e3,
-                                 "kind": ("spill" if spilled else where.get("kind"))
+                                 "kind": ("spill" if spilled else "side" if carried
+                                          else where.get("kind"))
                                  if reused else None}
         if spilled:
             STATE["last_prefill"]["spill"] = spilled
+        if carried:
+            STATE["last_prefill"]["side"] = carried
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -2227,6 +2241,12 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         if STATE.get("verbose") and why != "kept":
             print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
+    elif res is None and committed and mm is None and not delta:
+        why = _side_keep_end(committed, list(hidden) + list(STATE.get("hidden_spans") or []),
+                             served_hidden, conv_id)
+        if STATE.get("verbose") and why not in ("kept", "off"):
+            print(f"[parallel] side end not kept ({why}): kv.length={eng.kv.length} "
+                  f"ctx={len(committed)}", flush=True)
     suffix = STATE.get("suffix_store")
     if suffix is not None:
         if mm is not None:
@@ -2257,6 +2277,161 @@ def _end_replay(res, ids: list[int]) -> tuple[list[int], list, int]:
         out, spans = res.replay(ids)
         return out, spans, 0
     return al.replay(res, ids)
+
+
+def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
+    """FX10 (SRV-213): at the end of a request on a side slot, what its next turn on slot 0 needs
+    to carry the conversation over instead of reading it again: the tokens the slot's rows hold
+    (the served prompt, then what was committed), the hidden spans the client's copy lacks, and
+    the slot's grant count. The rows and the state stay in the slot's own buffers; nothing is
+    copied here. As `ResidentPrefix.keep_end`: a generation that stopped inside a block is cut back
+    to its committed tokens when the commit is still pending (else nothing is kept), and the
+    pending commit is settled so the state is the state at the end. Returns kept, off, short or
+    ahead."""
+    slot = slots_mod.current()
+    if slot is None or SIDE_CARRY == "off":
+        return "off"
+    slot.carry = None
+    eng, drafter = STATE["engine"], STATE["drafter"]
+    n_prompt = int(STATE.get("last_prompt_n") or 0)
+    e, n_c = int(eng.kv.length), len(committed)
+    if n_prompt <= 0 or e < n_prompt or n_c < n_prompt:
+        return "short"
+    if e > n_c:
+        trim = getattr(eng, "trim_pending", None)
+        if trim is None or not trim(n_c):
+            return "ahead"
+        e = n_c
+    settle = getattr(eng, "_settle", None)
+    if settle is not None:
+        settle()
+    mark = getattr(drafter, "end_mark", None) if drafter is not None else None
+    spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
+    slot.carry = {"gen": slot.gen, "t": time.monotonic(), "at": e,
+                  "tokens": [int(t) for t in committed[:e]], "n_prompt": n_prompt,
+                  "hidden": [(p, h) for p, h in spans if h and p + len(h) <= e],
+                  "served_hidden": [(int(a), int(b)) for a, b in (served_hidden or ())
+                                    if int(b) <= n_prompt],
+                  "mark": mark() if mark is not None else None, "owner": conv_id}
+    return "kept"
+
+
+def _carry_candidate(pool, res, ids: list[int], max_len: int):
+    """(slot, record) of the side slot whose last request this prompt continues, when carrying it
+    beats what slot 0 offers by more than a chunk; else None. Continues = shares the record's
+    tokens up to where the client's copy differs by design (the first hidden span, or the end of
+    the served prompt: the reasoning a client leaves out, the template's re-render), within one
+    chunk."""
+    chunk = max(1, int(getattr(res, "chunk", 0) or 1024))
+    best = None
+    for s in pool.side():
+        rec = s.carry
+        if rec is None or rec.get("gen") != s.gen or int(rec["at"]) > max_len:
+            continue
+        toks = rec["tokens"]
+        first = min([int(rec["n_prompt"])] + [int(p) for p, _ in rec["hidden"]])
+        need = max(2 * chunk, first - chunk)
+        # one list comparison (it runs for every request on slot 0 while an end is noted)
+        if len(ids) < need or len(toks) < need or list(ids[:need]) != list(toks[:need]):
+            continue
+        if best is None or int(rec["at"]) > int(best[1]["at"]):
+            best = (s, rec)
+    if best is None:
+        return None
+    c0 = res.common(ids) if res.valid else 0
+    here = max(res.best(c0, max_len), res.end_offer(c0, max_len),
+               res.pin_offer(ids, c0, max_len), res.park_offer(ids, c0, max_len))
+    return best if int(best[1]["at"]) > here + chunk else None
+
+
+def _carry_from_side(ids: list[int], session=None) -> dict | None:
+    """FX10 (SRV-213): on slot 0, before the replay: a conversation whose last request ran on a
+    side slot (a new chat or agent session that started as a guest beside slot 0's conversation)
+    is carried into slot 0 instead of read again. Measured before: UX2 O07 moved slot 1 -> 0 at
+    15,910 tokens and re-read 8.7k of them (18.3 s); UX1 W11 beside an 80k resident took slot 0 at
+    cached 0.44 (TTFT 17.0 s).
+
+    The resident conversation leaves first (`ResidentPrefix.vacate`: to the NVMe or the park, as a
+    request of another session would make it leave), then the side slot's rows [0, end) of every
+    position-indexed buffer are copied into slot 0's (a device copy, about 104 KiB a token: 0.9 GB
+    for 8,700 tokens) and its state at the end becomes slot 0's end anchor, with the hidden spans
+    and the end alignment's region, as `keep_end` would have kept it had the request run here.
+    The replay and the prefill then resume there as at any end anchor; what the side slot's
+    verify blocks wrote is held to the same gate as an end anchor's rows (the same greedy tokens),
+    and the rows count as a session's (`taint` 0: no prefix snapshot, no disk tier write of them).
+
+    The side slot is taken without waiting and only while no other request has had it since
+    (`Slot.gen`). Under the engine lock. Never fails a request: anything amiss and the prompt is
+    served from what slot 0 holds."""
+    pool, res = dict.get(STATE, "pool"), STATE.get("resident")
+    if SIDE_CARRY == "off" or pool is None or res is None or pool.n < 2 or res.chunk <= 0:
+        return None
+    eng, drafter = STATE["engine"], STATE["drafter"]
+    max_len = int(STATE.get("max_len") or 0)
+    try:
+        got = _carry_candidate(pool, res, ids, max_len)
+    except Exception:                                              # noqa: BLE001
+        return None
+    if got is None:
+        return None
+    slot, rec = got
+    if not slot.lock.acquire(blocking=False):
+        return None
+    t0 = time.perf_counter()
+    try:
+        if slot.carry is not rec or rec.get("gen") != slot.gen:
+            return None
+        from engine import spill as spill_mod
+        sv = slot.values or {}
+        seng, sdrafter = sv.get("engine"), sv.get("drafter")
+        if seng is None:
+            return None
+        e = int(rec["at"])
+        if drafter is not None and hasattr(drafter, "state_resume"):
+            drafter.state_resume(e)        # builds a draft cache that does not exist yet
+        v0, v1 = cache._kv_views(eng, drafter), cache._kv_views(seng, sdrafter)
+        if (spill_mod._layout(v0) != spill_mod._layout(v1)
+                or e > min(t.shape[ax] for t, ax in v0) or e > min(t.shape[ax] for t, ax in v1)
+                or seng.state.S.shape != eng.state.S.shape
+                or seng.state.conv.shape != eng.state.conv.shape):
+            return None
+        with torch.no_grad():
+            if eng.state.S.is_cuda:
+                torch.cuda.synchronize()
+            disk = STATE.get("disk_cache")
+            if disk is not None:
+                spill_mod.cache_fence(disk, 0)
+            how = res.vacate(eng, drafter, session if session is not None else rec.get("owner"))
+            for (t, ax), (u, _) in zip(v0, v1):
+                t.narrow(ax, 0, e).copy_(u.narrow(ax, 0, e))
+            res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")
+            pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"]})
+            if pair is not None:
+                pair[0].copy_(seng.state.S)
+                pair[1].copy_(seng.state.conv)
+                res.end["served_hidden"] = list(rec.get("served_hidden") or ())
+                al = STATE.get("end_align")
+                if al is not None:
+                    al.adopt(res, [(int(rec["n_prompt"]), e)])
+            if eng.state.S.is_cuda:
+                torch.cuda.synchronize()
+        slot.carry = None
+        info = {"slot": slot.index, "tokens": e, "end": pair is not None, "resident": how,
+                "ms": round((time.perf_counter() - t0) * 1e3, 1)}
+        STATE["side_carried"] = info
+        print(f"[parallel] carried slot {slot.index}'s conversation into slot 0: {e} tokens, "
+              f"end anchor {'kept' if pair is not None else 'refused'}, slot 0's conversation "
+              f"{how}, {info['ms']:.0f} ms", flush=True)
+        return info
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[parallel] carry failed: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            res.clear()                    # the rows in place are nobody's any more
+        except Exception:                                          # noqa: BLE001
+            pass
+        return None
+    finally:
+        slot.lock.release()
 
 
 def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
@@ -5344,7 +5519,10 @@ class Handler(BaseHTTPRequestHandler):
                 # FX5: a short request unrelated to slot 0's conversation takes an idle side slot
                 # before slot 0, so slot 0's rows stay that conversation's (else: slot 0 as a
                 # guest, with the stash, as before)
-                side = par.take_side(side_need, owner=cid)
+                # FX10: not over a side slot's fresh end, which its conversation's next turn
+                # carries into slot 0; slot 0 with the stash then, when it is free
+                side = par.take_side(side_need, owner=cid,
+                                     keep_carry_s=CARRY_KEEP_S if SIDE_CARRY != "off" else 0.0)
                 got = side is not None
                 if got:
                     with par._lk:
@@ -5442,6 +5620,7 @@ class Handler(BaseHTTPRequestHandler):
         if not micro:
             rec.lock_acquired()
             STATE.pop("spill_restored", None)
+            STATE.pop("side_carried", None)
         # SRV-197: the generation list a request on slot 0 finds; only one that generated
         # (`_generate_stream` publishes a new list) records its conversation as slot 0's
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
@@ -5536,6 +5715,10 @@ class Handler(BaseHTTPRequestHandler):
             hid_tail = max(0, plan_hidden - sum(b - a for a, b in hid_at))
             s1_len = int(prompt.numel())
             if res_ is not None and not images and not (comp and comp["prepared"] is not None):
+                if comp is None:
+                    # FX10 (SRV-213): a conversation that ran on a side slot is carried over first
+                    with torch.no_grad():
+                        _carry_from_side(prompt.tolist(), conv_id)
                 # 0.3.22-test: a conversation on the NVMe that this prompt continues is read back
                 # first, so the replay below works on its rows and its end anchor
                 _spill_before_replay(prompt.tolist(), mm_ok=comp is not None)

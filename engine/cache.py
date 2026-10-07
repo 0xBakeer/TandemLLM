@@ -1058,7 +1058,8 @@ class ResidentPrefix:
                       "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
                       "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
-                      "park_spills": 0, "park_dropped": 0}
+                      "park_spills": 0, "park_given_up": 0, "side_carries": 0,
+                      "carry_vacated": 0}
         # the session spill (engine/spill.py, 0.3.22-test): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
@@ -1345,10 +1346,35 @@ class ResidentPrefix:
         self.stats["spills"] += 1
         return True
 
-    def adopt(self, tokens, valid: int, taint, owner) -> None:
+    def vacate(self, eng, drafter, session) -> str:
+        """FX10 (SRV-213): before another slot's rows are copied over the rows in place from row
+        0, the resident conversation leaves as a request of another session would make it leave
+        (`begin`), with nothing of it kept in place: to the NVMe when it is at least the spill's
+        eviction length and longer than the RAM park holds, else to the park (from row 0, so its
+        head goes with it). Returns spilled, parked, dropped or empty."""
+        if self._stash is not None:
+            self.settle_guest(eng)
+        if not self.valid:
+            return "empty"
+        self.stats["carry_vacated"] += 1
+        other = session is None or session != self.owner
+        if (self.spiller is not None and other and self.valid >= self.spiller.min_tokens
+                and self.valid > self._park_cap_rows(eng, drafter)
+                and self._spill(eng, drafter, "switch")):
+            self.clear()
+            return "spilled"
+        parked = self.stats["parks"]
+        if self.park_budget and other:
+            self._park(eng, drafter, 0)
+        how = "parked" if self.stats["parks"] > parked else "dropped"
+        self.clear()
+        return how
+
+    def adopt(self, tokens, valid: int, taint, owner, count: str = "spill_restores") -> None:
         """A conversation read back from the disk is the resident prompt from here on: its rows
         are in place (engine/spill.py wrote them), its anchors and end anchor follow through
-        `adopt_anchor` and `adopt_end`. What the rows held before goes."""
+        `adopt_anchor` and `adopt_end`. What the rows held before goes. `count`: the counter it
+        adds to (`side_carries` for a conversation carried from a side slot, FX10)."""
         self._stash = None
         self._drop_end()
         for b in list(self.anchors):
@@ -1358,7 +1384,7 @@ class ResidentPrefix:
         self.taint = None if taint is None else int(taint)
         self.owner = owner
         self.capturing = False
-        self.stats["spill_restores"] += 1
+        self.stats[count] += 1
 
     def adopt_anchor(self, eng, b: int):
         """A buffer pair for the restored anchor at `b` (None when the memory policy refuses)."""
@@ -1688,14 +1714,14 @@ class ResidentPrefix:
             return False
         top = int(self.park_base + self.park_rows)
         if top < int(sp.cfg.get("drain_min_tokens", 4096)):
-            self.stats["park_dropped"] += 1
+            self.stats["park_given_up"] += 1
             return False
         try:
             info = sp.save_park(self, eng, drafter, "evict_park")
         except Exception:                                          # noqa: BLE001
             info = None
         if info is None:
-            self.stats["park_dropped"] += 1
+            self.stats["park_given_up"] += 1
             return False
         self.stats["park_spills"] += 1
         return True
