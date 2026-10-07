@@ -29,7 +29,8 @@ The test matrix:
   9  the block parser: attributes and head lines, defaults, schema errors
                                                         test_block_parse
  10  the stream filter: a block split over many pieces is held back, the text around it goes
-     out; an unclosed block, a fifth block and a refused block go out as text; `<tandem_memoryx`
+     out; a fifth block, a refused block and one over 2,000 characters are hidden too (SRV-277);
+     an unclosed block and one still open past the hold limit go out as text; `<tandem_memoryx`
      is not ours                                        test_stream_filter
  11  token spans: a block on whole tokens is found; one whose edge shares a token with text is
      not                                                test_token_spans
@@ -42,6 +43,11 @@ The test matrix:
                                                         test_model_routes
  15  the dashboard's routes: list, one, edit (ratified, human), pin, archive, delete, search,
      export, user delete with confirmation              test_admin_routes
+ 17  SRV-277: an Open WebUI chat (no working directory) writes a project-scoped block: the note
+     lands at user scope (rescoped, journaled), no markup reaches the answer; a block the store
+     refuses (schema, a rule from a tool turn) is hidden with its reason journaled; the hidden
+     blocks' tokens are found as spans for the next turn's end alignment
+                                                        test_srv277_owui_block_never_shown
  16  P-M3: a `propose` block becomes a proposal (never applied), Apply is a new packages version
      with the text and the old version restores it, a replacement of a changed text is refused,
      an append applies to the text as it is, Reject keeps the reason; no evidence without J1 rows
@@ -122,7 +128,10 @@ def test_add_and_scopes():
     assert st.get("owner", p["id"]).project == PROJ
     assert "/projects/pagoda-" in st.get("owner", p["id"]).path
     assert "/sessions/c-ses-1/" in st.get("owner", s["id"]).path
-    refused(lambda: add(st, "no project here", scope="project", project=None), "no_project")
+    # SRV-277: no working directory (an Open WebUI chat): the project note lands at user scope
+    q = add(st, "no project here", scope="project", project=None)
+    assert q["scope"] == "user" and q["rescoped"] == "project", q
+    assert "/owner/user/" in st.get("owner", q["id"]).path
     refused(lambda: add(st, "no session here", scope="session", session=None), "no_session")
     refused(lambda: add(st, "x", user="../etc"), "no_user")
     refused(lambda: add(st, "bad kind", kind="poem"), "schema")
@@ -313,25 +322,32 @@ def test_stream_filter():
         f = memblock.MemFilter(lambda raw: got.append(raw))
         assert feed_all(f, text, step) == "Done, the gate passes now.\n\n\n", (step,)
         assert got == [BLOCK] and f.taken == [BLOCK], step
-    # refused: out as text
+    # refused: hidden all the same (SRV-277), the reason kept
     f = memblock.MemFilter(lambda raw: "cap")
-    assert feed_all(f, "a " + BLOCK, 5) == "a " + BLOCK and f.failed == ["cap"]
+    assert feed_all(f, "a " + BLOCK, 5) == "a " and f.failed == ["cap"]
+    assert f.hidden == [BLOCK] and f.taken == [] and f.shown == []
     # unclosed
     f = memblock.MemFilter(lambda raw: None)
     half = BLOCK[:60]
     assert feed_all(f, "x " + half, 4) == "x " + half and f.failed == ["unclosed"]
-    # five blocks: the fifth goes out
+    # five blocks: the fifth is not written, and hidden
     f = memblock.MemFilter(lambda raw: None)
     out = feed_all(f, (BLOCK + "\n") * 5, 9)
-    assert out == "\n" * 4 + BLOCK + "\n" and f.failed == ["too_many"], (out, f.failed)
+    assert out == "\n" * 5 and f.failed == ["too_many"], (out, f.failed)
+    assert len(f.taken) == 4 and len(f.hidden) == 5
     # not ours
     f = memblock.MemFilter(lambda raw: None)
     s = "see <tandem_memoryx> and <tandem_mem"
     assert feed_all(f, s, 3) == s
-    # too long: out as text once it passes the limit
+    # too long but closed within the hold: not written, hidden
     f = memblock.MemFilter(lambda raw: None)
     long = '<tandem_memory op="add">\n' + "y" * 2100 + "</tandem_memory>"
-    assert feed_all(f, long, 100) == long and f.failed == ["too_long"]
+    assert feed_all(f, long, 100) == "" and f.failed == ["too_long"] and f.hidden == [long]
+    # still open past the hold limit: not a note any more, out as text
+    f = memblock.MemFilter(lambda raw: None)
+    huge = '<tandem_memory op="add">\n' + "y" * (memblock.HOLD_CHARS + 100) + "</tandem_memory>"
+    assert feed_all(f, huge, 100) == huge and f.failed == ["too_long"] and f.shown == ["too_long"]
+    assert f.hidden == []
     # the non-streamed strip
     rest, found = memblock.strip_blocks("a " + BLOCK + " b")
     assert rest == "a  b" and found == [BLOCK]
@@ -531,10 +547,10 @@ def test_take():
     kind, task, kw = j.rows[0]
     assert (kind, task) == ("memory_notes", "write") and "title" not in json.dumps(kw["detail"])
     assert "offerings" not in json.dumps(kw)
-    # a refused block goes out as text
+    # a refused block is hidden too (SRV-277)
     bad = BLOCK.replace('kind="gotcha"', 'kind="poem"')
     f = mem.filter(ctx, ui)
-    assert feed_all(f, bad, 13) == bad and f.failed == ["schema"]
+    assert feed_all(f, bad, 13) == "" and f.failed == ["schema"] and f.hidden == [bad]
     assert j.rows[-1][2]["decision"] == "schema"
     # off: no filter
     assert mem.filter({"mode": "off"}) is None and mem.filter(None) is None
@@ -701,6 +717,51 @@ def test_proposals():
     why = cond.memory.take(ctx, '<tandem_memory op="propose" name="no-such">\ntitle: x\n\n'
                                 'text\n</tandem_memory>')
     assert why == "unknown_package", why
+
+
+def test_srv277_owui_block_never_shown():
+    """CACHE1's W05 (0.4.3-test, 2026-10-07 22:06): the model wrote a project-scoped reference
+    note in an Open WebUI chat; the store refused it (no_project) and the whole block reached
+    the user as text."""
+    st = store()
+    j = Journal()
+    mem = memory_mod.Memory(st, j)
+    ui = UI()
+    owui = {"mode": "on", "user": "owner", "project": None, "session": "c:owui-chat-1",
+            "from_user": True, "request_id": "r-w05", "writer": "qwen-inline", "written": []}
+    note = ('<tandem_memory op="add" scope="project" kind="reference">\n'
+            'title: TandemLLM docs summary\n\nThe docs cover the engine, the conductor and the '
+            'packages; Laya is the decision model.\n</tandem_memory>')
+    answer = "Here is the summary of the docs.\n\n"
+    for step in (1, 7, 64, 5000):
+        f = mem.filter(dict(owui, written=[]), ui)
+        out = feed_all(f, answer + note, step)
+        assert out == answer and "<tandem_memory" not in out, (step, out)
+        assert f.hidden == [note] and f.failed == [], (step, f.failed)
+    n = [x for x in st.notes("owner") if x.title == "TandemLLM docs summary"]
+    assert len(n) == 1 and n[0].scope == "user" and n[0].project is None, n
+    rows = [kw for k, t, kw in j.rows if (k, t) == ("memory_notes", "write")]
+    assert rows[0]["decision"] == "add" and rows[0]["detail"]["rescoped"] == "project", rows[0]
+    assert ui.lines[0] == ("remembered", {"title": "TandemLLM docs summary"}), ui.lines
+    # the same block again: a revision of that note, still hidden
+    f = mem.filter(dict(owui, written=[]), ui)
+    assert feed_all(f, answer + note, 9) == answer
+    assert len([x for x in st.notes("owner") if x.title == "TandemLLM docs summary"]) == 1
+    # refused blocks: hidden, the reason in the journal
+    rule_from_tool = note.replace('scope="project" kind="reference"', 'scope="user" kind="rule"')
+    for raw, why, ctx in ((note.replace('kind="reference"', 'kind="poem"'), "schema", owui),
+                          (rule_from_tool, "rule_from_tool", dict(owui, from_user=False))):
+        f = mem.filter(dict(ctx, written=[]), ui)
+        assert feed_all(f, "Done.\n" + raw + "\nBye.", 5) == "Done.\n\nBye.", why
+        assert f.failed == [why] and f.hidden == [raw], (why, f.failed)
+        assert j.rows[-1][2]["decision"] == why
+    # the hidden blocks are spans of whole tokens (the end alignment puts them back)
+    tok = CharTok()
+    text = "Done.\n" + note + "\nBye."
+    ids = tok.encode(text)
+    spans, bad = memblock.token_spans(ids, tok.decode, [note])
+    assert bad == 0 and len(spans) == 1 and tok.decode(ids[spans[0][0]:spans[0][1]]).strip() \
+        == note, (spans, bad)
 
 
 if __name__ == "__main__":

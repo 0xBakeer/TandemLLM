@@ -6984,17 +6984,19 @@ def _locate(ctx: list[int], seq: list[int], start: int, window: int = 8192) -> i
 
 
 def _memory_close(plan, mfilter, ids: list[int], n_prompt: int, spans_ok: bool) -> tuple:
-    """After a streamed answer: (the blocks taken, their hidden spans), journaled on the row."""
+    """After a streamed answer: (the blocks kept from the client, their hidden spans), journaled
+    on the row. SRV-277: a block the store refused is kept from the client as a written one is,
+    so both are hidden spans for the next turn's end alignment."""
     if mfilter is None:
         return [], []
-    taken = list(mfilter.taken)
-    _memory_row(plan, mfilter.failed)
-    return taken, (_memory_spans(taken, ids, n_prompt) if spans_ok else [])
+    hidden = list(mfilter.hidden)
+    _memory_row(plan, mfilter.failed, getattr(mfilter, "shown", ()))
+    return hidden, (_memory_spans(hidden, ids, n_prompt) if spans_ok else [])
 
 
 def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -> tuple:
-    """The non-streamed answer's memory blocks: each closed block of the answer written, the
-    ones taken returned with their hidden spans (the text drops them later)."""
+    """The non-streamed answer's memory blocks: each closed block of the answer written, every
+    closed one returned with its hidden span (the text drops them later)."""
     f = _memory_filter(plan, chat, n_choices, ui)
     if f is None:
         return [], []
@@ -7005,7 +7007,7 @@ def _memory_full(plan, chat, n_choices, ui, ids, in_think, n_prompt, spans_ok) -
     return _memory_close(plan, f, ids, n_prompt, spans_ok)
 
 
-def _memory_row(plan, failed: list[str]) -> None:
+def _memory_row(plan, failed: list[str], shown=()) -> None:
     ctx = getattr(plan, "memory", None)
     if plan is None or plan.row is None or not ctx:
         return
@@ -7015,6 +7017,16 @@ def _memory_row(plan, failed: list[str]) -> None:
                            for w in ctx["written"]]
     if failed:
         info["failed"] = list(failed)
+        hid = [w for w in failed if w not in shown]
+        # SRV-277: the reason is the journal's and the log's, never the client's
+        print(f"[memory] {plan.row.get('request_id') or '-'}: "
+              + (f"{len(hid)} block(s) not written ({', '.join(hid)}), hidden from the answer"
+                 if hid else "")
+              + ("; " if hid and shown else "")
+              + (f"shown as text ({', '.join(shown)}: not a closed block)" if shown else ""),
+              flush=True)
+    if shown:
+        info["shown"] = list(shown)
 
 
 def _hidden_positions(hid_at, tail: int, s_len: int, n_prompt: int, hidden: int, plan):

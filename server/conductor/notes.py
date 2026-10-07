@@ -505,9 +505,15 @@ class NoteStore:
                 raise Refused("schema", f"scope: one of {', '.join(SCOPES)}")
             if not title:
                 raise Refused("schema", "title: one line, what the note says")
+            rescoped = None
             if scope == "project" and not project:
-                raise Refused("no_project", "no working directory in this conversation, so no "
-                                            "project scope")
+                # SRV-277 (2026-10-08): a conversation without a working directory (every Open
+                # WebUI chat, a curl script) has no project, and the note used to be refused and
+                # shown to the user as markup. TandemLLM serves one user and a "remember" from
+                # any client is read back in the next conversation (SRV-173), so the note lands
+                # in the user's scope, which every later conversation sees; a session note
+                # would be gone in the next chat. The result and the journal say `rescoped`.
+                scope, rescoped = "user", "project"
             if scope == "session" and not session:
                 raise Refused("no_session", "no session for this request")
             self._rule_check(kind, scope, from_user)
@@ -518,7 +524,8 @@ class NoteStore:
                 self.stats["revised"] += 1
                 self._done(counts)
                 return {"op": "add", "id": hit.id, "title": hit.title, "scope": hit.scope,
-                        "kind": hit.kind, "revised": True, "redacted": counts}
+                        "kind": hit.kind, "revised": True, "redacted": counts,
+                        **({"rescoped": rescoped} if rescoped else {})}
             live = self.notes(user)
             if len(live) >= CAPS["user_notes"]:
                 raise Refused("cap", f"{CAPS['user_notes']} live notes: archive some first")
@@ -541,8 +548,11 @@ class NoteStore:
             self._touch(user)
             self.stats["writes"] += 1
             self._done(counts)
-            return {"op": "add", "id": n.id, "title": n.title, "scope": scope, "kind": kind,
-                    "redacted": counts}
+            out = {"op": "add", "id": n.id, "title": n.title, "scope": scope, "kind": kind,
+                   "redacted": counts}
+            if rescoped:
+                out["rescoped"] = rescoped
+            return out
 
     def _done(self, counts: dict) -> None:
         if counts:

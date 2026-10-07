@@ -30,8 +30,10 @@ prefill once:
 
 THE WRITES. `Memory.take()` is the stream's `MemFilter` callback (server/memblock.py): a closed
 block is parsed and written (server/conductor/notes.py) with the request's user, project and
-session, and its `from_user` (a tool turn cannot write a rule about the user); a refusal sends the
-block out as text. A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
+session, and its `from_user` (a tool turn cannot write a rule about the user). A refused block is
+hidden from the client like a written one (SRV-277): the reason goes to the journal and the log,
+never into the answer. A project-scoped add in a conversation without a working directory (an
+Open WebUI chat) is written at user scope (`rescoped: project`). A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
 kind, why, the redaction counts. Never a title or a body: they stay in the files.
 
 A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (the owner's ruling,
@@ -144,7 +146,7 @@ class Memory:
     # ---------------------------------------------------------------- the model's writes
     def take(self, ctx: dict, raw: str, ui=None) -> str | None:
         """One closed block of the request whose memory context is `ctx` (Plan.memory): None when
-        it was written (hidden from the client), else why not (it goes out as text)."""
+        it was written, else why not. The block is hidden from the client either way (SRV-277)."""
         self.stats["blocks"] += 1
         op, why, res = None, None, None
         if ctx.get("read_only"):
@@ -185,7 +187,8 @@ class Memory:
                   "chars": len(raw)}
         if res is not None:
             detail.update({k: res.get(k) for k in ("id", "scope", "kind", "revised", "redacted",
-                                                    "name", "n", "kept") if res.get(k)})
+                                                    "name", "n", "kept", "rescoped")
+                           if res.get(k)})
         ctx.setdefault("written", []).append(detail)
         if why is None:
             self.stats["taken"] += 1

@@ -16,11 +16,17 @@ the block say the same; the body is what follows the first blank line. The engin
 back the way it holds a `<tool_call>` (`MemFilter`, beside server/toolcall.py's buffer), so the
 client never sees it: the stream is the answer alone, plus one state line `› remembered: ...`.
 
-THE HONEST FALLBACK. A block that is not taken goes out to the client as the text it was: one
-that never closed (`unclosed`), one over 2,000 characters (`too_long`), the fifth of a turn
-(`too_many`), one the schema or the store refused (`schema`, `cap`, `secret`, ...). The journal
-says why. Only the answer writes: a block inside the reasoning is a thought about remembering,
-as a call inside the reasoning is a thought about calling, and stays as the model wrote it.
+A CLOSED BLOCK IS NEVER SHOWN (SRV-277, 2026-10-08). Every closed block is held back from the
+client, whether it was written or not: one over 2,000 characters (`too_long`), the fifth of a turn
+(`too_many`), one the schema or the store refused (`schema`, `cap`, `secret`, ...). Before, a
+refused block went out as the text it was, so an Open WebUI chat (no working directory, so no
+project scope) showed the model's `<tandem_memory scope="project">` markup to the user. The journal
+and the log say why a block was not written; `hidden` lists every block kept from the client (its
+tokens are hidden spans, as a written one's). Only text that is not a closed block goes out as
+written: one that never closed (`unclosed`), one still open past `HOLD_CHARS` (`too_long`: the
+model is not writing a note any more), `<tandem_memoryx`. Only the answer writes: a block inside
+the reasoning is a thought about remembering, as a call inside the reasoning is a thought about
+calling, and stays as the model wrote it.
 
 THE CACHE. The rows hold the block; the client's copy of the answer does not. `token_spans()`
 finds the block's tokens in the generation, and the server records them as hidden spans, which
@@ -40,6 +46,7 @@ OPEN = "<tandem_memory"
 CLOSE = "</tandem_memory>"
 MAX_BLOCKS = 4
 MAX_CHARS = 2000
+HOLD_CHARS = 2 * MAX_CHARS       # how long an open block is held back before it is text after all
 OPS = ("add", "update", "archive", "propose")
 FIELDS = ("op", "scope", "kind", "title", "tags", "id", "reason", "verify_by", "name", "mode")
 _ATTR = re.compile(r"""([a-z_]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))""")
@@ -106,16 +113,19 @@ class MemFilter:
     """The answer's text with the closed blocks taken out, one piece at a time.
 
     `on_block(raw)` is called once a block closes; it returns None when the block was taken
-    (hidden), else the reason it was not, and the block then goes out as text. `feed()` returns
-    the text the client gets now; `finish()` the rest (an unclosed block as text)."""
+    (written), else the reason it was not. Either way a closed block is hidden (SRV-277).
+    `feed()` returns the text the client gets now; `finish()` the rest (an unclosed block as
+    text)."""
 
     def __init__(self, on_block):
         self.on_block = on_block
         self.pending = ""
         self.inside = False
         self.blocks = 0                  # blocks seen closed this turn
-        self.taken: list[str] = []       # the raw text of the blocks that were hidden
-        self.failed: list[str] = []      # why each one that went out as text did
+        self.taken: list[str] = []       # the raw text of the blocks that were written
+        self.hidden: list[str] = []      # every closed block kept from the client (taken or not)
+        self.failed: list[str] = []      # why each block that was not written was not
+        self.shown: list[str] = []       # why each piece that looked like a block went out as text
 
     def feed(self, piece: str) -> str:
         if not piece and not self.pending:
@@ -144,8 +154,9 @@ class MemFilter:
                 self.inside = True
             j = self.pending.find(CLOSE)
             if j < 0:
-                if len(self.pending) > MAX_CHARS + len(CLOSE):
+                if len(self.pending) > HOLD_CHARS + len(CLOSE):
                     self.failed.append("too_long")
+                    self.shown.append("too_long")
                     out.append(self.pending)
                     self.pending, self.inside = "", False
                 break
@@ -155,17 +166,18 @@ class MemFilter:
             self.blocks += 1
             why = ("too_long" if len(raw) > MAX_CHARS else
                    "too_many" if self.blocks > MAX_BLOCKS else self.on_block(raw))
+            self.hidden.append(raw)
             if why is None:
                 self.taken.append(raw)
             else:
                 self.failed.append(why)
-                out.append(raw)
         return "".join(out)
 
     def finish(self) -> str:
         rest, self.pending = self.pending, ""
         if self.inside:
             self.failed.append("unclosed")
+            self.shown.append("unclosed")
         self.inside = False
         return rest
 
