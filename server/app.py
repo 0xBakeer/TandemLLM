@@ -7676,25 +7676,20 @@ def _load(a) -> None:
         for x in led.stages()), flush=True)
 
 
-def _par_growth() -> int:
-    """What the engine may still take while a second request runs: the long-lived caches' budgets
-    less what they hold, but never more than the engine's memory policy lets it grow (SRV-250):
-    every cache asks `Budget.admit`, which keeps the allocated bytes under `--mem-ceiling-gib`
-    less the slack and the allocator's reservation plus a prefill's workspace under
-    `--mem-peak-gib`. So the room to the peak bounds the growth; the budgets alone counted
-    6.4 to 8.4 GiB of caches the policy would never have let grow."""
-    g = _par_cache_growth()
+def _par_room() -> int | None:
+    """SRV-250: the engine's room to `--mem-peak-gib` under its memory policy (the reservation
+    now against the peak), None without a policy. Every cache asks `Budget.admit` before it grows
+    and every prefill passes `Budget.gate`, so the caches, the requests in flight and a new one
+    take at most this together; the caches' budgets alone counted 6.4 to 8.4 GiB the policy would
+    never have let them grow."""
     mem = dict.get(STATE, "mem")
     if mem is None or not getattr(mem, "on", False):
-        return g
-    try:
-        _, reserved = mem.memory()
-        return min(g, max(0, int(mem.peak) - int(reserved)))
-    except Exception:                                              # noqa: BLE001
-        return g
+        return None
+    _, reserved = mem.memory()
+    return max(0, int(mem.peak) - int(reserved))
 
 
-def _par_cache_growth() -> int:
+def _par_growth() -> int:
     """What the long-lived caches may still take: each one's budget less what it holds."""
     g = 0
     store, res, rc = (dict.get(STATE, "state_store"), dict.get(STATE, "resident"),
@@ -7781,7 +7776,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                          f"not {a.drafter}")
     L = int(min(a.side_max_len, a.max_len))
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
-    adm = slots_mod.Admission(floor, growth=_par_growth)
+    adm = slots_mod.Admission(floor, growth=_par_growth, room=_par_room)
     drafter0 = STATE["drafter"]
     ng0 = getattr(drafter0, "ngram", None)
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]

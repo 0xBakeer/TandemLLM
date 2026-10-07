@@ -20,7 +20,7 @@ then restart the service. The same settings as flags: `--parallel N`, `--side-ma
 |-|-|-|
 | `--parallel N` | 1 | sequence slots; N - 1 side slots beside the engine |
 | `--side-max-len` | 65,536 | a side slot's window; a request whose prompt plus `max_tokens` does not fit waits for slot 0 |
-| `--parallel-floor-gb` | 15 | a request in flight beside others waits while its worst case would push MemAvailable under this; a side slot is built only if it fits above it |
+| `--parallel-floor-gb` | 15 | a request in flight beside others waits while its own prefill workspace, the others' and what the caches may still grow into (together at most the engine's room to `--mem-peak-gib`) would push MemAvailable under this; a side slot is built only if it fits above it. The wait is queue time (`wait_mem_ms` in the ledger) and the client sees a waiting line |
 | `--parallel-batch` | on | decoding slots verify their trees in one joint pass (off: they take turns) |
 | `--parallel-draft` | on | the decoding slots' draft calls in one packed pass over the drafter |
 | `--parallel-cut` | share | `share`: each slot's tree cut to a fixed share (16 rows at two slots, 10 at three, 8 at four); `joint`: the round cuts all trees together, best nodes first |

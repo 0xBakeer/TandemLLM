@@ -114,28 +114,40 @@ def _pool(avail_gib, growth=0, floor_gib=15.0):
     return types.SimpleNamespace(admission=adm, turn=None), box
 
 
-def test_3_the_need_and_the_growth():
+def test_3_the_need_and_the_engines_room():
     import torch
     app.STATE.clear()
     app.STATE["mem"] = _Mem(peak=int(84.6 * GiB), reserved=int(77.4 * GiB))
-    # the caches' budgets (8 GiB left) capped by the room to the peak (7.2 GiB) ...
     app.STATE["state_store"] = types.SimpleNamespace(budget=int(10 * GiB), bytes=int(2 * GiB),
                                                      max_entry=GiB)
-    assert abs(app._par_growth() - int(7.2 * GiB)) < GiB // 100, app._par_growth() / GiB
-    app.STATE["mem"]._r = int(84 * GiB)            # ... and by less when the engine is near it
-    assert abs(app._par_growth() - int(0.6 * GiB)) < GiB // 100
-    # 576 tokens beside a 9,000-token request in flight, 25 GiB available, growth 0.6: admitted
-    pool, _ = _pool(25.0, growth=app._par_growth())
-    ok, _ = pool.admission.reserve("big", app.STATE["mem"].workspace(9000))
-    assert ok
+    assert app._par_growth() == 8 * GiB                      # the caches' budgets left
+    assert abs(app._par_room() - int(7.2 * GiB)) < GiB // 100  # the engine's room to its peak
+    # FX7's live case on 0.3.49-test: MemAvailable 25.0, growth 6.6, in flight 2.1, need 2.1 ->
+    # 14.1 (< 15): the 576-token request waited 63 s. Now its need is its workspace and the
+    # engine's room caps what all of it may take
+    adm = slots_mod.Admission(int(15 * GiB), meminfo=lambda: {"MemAvailable": int(22.7 * GiB)},
+                              growth=lambda: int(6.6 * GiB), room=app._par_room)
+    pool = types.SimpleNamespace(admission=adm, turn=None)
+    assert adm.reserve("big", app.STATE["mem"].workspace(9000))[0]
     h = _Handler()
     t0 = time.perf_counter()
     assert app.Handler._par_admit(h, pool, "small", torch.zeros(576)) is True
     assert time.perf_counter() - t0 < 0.5, "no wait"
-    held = pool.admission.held
-    assert held["small"] == cache.WORKSPACE_FLOOR, held   # the workspace, no store entry
-    # 0.3.49-test's need for the same request: the workspace plus a 1 GiB store entry
-    assert held["small"] + GiB > 2 * GiB
+    held = adm.held
+    assert held["small"] == cache.WORKSPACE_FLOOR, held    # the workspace, no store entry
+    ok, d = adm.check(cache.WORKSPACE_FLOOR, count=False)
+    assert d["room"] is not None and abs(d["after"] - int((22.7 - 7.2) * GiB)) < GiB // 100, d
+    assert "room to its peak" in slots_mod.Admission.describe(d)
+    # the engine near its peak: little room, nothing waits that the policy would refuse anyway
+    app.STATE["mem"]._r = int(84 * GiB)
+    assert abs(app._par_room() - int(0.6 * GiB)) < GiB // 100
+    # where MemAvailable itself is low the floor still holds: 15.7 GiB with 0.6 of room passes,
+    # 15.5 GiB does not
+    for avail, want in ((15.7, True), (15.5, False)):
+        a2 = slots_mod.Admission(int(15 * GiB), meminfo=lambda v=avail: {"MemAvailable": int(v * GiB)},
+                                 growth=lambda: int(6.6 * GiB), room=app._par_room)
+        assert a2.reserve("big", GiB)[0]                  # alone
+        assert a2.reserve("small", cache.WORKSPACE_FLOOR)[0] is want, avail
 
 
 def test_4_a_held_request_waits_in_the_queue_and_says_so():

@@ -2,6 +2,36 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.50-test, 2026-10-07
+
+0.3.49-test (e6970f5) with seven fixes from the normal-user scenario run and FX7's measurements (SRV-243, SRV-239, SRV-245 with SRV-219, SRV-247, SRV-233, SRV-250; SRV-235 in the router document; QA SRV-244, SRV-240, SRV-246, SRV-220, SRV-248, SRV-234, SRV-236). Raw and bench text are unchanged. Under a conductor profile an API client that names no `reasoning_format` now gets `reasoning_content` (a changed default), and the follow-up of an answer that thought is served with that answer's reasoning.
+
+### A chat gets the packages its tools can carry out (SRV-243)
+
+- A plain Open WebUI chat (its tools: search_web, fetch_url) asking for a landing page got the testing and Laya packages, which tell the model to run a shell and write files. It called `terminal` and `write_file` ('Tool not found'), fetched the library's address with fetch_url, wrote the page into a failed call and printed it again: 518 s on 0.3.48-test; a snake game 423 s, a 3D garden 522 s.
+- The router reads what the request's tools can do off their schemas (a shell: a `command` argument; a file write: a path and a content argument). A package names what its steps need in `requires_tools` (absent: a shell when its text calls TandemLLM through `{tandem_url}`); one the tools cannot carry out stays out or gives way to its `fallback` (`coding` to the new `coding-answer`; on the reference box `web-design` to `web-design-answer`, packages v18), and the note says which tools the chat has and to deliver the files in the answer. The harness, library and memory routes need a shell too. Decision rows: `extra.tools`. `QWEN38_TOOL_FIT=off` keeps every package.
+- Live on 0.3.50-test (n = 1 each): W10 one request, no tool call, 294 s (315 s with `web-design-answer`); W11 195 s and its fix turn 116 s; W12 248 s; notes of 404 to 2,321 tokens instead of 4,562 to 7,590. What is left is the model's own work: 7,000 to 10,000 reasoning tokens and an 8,000 to 9,000-token page.
+
+### The follow-up of an answer that thought resumes at its end (SRV-239)
+
+- Open WebUI sends an answer back without its reasoning; the Qwen3.8 template renders it as an empty `<think>` block, so the client's copy parted from the engine's rows right after `<think>` and the turn resumed at the grid line below. Six of six Open WebUI chats whose first answer thought re-read it on the first follow-up (0.71 to 0.89, TTFT 2.5 to 5.0 s), and a long chat resumed at the grid on every turn after one that thought (W05: 0.985 falling to 0.947).
+- The end alignment remembers where each generation's reasoning ends and, when the copy does not align as the rows are, aligns it with the reasoning taken out; the prompt is served with the rows' tokens to the end anchor (the reasoning the engine wrote included, as the template renders it for a client that sends it) and resumes there. `QWEN38_END_ALIGN_REASONING=off` is the old rule.
+- A/B on 0.3.49-test, one build, the follow-up without the reasoning against with it as `reasoning_content` (n = 2 each): 0 tokens reused against 309 and 319. On 0.3.50-test with an Open WebUI-sized head: without the reasoning 6,324 to 6,340 client tokens reused at the end anchor, TTFT 112 to 131 ms, like the copy with it. Live first follow-ups: W02 7,300 of 7,315 (TTFT 0.17 s; 0.83 and 3.96 s on 0.3.48), W03 6,880 of 6,897, W04 7,018 of 7,044, W15 6,774 of 6,990, W16 7,095 of 7,116, W17 after Stop and Continue 8,276 of 8,306 (TTFT 1.0 s; 5.0 s before).
+
+### API clients get a clean answer (SRV-245, SRV-219, SRV-247)
+
+- Every client kind but the Hermes agent gets `reasoning_content` when it names no format (`QWEN38_CLIENT_REASONING=*=reasoning_content,hermes=tags`): an OpenAI SDK printed the thinking as its answer, and opencode with the installer's config showed literal `<think>` text. `reasoning_format: tags` keeps the tags. The answer starts with its first character.
+- `stop` strings apply to the answer only: `stop: ["\n\n"]` ended a response inside the thinking with no answer; now it returns the first paragraph (P04). State lines never go into a plain client's `content`.
+- A request that offered no tools never gets `tool_calls`; a call in the answer is dropped (`extra.calls_refused`), and a request without a shell gets the memory index without its routes. P08: "What is my UX1 pet?" answers "I don't have any note about a UX1 pet", finish `stop` (0.3.48-test: a call to a tool named `tool`, finish `tool_calls`).
+
+### cached_tokens counts the client's tokens (SRV-233)
+
+- The hidden rows inside the cached span counted as client tokens: an opencode turn that re-read 3,827 of its 24,706 client tokens reported 24,706 cached. The server now tracks where the hidden tokens sit and reports the client's tokens below the resume point (20,879 for that turn). Ledger schema 8 adds `engine_cached`, `forwarded_tokens` and `wait_mem_ms`.
+
+### The parallel admission sizes a request by what it needs (SRV-250)
+
+- A request counted the workspace floor plus a whole state-store entry (2.1 GiB for 576 tokens) against 6.4 to 8.4 GiB of cache budgets: at the box's idle MemAvailable a 576-token title request waited 63 and 83 s beside a 9,000-token one, booked as prefill. Now its need is its own prefill workspace, and the caches' growth, the requests in flight and its own together are capped by the engine's room to `--mem-peak-gib` (every cache asks the memory policy before it grows and every prefill passes its gate); the wait is queue time (`wait_mem_ms`) with a waiting line, and the alone path says so.
+
 ## 0.3.49-test, 2026-10-07
 
 0.3.48-test (c16b27c) with four fixes from the normal-user scenario run (SRV-223, SRV-225, SRV-227, SRV-231; QA SRV-224, SRV-226, SRV-228, SRV-232). Raw and bench text are unchanged.

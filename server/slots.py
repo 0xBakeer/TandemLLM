@@ -80,10 +80,16 @@ class Admission:
     what the long-lived caches may still take (their budgets minus what they hold). Without
     /proc/meminfo (a Mac, a test without `meminfo`) every request is admitted and says so."""
 
-    def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None):
+    def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None):
         self.floor = int(floor_bytes)
         self.meminfo = meminfo
         self.growth = growth or (lambda: 0)
+        # SRV-250: the most the engine may still take under its memory policy (its room to
+        # `--mem-peak-gib`), None when unknown. Every prefill, a side slot's too, passes the
+        # policy's gate, which keeps the reservation plus that prefill's workspace under the
+        # peak, so what the caches, the requests in flight and this one may take together is at
+        # most this room
+        self.room = room
         self.lock = threading.Lock()
         self._admit = threading.Lock()
         self.held: dict = {}
@@ -103,8 +109,17 @@ class Admission:
             d.update(avail=None, after=None, ok=True)
             return True, d
         avail = int(mi["MemAvailable"])
-        after = avail - grow - held - int(need)
-        d.update(avail=avail, after=after, ok=after >= self.floor)
+        take = grow + held + int(need)
+        room = None
+        if self.room is not None:
+            try:
+                room = max(0, int(self.room()))
+            except Exception:                                      # noqa: BLE001
+                room = None
+        if room is not None and room < take:
+            take = room
+        after = avail - take
+        d.update(avail=avail, after=after, ok=after >= self.floor, room=room)
         if count:
             self.stats["checks"] += 1
             m = self.stats["min_after"]
@@ -143,9 +158,14 @@ class Admission:
         if d.get("avail") is None:
             return "no /proc/meminfo: not checked"
         g = lambda b: f"{b / GiB:.1f}"                                    # noqa: E731
-        return (f"MemAvailable {g(d['avail'])} GiB - cache growth {g(d['grow_left'])} - "
-                f"in flight {g(d['reserved'])} - this request {g(d['need'])} = "
-                f"{g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})")
+        room = d.get("room")
+        capped = room is not None and room < d["grow_left"] + d["reserved"] + d["need"]
+        return (f"MemAvailable {g(d['avail'])} GiB - "
+                + (f"the engine's room to its peak {g(room)} (cache growth {g(d['grow_left'])}, "
+                   f"in flight {g(d['reserved'])}, this request {g(d['need'])})" if capped else
+                   f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - "
+                   f"this request {g(d['need'])}")
+                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})")
 
     def report(self) -> dict:
         with self.lock:
