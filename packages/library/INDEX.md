@@ -2,7 +2,7 @@
 
 One skill per folder, `<name>/SKILL.md`, opencode SKILL.md format (frontmatter `name`, `description`). The body before `## Reference` is the injected part (cap 350 tokens); the `## Reference` section (cap 600) is injected only when the skill is selected. Tokens are chars/3.9 estimates; measure with the engine tokenizer before install. Retrieval: match the task against `description` (the fit question over the class's candidates), then filter by class fit. The testing package and the five test-kind skills (`testing`, `test-web`, `test-cli`, `test-api`, `test-data`, `test-lib`), `tools-opencode`, `tools-hermes` and `tandem-harness` live one level up and are not repeated here.
 
-Count: 44 skills. Body total 14859 tokens, reference total 18840, all 33699.
+Count: 44 skills, plus the four first packages of OPS-39 below (each a folder with `references/`, `exemplars/`, `eval/` and a `manifest.json`; their body cap is the house 350, their references are longer and served on request; see docs/packages.md). Body total 14859 tokens, reference total 18840, all 33699.
 
 | name | description | body | ref | classes |
 |-|-|-|-|-|
@@ -56,6 +56,12 @@ Count: 44 skills. Body total 14859 tokens, reference total 18840, all 33699.
 | plan-feature | Planning a multi-file feature before building it - clarify the outcome, list files and steps in build order, a test for each step, the risks, an estimate, and when to stop planning and start. | 346 | 390 | plan |
 | algorithm-choice | Choosing a data structure or algorithm for a task - sizing the input, complexity targets, hash maps versus sorted structures, sets, heaps, graphs (BFS, DFS, Dijkstra), dynamic programming, and checking with a brute-force oracle. | 343 | 504 | code_edit, plan |
 | numerical-precision | Avoiding floating-point mistakes in code that computes money, statistics, physics or geometry - when to use integers or Decimal, comparing with tolerances, summation order, catastrophic cancellation, float32 limits, and rounding for display. | 319 | 516 | code_edit, debug |
+
+| **First packages (OPS-39)** | | | | |
+| creative-coding | One-file HTML/JS visuals with sound - canvas or Three.js scenes, particles, simulations, generative art, small animated worlds with WebAudio ambience and effects; plan in three lines, write one file, render, fix the top three findings. | 350 | 1100 | drawing, three_d, code_edit, design_ui |
+| charts | A chart from data in the prompt (CSV, JSON or numbers in the text) as one SVG block in the house style - dark readout, cobalt series, signal-orange highlight, tabular numbers, units on the axes; line, bar, scatter, histogram, heatmap, sparkline, stat tile. | 350 | 1050 | drawing, design_ui, code_edit, research |
+| voxel-worlds | A Three.js voxel world - an island with a pagoda, gardens, lakes, bridges, creatures with state machines, a day-night cycle, ambient sound, quality presets - built one feature at a time with a render after each, a to-do file and the frame rate held at its baseline. | 350 | 1070 | three_d, code_edit |
+| explainer-video | A short explainer video with synthesised sound rendered to an mp4 through the render_video tool - a scene script (title cards, numbers with their sources, schematic marks) and a sound cue list (bed, whoosh, chime, optional narration); every number on screen names its source. | 350 | 470 | drawing, code_edit |
 
 ## Class coverage
 

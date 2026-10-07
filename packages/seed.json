@@ -690,6 +690,97 @@
    "body": "",
    "max_tokens": 700,
    "enabled": true
+  },
+  "tandem-core": {
+   "title": "Core rules",
+   "kind": "package",
+   "source": "inline",
+   "description": "The runtime's own conventions, on every turn: tool arguments in their schema types, no literal think tags, one answer per turn, the size limits and the stop rule for long files, a final answer in plain words.",
+   "max_tokens": 300,
+   "enabled": true,
+   "general": true,
+   "body_from": "system/tandem-core/PACKAGE.md",
+   "requires_tools": []
+  },
+  "render-tools": {
+   "title": "Render tools",
+   "kind": "package",
+   "source": "inline",
+   "description": "How to use the render tool server of SRV-105 (render, audio_probe, package_read, package_search, the render_video interface): when to render, what to fix first, the renders per answer, the CDN allowlist. Goes in whole on every turn of a visual class whose chat offers a render tool.",
+   "max_tokens": 750,
+   "enabled": true,
+   "general": true,
+   "body_from": "system/render-tools/PACKAGE.md",
+   "requires_tools": [
+    "render"
+   ]
+  },
+  "eval-judge": {
+   "title": "Eval judge",
+   "kind": "package",
+   "source": "inline",
+   "description": "The judge prompt and the rubric format for eval runs: five scored items (match, composition, motion, sound, bugs) from three frames and the probes, one JSON object, the same scores for the same input. Named by the eval harness only; no class lists it.",
+   "max_tokens": 900,
+   "enabled": true,
+   "body_from": "system/eval-judge/PACKAGE.md",
+   "requires_tools": []
+  },
+  "creative-coding": {
+   "title": "Creative coding",
+   "kind": "skill",
+   "source": "skill:creative-coding",
+   "description": "One-file HTML/JS visuals with sound - canvas or Three.js scenes, particles, simulations, generative art, small animated worlds with WebAudio ambience and effects; plan in three lines, write one file, render, fix the top three findings.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true,
+   "requires_tools": []
+  },
+  "charts": {
+   "title": "Charts",
+   "kind": "skill",
+   "source": "skill:charts",
+   "description": "A chart from data in the prompt (CSV, JSON or numbers in the text) as one SVG block in the house style - dark readout, cobalt series, signal-orange highlight, tabular numbers, units on the axes; line, bar, scatter, histogram, heatmap, sparkline, stat tile.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true,
+   "requires_tools": []
+  },
+  "voxel-worlds": {
+   "title": "Voxel worlds",
+   "kind": "skill",
+   "source": "skill:voxel-worlds",
+   "description": "A Three.js voxel world - an island with a pagoda, gardens, lakes, bridges, creatures with state machines, a day-night cycle, ambient sound, quality presets - built one feature at a time with a render after each, a to-do file and the frame rate held at its baseline.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true,
+   "requires_tools": []
+  },
+  "explainer-video": {
+   "title": "Explainer video",
+   "kind": "skill",
+   "source": "skill:explainer-video",
+   "description": "A short explainer video with synthesised sound rendered to an mp4 through the render_video tool - a scene script (title cards, numbers with their sources, schematic marks) and a sound cue list (bed, whoosh, chime, optional narration); every number on screen names its source.",
+   "body": "",
+   "max_tokens": 500,
+   "enabled": true,
+   "library": true,
+   "requires_tools": [
+    "render_video"
+   ],
+   "fallback": "explainer-video-script"
+  },
+  "explainer-video-script": {
+   "title": "Explainer video: the script",
+   "kind": "package",
+   "source": "inline",
+   "description": "Stands in for explainer-video in a chat without the render_video tool: deliver the scene script and the cue list as two JSON blocks so the video can be rendered later, with the same honesty rules.",
+   "max_tokens": 300,
+   "enabled": true,
+   "body_from": "inline/explainer-video-script.md",
+   "requires_tools": []
   }
  }
 }

@@ -445,9 +445,16 @@ LIBRARY: dict = {
 # classes the testing and Laya packages before their own skills
 # SRV-227: every class that writes files carries `files-care` (never overwrite the
 # user's files: a new folder gets a free name, a file is read before it changes), a general package
-BUILD_PACKAGES = ["files-care", "testing", "laya-testing", "laya-playtest"]
-CODING_PACKAGES = ("coding", "files-care", "testing", "laya-testing", "laya-playtest", "laya-scripts",
-                   "test-web", "test-cli", "test-api", "test-data", "test-lib")
+# OPS-39 (the first packages, 2026-10-07): `tandem-core` (the runtime's own conventions, about
+# 300 tokens, a general package with no tool needs) goes in on every class but `summarize`;
+# `render-tools` (how to use SRV-105's render tool server, general, `requires_tools: [render]`)
+# on every class that builds something, so the tool fit leaves it out until a chat offers the tool
+CORE_PACKAGES = ["tandem-core"]
+BUILD_PACKAGES = ["tandem-core", "files-care", "testing", "laya-testing", "laya-playtest",
+                  "render-tools"]
+CODING_PACKAGES = ("tandem-core", "coding", "files-care", "testing", "laya-testing", "laya-playtest",
+                   "laya-scripts", "test-web", "test-cli", "test-api", "test-data", "test-lib",
+                   "render-tools")
 
 SHIPPED_ROUTER: dict = {
     "classes": [
@@ -471,36 +478,44 @@ SHIPPED_ROUTER: dict = {
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
          "reading": "a flat web page",
-         "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design"], "rules": []}},
+         "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design", "charts"],
+                    "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
          "reading": "a 2D drawing",
+         # OPS-39: creative-coding (one-file visuals with sound), charts (an SVG chart from
+         # data) and explainer-video (a video through the render_video tool, else its script
+         # fallback) are choices of the package question beside the portrait recipes
          "policy": {"effort": "high",
                     "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
-                                                  "one-line-portrait"],
+                                                  "one-line-portrait", "creative-coding",
+                                                  "charts", "explainer-video"],
                     "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
          "reading": "a 3D three.js scene",
          # FX6: the 3D skill is the class's core, in on every three_d turn; the package question
          # picks among the special recipes alone
+         # OPS-39: voxel-worlds (the voxel build order, curated modules) and creative-coding
+         # join the special recipes the package question picks among
          "policy": {"effort": "high",
-                    "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons"],
+                    "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons",
+                                                  "voxel-worlds", "creative-coding"],
                     "core": ["threejs-scene"], "rules": []}},
         # 2026-10-03 10:12 (the owner's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",
          "description": "Write prose in words, not code: an essay, an article, a story, an email, "
                         "a letter, a post or documentation text.",
-         "policy": {"effort": "medium", "packages": [], "rules": []}},
+         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
         {"id": "plan", "label": "Plan",
          "description": "Plan an approach, a design or an architecture before building it, or "
                         "break the work into steps.",
-         "policy": {"effort": "high", "packages": [], "rules": []}},
+         "policy": {"effort": "high", "packages": list(CORE_PACKAGES), "rules": []}},
         {"id": "research", "label": "Research",
          "description": "Look something up, compare options, or explain how something works.",
-         "policy": {"effort": "medium", "packages": [], "rules": []}},
+         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
         {"id": "summarize", "label": "Summarize",
          "description": "Summarize, shorten or pull the key points out of text that is given, or "
                         "compress a conversation.",
@@ -513,7 +528,7 @@ SHIPPED_ROUTER: dict = {
                          "that asks for no work: no code, files, commands or git."),
          # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
          # an essay
-         "policy": {"effort": "medium", "packages": [], "rules": []}},
+         "policy": {"effort": "medium", "packages": list(CORE_PACKAGES), "rules": []}},
     ],
     "classifier": {
         "stages": [
@@ -1308,7 +1323,8 @@ _BUDGET = {"type": "integer", "minimum": 0, "maximum": 262144}
 POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                "effort_by_size": _obj({z: {"enum": list(EFFORTS)} for z in SIZES}, required=()),
                # L1: 12 (was 8): a coding class lists two general packages more, the Laya ones
-               "packages": {"type": "array", "items": _ID, "maxItems": 12},
+               # OPS-39: 16, the coding classes list 13 with tandem-core and render-tools
+               "packages": {"type": "array", "items": _ID, "maxItems": 16},
                # FX6: the class's core skills, always in on a turn of the class (like a general
                # package, but for this class alone); one not in `packages` is ignored
                "core": {"type": "array", "items": _ID, "maxItems": 4},

@@ -1,5 +1,5 @@
 {
- "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227)",
+ "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227); packages-first: the class lists carry tandem-core, render-tools and the first packages (OPS-39)",
  "doc": {
   "classes": [
    {
@@ -9,6 +9,7 @@
     "policy": {
      "effort": "xhigh",
      "packages": [
+      "tandem-core",
       "coding",
       "files-care",
       "testing",
@@ -19,7 +20,8 @@
       "test-cli",
       "test-api",
       "test-data",
-      "test-lib"
+      "test-lib",
+      "render-tools"
      ],
      "core": [
       "coding"
@@ -41,6 +43,7 @@
     "policy": {
      "effort": "xhigh",
      "packages": [
+      "tandem-core",
       "coding",
       "files-care",
       "testing",
@@ -51,7 +54,8 @@
       "test-cli",
       "test-api",
       "test-data",
-      "test-lib"
+      "test-lib",
+      "render-tools"
      ],
      "core": [
       "coding"
@@ -69,11 +73,14 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "tandem-core",
       "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
-      "ui-design"
+      "render-tools",
+      "ui-design",
+      "charts"
      ],
      "rules": []
     }
@@ -86,13 +93,18 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "tandem-core",
       "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
+      "render-tools",
       "pencil-sketch",
       "spiral-portrait",
-      "one-line-portrait"
+      "one-line-portrait",
+      "creative-coding",
+      "charts",
+      "explainer-video"
      ],
      "rules": []
     }
@@ -105,13 +117,17 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "tandem-core",
       "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
+      "render-tools",
       "threejs-scene",
       "photo-to-3d",
-      "voxel-seasons"
+      "voxel-seasons",
+      "voxel-worlds",
+      "creative-coding"
      ],
      "core": [
       "threejs-scene"
@@ -125,7 +141,9 @@
     "description": "Write prose in words, not code: an essay, an article, a story, an email, a letter, a post or documentation text.",
     "policy": {
      "effort": "medium",
-     "packages": [],
+     "packages": [
+      "tandem-core"
+     ],
      "rules": []
     }
    },
@@ -135,7 +153,9 @@
     "description": "Plan an approach, a design or an architecture before building it, or break the work into steps.",
     "policy": {
      "effort": "high",
-     "packages": [],
+     "packages": [
+      "tandem-core"
+     ],
      "rules": []
     }
    },
@@ -145,7 +165,9 @@
     "description": "Look something up, compare options, or explain how something works.",
     "policy": {
      "effort": "medium",
-     "packages": [],
+     "packages": [
+      "tandem-core"
+     ],
      "rules": []
     }
    },
@@ -165,7 +187,9 @@
     "description": "Small talk, a greeting, thanks, a short question with a short answer, or an instruction about the reply itself (answer in one word, say OK, confirm, stop) that asks for no work: no code, files, commands or git.",
     "policy": {
      "effort": "medium",
-     "packages": [],
+     "packages": [
+      "tandem-core"
+     ],
      "rules": []
     }
    }
