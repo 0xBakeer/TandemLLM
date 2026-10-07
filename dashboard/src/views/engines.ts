@@ -54,11 +54,15 @@ function kvTile(f: EngineFigures): TemplateResult {
 function specTiles(kind: string, f: EngineFigures): TemplateResult {
   const s = f.spec;
   if (!s) return statTile({ label: 'draft acceptance', value: 'not reported', sub: `${NOT_REPORTED}: speculation off`, na: true });
+  // the counters give the bars once two scrapes make a window: until then the strip is held empty,
+  // so the card (and the page under it) does not grow 5 s after it loads
   const perPos = s.per_position?.length
     ? html`<div class="eng-pos" role="img" aria-label=${`acceptance by draft position: ${s.per_position.map((x, i) => `${i + 1}: ${x == null ? '—' : pct(x, 0)}`).join(', ')}`}>
         ${s.per_position.map((x, i) => html`<span class="eng-pos-bar" title=${`position ${i + 1}: ${x == null ? '—' : pct(x, 0)}`} style="height:${Math.max(2, (x ?? 0) * 28)}px"></span>`)}
       </div>`
-    : nothing;
+    : s.source === 'counters'
+      ? html`<div class="eng-pos is-empty" aria-hidden="true"></div>`
+      : nothing;
   const src = s.source === 'counters' ? 'accepted / drafted over the window' : `${KIND_WORD[kind] ?? kind}'s own last window`;
   return html`${statTile({ label: 'draft acceptance', value: s.acceptance == null ? 'none' : pct(s.acceptance, 1), sub: src, na: s.acceptance == null })}
     <div class="stat ${s.tokens_per_step == null ? 'is-na' : ''}" data-engine-steps>

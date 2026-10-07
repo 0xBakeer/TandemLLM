@@ -96,6 +96,18 @@ describe('backend engines (P2, P3)', () => {
     expect(flagNote('generic', null)).toBeNull();
   });
 
+  it('holds the per-position strip before the window, so the card does not grow when it arrives', () => {
+    const raw = (t: unknown) => flat(t);
+    const one = raw(engineCard({ id: 'vllm1', label: 'v', kind: 'vllm', figures: backendFigures(null, B, 'vllm1', 'vllm') }));
+    const two = raw(engineCard({ id: 'vllm1', label: 'v', kind: 'vllm', figures: backendFigures(A, B, 'vllm1', 'vllm') }));
+    expect(one).toContain('eng-pos is-empty');
+    expect(two).toContain('eng-pos-bar');
+    expect(two).not.toContain('eng-pos is-empty');
+    // SGLang's own window has no per-position figures: no strip at all
+    const sg = raw(engineCard({ id: 'sglang1', label: 's', kind: 'sglang', figures: backendFigures(A, B, 'sglang1', 'sglang') }));
+    expect(sg).not.toContain('eng-pos');
+  });
+
   it('shows no panel without a vLLM or SGLang backend', () => {
     expect(renderEngines([{ id: 'ds', label: 'DeepSeek', kind: 'deepseek', figures: null }], '')).toBe(renderEngines([], ''));
   });

@@ -32,6 +32,11 @@
 .eng-stats {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
+/* a "none" (smaller type) is as tall as a number: the card keeps its height when the window's
+   figures arrive with the second scrape */
+.eng-stats .stat-value {
+  min-height: calc(var(--fs-xl) * 1.1);
+}
 .eng-pos {
   display: flex;
   align-items: flex-end;

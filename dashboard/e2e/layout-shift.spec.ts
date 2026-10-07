@@ -81,6 +81,10 @@ test.describe('the Performance page holds still', () => {
       }
     });
     expect((await request.post('/__mock/live', { data: { scenario: 'loop' } })).ok()).toBeTruthy();
+    // the scenario's oldest finished turn ended 17 s before it started, so it leaves the 30 s tail
+    // (and the list loses a row: a real change, not a jump) 13 s in. The watch ends before that;
+    // a slower browser (WebKit reads the boxes in ~0.4 s, not 0.25 s) gets fewer ticks, not more time.
+    const deadline = Date.now() + 12_000;
     const items = page.locator(phone ? '.live-card' : '.live-row');
     await expect(items).toHaveCount(8, { timeout: 10_000 });
     await expect(page.locator('.live-state')).toContainText('4/s', { timeout: 10_000 });
@@ -95,7 +99,8 @@ test.describe('the Performance page holds still', () => {
     if (shots) await page.screenshot({ path: `${shots}/${tag}-1-prefilling.png`, fullPage: true });
     const headlines = new Set<string>();
     const moved: string[] = [];
-    for (let i = 0; i < 32; i++) {
+    let ticks = 0;
+    for (let i = 0; i < 32 && Date.now() < deadline; i++, ticks++) {
       await page.waitForTimeout(250);
       headlines.add((await page.locator('.now-headline').textContent())?.trim().split(' ')[0] ?? '');
       const b = await boxes(page, phone);
@@ -119,7 +124,8 @@ test.describe('the Performance page holds still', () => {
       shifts = await page.evaluate((t0) => (window as unknown as { __shifts: { value: number; t: number; sources: string[] }[] }).__shifts.filter((s) => s.t >= t0), t0);
       cls = shifts.reduce((a, s) => a + s.value, 0);
     }
-    console.log(`${tag}: ${moved.length} box moves over 32 ticks; CLS ${cls == null? 'n/a': cls.toFixed(5)}`);
+    expect(ticks, 'the watch ran long enough to see the states change').toBeGreaterThanOrEqual(16);
+    console.log(`${tag}: ${moved.length} box moves over ${ticks} ticks; CLS ${cls == null? 'n/a': cls.toFixed(5)}`);
     expect(moved.slice(0, 20), `${moved.length} boxes moved`).toEqual([]);
     // what is left is text moving inside its own fixed box (a number that gains a digit pushes its
     // unit; a timeline segment grows): far under the 0.1 a page counts as stable, and ~0 in practice
