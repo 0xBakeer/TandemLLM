@@ -35,6 +35,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from proxy import config as proxy_config
 from proxy import config_api
 from proxy import hostcollect
 from proxy import route as route_mod
@@ -660,7 +661,7 @@ def serve(args) -> None:
     srv = Server((args.host, args.port), Handler)
     led = STATE.get("ledger")
     print(f"[proxy] {version()} on {args.host}:{args.port}, config {svc.cfg.path} "
-          f"(schema {svc.cfg.schema_was or 'new'} -> 1), {len(svc.cfg.backends())} backends, "
+          f"(schema {svc.cfg.schema_was or 'new'} -> {proxy_config.SCHEMA_VERSION}), {len(svc.cfg.backends())} backends, "
           f"ledger {'off' if led is None else led.path}, {STATE['auth'].describe()}",
           flush=True)
     if svc.cfg.empty():
