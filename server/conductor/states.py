@@ -270,6 +270,85 @@ def into_full(content: str, reasoning: str | None, fmt: str, in_think: bool, ui:
     return content, reasoning
 
 
+def status_clients(spec: str | None = None) -> frozenset:
+    """`QWEN38_STATUS_CLIENTS` (`kind,kind`): the client kinds that get the lines said before the
+    first generated token as `status` events (`StatusBar`)."""
+    if spec is None:
+        from engine.settings import SETTINGS as _S
+        spec = _S.get("STATUS_CLIENTS")
+    return frozenset(k.strip() for k in (spec or "").split(",") if k.strip())
+
+
+def plain(line: str) -> str:
+    """A framed line (`frame`, the narrator's, `inline`'s) as plain text: no marker, no frame, no
+    sentinel, the first letter upper case ("Reading 12,874 tokens, about 14 s left")."""
+    text = " ".join(str(line).replace("⁠", "").replace("**", "").split())
+    if text.startswith(MARKER.strip()):
+        text = text[len(MARKER.strip()):].lstrip()
+    return text[:1].upper() + text[1:]
+
+
+class StatusBar:
+    """SRV-237 / SRV-249 (UX2, 2026-10-07): Open WebUI times a reasoning block from its first
+    `reasoning_content` delta to the first content delta and shows that as "Thought for N
+    seconds". The waiting and reading lines went out as reasoning, so a thinking-off summary that
+    read 12,874 tokens showed "Thought for 14 seconds" (its block held only the two reading lines)
+    and a one-line "17 x 23" that waited 35.8 s for the other request showed "Thought for 34
+    seconds".
+
+    Open WebUI 0.11.4 hands a stream chunk that carries an `event` key to its event emitter
+    (backend/open_webui/utils/middleware.py: `if 'event' in data: await event_emitter(...)`); an
+    event of type `status` is the line under the model's name that tools and web search use: kept
+    with the message (`statusHistory`), the newest one shown, shimmering while `done` is false,
+    the earlier ones a click away. So for the client kinds in `QWEN38_STATUS_CLIENTS` every line
+    said before the model's first generated token (the router's, the packages, the waiting and the
+    reading lines) goes out as such an event, and the reasoning block opens with the model's own
+    first thought: a turn that does not think shows no "Thought for" at all. At the first token
+    (`close`) one last event, `done`, says what the wait was ("Read 12,874 tokens in 14 s").
+    Lines after the first token (a cap, a check, a long thinking) stay in the profile's channel.
+
+    The chunk has an empty `choices` list, which every OpenAI client skips; it goes only to the
+    client kinds named, and nothing of it is a token (`usage`, the transcript and the prompt never
+    see it)."""
+
+    def __init__(self):
+        self.live = True                  # until the first generated token
+        self.n = 0
+        self.last: str | None = None
+        self.kinds: set[str] = set()
+
+    def line(self, kind: str, line: str) -> dict | None:
+        """The event for one line said before the first token; None once the bar is closed."""
+        if not self.live:
+            return None
+        text = plain(line)
+        if not text:
+            return None
+        self.n += 1
+        self.last = text
+        self.kinds.add(kind)
+        return {"type": "status", "data": {"description": text, "done": False}}
+
+    def close(self, read: tuple[int, float] | None = None,
+              waited: float | None = None) -> dict | None:
+        """The last event, at the first generated token (or the end of a request that wrote
+        none): what the wait was -- the tokens read and how long (`read`, when a reading line was
+        shown), the time waited (`waited`, when a waiting line was) -- else the newest line,
+        done. None when no line went out (nothing to close) or it was closed already."""
+        if not self.live:
+            return None
+        self.live = False
+        if not self.n:
+            return None
+        parts = []
+        if waited is not None and self.kinds & {"queue", "queue_eta"}:
+            parts.append(f"waited {duration(waited)}")
+        if read is not None and "prefill" in self.kinds and read[0] > 0:
+            parts.append(f"read {read[0]:,} tokens in {duration(read[1])}")
+        text = plain(", then ".join(parts)) if parts else self.last
+        return {"type": "status", "data": {"description": text, "done": True}}
+
+
 class States:
     """One request's steps: what is waiting to go out, and everything it said. `narrator`: the
     request's narrator (narrator.Lines), called once per line as it goes out; None: templates.

@@ -124,6 +124,10 @@ KNOBS: dict[str, tuple] = {
     # (an OpenAI SDK printed the model's thinking as its answer); the raw path keeps the server's.
     # Hermes keeps `tags`: its lines wait in the content for the block to close (S1)
     'CLIENT_REASONING': ('*=reasoning_content,hermes=tags', 'server/compat.py'),
+    # SRV-237/249: the client kinds whose state lines before the first generated token (the
+    # router's, the waiting and reading lines) go out as Open WebUI `status` events, outside the
+    # reasoning it times as "Thought for N seconds" ('' = in the profile's channel, as 0.3.49-test)
+    'STATUS_CLIENTS': ('open-webui', 'server/conductor/states.py'),
     # SRV-197: which test says a request continues slot 0's conversation with --parallel N:
     # `view` (the client's rendered tokens, then the resident rows) or `resident` (the rows alone,
     # the 0.3.45-test rule, for an A/B)

@@ -16,6 +16,11 @@ On 2026-10-04 a second opencode session's turn waited behind a running turn and 
   5  the waiting line names TandemLLM's own work when that holds the engine (the conductor's
      question to Qwen, the shadow reader, the summary written ahead, the drain), not "another
      request"
+  7  SRV-249: with the holder's live work (`Live`) the estimate is its prefill still to read plus
+     the tokens still to write (the `TOKENS_Q` quantile of what earlier requests of its kind
+     wrote past what it has written) at its own rate, capped by its max_tokens; the W18 shape
+     (35.8 s behind a thinking turn 14.8 s in) is no longer read as 20 s; no basis falls back
+     to the hold times; the handler's `_live_of` reads a record in both phases
 
 Run: python tests/test_queue_wait.py
 """
@@ -83,6 +88,73 @@ def test_1_the_clock_keeps_a_bounded_window():
     for x in range(100):
         c.done(1, float(x))
     assert c.typical(1) == 94.5                  # the last 10: 90..99
+
+
+# ------------------------------------------------------------------ 7: the holder's live work
+def test_7_the_holder_s_remaining_tokens_at_its_rate():
+    c = qw.TurnClock()
+    assert c.live_remaining(qw.Live(written=0, rate=30.0, thinking=True)) is None   # no basis
+    for n in (300, 800, 1200, 1500, 1500, 1500, 2000):
+        c.wrote(True, n, 30.0)
+    for n in (20, 40, 60, 80, 100):
+        c.wrote(False, n, 40.0)
+    # the ticket's case: 1,000 tokens left (the quantile of 1500-500 ... 2000-500) at 30 tok/s
+    est = c.live_remaining(qw.Live(written=500, rate=30.0, thinking=True))
+    assert est is not None and est >= 1000 / 30.0, est
+    # the holder's max_tokens caps what is left
+    capped = c.live_remaining(qw.Live(written=500, rate=30.0, thinking=True, max_tokens=800))
+    assert abs(capped - 300 / 30.0) < 1e-9, capped
+    # by kind: a turn that does not think reads the short ones
+    short = c.live_remaining(qw.Live(written=10, rate=40.0, thinking=False))
+    assert short is not None and short <= 100 / 40.0, short
+    # while it prefills: the prefill left at its rate, then the tokens at the median rate
+    pre = c.live_remaining(qw.Live(pf_left=9000, pf_rate=900.0, thinking=True))
+    assert pre is not None and pre >= 10.0 + 1500 / 30.0 - 1e-9, pre
+    assert c.live_remaining(qw.Live(pf_left=9000, pf_rate=None, thinking=True)) is None
+    # past nearly every recorded length: too few longer, no basis (the hold times take over)
+    assert c.live_remaining(qw.Live(written=1900, rate=30.0, thinking=True)) is None
+    for x in (2, 3, 4, 5, 60, 120, 300):
+        c.done(1, x)
+    assert c.estimate((1, 50.0), [], live=qw.Live(written=1900, rate=30.0, thinking=True)) \
+        == c.remaining(1, 50.0)
+    # a yielding holder never reads a live view
+    assert c.estimate((3, 0.5), [], yields=frozenset((3,)),
+                      live=qw.Live(written=500, rate=30.0, thinking=True)) is None
+
+
+def test_7_the_w18_shape_is_not_read_as_twenty_seconds():
+    """0.3.48-test, W18: tab B waited 35.8 s behind a thinking turn (1,479 tokens, 48 s of
+    decode at ~30 tok/s) that had run 14.8 s (1.5 s of prefill, ~400 tokens written). The hold
+    times said "about 20 s"."""
+    c = qw.TurnClock()
+    # thinking chat turns of a session like UX2's: a few hundred to a few thousand tokens
+    for n in (52, 180, 420, 650, 900, 1200, 1479, 1800, 2600, 3400):
+        c.wrote(True, n, 30.0)
+    est = c.live_remaining(qw.Live(written=400, rate=30.6, thinking=True, max_tokens=32768))
+    assert est is not None and est >= 30.0, est
+    assert qw.about(est) not in ("20 s", "10 s"), qw.about(est)
+
+
+def test_7_the_handler_reads_the_holder_s_record():
+    from server import app
+    from server.usage import RequestRecord as Record
+    r = Record("chatcmpl-x", "chat", True)
+    r.thinking, r.max_tokens = True, 4000
+    assert app._live_of(r) is None                     # before its first prefill chunk
+    t = time.perf_counter()
+    r.prefill_info = {"start": 0, "t0": t - 4.0, "chunk": 1024}
+    r.pf_marks = [(1024, 8192, t - 3.0), (2048, 8192, t - 2.0), (3072, 8192, t - 1.0)]
+    live = app._live_of(r)
+    assert live.pf_left == 8192 - 3072 and live.pf_rate and 900 <= live.pf_rate <= 1100, \
+        (live.pf_left, live.pf_rate)
+    r.t_first, r.n_live = t - 10.0, 300
+    live = app._live_of(r)
+    assert live.pf_left == 0 and live.written == 300 and 29.0 <= live.rate <= 31.0, live.rate
+    assert live.thinking and live.max_tokens == 4000
+    app.CLOCK = qw.TurnClock()
+    r.t_last = r.t_first + 9.0
+    app._clock_wrote(r)
+    assert app.CLOCK._wrote[True][-1] == 300 and abs(app.CLOCK._rates[-1] - 299 / 9.0) < 1e-9
 
 
 # ------------------------------------------------------------------ 2-4: the handler

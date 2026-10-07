@@ -333,7 +333,42 @@ def _wait_estimate(me: dict) -> tuple[int, float | None]:
         holder = (who["rank"], now - who["t_hold"])
     elif LOCK.locked():
         return len(ahead) + 1, None      # held by something that is not a request: no basis
-    return len(ahead) + 1, CLOCK.estimate(holder, ahead, frozenset((RANK_PREP, RANK_SHADOW)))
+    live = _live_of(who.get("rec")) if who is not None and not who.get("own") else None
+    return len(ahead) + 1, CLOCK.estimate(holder, ahead, frozenset((RANK_PREP, RANK_SHADOW)),
+                                          live=live)
+
+
+def _live_of(rec) -> "qwait.Live | None":
+    """SRV-249: what the holder's record says of its work now (queue_wait.Live): the prefill
+    still to read and its rate while it prefills, the tokens written and the decode rate after
+    its first token; None before its prefill reported a chunk (no basis)."""
+    if rec is None:
+        return None
+    try:
+        thinking, cap = bool(rec.thinking), rec.max_tokens
+        if rec.t_first is None:
+            marks = rec.pf_marks
+            if not marks:
+                return None
+            done, total, _ = marks[-1]
+            tps = activity_mod.prefill_live(rec, 1).get("tps_live_avg")
+            return qwait.Live(pf_left=max(0, int(total) - int(done)), pf_rate=tps,
+                              thinking=thinking, max_tokens=cap)
+        n = int(rec.n_live)
+        el = time.perf_counter() - rec.t_first
+        return qwait.Live(written=n, rate=(n / el if n >= 8 and el >= 1.0 else None),
+                          thinking=thinking, max_tokens=cap)
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def _clock_wrote(rec) -> None:
+    """SRV-249: a finished client request's tokens and decode rate, for the estimate."""
+    n = int(getattr(rec, "n_live", 0) or 0)
+    t1, t2 = getattr(rec, "t_first", None), getattr(rec, "t_last", None)
+    rate = (n - 1) / (t2 - t1) if n >= 8 and t1 is not None and t2 is not None and t2 > t1 \
+        else None
+    CLOCK.wrote(bool(getattr(rec, "thinking", False)), n, rate)
 
 
 def _place(me: dict) -> tuple[dict | None, int]:
@@ -3934,6 +3969,7 @@ class Handler(BaseHTTPRequestHandler):
     # keeps the refusal's status.
     _early: dict | None = None
     _early_body = False                # the generation's own stream has taken it over
+    _bar = None                        # SRV-237: the request's Open WebUI status line, if any
 
     def _open_early(self, cid: str, model: str, created: int, plan) -> None:
         if self._early is not None:
@@ -3968,6 +4004,10 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             err = {}
         try:
+            ev = self._bar.close() if self._bar is not None else None
+            if ev is not None:                   # SRV-249: no status line left shimmering
+                self.wfile.write(_chunk(e["cid"], e["model"], e["created"], None,
+                                        extra={"event": ev}).encode())
             self._early_write(_chunk(e["cid"], e["model"], e["created"], {}, finish="error",
                                      error={"message": str(err.get("message") or code),
                                             "type": err.get("type") or "error", "code": code}))
@@ -4726,7 +4766,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _complete(self, body: dict, chat: bool) -> None:
         """One completion request, and its record accounted for on every way out."""
-        self._early, self._early_body = None, False
+        self._early, self._early_body, self._bar = None, False, None
         t_req = time.perf_counter()
         cid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex[:24]
         rec = usage_mod.RequestRecord(cid, "chat" if chat else "completions",
@@ -5154,6 +5194,17 @@ class Handler(BaseHTTPRequestHandler):
         prog = states_mod.progress(ui_doc)
         live_lines = ui is not None and stream and prog["mode"] == "on"
         last_place: list = [None, 0.0]
+        # SRV-237/249: Open WebUI's status line for every line said before the first generated
+        # token (states.StatusBar), so its "Thought for N seconds" times the thinking alone
+        bar = self._bar = (states_mod.StatusBar()
+                           if ui is not None and stream and chat and n_choices == 1
+                           and rec.client_kind in states_mod.status_clients() else None)
+
+        def bar_out(kinds_lines, write) -> None:
+            for kind, line in kinds_lines:
+                ev = bar.line(kind, line)
+                if ev is not None:
+                    write(_chunk(cid, model, created, None, extra={"event": ev}).encode())
 
         def queued(me: dict) -> None:
             """The waiting line, when what keeps this request waiting or its place changed, or
@@ -5179,6 +5230,10 @@ class Handler(BaseHTTPRequestHandler):
                 ui.take_kinds()                  # SRV-245: never in a plain client's content
                 return
             self._open_early(cid, model, created, plan)
+            if bar is not None and bar.live:
+                bar_out(ui.take_kinds(), self.wfile.write)      # SRV-249: not in the reasoning
+                self.wfile.flush()
+                return
             key = ("content" if lines_in == "content" and not plain_lines
                    else "reasoning_content")
             for _, line in ui.take_kinds():
@@ -5200,6 +5255,10 @@ class Handler(BaseHTTPRequestHandler):
                 ui.take_kinds()
                 return
             self._open_early(cid, model, created, plan)
+            if bar is not None and bar.live:
+                bar_out(ui.take_kinds(), self.wfile.write)      # SRV-249: not in the reasoning
+                self.wfile.flush()
+                return
             key = ("content" if lines_in == "content" and not plain_lines
                    else "reasoning_content")
             for _, line in ui.take_kinds():
@@ -5223,7 +5282,8 @@ class Handler(BaseHTTPRequestHandler):
               "side": plan.side if plan is not None and plan.side is not None else None,
               # the conductor's own question to Qwen (server/conductor/classify.py's agent): the
               # waiting line of a turn behind it says so
-              "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA)}
+              "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA),
+              "rec": rec}                 # SRV-249: the holder's live work, for the estimate
         with QUEUE:
             if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
                 INFLIGHT["refused"] += 1
@@ -6119,6 +6179,10 @@ class Handler(BaseHTTPRequestHandler):
 
             def say(kind: str, line: str) -> None:
                 """One state line, in the profile's channel."""
+                if bar is not None and bar.live and kind not in states_mod.MEMORY_KINDS:
+                    bar_out([(kind, line)], w.write)    # SRV-237: before the first token
+                    w.flush()
+                    return
                 if plain_lines and kind not in states_mod.MEMORY_KINDS:
                     if fmt == "reasoning_content":
                         send([("reasoning", line)])   # SRV-245: its own field, not the answer
@@ -6225,9 +6289,23 @@ class Handler(BaseHTTPRequestHandler):
             # reset per stream; the non-streamed branch returns before this point
             cut = False
             cuts = sup.cuts if sup is not None and tbuf is not None and tbuf.hold else None
+            def bar_close() -> None:
+                """SRV-237: the status line done, at the first generated token: the tokens read
+                and how long, the time waited."""
+                marks = rec.pf_marks
+                t0 = watch.info.get("t0")
+                read = ((int(marks[-1][1]) - int(watch.info.get("start") or 0),
+                         time.perf_counter() - t0) if marks and t0 else None)
+                ev = bar.close(read=read, waited=(rec.queue_ms or 0.0) / 1000.0)
+                if ev is not None:
+                    w.write(_chunk(cid, model, created, None, extra={"event": ev}).encode())
+                    w.flush()
+
             try:
                 tell()                                   # the router's, before the prefill runs
                 for t in source:
+                    if bar is not None and bar.live:
+                        bar_close()              # SRV-237: the reasoning opens with this token
                     tell()                       # what the monitor did before this token came
                     if cuts and len(ids) >= cuts[0]:
                         # SP3 had the model write this answer's calls again: what the buffer
@@ -6276,6 +6354,8 @@ class Handler(BaseHTTPRequestHandler):
                     if sh_inline is not None:
                         sh_inline.tick(ids)        # SR1: the shadow reads in its share
                 _finishing(rec, "flush")                 # the token loop has ended
+                if bar is not None and bar.live:
+                    bar_close()                          # no token at all
                 if not cut:
                     if astop is not None:
                         send(astop.push(split.push(det.flush(ids))) + astop.finish())
@@ -6483,6 +6563,8 @@ class Handler(BaseHTTPRequestHandler):
                 if me.get("t_hold") is not None:
                     # how long it held the engine, for the waiting line's estimate
                     CLOCK.done(me["rank"], STATE["last_end_mono"] - me["t_hold"])
+                    if not me["own"] and rec.client_kind != "internal":
+                        _clock_wrote(rec)              # SRV-249: the tokens it wrote, its rate
                 with QUEUE:
                     INFLIGHT["running"] -= 1
                     INFLIGHT["served"] += 1
