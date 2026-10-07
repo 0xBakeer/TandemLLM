@@ -278,12 +278,12 @@ export function versionsPanel(ed: DocEditor<unknown>, what: string): TemplateRes
 export function saveBar(ed: DocEditor<unknown>, what: string): TemplateResult {
   const meta = ed.base?.meta;
   if (ed.locked) {
-    return html`<div class="savebar" data-savebar><span class="badge badge-lock">${icon('warn')} locked</span><span class="status">${ed.locked}. Every control is read-only.</span></div>`;
+    return html`<div class="savebar is-idle" data-savebar><span class="badge badge-lock">${icon('warn')} locked</span><span class="status">${ed.locked}. Every control is read-only.</span></div>`;
   }
   return html`
     ${ed.showDiff ? html`<section class="panel" data-diff-panel><header class="panel-head"><h2 class="panel-title">Changes against live (v${meta?.version ?? 0})</h2></header>${diffList(ed.changes)}</section>` : nothing}
     ${ed.showVersions ? versionsPanel(ed, what) : nothing}
-    <div class="savebar" data-savebar>
+    <div class="savebar ${ed.dirty || ed.saving ? '' : 'is-idle'}" data-savebar>
       <span class="status num" title=${meta?.note ?? ''}>live v${meta?.version ?? 0}${meta?.loaded_at ? html` · reloaded ${timeShort(meta.loaded_at)}` : nothing}</span>
       <input class="note-input" placeholder="one-line change note (required)" .value=${ed.note} @input=${(e: Event) => (ed.note = (e.target as HTMLInputElement).value)} aria-label="change note" maxlength="200" />
       <button class="btn btn-primary" ?disabled=${!ed.dirty || ed.saving || ed.errors.length > 0} @click=${() => ed.save()} data-save>${ed.saving ? 'Saving…' : 'Save as new version'}</button>

@@ -1533,7 +1533,9 @@ textarea.pk-body {
 .pk-review {
   border-color: var(--cobalt-dim);
 }
-/* nothing to save: the bar sits at the end of the page instead of over the list */
+/* nothing to save: the bar sits in the page's flow instead of over the cards (VIS-66: on a 390 px
+   phone the shared editor's bar wrapped to 124 px and floated over the Deciders stats and the
+   Monitor's panels; Packages had the rule, the shared save bar and the Deciders ask bar did not) */
 .savebar.is-idle {
   position: static;
 }

@@ -269,7 +269,7 @@ export class QseCondDeciders extends LightElement {
             ${['auto', ...s.models.map((m) => m.name)].map((m) => html`<option value=${m} ?selected=${m === this.tModel}>${m}</option>`)}
           </select></label>
         </div>
-        <div class="savebar"><button class="btn btn-primary" ?disabled=${this.asking} @click=${() => this.ask()} data-test-ask>${icon('send')} ${this.asking ? 'Asking…' : 'Ask'}</button>
+        <div class="savebar is-idle"><button class="btn btn-primary" ?disabled=${this.asking} @click=${() => this.ask()} data-test-ask>${icon('send')} ${this.asking ? 'Asking…' : 'Ask'}</button>
           ${this.tErr ? html`<span class="err-ink small" role="alert" data-test-error>${this.tErr}</span>` : nothing}</div>
         ${out && a
           ? html`<div class="decider-answer" data-test-out>

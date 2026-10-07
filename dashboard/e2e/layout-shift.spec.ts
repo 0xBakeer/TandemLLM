@@ -135,3 +135,51 @@ test.describe('the Performance page holds still', () => {
   });
   }
 });
+
+// VIS-66 (the owner's phone, 2026-10-07): on #/conductor → Deciders at 390 px the editor's save bar
+// ("live v0 · reloaded 08:02:01", the change note, Save, Reset, Diff, Versions) floated over the
+// stat cards ("a load now: refused"). The bar is sticky above the phone's tab bar so unsaved edits
+// keep their Save in view; with nothing to save it now sits in the page's flow (`is-idle`), as the
+// Packages tab already did. Every conductor screen with an editor, at 390 and 768 px, scrolled
+// top to bottom: no save bar covers a card, a panel or a table; every idle bar is static.
+const EDITOR_SCREENS = ['deciders', 'monitor', 'routing', 'profiles', 'packages', 'memory'];
+
+test.describe('an idle save bar covers nothing', () => {
+  test.skip(!IS_MOCK, 'the mock documents are idle editors');
+  for (const width of [390, 768]) {
+    for (const screen of EDITOR_SCREENS) {
+      test(`${width} px: #/conductor?screen=${screen}`, { tag: '@mock' }, async ({ page }) => {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 1024 });
+        await login(page, `#/conductor?screen=${screen}`);
+        await expect(page.locator('.savebar').first()).toBeAttached({ timeout: 10_000 });
+        await page.waitForTimeout(800);       // the documents load after the bar
+        const found = await page.evaluate(async () => {
+          const out: string[] = [];
+          const bars = [...document.querySelectorAll<HTMLElement>('.savebar')];
+          for (const bar of bars) {
+            const pos = getComputedStyle(bar).position;
+            if (bar.classList.contains('is-idle') && pos !== 'static') out.push(`idle bar is ${pos}`);
+          }
+          const docH = document.documentElement.scrollHeight;
+          for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+            window.scrollTo(0, f * Math.max(0, docH - innerHeight));
+            await new Promise((r) => setTimeout(r, 120));
+            for (const bar of bars) {
+              const b = bar.getBoundingClientRect();
+              if (!b.height) continue;
+              for (const el of document.querySelectorAll('.panel, .stat, .card, table')) {
+                if (el.contains(bar) || bar.contains(el)) continue;
+                const r = el.getBoundingClientRect();
+                const ix = Math.min(b.right, r.right) - Math.max(b.left, r.left);
+                const iy = Math.min(b.bottom, r.bottom) - Math.max(b.top, r.top);
+                if (ix > 2 && iy > 2) out.push(`at ${f}: bar over ${el.tagName.toLowerCase()}.${String(el.className).split(' ')[0]} (${Math.round(ix)}x${Math.round(iy)})`);
+              }
+            }
+          }
+          return out;
+        });
+        expect(found, found.slice(0, 5).join('; ')).toEqual([]);
+      });
+    }
+  }
+});
