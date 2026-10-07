@@ -98,7 +98,8 @@ def request_url(headers) -> str | None:
             return (headers.get(name) or "").split(",")[0].strip()
         except Exception:                                          # noqa: BLE001
             return ""
-    fixed = os.environ.get(URL_ENV, "").strip().rstrip("/")
+    from engine.settings import SETTINGS as _S
+    fixed = _S.get("TANDEM_URL").strip().rstrip("/")
     if fixed:
         return fixed                       # SRV-163: the operator's address for the notes
     host = get("X-Forwarded-Host") or get("Host")
@@ -110,7 +111,8 @@ def request_url(headers) -> str | None:
 def scratch_for(url: str | None) -> str:
     """SRV-171: the scratch directory the notes name: `QWEN38_TANDEM_SCRATCH` (its `{token}` the
     session token from the address, `.../s/<token>`), else `.tandem` in the project."""
-    want = os.environ.get(SCRATCH_ENV, "").strip() or SCRATCH_DEFAULT
+    from engine.settings import SETTINGS as _S
+    want = _S.get("TANDEM_SCRATCH").strip() or SCRATCH_DEFAULT
     if "{token}" in want:
         m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
         want = want.replace("{token}", m.group(1) if m else "session")

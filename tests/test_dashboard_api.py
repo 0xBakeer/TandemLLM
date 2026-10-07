@@ -354,17 +354,25 @@ def _dt_date(y, m, d):
 
 
 def test_fast_enough():
-    """500,000 synthetic rows over a year: the 365-day usage query under 1 s (a laptop CPU here;
-    the board's CPU is in the same range)."""
+    """500,000 synthetic rows over a year: the 365-day usage query under 1 s of CPU (a laptop CPU
+    here; the board's CPU is in the same range).
+
+    The bound is on the query's own cost, the process's CPU time across the call, not on the wall
+    clock: on a loaded box (the CPU suite at nice 19 next to a night A/B, 2026-10-07/08) the wall
+    time measured the wait for a core and failed at 1.0-1.6 s while the query's work had not
+    changed. CPU time still catches a slower query (more rows read, a lost index, a Python loop
+    per row). A query that waits instead of computing (a lock, a sleep, a subprocess) does not
+    show in CPU time, so the wall clock keeps a loose bound for that: 10 s, or 1 s when the
+    box is idle (1-minute load average under half the cores)."""
     from tools import ledger_synth
     path = os.path.join(tempfile.mkdtemp(prefix="qse-synth-"), "l.sqlite3")
     n = ledger_synth.write(path, 500_000, 365, seed=7, end=NOW / 1000)
     assert 490_000 <= n <= 510_000, n
     led = ledger.Ledger(path).open()
     api = _api(led, NOW)
-    t0 = time.perf_counter()
+    c0, t0 = time.process_time(), time.perf_counter()
     u = api.usage({"bucket": "day"})
-    dt_usage = time.perf_counter() - t0
+    cpu_usage, dt_usage = time.process_time() - c0, time.perf_counter() - t0
     t0 = time.perf_counter()
     s = api.summary({})
     dt_summary = time.perf_counter() - t0
@@ -379,9 +387,14 @@ def test_fast_enough():
     api.usage({"bucket": "day"})
     api._cache.clear()
     dt_warm = time.perf_counter() - t0
-    print(f"    500k rows: usage(365 d) cold {dt_usage * 1000:.0f} ms, summary after it "
-          f"{dt_summary * 1000:.0f} ms, usage again {dt_warm * 1000:.0f} ms")
-    assert dt_usage < 1.0, dt_usage
+    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
+    idle = load < 0.5 * (os.cpu_count() or 1)
+    print(f"    500k rows: usage(365 d) cold {dt_usage * 1000:.0f} ms ({cpu_usage * 1000:.0f} ms CPU, "
+          f"load {load:.1f}), summary after it {dt_summary * 1000:.0f} ms, usage again "
+          f"{dt_warm * 1000:.0f} ms")
+    assert cpu_usage < 1.0, f"the query's own CPU time {cpu_usage:.2f} s (wall {dt_usage:.2f} s)"
+    assert dt_usage < (1.0 if idle else 10.0), \
+        f"wall {dt_usage:.2f} s for {cpu_usage:.2f} s of CPU at load {load:.1f}: the query waits"
     led.close()
 
 

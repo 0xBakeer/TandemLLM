@@ -4921,8 +4921,8 @@ class Handler(BaseHTTPRequestHandler):
             return rec.user
         hdr = (self.headers.get("X-Tandem-User") or "").strip()
         if hdr:
-            peers = {"127.0.0.1", "::1"} | {p.strip() for p in os.environ.get(
-                "QWEN38_MEMORY_PROXIES", "").split(",") if p.strip()}
+            peers = {"127.0.0.1", "::1"} | {p.strip() for p in _S.get("MEMORY_PROXIES").split(",")
+                                             if p.strip()}
             return hdr if self._peer() in peers else None
         if self.headers.get("X-Tandem-Relay-Id"):
             return None
@@ -7142,17 +7142,20 @@ def parser() -> argparse.ArgumentParser:
                     help="verify a draft TREE per step instead of a chain, where the drafter "
                          "builds one; see docs/speculative-decoding.md")
     ap.add_argument("--regenerate", choices=("sample", "off"),
-                    default=os.environ.get("QWEN38_REGENERATE", "sample"),
+                    default=_S.get("REGENERATE"),
                     help="SRV-241: a regenerate (the same conversation again after it was "
                          "answered, under a TandemLLM plan; or X-Tandem-Regenerate: 1) samples "
                          "with a fresh seed; every other request keeps its own sampling (greedy "
                          "by default). `off`: no detection (server/regenerate.py)")
     ap.add_argument("--regenerate-temperature", type=float,
-                    default=float(os.environ.get("QWEN38_REGEN_TEMPERATURE", "0.7")))
+                    default=float(_S.get("REGEN_TEMPERATURE")),
+                    help="a regenerate's temperature (QWEN38_REGEN_TEMPERATURE)")
     ap.add_argument("--regenerate-top-p", type=float,
-                    default=float(os.environ.get("QWEN38_REGEN_TOP_P", "0.95")))
+                    default=float(_S.get("REGEN_TOP_P")),
+                    help="a regenerate's top-p (QWEN38_REGEN_TOP_P)")
     ap.add_argument("--regenerate-top-k", type=int,
-                    default=int(os.environ.get("QWEN38_REGEN_TOP_K", "20")))
+                    default=int(_S.get("REGEN_TOP_K")),
+                    help="a regenerate's top-k (QWEN38_REGEN_TOP_K)")
     ap.add_argument("--sampled-tree", nargs="?", const="det", default="",
                     choices=("", "det", "mixed"),
                     help="let a SAMPLED request keep the tree verify. `det` (the bare "

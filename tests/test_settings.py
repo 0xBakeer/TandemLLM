@@ -46,6 +46,64 @@ def test_no_stray_reads():
     return f"{len(scope())} modules, every QWEN38_* read through SETTINGS"
 
 
+def _environ_reads(tree):
+    """(line, name) for every read of the process environment in a module: os.environ.get(...),
+    os.getenv(...), os.environ[...] and `... in os.environ`, with the name a string literal, an
+    f-string's literal head, or a module constant bound to a string. The line regex above misses a
+    call split over two lines (QWEN38_MEMORY_PROXIES, 2026-10-05) and a name held in a constant
+    (QWEN38_TANDEM_URL / _SCRATCH, SRV-163/171); this does not."""
+    import ast
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    consts[t.id] = node.value.value
+
+    def is_environ(n):
+        return isinstance(n, ast.Attribute) and n.attr == "environ" \
+            and isinstance(n.value, ast.Name) and n.value.id == "os"
+
+    def name_of(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        if isinstance(n, ast.Name):
+            return consts.get(n.id)
+        if isinstance(n, ast.JoinedStr) and n.values and isinstance(n.values[0], ast.Constant):
+            return str(n.values[0].value)
+        return None
+
+    for n in ast.walk(tree):
+        arg = None
+        if isinstance(n, ast.Call) and n.args:
+            f = n.func
+            if (isinstance(f, ast.Attribute) and f.attr == "get" and is_environ(f.value)) or \
+                    (isinstance(f, ast.Attribute) and f.attr == "getenv"
+                     and isinstance(f.value, ast.Name) and f.value.id == "os"):
+                arg = n.args[0]
+        elif isinstance(n, ast.Subscript) and is_environ(n.value) and isinstance(n.ctx, ast.Load):
+            arg = n.slice
+        elif isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], (ast.In, ast.NotIn)) \
+                and is_environ(n.comparators[0]):
+            arg = n.left
+        name = name_of(arg) if arg is not None else None
+        if name and name.startswith("QWEN38_"):
+            yield n.lineno, name
+
+
+def test_no_hidden_reads():
+    import ast
+    bad = []
+    for f in scope():
+        rel = os.path.relpath(f, ROOT)
+        for line, name in _environ_reads(ast.parse(open(f).read(), f)):
+            if (rel, name) not in ALLOWED:
+                bad.append(f"{rel}:{line}: {name}")
+    assert not bad, "QWEN38_* read around engine/settings.py (split call or constant name):\n" + "\n".join(bad)
+    return "no QWEN38_* environment read hides from the line check"
+
+
 def test_registry_matches_reads():
     used = set()
     for f in scope():

@@ -226,6 +226,21 @@ KNOBS: dict[str, tuple] = {
     'WY_PREC': ('ieee', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS': ('4', 'tools/gdn_wy_kernels.py'),
     'WY_WARPS_PREP': ('4', 'tools/gdn_wy_kernels.py'),
+    # SRV-241 (0.4.4-test): the regenerate rule (server/regenerate.py): `sample` = a regenerate of
+    # an answered conversation under a TandemLLM plan samples with a fresh seed, `off` = no
+    # detection; the defaults of --regenerate and its sampling flags (docs/server.md, Regenerate)
+    'REGENERATE': ('sample', 'server/app.py'),
+    'REGEN_TEMPERATURE': ('0.7', 'server/app.py'),
+    'REGEN_TOP_P': ('0.95', 'server/app.py'),
+    'REGEN_TOP_K': ('20', 'server/app.py'),
+    # 2026-10-05: addresses besides loopback whose X-Tandem-User header names whose memory a
+    # request reads and writes (comma-separated; '' = loopback only)
+    'MEMORY_PROXIES': ('', 'server/app.py'),
+    # SRV-163: the address `{tandem_url}` in a package becomes ('' = the request's own address)
+    'TANDEM_URL': ('', 'server/conductor/packages.py'),
+    # SRV-171: the session's scratch directory the notes name (`{token}` = the session token;
+    # '' = `.tandem` in the project)
+    'TANDEM_SCRATCH': ('', 'server/conductor/packages.py'),
 }
 
 
