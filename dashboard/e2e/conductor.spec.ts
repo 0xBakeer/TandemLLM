@@ -186,6 +186,7 @@ test('the speed guard is never a banner; the build information carries one neutr
   // a pass: "passed for <build> · <date>" on System and Dev, still no banner
   await page.request.post('/__mock/conductor', { data: { guard: true } });
   await login(page, '#/system');
+  await page.reload();                          // the same hash: the line reads the reports again
   await expect(page.locator('qse-speed-check [data-speed-check="passed"]')).toContainText('passed for 0.3.1-test');
   await login(page, '#/dev');
   await expect(page.locator('qse-speed-check [data-speed-check]').first()).toBeAttached();
