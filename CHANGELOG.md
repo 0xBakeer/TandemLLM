@@ -2,6 +2,30 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.3.49-test, 2026-10-07
+
+0.3.48-test (c16b27c) with four fixes from the normal-user scenario run (SRV-223, SRV-225, SRV-227, SRV-231; QA SRV-224, SRV-226, SRV-228, SRV-232). Raw and bench text are unchanged.
+
+### A second chat no longer waits for the first
+
+- The cause (SRV-223): with `--parallel 2` a request "continued" slot 0's conversation when it shared all of its rows but the last chunk. Open WebUI's system prompt and tool block (about 6,700 tokens) are the same for every chat, so beside a conversation shorter than that head plus one chunk every new chat of the same client counted as its next turn and waited for slot 0. W18 on 0.3.48-test: '17 x 23' in a second tab shared 6,675 of slot 0's 7,096 rows and waited 35.8 s while slot 1 was idle.
+- Both continuation tests (the client view and the resident rows) now also require the shared part to reach past the end of the request's first user message (`_conv_start`, the chat template's `<|im_start|>user ... <|im_end|>` marks). `QWEN38_SIDE_CONV=off` is the old rule; the `[parallel]` line says `new conversation (shared head N)`.
+- Live on 0.3.49-test (W18, n = 1): the second tab ran on slot 1 inside the first tab's 67 s essay, queue 1.29 s (the side slot was finishing the router's 412-token question), TTFT 2.6 s, 6,144 of its 6,695 tokens from the disk tier, answer 391; Open WebUI showed "Thought for less than a second".
+
+### A side slot reads the disk tier (SRV-231)
+
+- A side slot had no disk tier, so a new chat there prefilled its client's whole head (0.3.48-test: Open WebUI 6,687 tokens, 9.0 s TTFT; an opencode first turn 19.1 s on slot 1 against 10.7 s on slot 0). It now reads slot 0's tier through a read-only view (server/diskcache.py `SideReader`): find and restore into the side engine's own buffers; no line counted, no write, no fence of slot 0's write-behind jobs. `/health` `parallel.side_disk`; `QWEN38_SIDE_DISK=off` is the old slot. `tests/test_disk_cache.py`: a restore into an engine with a shorter window equals its cold prefill bit for bit.
+
+### One conductor session per Open WebUI chat (SRV-225)
+
+- Open WebUI sends no chat id by default, and the session key fell back to a hash of the head up to the first user message: every chat that opened with the same sentence was one session (A01: a new chat's first row counted 27 turns and 21,216 session tokens of earlier chats and replayed their 4 notes).
+- The engine reads `X-OpenWebUI-Chat-Id` as a conversation id. On the reference box Open WebUI's TandemLLM connection sends it as a connection header (`{"X-OpenWebUI-Chat-Id": "{{CHAT_ID}}"}`), not through `ENABLE_FORWARD_USER_INFO_HEADERS`, which would send the user's name and email to every connection (docs/operations.md, Open WebUI).
+- Without an id, a head holds a list of conversations: a conversation's first turn starts its own session (`h:<hash>#n`) when the newest one of that head has had a turn; a later turn finds its own by a hash of its whole first turn as the client sends it back. Decision rows carry `extra.session` (`id`, `new`, `continued`, `alias`). `QWEN38_SESSION_GENERATIONS=off` is the old rule.
+
+### A new folder never replaces the user's files (SRV-227)
+
+- "Create a new folder and create there a pagoda garden" ran `mkdir -p pagoda-garden` on an existing folder and wrote index.html over the owner's page without reading it or saying so. The tools run in the client, so the fix is what the model is told: the general package `files-care` (a new folder or file gets a free name, a file is read before it changes, a replaced file is copied first, the answer says so) on every class that writes files (code_edit, debug, design_ui, drawing, three_d); packages v16 and router v16 on the box.
+
 ## 0.3.48-test, 2026-10-07
 
 0.3.47-test with one router fix (SRV-205; QA SRV-206). Raw and bench text are unchanged; under a conductor plan a three_d turn now always carries the 3D skill, and an unsure visual class adds one sentence to the note.
