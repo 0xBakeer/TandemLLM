@@ -431,7 +431,12 @@ class SessionSpill:
                 if e.man.get("owner") != owner:
                     continue
                 c = _common(tokens, e.tokens)
-                if c >= best:
+                # The same conversation, grown or with a changed tail, matches the entry to within
+                # its last 4 chunks. Another chat that shares only a long head (Open WebUI's system
+                # prompt and tools, about 6k tokens, and no owner) is not the same conversation: it
+                # took this entry and wrote over it, and the entry's own conversation came back cold
+                # (live 0.4.1-test, A, B, C, A: `restore_failed why=sums`).
+                if c >= best and c >= len(e.tokens) - 4 * self.chunk:
                     best, eid = c, e.eid
         if eid is not None:
             return eid

@@ -394,6 +394,58 @@ def test_fx10_park_spill_off_gives_it_up_as_before():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _shared_head_run(d, sessions):
+    """A, B, C in turn with one long shared head (6 chunks, over the 4 a save matches on), as Open
+    WebUI's chats share its system prompt and tools; none is a guest, each written in turn; then A."""
+    res = _state(park_bytes=0, guest_max=40)
+    sp, t = _spill(d, res)
+    head = tokens(6 * CH, seed=90)
+    a = head + tokens(140, seed=91)
+    out_a, _, _ = turn(a, 40, session=sessions[0])
+    e = res.end["at"]
+    turn(head + tokens(130, seed=92), 8, session=sessions[1])      # A written to the NVMe
+    turn(head + tokens(120, seed=93), 8, session=sessions[2])      # B written in turn
+    out2, pre2, _ = turn(a + out_a + TOOL, 16, session=sessions[0])
+    return res, sp, t, e, pre2, out2
+
+
+def test_fx10b_chats_without_an_owner_sharing_a_long_head_keep_their_own_entries():
+    """FX10b (SRV-257 live, 0.4.1-test): Open WebUI chats carry no owner, and every one starts with
+    the same ~6k-token head. A save reused any entry that shared 4 chunks with it, so B's save wrote
+    over A's entry and A came back cold. With owners (opencode sessions) it never showed."""
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        _, _, t, e0, ref, out_ref = _shared_head_run(d, ("A", "B", "C"))
+        assert ref["kind"] == "spill" and ref["reused"] == e0, ref
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res, sp, t, e, pre, out2 = _shared_head_run(d, (None, None, None))
+        assert e == e0
+        assert pre["kind"] == "spill" and pre["reused"] == e, pre
+        assert out2 == out_ref, "the same tokens as with owners"
+        assert len(sp.entries) >= 2 and all(x.man["owner"] is None for x in sp.entries.values())
+        t.close()
+        return f"A came back from its own entry at {pre['reused']} beside {len(sp.entries) - 1} other(s)"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_fx10b_the_same_conversation_written_again_keeps_its_entry():
+    """The guard above keeps incremental saves: a conversation that grew matches its own entry."""
+    sp = spill.SessionSpill.__new__(spill.SessionSpill)
+    import threading
+    sp.lock, sp.chunk, sp.clock = threading.Lock(), CH, (lambda: 0)
+    head = tokens(6 * CH, seed=90)
+    a = head + tokens(140, seed=91)
+    sp.entries = {"aaaa": spill.Entry("/x", {"eid": "aaaa", "owner": None}, a)}
+    assert sp._eid_for(None, a + tokens(50, seed=94)) == "aaaa"                 # grown
+    assert sp._eid_for(None, a[:-2 * CH] + tokens(70, seed=95)) == "aaaa"       # a changed tail
+    assert sp._eid_for(None, head + tokens(130, seed=92)) != "aaaa"             # another chat
+
+
 # ------------------------------------------------------------------ its own I/O path
 
 def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():

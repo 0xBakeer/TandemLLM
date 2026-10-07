@@ -20,10 +20,12 @@ Branch `fixes-041` from 0.3.51-test (3d4768e), deployed on the box as 0.4.1-test
 ### The per-entry cap stays; the park writes what it gives up (SRV-257; QA SRV-258)
 
 - A 16,000-token snapshot is about 1.9 GB, the whole store, so the cap stays. A conversation between the cap and the spill's 16,384 tokens lived only in the park, which holds one; a third session dropped it. The park now writes it to the NVMe first (from 4,096 tokens; `QWEN38_SPILL_PARK=off`). The over-the-cap line is said once per conversation (165 of 245 requests printed it on 0.3.51-test).
+- Live on 0.4.1-test, three Open WebUI chats in turn (A, B, C, A) showed a second gap: chats without an owner that share Open WebUI's ~6k-token head all saved into one NVMe entry, so C's save wrote over A's and A's restore failed its sums (the disk tier still served A at 0.964). A save now reuses an entry only when it matches it to within its last 4 chunks; another chat gets its own entry.
 
 ### The Deciders screen says why a model is not loaded (VIS-70; QA VIS-71)
 
 - MemAvailable 28.97 GiB less the engine's 8.25 GiB of growth leaves the shadow reader (6.5 GiB) at 14.22, under the 15 GiB floor. The growth is not counted twice: a request alone is admitted by the engine's own peak, not by MemAvailable. The screen now says "not loaded: kept free for requests" with the numbers in words and names the shadow reader.
+- The Memory panel's "a load now" tile reads "kept free" without the warning colour, the sentence below it (live at 390 px it clipped and showed the warning).
 
 ### opencode answers keep Laya out (SRV-259; QA SRV-260)
 
