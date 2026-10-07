@@ -2,9 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## 0.4.1 (unreleased: code and CPU tests, not deployed)
+## 0.4.1-test, 2026-10-07
 
-Branch `fixes-041` from 0.3.51-test (3d4768e). Nothing here has run on the box yet; the live checks are listed per item.
+Branch `fixes-041` from 0.3.51-test (3d4768e), deployed on the box as 0.4.1-test for the owner's own test. The release 0.4.0 stays as it was. `~/rollback-0.4.1.sh` returns the box to 0.3.51-test (a8ef6bf, the 0.4.0 candidate) with packages v21. The live checks are listed per item.
 
 ### A conversation that ran on a side slot is carried into slot 0 (SRV-213; QA SRV-214)
 
