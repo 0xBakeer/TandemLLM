@@ -6,6 +6,8 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 0.4.4-test (dbdd4dd) plus three leftovers from the 0.4.x test runs, deployed on the box as 0.4.5-test; the package texts go in as the box's packages v24 (`tools/packages_migrate.py --put`, edits 30-33). `~/rollback-0.4.5.sh` restores packages v23 and returns the box to 0.4.4-test. Raw and bench text are unchanged.
 
+Live on the box (2026-10-08 00:26, 41a5b3d, about 4.5 min down; serve.env, router v19 and the DeepSeek relay kept): a dedicated test user in an Open WebUI-shaped chat asked for a project note, and it landed at user scope (`rescoped: project`) with no markup in the answer; W05 PASS (no_leak, follow-ups 1.00 at the end anchor, TTFT 1.4-2.0 s); O03 PASS with 0 of 13 visible text parts naming Laya (7 on 0.4.1-test), while the model wrote the new helper and used Laya twice; the helper against the live route: an empty text exit 2 "LAYA not asked", a duplicate label exit 2 with "choices: a label is listed twice (field: choices)" (0.4.4-test: exit 3 "LAYA unavailable (HTTP Error 422)"); W18 PASS (overlap 6.5 s on slots 0/1); DeepSeek flash 200.
+
 ### A memory note the store refuses is never shown (SRV-277; QA SRV-278)
 
 - In an Open WebUI chat (0.4.3-test, W05) the model wrote a `<tandem_memory scope="project">` block. The chat has no working directory, so the store refused it (`no_project`), and the stream filter sent the refused block to the user as text, by design ("a block that is not taken goes out as the text it was").
