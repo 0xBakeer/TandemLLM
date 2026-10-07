@@ -78,7 +78,7 @@ MAGIC = b"QSESPIL1"
 GB = dc.GB
 ALIGN = dc.ALIGN
 SETTINGS = {"budget_gb": 64.0, "ttl_hours": 48.0, "min_tokens": 16384,
-            "drain_min_tokens": 4096, "anchors": 4, "codec": "zstd", "codec_threads": 4}
+            "drain_min_tokens": 4096, "anchors": 4, "codec": "zstd", "codec_threads": 8}
 #: a compressed block's frames: each section's byte planes cut into pieces of this size, one zstd
 #: frame each, so a block's frames compress and decompress on `codec_threads` threads at once
 CODEC_FRAME = 8 << 20
@@ -165,8 +165,8 @@ def _common(a, b) -> int:
 # again on the device and compared with the sums taken from the engine's rows before the save
 # (`block_sums_views`), as for an uncompressed block; a mismatch fails the restore.
 # WHERE THE TIME GOES. The planes are cut on the device (a transpose of the block's bytes, a few
-# ms) and joined there on the way back; the host only runs zstd: 3.4 GB/s compressing and
-# 10.8 GB/s decompressing on 4 threads on the box, against 5.4-6.4 GB/s O_DIRECT reads, so a
+# ms) and joined there on the way back; the host only runs zstd: 4.5 GB/s compressing on 8 threads
+# (1.1 on one), 10.8 GB/s decompressing on 4, on the box, against 5.4-6.4 GB/s O_DIRECT reads, so a
 # restore reads 40 % fewer bytes and is no slower (0.93 s against 0.97 s for the 48,853-token
 # entry measured serially; the reader overlaps the next block's read with this block's copy).
 
@@ -487,7 +487,9 @@ class SessionSpill:
     def _writer(self):
         if self._wpool is None:
             from concurrent.futures import ThreadPoolExecutor
-            self._wpool = ThreadPoolExecutor(1, thread_name_prefix="spill-write")
+            # two: a compressed block's frames are compressed while the block before it is written
+            # (each staging slot is still used by one write at a time: `pending` in `_save`)
+            self._wpool = ThreadPoolExecutor(2, thread_name_prefix="spill-write")
         return self._wpool
 
     def _staging(self, views):
