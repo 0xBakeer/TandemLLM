@@ -397,11 +397,13 @@ def test_package_texts_round2():
     # a box before edit 5 (edits 9-10 of 0.3.45 reword two of its lines: undone first)
     # (and edits 15-17 of 0.3.51 reword the hook's end and the final line: undone too)
     shipped = testing
-    testing = (testing.replace("\n" + pm.TOOLS_QUIRK_RULE, "")
+    # (and edit 30 of 0.4.5 adds the progress-lines bullet after the quirk rule: undone too)
+    testing = (testing.replace("\n- " + pm.PROGRESS_LINE, "").replace("\n" + pm.TOOLS_QUIRK_RULE, "")
                .replace(pm.FINISH_NEW + "\n" + pm.OVERLAY_RULE, pm.FINISH_OLD)
                .replace(pm.STATE_SAY_NEW, pm.STATE_SAY_OLD))
     r351 = ["testing: the state hook goes without a word", "testing: the final message is for the user",
-            "testing: check-only overlays go before done", "testing: test-tool quirks stay out"]
+            "testing: check-only overlays go before done", "testing: test-tool quirks stay out",
+            "all text: plans and progress lines name no Laya"]
     v43 = (testing.replace(pm.CHECK_ONE_NEW, pm.CHECK_ONE_OLD).replace(pm.QUOTE_NEW, pm.QUOTE_OLD)
            .replace(pm.PAGE_CMD_NEW, pm.PAGE_CMD_OLD)
            .replace(pm.VERIFY_NEW, pm.VERIFY_OLD)
