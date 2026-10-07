@@ -112,7 +112,7 @@ def test_a_settled_commit_cannot_be_trimmed():
 
 # ------------------------------------------------------------------ the server's put
 
-def _remember_with(ahead: int, trim: bool, max_entry: int = 0):
+def _remember_with(ahead: int, trim: bool, max_entry: int = 0, said=None, conv=None):
     from server import app
     tree = T.BRANCHY
     path = tree.path(tree.leaves()[0])
@@ -122,14 +122,14 @@ def _remember_with(ahead: int, trim: bool, max_entry: int = 0):
         store = cache.StateStore(1 << 30, chunk=16, max_entry_bytes=max_entry)
         saved = {k: app.STATE.get(k) for k in ("engine", "drafter", "state_store", "session_cache",
                                                "verbose", "last_ctx", "session_trim",
-                                               "suffix_store")}
+                                               "suffix_store", "store_big_said")}
         app.STATE.update(engine=eng, drafter=None, state_store=store, session_cache=True,
                          verbose=True, last_ctx=list(range(1, n_c + 1)), session_trim=trim,
-                         suffix_store=None)
+                         suffix_store=None, store_big_said=said)
         out = io.StringIO()
         try:
             with redirect_stdout(out):
-                app._remember(list(range(1, pos + 1)), list(range(pos + 1, n_c + 1)), None)
+                app._remember(list(range(1, pos + 1)), list(range(pos + 1, n_c + 1)), conv)
         finally:
             app.STATE.update(saved)
     return store, out.getvalue(), eng, n_c
@@ -144,7 +144,17 @@ def test_the_put_names_the_engine_being_ahead():
 def test_the_put_names_the_size_cap():
     store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1)
     assert store.stats["puts"] == 0 and store.stats.get("declined_big") == 1
-    assert "too big for the per-entry cap" in log, log
+    # FX10: over the cap is said as what it is, and who keeps the conversation instead
+    assert "over the store's per-entry cap" in log and "resident prefix keeps" in log, log
+
+
+def test_over_the_cap_is_said_once_per_conversation():
+    """FX10: 165 of 245 requests on 0.3.51-test printed the decline, every turn of every
+    conversation past about 7,400 tokens; the counter still counts each one."""
+    store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1, said="a", conv="a")
+    assert store.stats.get("declined_big") == 1 and "per-entry cap" not in log, log
+    store, log, _, _ = _remember_with(ahead=0, trim=False, max_entry=1, said="a", conv="b")
+    assert "over the store's per-entry cap" in log, log
 
 
 def test_with_the_trim_on_the_put_succeeds_at_the_committed_length():

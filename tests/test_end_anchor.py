@@ -222,6 +222,66 @@ def test_a_generation_stopped_inside_a_pending_block_is_cut_back_and_kept():
     return f"{n} (path, cut) pairs: the end anchor is the shorter commit's state"
 
 
+def _remember_ahead(store, m: int = 1, conv="ses"):
+    """`_remember` as the handler runs it after a generation that stopped `m` tokens into a pending
+    block, with the session cache on (the served flags) and the resident prefix's end anchor."""
+    tree = T.BRANCHY
+    path = tree.path(tree.leaves()[0])
+    prompt = tokens(40, seed=61)
+    res = cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, end=True)
+    eng, toks = _block(res, path, prompt)
+    assert eng._pend is not None and eng.kv.length > len(prompt) + m
+    other = cache.StateStore(BIG, chunk=CH)
+    app.STATE.clear()
+    app.STATE.update(engine=eng, drafter=None, state_store=store, session_cache=True,
+                     verbose=True, last_ctx=prompt + toks[:m], last_prompt_n=len(prompt),
+                     session_trim=False, suffix_store=None, resident=res, mem=None)
+    out = io.StringIO()
+    from contextlib import redirect_stdout
+    with redirect_stdout(out):
+        app._remember(list(prompt), list(toks[:m]), conv)
+    del other
+    return res, eng, out.getvalue(), prompt, toks
+
+
+def test_srv253_a_session_put_the_engine_is_ahead_of_leaves_the_end_anchor_kept():
+    """SRV-253 (0.3.50-test, 5 of 45 non-streamed turns): the session put came first, and for a
+    conversation under the store's per-entry cap it cloned a snapshot -- `capture` settles the
+    block's pending commit -- and then declined it as ahead of its key. The end anchor after it
+    found the commit absorbed and was not kept. The put now declines before anything is cloned."""
+    with folded():
+        store = cache.StateStore(BIG, chunk=CH)         # the snapshot fits: the served < 7.4k case
+        res, eng, log, prompt, toks = _remember_ahead(store)
+    assert store.stats["puts"] == 0 and store.stats.get("declined_short") == 1, store.stats
+    assert "ahead of the committed tokens" in log, log
+    assert "end anchor not kept" not in log, log
+    assert res.end is not None and res.end["at"] == len(prompt) + 1, res.end
+    assert res.stats["end_kept"] == 1 and res.stats["end_ahead"] == 0, res.stats
+    # the next turn resumes at the end, as a streamed one over the cap always did
+    nxt = prompt + toks[:1] + TOOL
+    info = {}
+    with folded():
+        cache.prefill(eng, None, nxt, DEV, chunk=CH, resident=res, info=info)
+    assert info["kind"] == "end" and info["start"] == len(prompt) + 1, info
+    return "declined before the clone; end anchor kept; the next turn resumes at the end"
+
+
+def test_srv253_the_doomed_put_evicts_nothing_from_the_store():
+    """The decline used to make room first (`StateStore.reserve`): other conversations' entries
+    were evicted for a snapshot that was then thrown away."""
+    with folded():
+        eng0, _ = _block(cache.ResidentPrefix(BIG, CH), T.BRANCHY.path(T.BRANCHY.leaves()[1]),
+                         tokens(40, seed=70))
+        eng0._settle()
+        snap = cache.capture(eng0)
+        store = cache.StateStore(snap.nbytes + snap.nbytes // 2, chunk=CH)
+        store.put(list(range(1, eng0.kv.length + 1)), snap, "other", kind="session")
+        assert store.stats["puts"] == 1
+        _remember_ahead(store)
+    assert store.stats["evictions"] == 0 and len(store._d) == 1, store.stats
+    return "the other conversation's entry stays"
+
+
 def test_without_a_pending_commit_an_engine_ahead_is_declined():
     tree = T.BRANCHY
     path = tree.path(tree.leaves()[0])

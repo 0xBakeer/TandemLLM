@@ -2163,22 +2163,48 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
                     drafter.state_resume(n_c)
                 store.stats["session_trimmed"] = store.stats.get("session_trimmed", 0) + 1
         before = dict(store.stats)
-        # room is made before the clone, and the memory policy is asked for it (OPS-47)
-        est = cache._snapshot_estimate(eng, eng.kv.length, drafter)
-        mem = STATE.get("mem")
-        snap = (cache.capture(eng, drafter, max_bytes=store.max_entry)
-                if store.reserve(est) and (mem is None or mem.admit("store", est)) else None)
-        if snap is None:
-            store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
-            why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
+        big = False
+        if eng.kv.length > n_c:
+            # SRV-253: a snapshot longer than its key is declined by `put` anyway, and the steps
+            # before it did harm: `reserve` evicted other entries for it, the memory policy shed
+            # caches for it, and `capture` settled the block's pending commit, after which the end
+            # anchor below could not cut the engine back to the committed tokens (`trim_pending`):
+            # every conversation small enough for the store (under about 7,400 tokens on the served
+            # stack) lost its end anchor whenever its generation stopped inside a block, and the
+            # next turn re-read the answer from the last grid line (5 of 45 non-streamed first
+            # turns on 0.3.50-test, `engine-20261007-060639.log`). Nothing is cloned now.
+            store.stats["declined_short"] = store.stats.get("declined_short", 0) + 1
+            why = "the engine is ahead of the committed tokens"
         else:
-            store.put(committed, snap, conv_id, kind="session")
-            why = ("the engine is ahead of the committed tokens" if
-                   store.stats.get("declined_short", 0) > before.get("declined_short", 0)
-                   else f"too big for the per-entry cap ({store.max_entry >> 20} MiB)")
+            # room is made before the clone, and the memory policy is asked for it (OPS-47)
+            est = cache._snapshot_estimate(eng, eng.kv.length, drafter)
+            mem = STATE.get("mem")
+            big = bool(store.max_entry) and est > store.max_entry
+            snap = (cache.capture(eng, drafter, max_bytes=store.max_entry)
+                    if store.reserve(est) and (mem is None or mem.admit("store", est)) else None)
+            if snap is None:
+                store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
+                why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
+            else:
+                store.put(committed, snap, conv_id, kind="session")
+                why = ("the engine is ahead of the committed tokens" if
+                       store.stats.get("declined_short", 0) > before.get("declined_short", 0)
+                       else f"too big for the per-entry cap ({store.max_entry >> 20} MiB)")
         if STATE.get("verbose") and store.stats["puts"] == before["puts"]:
-            print(f"[cache] session put declined, {why}: kv.length={eng.kv.length} "
-                  f"ctx={n_c}", flush=True)
+            if big:
+                # FX10: over the per-entry cap is the ordinary case of every conversation longer
+                # than about 7,400 tokens; the resident prefix keeps it (its end anchor, the park,
+                # the NVMe spill), so it is said once per conversation, not at every turn
+                key = conv_id or "-"
+                if STATE.get("store_big_said") != key:
+                    STATE["store_big_said"] = key
+                    print(f"[cache] session snapshot not taken: {n_c} tokens is over the store's "
+                          f"per-entry cap ({store.max_entry >> 20} MiB); the resident prefix keeps "
+                          f"this conversation (end anchor, park, NVMe spill); said once per "
+                          f"conversation", flush=True)
+            else:
+                print(f"[cache] session put declined, {why}: kv.length={eng.kv.length} "
+                      f"ctx={n_c}", flush=True)
         # `declined_big` and `declined_short` in /v1/cache/stats count the same events, for when
         # nobody is reading the log.
     res = STATE.get("resident")
