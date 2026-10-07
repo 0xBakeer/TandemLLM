@@ -341,7 +341,12 @@ def parse(body, cfg: dict, max_options: int) -> dict:
         texts = [t]
     for i, t in enumerate(texts):
         if not t.strip():
-            raise Refused(422, "invalid_request_error", f"text {i} is empty", "texts")
+            # FX13: say what an empty text means, so the caller can fix it (the model piped its
+            # evidence into a heredoc script whose stdin was the script, and sent "")
+            which = "text" if "texts" not in body else f"texts[{i}]"
+            raise Refused(422, "invalid_request_error",
+                          f"{which} is empty: there is nothing to judge; send the evidence itself "
+                          f"(a log tail, an output, a state dump), not an empty string", "texts")
         if len(t) > int(cfg["max_chars"]):
             raise Refused(422, "invalid_request_error",
                           f"text {i}: at most {cfg['max_chars']} characters; send the part to "
