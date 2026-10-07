@@ -1570,8 +1570,11 @@ class Router:
         if not mine or not getattr(plan, "class_new", False) or conf is None or \
                 row.get("source") not in ("qwen", "decider") or conf >= float(cfg["below"]):
             return None
+        # SRV-255: a first message kept on its top build class under the bar reads its own stage
+        below_ok = row.get("kept") == "below_build"
         probs = next((s.get("probs") or {} for s in reversed(row.get("stages") or [])
-                      if s.get("label") == cls and not s.get("error") and not s.get("below")), {})
+                      if s.get("label") == cls and not s.get("error")
+                      and (below_ok or not s.get("below"))), {})
         others = sorted(((p, c) for c, p in probs.items()
                          if c != cls and (classes.get(c) or {}).get("reading")
                          and float(p) >= float(cfg["other"])), reverse=True)

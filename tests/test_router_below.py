@@ -14,6 +14,8 @@ margin; anything else falls back as before.
   5  mode `default` and a document without the key: the old rule
   6  an errored stage or no probabilities: the old rule
   7  the shipped router carries the measured setting and validates
+  8  the reading line fires for a turn kept on its top build class (its stage is under the bar),
+     and still not for a below-bar stage of a turn that was not kept that way
 
 Run: python tests/test_router_below.py
 """
@@ -95,6 +97,24 @@ def test_7_the_shipped_router_carries_the_setting():
     bad = copy.deepcopy(schema.SHIPPED_ROUTER)
     bad["classifier"]["below_accept"] = {"mode": "top"}
     assert schema.doc_errors("router", bad)
+
+
+class _Plan:
+    decisions = {"classify": "on"}
+    class_new = True
+
+
+def test_8_the_reading_line_reads_the_kept_stage():
+    r = router()
+    st = stage(PAGODA)
+    row = {"class_id": "three_d", "confidence": 0.3784, "source": "qwen", "kept": "below_build",
+           "stages": st, "extra": {}}
+    part = Router._reading(None, _Plan(), r, "three_d", CLASSES, row)
+    assert part and part[1]["kind"] == "reading", part
+    assert "3D three.js scene" in part[1]["text"] and "flat web page" in part[1]["text"], part
+    assert row["extra"]["reading"]["other"] == "design_ui"
+    row2 = dict(row, kept=None, extra={})
+    assert Router._reading(None, _Plan(), r, "three_d", CLASSES, row2) is None
 
 
 if __name__ == "__main__":
