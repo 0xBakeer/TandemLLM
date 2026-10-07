@@ -13,6 +13,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
 | [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
+| [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
 | [adding-a-model.md](adding-a-model.md) | the seams a new model plugs into, and the tests it must pass |

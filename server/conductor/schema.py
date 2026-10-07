@@ -1532,8 +1532,11 @@ SCHEMAS: dict[str, dict] = {
             # SRV-243: the tool capabilities its steps need (a shell, a file write); a turn whose
             # tools lack one leaves it out, or puts its `fallback` in. Absent: a shell when the
             # text calls TandemLLM through `{tandem_url}`, else none (packages.Library.requires)
-            "requires_tools": {"type": "array", "items": {"enum": ["shell", "write"]},
-                               "maxItems": 2},
+            # OPS-39: `render` (SRV-105's render tool, an `html` argument) and `render_video`
+            # (`scenes` and `cues` arguments) for the packages that only make sense with them
+            "requires_tools": {"type": "array",
+                               "items": {"enum": ["shell", "write", "render", "render_video"]},
+                               "maxItems": 4},
             "fallback": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9_.-]*$",
                          "maxLength": 80}},
             required=("title", "kind", "source", "description", "body", "max_tokens",

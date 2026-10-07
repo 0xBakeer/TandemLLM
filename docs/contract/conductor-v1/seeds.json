@@ -2443,7 +2443,7 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9_-]{0,39}$"
            },
-           "maxItems": 12
+           "maxItems": 16
           },
           "core": {
            "type": "array",
@@ -3571,10 +3571,12 @@
          "items": {
           "enum": [
            "shell",
-           "write"
+           "write",
+           "render",
+           "render_video"
           ]
          },
-         "maxItems": 2
+         "maxItems": 4
         },
         "fallback": {
          "type": "string",
@@ -3728,7 +3730,7 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
          },
-         "maxItems": 12
+         "maxItems": 16
         },
         "core": {
          "type": "array",

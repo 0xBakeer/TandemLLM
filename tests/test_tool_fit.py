@@ -110,6 +110,18 @@ def test_1_capabilities_from_the_schemas():
     odd = [{"type": "function", "function": {"name": "x", "parameters": {
         "type": "object", "properties": {"command": {"type": "integer"}}}}}]
     assert signals.tool_caps({"tools": odd})[0] == frozenset()
+    # OPS-39: the render tool (an `html` string argument) and the video tool (`scenes`, `cues`)
+    render = [_fn("render", ["html", "frames_at", "size"], ["html"]),
+              _fn("audio_probe", ["html", "seconds"], ["html"])]
+    assert signals.tool_caps({"tools": render})[0] == {"render"}
+    video = [_fn("render_video", ["scenes", "cues", "out"], ["scenes", "cues"])]
+    assert signals.tool_caps({"tools": video})[0] == {"render_video"}
+    assert signals.tool_caps({"tools": OPENCODE + render + video})[0] == \
+        {"shell", "write", "render", "render_video"}
+    # an `html` that is not a string (an object) is no render tool
+    odd_html = [{"type": "function", "function": {"name": "x", "parameters": {
+        "type": "object", "properties": {"html": {"type": "object"}}}}}]
+    assert signals.tool_caps({"tools": odd_html})[0] == frozenset()
 
 
 def test_2_what_a_package_needs():
@@ -160,6 +172,41 @@ def test_5b_a_file_tool_without_a_shell():
     plan, text = _turn(cond, [_fn("write_file", ["path", "content"])], "fit-write")
     assert _parts(plan) == ["high", "files-care", "coding-answer", "ui-design", "fit"], _parts(plan)
     assert "can write files but has no shell (its tools: write_file)" in text
+
+
+def test_5c_a_package_that_needs_the_render_tool():
+    """OPS-39: a package with `requires_tools: [render]` (render-tools, the system package of the
+    first packages) goes in only when the chat offers a tool with an `html` argument; an agent
+    chat with a shell and files alone leaves it out (dropped, no fallback), and the same with a
+    `render_video` tool for explainer-video."""
+    cond = _setup()
+    _, p = cond.store.get("packages")
+    for n, cap in (("render-tools", "render"), ("explainer-video", "render_video")):
+        p["packages"][n] = {"title": n, "kind": "package", "source": "inline",
+                            "description": f"The {n} package's description.",
+                            "body": f"Call the {cap} tool after each change.",
+                            "max_tokens": 3000, "enabled": True, "requires_tools": [cap],
+                            **({"general": True} if n == "render-tools" else {})}
+    cond.store.put("packages", None, p, note="render", author="t")
+    _, r = cond.store.get("router")
+    for c in r["classes"]:
+        if c["id"] == "design_ui":
+            c["policy"]["packages"] = ["files-care", "coding", "testing", "render-tools",
+                                       "ui-design", "explainer-video"]
+    cond.store.put("router", None, r, note="render packages", author="t")
+    plan, text = _turn(cond, TERMINAL, "fit-render-none")
+    assert "render-tools" not in _parts(plan) and "explainer-video" not in _parts(plan), \
+        _parts(plan)
+    t = plan.row["extra"]["tools"]
+    assert t["caps"] == ["shell", "write"] and t["dropped"] == ["render-tools",
+                                                                "explainer-video"], t
+    render = [_fn("render", ["html", "frames_at", "size"], ["html"]),
+              _fn("render_video", ["scenes", "cues"], ["scenes", "cues"])]
+    plan, text = _turn(cond, TERMINAL + render, "fit-render-on")
+    assert "render-tools" in _parts(plan), _parts(plan)
+    t = plan.row["extra"]["tools"]
+    assert t["caps"] == ["render", "render_video", "shell", "write"] and "dropped" not in t, t
+    assert "Call the render tool after each change." in text
 
 
 # ------------------------------------------------------------------ 6 off and shadow

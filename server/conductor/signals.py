@@ -92,7 +92,13 @@ SHELL_ARGS = ("command", "cmd")
 WRITE_PATH_ARGS = ("filePath", "file_path", "path", "filename")
 WRITE_BODY_ARGS = ("content", "contents", "text", "newString", "new_string", "replacements",
                    "patch", "diff")
-CAPS = ("shell", "write")
+# OPS-39 (the first packages): the render tool of SRV-105 takes the page as an `html` string
+# argument (`render(html, frames_at, size)`, `audio_probe(html, seconds)`); the video tool takes
+# a scene script and a cue list (`render_video(scenes, cues)`). A package whose steps need one
+# (render-tools, explainer-video) names it in `requires_tools` and stays out of a turn without it.
+RENDER_ARGS = ("html",)
+VIDEO_ARGS = ("scenes", "cues")
+CAPS = ("shell", "write", "render", "render_video")
 _EXT = re.compile(r"^\.[a-z0-9]{1,8}$")
 _TOOL_NAME = re.compile(r"[^A-Za-z0-9_.-]")
 _MCP = re.compile(r"^[A-Za-z0-9.]+(?:-[A-Za-z0-9.]+)+_(?=.)")     # `server-name_` of an MCP tool
@@ -134,6 +140,11 @@ def tool_caps(body: dict) -> tuple[frozenset, list[str]]:
             caps.add("shell")
         if keys & set(WRITE_PATH_ARGS) and keys & set(WRITE_BODY_ARGS):
             caps.add("write")
+        if any(isinstance((props or {}).get(k), dict) and
+               (props[k].get("type") in (None, "string")) for k in RENDER_ARGS if k in keys):
+            caps.add("render")
+        if set(VIDEO_ARGS) <= keys:
+            caps.add("render_video")
     return frozenset(caps), names
 
 

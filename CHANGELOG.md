@@ -2,6 +2,15 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased, branch `packages-first`, 2026-10-07
+
+### The first packages (OPS-39; QA OPS-40)
+
+- Seven package folders under `packages/`: the system set `tandem-core` (the runtime's conventions, general on every class but summarize, 300 tokens), `render-tools` (how to use the render tool server of SRV-105, general on the classes that build, `requires_tools: [render]`) and `eval-judge` (the judge prompt and the rubric format, routed by no class); and the four first packages `creative-coding`, `charts`, `voxel-worlds` and `explainer-video` as library skills with their references, exemplars, eval sets (24, 20, 20, 12 prompts) and rubrics. [docs/packages.md](docs/packages.md) lists them; nothing is measured.
+- Two tool capabilities for the tool fit (SRV-243): `render` (a tool with a string `html` argument) and `render_video` (`scenes` and `cues`), in `requires_tools`; a chat without the tool never sees `render-tools`, and `explainer-video` gives way to `explainer-video-script` (the scene script and cue list as the answer). A class may list 16 packages (was 12).
+- `tools/packages_first.py` checks the folders against seed.json, INDEX.md and the router, measures the texts (the engine's tokenizer with `--tokenizer`), loads the eval sets and refuses private text; `tests/test_packages_first.py` runs it.
+- Raw and bench text are unchanged; the router's class lists changed (tandem-core and render-tools on the classes above, the first packages as choices of the package question on drawing, three_d and design_ui).
+
 ## 0.4.3-test, 2026-10-07
 
 0.4.2-test (6fee8d3) with the spill compressed, the disk budgets of SRV-271's option A and a daily NVMe write budget, deployed on the box as 0.4.3-test. `~/rollback-0.4.3.sh` returns the box to 0.4.2-test. The text is the same: every cache restores exact state, and the codec is lossless.

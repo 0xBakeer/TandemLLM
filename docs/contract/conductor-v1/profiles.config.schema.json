@@ -127,7 +127,7 @@
               "type": "string",
               "pattern": "^[a-z][a-z0-9_-]{0,39}$"
             },
-            "maxItems": 12
+            "maxItems": 16
           },
           "core": {
             "type": "array",

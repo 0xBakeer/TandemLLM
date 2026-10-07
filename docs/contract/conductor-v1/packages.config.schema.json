@@ -59,10 +59,12 @@
             "items": {
               "enum": [
                 "shell",
-                "write"
+                "write",
+                "render",
+                "render_video"
               ]
             },
-            "maxItems": 2
+            "maxItems": 4
           },
           "fallback": {
             "type": "string",
