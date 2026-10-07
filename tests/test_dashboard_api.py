@@ -353,12 +353,71 @@ def _dt_date(y, m, d):
     return dt.date(y, m, d)
 
 
+def test_dimensions_internal_only_and_users_by_seeks():
+    """FX14: dimensions() decides "seen only on internal rows" (VIS-60) with two seeks per model
+    and client on requests_dim_kind, and lists the users by seeks on requests_user, instead of
+    reading every row. Kinds that sort before ('curl') and after ('opencode') 'internal' both count
+    as another kind; a pair with internal rows only is left out unless internal=1."""
+    t = NOW - 3_600_000
+    led = _ledger([
+        {"ts_ms": t, "client_id": "conductor", "client_kind": "internal"},
+        {"ts_ms": t + 1, "client_id": "conductor", "client_kind": "internal"},
+        {"ts_ms": t + 2, "client_id": "mixed-before", "client_kind": "internal"},
+        {"ts_ms": t + 3, "client_id": "mixed-before", "client_kind": "curl"},
+        {"ts_ms": t + 4, "client_id": "mixed-after", "client_kind": "opencode"},
+        {"ts_ms": t + 5, "client_id": "mixed-after", "client_kind": "internal"},
+        {"ts_ms": t + 6, "model": "router-only", "client_id": "mixed-before", "client_kind": "internal"},
+        {"ts_ms": t + 7, "user": "zoe"}, {"ts_ms": t + 8, "user": "anna"}, {"ts_ms": t + 9, "user": "zoe"},
+    ])
+    db = led.reader()
+    plan = " ".join(str(r) for r in db.execute(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM requests WHERE model = ? AND client_id = ? AND "
+        "client_kind < 'internal' LIMIT 1", ("m", "c")))
+    assert "requests_dim_kind" in plan, plan
+    api = _api(led, NOW)
+    d = api.dimensions()
+    ids = {c["id"] for c in d["clients"]}
+    assert ids == {A, "mixed-before", "mixed-after"}, ids
+    assert d["models"] == ["qwen38-spark-engine"], d["models"]
+    full = api.dimensions(internal=True)
+    assert {c["id"] for c in full["clients"]} == ids | {"conductor"}
+    assert full["models"] == ["qwen38-spark-engine", "router-only"], full["models"]
+    kinds = {c["id"]: c["kind"] for c in full["clients"]}
+    assert kinds["mixed-after"] == "internal" and kinds["mixed-before"] == "internal", kinds
+    assert D.DashboardAPI._distinct_users(db) == ["anna", "zoe"]
+    led.close()
+
+
+def _fastest_cores() -> set | None:
+    """The cores within 10 % of the highest capacity (Linux `cpu_capacity`, else
+    `cpuinfo_max_freq`); None where the kernel says nothing (macOS) or every core is the same.
+    The Spark's GB10 has ten
+    Cortex-X925 (capacity ~1000, 3.9 GHz) and ten Cortex-A725 (~720, 2.8 GHz); a nice-19 suite is
+    placed on the small ones, where the same query costs 1.7x the CPU time (FX14: 1.85 s vs 1.09 s)."""
+    if not hasattr(os, "sched_setaffinity"):
+        return None
+    caps = {}
+    for c in os.sched_getaffinity(0):
+        for f in ("cpu_capacity", "cpufreq/cpuinfo_max_freq"):
+            try:
+                caps[c] = int(open(f"/sys/devices/system/cpu/cpu{c}/{f}").read())
+                break
+            except (OSError, ValueError):
+                continue
+    if len(caps) < 2 or len(set(caps.values())) < 2:
+        return None
+    top = max(caps.values())
+    fast = {c for c, v in caps.items() if v >= 0.9 * top}   # the X925s report 997-1024
+    return fast if len(fast) < len(caps) else None
+
+
 def test_fast_enough():
     """500,000 synthetic rows over a year: the 365-day usage query under 1 s of CPU (a laptop CPU
     here; the board's CPU is in the same range).
 
-    The bound is on the query's own cost, the process's CPU time across the call, not on the wall
-    clock: on a loaded box (the CPU suite at nice 19 next to a night A/B, 2026-10-07/08) the wall
+    The bound is on the query's own cost, the process's CPU time across the call, measured on the
+    box's fastest cores (the thread is pinned there for the call: on a big.LITTLE board the small
+    cores cost 1.7x the CPU time for the same work), not on the wall clock: on a loaded box (the CPU suite at nice 19 next to a night A/B, 2026-10-07/08) the wall
     time measured the wait for a core and failed at 1.0-1.6 s while the query's work had not
     changed. CPU time still catches a slower query (more rows read, a lost index, a Python loop
     per row). A query that waits instead of computing (a lock, a sleep, a subprocess) does not
@@ -370,9 +429,17 @@ def test_fast_enough():
     assert 490_000 <= n <= 510_000, n
     led = ledger.Ledger(path).open()
     api = _api(led, NOW)
-    c0, t0 = time.process_time(), time.perf_counter()
-    u = api.usage({"bucket": "day"})
-    cpu_usage, dt_usage = time.process_time() - c0, time.perf_counter() - t0
+    fast = _fastest_cores()
+    keep = os.sched_getaffinity(0) if fast else None
+    if fast:
+        os.sched_setaffinity(0, fast)
+    try:
+        c0, t0 = time.process_time(), time.perf_counter()
+        u = api.usage({"bucket": "day"})
+        cpu_usage, dt_usage = time.process_time() - c0, time.perf_counter() - t0
+    finally:
+        if keep:
+            os.sched_setaffinity(0, keep)
     t0 = time.perf_counter()
     s = api.summary({})
     dt_summary = time.perf_counter() - t0
@@ -390,7 +457,7 @@ def test_fast_enough():
     load = os.getloadavg()[0] if hasattr(os, "getloadavg") else 0.0
     idle = load < 0.5 * (os.cpu_count() or 1)
     print(f"    500k rows: usage(365 d) cold {dt_usage * 1000:.0f} ms ({cpu_usage * 1000:.0f} ms CPU, "
-          f"load {load:.1f}), summary after it {dt_summary * 1000:.0f} ms, usage again "
+          f"load {load:.1f}{', fastest cores ' + str(len(fast)) if fast else ''}), summary after it {dt_summary * 1000:.0f} ms, usage again "
           f"{dt_warm * 1000:.0f} ms")
     assert cpu_usage < 1.0, f"the query's own CPU time {cpu_usage:.2f} s (wall {dt_usage:.2f} s)"
     assert dt_usage < (1.0 if idle else 10.0), \

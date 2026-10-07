@@ -318,6 +318,11 @@ def migrate(conn: sqlite3.Connection, now_ms: int | None = None) -> int:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
     conn.executescript(CONDUCTOR_DDL)
     conn.execute("CREATE INDEX IF NOT EXISTS requests_backend_ts ON requests(backend, ts_ms)")
+    # FX14 (2026-10-08): the dashboard's filter lists answer from these by seeks instead of reading
+    # every row on each usage call (dimensions(): VIS-60's "internal only" pairs and the proxy's
+    # users cost 230 ms of a 1.1 s 365-day query over 500k rows). Indexes only, no row touched
+    conn.execute("CREATE INDEX IF NOT EXISTS requests_dim_kind ON requests(model, client_id, client_kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS requests_user ON requests(user) WHERE user IS NOT NULL")
     got = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     was = int(got[0]) if got else 0
     if was and was < 6 and conn.execute(

@@ -520,16 +520,12 @@ class DashboardAPI:
         model or client seen only on internal rows is listed with `internal` alone (VIS-60)."""
         db = self._db()
         models, clients = set(), {}
-        hidden = set()
-        if db is not None and not internal:
-            hidden = {(m, c) for m, c in db.execute(
-                "SELECT model, client_id FROM requests GROUP BY model, client_id "
-                "HAVING SUM(client_kind IS NOT 'internal') = 0")}
         if db is not None:
             labels = self.labels()
             for model, cid, ts in db.execute(
-                    "SELECT model, client_id, MAX(ts_ms) FROM requests GROUP BY model, client_id"):
-                if (model, cid) in hidden:
+                    "SELECT model, client_id, MAX(ts_ms) FROM requests GROUP BY model, client_id"
+                    ).fetchall():
+                if not internal and self._internal_only(db, model, cid):
                     continue
                 models.add(model)
                 if cid not in clients or ts > clients[cid][0]:
@@ -543,6 +539,27 @@ class DashboardAPI:
             out.update(extra)
         return out
 
+    @staticmethod
+    def _internal_only(db, model: str, cid: str) -> bool:
+        """VIS-60: every row of this model and client is `internal`. Two seeks on requests_dim_kind
+        (model, client_id, client_kind; client_kind is NOT NULL): a kind sorting before
+        'internal' or one after it. It replaced a GROUP BY ... HAVING over every row on each usage
+        call (165 ms of 1.1 s over 500k rows, FX14)."""
+        q = ("SELECT 1 FROM requests WHERE model = ? AND client_id = ? AND client_kind {} 'internal' "
+             "LIMIT 1")
+        return not any(db.execute(q.format(op), (model, cid)).fetchone() for op in ("<", ">"))
+
+    @staticmethod
+    def _distinct_users(db) -> list:
+        """The users the ledger has seen, one seek each on the partial index requests_user (a
+        DISTINCT read every row: 67 ms over 500k rows, FX14)."""
+        out = []
+        u = db.execute("SELECT MIN(user) FROM requests WHERE user IS NOT NULL").fetchone()[0]
+        while u is not None:
+            out.append(u)
+            u = db.execute("SELECT MIN(user) FROM requests WHERE user > ?", (u,)).fetchone()[0]
+        return sorted(out)
+
     def _proxy_dimensions(self, db) -> dict | None:
         """1.3: the backends and users the ledger has seen, with the configured ones; None on a
         server without the proxy and a ledger with no relayed row (the 1.0 answer)."""
@@ -550,8 +567,7 @@ class DashboardAPI:
         if db is not None:
             try:
                 rows = [r[0] for r in db.execute("SELECT DISTINCT backend FROM requests")]
-                users = sorted(r[0] for r in db.execute(
-                    "SELECT DISTINCT user FROM requests WHERE user IS NOT NULL"))
+                users = self._distinct_users(db)
             except sqlite3.Error:
                 rows, users = [], []
         conf = {}
