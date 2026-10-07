@@ -1,6 +1,6 @@
 // Conductor — how TandemLLM decides, and every knob of it (VIS-42, SRV-129). A header with the
 // active profile's three-way switch (raw, shadow, on; "on" asks first) and the orange lines that
-// matter everywhere (no speed guard for this build, a config file that failed to load), then nine
+// matter everywhere (a config file that failed to load; VIS-68: never the speed guard), then nine
 // screens: Overview (tiles, the 24 h ribbons, the live decision feed, the monitor's last actions),
 // Routing (task classes and their policy, the classifier stages, effort levels, the note wrapper,
 // a test box), Monitor (the session monitor's journal and its rules: the tool checks, the
@@ -16,7 +16,6 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../api/client';
 import { conductor, type ConfigInfo, type Meta, type ProfileMode, type ProfileTile, type RouterDoc } from '../api/conductor';
-import { speedGuard, type GuardState } from '../lib/conductor';
 import { timeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { setParams } from '../lib/router';
@@ -54,7 +53,6 @@ export class QseConductor extends LightElement {
   @state() private meta: Meta | null = null;
   @state() private config: ConfigInfo | null = null;
   @state() private ids: string[] = [];
-  @state() private guard: GuardState | null = null;
   @state() private error: string | null = null;
   @state() private switching = false;
   @state() private reloaded: string | null = null;
@@ -81,19 +79,17 @@ export class QseConductor extends LightElement {
 
   private async load(): Promise<void> {
     try {
-      const [p, meta, config, router, evals] = await Promise.all([
+      const [p, meta, config, router] = await Promise.all([
         conductor.profiles(),
         this.meta ? Promise.resolve(this.meta) : conductor.meta(),
         conductor.config(),
         conductor.doc<RouterDoc>('router'),
-        conductor.evals(),
       ]);
       this.tiles = p.profiles;
       this.defaultProfile = p.default_profile;
       this.meta = meta;
       this.config = config;
       this.ids = router.doc.classes.map((c) => c.id);
-      this.guard = speedGuard(evals.reports, evals.engine);
       this.error = null;
     } catch (e) {
       const d = describeError(e);
@@ -143,9 +139,6 @@ export class QseConductor extends LightElement {
         </div>
         ${this.switchError ? html`<div class="guard-line" role="alert">${icon('warn')} ${this.switchError}</div>` : nothing}
         ${this.error ? html`<div class="guard-line" role="alert">${icon('warn')} ${this.error}</div>` : nothing}
-        ${this.guard && this.guard.tone !== 'ok'
-          ? html`<div class="guard-line ${this.guard.tone === 'note' ? 'guard-note' : ''}" data-guard=${this.guard.status}>${icon(this.guard.tone === 'note' ? 'info' : 'warn')}<span>${this.guard.line}${this.guard.detail ? html`. <span class="small">${this.guard.detail}</span>` : nothing}</span></div>`
-          : nothing}
         ${loadErrors.map(([k, d]) => html`<div class="guard-line" role="alert">${icon('warn')} ${k}: ${d.error?.message} (kept version ${d.version})</div>`)}
         ${tile?.locked ? html`<div class="note" data-locked>${icon('warn')} ${tile.name} is locked: ${tile.locked}.</div>` : nothing}
         <nav class="cond-tabs" aria-label="conductor screens">

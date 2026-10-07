@@ -143,6 +143,44 @@ function guardStats(stats: GuardStat[]): string {
     .join(', ');
 }
 
+/** VIS-68 (the owner, 2026-10-07): the speed guard is the release process's signal, not something a
+ * user can act on, so it is never a warning banner. Its result is one neutral line in the build
+ * information (System → Engine, the Dev tab's model card, the Compare screen): "passed for 0.4.0 ·
+ * 7 Oct 2026", "not run for this build". A short gate (one run a side, `no_noise_estimate`) reads
+ * as passed when no decode statistic dropped more than `SHORT_GATE_TOLERANCE_PCT` (the owner's
+ * ~5 % stop rule for a candidate); the numbers stay in the line's title. A release tree ships its
+ * own report (`release/speed-guard.json`, tools/speed_guard.py `ship`), so a release reads
+ * "passed" out of the box. */
+export const SHORT_GATE_TOLERANCE_PCT = 5;
+export interface SpeedCheck {
+  state: 'passed' | 'not_run' | 'slower' | 'other_code';
+  text: string;
+  title: string;
+}
+
+export function speedCheck(reports: EvalReport[], engine: { version: string | null; code_sha: string | null }): SpeedCheck {
+  const g = speedGuard(reports, engine);
+  const guards = reports.filter((r) => r.kind === 'speed_guard');
+  const b = (r: EvalReport) => (r.build ?? {}) as { version?: string; code_sha?: string };
+  const rep = guards.find((r) => engine.code_sha && b(r).code_sha === engine.code_sha) ?? guards.find((r) => engine.version && b(r).version === engine.version);
+  const when = rep?.created_at ? dateShort(String(rep.created_at)) : null;
+  const build = engine.version ?? 'this build';
+  const title = [g.line, g.detail].filter(Boolean).join('. ');
+  if (g.status === 'missing' && !rep) return { state: 'not_run', text: 'not run for this build', title };
+  if (g.status === 'other_code') return { state: 'other_code', text: `run for ${build} on other code${when ? ` · ${when}` : ''}`, title };
+  const decode = ((rep?.stats ?? []) as GuardStat[]).filter((s) => s.stat === 'mean' || s.stat === 'p50');
+  const worst = decode.length ? Math.min(...decode.map((s) => s.delta_pct)) : 0;
+  if (g.status === 'pass' || (g.status === 'no_noise_estimate' && worst >= -SHORT_GATE_TOLERANCE_PCT)) {
+    return { state: 'passed', text: `passed for ${build}${when ? ` · ${when}` : ''}`, title };
+  }
+  return { state: 'slower', text: `${build} measured ${Math.abs(worst).toFixed(1)} % slower than the release${when ? ` · ${when}` : ''}`, title };
+}
+
+function dateShort(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso.slice(0, 10) : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 export function speedGuard(reports: EvalReport[], engine: { version: string | null; code_sha: string | null }): GuardState {
   const guards = reports.filter((r) => r.kind === 'speed_guard');
   const b = (r: EvalReport) => (r.build ?? {}) as { version?: string; code_sha?: string };

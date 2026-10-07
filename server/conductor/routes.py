@@ -113,6 +113,10 @@ from server.conductor import decisions as dec_mod
 from server.conductor import schema, store as store_mod
 from server.conductor.store import ConfigError
 
+#: VIS-68: the speed-guard report a release tree ships (tools/speed_guard.py ship)
+SHIPPED_GUARD = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                             "release", "speed-guard.json")
+
 CONTRACT = "1.0"
 DOCS = ("settings", "router", "roles", "packages", "monitor", "residency", "deciders")
 DECIDER_ROUTES = ("status", "models", "autoload", "test")
@@ -384,6 +388,17 @@ def _route(handler, cond, method, parts, q, body, auth):
                 reports.append(rep)
             except (OSError, ValueError):
                 continue
+        # VIS-68: a release tree ships its own speed-guard report (release/speed-guard.json, written in
+        # the fold by tools/speed_guard.py ship), so a release's build line reads its result out of
+        # the box; a report of the box's own for the same build comes first
+        try:
+            with open(SHIPPED_GUARD) as fh:
+                rep = json.load(fh)
+            if isinstance(rep, dict) and rep.get("kind") == "speed_guard":
+                rep["file"], rep["shipped"] = "release/speed-guard.json", True
+                reports.append(rep)
+        except (OSError, ValueError):
+            pass
         # a report another one supersedes says so, also when its own file was never marked
         # (the kept files are not rewritten)
         names = {r["file"]: r for r in reports}

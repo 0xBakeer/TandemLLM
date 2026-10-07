@@ -94,6 +94,31 @@ def test_the_cli_writes_one_file_per_build_into_evals():
         assert bad.returncode != 0 and "no build" in bad.stderr
 
 
+def test_ship_puts_the_report_into_a_release_tree_for_its_own_build():
+    """VIS-68: a release reads its speed check out of the box: the fold ships the candidate's report
+    as release/speed-guard.json, named for the tree's own version and code hash; the server serves
+    it beside the box's reports (server/conductor/routes.py)."""
+    from pathlib import Path
+    from tools.row3 import code_hash
+    rep = speed_guard.report(row("b", [run(49.98, 424.9)]), row("c", [run(50.54, 425.6)]), BUILD)
+    with tempfile.TemporaryDirectory() as d:
+        tree = os.path.join(d, "rel")
+        for sub in ("engine", "server", "tools", "ops"):
+            os.makedirs(os.path.join(tree, sub))
+            open(os.path.join(tree, sub, "x.py"), "w").write(f"# {sub}\n")
+        open(os.path.join(tree, "VERSION"), "w").write("0.4.0\n")
+        src = os.path.join(d, "guard.json")
+        json.dump(rep, open(src, "w"))
+        before = code_hash(Path(tree))
+        cmd = [sys.executable, os.path.join(os.path.dirname(HERE), "tools", "speed_guard.py"), "ship", src,
+               "--tree", tree]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        got = json.load(open(os.path.join(tree, "release", "speed-guard.json")))
+        assert got["build"] == {"version": "0.4.0", "code_sha": before[:16]}, got["build"]
+        assert got["measured_on"] == BUILD and got["verdict"] == "no_noise_estimate"
+        assert code_hash(Path(tree)) == before, "the shipped report is outside the hashed code"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -4,6 +4,8 @@
      server (0.3.7-test) answered its --publish with a 422 ("report.night: YYYY-MM-DD")
   2  a report another one supersedes is listed with `superseded_by`, also when its own file was
      never marked (kept files are not rewritten); a marked one keeps its own words
+  3  VIS-68: a release tree's shipped speed-guard report (release/speed-guard.json) is listed
+     beside the box's own, marked `shipped`; a broken or foreign file is left out
 
 Run: python tests/test_eval_reports.py
 """
@@ -73,6 +75,26 @@ def test_a_superseded_report_says_so():
     # the files on the box are not rewritten
     with open(os.path.join(d, "suite-2026-10-01-155808.json")) as f:
         assert "superseded_by" not in json.load(f)
+
+
+def test_a_shipped_speed_guard_report_is_listed():
+    root = tempfile.mkdtemp(prefix="evals-")
+    os.makedirs(os.path.join(root, "evals"))
+    real = routes.SHIPPED_GUARD
+    try:
+        routes.SHIPPED_GUARD = os.path.join(root, "speed-guard.json")
+        assert "release/speed-guard.json" not in _get(root)            # none shipped
+        with open(routes.SHIPPED_GUARD, "w") as f:
+            json.dump({"kind": "speed_guard", "build": {"version": "0.4.0", "code_sha": "abc"},
+                       "verdict": "no_noise_estimate"}, f)
+        got = _get(root)["release/speed-guard.json"]
+        assert got["shipped"] is True and got["build"]["version"] == "0.4.0"
+        for bad in ("{not json", json.dumps({"kind": "suite"})):
+            with open(routes.SHIPPED_GUARD, "w") as f:
+                f.write(bad)
+            assert "release/speed-guard.json" not in _get(root)
+    finally:
+        routes.SHIPPED_GUARD = real
 
 
 if __name__ == "__main__":

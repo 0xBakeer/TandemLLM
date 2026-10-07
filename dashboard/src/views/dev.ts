@@ -10,6 +10,7 @@ import type { ChatMetrics, ChatTimings, ChatUsage, LogLevel, LogLine, RequestRow
 import { exact, fixed, money, ms, NOT_REPORTED, pct, tps, timeShort, dateTimeShort } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
 import { isReplay } from '../lib/cache-source';
+import '../ui/speed-check';
 import { readJsonStream, ResumableStream, type StreamState } from '../lib/sse';
 import { badge } from '../lib/supervisor';
 import { LightElement, type Loadable } from '../ui/base';
@@ -407,6 +408,7 @@ export class QseDev extends LightElement {
             <div><dt>reasoning</dt><dd>${card.reasoning_format}, ${card.reasoning_effort ?? 'template default'}</dd></div>
             <div><dt>version</dt><dd class="num">${card.version} <span class="muted">${card.git_sha}</span></dd></div>
             <div><dt>code hash</dt><dd class="num">${card.code_sha256.slice(0, 12)}</dd></div>
+            <div><dt>speed check</dt><dd><qse-speed-check></qse-speed-check></dd></div>
           </dl>
           ${copyButton(JSON.stringify(card, null, 2), 'Copy as JSON')}
         </div>

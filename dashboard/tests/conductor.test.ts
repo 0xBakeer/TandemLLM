@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DecisionRow, MonitorDoc, MonitorStats, ProfileDoc, RouterDoc, SizeDecision, Stats, UiStates, WatchSession } from '../src/api/conductor';
-import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, PROGRESS_DEFAULT, progressOf, sideOf, SIDE_SHAPES, statesChannel, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, variantRows, watchLine } from '../src/lib/conductor';
+import { armName, contextStage, CONTEXT_STAGE_SEED, pickSuite, PROGRESS_DEFAULT, progressOf, sideOf, SIDE_SHAPES, statesChannel, stageName, STATE_KINDS, SOURCE_WORDS, supersededBy, speedCheck, SHORT_GATE_TOLERANCE_PCT, BUDGET_LEVELS, BUDGET_MAX, budgetText, BY_SIZE_DEFAULT, comparable, levelBudget, withBudget, didWhat, effortsCell, eventWhat, gateSeries, hourlySeries, indicative, isAct, isSessionTask, linesToList, monitorSeries, monitorTaskOrder, promotion, PROMOTE_MIN, readablePath, ruleSchema, setIn, SIZE_SEED, SIZE_SIGNALS, sizeEffort, sizeLine, speedGuard, suitePairs, TOOL_TURN_EFFORTS, toolTurnEffort, toolTurnText, variantRows, watchLine } from '../src/lib/conductor';
 
 describe('promotion', () => {
   it('is allowed at precision 0.93 over 41 labelled decisions', () => {
@@ -91,6 +91,32 @@ describe('eval tables', () => {
     const g = speedGuard([{ kind: 'speed_guard', build: engine, verdict: 'worse', why: 'resolved worse: mean', runs_each: 3, stats: [{ stat: 'mean', base: 50, cand: 45, delta_pct: -10, noise_pct: 2 }] }], engine);
     expect(g).toMatchObject({ tone: 'warn', status: 'worse', line: 'speed guard for build 0.3.5-test: resolved worse: mean' });
     expect(g.detail).toContain('mean 50.00 → 45.00 tok/s (−10.0 %, noise 2.0 %)');
+  });
+});
+
+describe('the speed check line (VIS-68)', () => {
+  const engine = { version: '0.4.0', code_sha: 'abc' };
+  const at = '2026-10-07T09:10:00Z';
+  const short = (delta: number) => ({ kind: 'speed_guard' as const, build: engine, created_at: at, verdict: 'no_noise_estimate', runs_each: 1,
+    stats: [{ stat: 'mean', base: 50, cand: 50 * (1 + delta / 100), delta_pct: delta, noise_pct: null }, { stat: 'p50', base: 46, cand: 46, delta_pct: 0, noise_pct: null }] });
+  it('says not run when there is no report for the build', () => {
+    expect(speedCheck([], engine)).toMatchObject({ state: 'not_run', text: 'not run for this build' });
+  });
+  it('reads a pass, and a short gate within the tolerance, as passed with the date', () => {
+    const pass = speedCheck([{ kind: 'speed_guard', build: engine, created_at: at, verdict: 'pass', runs_each: 3, stats: [] }], engine);
+    expect(pass.state).toBe('passed');
+    expect(pass.text).toMatch(/^passed for 0\.4\.0 · 7 Oct 2026$/);
+    expect(speedCheck([short(-1.2)], engine).state).toBe('passed');
+    expect(speedCheck([short(-SHORT_GATE_TOLERANCE_PCT)], engine).state).toBe('passed');
+  });
+  it('says how much slower a short gate beyond the tolerance measured, without alarm words', () => {
+    const c = speedCheck([short(-7.5)], engine);
+    expect(c.state).toBe('slower');
+    expect(c.text).toBe('0.4.0 measured 7.5 % slower than the release · 7 Oct 2026');
+    expect(c.title).toContain('mean 50.00');
+  });
+  it('names a report for the same version on other code', () => {
+    expect(speedCheck([{ ...short(0), build: { version: '0.4.0', code_sha: 'zzz' } }], engine).state).toBe('other_code');
   });
 });
 

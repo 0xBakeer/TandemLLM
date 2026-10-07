@@ -19,6 +19,16 @@ its difference is bigger than the run-to-run noise and the run ranges do not ove
 
 The owner's short-gate rule (2026-10-01 12:58) runs ONE pair of 1 run each, so a short gate ends in
 `no_noise_estimate` by design; the report says so instead of reading as a pass or a failure.
+
+A release carries its result (VIS-68, 2026-10-07):
+
+    python tools/speed_guard.py ship REPORT.json --tree DIR [--version 0.4.0]
+
+copies a candidate's report into the release tree as `release/speed-guard.json`, the build named
+as the tree's own (`VERSION`, and the code hash `tools/row3.py` takes over engine/, server/, tools/
+and ops/, which the release's cleaned comments change), the measured build kept as `measured_on`.
+The server serves it beside the box's own reports, so a release's build line reads its result out
+of the box.
 """
 
 from __future__ import annotations
@@ -85,7 +95,37 @@ def file_name(build: dict) -> str:
     return f"speed-guard-{safe(build.get('version'))}-{safe(build.get('code_sha'))}.json"
 
 
+def ship(report_path: str, tree: str, version: str | None = None) -> str:
+    """Write `report_path`'s report into `tree` as release/speed-guard.json for `tree`'s own build."""
+    from pathlib import Path
+    from tools.row3 import code_hash
+    with open(report_path) as f:
+        rep = json.load(f)
+    if rep.get("kind") != "speed_guard":
+        raise SystemExit(f"speed_guard ship: {report_path} is no speed_guard report")
+    ver = version or open(os.path.join(tree, "VERSION")).read().strip()
+    out = dict(rep, measured_on=rep.get("measured_on") or rep.get("build"),
+               build={"version": ver, "code_sha": code_hash(Path(tree))[:16]})
+    out.pop("file", None)
+    d = os.path.join(tree, "release")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "speed-guard.json")
+    with open(path, "w") as f:
+        json.dump(out, f, indent=1)
+        f.write("\n")
+    return path
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "ship":
+        sp = argparse.ArgumentParser(description="copy a speed_guard report into a release tree")
+        sp.add_argument("report")
+        sp.add_argument("--tree", required=True)
+        sp.add_argument("--version")
+        a = sp.parse_args(sys.argv[2:])
+        path = ship(a.report, a.tree, a.version)
+        print(f"[speed_guard] shipped {a.report} as {path}")
+        return
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("base")

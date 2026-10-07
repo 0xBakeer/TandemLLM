@@ -18,7 +18,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { describeError } from '../../api/client';
 import { conductor, type Change, type DecisionRow, type EvalReport, type EvalVerdict, type ProfileDoc, type ProfileTile, type Stats, type SuiteComparison, type VersionRow } from '../../api/conductor';
-import { armName, indicative, INDICATIVE_N, pickSuite, promotion, PROMOTE_RULE, readablePath, setIn, short, speedGuard, suitePairs, supersededBy, variantRows, effortsCell, type SuiteRow } from '../../lib/conductor';
+import { armName, indicative, INDICATIVE_N, pickSuite, promotion, PROMOTE_RULE, readablePath, setIn, short, speedCheck, speedGuard, suitePairs, supersededBy, variantRows, effortsCell, type SuiteRow } from '../../lib/conductor';
 import { dateTimeShort, exact, ms, pct } from '../../lib/format';
 import { LightElement } from '../../ui/base';
 import { emptyState, icon, panel, skeleton } from '../../ui/bits';
@@ -207,6 +207,7 @@ export class QseCondCompare extends LightElement {
     const sup = supersededBy(rep, suite);
     const rows: SuiteRow[] = ((rep?.rows ?? []) as SuiteRow[]);
     const guard = speedGuard(this.reports, this.engine);
+    const check = speedCheck(this.reports, this.engine);           // VIS-68: a line, no banner
     const pairs = suitePairs(rows);
     const v = rep?.verdict as EvalVerdict | undefined;
     const comp = (rep?.comparison ?? []) as SuiteComparison[];
@@ -216,9 +217,7 @@ export class QseCondCompare extends LightElement {
     const cell = (x: number | null | undefined, digits = 1) => (x == null ? '—' : Number.isInteger(x) ? exact(x) : x.toFixed(digits));
     return panel(
       html`TandemLLM against the raw engine ${rep ? html`<span class="muted small num">night ${rep.night ?? '—'}${build ? ` · ${build.version ?? '?'} ${short(build.code_sha, 12)}` : ''}${rep.profile ? ` · profile ${rep.profile}` : ''}</span>` : nothing}`,
-      html`${guard.tone === 'ok'
-          ? html`<p class="small" data-guard-detail=${guard.status}>${icon('check')} ${guard.line}${guard.detail ? html`: <span class="num">${guard.detail}</span>` : nothing}.</p>`
-          : html`<div class="guard-line ${guard.tone === 'note' ? 'guard-note' : ''}" data-guard-detail=${guard.status}>${icon(guard.tone === 'note' ? 'info' : 'warn')}<span>${guard.line}${guard.detail ? html`. <span class="small">${guard.detail}</span>` : nothing}</span></div>`}
+      html`<p class="small muted" data-guard-detail=${guard.status} data-speed-check=${check.state}>Speed check: ${check.text}. <span class="num">${guard.line}${guard.detail ? html`. ${guard.detail}` : nothing}</span></p>
         ${suite.length > 1
           ? html`<label class="field suite-pick"><span>report</span><select aria-label="suite report" data-suite-report @change=${(e: Event) => (this.suiteFile = (e.target as HTMLSelectElement).value)}>${suite.map((r) => html`<option value=${String(r.file)} ?selected=${r === rep}>${String(r.night ?? r.file)} · ${String(r.file)}${supersededBy(r, suite) ? ' · superseded' : ''}</option>`)}</select></label>`
           : nothing}

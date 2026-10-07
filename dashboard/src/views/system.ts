@@ -25,6 +25,7 @@ import { LightElement, type Loadable } from '../ui/base';
 import { pushHostSamples, renderHosts, type HostSample } from './hosts';
 import { renderEngines } from './engines';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
+import '../ui/speed-check';
 
 const KEEP = 360; // 30 min at 5 s
 
@@ -108,6 +109,7 @@ export class QseSystem extends LightElement {
           html`<dl class="kv">
             <div><dt>version</dt><dd class="num">${d.engine.version} <span class="muted">${d.engine.git_sha}</span></dd></div>
             <div><dt>code hash</dt><dd class="num">${d.engine.code_sha256.slice(0, 16)}… ${copyButton(d.engine.code_sha256, 'Copy code hash')}</dd></div>
+            <div><dt>speed check</dt><dd><qse-speed-check></qse-speed-check></dd></div>
             <div><dt>started</dt><dd class="num">${dateTimeShort(d.engine.started_at)}</dd></div>
             <div><dt>uptime</dt><dd class="num">${duration(d.engine.uptime_s)}</dd></div>
             <div><dt>pid</dt><dd class="num">${d.engine.pid}</dd></div>

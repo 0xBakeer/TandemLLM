@@ -1,7 +1,7 @@
 // The Conductor view (VIS-42, QA VIS-43; SRV-129's UI rows, QA SRV-130), on the mock engine:
 // the mode switch asks before "on" and shows the reload; promotion is gated by the rule; the raw
-// and bench profiles are read-only; a pair from two builds is "not comparable"; the guard line
-// shows when no speed guard ran for the serving build; a class added on the Routing screen saves
+// and bench profiles are read-only; a pair from two builds is "not comparable"; the speed guard is
+// never a banner (VIS-68), one neutral line in the build information; a class added on the Routing screen saves
 // as a new version; the test box shows the exact note; the drawer shows the exact injected text
 // and takes a label; editing asks for the admin token when the server wants it; and every screen
 // fits a 390 px phone. SRV-113/115 (QA SRV-114/116): the Monitor screen renders every tool check's
@@ -174,30 +174,42 @@ test('a profile\'s Context sets S1, S4 and the push, and mirrors the task rows @
   await expect(page.locator('[data-in-context="S1"]')).toContainText('fails 4: set in Context below');
 });
 
-test('the guard line shows when no speed guard ran for the serving build @mock', async ({ page }) => {
+test('the speed guard is never a banner; the build information carries one neutral line (VIS-68) @mock', async ({ page }) => {
+  // no report for the serving build: no banner on the Conductor view, "not run" in the build info
   await open(page);
-  await expect(page.locator('[data-guard]')).toContainText('speed guard not run for build 0.3.1-test');
-  await page.request.post('/__mock/conductor', { data: { guard: true } });
-  await page.reload();
-  await expect(page.locator('qse-conductor')).toBeVisible();
   await expect(page.locator('.cond-title')).toBeVisible();
   await page.waitForTimeout(500);
   await expect(page.locator('[data-guard]')).toHaveCount(0);
+  await expect(page.locator('.guard-line', { hasText: /speed guard/i })).toHaveCount(0);
+  await login(page, '#/system');
+  await expect(page.locator('qse-speed-check [data-speed-check="not_run"]')).toHaveText('not run for this build');
+  // a pass: "passed for <build> · <date>" on System and Dev, still no banner
+  await page.request.post('/__mock/conductor', { data: { guard: true } });
+  await login(page, '#/system');
+  await expect(page.locator('qse-speed-check [data-speed-check="passed"]')).toContainText('passed for 0.3.1-test');
+  await login(page, '#/dev');
+  await expect(page.locator('qse-speed-check [data-speed-check]').first()).toBeAttached();
+  await open(page);
+  await page.waitForTimeout(500);
+  await expect(page.locator('[data-guard]')).toHaveCount(0);
+  await page.request.post('/__mock/conductor', { data: { guard: false } });
 });
 
-test('a one-run short gate shows its numbers and says the noise is unknown @mock', async ({ page }) => {
+test('a one-run short gate reads as passed within the tolerance; Compare keeps its numbers (VIS-68) @mock', async ({ page }) => {
   await open(page);
   await page.request.post('/__mock/conductor', { data: { guard: 'single' } });
   await page.reload();
   await expect(page.locator('qse-conductor')).toBeVisible();
-  const line = page.locator('[data-guard="no_noise_estimate"]');
-  await expect(line).toContainText('one row pair, 1 run a side');
-  await expect(line).toContainText('mean 49.98 → 50.54 tok/s');
-  await expect(line).toContainText('TTFT 424.9 → 425.6 ms');
-  await expect(line).toContainText('One run gives no noise estimate');
-  await expect(page.locator('[data-guard="missing"]')).toHaveCount(0);
+  await page.waitForTimeout(500);
+  await expect(page.locator('[data-guard]')).toHaveCount(0);
+  await login(page, '#/system');
+  await expect(page.locator('qse-speed-check [data-speed-check="passed"]')).toContainText('passed for 0.3.1-test');
   await login(page, '#/conductor?screen=compare');
-  await expect(page.locator('[data-guard-detail="no_noise_estimate"]')).toContainText('no pass and no failure');
+  const line = page.locator('[data-guard-detail="no_noise_estimate"]');
+  await expect(line).toContainText('Speed check: passed for 0.3.1-test');
+  await expect(line).toContainText('mean 49.98 → 50.54 tok/s');
+  await expect(line).toContainText('no pass and no failure');
+  await expect(page.locator('.guard-line[data-guard-detail]')).toHaveCount(0);
   await page.request.post('/__mock/conductor', { data: { guard: false } });
 });
 
