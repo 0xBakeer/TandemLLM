@@ -4,7 +4,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## 0.3.50-test, 2026-10-07
 
-0.3.49-test (e6970f5) with seven fixes from the normal-user scenario run and FX7's measurements (SRV-243, SRV-239, SRV-245 with SRV-219, SRV-247, SRV-233, SRV-250; SRV-235 in the router document; QA SRV-244, SRV-240, SRV-246, SRV-220, SRV-248, SRV-234, SRV-236). Raw and bench text are unchanged. Under a conductor profile an API client that names no `reasoning_format` now gets `reasoning_content` (a changed default), and the follow-up of an answer that thought is served with that answer's reasoning.
+0.3.49-test (e6970f5) with seven fixes from the normal-user scenario run and FX7's measurements (SRV-243, SRV-239, SRV-245 with SRV-219, SRV-247, SRV-233, SRV-250, SRV-235; QA SRV-244, SRV-240, SRV-246, SRV-220, SRV-248, SRV-234, SRV-236). Raw and bench text are unchanged. Under a conductor profile an API client that names no `reasoning_format` now gets `reasoning_content` (a changed default), and the follow-up of an answer that thought is served with that answer's reasoning.
 
 ### A chat gets the packages its tools can carry out (SRV-243)
 
@@ -23,6 +23,11 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - Every client kind but the Hermes agent gets `reasoning_content` when it names no format (`QWEN38_CLIENT_REASONING=*=reasoning_content,hermes=tags`): an OpenAI SDK printed the thinking as its answer, and opencode with the installer's config showed literal `<think>` text. `reasoning_format: tags` keeps the tags. The answer starts with its first character.
 - `stop` strings apply to the answer only: `stop: ["\n\n"]` ended a response inside the thinking with no answer; now it returns the first paragraph (P04). State lines never go into a plain client's `content`.
 - A request that offered no tools never gets `tool_calls`; a call in the answer is dropped (`extra.calls_refused`), and a request without a shell gets the memory index without its routes. P08: "What is my UX1 pet?" answers "I don't have any note about a UX1 pet", finish `stop` (0.3.48-test: a call to a tool named `tool`, finish `tool_calls`).
+
+### A trivial instruction stays cheap (SRV-235)
+
+- "Reply with just: OK. Do not use any tools." in a new opencode session went to code_edit (0.80) at xhigh with the 4.9k-token coding package: 9.3 s to "OK". Unquoted, the class question put chat first at 0.41, under the 0.45 accept, so a first message fell back to the profile's default class (code_edit); quoted, as the scenario sent it, Qwen said code_edit 0.80.
+- The chat class now covers an instruction about the reply itself (answer in one word, say OK, confirm, stop) that asks for no work on code, files, commands or git (router v17 on the box, the shipped router). On the labelled sets (308 prompts) and 20 short opencode messages (`tests/fixtures/conductor/short_prompts.jsonl`, 10 about the reply, 10 coding) the live class question went from 286 to 297 of 328 right (the prose set 18 to 27, the task set 198 to 200, long 51 to 51, short 19 to 19); two answers got worse ("Commit the changes with a short message" is chat, "What does ASAP stand for?" code_edit). Live in opencode: the OK message is chat at 0.999, no note, TTFT 2.3 s; "fix the failing test in textstats.py" stays debug at 0.999 with the coding package.
 
 ### cached_tokens counts the client's tokens (SRV-233)
 

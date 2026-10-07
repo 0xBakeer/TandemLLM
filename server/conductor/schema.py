@@ -506,7 +506,11 @@ SHIPPED_ROUTER: dict = {
                         "compress a conversation.",
          "policy": {"effort": "off", "packages": [], "rules": []}},
         {"id": "chat", "label": "Chat",
-         "description": "Small talk, a greeting, or a short question with a short answer.",
+         # SRV-235: an instruction about the reply itself ("Reply with just: OK") is chat; on 308
+         # labelled prompts and 20 short opencode messages the class question went 286 -> 297 of 328
+         "description": ("Small talk, a greeting, thanks, a short question with a short answer, or an "
+                         "instruction about the reply itself (answer in one word, say OK, confirm, stop) "
+                         "that asks for no work: no code, files, commands or git."),
          # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
          # an essay
          "policy": {"effort": "medium", "packages": [], "rules": []}},

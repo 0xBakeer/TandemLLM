@@ -162,7 +162,7 @@
    {
     "id": "chat",
     "label": "Chat",
-    "description": "Small talk, a greeting, or a short question with a short answer.",
+    "description": "Small talk, a greeting, thanks, a short question with a short answer, or an instruction about the reply itself (answer in one word, say OK, confirm, stop) that asks for no work: no code, files, commands or git.",
     "policy": {
      "effort": "medium",
      "packages": [],
