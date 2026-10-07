@@ -103,6 +103,22 @@ coding text asked for "evidence in the message"):
  29  laya-scripts and laya-testing: when a call fails, the model notes it in its check output and
      goes on; it does not tell the user.
 
+The sixth round (FX13, 2026-10-08; UX1 O03 on 0.4.1-test: the closing message no longer named
+Laya, but 7 lines between tool calls did: "3. Ask Laya about the diff evidence", "Now the Laya
+verdicts", "Laya is unavailable on this machine (transport error)". The texts said only that the
+final message keeps Laya out. And that "unavailable" was a 422: the model piped its evidence into
+a heredoc script, sent an empty text, and the helper called the refusal this machine's network):
+
+ 30  test-*, laya-testing, tandem-harness, coding: the plan and every line between tool calls
+     reach the user too; a check is named by what it checks, never Laya, a verdict or a
+     probability.
+ 31  test-lib: step 6 is a check for the model that no line it writes names.
+ 32  laya-scripts: the helper refuses an empty text before it asks (exit 2, what to do), and a
+     4xx from Laya is the request's fault: the server's message and field, exit 2, "fix it and
+     ask again"; only a refused connection, TLS, a timeout, a 429 or a 5xx is "unavailable"
+     (exit 3).
+ 33  laya-testing: a refused request (exit 2) is the model's to fix, not the network.
+
 Every edit is idempotent: a text already migrated comes out unchanged.
 
   python tools/packages_migrate.py --repo                 # rewrite packages/ in this checkout
@@ -377,6 +393,51 @@ WEB8_NEW = ("8. A game or a UI flow: let Laya play it, 3 episodes or more (laya-
             "`{tandem_scratch}/laya_drive.py browser`); a death or stuck spot that real keys cannot avoid "
             "either is a bug. Two runs that end at the same spot: stop and report it as untested.")
 
+# 30-33 (FX13): the plan and the progress lines name no Laya; the helper says why a request was refused
+NOTE_045 = ("0.4.5: plans and progress lines between tool calls name no Laya; the Laya helper says what was "
+            "wrong with a refused request (4xx, exit 2) instead of 'unavailable' (FX13)")
+ROUND6 = ("all text: plans and progress", "test-lib: a check no line names", "laya helper: a refused request",
+          "laya-testing: a refused request")
+PROGRESS_LINE = ("Your plan and every line you write between tool calls reach the user too: name a check by "
+                 "what it checks (\"checking the output against the expected file\", \"running the tests\"), "
+                 "never Laya, a verdict or a probability.")
+SECOND_V3 = "6. Let Laya read the suite's tail, a check for you that no line you write names:"
+ASK_DEF = "def ask(question, text=None, texts=None, **kw):   # kw: choices, scale, threshold\n"
+EMPTY_GUARD = (
+    "    if not texts and not (text or \"\").strip():   # nothing to judge: the evidence never arrived\n"
+    "        print(\"LAYA not asked: the evidence text is empty, so there is nothing to judge. Pass the \"\n"
+    "              \"output itself (save it to a file and read that; a script fed by a heredoc gets no \"\n"
+    "              \"piped stdin).\", file=sys.stderr)\n"
+    "        raise SystemExit(2)\n")
+HELPER_TRY = (
+    "    try:\n"
+    "        return json.load(urllib.request.urlopen(req, timeout=90))\n"
+    "    except (OSError, ValueError) as e:   # refused, TLS, timeout, not JSON: this machine's network")
+HELPER_TRY_NEW = (
+    "    try:\n"
+    "        return json.load(urllib.request.urlopen(req, timeout=90))\n"
+    "    except urllib.error.HTTPError as e:   # Laya answered: a 4xx says what was wrong with this request\n"
+    "        try:\n"
+    "            err = json.loads(e.read() or b\"{}\").get(\"error\") or {}\n"
+    "        except ValueError:\n"
+    "            err = {}\n"
+    "        if 400 <= e.code < 500 and e.code != 429:\n"
+    "            print(f\"LAYA refused this request (HTTP {e.code}): {err.get('message') or e.reason}\"\n"
+    "                  + (f\" (field: {err['param']})\" if err.get(\"param\") else \"\")\n"
+    "                  + f\". The request is wrong, not the network: fix it and ask again \"\n"
+    "                  f\"(`curl -s {URL[:-4]}` shows the contract).\", file=sys.stderr)\n"
+    "            raise SystemExit(2)\n"
+    "        print(f\"LAYA unavailable (HTTP {e.code}: {err.get('message') or e.reason}). The call failed \"\n"
+    "              \"on this machine, your code is not the cause: continue with your own evidence; \"\n"
+    "              \"the user does not need to hear about it.\", file=sys.stderr)\n"
+    "        raise SystemExit(3)\n"
+    "    except (OSError, ValueError) as e:   # refused, TLS, timeout, not JSON: this machine's network")
+HELPER_IMPORT_OLD = "import json, os, sys, urllib.request\n"
+HELPER_IMPORT_NEW = "import json, os, sys, urllib.error, urllib.request\n"
+REFUSED_BULLET = ("- A call refused with a 4xx (the helper prints \"LAYA refused this request\" or \"LAYA not "
+                  "asked\" and exits 2) is your request, not the network: read the message, fix the call (an "
+                  "empty text, a missing question, a bad choices list) and ask again.")
+
 
 def _once(text: str, anchor: str, add: str, changes: list, what: str) -> str:
     """`add` on its own line after `anchor`, unless it is there already."""
@@ -384,6 +445,15 @@ def _once(text: str, anchor: str, add: str, changes: list, what: str) -> str:
         return text
     changes.append(what)
     return text.replace(anchor, anchor + "\n" + add, 1)
+
+
+def _after_line(text: str, needle: str, add: str, changes: list, what: str) -> str:
+    """`add` on its own line after the line that holds `needle`, unless it is there already."""
+    if add in text or needle not in text:
+        return text
+    j = text.find("\n", text.find(needle))
+    changes.append(what)
+    return text + "\n" + add if j < 0 else text[:j] + "\n" + add + text[j:]
 
 
 def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
@@ -522,6 +592,28 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
         if old in out and new not in out:
             out = out.replace(old, new, 1)
             changes.append(what)
+    # 30: the plan and the lines between tool calls name no Laya (the final message already did not)
+    for needle in (EVIDENCE_TAIL, LAYA_DONE_NEW, HARNESS_RULE, TOOLS_QUIRK_RULE, DONE_EV_NEW):
+        if needle in out:
+            bullet = "- " if needle in (LAYA_DONE_NEW, HARNESS_RULE, TOOLS_QUIRK_RULE) else ""
+            out = _after_line(out, needle, bullet + PROGRESS_LINE, changes,
+                              "all text: plans and progress lines name no Laya")
+            break
+    # 31
+    if SECOND_NEW in out:
+        out = out.replace(SECOND_NEW, SECOND_V3, 1)
+        changes.append("test-lib: a check no line names")
+    # 32: the helper says what was wrong with a refused request, and sends no empty text
+    if HELPER_TRY in out:
+        out = out.replace(HELPER_TRY, HELPER_TRY_NEW, 1)
+        out = out.replace(HELPER_IMPORT_OLD, HELPER_IMPORT_NEW, 1)
+        changes.append("laya helper: a refused request says why (exit 2)")
+    if ASK_DEF in out and EMPTY_GUARD not in out:
+        out = out.replace(ASK_DEF, ASK_DEF + EMPTY_GUARD, 1)
+        changes.append("laya helper: a refused request before it is sent (an empty text)")
+    # 33
+    out = _once(out, FAIL_BULLET.replace(WRITE_UNAVAIL_OLD, WRITE_UNAVAIL_NEW), REFUSED_BULLET, changes,
+                "laya-testing: a refused request is the model's to fix")
     return out, changes
 
 
@@ -617,7 +709,8 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE_041 if any(
+                    {"doc": new, "note": NOTE_045 if any(
+                        c.startswith(ROUND6) for ch in rep.values() for c in ch) else NOTE_041 if any(
                         c.startswith(ROUND5) for ch in rep.values() for c in ch) else NOTE_351 if any(
                         c.startswith(ROUND4) for ch in rep.values() for c in ch) else NOTE_345 if any(
                         c.startswith(ROUND3) for ch in rep.values() for c in ch) else NOTE_343 if any(

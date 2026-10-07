@@ -6,3 +6,4 @@
 5. Stop the server you started at the end; say that you did.
 6. Let Laya judge every response: `(echo "expected: 404 with an error body"; curl -s -w '\nHTTP %{http_code}' localhost:8080/items/999) | python3 {tandem_scratch}/laya.py "Is this response what the request should get?" right,wrong`.
 Your evidence, for you: the routes called with their codes, the read-back checks, the log tail, and Laya's verdicts. The final message says in plain words what you ran and what it showed; it never names Laya, a verdict or a probability.
+Your plan and every line you write between tool calls reach the user too: name a check by what it checks ("checking the output against the expected file", "running the tests"), never Laya, a verdict or a probability.

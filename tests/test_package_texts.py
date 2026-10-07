@@ -28,6 +28,12 @@
      overlay rules; the box's v16 shape migrates, idempotent      test_the_final_message_edits
   9  SRV-229: the S5 and E2 notes in plain words, in the YAML, its JSON copy and a box's document
                                                         test_the_monitor_notes_in_plain_words
+ 10  FX13 (SRV-259 leftover, O03 on 0.4.1-test: 7 lines between tool calls named Laya; a 422 for an
+     empty text read "Laya is unavailable (transport error)"): every text that keeps Laya out of
+     the final message also keeps it out of the plan and the progress lines; the helper, against a
+     server that answers with the route's own 422 bodies, says what was wrong and exits 2 (an
+     empty text is caught before the call), a 503 is still "unavailable" (exit 3); the box's v23
+     shape migrates (10 packages), idempotent        test_fx13_progress_lines_and_refused_laya_calls
 
 Run: python tests/test_package_texts.py
 """
@@ -328,7 +334,7 @@ def test_fx10_opencode_answers_keep_laya_out():
     assert {"test-web", "test-cli", "test-api", "test-data", "test-lib", "coding", "laya-scripts",
             "laya-testing"} <= set(report), report
     lib = new["packages"]["test-lib"]["body"]
-    assert M.SECOND_NEW in lib and (M.EVIDENCE_LINE + "the summary lines before and after, the tests "
+    assert M.SECOND_V3 in lib and (M.EVIDENCE_LINE + "the summary lines before and after, the tests "
                                     "added, the example run, and Laya's verdict." + M.EVIDENCE_TAIL) in lib
     assert M.DONE_EV_NEW in new["packages"]["coding"]["body"]
     assert M.SAY_UNAVAIL_NEW in new["packages"]["laya-scripts"]["body"]
@@ -361,6 +367,118 @@ def test_the_monitor_notes_in_plain_words():
     assert new["tasks"] == data["tasks"]
     assert MM.migrate_doc(new, tasks=())[1] == []
     return f"{len(MM.TEXT_EDITS)} note texts in plain words; idempotent"
+
+
+def _undo_045(text: str) -> str:
+    """A text as the box's v23 had it (edits 30-33 not in)."""
+    for line in ("\n- " + M.PROGRESS_LINE, "\n" + M.PROGRESS_LINE, "\n" + M.REFUSED_BULLET):
+        text = text.replace(line, "")
+    return (text.replace(M.SECOND_V3, M.SECOND_NEW).replace(M.HELPER_TRY_NEW, M.HELPER_TRY)
+            .replace(M.HELPER_IMPORT_NEW, M.HELPER_IMPORT_OLD).replace(M.EMPTY_GUARD, ""))
+
+
+def _laya_server():
+    """A loopback server that answers /v1/laya/ask as the route does before any model runs: the
+    request checked by server/laya_api.parse (the route's own 422 bodies), a fixed verdict when
+    it passes, and a 503 under /down."""
+    import http.server
+    import threading
+    from server import laya_api
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path.startswith("/down/"):
+                st, out = 503, {"error": {"message": "the deciders are loading", "type": "overloaded"}}
+            else:
+                try:
+                    laya_api.parse(json.loads(raw), schema.DECIDER_API, 8)
+                    st, out = 200, {"label": "passed", "p": 0.99, "sure": True}
+                except laya_api.Refused as exc:
+                    st, out = exc.status, exc.body()
+            data = json.dumps(out).encode()
+            self.send_response(st)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_fx13_progress_lines_and_refused_laya_calls():
+    files = glob.glob(os.path.join(ROOT, "packages", "**", "*.md"), recursive=True)
+    covered = set()
+    for path in files:
+        with open(path) as f:
+            text = f.read()
+        keeps_out = any(k in text for k in ("never names Laya", "never a label or a probability",
+                                            "Laya's verdicts are yours", "Laya and its scores",
+                                            "Laya and its labels"))
+        if keeps_out:
+            assert M.PROGRESS_LINE in text, ("the final message keeps Laya out, the progress lines "
+                                             "do not", path)
+            covered.add(os.path.basename(path)[:-3])
+        assert "(not for the final message)" not in text, path
+    assert {"coding", "testing", "tandem-harness", "laya-testing", "test-lib", "test-web",
+            "test-cli", "test-api", "test-data"} <= covered, covered
+    # the helper as the model writes it, against the route's own answers
+    with open(os.path.join(ROOT, "packages", "inline", "laya-scripts.md")) as f:
+        code = re.search(r"```python\n(# \{tandem_scratch\}/laya\.py.*?)```", f.read(), re.S).group(1)
+    srv = _laya_server()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "laya.py"), "w") as f:
+                f.write(P.with_url(code, base))
+
+            def run(argv, stdin="", url=base, script=None):
+                cmd = [sys.executable] + (["-c", script] if script else [os.path.join(d, "laya.py")]) + argv
+                return subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=30,
+                                      cwd=d, env={"PATH": os.environ.get("PATH", ""), "TANDEM_URL": url,
+                                                  "PYTHONPATH": d})
+            ok = run(["Did every test pass?", "passed,failed"], "16 passed in 0.4s")
+            assert ok.returncode == 0 and "LAYA passed" in ok.stdout, (ok.returncode, ok.stderr)
+            # O03's call: the evidence piped into a heredoc script never arrived; an empty text
+            empty = run([], script="from laya import ask; ask('Did every test pass?', '', "
+                                   "choices=['passed', 'failed'])")
+            assert empty.returncode == 2 and "LAYA not asked" in empty.stderr, (empty.returncode,
+                                                                               empty.stderr)
+            assert "unavailable" not in empty.stderr and "Traceback" not in empty.stderr, empty.stderr
+            # a malformed request reaches the route: its message and field, exit 2, fix and ask again
+            bad = run([], script="from laya import ask; ask('Did it pass?', 'out: 3 rows', "
+                                 "choices=['passed', 'passed'])")
+            assert bad.returncode == 2, (bad.returncode, bad.stderr)
+            assert "LAYA refused this request (HTTP 422): choices: a label is listed twice" in bad.stderr \
+                and "(field: choices)" in bad.stderr and "fix it and ask again" in bad.stderr, bad.stderr
+            assert "unavailable" not in bad.stderr and "Traceback" not in bad.stderr, bad.stderr
+            # the route's own message for an empty text names it and what to send
+            raw = run([], script="from laya import ask; ask('Did it pass?', texts=['ok', ' '])")
+            assert raw.returncode == 2 and "texts[1] is empty: there is nothing to judge" in raw.stderr, \
+                raw.stderr
+            # a server error is still this machine's trouble, not the request's
+            down = run(["Did it pass?", "passed,failed"], "16 passed", url=base + "/down")
+            assert down.returncode == 3 and "LAYA unavailable (HTTP 503" in down.stderr, down.stderr
+    finally:
+        srv.shutdown()
+    # the box's v23 shape (edits 26-29 in, 30-33 not) migrates, idempotent
+    doc = _seed()
+    for p in doc["packages"].values():
+        if isinstance(p.get("body"), str):
+            p["body"] = _undo_045(p["body"])
+    assert M.PROGRESS_LINE not in json.dumps(doc) and M.HELPER_TRY in doc["packages"]["laya-scripts"]["body"]
+    new, report = M.migrate_doc(doc)
+    assert set(report) == {"coding", "testing", "tandem-harness", "laya-testing", "laya-scripts",
+                           "test-lib", "test-web", "test-cli", "test-api", "test-data"}, report
+    assert new == _seed(), "the migrated box texts are the shipped texts"
+    assert M.migrate_doc(new)[1] == {}, "a second run changes nothing"
+    assert any(c.startswith(M.ROUND6) for ch in report.values() for c in ch) and len(M.NOTE_045) < 200
+    return f"{len(covered)} texts keep Laya out of plans and progress lines; helper exit 2 on 422; idempotent"
 
 
 if __name__ == "__main__":

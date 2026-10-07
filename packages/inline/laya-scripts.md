@@ -12,14 +12,34 @@ Laya gives a fast typed verdict on a short text you cannot check by a plain comp
 
 ```python
 # {tandem_scratch}/laya.py: ask Laya (TandemLLM) a typed question about evidence
-import json, os, sys, urllib.request
+import json, os, sys, urllib.error, urllib.request
 URL = os.environ.get("TANDEM_URL", "{tandem_url}") + "/v1/laya/ask"
 
 def ask(question, text=None, texts=None, **kw):   # kw: choices, scale, threshold
+    if not texts and not (text or "").strip():   # nothing to judge: the evidence never arrived
+        print("LAYA not asked: the evidence text is empty, so there is nothing to judge. Pass the "
+              "output itself (save it to a file and read that; a script fed by a heredoc gets no "
+              "piped stdin).", file=sys.stderr)
+        raise SystemExit(2)
     body = {"question": question, **kw, **({"texts": texts} if texts else {"text": text})}
     req = urllib.request.Request(URL, json.dumps(body).encode(), {"Content-Type": "application/json"})
     try:
         return json.load(urllib.request.urlopen(req, timeout=90))
+    except urllib.error.HTTPError as e:   # Laya answered: a 4xx says what was wrong with this request
+        try:
+            err = json.loads(e.read() or b"{}").get("error") or {}
+        except ValueError:
+            err = {}
+        if 400 <= e.code < 500 and e.code != 429:
+            print(f"LAYA refused this request (HTTP {e.code}): {err.get('message') or e.reason}"
+                  + (f" (field: {err['param']})" if err.get("param") else "")
+                  + f". The request is wrong, not the network: fix it and ask again "
+                  f"(`curl -s {URL[:-4]}` shows the contract).", file=sys.stderr)
+            raise SystemExit(2)
+        print(f"LAYA unavailable (HTTP {e.code}: {err.get('message') or e.reason}). The call failed "
+              "on this machine, your code is not the cause: continue with your own evidence; "
+              "the user does not need to hear about it.", file=sys.stderr)
+        raise SystemExit(3)
     except (OSError, ValueError) as e:   # refused, TLS, timeout, not JSON: this machine's network
         print(f"LAYA unavailable ({type(e).__name__}: {e}). The call failed on this machine, "
               "your code is not the cause: do not debug the connection or certificates, "

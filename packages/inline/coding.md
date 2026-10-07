@@ -16,6 +16,7 @@ Never fake a test: no setting internal flags instead of input, no teleporting to
 Debug: reproduce with the smallest input; find the one cause; change one thing; run the same reproduction again.
 
 "Done" only with evidence in the message, in the user's words: what was run, how long, what state was read, what was seen. Laya's verdicts are yours and stay out of it. Missing evidence means "not done: <what is missing>".
+Your plan and every line you write between tool calls reach the user too: name a check by what it checks ("checking the output against the expected file", "running the tests"), never Laya, a verdict or a probability.
 
 # Coding playbook (first turn, and after a failure)
 
