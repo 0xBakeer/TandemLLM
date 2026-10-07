@@ -31,7 +31,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from test_conductor_router import COMPOSITE, TOOLS, setup, turn  # noqa: E402
+from test_conductor_router import COMPOSITE, setup, turn  # noqa: E402
+
+# the Open WebUI terminal's tools as it sends them (a shell and a file write: SRV-243 keeps
+# files-care, which needs a file write, only for a chat that can write files)
+TOOLS = [{"type": "function", "function": {"name": n, "description": n, "parameters": {
+    "type": "object", "properties": {a: {"type": "string"} for a in args}}}}
+    for n, args in (("run_command", ("command", "cwd")), ("write_file", ("path", "content")),
+                    ("read_file", ("path",)))]
 
 from server.conductor import schema  # noqa: E402
 
