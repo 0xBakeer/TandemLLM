@@ -717,6 +717,93 @@ def test_stats_count_only_the_stages_that_were_asked():
     assert st["failures"] == {"decider_unreachable": 1}, st["failures"]
 
 
+def test_two_chats_that_open_the_same_way_are_two_sessions():
+    """SRV-225 (UX2 run, 0.3.48-test): Open WebUI sends no chat id, so the session key is the hash
+    of the head up to the first user message, and every chat that opened with the same sentence
+    was one session (A01's new chat: turns 27, 21,216 session tokens, four notes replayed at its
+    first message). A conversation's very first turn now starts its own session, and its later
+    turns find it again by their first turn; the rows say how (`extra.session`)."""
+    cond, fakes = setup(decider=by_label("code_edit", 0.91))
+    hdr = {"User-Agent": "Open WebUI"}
+    first = [{"role": "system", "content": "You are helpful."},
+             {"role": "user", "content": CODE}]
+
+    def go(msgs):
+        return turn(cond, body(msgs, tools=False), headers=hdr, kind="open-webui")[0]
+
+    a1 = go(first)
+    ka = a1.row["session_key"]
+    assert ka.startswith("h:") and a1.session.turns == 1 and a1.injected
+    assert a1.row["extra"]["session"] == "new"
+    # the first turn's tool rounds and its next turns stay in that session
+    a_tool = first + [{"role": "assistant", "content": "",
+                       "tool_calls": [{"id": "1", "type": "function", "function": {
+                           "name": "read", "arguments": "{\"path\": \"/a\"}"}}]},
+                      {"role": "tool", "tool_call_id": "1", "content": "x = 1"}]
+    a1b = go(a_tool)
+    assert a1b.row["session_key"] == ka and a1b.row["extra"]["session"] == "continued"
+    a2_msgs = a_tool + [{"role": "assistant", "content": "Done A."},
+                        {"role": "user", "content": "Now add tests."}]
+    a2 = go(a2_msgs)
+    assert a2.row["session_key"] == ka and a2.row["replayed"]["count"] >= 1
+    turns_a = a2.session.turns
+    # a new chat with the same opening: its own session, turn 1, nothing replayed
+    b1 = go(first)
+    kb = b1.row["session_key"]
+    assert kb != ka and kb.startswith(ka + "#"), (ka, kb)
+    assert b1.session.turns == 1 and b1.injected and not (b1.row["replayed"] or {}).get("count")
+    assert b1.row["extra"]["session"] == "new"
+    # both go on in their own sessions, also interleaved
+    b2 = go(first + [{"role": "assistant", "content": "Done B, another answer."},
+                     {"role": "user", "content": "Now add tests."}])
+    assert b2.row["session_key"] == kb
+    a3 = go(a2_msgs + [{"role": "assistant", "content": "Tests added."},
+                       {"role": "user", "content": "Run them."}])
+    assert a3.row["session_key"] == ka and a3.session.turns == turns_a + 1
+    # a client that sends its chat id gets a `c:` key, whatever the opening
+    c1 = turn(cond, body(first, tools=False), headers={"X-OpenWebUI-Chat-Id": "chat-1"},
+              kind="open-webui")[0]
+    c2 = turn(cond, body(first, tools=False), headers={"X-OpenWebUI-Chat-Id": "chat-2"},
+              kind="open-webui")[0]
+    assert (c1.row["session_key"], c2.row["session_key"]) == ("c:chat-1", "c:chat-2")
+    assert c1.row["extra"]["session"] == "id"
+
+
+def test_without_generations_the_second_chat_joins_the_first():
+    """The A side of the A/B (`QWEN38_SESSION_GENERATIONS=off`, 0.3.48-test): the bug."""
+    from server.conductor import router as R
+    was = R.SESSION_GENERATIONS
+    R.SESSION_GENERATIONS = "off"
+    try:
+        cond, _ = setup(decider=by_label("code_edit", 0.91))
+        hdr = {"User-Agent": "Open WebUI"}
+        first = [{"role": "system", "content": "You are helpful."},
+                 {"role": "user", "content": CODE}]
+        a = turn(cond, body(first, tools=False), headers=hdr, kind="open-webui")[0]
+        b = turn(cond, body(first, tools=False), headers=hdr, kind="open-webui")[0]
+        assert a.row["session_key"] == b.row["session_key"] and b.session.turns == 2
+    finally:
+        R.SESSION_GENERATIONS = was
+
+
+def test_session_shape_counts_people_and_hashes_the_first_turn():
+    m1 = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
+    sh = signals.shape(body(m1, tools=False))
+    assert (sh.n_user, sh.fresh, sh.turn1_hash) == (1, True, None)
+    m2 = m1 + [{"role": "assistant", "content": "hello"}, {"role": "user", "content": "more"}]
+    sh2 = signals.shape(body(m2, tools=False))
+    assert sh2.n_user == 2 and not sh2.fresh and sh2.turn1_hash
+    m3 = m2 + [{"role": "assistant", "content": "x"}, {"role": "user", "content": "y"}]
+    assert signals.shape(body(m3, tools=False)).turn1_hash == sh2.turn1_hash
+    other = m1 + [{"role": "assistant", "content": "hello there"},
+                  {"role": "user", "content": "more"}]
+    assert signals.shape(body(other, tools=False)).turn1_hash != sh2.turn1_hash
+    # a tool response in a user message is not a person's message
+    tr = m1 + [{"role": "assistant", "content": "", "tool_calls": []},
+               {"role": "user", "content": "<tool_response>ok</tool_response>"}]
+    assert signals.shape(body(tr, tools=False)).n_user == 1
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

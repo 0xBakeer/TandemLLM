@@ -740,5 +740,83 @@ def _main():
     print(f"\n{len(fns)} passed")
 
 
+# ------------------------------------------------------------------ 0.3.49-test: a side slot reads the tier
+
+def _side_engine(max_len=320, seed=3):
+    """A side slot's engine: the same weights, its own (shorter) window and buffers."""
+    from engine.model import Qwen38Engine
+    from test_forward_tree import FakeWeights, tiny_config
+    from test_cache import DT
+    cfg = tiny_config()
+    eng = Qwen38Engine(cfg, FakeWeights(cfg, seed), max_len=max_len, device=DEV)
+    eng.kv.k = eng.kv.k.to(DT)
+    eng.kv.v = eng.kv.v.to(DT)
+    eng.state.conv = eng.state.conv.to(DT)
+    return eng
+
+
+def test_a_side_slot_reads_the_head_into_its_own_buffers_bit_for_bit():
+    """SRV-231: slot 0 wrote a client's head; a new chat on a side slot (no resident prefix, its
+    own shorter window) restores it through `SideReader` and holds what its own cold prefill of
+    the whole prompt holds, to the bit: logits, recurrent state, convolution tails, KV and the
+    drafter's rows. The slot-0 engine's rows are not touched."""
+    from server.diskcache import SideReader
+    head = tokens(150, seed=21)
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d, settings={"admit_after": 1})
+        slot0 = fresh()
+        run(slot0, head + tokens(5, seed=22), t, Pos())
+        k0 = slot0.kv.k.clone()
+        side, dr = _side_engine(), Pos()
+        prompt = head + tokens(30, seed=23)
+        info = {}
+        lg, reused, fwd = cache.prefill(side, dr, prompt, DEV, chunk=CH, disk=SideReader(t),
+                                        resident=None, info=info)
+        assert info.get("kind") == "disk" and reused == 144 and fwd == len(prompt) - 144
+        ref, ref_d = _side_engine(), Pos()
+        ref_lg, _, _ = cache.prefill(ref, ref_d, prompt, DEV, chunk=CH)
+        assert torch.equal(lg, ref_lg), (lg - ref_lg).abs().max().item()
+        same_state(side, ref, len(prompt))
+        assert torch.equal(dr.buf[:len(prompt)], ref_d.buf[:len(prompt)])
+        assert torch.equal(slot0.kv.k, k0), "slot 0's buffers are not the side slot's"
+        t.close()
+
+
+def test_without_the_reader_a_side_slot_prefills_cold():
+    """The A side of the A/B (`QWEN38_SIDE_DISK=off`, 0.3.48-test): no tier, every token read."""
+    head = tokens(150, seed=21)
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d, settings={"admit_after": 1})
+        run(fresh(), head + tokens(5, seed=22), t, Pos())
+        side = _side_engine()
+        info = {}
+        _, reused, fwd = cache.prefill(side, Pos(), head + tokens(30, seed=23), DEV, chunk=CH,
+                                       disk=None, resident=None, info=info)
+        assert (info.get("kind"), reused, fwd) == (None, 0, 180)
+        t.close()
+
+
+def test_a_side_prefill_writes_nothing_and_fences_nothing():
+    """A side slot's prefill neither counts lines nor plans writes (it would write the side
+    engine's rows under slot 0's names) nor fences slot 0's write-behind jobs."""
+    from server.diskcache import SideReader
+    with tempfile.TemporaryDirectory() as d:
+        t = tier(d, settings={"admit_after": 1})
+        r = SideReader(t)
+        cache.prefill(_side_engine(), Pos(), tokens(150, seed=31), DEV, chunk=CH, disk=r,
+                      resident=None)
+        assert t.flush()
+        assert files(d, "anchors") == [] and files(d, "chunks") == []
+        assert t.counts == {} or not any(t.counts.values()), "no line counted"
+        fenced = []
+        t.fence = lambda safe: fenced.append(safe)
+        cache.prefill(_side_engine(), Pos(), tokens(150, seed=32), DEV, chunk=CH, disk=r,
+                      resident=None)
+        assert fenced == []
+        assert r.plan() is None and r.guard_rows(10) == 0
+        assert r.report()["lookups"] == 2 and r.report()["hits"] == 0
+        t.close()
+
+
 if __name__ == "__main__":
     _main()

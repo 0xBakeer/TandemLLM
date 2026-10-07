@@ -66,6 +66,13 @@ CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
 #: (`Plan._fresh_block`); `block`: the whole note whenever its key is new (0.3.47-test)
 NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
 
+#: SRV-225: the `h:` heads whose conversations `Router._generation` tells apart, and the
+#: conversations kept per head (the oldest go first)
+GEN_HEADS_MAX = 256
+GEN_PER_HEAD = 8
+#: `off`: every request with the same head is one session, as until 0.3.48-test (the A/B)
+SESSION_GENERATIONS = (_S.get("SESSION_GENERATIONS") or "on").strip().lower()
+
 COMPOSITE = "TandemLLM"
 RANK = {"raw": 0, "off": 0, "shadow": 1, "on": 2}
 SESSIONS_MAX = 64
@@ -175,9 +182,12 @@ class Session:
 
 
 def session_key(body: dict, headers, sh: signals.Shape) -> str:
-    """A conversation id if the client sends one (opencode sends `x-session-id`), else a hash of
-    the conversation's head -- its messages up to and including the first user message -- which
-    every turn sends again (`signals.Shape.first_hash`)."""
+    """A conversation id if the client sends one (opencode sends `x-session-id`; Open WebUI sends
+    `X-OpenWebUI-Chat-Id` with ENABLE_FORWARD_USER_INFO_HEADERS, or as a connection header with the
+    `{{CHAT_ID}}` placeholder: docs/conductor setup), else a hash of the conversation's head -- its
+    messages up to and including the first user message -- which every turn sends again
+    (`signals.Shape.first_hash`). Two chats that open with the same message share that hash;
+    `Router._generation` tells them apart (SRV-225)."""
     for k in ("conversation_id", "session_id"):
         v = body.get(k)
         if isinstance(v, str) and v:
@@ -187,7 +197,7 @@ def session_key(body: dict, headers, sh: signals.Shape) -> str:
         v = meta.get("conversation_id") or meta.get("session_id") or meta.get("chat_id")
         if isinstance(v, str) and v:
             return "c:" + v[:120]
-    for h in ("x-session-id", "X-Conversation-Id"):
+    for h in ("x-session-id", "X-Conversation-Id", "X-OpenWebUI-Chat-Id"):
         v = _header(headers, h)
         if v:
             return "c:" + v[:120]
@@ -553,6 +563,8 @@ class Router:
         self.server_effort, self.global_mode = server_effort, global_mode
         self.factory = factory or self._make
         self._sessions: collections.OrderedDict[str, Session] = collections.OrderedDict()
+        # SRV-225: per `h:` head, the conversations that opened with it (`_generation`)
+        self._gens: collections.OrderedDict[str, list] = collections.OrderedDict()
         self._texts: collections.OrderedDict = collections.OrderedDict()
         self._adapters: dict = {}
         self._lock = threading.Lock()
@@ -679,6 +691,68 @@ class Router:
                 self._sessions.popitem(last=False)
             return s
 
+    def _generation(self, base: str, sh: signals.Shape) -> tuple[str, str]:
+        """SRV-225 (0.3.49-test): which conversation with the head `base` (an `h:` key: the client
+        sent no id) a request belongs to, as `(session key, how)`.
+
+        Open WebUI sends no chat id by default, so every chat that opened with the same message
+        (and the same system prompt) was one conductor session: the UX2 run's A01 started a new
+        chat whose first decision row already counted 27 turns and 21,216 session tokens of
+        earlier chats, with their notes replayed. A head now holds a list of conversations:
+
+          * a conversation's very first turn (`Shape.fresh`: its one user message is the last
+            message) while the newest conversation of that head has had a turn starts a new one,
+            `<base>#<n>` (`how` = `new`). A first turn regenerated without an id is the same
+            request as a new chat that opens the same way; it starts afresh too, which costs it
+            nothing the first turn had (the class is decided again the same way, its notes go in
+            at the same place);
+          * from the second user message on, the request carries a hash of its whole first turn as
+            the client sends it back (`Shape.turn1_hash`): the conversation that recorded it, or
+            else the newest one that has none yet and is not ahead of this request, records it;
+          * anything else (the first turn's tool rounds, a hash no conversation has) goes to the
+            newest conversation not ahead of the request in user messages, as before 0.3.49 when
+            there was only one.
+
+        A client id (`c:` keys) never comes here. Off (`QWEN38_SESSION_GENERATIONS=off`): `base`."""
+        if SESSION_GENERATIONS != "on":
+            return base, "head"
+        u = int(getattr(sh, "n_user", 0) or 0)
+        sig = getattr(sh, "turn1_hash", None)
+        with self._lock:
+            gens = self._gens.get(base)
+            if gens is None:
+                gens = self._gens[base] = []
+            self._gens.move_to_end(base)
+            while len(self._gens) > GEN_HEADS_MAX:
+                self._gens.popitem(last=False)
+            if not gens:
+                gens.append({"key": base, "u": u, "sig": sig, "n": 1})
+                return base, "new"
+            newest = gens[-1]
+            if getattr(sh, "fresh", False):
+                s = self._sessions.get(newest["key"])
+                if s is None or s.turns == 0:
+                    newest.update(u=1, sig=None)
+                    return newest["key"], "continued"
+                n = newest["n"] + 1
+                gens.append({"key": f"{base}#{n}", "u": 1, "sig": None, "n": n})
+                del gens[:-GEN_PER_HEAD]
+                return gens[-1]["key"], "new"
+            if sig is not None:
+                for g in reversed(gens):
+                    if g["sig"] == sig:
+                        g["u"] = max(g["u"], u)
+                        return g["key"], "continued"
+                free = [g for g in gens if g["sig"] is None and g["u"] <= u]
+                if free:
+                    g = max(free, key=lambda g: (g["u"], g["n"]))
+                    g.update(sig=sig, u=max(g["u"], u))
+                    return g["key"], "continued"
+            fit = [g for g in gens if g["u"] <= u] or gens
+            g = max(fit, key=lambda g: (g["u"], g["n"]))
+            g["u"] = max(g["u"], u)
+            return g["key"], "continued"
+
     def sessions_live(self) -> list[dict]:
         with self._lock:
             ss = list(self._sessions.values())
@@ -749,9 +823,15 @@ class Router:
             return self._side(plan, body, headers, sh, shape, router_v, client_kind, request_id,
                               dry, side_cap)
         key = session_key(body, headers, sh)
+        sess_how = "id" if key.startswith("c:") else None
         if not dry:
+            head = key
             key = self.aliases.resolve(key, body.get("messages") or [],
                                        known=lambda k: k in self._sessions)
+            if key == head and key.startswith("h:") and not sh.compaction:
+                key, sess_how = self._generation(key, sh)
+            elif key != head:
+                sess_how = "alias"
         sess = Session("dry") if dry else self.session(key)
         plan.session = sess
         if not dry and self.session_tokens is not None:
@@ -783,6 +863,10 @@ class Router:
                                         line) if keep_text and sh.user_text else None}
         if line:
             row["extra"]["context_line"] = line
+        if sess_how is not None:
+            # SRV-225: how the session was found: the client's id, a new conversation of its
+            # head, one continued, an alias after a compaction
+            row["extra"]["session"] = sess_how
         plan.row = row
         # the previous turn's outcome label: the checker result this request carries
         if sh.results and sess.last_row and not dry:

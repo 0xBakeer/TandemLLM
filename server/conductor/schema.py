@@ -429,9 +429,11 @@ LIBRARY: dict = {
 # The packages every class that builds something carries (J1, R1, X1; the live router v13 of
 # 2026-10-03): the coding classes get the coding package, the test skills and Laya's; the visual
 # classes the testing and Laya packages before their own skills
-BUILD_PACKAGES = ["testing", "laya-testing", "laya-playtest"]
-CODING_PACKAGES = ("coding", "testing", "laya-testing", "laya-playtest", "laya-scripts", "test-web",
-                   "test-cli", "test-api", "test-data", "test-lib")
+# 0.3.49-test (SRV-227): every class that writes files carries `files-care` (never overwrite the
+# user's files: a new folder gets a free name, a file is read before it changes), a general package
+BUILD_PACKAGES = ["files-care", "testing", "laya-testing", "laya-playtest"]
+CODING_PACKAGES = ("coding", "files-care", "testing", "laya-testing", "laya-playtest", "laya-scripts",
+                   "test-web", "test-cli", "test-api", "test-data", "test-lib")
 
 SHIPPED_ROUTER: dict = {
     "classes": [

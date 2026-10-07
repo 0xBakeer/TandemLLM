@@ -70,6 +70,16 @@
    "enabled": true,
    "body_from": "inline/coding.md"
   },
+  "files-care": {
+   "title": "The user's files",
+   "kind": "package",
+   "source": "inline",
+   "description": "Never overwrite the user's files: a new folder or file gets a name that is free, an existing file is read before it changes, a file that must be replaced is copied first, and the answer says so. Goes with every class that writes files.",
+   "max_tokens": 400,
+   "enabled": true,
+   "general": true,
+   "body_from": "inline/files-care.md"
+  },
   "testing": {
    "title": "Testing with TandemLLM",
    "kind": "package",

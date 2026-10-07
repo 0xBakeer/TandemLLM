@@ -202,6 +202,79 @@ def refresh(state, tier=None) -> list[str]:
     return changed
 
 
+class SideReader:
+    """A side slot's view of slot 0's disk tier (0.3.49-test, `QWEN38_SIDE_DISK=read`).
+
+    A side slot has no resident prefix, no park and, until 0.3.48-test, no disk tier: a new chat
+    sent there read its client's whole head again (Open WebUI's 6,687 tokens in 9.0 s, opencode's
+    7,414 in 19.1 s against 10.7 s on slot 0, where the tier held the head). Through this view a
+    side slot's prefill asks the tier as slot 0's does and reads a hit into ITS OWN buffers
+    (`DiskTier.restore` streams the rows and the state into the engine it is given). What the
+    tier does for slot 0 alone stays slot 0's: counting lines and planning writes (`plan`, so a
+    side prefill writes nothing and admits nothing), the write-behind copies (`capture`, `seal`),
+    and the fences, which protect rows of slot 0's buffers a write is still copying (a side
+    slot's prefill never writes those rows, so it fences nothing). A restore and the writer share
+    the tier's staging slots under its own locks, as two prefills on slot 0 would."""
+
+    def __init__(self, tier):
+        self.tier = tier
+        self.stats = {"lookups": 0, "hits": 0, "tokens_restored": 0, "failed": 0}
+
+    @property
+    def on(self) -> bool:
+        return bool(self.tier.on)
+
+    def find(self, keys, hashes, max_len: int, min_len: int, have: int = 0):
+        self.stats["lookups"] += 1
+        return self.tier.find(keys, hashes, max_len, min_len, have)
+
+    def restore(self, eng, drafter, hit) -> bool:
+        ok = self.tier.restore(eng, drafter, hit)
+        if ok:
+            self.stats["hits"] += 1
+            self.stats["tokens_restored"] += int(hit.L) - int(hit.have)
+        else:
+            self.stats["failed"] += 1
+        return ok
+
+    def fence(self, safe: int) -> None:                 # slot 0's rows only
+        return None
+
+    def plan(self, *a, **kw):                           # a side prefill writes nothing
+        return None
+
+    def capture(self, *a, **kw) -> None:
+        return None
+
+    def seal(self, *a, **kw) -> None:
+        return None
+
+    def guard_rows(self, n: int) -> int:
+        return 0
+
+    def _event(self, kind: str, **detail) -> None:
+        self.tier._event(kind, side=True, **detail)
+
+    def report(self) -> dict:
+        return dict(self.stats)
+
+
+def side_reader(state):
+    """The disk tier a request on a side slot may read (`SideReader`), or None: no tier, the tier
+    off, or `QWEN38_SIDE_DISK=off`. One reader for every side slot, kept in the state."""
+    from engine.settings import SETTINGS as _S
+    if (_S.get("SIDE_DISK") or "read").strip().lower() != "read":
+        return None
+    tier = dict.get(state, "disk_cache")
+    if tier is None:
+        return None
+    r = dict.get(state, "disk_side")
+    if r is None or r.tier is not tier:
+        r = SideReader(tier)
+        dict.__setitem__(state, "disk_side", r)
+    return r
+
+
 def request_tag(plan, client: str | None, prompt_ids: list[int], tok) -> dict:
     """What the tier is told about a request: its client, the notes the conductor spliced into
     its prompt (served positions, kinds, package names), and `head_end` -- where its last user

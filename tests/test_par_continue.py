@@ -245,6 +245,119 @@ def test_holder_name():
         A.HOLDER["who"] = saved
 
 
+# ------------------------------------------------------------------ 0.3.49-test: a shared head is not a conversation
+IM_S, USER, IM_E, NL, ASSIST = 151_644, 872, 151_645, 198, 77_091
+
+
+def _owui(head_n: int, user_n: int, seed: int) -> list[int]:
+    """An Open WebUI chat's first prompt in the template's marks: the system turn (its prompt and
+    tool block, `head_n` tokens in all), the first user message, the generation prompt."""
+    head = [IM_S, 9_001, NL] + list(range(10, 10 + head_n - 5)) + [IM_E, NL]
+    user = [IM_S, USER, NL] + [seed * 100_000 + i for i in range(user_n)] + [IM_E, NL]
+    return head + user + [IM_S, ASSIST, NL]
+
+
+def _with_marks(fn):
+    saved = A._CONV_MARKS
+    A._CONV_MARKS = (IM_S, [USER], IM_E)
+    try:
+        fn()
+    finally:
+        A._CONV_MARKS = saved
+
+
+def test_conv_start_is_past_the_first_user_message():
+    def t():
+        p = _owui(6_675, 20, 1)
+        assert A._conv_start(p) == 6_675 + 3 + 20 + 1
+        assert A._conv_start([IM_S, 9_001, NL, 5, IM_E]) is None, "no user message"
+        assert A._conv_start([IM_S, USER, NL, 5]) is None, "a user message that never ends"
+        assert A._conv_start([IM_S, USER, NL, IM_E]) == 4, "a chat with no system turn"
+    _with_marks(t)
+    saved = A._CONV_MARKS
+    A._CONV_MARKS = False
+    try:
+        assert A._conv_start(_owui(100, 5, 1)) is None, "no tokenizer: the old rule alone"
+    finally:
+        A._CONV_MARKS = saved
+
+
+def test_w18_a_new_chat_that_shares_only_the_head_takes_the_side_slot():
+    """W18 (0.3.48-test, the UX2 run): slot 0 held tab A's essay chat, 7,096 rows of which tab B's
+    new chat shared 6,675 (Open WebUI's system and tool head); the resident test called it a
+    continuation and tab B waited 35.8 s while slot 1 was idle. With the conversation's start
+    known, sharing the head is not continuing it."""
+    def t():
+        a = _owui(6_675, 40, 1)
+        rows = a + [999_001] * 100 + [888_000 + i for i in range(7_096 - len(a) - 100)]
+        b = _owui(6_675, 15, 2)
+        res = FakeResident(rows)
+        assert res.valid == 7_096 and res.common(b) == 6_675 + 3
+        # the old rule (`QWEN38_SIDE_CONV=off`): a continuation of tab A, it waits for slot 0
+        was = A.SIDE_CONV
+        A.SIDE_CONV = "off"
+        pool, saved = _setup(res, view=None)
+        try:
+            need, why = _need(b, max_new=32_768, plan_active=False)
+            assert need is None and why["wait"] == "resident", why
+        finally:
+            A.SIDE_CONV = was
+            _restore(saved)
+        # the fix: a new conversation, it takes the side slot
+        pool, saved = _setup(res, view=None)
+        try:
+            need, why = _need(b, max_new=32_768, plan_active=False)
+            assert need is not None and "wait" not in why, why
+            assert why["conv"] == A._conv_start(b) > why["res_common"]
+            assert pool.stats.get("resident_waits", 0) == 0
+        finally:
+            _restore(saved)
+    _with_marks(t)
+
+
+def test_a_short_view_of_another_chat_is_not_continued_either():
+    """The view test has the same hole: slot 0's last prompt was a short chat ('hi', head plus a
+    few tokens); a new chat shares the head within a chunk of that view."""
+    def t():
+        hi = _owui(6_675, 3, 1)
+        other = _owui(6_675, 30, 2)
+        assert A._continues_view(len(hi), A._shared_head(other, hi), CHUNK), "the hole"
+        assert not A._continues_view(len(hi), A._shared_head(other, hi), CHUNK,
+                                     A._conv_start(other))
+        pool, saved = _setup(FakeResident(hi + [888_000] * 50), view=hi)
+        try:
+            need, why = _need(other, max_new=4_096, plan_active=False)
+            assert need is not None and "wait" not in why, why
+        finally:
+            _restore(saved)
+    _with_marks(t)
+
+
+def test_the_next_turn_of_the_same_chat_still_waits():
+    """SRV-197 stays: the next turn shares the first user message and the answer, past `conv`."""
+    def t():
+        t1 = _owui(6_675, 40, 1)
+        rows = t1 + [888_000 + i for i in range(1_500)]
+        t2 = (t1 + [888_000 + i for i in range(1_500)] + [IM_E, NL, IM_S, USER, NL, 5, 6, IM_E, NL,
+                                                          IM_S, ASSIST, NL])
+        pool, saved = _setup(FakeResident(rows), view=t1)
+        try:
+            need, why = _need(t2, max_new=32_768, plan_active=True)
+            assert need is None and why["wait"] in ("view", "resident"), why
+            assert why["conv"] < why["view_common"]
+        finally:
+            _restore(saved)
+        # an agent turn under a plan (notes in the rows): the view decides, as FX4 made it
+        r1, rows2, r2 = _turns()
+        pool, saved = _setup(FakeResident(rows2), view=r1)
+        try:
+            need, why = _need(r2)
+            assert need is None and why["wait"] == "view", why
+        finally:
+            _restore(saved)
+    _with_marks(t)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

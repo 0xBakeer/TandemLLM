@@ -1,5 +1,5 @@
 {
- "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading",
+ "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227)",
  "doc": {
   "classes": [
    {
@@ -10,6 +10,7 @@
      "effort": "xhigh",
      "packages": [
       "coding",
+      "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
@@ -41,6 +42,7 @@
      "effort": "xhigh",
      "packages": [
       "coding",
+      "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
@@ -67,6 +69,7 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
@@ -83,6 +86,7 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",
@@ -101,6 +105,7 @@
     "policy": {
      "effort": "high",
      "packages": [
+      "files-care",
       "testing",
       "laya-testing",
       "laya-playtest",

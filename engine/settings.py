@@ -129,6 +129,15 @@ KNOBS: dict[str, tuple] = {
     # questions, a client's title or tags task) takes an idle side slot first; off: slot 0 as a
     # guest with the stash, as 0.3.46-test
     'SIDE_GUESTS': ('on', 'server/app.py'),
+    # 0.3.49-test: a request continues slot 0's conversation only when the part it shares reaches
+    # past its first user message (`on`); `off`: a client's fixed head alone may count (0.3.48-test)
+    'SIDE_CONV': ('on', 'server/app.py'),
+    # 0.3.49-test: a side slot reads the disk tier (`read`: a new chat's head from the NVMe, writes
+    # stay slot 0's); `off`: a side slot prefills its whole prompt (0.3.48-test)
+    'SIDE_DISK': ('read', 'server/app.py'),
+    # SRV-225 (0.3.49-test): a client that sends no conversation id (Open WebUI): chats that open
+    # with the same message are separate conductor sessions (`on`); `off`: one session per head
+    'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),
     # FX5: Open WebUI's live working directory moves from run_command's description (the system
     # prompt) into a router note (`note`), so a `cd` no longer re-reads the conversation; `off`
     'CLIENT_CWD': ('note', 'server/conductor/router.py'),

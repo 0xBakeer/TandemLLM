@@ -206,7 +206,7 @@ class Shape:
     __slots__ = ("tools", "n_messages", "has_system", "last_role", "tool_turn", "user_text",
                  "user_index", "user_hash", "images", "compaction", "results", "loaded_skills",
                  "system_text", "tool_names_called", "first_hash", "files", "call_files",
-                 "last_checker", "max_checks", "tool_media")
+                 "last_checker", "max_checks", "tool_media", "n_user", "fresh", "turn1_hash")
 
     def __repr__(self):
         return (f"Shape(tools={self.tools}, last={self.last_role}, tool_turn={self.tool_turn}, "
@@ -337,6 +337,25 @@ def shape(body: dict, skill_names: tuple = (), client_kind: str | None = None) -
     s.first_hash = hashlib.sha256(json.dumps(
         [(m.get("role"), _text(m.get("content"))[:4096]) for m in first],
         ensure_ascii=False).encode()).hexdigest()[:24] if first else None
+    # SRV-225 (0.3.49-test): which conversation of that head this is, for a client that sends no
+    # id (Open WebUI): how many messages a person wrote (not tool responses, not tool media),
+    # whether the request is a conversation's very first turn (its one user message is the last
+    # message: a new chat, or that turn regenerated), and from the second user message on a hash
+    # of the whole first turn as the client sends it back (the first message, the answer, its
+    # tool calls and results), which two chats with the same opening do not share
+    people = [i for i, m in enumerate(msgs) if m.get("role") == "user"
+              and not _is_tool_response(_text(m.get("content"))) and not is_tool_media(msgs, i)]
+    s.n_user = len(people)
+    s.fresh = len(people) == 1 and people[0] == len(msgs) - 1
+    s.turn1_hash = None
+    if len(people) >= 2:
+        turn1 = []
+        for m in msgs[:people[1]]:
+            calls = [((c or {}).get("function") or {}) for c in (m.get("tool_calls") or [])]
+            turn1.append((m.get("role"), _text(m.get("content"))[:4096],
+                          [(str(f.get("name")), str(f.get("arguments"))[:512]) for f in calls]))
+        s.turn1_hash = hashlib.sha256(json.dumps(turn1, ensure_ascii=False, default=str)
+                                      .encode()).hexdigest()[:16]
     return s
 
 

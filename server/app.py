@@ -487,6 +487,24 @@ def _lane_room(job, where: str) -> bool:
         return where != "prefill"
 
 
+def _par_health() -> dict:
+    """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
+    (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader)."""
+    out = dict.get(STATE, "pool").report()
+    r = dict.get(STATE, "disk_side")
+    out["side_disk"] = r.report() if r is not None else None
+    return out
+
+
+def _slot_disk():
+    """The disk tier a prefill asks: slot 0's own; on a side slot (`--parallel N`) the read-only
+    view of it (server/diskcache.py `SideReader`, 0.3.49-test), or None with `QWEN38_SIDE_DISK=off`
+    (0.3.48-test: a side slot had no disk tier, `OVERLAY` makes `disk_cache` None there)."""
+    if slots_mod.current() is None:
+        return STATE.get("disk_cache")
+    return diskcache_mod.side_reader(STATE)
+
+
 def _lane_run(job) -> None:
     """One side-lane job on the engine (server/preempt.py `decode`), with the engine held: an open
     disk-tier write that has not copied the rows the guest writes stops first."""
@@ -508,15 +526,66 @@ SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
 
 
-def _continues_resident(valid: int, common: int, chunk: int) -> bool:
+def _continues_resident(valid: int, common: int, chunk: int, conv: int | None = None) -> bool:
     """Does a request whose prompt shares `common` leading tokens with slot 0's resident rows
     (`valid` of them) continue that conversation, so that it waits for slot 0 and resumes in place?
     Yes when it shares (nearly) all of the rows (within one prefill chunk) AND at least one chunk of
     them: below a chunk, waiting for slot 0 saves less prefill than the wait costs. Until
     0.3.44-test only the first test ran, and a resident conversation shorter than a chunk
-    (valid - chunk <= 0) made every request "continue" it, so no request took a side slot (PL1)."""
+    (valid - chunk <= 0) made every request "continue" it, so no request took a side slot (PL1).
+
+    `conv` (`_conv_start`): where the request's conversation starts to be its own, past the end of
+    its first user message. A client's fixed head (Open WebUI's system prompt and tool block, about
+    6,700 tokens; opencode's, about 7,400) is the same for every chat of that client, so sharing it
+    is not continuing a conversation: the shared part must reach past it (0.3.49-test). Until then a
+    new chat beside a conversation shorter than the head plus one chunk counted as its next turn
+    and waited for slot 0 while the side slot was idle (W18: 6,675 of 7,096 rows shared, 35.8 s in
+    the queue for '17 x 23'). None (no first user message found): the rule above alone."""
     chunk = max(1, int(chunk))
-    return valid > 0 and common >= valid - chunk and common >= chunk
+    return (valid > 0 and common >= valid - chunk and common >= chunk
+            and (conv is None or common >= conv))
+
+
+#: the chat template's marks `_conv_start` looks for: (`<|im_start|>`, the ids of `user`,
+#: `<|im_end|>`), from the tokenizer at the first use; False when there is none (the fake engine)
+_CONV_MARKS: tuple | None | bool = None
+
+
+def _conv_marks():
+    global _CONV_MARKS
+    if _CONV_MARKS is None:
+        try:
+            tok = dict.get(STATE, "tok")
+            im_s = tok.convert_tokens_to_ids("<|im_start|>")
+            im_e = tok.convert_tokens_to_ids("<|im_end|>")
+            user = list(tok.encode("user", add_special_tokens=False))
+            ok = (isinstance(im_s, int) and isinstance(im_e, int) and im_s >= 0 and im_e >= 0
+                  and user and im_s != getattr(tok, "unk_token_id", None))
+            _CONV_MARKS = (im_s, user, im_e) if ok else False
+        except Exception:                                          # noqa: BLE001
+            _CONV_MARKS = False
+    return _CONV_MARKS or None
+
+
+def _conv_start(ids) -> int | None:
+    """Where a rendered prompt's conversation starts to be its own: the position just past the
+    `<|im_end|>` of its first user message (`<|im_start|>user ... <|im_end|>`). Everything before
+    is the client's head (its system prompt, its tools), which every chat of that client sends the
+    same. Structure of the chat template, not content: None when the template's marks are not
+    known or the prompt has no user message."""
+    marks = _conv_marks()
+    if marks is None:
+        return None
+    im_s, user, im_e = marks
+    u = len(user)
+    try:
+        i = ids.index(im_s)
+        while True:
+            if list(ids[i + 1:i + 1 + u]) == user:
+                return ids.index(im_e, i + 1 + u) + 1
+            i = ids.index(im_s, i + 1)
+    except Exception:                                              # noqa: BLE001
+        return None
 
 
 def _shared_head(a, b) -> int:
@@ -537,7 +606,7 @@ def _shared_head(a, b) -> int:
     return lo
 
 
-def _continues_view(view_len: int, common: int, chunk: int) -> bool:
+def _continues_view(view_len: int, common: int, chunk: int, conv: int | None = None) -> bool:
     """Does a request continue the conversation slot 0 holds, judged on the CLIENT's tokens?
 
     `view_len` is the length of the last slot-0 prompt whose rows stayed resident, as the client's
@@ -554,9 +623,12 @@ def _continues_view(view_len: int, common: int, chunk: int) -> bool:
     at the first note, often in the conversation's first turn, so no conductor request ever
     counted as continuing it (0.3.44-test and 0.3.45-test: `resident_waits` 0 over ~100 opencode
     turns), and a turn that met slot 0 held for a moment (the shadow reader's read, a summary
-    being prepared) took the side slot and read its whole conversation again (SRV-197)."""
+    being prepared) took the side slot and read its whole conversation again (SRV-197).
+
+    `conv`: as in `_continues_resident`, the shared part must reach past the request's first user
+    message; a short last prompt of another chat of the same client shares only the client's head."""
     chunk = max(1, int(chunk))
-    return view_len >= chunk and common >= view_len - chunk
+    return view_len >= chunk and common >= view_len - chunk and (conv is None or common >= conv)
 
 
 #: which test decides that a request continues slot 0's conversation and waits for it: `view`
@@ -564,6 +636,11 @@ def _continues_view(view_len: int, common: int, chunk: int) -> bool:
 #: resident rows' test) or `resident` (the rows' test alone, 0.3.44-test/0.3.45-test; kept for the
 #: A/B that measured SRV-197)
 SIDE_CONTINUE = (_S.get("SIDE_CONTINUE") or "view").strip().lower()
+
+#: 0.3.49-test: `on`: a request continues slot 0's conversation only when the shared part reaches
+#: past its first user message (`_conv_start`); `off`: the client's head alone may count (0.3.48-test,
+#: kept for the A/B)
+SIDE_CONV = (_S.get("SIDE_CONV") or "on").strip().lower()
 
 #: FX5: whether a guest of slot 0's conversation (`_guest_of_slot0`) takes an idle side slot before
 #: slot 0: `on`, or `off` (slot 0 with the stash, 0.3.46-test; kept for the A/B)
@@ -656,11 +733,15 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     why["ids"] = ids
     res = dict.get(STATE, "resident")
     chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
+    # 0.3.49-test: past the client's head, or it is a new conversation (`_continues_resident`)
+    conv = _conv_start(ids) if SIDE_CONV == "on" else None
+    if conv is not None:
+        why["conv"] = conv
     view = dict.get(STATE, "slot0_view")
     if SIDE_CONTINUE != "resident" and view:
         vc = _shared_head(ids, view)
         why.update(view=len(view), view_common=vc)
-        if _continues_view(len(view), vc, chunk):
+        if _continues_view(len(view), vc, chunk, conv):
             why["wait"] = "view"
             with pool._lk:
                 pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
@@ -670,7 +751,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             valid = int(getattr(res, "valid", 0) or 0)
             rc = res.common(ids) if valid else 0
             why.update(valid=valid, res_common=rc)
-            if valid and _continues_resident(valid, rc, chunk):
+            if valid and _continues_resident(valid, rc, chunk, conv):
                 why["wait"] = "resident"
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
@@ -1070,7 +1151,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
             on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
-            compacting=compacting, disk=STATE.get("disk_cache"), disk_tag=disk_tag,
+            compacting=compacting, disk=_slot_disk(), disk_tag=disk_tag,
             end_mm=end_mm, scratch=scratch,
             # FX5: the highest row this generation can write, for a guest's stash; the monitor's
             # hidden tokens are not in `max_new`
@@ -1587,7 +1668,7 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
         chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
         checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
         on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids,
-        disk=STATE.get("disk_cache"))
+        disk=_slot_disk())
     if mm is not None:
         mm.release()
         eng.mm, eng.pos_delta = None, 0
@@ -3562,7 +3643,7 @@ def _system() -> dict:
                   "lane": INFLIGHT["lane"],
                   "side_lane": STATE["lane"].report() if STATE.get("lane") is not None else None,
                   # `--parallel N` only: a server without side slots sends what it always did
-                  **({"parallel": dict.get(STATE, "pool").report()}
+                  **({"parallel": _par_health()}
                      if dict.get(STATE, "pool") is not None else {}),
                   "max_queue": STATE.get("max_queue"),
                   "queue_timeout_s": STATE.get("queue_timeout"),
@@ -4319,7 +4400,7 @@ class Handler(BaseHTTPRequestHandler):
                 "memory": _memory(),
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
                 # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
-                **({"parallel": dict.get(STATE, "pool").report()}
+                **({"parallel": _par_health()}
                    if dict.get(STATE, "pool") is not None else {}),
             })
         if path == "/metrics/up":
@@ -5181,11 +5262,17 @@ class Handler(BaseHTTPRequestHandler):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
-                                                          "res_common", "need", "guest")
+                                                          "res_common", "conv", "need", "guest")
                             if k in par_why)
             if side is not None:
+                # 0.3.49-test: a request that shares only the client's head with slot 0's
+                # conversation is a new conversation, and says so
+                head = max(int(par_why.get("view_common") or 0), int(par_why.get("res_common") or 0))
+                conv = par_why.get("conv")
+                new_conv = (f" new conversation (shared head {head})"
+                            if conv is not None and head >= 1024 and head < conv else "")
                 print(f"[parallel] {cid} slot {side.index} ({len(par_why.get('ids') or ())} "
-                      f"tokens; slot 0 {_holder_name()}): {nums}", flush=True)
+                      f"tokens; slot 0 {_holder_name()}):{new_conv} {nums}", flush=True)
             elif par_why.get("wait") in ("view", "resident"):
                 print(f"[parallel] {cid} slot 0, continues its conversation "
                       f"({par_why['wait']}): {nums}", flush=True)
