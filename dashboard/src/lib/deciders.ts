@@ -29,23 +29,47 @@ export function stateBadge(s: DeciderState): string {
   return '';
 }
 
-/** "refused: it would break the floor (MemAvailable 28.0 GiB, claim 8.2 GiB, 19.8 GiB left, 21.0 needed)". */
+/** FX10: a memory refusal is the planner keeping room for requests, not a fault: the words say so
+ * first, then the numbers. */
+export const KEPT_FREE = 'not loaded: kept free for requests';
+
+/** "not loaded: kept free for requests (MemAvailable 29.0 GiB, less 8.3 GiB the engine may still
+ * take for a long request and the 6.5 GiB claim, leaves 14.2 GiB; the box keeps 19.0 GiB free)";
+ * any other refusal in the planner's words ("refused: a hold owns the board"). */
 export function refusalWords(d: DeciderDecision | null | undefined): string | null {
   if (!d || d.allowed) return null;
   const why = d.reason ? REASON_WORDS[d.reason] ?? d.reason : 'refused';
   if (d.reason !== 'refused_memory') return why;
-  const nums = [`MemAvailable ${gibOf(d.mem_available_gib)}`];
-  // OPS-47: what the engine may still take up to its declared peak comes off first
-  if (d.engine_growth_gib) nums.push(`engine growth ${gibOf(d.engine_growth_gib)}`);
-  nums.push(`claim ${gibOf(d.claim_gib)}`);
-  if (d.after_gib != null) nums.push(`${gibOf(d.after_gib)} left`, `${gibOf(d.need_gib)} needed`);
-  return `${why} (${nums.join(', ')})`;
+  if (d.mem_available_gib == null || d.after_gib == null) return `${KEPT_FREE} (MemAvailable not read)`;
+  // OPS-47: what the engine may still take up to its declared peak comes off first. A single
+  // request is admitted by the engine's own peak, not by MemAvailable, so this room is the only
+  // thing that keeps the floor at a long prefill (docs/parallel-requests.md, beside the small models)
+  const less = d.engine_growth_gib
+    ? `less ${gibOf(d.engine_growth_gib)} the engine may still take for a long request and the ${gibOf(d.claim_gib)} claim`
+    : `less the ${gibOf(d.claim_gib)} claim`;
+  const keep = d.margin_gib ? `${gibOf(d.need_gib)} free (a ${gibOf(d.floor_gib)} floor and a ${gibOf(d.margin_gib)} margin)` : `${gibOf(d.need_gib)} free`;
+  return `${KEPT_FREE} (MemAvailable ${gibOf(d.mem_available_gib)}, ${less}, leaves ${gibOf(d.after_gib)}; the box keeps ${keep})`;
 }
 
 /** What a load now would get: "fits, 22.8 GiB left after the claim" or the refusal. */
 export function plannerWords(d: DeciderDecision | null | undefined): string {
   if (!d) return '—';
   return d.allowed ? `fits, ${gibOf(d.after_gib)} left after the claim` : refusalWords(d) ?? 'refused';
+}
+
+/** The "a load now" tile's value: fits, kept free (memory) or refused (a hold, a load running). */
+export function plannerValue(d: DeciderDecision | null | undefined): string {
+  if (!d) return '—';
+  return d.allowed ? 'fits' : d.reason === 'refused_memory' ? 'kept free' : 'refused';
+}
+
+/** Who a journaled engine load was for: "the shadow reader (qwen3.5-0.8b)" for role `shadow`,
+ * else the model the source names. */
+export function loadWho(d: DeciderDecision | null | undefined): string {
+  if (!d) return '';
+  const name = (d.source ?? '').replace(/^engine:/, '');
+  if (d.role === 'shadow') return name ? `the shadow reader (${name})` : 'the shadow reader';
+  return name;
 }
 
 /** "laya-english 12 · laya-multilingual 3", most used first; "no call yet". */

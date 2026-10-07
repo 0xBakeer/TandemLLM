@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
 import { MockConductor } from '../mock/conductor.ts';
-import { choiceQuestion, picksWords, plannerWords, probsOf, refusalWords, stateBadge } from '../src/lib/deciders';
+import { choiceQuestion, loadWho, picksWords, plannerValue, plannerWords, probsOf, refusalWords, stateBadge } from '../src/lib/deciders';
 import { splitSegments } from '../src/lib/residency';
 
 const DIR = join(__dirname, '..', '..', 'docs', 'contract', 'conductor-v1');
@@ -84,7 +84,7 @@ describe('the contract of the decision-model routes', () => {
     check('deciders-status', s);
     const row = s.models.find((x) => x.name === 'laya-typed-decisions')!;
     expect(row.state).toBe('not_loaded');
-    expect(refusalWords(row.refusal as never)).toBe('refused: it would break the floor (MemAvailable 28.0 GiB, engine growth 7.0 GiB, claim 8.2 GiB, 12.8 GiB left, 21.0 GiB needed)');
+    expect(refusalWords(row.refusal as never)).toBe('not loaded: kept free for requests (MemAvailable 28.0 GiB, less 7.0 GiB the engine may still take for a long request and the 8.2 GiB claim, leaves 12.8 GiB; the box keeps 21.0 GiB free (a 15.0 GiB floor and a 6.0 GiB margin))');
   });
   it('the mapping is a versioned document (scenario 5)', () => {
     const m = new MockConductor(7);
@@ -126,6 +126,15 @@ describe('the screen’s words', () => {
     expect(plannerWords(null)).toBe('—');
     expect(refusalWords({ allowed: false, reason: 'refused_hold' })).toBe('refused: a hold owns the board');
     expect(refusalWords({ allowed: true, reason: null })).toBeNull();
+    // FX10: REL1's live numbers (0.3.51-test, 2026-10-07): the shadow reader and a second decider
+    const shadow = { allowed: false, reason: 'refused_memory' as const, role: 'shadow', source: 'engine:qwen3.5-0.8b', mem_available_gib: 28.97, engine_growth_gib: 8.25, claim_gib: 6.5, after_gib: 14.22, need_gib: 19, floor_gib: 15, margin_gib: 4 };
+    expect(refusalWords(shadow)).toBe('not loaded: kept free for requests (MemAvailable 29.0 GiB, less 8.3 GiB the engine may still take for a long request and the 6.5 GiB claim, leaves 14.2 GiB; the box keeps 19.0 GiB free (a 15.0 GiB floor and a 4.0 GiB margin))');
+    expect(loadWho(shadow)).toBe('the shadow reader (qwen3.5-0.8b)');
+    expect(loadWho({ allowed: false, reason: 'refused_memory', role: 'decider', source: 'engine:laya-english' })).toBe('laya-english');
+    expect(plannerValue(shadow)).toBe('kept free');
+    expect(plannerValue({ allowed: false, reason: 'refused_hold' })).toBe('refused');
+    expect(plannerValue({ allowed: true, reason: null })).toBe('fits');
+    expect(refusalWords({ allowed: false, reason: 'refused_memory' })).toBe('not loaded: kept free for requests (MemAvailable not read)');
   });
   it('the test box question', () => {
     expect(choiceQuestion('Which?', 'a, b\nc')).toEqual({ type: 'choice', instructions: 'Which?', criteria: { a: null, b: null, c: null } });

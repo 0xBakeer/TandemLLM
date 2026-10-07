@@ -50,10 +50,10 @@ test.describe('the Deciders screen @mock', () => {
   test('3 a refused load says why with the numbers and nothing loads', async ({ page, request }) => {
     await request.post('/__mock/conductor', { data: { deciderMem: 28 } });
     await login(page, '#/conductor?screen=deciders');
-    await expect(page.locator('[data-decider-memory]')).toContainText('refused: it would break the floor', { timeout: 10_000 });
+    await expect(page.locator('[data-decider-memory]')).toContainText('not loaded: kept free for requests', { timeout: 10_000 });
     await row(page, 'laya-typed-decisions').locator('[data-load]').click();
     const note = page.locator('[data-decider-note="laya-typed-decisions"]');
-    await expect(note.locator('[data-refusal]')).toContainText('refused: it would break the floor (MemAvailable 28.0 GiB, engine growth 7.0 GiB, claim 8.2 GiB, 12.8 GiB left, 21.0 GiB needed)', { timeout: 8_000 });
+    await expect(note.locator('[data-refusal]')).toContainText('not loaded: kept free for requests (MemAvailable 28.0 GiB, less 7.0 GiB the engine may still take for a long request and the 8.2 GiB claim, leaves 12.8 GiB; the box keeps 21.0 GiB free (a 15.0 GiB floor and a 6.0 GiB margin))', { timeout: 8_000 });
     await expect(note).toContainText('refused by the residency planner');
     await expect(row(page, 'laya-typed-decisions').locator('[data-decider-state]')).toHaveText('not loaded');
   });

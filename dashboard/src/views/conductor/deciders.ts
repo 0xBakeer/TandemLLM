@@ -10,7 +10,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../../api/client';
 import { conductor, type DeciderApi, type DeciderLoad, type DeciderModel, type DecidersDoc, type DecidersStatus, type SystemOneResult } from '../../api/conductor';
 import { setIn } from '../../lib/conductor';
-import { choiceQuestion, limitsWords, picksWords, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
+import { choiceQuestion, limitsWords, loadWho, picksWords, plannerValue, plannerWords, probsOf, refusalWords, roleWords, STATE_WORDS, stateBadge } from '../../lib/deciders';
 import { exact, ms } from '../../lib/format';
 import { poll, type Poller } from '../../lib/poll';
 import { gib, gibOf } from '../../lib/residency';
@@ -127,7 +127,7 @@ export class QseCondDeciders extends LightElement {
       <div class="stats" data-decider-tiles>
         ${statTile({ label: 'loaded', value: `${loaded.length} / ${s.models.length}`, sub: loaded.length ? loaded.map((m) => m.name).join(', ') : 'none: questions fail open', warn: !loaded.length })}
         ${statTile({ label: 'on the device', value: gib(loaded.reduce((a, m) => a + m.device_bytes, 0)), sub: `${s.device ?? 'no device'} · own stream and memory pool` })}
-        ${statTile({ label: 'a load now', value: s.planner?.allowed ? 'fits' : 'refused', sub: plannerWords(s.planner), warn: !s.planner?.allowed })}
+        ${statTile({ label: 'a load now', value: plannerValue(s.planner), sub: plannerWords(s.planner), warn: !s.planner?.allowed && s.planner?.reason !== 'refused_memory' })}
         ${statTile({ label: 'when they run', value: 'idle', sub: 'only while no request holds the engine (stage A)' })}
       </div>
       ${this.renderModels(s)}
@@ -192,9 +192,9 @@ export class QseCondDeciders extends LightElement {
           <div class="stat ${p?.allowed ? '' : 'is-warn'}"><div class="stat-label">a load now</div><div class="stat-value num small">${plannerWords(p)}</div></div>
         </div>
         <p class="small" data-decider-last-refusal>${ref
-          ? html`Last refused engine load: ${refusalWords(ref)} <span class="muted">(${ref.source ?? ''})</span>`
+          ? html`Last engine load not made: ${loadWho(ref)}, ${refusalWords(ref)}`
           : html`<span class="muted">No refused engine load in the planner's journal.</span>`}</p>
-        <p class="muted small">A load is allowed when MemAvailable, less what the engine may still take up to its declared peak, minus the claim stays at or above floor + margin, never during a hold, never beside another load. <a href="#/conductor?screen=profiles">Edit the claim and the limits</a> (Profiles, Residency).</p>`,
+        <p class="muted small">A load is allowed when MemAvailable, less what the engine may still take up to its declared peak, minus the claim stays at or above floor + margin, never during a hold, never beside another load. A model left out this way is not a fault: the room is kept for requests, because one long request is admitted by the engine's own peak, not by what is free, and the box must keep its floor at that peak. <a href="#/conductor?screen=profiles">Edit the claim and the limits</a> (Profiles, Residency).</p>`,
       { id: 'deciders-memory' },
     );
   }
