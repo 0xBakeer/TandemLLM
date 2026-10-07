@@ -142,6 +142,9 @@ KNOBS: dict[str, tuple] = {
     # 0.3.49-test: a side slot reads the disk tier (`read`: a new chat's head from the NVMe, writes
     # stay slot 0's); `off`: a side slot prefills its whole prompt (0.3.48-test)
     'SIDE_DISK': ('read', 'server/app.py'),
+    # FX10 (0.4.1): a parked conversation a new park gives up is written to the NVMe spill first
+    # (`on`); `off` gives it up as 0.4.0 did
+    'SPILL_PARK': ('on', 'engine/cache.py'),
     # SRV-225 (0.3.49-test): a client that sends no conversation id (Open WebUI): chats that open
     # with the same message are separate conductor sessions (`on`); `off`: one session per head
     'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),

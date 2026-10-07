@@ -341,6 +341,59 @@ def test_the_parked_conversation_is_written_with_its_head_from_the_rows_in_place
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _three_sessions(d=None, park_spill="on"):
+    """A, B, C in turn, all under the spill's eviction length (they park in RAM), then A again.
+    The park holds one conversation, so C's prefill gives A up."""
+    old = getattr(cache, "SPILL_PARK", None)
+    cache.SPILL_PARK = park_spill
+    try:
+        res = _state(park_bytes=BIG, guest_max=10)
+        sp = t = None
+        if d is not None:
+            sp, t = _spill(d, res, min_tokens=10 ** 6)
+        head = tokens(64, seed=80)
+        a = head + tokens(150, seed=81)
+        out_a, _, _ = turn(a, 10, session="A")
+        turn(head + tokens(140, seed=82), 10, session="B")
+        assert res.park_owner == "A"
+        turn(head + tokens(130, seed=83), 10, session="C")
+        assert res.park_owner == "B"
+        out2, pre, _ = turn(a + out_a + TOOL2, 6, session="A")
+        return res, sp, t, pre, out2
+    finally:
+        cache.SPILL_PARK = old
+
+
+def test_fx10_a_parked_conversation_a_new_park_gives_up_goes_to_the_nvme_first():
+    """FX10 (the per-entry cap, item 3): a conversation over the state store's cap and under the
+    spill's eviction length lived only in the RAM park, which holds one; a third session dropped
+    it and its next turn read everything past the shared head again."""
+    _, _, _, ref, out_ref = _three_sessions(None)
+    assert ref["reused"] <= 64, ref                    # the head only: A was dropped
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res, sp, t, pre, out2 = _three_sessions(d)
+        assert pre["kind"] == "spill" and pre["reused"] > 64 + CH, pre
+        assert res.stats.get("park_spills") == 1, res.stats
+        assert [x.man["owner"] for x in sp.entries.values()] == ["A"]
+        assert out2 == out_ref, "the same tokens as the re-read"
+        t.close()
+        return f"A came back from the NVMe at {pre['reused']} (was {ref['reused']}), same tokens"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_fx10_park_spill_off_gives_it_up_as_before():
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        res, sp, t, pre, _ = _three_sessions(d, park_spill="off")
+        assert res.stats.get("park_spills", 0) == 0 and not sp.entries, res.stats
+        assert pre["reused"] <= 64, pre
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ------------------------------------------------------------------ 0.3.23-test: its own I/O path
 
 def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():

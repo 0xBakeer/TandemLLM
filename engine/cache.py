@@ -75,6 +75,12 @@ from collections import OrderedDict, deque
 
 import torch
 
+from engine.settings import SETTINGS as _S
+
+#: FX10: a parked conversation a new park gives up goes to the NVMe spill first (`on`); `off`
+#: gives it up as before (`ResidentPrefix._spill_park`)
+SPILL_PARK = (_S.get("SPILL_PARK") or "on").strip().lower()
+
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
 # nothing and probing thirty costs nothing thirty times.
@@ -1051,7 +1057,8 @@ class ResidentPrefix:
                       "refused_park": 0,
                       "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
                       "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
-                      "spills": 0, "spill_failed": 0, "spill_restores": 0}
+                      "spills": 0, "spill_failed": 0, "spill_restores": 0,
+                      "park_spills": 0, "park_dropped": 0}
         # the session spill (engine/spill.py, 0.3.22-test): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
@@ -1637,6 +1644,8 @@ class ResidentPrefix:
         rows = (above[-1] - keep) if above else 0
         if rows < self.chunk:
             return
+        if self.park_rows:
+            self._spill_park(eng, drafter)
         self._drop_park_rows()
         have = self._park_bufs[0].shape[views[0][1]] if (
             self._park_bufs is not None and len(self._park_bufs) == len(views)) else 0
@@ -1660,6 +1669,36 @@ class ResidentPrefix:
                            else None)
         self._park_views = [(t, ax) for t, ax in views]
         self.stats["parks"] += 1
+
+    def _spill_park(self, eng, drafter) -> bool:
+        """FX10: the parked conversation a new park is about to give up, to the NVMe first.
+
+        The state store keeps a conversation only under its per-entry cap (1 GiB, about 7,400
+        tokens on the served stack: `session snapshot not taken` at every longer turn), and the
+        spill wrote a replaced conversation only when it was longer than the RAM park holds above
+        the shared head. Everything between went to the park, which holds ONE conversation: a
+        third session gave the parked one up, and when it came back it read everything past the
+        disk tier's head again (about 740 tokens a second cold; 10,000 tokens, ~13.5 s). Written
+        here it costs about 0.1 s a GB on a rested drive (the box's evictions on 2026-10-07: 4.6 GB
+        in 0.90 s, 7.3 GB in 1.41 s), incremental by content, under the spill's own budget. Its
+        head below `park_base` is the rows in place (`save_park` checks that), so this runs before
+        anything is cut. `QWEN38_SPILL_PARK=off` gives it up as before."""
+        sp = self.spiller
+        if sp is None or SPILL_PARK == "off" or not self.park_rows:
+            return False
+        top = int(self.park_base + self.park_rows)
+        if top < int(sp.cfg.get("drain_min_tokens", 4096)):
+            self.stats["park_dropped"] += 1
+            return False
+        try:
+            info = sp.save_park(self, eng, drafter, "evict_park")
+        except Exception:                                          # noqa: BLE001
+            info = None
+        if info is None:
+            self.stats["park_dropped"] += 1
+            return False
+        self.stats["park_spills"] += 1
+        return True
 
     def _drop_park_rows(self) -> None:
         """Forget the parked prompt but keep its row buffers: its anchors join the live pool's
