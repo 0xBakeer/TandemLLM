@@ -26,6 +26,9 @@ have resumed had the rows never left (the end anchor), and writes the same greed
      on the disk (the request used to drop it before the eviction wrote it); and written again
      with unchanged rows after its end anchor's buffers went, the end anchor already on the disk
      stays
+  9  SRV-269: a chat whose client leaves the earlier answers' reasoning out (Open WebUI) comes
+     back from the NVMe: the restore's offer aligns the copy as the resume after it does; a copy
+     changed in more than the reasoning reads nothing back
 
 Run: python tests/test_session_spill.py
 """
@@ -572,6 +575,56 @@ def test_written_again_without_its_end_buffers_the_end_on_the_disk_stays():
         assert sp.entries[moved["eid"]].man["end"] is None
         t.close()
         return f"end at {e} kept on the disk through a save without its buffers"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 9. SRV-269
+
+def test_srv269_a_chat_without_its_reasoning_comes_back_from_the_nvme():
+    """SRV-269 (2026-10-07, live): an Open WebUI chat (130,381 client tokens, 182,053 rows with
+    the reasoning Open WebUI does not send back) went to the NVMe while two other chats ran, and
+    back in it the whole chat was read again cold (about 4 minutes): the restore's offer replayed
+    the hidden spans only, the copy parted at the first answer's reasoning, and no entry was
+    offered. The offer now aligns the copy as the resume after the restore does (SRV-239)."""
+    import test_end_align as EA
+    from server import diskcache
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        prompt = tokens(99, seed=93) + [EA.NL]
+        res, al, out, k = EA._thinking(prompt)
+        sp, t = _spill(d, res)
+        diskcache.wire_end_align(sp, al)
+        e = res.end["at"]
+        rows_before = _rows(app.STATE["engine"], e)
+        # the client's copy: the answer without its reasoning (`<think>\n\n</think>\n\n`)
+        copy = prompt[:-1] + [EA.SP] + out[k:] + TOOL
+        assert res.replay(copy)[1] == [], "the hidden spans alone do not replay this copy"
+        sp.save_resident(res, app.STATE["engine"], None, "evict")
+        assert sp.entries and next(iter(sp.entries.values())).man["extra"]["end_regions"]
+        res.clear()
+        for tt, ax in cache._kv_views(app.STATE["engine"], None):
+            tt.fill_(0)
+        # a copy that differs in more than the reasoning is not offered the end anchor (a grid
+        # anchor of the head it shares at most)
+        j = next(i for i in range(k + 2, len(out) - 2) if out[i] not in (EA.NL, EA.SP))
+        other = next(x for x in range(1, 95) if x not in (out[j], out[k]))
+        changed = prompt[:-1] + [EA.SP] + out[k:j] + [other] + out[j + 1:] + TOOL
+        got = sp.candidate(res, changed, len(changed) - 1, replay=True)
+        assert got is None or got[1] < len(prompt), got and got[1]
+        got = sp.candidate(res, copy, len(copy) - 1, replay=True)
+        assert got is not None and got[1] == e, got and got[1]
+        # the chat's own copy: read back from the NVMe before the replay
+        app._spill_before_replay(copy)
+        assert sp.stats["restores"] == 1, sp.stats
+        assert res.end is not None and res.end["at"] == e
+        _same_rows(_rows(app.STATE["engine"], e), rows_before)
+        ids, spans, aligned = app._end_replay(res, copy)
+        assert aligned > 0 and ids == res.tokens[:e] + out[e - len(prompt):] + TOOL
+        got, pre, _ = turn(ids, 8)
+        assert pre["reused"] == e and pre["kind"] in ("spill", "end"), pre
+        t.close()
+        assert got == EA._cold(ids, 8), "the end anchor's gate: the same greedy tokens as cold"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

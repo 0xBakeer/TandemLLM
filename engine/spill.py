@@ -177,10 +177,19 @@ class Entry:
         return int(self.man.get("bytes") or 0)
 
     def offer(self, keys, max_len: int, glue=frozenset(), replay: bool = False,
-              mm_ok: bool = False) -> int:
+              mm_ok: bool = False, align=None) -> int:
         """The line a prompt would resume at after a restore of this entry: the end anchor when
-        the prompt starts with all of it (the hidden spans put back when `replay`), else the
-        largest saved grid anchor it shares; 0 for none."""
+        the prompt starts with all of it (the hidden spans put back when `replay`, or, with
+        `align`, the copy aligned to the rows as the server's end alignment aligns it), else the
+        largest saved grid anchor it shares; 0 for none.
+
+        SRV-269 (2026-10-07, live): an Open WebUI chat of 130,381 client tokens (182,053 rows: the
+        reasoning of every earlier answer, which Open WebUI does not send back) went to the NVMe
+        when two other chats ran; back in it, the copy parted from the rows at its first answer's
+        `<think>`, the hidden spans alone did not replay it, no grid anchor lay below that point,
+        and the whole chat was read again cold (about 4 minutes) with its 20 GB entry on the disk.
+        In RAM the same copy resumes at the end anchor through server/endalign.py (SRV-239); the
+        offer now asks the same alignment, on the entry's own tokens, end anchor and regions."""
         c = _common(keys, self.tokens)
         end = self.man.get("end")
         if end is not None and end.get("mm") and not mm_ok:
@@ -196,6 +205,12 @@ class Entry:
                 _, spans = ResidentPrefix.replay(shim, list(keys))
                 if spans:
                     return e
+            if replay and align is not None and c < e:
+                try:
+                    if align(self.tokens, end, self.man.get("extra"), list(keys)):
+                        return e
+                except Exception:                                  # noqa: BLE001
+                    pass
         return max((b for b in self.man["anchors"] if b <= min(c, max_len)), default=0)
 
 
@@ -231,6 +246,9 @@ class SessionSpill:
         # what the caller's server adds to an entry (the end alignment's regions) and reads back
         self.extra_of = None
         self.on_adopt = None
+        # SRV-269: (tokens, end, extra, keys) -> whether the server's end alignment serves `keys`
+        # from an entry's end anchor (a copy that left the earlier answers' reasoning out)
+        self.offer_align = None
         self.stats = {"saves": 0, "save_ms": 0.0, "blocks_written": 0, "blocks_kept": 0,
                       "bytes_written": 0, "restores": 0, "restore_ms": 0.0, "blocks_read": 0,
                       "blocks_in_place": 0, "bytes_read": 0, "tokens_restored": 0,
@@ -741,7 +759,8 @@ class SessionSpill:
         for e in entries:
             if e.valid <= here + self.chunk:
                 continue
-            line = e.offer(keys, max_len, res.glue, replay, mm_ok=mm_ok)
+            line = e.offer(keys, max_len, res.glue, replay, mm_ok=mm_ok,
+                           align=self.offer_align if replay else None)
             if line <= here + self.chunk:
                 continue
             need = sum(int(b["bytes"]) for b in e.man["blocks"] if b["b"] + b["rows"] > c)

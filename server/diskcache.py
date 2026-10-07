@@ -177,14 +177,24 @@ def start_spill(state, a, tier, journal=None):
                                                                 16384))}).open()
     al = state.get("end_align")
     if al is not None:
-        spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
-        spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
+        wire_end_align(spill, al)
     res.spiller = spill
     rep = spill.report()
     print(f"[spill] on: {spill.root}, {rep['entries']} conversations, "
           f"{rep['bytes'] / dc.GB:.1f} of {rep['budget'] / dc.GB:g} GB, evictions from "
           f"{spill.min_tokens} tokens; fingerprint {fp[:12]}", flush=True)
     return spill
+
+
+def wire_end_align(spill, al) -> None:
+    """The end alignment's part in the NVMe entries (server/endalign.py): its regions written with
+    an entry and read back with it, and (SRV-269) the restore's offer aligning a copy the way the
+    resume after the restore will, so a chat whose client leaves the reasoning out comes back
+    from the disk instead of being read again."""
+    spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
+    spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
+    spill.offer_align = lambda toks, end, extra, keys: al.offers(
+        toks, end, (extra or {}).get("end_regions") or [], keys)
 
 
 def refresh(state, tier=None) -> list[str]:

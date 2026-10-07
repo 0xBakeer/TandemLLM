@@ -2,6 +2,16 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.2-test, 2026-10-07
+
+0.4.1-test (585856d) and one fix, deployed on the box as 0.4.2-test. `~/rollback-0.4.2.sh` returns the box to 0.4.1-test.
+
+### A long Open WebUI chat comes back from the NVMe after other chats ran (SRV-269; QA SRV-270)
+
+- Live on 0.4.1-test: back in a 130,381-token Open WebUI chat after two other chats, the engine read the whole chat again cold (about 4 minutes at ~510 tokens a second) while it sat on the NVMe (182,053 rows with the reasoning, 20 GB, `end=True`). The restore's offer (`Entry.offer`) accepted the end anchor only through the hidden spans; Open WebUI's copy leaves every earlier answer's reasoning out, which only the end alignment (SRV-239) serves, so no entry was offered.
+- The offer now asks the end alignment too, on the entry's own tokens, end anchor and saved regions (`EndAlign.offers`, `SessionSpill.offer_align`, wired in `server/diskcache.py` `wire_end_align`). A copy that differs in more than whitespace and the reasoning is offered a grid anchor at most, as before.
+- To verify live: a long Open WebUI-shaped chat, three other chats, back: `[spill] restore` in the log, cached 0.95 or more, TTFT under 15 s.
+
 ## 0.4.1-test, 2026-10-07
 
 Branch `fixes-041` from 0.3.51-test (3d4768e), deployed on the box as 0.4.1-test for the owner's own test. The release 0.4.0 stays as it was. `~/rollback-0.4.1.sh` returns the box to 0.3.51-test (a8ef6bf, the 0.4.0 candidate) with packages v21. The live checks are listed per item.

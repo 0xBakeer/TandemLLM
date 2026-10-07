@@ -198,6 +198,23 @@ class EndAlign:
         self._carry = []
         self.stats["regions"] = len(self._regions)
 
+    def offers(self, tokens: list, end: dict, regions, copy: list[int]) -> bool:
+        """SRV-269: whether `copy` would resume at the end anchor of a conversation that is not in
+        place (an NVMe entry, engine/spill.py `Entry.offer`): its tokens, its end anchor and its
+        regions as written. A probe of its own: this alignment's regions, stats and
+        `last_omitted` stay the resident conversation's."""
+        if not self.on or end is None:
+            return False
+        e = int(end["at"])
+        if len(tokens) < e:
+            return False
+        rows = _Rows(list(tokens[:e]),
+                     {"at": e, "hidden": [(int(p), list(h)) for p, h in (end.get("hidden") or ())],
+                      "mark": end.get("mark")})
+        probe = EndAlign(self.tbytes, on=True, reasoning=self.reasoning)
+        probe.adopt(rows, regions or [])
+        return probe._align(rows, list(copy)) is not None
+
     # ------------------------------------------------------------------ the walk
     def _align(self, res, copy: list[int]):
         """The copy aligned to the rows: first as the rows are, then (SRV-239) with every
@@ -288,6 +305,13 @@ class EndAlign:
 
     def report(self) -> dict:
         return {"on": self.on, "reasoning": self.reasoning, **self.stats}
+
+
+class _Rows:
+    """What the walk reads of a conversation: its end anchor and its rows' tokens."""
+
+    def __init__(self, tokens: list, end: dict):
+        self.tokens, self.end = tokens, end
 
 
 def _merge(zones: list[tuple[int, int]]) -> list[tuple[int, int]]:
