@@ -106,7 +106,15 @@ PY
 
 bget()  { hf buckets cp "$BROOT/$1" "$2" >/dev/null; }                  # one file down
 bput()  { hf buckets cp "$2" "$BROOT/$1" >/dev/null; }                  # one file up
-bdown() { mkdir -p "$2"; hf buckets sync "$BROOT/$1" "$2" >/dev/null; } # prefix -> dir
+bdown() {   # prefix -> dir; retried, the CAS CDN answers 429 when several jobs pull at once
+  mkdir -p "$2"
+  local i
+  for i in 1 2 3 4 5 6; do
+    hf buckets sync "$BROOT/$1" "$2" >/dev/null && return 0
+    el "bdown $1: attempt $i failed, retry in $((i * 30)) s"; sleep $((i * 30))
+  done
+  return 1
+}
 bup()   { hf buckets sync "$1" "$BROOT/$2" >/dev/null; }                # dir -> prefix
 bhas()  { hf buckets ls "$BUCKET/exl3/$1" 2>/dev/null | grep -qF "exl3/$1"; }   # ls exits 0 and prints (empty) when missing
 
