@@ -94,6 +94,11 @@ def fingerprint(root: str, extra: dict) -> str:
     return dc.fingerprint(root, extra, skip=NOT_ARITHMETIC)
 
 
+def fingerprint_legacy(root: str, extra: dict) -> str:
+    """The same under the formula before FX15 (`disk_cache.fingerprint_legacy`)."""
+    return dc.fingerprint_legacy(root, extra, skip=NOT_ARITHMETIC)
+
+
 def block_sums(t, ax: int, s: int, r: int) -> list[int]:
     """Two 64-bit sums of the bytes of rows [s, s + r) of `t` along `ax`, on its device: the plain
     sum of its 32-bit words and a position-weighted sum of each innermost run's sum. Identical
@@ -319,10 +324,12 @@ class SessionSpill:
 
     def __init__(self, root: str, *, chunk: int, fingerprint: str, tier=None,
                  settings: dict | None = None, on_event=None, clock=time.time, free_bytes=None,
-                 floor_bytes: int | None = None):
+                 floor_bytes: int | None = None, also=()):
         self.root = os.path.realpath(os.path.expanduser(root))
         self.chunk = int(chunk)
         self.fp = str(fingerprint)
+        # the fingerprints whose entries hold the same rows (`disk_cache.equivalents`)
+        self.fps = frozenset((self.fp, *(str(x) for x in also)))
         self.tier = tier
         self.cfg = dict(SETTINGS)
         self.cfg.update({k: v for k, v in (settings or {}).items() if k in SETTINGS
@@ -396,7 +403,7 @@ class SessionSpill:
                     man = json.load(f)
                 if man.get("format") != FORMAT or man.get("chunk") != self.chunk:
                     raise ValueError("format")
-                if man.get("fp") != self.fp:
+                if man.get("fp") not in self.fps:
                     raise ValueError("fingerprint")
                 tokens = self._read_tokens(p, int(man["valid"]))
                 if _tsha(tokens) != man["tsha"]:

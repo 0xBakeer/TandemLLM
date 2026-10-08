@@ -88,6 +88,7 @@ import json
 import mmap
 import os
 import queue
+import re
 import threading
 import time
 import zlib
@@ -354,10 +355,12 @@ class DiskTier:
 
     def __init__(self, root: str, *, chunk: int, fingerprint: str, settings: dict | None = None,
                  head_anchors: int = 4, min_tokens: int = 4096, on_event=None, clock=time.time,
-                 free_bytes=None, preview=None):
+                 free_bytes=None, preview=None, also=()):
         self.root = os.path.realpath(os.path.expanduser(root))
         self.chunk = int(chunk)
         self.fp = str(fingerprint)
+        # the fingerprints whose files hold the same rows (`equivalents`): read, never written
+        self.fps = frozenset((self.fp, *(str(x) for x in also)))
         self.head_anchors = max(0, int(head_anchors))
         self.min_tokens = max(self.chunk, int(min_tokens))
         self.on_event = on_event
@@ -471,7 +474,7 @@ class DiskTier:
                     _unlink(p)
                     self.stats["corrupt"] += 1
                     continue
-                if meta.get("fp") != self.fp or meta.get("chunk") != self.chunk:
+                if meta.get("fp") not in self.fps or meta.get("chunk") != self.chunk:
                     _unlink(p)
                     self.stats["swept_fingerprint"] += 1
                     continue
@@ -589,7 +592,7 @@ class DiskTier:
             for L, h, n in doc.get("counts", [])[-COUNT_MAX:]:
                 self.counts[(int(L), int(h, 16))] = int(n)
             self._dirty = doc.get("fp") != self.fp
-        if doc.get("fp") != self.fp:
+        if doc.get("fp") not in self.fps:
             return
         for s, ts in doc.get("sessions", [])[-SESSIONS_MAX:]:
             self.sessions[s] = ts
@@ -1236,7 +1239,7 @@ class DiskTier:
             try:
                 for (b, _), r in zip(chain, recs):
                     meta = self._read_header(r["path"], "chunk")
-                    if meta["tokens"] != list(keys[b - C:b]) or meta.get("fp") != self.fp:
+                    if meta["tokens"] != list(keys[b - C:b]) or meta.get("fp") not in self.fps:
                         ok = False
                         break
                     meta["path"] = r["path"]
@@ -1581,22 +1584,143 @@ def _statvfs_free(path: str) -> int:
     return st.f_bavail * st.f_frsize
 
 
-def fingerprint(root: str, extra: dict, skip=()) -> str:
-    """What the rows on disk depend on besides the tokens: the engine's code (every file under
-    `engine/` but the other models' packages, and the file names in `skip`) and `extra` (the
-    weights, the arithmetic flags, the grid, the library versions). A file written under another
-    fingerprint is swept. The tier skips nothing; the session spill (engine/spill.py) skips the
-    files that keep state rather than compute it."""
-    h = hashlib.sha256()
+def _engine_files(root: str, skip=()) -> list[str]:
+    """The engine's own modules the fingerprint reads: every file under `engine/` but the other
+    models' packages and the file names in `skip` (at the top of `engine/`), in a fixed order."""
+    out = []
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
         dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative",
                                                                "__pycache__"))
         for name in sorted(files):
             if name.endswith(".py") and not (dirpath == base and name in skip):
-                p = os.path.join(dirpath, name)
-                h.update(os.path.relpath(p, root).encode())
-                with open(p, "rb") as f:
-                    h.update(hashlib.sha256(f.read()).digest())
+                out.append(os.path.join(dirpath, name))
+    return out
+
+
+def fingerprint_legacy(root: str, extra: dict, skip=()) -> str:
+    """The fingerprint as builds up to 0.4.6 computed it: the bytes of every engine module
+    (`_engine_files`) and `extra`. Kept to adopt their files once (`equivalents`); never written."""
+    h = hashlib.sha256()
+    for p in _engine_files(root, skip):
+        h.update(os.path.relpath(p, root).encode())
+        with open(p, "rb") as f:
+            h.update(hashlib.sha256(f.read()).digest())
     h.update(json.dumps(extra, sort_keys=True, default=str).encode())
     return h.hexdigest()
+
+
+#: the knob registry: its bytes are documentation; what it can change in a row is the defaults of
+#: the knobs the arithmetic reads (`_arithmetic_knobs`)
+SETTINGS_FILE = os.path.join("engine", "settings.py")
+
+_TOOLS_IMPORT = re.compile(r"^\s*(?:from\s+tools\s+import\s+([\w\s,()]+)|from\s+tools\.(\w+)\s+"
+                           r"import|import\s+tools\.(\w+))", re.M)
+
+
+def _arithmetic_knobs(path: str) -> bytes | None:
+    """The knobs of `engine/settings.py` that the server does not own, as (name, default) in name
+    order: the defaults the engine's and the kernels' modules read. A knob the server reads (the
+    regenerate rule, a decider's queue, a package's address) cannot change a prefill's rows, as no
+    code under `server/` is in the fingerprint. None when the file has no literal `KNOBS` table
+    (the caller hashes the bytes then)."""
+    import ast
+    try:
+        with open(path, "rb") as f:
+            tree = ast.parse(f.read())
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for node in tree.body:
+        target = node.target if isinstance(node, ast.AnnAssign) else (
+            node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None)
+        if isinstance(target, ast.Name) and target.id == "KNOBS" and node.value is not None:
+            try:
+                knobs = ast.literal_eval(node.value)
+            except ValueError:
+                return None
+            rows = sorted((str(k), v[0]) for k, v in knobs.items()
+                          if not str(v[1] if len(v) > 1 else "").startswith("server/"))
+            return json.dumps(rows, default=str).encode()
+    return None
+
+
+def _tools_modules(root: str, files: list[str]) -> list[str]:
+    """The `tools/` modules (kernels, quantized linears, the head) the engine's modules import,
+    and the ones those import, in name order. They compute rows as much as `engine/` does."""
+    seen: set[str] = set()
+    todo = list(files)
+    while todo:
+        p = todo.pop()
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        for m in _TOOLS_IMPORT.finditer(src):
+            names = ([n.strip() for n in m.group(1).replace("(", " ").replace(")", " ").split(",")]
+                     if m.group(1) else [m.group(2) or m.group(3)])
+            for n in names:
+                n = n.split(" as ")[0].strip()
+                q = os.path.join(root, "tools", n + ".py")
+                if n and n not in seen and os.path.isfile(q):
+                    seen.add(n)
+                    todo.append(q)
+    return [os.path.join(root, "tools", n + ".py") for n in sorted(seen)]
+
+
+def fingerprint(root: str, extra: dict, skip=()) -> str:
+    """What the rows on disk depend on besides the tokens: the engine's code (every file under
+    `engine/` but the other models' packages, and the file names in `skip`), the `tools/` modules
+    it imports (`_tools_modules`), and `extra` (the weights, the arithmetic flags, the grid, the
+    library versions). A file written under another fingerprint is swept. The tier skips nothing;
+    the session spill (engine/spill.py) skips the files that keep state rather than compute it.
+    `engine/settings.py` counts by its arithmetic knobs' defaults, not its bytes: 0.4.6-test
+    registered seven server knobs there, and that alone swept 13 shared heads (12.4 GB) and 13
+    spilled conversations (29.6 GB) at its start (FX15, 2026-10-08)."""
+    h = hashlib.sha256()
+    h.update(b"fp2")
+    files = _engine_files(root, skip)
+    for p in files + _tools_modules(root, files):
+        rel = os.path.relpath(p, root)
+        h.update(rel.encode())
+        data = _arithmetic_knobs(p) if rel == SETTINGS_FILE else None
+        if data is None:
+            with open(p, "rb") as f:
+                data = f.read()
+        h.update(hashlib.sha256(data).digest())
+    h.update(json.dumps(extra, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
+#: in the tier's directory: fingerprint -> the older ones whose files it reads (`equivalents`)
+EQUIV_FILE = "fp-equal.json"
+
+
+def equivalents(root_dir: str, fp: str, legacy: str | None) -> tuple:
+    """The fingerprints whose files a tier (and its session spill) under `fp` may read besides
+    `fp`'s own. The first start under the current formula adopts the files of the formula before
+    it computed on this same tree (`fingerprint_legacy`): same engine bytes, flags, weights and
+    grid, so the same rows. The adoption is written to `root_dir/fp-equal.json` and from then on
+    that record alone counts: a later build reads those files only under the same `fp`, and a
+    `tools/` change (which the old formula did not see) sweeps them as it sweeps any other."""
+    path = os.path.join(root_dir, EQUIV_FILE)
+    try:
+        with open(path) as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            doc = {}
+    except (OSError, ValueError):
+        doc = None
+    if doc is None:
+        doc = {}
+        if legacy and legacy != fp:
+            doc[fp] = [legacy]
+        try:
+            os.makedirs(root_dir, mode=0o700, exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return tuple(str(x) for x in doc.get(fp, []) if x != fp)

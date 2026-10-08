@@ -128,7 +128,13 @@ def start(state, a, journal=None):
     # spill leaves them out: a deploy that changes only them keeps the tier's heads (0.3.22's swept
     # 49 GB for a change in engine/cache.py alone)
     from engine import spill as spill_mod
-    fp = dc.fingerprint(here, fingerprint_extra(a), skip=spill_mod.NOT_ARITHMETIC)
+    extra = fingerprint_extra(a)
+    fp = dc.fingerprint(here, extra, skip=spill_mod.NOT_ARITHMETIC)
+    # FX15: the first start under this formula adopts the files of the one before it on this
+    # same tree (`dc.equivalents`); the record in the directory says so from then on
+    also = dc.equivalents(root, fp, dc.fingerprint_legacy(here, extra,
+                                                          skip=spill_mod.NOT_ARITHMETIC))
+    state["disk_cache_fp_also"] = also
     tok = state.get("tok")
 
     def on_event(kind: str, detail: dict) -> None:
@@ -157,7 +163,7 @@ def start(state, a, journal=None):
     tier = dc.DiskTier(root, chunk=chunk, fingerprint=fp, settings=settings_of(doc),
                        head_anchors=int(getattr(a, "disk_cache_head_anchors", 4)),
                        min_tokens=int(getattr(a, "disk_cache_min_tokens", 4096)),
-                       on_event=on_event, preview=preview)
+                       on_event=on_event, preview=preview, also=also)
     tier.plan_staging(eng, drafter)
 
     def on_guard(kind: str, detail: dict) -> None:
@@ -176,8 +182,8 @@ def start(state, a, journal=None):
           f"entries, {rep['bytes'] / dc.GB:.1f} of {rep['budget'] / dc.GB:g} GB, "
           f"{rep['free_bytes'] / dc.GB:.0f} GB free (floor {rep['floor'] / dc.GB:g}), "
           f"TTL {tier.cfg['ttl_days']} days, admit after {tier.cfg['admit_after']}; staging "
-          f"{tier.staging_planned / dc.GB:.2f} GB when first used; fingerprint {fp[:12]}",
-          flush=True)
+          f"{tier.staging_planned / dc.GB:.2f} GB when first used; fingerprint {fp[:12]}"
+          + (f" (also reads {', '.join(x[:12] for x in also)})" if also else ""), flush=True)
     return tier
 
 
@@ -193,6 +199,8 @@ def start_spill(state, a, tier, journal=None):
         return None
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     fp = sp.fingerprint(here, fingerprint_extra(a))
+    # the tier's record (`dc.equivalents`): the same fingerprints, as the files are the same rows
+    also = tuple(state.get("disk_cache_fp_also") or ()) if fp == getattr(tier, "fp", None) else ()
 
     def on_event(kind: str, detail: dict) -> None:
         if journal is not None:
@@ -200,7 +208,7 @@ def start_spill(state, a, tier, journal=None):
         print(f"[spill] {kind} " + " ".join(f"{k}={v}" for k, v in detail.items()), flush=True)
 
     spill = sp.SessionSpill(os.path.join(tier.root, "sessions"), chunk=tier.chunk,
-                            fingerprint=fp, tier=tier, on_event=on_event,
+                            fingerprint=fp, tier=tier, on_event=on_event, also=also,
                             settings={"budget_gb": float(getattr(a, "session_spill_gb", 64.0)),
                                       "min_tokens": int(getattr(a, "session_spill_min_tokens",
                                                                 16384)),
