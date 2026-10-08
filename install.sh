@@ -25,10 +25,11 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.3.0 adds image input; text requests decode as in v0.2.0-staircut, the StairCut
-# paper's version (merge c111fa7).
+# The engine release. v0.4.7 adds the conductor, memory notes, packages, the long-session caches, the
+# proxy and the dashboard's views of other engines. The raw path (X-Tandem: raw) decodes as in v0.3.0;
+# v0.2.0-staircut is the StairCut paper's version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.3.0}"
+TANDEM_REF="${TANDEM_REF:-v0.4.7}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -464,7 +465,7 @@ if [ -d "$SRC/.git" ]; then
 else
     [ -e "$SRC" ] && die "$SRC exists and is not a git checkout; move it away"
     run git clone --quiet "$TANDEM_REPO" "$SRC" \
-        || die "git clone $TANDEM_REPO failed. While the repository is private, clone access is needed: --repo git@github.com:0xBakeer/TandemLLM.git (an SSH key) or a git credential helper"
+        || die "git clone $TANDEM_REPO failed. Check the network, or pass another --repo"
 fi
 if [ "$DRY" = 1 ] && [ ! -d "$SRC/.git" ]; then
     note "git checkout --detach $TANDEM_REF"
