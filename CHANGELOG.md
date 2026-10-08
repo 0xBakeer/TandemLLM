@@ -2,6 +2,21 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.8-test, 2026-10-08
+
+Two Open WebUI chats beside each other, after the owner's run of 2026-10-08 (two chats that took turns on slot 0 with the side slot idle, and a chat read again cold, 60,814 tokens in 91 s, after its retrieval block moved). The text does not change: every resume here is held to the end anchor's gate.
+
+### Parallel requests
+
+- A side slot takes a request whose window leaves it at least 16,384 rows of output, with `max_tokens` cut to the room (`QWEN38_SIDE_MIN_ROOM`). 0.4.7 compared the window with the prompt plus the whole served limit of 32,768, so a chat past about 24,000 tokens could never take the 65,536-token side slot.
+- A side slot has a resident prefix of its own (`QWEN38_SIDE_RESIDENT_GB`, `QWEN38_SIDE_STASH_GB`): the next turn of the conversation it holds resumes at the end anchor there (`home`), beside slot 0's conversation, which stays where it is; the router's question in between leaves it in place through the stash. The carry into slot 0 stays the fallback when that slot is busy for `QWEN38_SIDE_HOME_WAIT_S` or the prompt outgrew the window.
+- A new conversation beside one a side slot could never hold takes an idle side slot before slot 0 (`QWEN38_SIDE_NEW_FIRST`), so the long conversation is not evicted for it.
+
+### Caches
+
+- The end alignment's third pass: a block the client put into an earlier user message and moved to its last one (Open WebUI's retrieval block, on every request in the last user message) is served from the rows where the model saw it, token-aligned on the bare bytes, only when the same bytes are in the last message; a message the user edited is served as sent (`QWEN38_END_ALIGN_MOVED`). Without it the copy parted from the rows at the first message and the chat was read again cold on every new message.
+- A long prompt the end anchor does not serve says why in the log and the journal (`[cache] ... re-read ahead`, `extra.reread`: the position and message the copy parts at, what the alignment refused) (`QWEN38_REREAD_SAY_TOKENS`).
+
 ## 0.4.7, 2026-10-08
 
 The release after the 0.4.0 tree. It is 0.3.51-test (the 0.4.0 candidate) plus everything in 0.4.1-test to 0.4.7-test below, the manual, and the proxy documentation of the in-process DeepSeek relay. The 0.4.0 tree was never published; 0.4.7 replaces it. The text changes on purpose in three places: a regenerate under TandemLLM samples, Continue Response continues the partial answer, and the package documents change what the router attaches.

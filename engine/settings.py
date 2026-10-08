@@ -148,6 +148,21 @@ KNOBS: dict[str, tuple] = {
     # FX10 (0.4.1, SRV-213): the next turn of a conversation that ran on a side slot is carried
     # into slot 0 from the side slot's rows (`on`); `off` re-reads it on slot 0 as 0.4.0 did
     'SIDE_CARRY': ('on', 'server/app.py'),
+    # FX16 (0.4.8): two chats beside each other. The least output a side slot's window must
+    # leave a request (its max_tokens is cut to the room), whether a new conversation takes an
+    # idle side slot before slot 0 when slot 0's conversation could never run there, how long a
+    # turn waits for the side slot that holds its rows, and the side slot's own resident prefix
+    # (anchors GB, stash GB; 0 builds none)
+    'SIDE_MIN_ROOM': ('16384', 'server/app.py'),
+    'SIDE_NEW_FIRST': ('on', 'server/app.py'),
+    'SIDE_HOME_WAIT_S': ('10', 'server/app.py'),
+    'SIDE_RESIDENT_GB': ('0.5', 'server/app.py'),
+    'SIDE_STASH_GB': ('1.0', 'server/app.py'),
+    # FX16: the end alignment's third pass (a block the client moved from an earlier message to
+    # its last one is served where the model saw it), and the prompt length from which a turn
+    # the end anchor did not serve says why in the log
+    'END_ALIGN_MOVED': ('on', 'server/endalign.py'),
+    'REREAD_SAY_TOKENS': ('8192', 'server/app.py'),
     # SRV-225: a client that sends no conversation id (Open WebUI): chats that open
     # with the same message are separate conductor sessions (`on`); `off`: one session per head
     'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),

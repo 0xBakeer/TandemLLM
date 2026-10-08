@@ -119,18 +119,28 @@ class EndAlign:
     """The whitespace alignment of a copy against the end anchor's rows, and the regions it may
     use. One per server; called under the engine lock, as the replay is."""
 
-    def __init__(self, tbytes, on: bool = True, reasoning: bool = True):
+    def __init__(self, tbytes, on: bool = True, reasoning: bool = True, moved: bool = True):
         self.tbytes = tbytes
         self.on = bool(on)
         self.reasoning = bool(reasoning)  # SRV-239: the second pass, without the reasoning
+        self.moved = bool(moved)          # FX16: the third pass, a client's block that moved
+        # the chat template's marks (`<|im_start|>`, the ids of `user`, `<|im_end|>`), for the
+        # third pass; None (the server sets them) leaves it out
+        self.marks: tuple | None = None
         self._for = None             # the end anchor (the `ResidentPrefix.end` dict) of `_regions`
         # (start, end, the position of the region's first `</think>` or -1): rows positions
         self._regions: list[tuple[int, int, int]] = []
         self._carry: list[tuple[int, int, int]] = []    # the served prompt's, for the next `kept`
         self.stats = {"aligned": 0, "aligned_tokens": 0, "refused": 0, "regions": 0,
-                      "aligned_reasoning": 0, "reasoning_tokens": 0}
+                      "aligned_reasoning": 0, "reasoning_tokens": 0,
+                      "aligned_moved": 0, "moved_tokens": 0}
         # the rows ranges the last `replay` served that the client's copy left out (SRV-233)
         self.last_omitted: list[tuple[int, int]] = []
+        # FX16: the rows ranges of the client's own block the last `replay` served from the rows
+        # (the copy had moved them to its last message), and why the last copy was refused
+        # (`why`, the position it parted at, the end), for the log line of a re-read
+        self.last_moved: list[tuple[int, int]] = []
+        self.last_refusal: dict | None = None
 
     def regions(self, res) -> list[tuple[int, int, int]]:
         """The end anchor's generation regions (rows positions), when they are its."""
@@ -220,32 +230,160 @@ class EndAlign:
         """The copy aligned to the rows: first as the rows are, then (SRV-239) with every
         region's reasoning left out of what the copy must hold."""
         refused = self.stats["refused"]
-        self.last_omitted = []
+        self.last_omitted, self.last_moved, self.last_refusal = [], [], None
         got = self._walk(res, copy, False)
-        if got is None and self.reasoning and any(r[2] > r[0] for r in self.regions(res)):
+        thinks = self.reasoning and any(r[2] > r[0] for r in self.regions(res))
+        if got is None and thinks:
             got = self._walk(res, copy, True)
             if got is not None:
                 self.stats["aligned_reasoning"] += 1
                 self.stats["reasoning_tokens"] += got[2]
                 self.last_omitted = [(a, t) for a, _, t in self.regions(res) if t > a]
+        if got is None and self.moved and self.marks is not None:
+            # FX16: a block the client put into an earlier message and moved to its last one
+            moved = self._moved_spans(res, copy)
+            if moved:
+                got = self._walk(res, copy, False, moved=moved)
+                if got is None and thinks:
+                    got = self._walk(res, copy, True, moved=moved)
+                    if got is not None:
+                        self.stats["aligned_reasoning"] += 1
+                        self.stats["reasoning_tokens"] += got[2]
+                        self.last_omitted = [(a, t) for a, _, t in self.regions(res) if t > a]
+                if got is not None:
+                    self.stats["aligned_moved"] += 1
+                    self.stats["moved_tokens"] += sum(b - a for a, b in moved)
+                    self.last_moved = list(moved)
         # one refusal a copy, whichever pass said it
         self.stats["refused"] = refused + (0 if got is not None else
                                            int(self.stats["refused"] > refused))
+        if got is not None:
+            self.last_refusal = None
         return None if got is None else got[:2]
 
-    def _walk(self, res, copy: list[int], omit: bool):
+    def _refuse(self, why: str, c: int, e: int, at: int | None = None):
+        """A refusal: counted, and remembered for the log line of the re-read it causes."""
+        self.stats["refused"] += 1
+        # the last pass tried is the most permissive one: its reason is the one kept
+        self.last_refusal = {"why": why, "c": int(c), "e": int(e),
+                             "at": int(at) if at is not None else None}
+        return None
+
+    def _moved_spans(self, res, copy: list[int]) -> list[tuple[int, int]]:
+        """FX16 (2026-10-08 12:14:30, live): Open WebUI puts its retrieval block ("### Task:
+        Respond to the user query using the provided context ... <context>...</context>") into the
+        LAST user message of every request. In a tool loop the user message is the first one, so
+        the rows hold the block there; the next user message takes the block with it, the first
+        message is sent bare, and the copy parts from the rows 12,000 tokens in: an 83,160-token
+        chat with its end anchor on the NVMe was read again cold (60,814 tokens, 91 s), and the
+        router's notes, hashed on the client's prefix, went with it.
+
+        The rows ranges of such blocks: in each user message of the rows (the template's marks),
+        the copy's message is the rows' message with one contiguous run of bytes taken out, and
+        that run is in the copy's last user message. Token-aligned, on the bare bytes; empty for
+        anything else (a message the user edited is not a moved block: its bytes are not in the
+        last message). Served, the model sees the message as it saw it when it answered, and the
+        block again where the client put it now."""
+        im_s, user, im_e = self.marks
+        e, rows = int(res.end["at"]), res.tokens[:int(res.end["at"])]
+        tb, u = self.tbytes, len(user)
+
+        def messages(ids, upto):
+            out, i = [], 0
+            while True:
+                try:
+                    i = ids.index(im_s, i)
+                except ValueError:
+                    return out
+                if i + 1 + u <= len(ids) and list(ids[i + 1:i + 1 + u]) == user:
+                    try:
+                        j = ids.index(im_e, i + 1 + u)
+                    except ValueError:
+                        j = len(ids)
+                    if i >= upto:
+                        return out
+                    out.append((i, j))
+                    i = j
+                else:
+                    i += 1
+
+        rm = messages(rows, e)
+        cm = messages(copy, len(copy))
+        if not rm or len(cm) < len(rm) + 1:
+            return []
+        last = b"".join(_bare(tb(t)) for t in copy[cm[-1][0]:cm[-1][1]])
+        # the rows the client never sent (the router's notes, SRV-233): left out of the rows'
+        # message here, and served as hidden by the walk (`_served_hidden`). With the block
+        # gone the notes' hash no longer matches and the router does not put them back, so
+        # the copy's message lacks both
+        served = self._served_hidden(res)
+        spans: list[tuple[int, int]] = []
+        for (ra, rb), (ca, cb) in zip(rm, cm[:len(rm)]):
+            rt, ct = rows[ra:rb], copy[ca:cb]
+            if rt == ct:
+                continue
+            # token by token on the bare bytes, whitespace-only tokens left out (the copy's
+            # newlines next to the run are not the rows'): the copy's message is the rows'
+            # with the run [a, b) taken out, whole tokens, nothing else changed
+            rb_ = [(k, _bare(tb(t))) for k, t in enumerate(rt)]
+            ri = [(k, p) for k, p in rb_ if p and not any(x <= ra + k < y for x, y in served)]
+            ci = [p for p in (_bare(tb(t)) for t in ct) if p]
+            if len(ci) >= len(ri):
+                return []
+            x = 0
+            while x < len(ci) and ri[x][1] == ci[x]:
+                x += 1
+            y = 0
+            while y < len(ci) - x and ri[len(ri) - 1 - y][1] == ci[len(ci) - 1 - y]:
+                y += 1
+            if x + y != len(ci):
+                return []
+            run = ri[x:len(ri) - y]
+            d = b"".join(p for _, p in run)
+            if not run or not d or d not in last:
+                return []
+            a, b = run[0][0], run[-1][0] + 1
+            while b < len(rt) and not rb_[b][1]:
+                b += 1                         # the rows' whitespace after it goes with it
+            spans.append((ra + a, ra + b))
+        return spans
+
+    @staticmethod
+    def _served_hidden(res) -> list[tuple[int, int]]:
+        """The rows ranges of the served prompt its client did not send (the router's notes,
+        `end["served_hidden"]`, SRV-233), below the end anchor."""
+        end = getattr(res, "end", None) or {}
+        e = int(end.get("at") or 0)
+        out = []
+        for a, b in (end.get("served_hidden") or ()):
+            a, b = int(a), int(b)
+            if 0 <= a < b <= e:
+                out.append((a, b))
+        return out
+
+    def _walk(self, res, copy: list[int], omit: bool, moved=()):
         end = res.end
         e, rows = int(end["at"]), res.tokens
         regs = self.regions(res)
         if not regs or len(rows) < e:
-            return None
+            return self._refuse("no_regions", 0, e)
         c = _common(copy, rows[:e])
         if c >= e:
-            return None                                # the copy holds the rows: nothing to align
+            return self._refuse("copy_holds_rows", c, e)   # nothing to align
         hidden = [(int(p), list(h)) for p, h in end["hidden"]]
         hid = set()
         zones = [(r[0], r[1]) for r in regs]
         left = 0
+        # the moved runs, and with them the notes the client never sent, which the router
+        # does not put back once the prompt changed before them
+        extra = list(moved) + (self._served_hidden(res) if moved else [])
+        for a, b in extra:
+            hid.update(range(a, b))
+            while a > 0 and not _bare(self.tbytes(rows[a - 1])):
+                a -= 1
+            while b < e and not _bare(self.tbytes(rows[b])):
+                b += 1
+            zones.append((a, b))
         if omit:
             # each region's reasoning (from its start to its `</think>`) is not in the copy; the
             # whitespace right before it (the prompt's `\n` after `<think>`, which the copy
@@ -270,8 +408,9 @@ class EndAlign:
         zones = _merge(sorted(zones))
         first = next((z for z in zones if z[0] <= c < z[1] or c == z[1]), None)
         if first is None:
-            self.stats["refused"] += 1
-            return None
+            # the copy parts from the rows outside every generation and every hidden span: in
+            # the prompt itself (a message changed, a block moved)
+            return self._refuse("in_prompt", c, e)
         i = j = first[0]
         aligned = 0
         tb = self.tbytes
@@ -279,16 +418,14 @@ class EndAlign:
             if b <= i:
                 continue
             if copy[j:j + a - i] != rows[i:a]:
-                self.stats["refused"] += 1
-                return None
+                return self._refuse("between_zones", c, e, at=i)
             j += a - i
             want = b"".join(_bare(tb(rows[p])) for p in range(a, b) if p not in hid)
             pos = 0
             while pos < len(want):
                 piece = _bare(tb(copy[j])) if j < len(copy) else None
                 if piece is None or want[pos:pos + len(piece)] != piece:
-                    self.stats["refused"] += 1
-                    return None
+                    return self._refuse("in_zone", c, e, at=a)
                 pos += len(piece)
                 j += 1
             i = b
@@ -297,8 +434,7 @@ class EndAlign:
             while i < e and j < len(copy) and copy[j] != rows[i] and not _bare(tb(copy[j])):
                 j += 1
         if len(copy) - j <= e - i or copy[j:j + e - i] != rows[i:e]:
-            self.stats["refused"] += 1
-            return None
+            return self._refuse("tail", c, e, at=i)
         self.stats["aligned"] += 1
         self.stats["aligned_tokens"] += aligned
         return rows[:e] + copy[j + e - i:], aligned, left

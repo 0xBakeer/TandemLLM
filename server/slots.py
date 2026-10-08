@@ -517,7 +517,10 @@ class Pool:
         now = time.monotonic()
         for s in sorted(self.side(), key=lambda s: s.max_len):
             c = s.carry
-            if (keep_carry_s > 0 and c is not None and c.get("gen") == s.gen
+            # FX16: a record backed by the slot's resident prefix outlives a guest (the stash
+            # puts the rows back), so its freshness is its age alone
+            if (keep_carry_s > 0 and c is not None
+                    and (c.get("gen") == s.gen or c.get("resident"))
                     and now - float(c.get("t") or 0.0) < keep_carry_s):
                 continue
             if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
@@ -528,6 +531,24 @@ class Pool:
                     self.stats["side_grants"] += 1
                     self.stats["max_running"] = max(self.stats["max_running"], self.running())
                 return s
+        return None
+
+    def take_slot(self, index: int, need: int, owner=None) -> Slot | None:
+        """FX16: one named side slot, without waiting: the slot whose resident rows the request's
+        conversation continues (server/app.py `_side_home`). None while another request has it,
+        or when its window does not hold `need` rows."""
+        for s in self.side():
+            if s.index != int(index):
+                continue
+            if need <= s.max_len and not s.busy and s.lock.acquire(blocking=False):
+                s.gen += 1
+                s.owner = owner
+                s.t_start = time.monotonic()
+                with self._lk:
+                    self.stats["side_grants"] += 1
+                    self.stats["max_running"] = max(self.stats["max_running"], self.running())
+                return s
+            return None
         return None
 
     def release_side(self, slot: Slot) -> None:
