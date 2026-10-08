@@ -968,6 +968,20 @@ class ResidentPrefix:
     has to be in place (it is the head both sessions share); the rows and anchors are a grid
     prefill's bytes, so the resume is as exact as the pin's.
 
+    THE PARKED END (`park_end`). Open WebUI never sends an answer's reasoning back, so a chat's copy
+    parts from the rows inside its first answer, and the park held rows and grid anchors only: it
+    could offer nothing above the first reasoning, which the disk's head already gave (0.4.7 live,
+    2026-10-08: `parks 4, park_hits 0`; chat B, 36,841 tokens parked at 12:14:30, came back at
+    12:15:01 with 12,288 cached from the disk and 16,370 re-read, 23.7 s). So when the rows up to
+    the end of the last generation fit the park, they are parked whole, and the end anchor goes
+    with them: its line, hidden spans and mark, its (S, conv) buffers (moved, not copied: they
+    take one of the `park_anchors` places), and the end alignment's regions. A copy that continues
+    the parked conversation to its end -- every token, the hidden spans put back, or aligned by
+    the server's end alignment -- is offered the end (`park_offer`), and the server brings the
+    park back before its replay (`unpark_end`), as it reads an NVMe entry back (engine/spill.py).
+    The resume is the end anchor's, held to its gate; the swap parks the other conversation's end
+    the same way.
+
     THE END OF A GENERATION (`end`). Anchors come from prefill chunks only, so the
     next turn of an agent conversation re-read the whole previous answer: 33,172 tokens, about
     44 s, after a 32,773-token thinking (rrr2, 2026-10-02). `keep_end` keeps ONE more anchor when
@@ -983,7 +997,8 @@ class ResidentPrefix:
     monitor hid in an answer (a hidden close's phrase, a hidden turn) are in the rows and not in
     the client's copy: `end["hidden"]` lists them with their positions, and `replay` puts them
     back where they sit, as the router replays its notes. The pin and the park carry their rows'
-    `taint` with them; the end anchor itself is dropped when its rows go.
+    `taint` with them; the end anchor goes to the park with its rows when they fit there, and is
+    dropped otherwise.
 
     THE MEMORY POLICY (`mem`, a `Budget`). Every buffer this allocates after the first is asked for
     first: an anchor that is refused reuses an evicted one, a stash that is refused leaves the
@@ -1031,6 +1046,16 @@ class ResidentPrefix:
         self.park_anchors: dict[int, tuple] = {}
         self._park_bufs: list | None = None
         self._park_views: list | None = None
+        # the parked conversation's end anchor (`_park`): the `end` dict with its own (S, conv)
+        # as "pair", and the end alignment's regions as they were at park time
+        self.park_end: dict | None = None
+        self.park_regions: list = []
+        # the server's end alignment (server/diskcache.py `wire_end_align`), so this file imports
+        # nothing of the server: (res) -> the regions of `res.end`; (res, regions) -> adopts them
+        # for `res.end`; (tokens, end, regions, copy) -> whether `copy` aligns to that end
+        self.end_extra_of = None
+        self.end_adopt = None
+        self.park_align = None
         self.owner: str | None = None      # the session (x-session-id) the rows belong to
         # the end of the last generation (`keep_end`): its line `at`, the hidden spans below it
         # and the drafter's mark; its (S, conv) in `_end_bufs`, allocated once and reused
@@ -1059,7 +1084,7 @@ class ResidentPrefix:
                       "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
                       "park_spills": 0, "park_given_up": 0, "side_carries": 0,
-                      "carry_vacated": 0}
+                      "carry_vacated": 0, "park_ends": 0, "park_end_hits": 0}
         # the session spill (engine/spill.py): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
@@ -1661,15 +1686,25 @@ class ResidentPrefix:
     def _park(self, eng, drafter, keep: int) -> None:
         """Copy aside the rows of the prompt being replaced, from `keep` (where the new prompt
         parts from it) to its newest anchor that `park_bytes` holds; its newest anchors move with
-        them. The previous parked session, if any, is given up."""
+        them. When every row up to the end anchor fits, the rows go up to it and the end anchor
+        moves too, in one of the anchors' places (`park_end`). The previous parked session, if
+        any, is given up."""
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
         ab = self._anchor_bytes or eng.state.nbytes
         cap_rows = max(0, (self.park_budget - self.park_anchor_max * ab) // max(1, per_row))
-        above = sorted(b for b in self.anchors if keep < b <= min(self.valid, keep + cap_rows))
-        rows = (above[-1] - keep) if above else 0
+        end = self._end_to_park(keep, cap_rows)
+        if end is not None:
+            above = sorted(b for b in self.anchors if keep < b <= self.valid)
+            top = self.valid
+        else:
+            above = sorted(b for b in self.anchors if keep < b <= min(self.valid, keep + cap_rows))
+            top = above[-1] if above else keep
+        rows = top - keep
         if rows < self.chunk:
             return
+        # the regions are the alignment's for this end only while it is `self.end`
+        regions = self._end_regions() if end is not None else []
         if self.park_rows:
             self._spill_park(eng, drafter)
         self._drop_park_rows()
@@ -1686,15 +1721,52 @@ class ResidentPrefix:
                                            dtype=t.dtype, device=t.device) for t, ax in views]
         for (t, ax), buf in zip(views, self._park_bufs):
             buf.narrow(ax, 0, rows).copy_(t.narrow(ax, keep, rows))
-        for b in above[-self.park_anchor_max:]:
+        k = self.park_anchor_max - (end is not None)
+        for b in (above[-k:] if k > 0 else []):
             self.park_anchors[b] = self.anchors.pop(b)
             self._allocated -= 1
-        self.park_tokens = list(self.tokens[:above[-1]])
+        if end is not None:
+            # the end's buffers go with it; the next generation's end asks for its own
+            self.park_end = self._parked_end(end, self._end_bufs)
+            self.park_regions = regions
+            self._end_bufs, self.end = None, None
+            self.stats["park_ends"] += 1
+        self.park_tokens = list(self.tokens[:top])
         self.park_base, self.park_rows, self.park_owner = keep, rows, self.owner
-        self.park_taint = (self.taint if self.taint is not None and self.taint < above[-1]
+        self.park_taint = (self.taint if self.taint is not None and self.taint < top
                            else None)
         self._park_views = [(t, ax) for t, ax in views]
         self.stats["parks"] += 1
+
+    def _end_to_park(self, base: int, cap: int) -> dict | None:
+        """The end anchor, when it can be parked with rows [base, end) and the park holds them."""
+        end = self.end
+        if (end is None or self._end_bufs is None or int(end["at"]) != self.valid
+                or not self.chunk <= self.valid - base <= cap):
+            return None
+        return end
+
+    def _end_regions(self) -> list:
+        """The end alignment's regions of the end anchor in place (none without the alignment)."""
+        if self.end_extra_of is None or self.end is None:
+            return []
+        try:
+            return [list(x) for x in self.end_extra_of(self)]
+        except Exception:                                          # noqa: BLE001
+            return []
+
+    @staticmethod
+    def _parked_end(end: dict, pair: tuple) -> dict:
+        """The end anchor as the park keeps it: `end`'s line, spans, mark (and the image offset,
+        the served notes), with its (S, conv) buffers."""
+        out = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
+               "mark": end.get("mark"), "pair": pair}
+        for k in ("delta", "mm"):
+            if k in end:
+                out[k] = end[k]
+        if end.get("served_hidden") is not None:
+            out["served_hidden"] = list(end["served_hidden"])
+        return out
 
     def _spill_park(self, eng, drafter) -> bool:
         """FX10: the parked conversation a new park is about to give up, to the NVMe first.
@@ -1708,7 +1780,8 @@ class ResidentPrefix:
         here it costs about 0.1 s a GB on a rested drive (the box's evictions on 2026-10-07: 4.6 GB
         in 0.90 s, 7.3 GB in 1.41 s), incremental by content, under the spill's own budget. Its
         head below `park_base` is the rows in place (`save_park` checks that), so this runs before
-        anything is cut. `QWEN38_SPILL_PARK=off` gives it up as before."""
+        anything is cut; a parked end anchor is written with it, its regions too, as the resident
+        conversation's is. `QWEN38_SPILL_PARK=off` gives it up as before."""
         sp = self.spiller
         if sp is None or SPILL_PARK == "off" or not self.park_rows:
             return False
@@ -1727,11 +1800,15 @@ class ResidentPrefix:
         return True
 
     def _drop_park_rows(self) -> None:
-        """Forget the parked prompt but keep its row buffers: its anchors join the live pool's
-        free list, as far as the pool's cap allows."""
+        """Forget the parked prompt but keep its row buffers: its anchors and its end's buffers
+        join the live pool's free list, as far as the pool's cap allows."""
         for b in list(self.park_anchors):
             self._free.append(self.park_anchors.pop(b))
             self._allocated += 1
+        if self.park_end is not None:
+            self._free.append(self.park_end["pair"])
+            self._allocated += 1
+        self.park_end, self.park_regions = None, []
         self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
         self.park_taint = None
         self._trim_pool()
@@ -1748,10 +1825,20 @@ class ResidentPrefix:
             self._free.pop()
             self._allocated -= 1
 
-    def park_offer(self, ids, c: int, max_len: int) -> int:
+    def park_offer(self, ids, c: int, max_len: int, align: bool = True) -> int:
         """The parked anchor a prompt could resume at, when it beats the rows in place; else 0.
-        The head below the parked rows must be the rows in place: `ids` shares it with them."""
-        if not self.park_rows or not self.park_anchors or c < self.park_base:
+        The head below the parked rows must be the rows in place: `ids` shares it with them.
+
+        With a parked end anchor, its line when the prompt holds every token up to it, or (with
+        `align`: a client's copy, before the server's replay) when the copy continues the parked
+        conversation to it as the replay will serve it -- the hidden spans put back, or aligned
+        by the server's end alignment on the parked rows and regions -- the tests an NVMe entry's
+        offer makes (engine/spill.py `Entry.offer`). Such a copy is served as the rows up to the
+        end and its own tail after it, so `max_len` (the copy's last position) does not bound it.
+        An end after images is not offered here: the caller set the rotary offset for the end in
+        place (`keep_end`)."""
+        pe = self.park_end
+        if not self.park_rows or (not self.park_anchors and pe is None) or c < self.park_base:
             return 0
         top = self.park_base + self.park_rows
         m = min(len(ids), top)
@@ -1759,12 +1846,55 @@ class ResidentPrefix:
         if cp <= self.park_base:
             return 0
         bk = max((b for b in self.park_anchors if b <= min(cp, max_len)), default=0)
+        if pe is not None and not pe.get("mm"):
+            e = int(pe["at"])
+            if cp >= e and e <= max_len:
+                bk = e
+            elif align and cp < e and self._continues_park(ids):
+                bk = e
         return bk if bk > self.best(c, max_len) else 0
+
+    def _continues_park(self, ids) -> bool:
+        """Whether the server's replay serves `ids` from the parked end anchor."""
+        pe = self.park_end
+        e = int(pe["at"])
+        if pe["hidden"]:
+            out, spans = ResidentPrefix.replay(_EndRows(pe, self.park_tokens, self.glue), list(ids))
+            if spans and len(out) > e:
+                return True
+        if self.park_align is None:
+            return False
+        try:
+            return bool(self.park_align(self.park_tokens, pe, self.park_regions, list(ids)))
+        except Exception:                                          # noqa: BLE001
+            return False
+
+    def unpark_end(self, eng, drafter, ids, max_len: int) -> int:
+        """Before the server's replay: the parked conversation back in place when the client's
+        copy `ids` continues it to its end anchor and that beats every other cache in RAM, so the
+        replay (hidden spans, end alignment) works on its rows and the prefill resumes at its end.
+        The same order as an NVMe entry's restore (engine/spill.py `maybe_restore`, which calls
+        this when no entry beats it). Returns the end's line, 0 when nothing moved."""
+        pe = self.park_end
+        if pe is None or not self.park_rows or self._stash is not None:
+            return 0
+        e = int(pe["at"])
+        c = self.common(ids)
+        if self.park_offer(ids, c, max_len) != e:
+            return 0
+        if e <= max(self.end_offer(c, max_len), self.pin_offer(ids, c, max_len)):
+            return 0
+        if not self.unpark(eng, drafter) or self.end is None or int(self.end["at"]) != e:
+            return 0
+        self.stats["park_tokens_reused"] += e
+        return e
 
     def unpark(self, eng, drafter) -> bool:
         """Make the parked prompt the resident one, and park the resident one in its place: the
-        two sets of rows are swapped a block at a time, and so are the anchors. False, and
-        nothing changed, if the buffers the rows came from are not the ones in service any more."""
+        two sets of rows are swapped a block at a time, and so are the anchors and the end anchors
+        (the one in place is parked with its rows when they fit the park's buffers, as `_park`
+        parks it). False, and nothing changed, if the buffers the rows came from are not the ones
+        in service any more."""
         views = _kv_views(eng, drafter)
         if (self._park_views is None or len(views) != len(self._park_views)
                 or any(a is not b or x != y
@@ -1772,15 +1902,22 @@ class ResidentPrefix:
             self.stats["park_refused"] += 1
             return False
         self._stash = None
-        self._drop_end()
         base, ra = self.park_base, self.park_rows
         cap = self._park_bufs[0].shape[views[0][1]]
-        above = sorted(b for b in self.anchors if base < b <= min(self.valid, base + cap))
         # the prompt in place is parked in turn unless it is the parked one's own session
-        rb = (above[-1] - base) if above and (self.owner is None
-                                              or self.owner != self.park_owner) else 0
-        if rb < self.chunk:
-            rb = 0
+        other = self.owner is None or self.owner != self.park_owner
+        end_b = self._end_to_park(base, cap) if other else None
+        regions_b = self._end_regions() if end_b is not None else []
+        if end_b is not None:
+            above = sorted(b for b in self.anchors if base < b <= self.valid)
+            rb = self.valid - base
+            self.end = None                # it moves to the park below, its buffers too
+        else:
+            self._drop_end()
+            above = sorted(b for b in self.anchors if base < b <= min(self.valid, base + cap))
+            rb = (above[-1] - base) if above and other else 0
+            if rb < self.chunk:
+                rb = 0
         step = 4 * self.chunk
         for (t, ax), buf in zip(views, self._park_bufs):
             both = min(ra, rb)
@@ -1795,11 +1932,19 @@ class ResidentPrefix:
                 t.narrow(ax, base + rb, ra - rb).copy_(buf.narrow(ax, rb, ra - rb))
         back, back_tokens, back_owner = self.park_anchors, self.park_tokens, self.park_owner
         back_taint = self.park_taint
+        back_end, back_regions = self.park_end, self.park_regions
         self.park_anchors = {}
+        self.park_end, self.park_regions = None, []
         if rb:
-            for b in above[-self.park_anchor_max:]:
+            k = self.park_anchor_max - (end_b is not None)
+            for b in (above[-k:] if k > 0 else []):
                 self.park_anchors[b] = self.anchors.pop(b)
                 self._allocated -= 1
+            if end_b is not None:
+                self.park_end = self._parked_end(end_b, self._end_bufs)
+                self.park_regions = regions_b
+                self._end_bufs = None
+                self.stats["park_ends"] += 1
             self.park_tokens = list(self.tokens[:base + rb])
             self.park_rows, self.park_owner = rb, self.owner
             self.park_taint = (self.taint if self.taint is not None and self.taint < base + rb
@@ -1817,9 +1962,36 @@ class ResidentPrefix:
         self.valid = base + ra
         self.owner = back_owner
         self.taint = back_taint
+        if back_end is not None:
+            self._adopt_parked_end(eng, back_end, back_regions)
         self._trim_pool()
         self.stats["park_hits"] += 1
         return True
+
+    def _adopt_parked_end(self, eng, pe: dict, regions: list) -> None:
+        """The parked end anchor is the end in place again: its buffers become the end's (or are
+        copied into the end's own and join the free list), its served notes and the alignment's
+        regions come back with it."""
+        pair = pe["pair"]
+        if self._end_bufs is None and self.end_on:
+            self._end_bufs, pair = pair, None
+        got = self.adopt_end(eng, pe)
+        if got is not None and pair is not None:
+            got[0].copy_(pair[0])
+            got[1].copy_(pair[1])
+        if pair is not None:
+            self._free.append(pair)
+            self._allocated += 1
+        if got is None:
+            return
+        if pe.get("served_hidden") is not None:
+            self.end["served_hidden"] = list(pe["served_hidden"])
+        if self.end_adopt is not None:
+            try:
+                self.end_adopt(self, regions)
+            except Exception:                                      # noqa: BLE001
+                pass
+        self.stats["park_end_hits"] += 1
 
     def drop_session(self, session: str | None) -> int:
         """A compaction of `session` started: its parked rows go. Returns the bytes."""
@@ -1872,7 +2044,9 @@ class ResidentPrefix:
     def shed_park(self, safe: bool = False) -> int:
         freed = sum(b.numel() * b.element_size() for b in (self._park_bufs or []))
         freed += len(self.park_anchors) * self._anchor_bytes
+        freed += sum(_nbytes(x) for x in (self.park_end or {}).get("pair", ()))
         self.park_anchors = {}
+        self.park_end, self.park_regions = None, []
         self._park_bufs, self._park_views = None, None
         self.park_tokens, self.park_base, self.park_rows, self.park_owner = [], 0, 0, None
         self.park_taint = None
@@ -1928,6 +2102,7 @@ class ResidentPrefix:
     @property
     def park_bytes(self) -> int:
         park = sum(b.numel() * b.element_size() for b in (self._park_bufs or []))
+        park += sum(_nbytes(x) for x in (self.park_end or {}).get("pair", ()))
         return park + len(self.park_anchors) * self._anchor_bytes
 
     @property
@@ -1963,11 +2138,21 @@ class ResidentPrefix:
                 "park_base": self.park_base, "park_rows": self.park_rows,
                 "park_owner": _short(self.park_owner),
                 "park_anchor_list": sorted(self.park_anchors),
+                "park_end_at": self.park_end["at"] if self.park_end else None,
                 "end_on": self.end_on, "end_at": self.end["at"] if self.end else None,
                 "end_hidden": sum(len(h) for _, h in self.end["hidden"]) if self.end else 0,
                 "end_bytes": self.end_bytes, "taint": self.taint,
                 "last_switch": self.switches[-1] if self.switches else None,
                 "switch_list": list(self.switches), **self.stats}
+
+
+class _EndRows:
+    """What `ResidentPrefix.replay` reads of a conversation that is not in place (the park's):
+    its end anchor, its rows' tokens, the server's whitespace tokens."""
+
+    def __init__(self, end, tokens, glue):
+        self.end, self.tokens, self.glue = end, tokens, glue
+        self.stats = {"end_replayed": 0}
 
 
 def _short(session: str | None) -> str | None:
@@ -2077,7 +2262,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         b = res.best(c, n - 1)
         was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
-    bk = res.park_offer(keys, c, n - 1) if res is not None else 0
+    # the server has replayed the client's copy already: the park's end only for every token
+    bk = res.park_offer(keys, c, n - 1, align=False) if res is not None else 0
     be = res.end_offer(c, n - 1, mm_ok=end_mm) if res is not None else 0
     hit, via, dh = None, None, None
     if store is not None:
@@ -2101,7 +2287,9 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         if via is not None:
             c = res.common(keys)
             b = res.best(c, n - 1)
-            res.stats[f"{via}_tokens_reused"] += b
+            # the parked end came back with its rows (`unpark`); the pin brings none
+            be = res.end_offer(c, n - 1)
+            res.stats[f"{via}_tokens_reused"] += max(b, be)
         elif store is not None:
             hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
     if dh is not None:
@@ -2109,7 +2297,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     elif hit is not None:
         L, entry = hit
         start, kind = L, entry.kind
-    elif be and via is None:
+    elif be:
         start, kind = be, "end"
     elif b > 0:
         start, kind = b, "resident"

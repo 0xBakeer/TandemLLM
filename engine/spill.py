@@ -361,6 +361,8 @@ class SessionSpill:
         # SRV-269: (tokens, end, extra, keys) -> whether the server's end alignment serves `keys`
         # from an entry's end anchor (a copy that left the earlier answers' reasoning out)
         self.offer_align = None
+        # the parked conversation's `extra` (its end's regions as the park kept them)
+        self.park_extra_of = None
         # SRV-269: the entry a restore is about to read; no sweep evicts it (the switch save of
         # the resident conversation before the read used to, at a full budget)
         self._keep: set[str] = set()
@@ -684,8 +686,10 @@ class SessionSpill:
 
     def save_park(self, res, eng, drafter, reason: str) -> dict | None:
         """The parked conversation: its head is the rows in place (the resident prompt shares it),
-        the rest the park's buffers."""
-        if not res.park_rows or not res.park_anchors or res._park_bufs is None:
+        the rest the park's buffers; its end anchor (engine/cache.py `_park`) and that end's
+        regions when the park kept one."""
+        pe = getattr(res, "park_end", None)
+        if not res.park_rows or (not res.park_anchors and pe is None) or res._park_bufs is None:
             return None
         base, top = int(res.park_base), int(res.park_base + res.park_rows)
         if res.common(res.park_tokens[:base]) < base or len(res.park_tokens) < top:
@@ -704,9 +708,22 @@ class SessionSpill:
                 a = max(s, base)
                 out.append((a - s, res._park_bufs[i].narrow(ax, a - base, s + r - a)))
             return out
+        end = extra = None
+        if pe is not None and int(pe["at"]) == top:
+            end = {"at": top, "hidden": [[int(p), [int(x) for x in h]] for p, h in pe["hidden"]],
+                   "mark": pe.get("mark"), "pair": pe["pair"]}
+            if pe.get("mm") or pe.get("delta"):
+                end.update(delta=int(pe.get("delta") or 0), mm=bool(pe.get("mm")))
+            if self.park_extra_of is not None:
+                try:
+                    extra = self.park_extra_of(res)
+                except Exception:                                  # noqa: BLE001
+                    extra = None
+        if end is None and not res.park_anchors:
+            return None
         return self._save(eng, drafter, tokens=res.park_tokens[:top], n=top, rows_from=rows_from,
-                          anchors=dict(res.park_anchors), end=None, taint=res.park_taint,
-                          owner=res.park_owner, reason=reason, extra=None, resident=False)
+                          anchors=dict(res.park_anchors), end=end, taint=res.park_taint,
+                          owner=res.park_owner, reason=reason, extra=extra, resident=False)
 
     def _extra(self, res) -> dict | None:
         if self.extra_of is None:
@@ -985,32 +1002,64 @@ class SessionSpill:
         _fsync_dir(path)
 
     # --- reading ------------------------------------------------------------------------------
-    def candidate(self, res, keys, max_len: int, replay: bool = False, mm_ok: bool = False):
+    def candidate(self, res, keys, max_len: int, replay: bool = False, mm_ok: bool = False,
+                  miss: dict | None = None):
         """(entry, line, the line the caches in RAM offer) for the entry a prompt should be served
-        from, or None: it must beat them by more than a chunk and by more than its read costs."""
+        from, or None: it must beat them by more than a chunk and by more than its read costs.
+
+        With `replay` (the server's copy, before its replay), what RAM offers counts the resident
+        end anchor as the replay will serve it: with the hidden spans put back, or aligned by the
+        end alignment. The alignment was asked of the entries only (SRV-269): a chat restored
+        from the NVMe once and continued by an Open WebUI copy (its reasoning left out) restored
+        the same entry again in place on every later turn (live 2026-10-08: `[spill] restore
+        blocks_read=0 blocks_in_place=87 ms=398`, ten times in ten minutes, 0.4 s on each TTFT),
+        because the resident's own aligned end did not count. The parked end is asked the same.
+
+        `miss` (a dict): filled with the entry that shares the most with `keys` (at least four
+        chunks) among those that hold more of it than RAM serves and were not served, with why
+        (`_unserved`)."""
         if not self.entries:
             return None
         c = res.common(keys)
         here = max(res.best(c, max_len), res.end_offer(c, max_len, mm_ok=mm_ok),
-                   res.pin_offer(keys, c, max_len), res.park_offer(keys, c, max_len))
-        if replay and res.end is not None and res.end.get("hidden") and here < res.end["at"] \
-                and res.end["at"] <= max_len:
+                   res.pin_offer(keys, c, max_len), res.park_offer(keys, c, max_len, align=replay))
+        end = res.end
+        if replay and end is not None and here < end["at"]:
+            e = int(end["at"])
             from engine.cache import ResidentPrefix
-            if ResidentPrefix.replay(_Shim(res.end, res.tokens, res.glue), list(keys))[1]:
-                here = int(res.end["at"])
+            if (end.get("hidden") and e <= max_len and ResidentPrefix.replay(
+                    _Shim(end, res.tokens, res.glue), list(keys))[1]):
+                here = e
+            elif self.offer_align is not None and not (end.get("mm") and not mm_ok):
+                try:
+                    if self.offer_align(res.tokens[:e], end, self._extra(res), list(keys)):
+                        here = e
+                except Exception:                                  # noqa: BLE001
+                    pass
         best = None
         with self.lock:
             entries = list(self.entries.values())
+
+        def note(e, line, why):
+            if miss is None:
+                return
+            s = _common(keys, e.tokens)
+            if (s >= 4 * self.chunk and max(s, line) > here + self.chunk
+                    and s > miss.get("shares", -1)):
+                miss.update(eid=e.eid, owner=_short(e.man.get("owner")), tokens=e.valid,
+                            shares=s, offer=line, ram=here, why=why)
         for e in entries:
             if e.valid <= here + self.chunk:
                 continue
             line = e.offer(keys, max_len, res.glue, replay, mm_ok=mm_ok,
                            align=self.offer_align if replay else None)
             if line <= here + self.chunk:
+                note(e, line, _why_not(e, line, mm_ok))
                 continue
             need = sum(int(b["bytes"]) for b in e.man["blocks"] if b["b"] + b["rows"] > c)
             if need / self.read_bps >= (line - here) / self.prefill_tok_s:
                 self._count("refused", "slow")
+                note(e, line, "slow")
                 continue
             if best is None or line > best[1]:
                 best = (e, line, here)
@@ -1019,15 +1068,26 @@ class SessionSpill:
     def maybe_restore(self, res, eng, drafter, keys, max_len: int, replay: bool = False,
                       disk=None, mm_ok: bool = False) -> dict | None:
         """Serve `keys` from an entry when one beats the caches in RAM: the resident conversation
-        written first when it is worth keeping, then the entry's rows read in place."""
-        if res is None or not self.entries:
+        written first when it is worth keeping, then the entry's rows read in place. With
+        `replay` (the server's call before its replay), when no entry does: the parked
+        conversation back in place when the copy continues it to its end anchor
+        (engine/cache.py `unpark_end`), and one line when an entry that shares a long head with
+        the prompt serves none of it (`unserved`)."""
+        if res is None or (not self.entries and getattr(res, "park_end", None) is None):
             return None
         if res._stash is not None:
             if disk is not None:
                 cache_fence(disk, 0)
             res.settle_guest(eng)
-        got = self.candidate(res, keys, max_len, replay, mm_ok=mm_ok)
+        miss = {} if replay and len(keys) >= self.min_tokens else None
+        got = self.candidate(res, keys, max_len, replay, mm_ok=mm_ok, miss=miss)
         if got is None:
+            if miss:
+                self._unserved(miss)
+            if replay and res.park_end is not None:
+                if disk is not None:
+                    cache_fence(disk, 0)       # the swap writes rows a disk job may be copying
+                res.unpark_end(eng, drafter, keys, max_len)
             return None
         e, line, here = got
         if (res.valid >= self.min_tokens and (res.owner is None or res.owner != e.man.get("owner"))
@@ -1040,6 +1100,22 @@ class SessionSpill:
             finally:
                 self._keep.discard(e.eid)
         return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here)
+
+    def _unserved(self, m: dict) -> None:
+        """A long prompt no entry served although one shares a long head with it: one line, so a
+        cold re-read is not silent (it was: nothing was logged when a 60k-token copy found no
+        entry). `why`: the entry's end anchor was not reached and the alignment refused the copy
+        (end_no_align), the entry has no end and its anchors lie below what RAM serves
+        (anchors_below), the read would cost more than the re-read (slow, counted where the rule
+        refuses), or its line does not beat RAM's by a chunk (short). Numbers only."""
+        if m["why"] != "slow":
+            self._count("refused", m["why"])
+        print(f"[spill] no entry served: eid={m['eid']} owner={m['owner']} tokens={m['tokens']} "
+              f"shares={m['shares']} offer={m['offer']} ram={m['ram']} why={m['why']}",
+              flush=True)
+        with self.lock:
+            self.events.append({"kind": "unserved", "ts": round(self.clock(), 3), **m})
+            del self.events[:-30]
 
     def restore(self, res, eng, drafter, e: Entry, disk=None, line: int = 0,
                 here: int = 0) -> dict | None:
@@ -1235,6 +1311,16 @@ def _tsha(tokens: list[int]) -> str:
 
 def _short(s):
     return None if s is None else (s if len(s) <= 12 else s[:12] + "…")
+
+
+def _why_not(e: Entry, line: int, mm_ok: bool) -> str:
+    """Why entry `e`'s `line` did not beat what RAM serves (`SessionSpill._unserved`)."""
+    end = e.man.get("end")
+    if end is not None and end.get("mm") and not mm_ok:
+        end = None
+    if end is None:
+        return "anchors_below"
+    return "end_no_align" if line < int(end["at"]) else "short"
 
 
 def _cancel(futs: dict) -> None:

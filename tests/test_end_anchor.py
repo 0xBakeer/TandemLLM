@@ -33,7 +33,7 @@ back where they sit (`replay`), as the router replays its notes.
   6  a guest between the turns keeps the end anchor; a guest's own generation keeps none
   7  memory: one buffer pair, asked of the `Budget` at level `end`, given back after the body
      anchors and before the stash; a safe shed keeps a held anchor
-  8  the pin and the park carry their rows' line; the end anchor goes with its rows
+  8  the pin and the park carry their rows' line; the end anchor goes to the park with its rows
   9  off: nothing is kept, and every prefill restores what it restored without the anchor
   10 the length router's mark: the arm the latch released is inherited, as a session snapshot's
   11 through the handler: the replay, `usage.prompt_tokens` the client's, and the request after
@@ -612,7 +612,9 @@ def test_the_park_carries_the_line_and_the_end_goes_with_its_rows():
     assert res.end is not None and res.end["at"] == len(b) + 9  # B's own end
     _, pre, _ = turn(nxt_a + tokens(5, seed=74), 4, session="A")
     assert pre["kind"] == "resident" and res.taint == len(a), (pre, res.taint)
-    assert res.park_owner == "B" and res.park_taint is None
+    # B is parked up to its end, with it: the rows its generation wrote are a session's
+    assert res.park_owner == "B" and res.park_taint == len(b), res.park_taint
+    assert res.park_end is not None and res.park_end["at"] == len(b) + 9
 
 
 def test_the_pin_carries_the_line():

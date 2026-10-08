@@ -29,6 +29,11 @@ have resumed had the rows never left (the end anchor), and writes the same greed
   9  SRV-269: a chat whose client leaves the earlier answers' reasoning out (Open WebUI) comes
      back from the NVMe: the restore's offer aligns the copy as the resume after it does; a copy
      changed in more than the reasoning reads nothing back
+  10 such a chat, read back once, is not read back again on its next turns: what RAM offers counts
+     the resident end as the alignment serves it; a parked end is asked the same, and comes back
+     before the replay through the server's hook
+  11 a long prompt no entry serves although one shares a long head with it: one line says why
+     (the end not reached and the alignment refused, no end, the read cost, a line too short)
 
 Run: python tests/test_session_spill.py
 """
@@ -692,6 +697,174 @@ def test_srv269_the_switch_save_never_evicts_the_entry_it_reads_next():
         assert ea.eid in sp.entries and sp.stats["refused"].get("room", 0) >= 1, sp.stats
         assert res.tokens[:res.valid] == ea.tokens[:res.valid] and res.valid == ea.valid
         t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 10. not read back again
+
+def test_fx16_a_restored_chat_continued_without_its_reasoning_is_not_restored_again():
+    """Live 0.4.7 (2026-10-08): after an Open WebUI chat came back from the NVMe, every later turn
+    restored the same entry again in place (`[spill] restore blocks_read=0 blocks_in_place=87
+    ms=398`, ten times in ten minutes): `candidate` asked the alignment of the entries, never of
+    the resident's own end, so the copy (the reasoning left out) looked like RAM held nothing of
+    it. RAM's offer now counts the aligned resident end; the entry is read only when it beats it."""
+    import test_end_align as EA
+    from server import diskcache
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        prompt = tokens(99, seed=93) + [EA.NL]
+        res, al, out, k = EA._thinking(prompt)
+        sp, t = _spill(d, res)
+        diskcache.wire_end_align(sp, al)
+        e = res.end["at"]
+        copy = prompt[:-1] + [EA.SP] + out[k:] + TOOL
+        sp.save_resident(res, app.STATE["engine"], None, "evict")
+        res.clear()
+        for tt, ax in cache._kv_views(app.STATE["engine"], None):
+            tt.fill_(0)
+        app._spill_before_replay(copy)
+        assert sp.stats["restores"] == 1, sp.stats
+        ids, _, aligned = app._end_replay(res, copy)
+        assert aligned
+        out2, pre, _ = turn(ids, 10)
+        assert pre["reused"] == e and pre["kind"] in ("spill", "end"), pre
+        assert out[k] not in out2, "this turn's answer has no reasoning of its own"
+        e2 = res.end["at"]
+        # the turn after, as Open WebUI sends it: still without the first answer's reasoning
+        copy3 = copy + out2 + TOOL2
+        events = len(sp.events)
+        app._spill_before_replay(copy3)
+        assert sp.stats["restores"] == 1, ("restored again", sp.stats["last_restore"])
+        assert not any(ev["kind"] == "restore" for ev in sp.events[events:])
+        assert res.end["at"] == e2
+        ids3, _, a3 = app._end_replay(res, copy3)
+        assert a3 and ids3[:e2] == res.tokens[:e2]
+        out3, pre3, _ = turn(ids3, 8)
+        assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
+        t.close()
+        assert out3 == EA._cold(ids3, 8), "the end anchor's gate: the same greedy tokens as cold"
+        return f"read back once at {e}; the next turn resumed at its end {e2} with no restore"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_fx16_a_parked_end_comes_back_through_the_servers_hook_not_an_entry():
+    """The server's hook before its replay (`_spill_before_replay` -> `maybe_restore`): when no
+    entry beats the parked end, the park comes back before the replay (engine/cache.py
+    `unpark_end`), so the copy without its reasoning resumes at the end; the parked end is
+    written to the NVMe with its regions when a third chat gives the park up."""
+    import test_end_align as EA
+    from server import diskcache, endalign
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        head = tokens(4 * CH, seed=110)
+        a = head + tokens(99, seed=111) + [EA.NL]
+        _state()
+        out0, _, _ = turn(a, 60, session="A")
+        k = next(i for i in range(12, 30) if out0[i] not in out0[:i] and out0[i] not in a
+                 and out0[i] not in (EA.NL, EA.SP))
+        res = _state(park_bytes=BIG, guest_max=10)
+        al = app.STATE["end_align"] = endalign.EndAlign(EA.tb_of({out0[k]: endalign.THINK_END}))
+        sp, t = _spill(d, res, min_tokens=10 ** 6)          # evictions park in RAM here
+        diskcache.wire_end_align(sp, al, res)
+        other = tokens(150, seed=102)                        # an entry of another chat on the disk
+        turn(other, 8, session="X")
+        sp.save_resident(res, app.STATE["engine"], None, "evict")
+        out, _, _ = turn(a, 60, session="A")
+        e = res.end["at"]
+        turn(head + tokens(140, seed=103), 8, session="B")
+        assert res.park_owner == "A" and res.park_end["at"] == e
+        copy = a[:-1] + [EA.SP] + out[k:] + TOOL
+        app._spill_before_replay(copy)
+        assert sp.stats["restores"] == 0 and res.owner == "A" and res.end["at"] == e, res.report()
+        ids, _, aligned = app._end_replay(res, copy)
+        assert aligned
+        out2, pre, _ = turn(ids, 8, session="A")
+        assert pre["kind"] == "end" and pre["reused"] == e, pre
+        assert res.stats["park_tokens_reused"] == e
+        # B is parked now, with its end; a third chat gives it up: to the NVMe, its end with it
+        e_b = res.park_end["at"]
+        turn(head + tokens(130, seed=104), 8, session="C")
+        b_entry = [x for x in sp.entries.values() if x.man["owner"] == "B"]
+        assert len(b_entry) == 1 and b_entry[0].man["end"]["at"] == e_b, sp.report()
+        assert b_entry[0].man["extra"]["end_regions"], b_entry[0].man["extra"]
+        t.close()
+        assert out2 == EA._cold(ids, 8), "the end anchor's gate: the same greedy tokens as cold"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------ 11. why no entry served
+
+def _unserved_run(d, copy_of, *, end=True, read_bps=None):
+    """A, written to the NVMe; the rows in place cleared; then `copy_of(prompt, out)` through the
+    server's hook. Returns (spill, the `no entry served` lines, the tier)."""
+    import contextlib
+    import io
+    res = _state(park_bytes=0, guest_max=40)
+    sp, t = _spill(d, res)
+    prompt = tokens(220, seed=105)
+    out, _, _ = turn(prompt, 40, session="A")
+    if not end:
+        res.shed_end()
+    sp.save_resident(res, app.STATE["engine"], None, "evict")
+    res.clear()
+    for tt, ax in cache._kv_views(app.STATE["engine"], None):
+        tt.fill_(0)
+    if read_bps is not None:
+        sp.read_bps = read_bps
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        app._spill_before_replay(copy_of(prompt, out))
+    lines = [x for x in buf.getvalue().splitlines() if x.startswith("[spill] no entry served:")]
+    return sp, lines, t
+
+
+def _changed_at_100(prompt, out):
+    """Ten tokens of the user message changed (not whitespace, not reasoning)."""
+    ch = [(x % 90) + 1 for x in tokens(10, seed=106)]
+    ch[0] = ch[0] % 90 + 1 if ch[0] == prompt[100] else ch[0]
+    assert ch[0] != prompt[100]
+    return prompt[:100] + ch + prompt[110:] + out + TOOL
+
+
+def test_fx16_no_entry_served_says_why_in_one_line():
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        sp, lines, t = _unserved_run(d, _changed_at_100)
+        assert len(lines) == 1, lines
+        eid = next(iter(sp.entries))
+        assert lines[0] == (f"[spill] no entry served: eid={eid} owner=A tokens={sp.entries[eid].valid} "
+                            "shares=100 offer=0 ram=0 why=end_no_align"), lines[0]
+        assert sp.stats["restores"] == 0 and not any(ev["kind"] == "restore" for ev in sp.events)
+        assert sp.stats["refused"].get("end_no_align") == 1, sp.stats["refused"]
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        sp, lines, t = _unserved_run(d, _changed_at_100, end=False)    # an entry without an end
+        assert len(lines) == 1 and lines[0].endswith("why=anchors_below"), lines
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        # the whole conversation, but a read that costs more than the re-read
+        sp, lines, t = _unserved_run(d, lambda p, o: p + o + TOOL, read_bps=1.0)
+        assert len(lines) == 1 and lines[0].endswith("why=slow"), lines
+        assert sp.stats["refused"].get("slow") == 1 and sp.stats["restores"] == 0
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp(prefix="qse-spill-")
+    try:
+        # served: no line
+        sp, lines, t = _unserved_run(d, lambda p, o: p + o + TOOL)
+        assert lines == [] and sp.stats["restores"] == 1, (lines, sp.stats)
+        t.close()
+        return "end_no_align, anchors_below and slow each one line; a served copy none"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
