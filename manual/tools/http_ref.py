@@ -197,6 +197,7 @@ HEADERS = [
     ("X-Engine-Stop", "out", "engine", "pattern-stop(<label>) on a response without a stream that a stop pattern ended"),
     ("x-session-id", "in", "both", "opencode's session id: the router's session and the caches' session key"),
     ("X-Conversation-Id", "in", "both", "a conversation id for clients that send no session field; read after the body's own ids"),
+    ("X-OpenWebUI-Chat-Id", "in", "both", "Open WebUI's chat id (a connection header with {{CHAT_ID}}): the router's session for that chat"),
     ("X-Request-Id", "both", "proxy", "sent to a vllm backend as px-<hex>, which the plugin reports back for the join; a client's own id is kept"),
     ("X-QSE-Client", "in", "engine", "dashboard marks the dashboard's own requests (client kind dashboard)"),
     ("X-Real-IP", "in", "both", "set by a reverse proxy; a request that carries it is never trusted as local; the sign-in's rate limit counts per address"),

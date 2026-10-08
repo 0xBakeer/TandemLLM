@@ -67,7 +67,7 @@ In the shipped router, which \code{ops/start.sh}\index{ops/start.sh@\texttt{ops/
 
 \begin{enumerate}
 \item Qwen itself, raw, thinking off, its answer constrained to the class ids by a choice grammar, taken at a confidence of 0.45 or more; every class's probability comes from the answer's first token and its alternatives, and a code class under 0.7 for a request that names a piece of prose (an essay, a letter, ``700 words'') and nothing of code gives way to the best class outside the code classes (\code{guard} in the journal; on 374 labelled prompts it changed two essays and nothing else);
-\item below that, the turn keeps the session's class, or on a session's first turn the profile's default class.
+\item below that, the turn keeps the session's class, or on a session's first turn the profile's default class, unless the top answer is a class that builds something (its policy names packages) and leads the second by 0.1: then the first turn takes it (\code{classifier.below_accept}). On 341 labelled prompts that rule turned two answers right and none wrong; one of the two was \enquote{Create a new folder and create there a pagoda garden} at three\_d 0.378, which had gone to chat (\measured).
 \end{enumerate}
 
 Asked who or what it is, the model names its model and that it runs in TandemLLM (``I'm Qwen3.8-27B, running in TandemLLM'') in the user's language: the router adds one hidden note on the turn whose message asks (English, German, French, Spanish, Italian, Dutch), replayed at its place on every later turn like the other notes, under every profile but \code{raw} and \code{bench}. \code{QWEN38_MODEL_NAME} names another checkpoint.
@@ -76,18 +76,20 @@ The decider stage, a decision model asked a \code{choice} question (Laya, Chapte
 
 No word list decides anything. The classifiers read a digest of the new user message, its head and its tail, sized to what each stage reads. Two more stages exist and are off by default in the router document: Qwen classifying inside the conversation the engine already holds (\code{classifier.context_stage}, for follow-ups and long prompts; every class is a single-letter token, so one forward's softmax is the answer), and a linear probe on Qwen's own hidden rows (\code{classifier.probe_stage}).
 
+An unsure deliverable is built and stated, not asked\index{reading line}. A class a classifier picks on the turn the class starts, below 0.8, with another class at 0.15 or more, both with a \code{reading} phrase in the router document (three\_d ``a 3D three.js scene'', design\_ui ``a flat web page'', drawing ``a 2D drawing''), gets one sentence in its note: build it as the picked class and open the answer with one short line such as ``Building it as a 3D three.js scene. Say if you wanted a flat web page.'', never a blocking question (\code{classifier.reading}, under the profile's \code{classify} decision; \code{mode: shadow} journals the sentence only). On 308 labelled prompts it fired on none, on 13 ambiguous ones on 7 (\measured, \code{tools/class_core_eval.py}).
+
 \begin{table}[htbp]
 \centering\small
-\caption{The router's shipped classes, with each class's effort and packages.}\label{tab:classes}
+\caption{The router's shipped classes, with each class's effort and packages. A package marked core goes in on every turn of the class.}\label{tab:classes}
 \begin{tabularx}{\linewidth}{@{}L{.13\linewidth}YL{.1\linewidth}L{.3\linewidth}@{}}
 \toprule
 \hd{class} & \hd{what} & \hd{effort} & \hd{packages} \\
 \midrule
-\code{code_edit} & write, change, refactor or extend code & xhigh & coding, testing, Laya's test skills, test-web, test-cli, test-api, test-data, test-lib \\
+\code{code_edit} & write, change, refactor or extend code & xhigh & coding (core), testing, Laya's test skills, test-web, test-cli, test-api, test-data, test-lib \\
 \code{debug} & find and fix a bug, a failing test, an error, a crash & xhigh & the same \\
 \code{design_ui} & the look of a page or an app & high & testing, Laya's, ui-design \\
 \code{drawing} & draw, paint or animate with code & high & testing, Laya's, three drawing skills \\
-\code{three_d} & a 3D scene or model & high & testing, Laya's, photo-to-3d, voxel-seasons \\
+\code{three_d} & a 3D scene or model & high & testing, Laya's, threejs-scene (core), photo-to-3d, voxel-seasons \\
 \code{writing} & prose: an essay, an email, documentation & medium & none \\
 \code{plan} & plan an approach before building & high & none \\
 \code{research} & look up, compare, explain & medium & none \\
@@ -129,7 +131,7 @@ The class's plan goes into the prompt as a hidden note: the effort sentence, the
 
 A later user message's note carries only the parts that no live note of the session holds with the same text (\code{QWEN38_NOTE_DEDUP}, \code{parts}): a coding message whose task skill differs from the last one's adds that skill, a few hundred tokens, and not the general packages again (about 4,800 tokens). The replayed notes have a budget (\code{injection.max_replay_tokens}, 16,000). Over it the oldest note goes, which changes the prompt at that note's position, and the turn reads everything after it again. In the test builds before this release every new task skill brought the whole note back, and the third copy crossed the budget: in an Open WebUI agent chat a turn read 35,442 tokens again (49~s). \code{block} keeps the old rule for an A/B.
 
-The router's session is the client's conversation id (opencode's \code{x-session-id}\index{x-session-id@\texttt{x-session-id}}), else a hash of the conversation's head: its messages up to and including the first user message, which every turn sends again.
+\label{sec:router-session}The router's session is the client's conversation id (opencode's \code{x-session-id}\index{x-session-id@\texttt{x-session-id}}; Open WebUI's \code{X-OpenWebUI-Chat-Id}\index{X-OpenWebUI-Chat-Id@\texttt{X-OpenWebUI-Chat-Id}} when its connection sends the chat id as a header), else a hash of the conversation's head: its messages up to and including the first user message, which every turn sends again. Every chat that opens with the same message has that hash, so a head holds a list of conversations: a conversation's very first turn starts a new one when the newest of that head has had a turn, and a later turn finds its own by a hash of its whole first turn as the client sends it back. Without this, a new agent chat was measured starting with 27 turns and 21,216 session tokens of earlier chats and their notes replayed. A first turn regenerated without an id cannot be told from a new chat and starts afresh, which costs it nothing. The decision row's \code{extra.session} says how the session was found (\code{id}, \code{new}, \code{continued}, \code{alias}). Prefer the connection header to \code{ENABLE_FORWARD_USER_INFO_HEADERS}, which sends the same id but also the user's name and email to every connection.
 
 \section{Side requests}\label{sec:side-requests}\index{side request}
 

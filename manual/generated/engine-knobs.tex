@@ -3,7 +3,7 @@
 \begin{reftable}{Every QWEN38\_* switch in engine/settings.py, with the value ops/serve.env sets}{tab:ref-knobs}{\hd{Variable} & \hd{Code default} & \hd{Served value \textbullet{} read in}}
 \texttt{QWEN38\_\allowbreak{}BLOCKING\_\allowbreak{}SYNC} & \texttt{0} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}CLIENT\_\allowbreak{}CWD} & \texttt{note} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
-\texttt{QWEN38\_\allowbreak{}CLIENT\_\allowbreak{}REASONING} & \texttt{open-\allowbreak{}webui=\allowbreak{}reasoning\_\allowbreak{}content} & \texttt{server/\allowbreak{}compat.py} \\
+\texttt{QWEN38\_\allowbreak{}CLIENT\_\allowbreak{}REASONING} & \texttt{*=\allowbreak{}reasoning\_\allowbreak{}content,\allowbreak{}hermes=\allowbreak{}tags} & \texttt{server/\allowbreak{}compat.py} \\
 \texttt{QWEN38\_\allowbreak{}COMMIT\_\allowbreak{}IN\_\allowbreak{}VERIFY} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}CORPUS} & \texttt{none} & \texttt{engine/\allowbreak{}drafters/\allowbreak{}ngram.py} \\
 \texttt{QWEN38\_\allowbreak{}DECIDER\_\allowbreak{}COLLATE} & \texttt{call} & \texttt{server/\allowbreak{}decider\_\allowbreak{}api.py} \\
@@ -27,6 +27,7 @@
 \texttt{QWEN38\_\allowbreak{}DRAFT\_\allowbreak{}TEMP} & \texttt{1.0} & \texttt{0.3} \textbullet{} \texttt{engine/\allowbreak{}drafters/\allowbreak{}dflash2.py} \\
 \texttt{QWEN38\_\allowbreak{}DSPARK} & \texttt{none} & \texttt{engine/\allowbreak{}drafters/\allowbreak{}dspark.py} \\
 \texttt{QWEN38\_\allowbreak{}DSPARK\_\allowbreak{}NO\_\allowbreak{}YARN} & \texttt{none} & \texttt{engine/\allowbreak{}drafters/\allowbreak{}dspark.py} \\
+\texttt{QWEN38\_\allowbreak{}END\_\allowbreak{}ALIGN\_\allowbreak{}REASONING} & \texttt{on} & \texttt{server/\allowbreak{}endalign.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}HEAD} & \texttt{none} & \texttt{engine/\allowbreak{}loader.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}TILES} & \texttt{none} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
 \texttt{QWEN38\_\allowbreak{}FUSED\_\allowbreak{}ADDNORM} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
@@ -105,6 +106,7 @@
 \texttt{QWEN38\_\allowbreak{}PROBE\_\allowbreak{}SNAPSHOTS} & \texttt{off} & \texttt{off} \textbullet{} \texttt{server/\allowbreak{}probe.py} \\
 \texttt{QWEN38\_\allowbreak{}RANKK} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}SCALE\_\allowbreak{}ON} & \texttt{weight} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
+\texttt{QWEN38\_\allowbreak{}SESSION\_\allowbreak{}GENERATIONS} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DIR} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DISK} & \texttt{none} & \texttt{auto} \textbullet{} \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DISK\_\allowbreak{}GB} & \texttt{20} & \texttt{20} \textbullet{} \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
@@ -113,6 +115,8 @@
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}MODEL} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}POOL\_\allowbreak{}SLACK\_\allowbreak{}GIB} & \texttt{2} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CONTINUE} & \texttt{view} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CONV} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}DISK} & \texttt{read} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}GUESTS} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}LDW} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}PDL} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
@@ -127,7 +131,9 @@
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}RHO} & \texttt{none} & \texttt{(a path)} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}SKIP} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}TABLES} & \texttt{none} & \texttt{(a path)} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
+\texttt{QWEN38\_\allowbreak{}STATUS\_\allowbreak{}CLIENTS} & \texttt{open-\allowbreak{}webui} & \texttt{server/\allowbreak{}conductor/\allowbreak{}states.py} \\
 \texttt{QWEN38\_\allowbreak{}SUFFIX\_\allowbreak{}STORE} & \texttt{\textasciitilde{}/\allowbreak{}.qwen38-\allowbreak{}spark-\allowbreak{}engine/\allowbreak{}suffix} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}TOOL\_\allowbreak{}FIT} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}TREE\_\allowbreak{}ALIAS\_\allowbreak{}STATE} & \texttt{0} & \texttt{0} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}TREE\_\allowbreak{}CHAIN\_\allowbreak{}DELEGATE} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}TREE\_\allowbreak{}HOST\_\allowbreak{}DEPTH} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\

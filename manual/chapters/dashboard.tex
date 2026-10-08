@@ -100,6 +100,8 @@ The proxy's registry: each backend's health, models, requests in flight and cost
 
 The engine's settings (its command line and every \code{QWEN38_*} and \code{QSE_*} variable, the home directory written as \code{~}, every token-like value redacted) and the machine's state: memory, GPU, caches, with 30 minutes of history kept in the browser. The memory plan shows the engine's own split (weights, KV pool, drafter caches, graphs, each read off the object that holds it), \code{MemAvailable}, every role with its claim and whether it fits now, the limits with what each holds, and the last refusal. Below them are the hosts: this machine with the engine's process and every backend on it, and each remote backend's machine, down to the GPU memory of its processes (Chapter~\ref{ch:hosts}).
 
+The engine card carries one neutral line, the speed check: \enquote{passed for 0.4.0 · <date>} when the build has a speed guard report (the release ships its own, \code{release/speed-guard.json}), \enquote{not run for this build} otherwise; the numbers are in its tooltip and on the Conductor's Compare screen. It is no warning: the speed guard is the release process's check, not something to act on in the dashboard.
+
 \screenshot{dashboard-system}{The System view: the engine, the memory, the GPU, the queue, the caches and the machine. Demo data from the dashboard's mock server (\texttt{npm run preview:mock}), not a measurement.}{fig:shot-system}
 
 \section{The contract}\index{dashboard contract}

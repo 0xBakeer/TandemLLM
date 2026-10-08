@@ -634,6 +634,11 @@ LEDGER_NOTES = {
     "engine_finish": "the backend engine's own finish reason", "corrupted": "vLLM's NaN check",
     "l2_join": "exact or approximate join of the plugin's numbers",
     "wait_own_ms": "ms the request waited behind the engine's own work (the shadow reader, a summary written ahead, the conductor's question)",
+    "parent_request": "the turn an internal row served (the router's question names the turn it routes)",
+    "slot": "the engine's sequence slot with --parallel N (0 the main slot, 1 and up a side slot); null without",
+    "engine_cached": "the prompt tokens the engine read from a cache, the hidden notes included (cached_tokens counts the client's among them)",
+    "forwarded_tokens": "what the prefill forwarded, hidden tokens included",
+    "wait_mem_ms": "ms the parallel memory admission held the request (inside queue_ms)",
 }
 
 
@@ -665,6 +670,12 @@ def gen_ledger(root: str) -> str:
             v = 4
         if name == "wait_own_ms":
             v = 5
+        if name == "parent_request":
+            v = 6
+        if name == "slot":
+            v = 7
+        if name == "engine_cached":
+            v = 8
         version_of[name] = str(v)
         cols.append((name, kind, str(v)))
     lines = [HEADER, r"\begin{reftable}{The usage ledger's requests table (schema version "
