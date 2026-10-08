@@ -798,7 +798,7 @@
    "title": "Write message",
    "kind": "skill",
    "source": "skill:write-message",
-   "description": "Draft an email, text or chat message that the user will send to someone else - a boss, colleague, landlord, teacher, customer, friend or family - or a reply to a message the user received, with the right tone (formal, friendly, firm, apologetic), the right length, and ready to send. Not for how you yourself should answer the user (an instruction to reply with one word, OK, yes or no, or in a set format).",
+   "description": "Compose a message from the user to someone they name - an email, a text, a chat or WhatsApp message to a boss, colleague, landlord, teacher, customer, friend or family member - with the right tone (formal, friendly, firm, apologetic) and length, ready for the user to copy and send.",
    "body": "",
    "max_tokens": 850,
    "enabled": true,
@@ -1121,6 +1121,16 @@
    "description": "Tell whether a message, call, email, text, link, website, job offer, shop, investment or request for money is likely a scam, and what to do now - and give plain-language security help - passwords, two-step login, a hacked account, a lost phone, what to share online - for a person who is not technical.",
    "body": "",
    "max_tokens": 1300,
+   "enabled": true,
+   "requires_tools": []
+  },
+  "reply-format": {
+   "title": "Reply format",
+   "kind": "skill",
+   "source": "skill:reply-format",
+   "description": "An instruction about the form of your own reply, with nothing to write for anyone else: reply with one word, just OK, yes or no, a number, a set format or language, shorter or longer, no tools.",
+   "body": "",
+   "max_tokens": 290,
    "enabled": true,
    "requires_tools": []
   }

@@ -2,14 +2,16 @@
 
 One package per folder, `<name>/SKILL.md`, the same SKILL.md format as `packages/library/` (frontmatter `name`, `description`; the whole body goes in, there is no `## Reference`). These are not library skills (no `library: true`, not searched by the library index): each is a candidate of the router classes a plain chat lands on (`writing`, `plan`, `research`, `summarize`, `chat`; `tech-troubleshoot` also `debug`), chosen by the package question from its `description`, and `everyday-core` goes in whole on each of those classes (`general`). None needs a tool (`requires_tools: []`): the answer carries the whole result, so they fit a chat without a shell. Written for small models: numbered steps, concrete defaults, one worked example, Do and Don't, an output template, a self-check line, at most one clarifying question.
 
-Count: 34 packages, 28837 tokens in all (the engine family's tokenizer; chars/3.5 decides `max_tokens`, the server's cut). Eval sets: `evals/<name>.json` (5 to 8 prompts in English, German and Arabic, a 5-line rubric) for the before/after run.
+Count: 35 packages: PKG2's 34, 28837 tokens in all, and PKG3's reply-format (about 267) (the engine family's tokenizer; chars/3.5 decides `max_tokens`, the server's cut). Eval sets: `evals/<name>.json` (5 to 8 prompts in English, German and Arabic, a 5-line rubric) for the before/after run.
 
 | name | description | tokens | max_tokens | classes |
 |-|-|-|-|-|
 | **Core** | | | | |
 | everyday-core | How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, at most one question, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class. | 393 | 550 | writing, plan, research, summarize, chat (general) |
+| **Reply form** | | | | |
+| reply-format | An instruction about the form of your own reply, with nothing to write for anyone else: reply with one word, just OK, yes or no, a number, a set format or language, shorter or longer, no tools. | 267 | 290 | chat (all prose classes through EVERYDAY_ALL) |
 | **Writing** | | | | |
-| write-message | Write or reply to an email, text or chat message for the user - to a boss, colleague, landlord, teacher, customer, friend or family - with the right tone (formal, friendly, firm, apologetic), the right length, and ready to send. | 682 | 850 | writing |
+| write-message | Compose a message from the user to someone they name - an email, a text, a chat or WhatsApp message to a boss, colleague, landlord, teacher, customer, friend or family member - with the right tone (formal, friendly, firm, apologetic) and length, ready for the user to copy and send. | 682 | 850 | writing |
 | formal-letter | Write an official letter to an authority, company, landlord, insurer, school or employer - a cancellation, complaint, objection, refund request, application, notice or request for information - in the formal layout of the user's country, with the facts, the demand and a deadline. | 779 | 950 | writing |
 | cv-cover-letter | Write or improve a CV (resume), a cover letter, a job application email, a LinkedIn summary or an answer to "tell me about yourself" - from the user's experience and the job advert, with results in numbers and nothing invented. | 764 | 950 | writing |
 | rewrite-text | Rewrite a text the user gives - make it shorter, longer, simpler, more formal, friendlier, clearer or more persuasive, or change it for a new audience - keeping its meaning and facts, and showing the result ready to use. | 655 | 800 | writing, summarize |

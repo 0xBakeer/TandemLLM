@@ -177,7 +177,8 @@
       "summarize-text",
       "language-practice",
       "gift-ideas",
-      "parenting-help"
+      "parenting-help",
+      "reply-format"
      ],
      "rules": []
     }
@@ -223,7 +224,8 @@
       "summarize-text",
       "language-practice",
       "gift-ideas",
-      "parenting-help"
+      "parenting-help",
+      "reply-format"
      ],
      "rules": []
     }
@@ -269,7 +271,8 @@
       "summarize-text",
       "language-practice",
       "gift-ideas",
-      "parenting-help"
+      "parenting-help",
+      "reply-format"
      ],
      "rules": []
     }
@@ -314,7 +317,8 @@
       "summarize-text",
       "language-practice",
       "gift-ideas",
-      "parenting-help"
+      "parenting-help",
+      "reply-format"
      ],
      "rules": []
     }
@@ -359,7 +363,8 @@
       "summarize-text",
       "language-practice",
       "gift-ideas",
-      "parenting-help"
+      "parenting-help",
+      "reply-format"
      ],
      "rules": []
     }

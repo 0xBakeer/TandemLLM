@@ -481,7 +481,7 @@ EVERYDAY: dict[str, list[str]] = {
                   "rewrite-text"],
     "chat": ["everyday-core", "explain-simply", "language-practice", "gift-ideas",
              "parenting-help", "health-info", "security-scam", "translate", "recipe-cooking",
-             "difficult-conversation"],
+             "difficult-conversation", "reply-format"],
     "debug": ["tech-troubleshoot"],
 }
 # PKG3 (2026-10-08, measured): router v19 sent 106 of the 210 everyday eval prompts to chat (the
@@ -490,7 +490,9 @@ EVERYDAY: dict[str, list[str]] = {
 # of 106 (none 51, wrong 17); over all 33 everyday packages 94 (none 6, wrong 6). Three class-
 # description rewrites routed better but moved the pagoda prompt to code_edit (SRV-255): the lists
 # widen instead. Every prose class offers the whole everyday set; the home lists above stay as the
-# packages' own classes (manifests, INDEX.md)
+# packages' own classes (manifests, INDEX.md). `reply-format` (last, as measured) takes an
+# instruction about the reply itself ("Reply with just: OK" picked write-message live): about 267
+# tokens instead of a whole package
 EVERYDAY_ALL: list[str] = list(dict.fromkeys(
     p for k in ("writing", "plan", "research", "summarize", "chat") for p in EVERYDAY[k]
     if p != "everyday-core"))
