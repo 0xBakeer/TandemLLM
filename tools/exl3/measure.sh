@@ -36,7 +36,7 @@ for bpw in $TARGETS; do
   hb=$(head_bits $bpw)
   el "optimize $bpw bpw, head $hb bits"
   python3 $EXL3_SRC/sc_optimize.py -m $CAL/noise_attrib.json -b $bpw -hb $hb -al 2.0 -mink 2 -ks 1.0 \
-      -o $CAL/recipes/recipe_$bpw.yaml -t $CAL/recipes/table_$bpw.json 2>&1 | tee $CAL/recipes/optimize_$bpw.txt
+      -o $CAL/recipes/recipe_$bpw.yaml 2>&1   # no -t: upstream builds the table with range() over the float --min_k and crashes | tee $CAL/recipes/optimize_$bpw.txt
 done
 python3 - $CAL/recipes <<'PY'
 import sys, os, yaml, json, collections
