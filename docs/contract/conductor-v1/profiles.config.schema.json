@@ -129,6 +129,12 @@
             },
             "maxItems": 48
           },
+          "package_sticky": {
+            "enum": [
+              "class",
+              "message"
+            ]
+          },
           "core": {
             "type": "array",
             "items": {

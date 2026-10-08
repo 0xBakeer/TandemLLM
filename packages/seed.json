@@ -789,7 +789,7 @@
    "source": "skill:everyday-core",
    "description": "How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, assumptions stated instead of questions, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class.",
    "body": "",
-   "max_tokens": 550,
+   "max_tokens": 650,
    "enabled": true,
    "requires_tools": [],
    "general": true

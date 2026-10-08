@@ -1197,6 +1197,7 @@ class Router:
                   "core": list(ov["core"] if "core" in ov else base.get("core", [])),
                   "rules": list(ov["rules"] if "rules" in ov else base.get("rules", [])),
                   "note": ov.get("note") or base.get("note") or "",
+                  "package_sticky": ov.get("package_sticky") or base.get("package_sticky"),
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
         self._size(plan, router, prof, sh, sess, policy, row)
@@ -1458,7 +1459,7 @@ class Router:
                 held = sess.package_pick.get(("class", cls))
                 if hit is None and held is not None and held[0] in cands and \
                         not getattr(plan, "class_new", True) and \
-                        schema.package_sticky(router) == "class":
+                        schema.package_sticky(router, policy) == "class":
                     hit = (held[0], "sticky")
                 if hit is not None:
                     chosen, how = hit

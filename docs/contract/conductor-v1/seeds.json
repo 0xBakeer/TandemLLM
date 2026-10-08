@@ -2445,6 +2445,12 @@
            },
            "maxItems": 48
           },
+          "package_sticky": {
+           "enum": [
+            "class",
+            "message"
+           ]
+          },
           "core": {
            "type": "array",
            "items": {
@@ -2539,6 +2545,12 @@
         "type": "number",
         "minimum": 0,
         "maximum": 1
+       },
+       "package_sticky": {
+        "enum": [
+         "class",
+         "message"
+        ]
        },
        "qwen_prompt": {
         "type": "string",
@@ -3731,6 +3743,12 @@
           "pattern": "^[a-z][a-z0-9_-]{0,39}$"
          },
          "maxItems": 48
+        },
+        "package_sticky": {
+         "enum": [
+          "class",
+          "message"
+         ]
         },
         "core": {
          "type": "array",

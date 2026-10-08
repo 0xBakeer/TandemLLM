@@ -556,22 +556,22 @@ SHIPPED_ROUTER: dict = {
                         "a letter, a post or documentation text.",
          "policy": {"effort": "medium", "packages": CORE_PACKAGES + ["everyday-core"]
                     + EVERYDAY_ALL,
-                    "rules": []}},
+                    "rules": [], "package_sticky": "class"}},
         {"id": "plan", "label": "Plan",
          "description": "Plan an approach, a design or an architecture before building it, or "
                         "break the work into steps.",
          "policy": {"effort": "high", "packages": CORE_PACKAGES + ["everyday-core"]
                     + EVERYDAY_ALL,
-                    "rules": []}},
+                    "rules": [], "package_sticky": "class"}},
         {"id": "research", "label": "Research",
          "description": "Look something up, compare options, or explain how something works.",
          "policy": {"effort": "medium", "packages": CORE_PACKAGES + ["everyday-core"]
                     + EVERYDAY_ALL,
-                    "rules": []}},
+                    "rules": [], "package_sticky": "class"}},
         {"id": "summarize", "label": "Summarize",
          "description": "Summarize, shorten or pull the key points out of text that is given, or "
                         "compress a conversation.",
-         "policy": {"effort": "off", "packages": ["everyday-core"] + EVERYDAY_ALL, "rules": []}},
+         "policy": {"effort": "off", "packages": ["everyday-core"] + EVERYDAY_ALL, "rules": [], "package_sticky": "class"}},
         {"id": "chat", "label": "Chat",
          # SRV-235: an instruction about the reply itself ("Reply with just: OK") is chat; on 308
          # labelled prompts and 20 short opencode messages the class question went 286 -> 297 of 328
@@ -581,7 +581,7 @@ SHIPPED_ROUTER: dict = {
          # medium since router v12 (2026-10-03): a question that fell to chat at Qwen's 0.47 was
          # an essay
          "policy": {"effort": "medium", "packages": CHAT_CORE + ["everyday-core"] + EVERYDAY_ALL,
-                    "rules": []}},
+                    "rules": [], "package_sticky": "class"}},
     ],
     "classifier": {
         "stages": [
@@ -1306,15 +1306,21 @@ def tool_fit(router: dict) -> dict:
 #: package it picked stays the pick for the follow-ups while the class question keeps the session's
 #: class; the question is asked again when the class question moves the session to another class,
 #: and after an answer of none (a later message may fit a package). `message`: asked again for
-#: every new user message, as 0.4.6 did (2.4k tokens, 0.55 s warm, 3.3 s on slot 0; UX3 W02 re-asked
-#: "make it shorter" and got the package the note already held)
+#: every new user message. The prose classes (34 everyday options, 2.4k tokens, 0.55 s warm and
+#: 3.3 s on slot 0; UX3 W02 re-asked "make it shorter" and got the package the note already held)
+#: take `class`; a coding session's next message is often another task with another skill
+#: (lib -> cli, tests/test_note_dedup.py), so the coding classes keep `message`
 PACKAGE_STICKY = ("class", "message")
 
 
-def package_sticky(router: dict) -> str:
-    """The router's `classifier.package_sticky`; a router stored before FX15 has none: `class`."""
+def package_sticky(router: dict, policy: dict | None = None) -> str:
+    """The class policy's `package_sticky`, else the router's `classifier.package_sticky`, else
+    `message` (every router and class before FX15)."""
+    v = (policy or {}).get("package_sticky")
+    if v in PACKAGE_STICKY:
+        return v
     v = (router.get("classifier") or {}).get("package_sticky")
-    return v if v in PACKAGE_STICKY else "class"
+    return v if v in PACKAGE_STICKY else "message"
 
 
 def package_prompt(router: dict) -> str | None:
@@ -1394,6 +1400,9 @@ POLICY = _obj({"effort": {"enum": list(EFFORTS)},
                # OPS-39: 16, the coding classes list 13 with tandem-core and render-tools
                # PKG3: 48, the prose classes offer the whole everyday set (35 with the cores)
                "packages": {"type": "array", "items": _ID, "maxItems": 48},
+               # FX15: how long the package question's answer holds on this class (`class`,
+               # `message`); absent: the classifier's `package_sticky` (`package_sticky`)
+               "package_sticky": {"enum": list(PACKAGE_STICKY)},
                # FX6: the class's core skills, always in on a turn of the class (like a general
                # package, but for this class alone); one not in `packages` is ignored
                "core": {"type": "array", "items": _ID, "maxItems": 4},
@@ -1493,8 +1502,7 @@ SCHEMAS: dict[str, dict] = {
             "context_line": {"type": "boolean"},
             "package_question": {"type": "string", "minLength": 4, "maxLength": 400},
             "package_accept": _PROB,
-            # FX15: `class` = a package picked for a class stays the session's pick for that
-            # class's follow-ups; `message` = asked again for every new user message (0.4.6)
+            # FX15: the default of the classes' `policy.package_sticky` (absent: `message`)
             "package_sticky": {"enum": list(PACKAGE_STICKY)},
             "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
             "package_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},

@@ -12,9 +12,10 @@ The test matrix:
      that class (`how: sticky`); the package question is not asked again
   2  the class question moves the session to another class: the package question is asked again
   3  after an answer of none the next message asks again (it may fit a package)
-  4  `classifier.package_sticky: message` asks on every new user message, as 0.4.6 did
-  5  the schema takes `package_sticky` (class, message) and refuses another value; a router without
-     it is `class`
+  4  a class without `policy.package_sticky` (the coding classes) asks on every new user message,
+     as 0.4.6 did; `classifier.package_sticky` is the classes' default
+  5  the schema takes `package_sticky` (class, message) on a class policy and on the classifier and
+     refuses another value; the shipped router sets `class` on the five prose classes only
 
 Run: python tests/test_package_sticky.py
 """
@@ -67,21 +68,33 @@ def _asked(q) -> int:
     return sum(1 for _, _, o in q.calls if "none" in o)
 
 
-def _set_sticky(cond, mode):
+def _set_sticky(cond, mode, where="three_d"):
+    """`mode` on the class `where`'s policy, or on the classifier when `where` is None."""
     _, r = cond.store.get("router")
     r = copy.deepcopy(r)
-    r["classifier"]["package_sticky"] = mode
+    if where is None:
+        r["classifier"]["package_sticky"] = mode
+    else:
+        for c in r["classes"]:
+            if c["id"] == where:
+                c["policy"]["package_sticky"] = mode
     cond.store.put("router", None, r, note="fx15", author="t")
+
+
+def _make(s):
+    cond, q = make(qwen_fn=s)
+    _set_sticky(cond, "class")
+    return cond, q
 
 
 # ------------------------------------------------------------------ 1
 def test_a_follow_up_in_the_same_class_keeps_the_pick_without_asking():
     s = Script()
-    cond, q = make(qwen_fn=s)
+    cond, q = _make(s)
     p1, = _session(cond, "s-fx15-1", [PAGODA])
     assert p1.row["extra"]["package_choice"]["chosen"] == "photo-to-3d"
     assert _asked(q) == 1
-    cond2, q2 = make(qwen_fn=s)
+    cond2, q2 = _make(s)
     plans = _session(cond2, "s-fx15-1b", [PAGODA, "Make the pagoda taller.", "Add a koi pond."])
     for p in plans[1:]:
         ch = p.row["extra"]["package_choice"]
@@ -93,7 +106,7 @@ def test_a_follow_up_in_the_same_class_keeps_the_pick_without_asking():
 # ------------------------------------------------------------------ 2
 def test_a_new_class_asks_again():
     s = Script()
-    cond, q = make(qwen_fn=s)
+    cond, q = _make(s)
     _session(cond, "s-fx15-2", [PAGODA])
     assert _asked(q) == 1
     s.cls[0] = "chat"
@@ -120,7 +133,7 @@ def test_a_new_class_asks_again():
 # ------------------------------------------------------------------ 3
 def test_after_none_the_next_message_asks_again():
     s = Script(pkg=("none", 0.9))
-    cond, q = make(qwen_fn=s)
+    cond, q = _make(s)
     plans = _session(cond, "s-fx15-3", [PAGODA, "Now build it with voxels."])
     assert plans[0].row["extra"]["package_choice"]["chosen"] is None
     assert _asked(q) == 2
@@ -132,27 +145,43 @@ def test_after_none_the_next_message_asks_again():
 # ------------------------------------------------------------------ 4
 def test_message_mode_asks_on_every_message():
     s = Script()
-    cond, q = make(qwen_fn=s)
-    _set_sticky(cond, "message")
+    cond, q = make(qwen_fn=s)                    # no policy: `message`, as 0.4.6 and coding
     plans = _session(cond, "s-fx15-4", [PAGODA, "Make the pagoda taller.", "Add a koi pond."])
     assert _asked(q) == 3
     assert all(p.row["extra"]["package_choice"]["how"] != "sticky" for p in plans)
+    # the classifier's default reaches a class without its own
+    cond, q = make(qwen_fn=s)
+    _set_sticky(cond, "class", where=None)
+    _session(cond, "s-fx15-4b", [PAGODA, "Make the pagoda taller."])
+    assert _asked(q) == 1
+    # the class's own value wins over the classifier's
+    cond, q = make(qwen_fn=s)
+    _set_sticky(cond, "class", where=None)
+    _set_sticky(cond, "message")
+    _session(cond, "s-fx15-4c", [PAGODA, "Make the pagoda taller."])
+    assert _asked(q) == 2
 
 
 # ------------------------------------------------------------------ 5
 def test_schema():
     pk = copy.deepcopy(schema.SHIPPED_PACKAGES)
     r = copy.deepcopy(schema.SHIPPED_ROUTER)
-    assert "package_sticky" not in r["classifier"] and schema.package_sticky(r) == "class"
+    assert "package_sticky" not in r["classifier"] and schema.package_sticky(r) == "message"
+    sticky = {c["id"] for c in r["classes"]
+              if schema.package_sticky(r, c["policy"]) == "class"}
+    assert sticky == {"writing", "plan", "research", "summarize", "chat"}, sticky
     for mode in ("class", "message"):
         r2 = copy.deepcopy(r)
         r2["classifier"]["package_sticky"] = mode
+        r2["classes"][0]["policy"]["package_sticky"] = mode
         assert schema.check("router", r2, packages=pk) == [], schema.check("router", r2,
                                                                           packages=pk)
         assert schema.package_sticky(r2) == mode
-    r2 = copy.deepcopy(r)
-    r2["classifier"]["package_sticky"] = "turn"
-    assert any("package_sticky" in e for e in schema.check("router", r2, packages=pk))
+    for where in ("classifier", "policy"):
+        r2 = copy.deepcopy(r)
+        (r2["classifier"] if where == "classifier" else r2["classes"][0]["policy"])[
+            "package_sticky"] = "turn"
+        assert any("package_sticky" in e for e in schema.check("router", r2, packages=pk)), where
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ Count: 35 packages: PKG2's 34, 29050 tokens in all (FX15 wording, 2026-10-08), a
 | name | description | tokens | max_tokens | classes |
 |-|-|-|-|-|
 | **Core** | | | | |
-| everyday-core | How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, assumptions stated instead of questions, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class. | 481 | 550 | writing, plan, research, summarize, chat (general) |
+| everyday-core | How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, assumptions stated instead of questions, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class. | 481 | 650 | writing, plan, research, summarize, chat (general) |
 | **Reply form** | | | | |
 | reply-format | An instruction about the form of your own reply, with nothing to write for anyone else: reply with one word, just OK, yes or no, a number, a set format or language, shorter or longer, no tools. | 244 | 290 | chat (all prose classes through EVERYDAY_ALL) |
 | **Writing** | | | | |

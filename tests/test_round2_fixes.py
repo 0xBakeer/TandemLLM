@@ -398,12 +398,16 @@ def test_package_texts_round2():
     # (and edits 15-17 of 0.3.51 reword the hook's end and the final line: undone too)
     shipped = testing
     # (and edit 30 of 0.4.5 adds the progress-lines bullet after the quirk rule: undone too)
+    # (and edit 34 of 0.4.7 rewords the scratch rule and the leftover rule: undone too)
+    testing = testing.replace(pm.SCRATCH_RULE_V3, pm.SCRATCH_RULE).replace(pm.LEFTOVER_NEW,
+                                                                           pm.LEFTOVER_OLD)
     testing = (testing.replace("\n- " + pm.PROGRESS_LINE, "").replace("\n" + pm.TOOLS_QUIRK_RULE, "")
                .replace(pm.FINISH_NEW + "\n" + pm.OVERLAY_RULE, pm.FINISH_OLD)
                .replace(pm.STATE_SAY_NEW, pm.STATE_SAY_OLD))
     r351 = ["testing: the state hook goes without a word", "testing: the final message is for the user",
             "testing: check-only overlays go before done", "testing: test-tool quirks stay out",
-            "all text: plans and progress lines name no Laya"]
+            "all text: plans and progress lines name no Laya",
+            "testing: scratch marked, deleted only when made", "testing: a leftover is reused, never deleted"]
     v43 = (testing.replace(pm.CHECK_ONE_NEW, pm.CHECK_ONE_OLD).replace(pm.QUOTE_NEW, pm.QUOTE_OLD)
            .replace(pm.PAGE_CMD_NEW, pm.PAGE_CMD_OLD)
            .replace(pm.VERIFY_NEW, pm.VERIFY_OLD)

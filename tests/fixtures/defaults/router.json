@@ -180,7 +180,8 @@
       "parenting-help",
       "reply-format"
      ],
-     "rules": []
+     "rules": [],
+     "package_sticky": "class"
     }
    },
    {
@@ -227,7 +228,8 @@
       "parenting-help",
       "reply-format"
      ],
-     "rules": []
+     "rules": [],
+     "package_sticky": "class"
     }
    },
    {
@@ -274,7 +276,8 @@
       "parenting-help",
       "reply-format"
      ],
-     "rules": []
+     "rules": [],
+     "package_sticky": "class"
     }
    },
    {
@@ -320,7 +323,8 @@
       "parenting-help",
       "reply-format"
      ],
-     "rules": []
+     "rules": [],
+     "package_sticky": "class"
     }
    },
    {
@@ -366,7 +370,8 @@
       "parenting-help",
       "reply-format"
      ],
-     "rules": []
+     "rules": [],
+     "package_sticky": "class"
     }
    }
   ],
