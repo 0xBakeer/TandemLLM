@@ -59,7 +59,7 @@ PY
 }
 
 run() {   # $1 = name, $2 = timeout, rest = command; detached, labelled, token via --secrets
-  local name=$1 timeout=$2; shift 2
+  local name=${1//./p} timeout=$2; shift 2   # job names and labels allow [a-zA-Z0-9_-] only: 6.0 -> 6p0
   echo "+ hf jobs run --flavor $FLAVOR --timeout $timeout --name $name  $*"
   hf jobs run --detach --flavor "$FLAVOR" --timeout "$timeout" --name "$name" \
       -l program=exl3 -l stage="${name#tandem-exl3-}" --secrets HF_TOKEN $VOL ${ENVS[@]+"${ENVS[@]}"} \
