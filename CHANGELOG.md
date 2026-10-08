@@ -4,7 +4,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## 0.4.7-test, 2026-10-08
 
-0.4.6-test (b7be6e8) with the fixes for UX3's first regressions (FX15) and PKG3's measured package documents (v25-v27, router v21, below). The package texts go in as the box's packages v28 (`tools/packages_migrate.py --put`, edit 34, and the everyday skill copies), the router as v22 (`package_sticky: class` on the five prose classes). `~/rollback-0.4.7.sh` restores packages v27, router v21 and the skill copies and returns the box to 0.4.6-test.
+0.4.6-test (b7be6e8) with the fixes for UX3's first regressions (FX15) and PKG3's measured package documents (v25-v27, router v21, below). The package texts go in as the box's packages v28 (`tools/packages_migrate.py --put`, edit 34, and the everyday skill copies), the router as v22 (`package_sticky: class` on the five prose classes). `~/rollback-0.4.7.sh` restores packages v27, router v21 and the skill copies and returns the box to 0.4.6-test. Speed guard short gate (2026-10-08, store off, one run a side, same hour): release 0.3.0 50.38 -> 0.4.7-test 49.93 tok/s mean (-0.9 %), 93.73 -> 93.74 ms a round; no noise estimate by design.
 
 ### A deploy that only registers a knob keeps the disk's heads and conversations (FX15)
 
