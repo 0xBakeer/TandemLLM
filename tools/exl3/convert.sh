@@ -85,6 +85,7 @@ fi
 
 # ---- quality checks, each non-fatal. The BF16 reference numbers come from PREP (bf16_ref.json).
 el "checks"
+bdown cal $CAL   # again: a convert launched while PREP still ran gets the held-out files PREP wrote later
 python3 $EXL3_SRC/eval/ppl.py -m $OUT -t $CAL/heldout_rows.safetensors 2>&1 | tee $Q/ppl_rows.txt || el "WARN ppl rows failed"
 python3 $EXL3_SRC/eval/ppl.py -m $OUT -t $CAL/qbench_prompts_gen.json 2>&1 | tee $Q/ppl_trace.txt || el "WARN ppl trace failed"
 # wikitext-2 (public, standard, disjoint from the trace): KLD both ways and top-K agreement vs BF16
