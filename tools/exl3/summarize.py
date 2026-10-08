@@ -16,7 +16,7 @@ def read(path):
 
 
 def ppl_of(text):
-    m = re.findall(r"perplexity:\s*([0-9.]+)", text)
+    m = re.findall(r"perplexity:\s*([0-9.]+)", text, re.I)   # ppl.py prints " -- Perplexity: 2.70"
     return float(m[-1]) if m else None
 
 
