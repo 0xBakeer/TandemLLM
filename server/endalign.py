@@ -269,11 +269,15 @@ class EndAlign:
                 self.last_omitted = [(a, t) for a, _, t in self.regions(res) if t > a]
         if got is None and self.moved and self.marks is not None:
             # FX16: a block the client put into an earlier message and moved to its last one
-            moved = self._moved_spans(res, copy)
+            # FX17: first with the router's notes in the copy (the router keeps them live by
+            # their message), then without them (the notes dropped: served as hidden)
+            moved, absent = self._moved_spans(res, copy), False
+            if not moved:
+                moved, absent = self._moved_spans(res, copy, notes_absent=True), True
             if moved:
-                got = self._walk(res, copy, False, moved=moved)
+                got = self._walk(res, copy, False, moved=moved, notes_absent=absent)
                 if got is None and thinks:
-                    got = self._walk(res, copy, True, moved=moved)
+                    got = self._walk(res, copy, True, moved=moved, notes_absent=absent)
                     if got is not None:
                         self.stats["aligned_reasoning"] += 1
                         self.stats["reasoning_tokens"] += got[2]
@@ -297,7 +301,7 @@ class EndAlign:
                              "at": int(at) if at is not None else None}
         return None
 
-    def _moved_spans(self, res, copy: list[int]) -> list[tuple[int, int]]:
+    def _moved_spans(self, res, copy: list[int], notes_absent: bool = False) -> list[tuple[int, int]]:
         """FX16 (2026-10-08 12:14:30, live): Open WebUI puts its retrieval block ("### Task:
         Respond to the user query using the provided context ... <context>...</context>") into the
         LAST user message of every request. In a tool loop the user message is the first one, so
@@ -344,7 +348,7 @@ class EndAlign:
         # message here, and served as hidden by the walk (`_served_hidden`). With the block
         # gone the notes' hash no longer matches and the router does not put them back, so
         # the copy's message lacks both
-        served = self._served_hidden(res)
+        served = self._served_hidden(res) if notes_absent else []
         spans: list[tuple[int, int]] = []
         for (ra, rb), (ca, cb) in zip(rm, cm[:len(rm)]):
             rt, ct = rows[ra:rb], copy[ca:cb]
@@ -389,7 +393,7 @@ class EndAlign:
                 out.append((a, b))
         return out
 
-    def _walk(self, res, copy: list[int], omit: bool, moved=()):
+    def _walk(self, res, copy: list[int], omit: bool, moved=(), notes_absent: bool = False):
         end = res.end
         e, rows = int(end["at"]), res.tokens
         regs = self.regions(res)
@@ -404,7 +408,7 @@ class EndAlign:
         left = 0
         # the moved runs, and with them the notes the client never sent, which the router
         # does not put back once the prompt changed before them
-        extra = list(moved) + (self._served_hidden(res) if moved else [])
+        extra = list(moved) + (self._served_hidden(res) if moved and notes_absent else [])
         for a, b in extra:
             hid.update(range(a, b))
             while a > 0 and not _bare(self.tbytes(rows[a - 1])):

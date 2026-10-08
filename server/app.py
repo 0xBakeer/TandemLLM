@@ -715,6 +715,15 @@ SIDE_NEW_FIRST = (_S.get("SIDE_NEW_FIRST") or "on").strip().lower()
 #: (`_carry_from_side`) or read again
 SIDE_HOME_WAIT_S = float(_S.get("SIDE_HOME_WAIT_S") or 10.0)
 
+#: FX17: a new chat of at most SIDE_NEW_SHORT rendered tokens (plus the margins) beside a long
+#: resident conversation waits SIDE_NEW_WAIT_S for a busy side slot before it takes slot 0, where
+#: it would send the long conversation to the NVMe (restorable, about 3 s, but its next turn
+#: then waits behind the new chat's). The rule: the eviction costs the long chat's next turn, the
+#: wait costs only the new chat's first token, and a new chat's first answer is rarely urgent
+#: within 20 s; a long new chat does not wait (it would not fit a busy side slot's leftovers)
+SIDE_NEW_WAIT_S = float(_S.get("SIDE_NEW_WAIT_S") or 20.0)
+SIDE_NEW_SHORT = 16384
+
 #: FX16: a side slot's own resident prefix (engine/cache.py `ResidentPrefix`): the anchors it may
 #: hold (GB; 0 builds none, the 0.4.7 slot with no conversation of its own), the stash that keeps
 #: its conversation under a guest (GB), with the end anchor on when slot 0's is
@@ -886,6 +895,10 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             other = head < conv if conv is not None else head < valid - chunk
             if other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
                 why["prefer_side"] = valid
+                if len(ids) <= SIDE_NEW_SHORT:
+                    # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
+                    # takes slot 0 and sends the long conversation to the NVMe
+                    why["prefer_side_wait"] = True
         except Exception:                                          # noqa: BLE001
             pass
     return need
@@ -5871,15 +5884,36 @@ class Handler(BaseHTTPRequestHandler):
                     with par._lk:
                         key = "guest_side" if par_why.get("guest") else "new_side"
                         par.stats[key] = par.stats.get(key, 0) + 1
-            if not got and home is None:
+            new_wait = bool(par_why.get("prefer_side_wait")) and not got and side_need is not None
+            if not got and home is None and not new_wait:
                 got = _take(me, None)
-            if not got and home is None and side_need is not None and _side_ok(0.0, _own_holder()):
+            if (not got and home is None and not new_wait and side_need is not None
+                    and _side_ok(0.0, _own_holder())):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
                 if got:
                     side.no_carry = bool(me["own"]) or lane_kind is not None
             micro = not got and lane_kind is not None
             while not got and not micro:
+                if new_wait:
+                    # FX17: the side slot first, for SIDE_NEW_WAIT_S; then slot 0 as before
+                    side = par.take_side(side_need, owner=cid,
+                                         keep_carry_s=CARRY_KEEP_S if SIDE_CARRY != "off" else 0.0)
+                    got = side is not None
+                    if got:
+                        side.no_carry = bool(me["own"]) or lane_kind is not None
+                        with par._lk:
+                            par.stats["new_side"] = par.stats.get("new_side", 0) + 1
+                        break
+                    if time.monotonic() - t_wait < SIDE_NEW_WAIT_S:
+                        time.sleep(0.1)
+                        if self._client_gone():
+                            left = True
+                            rec.client_gone_at = time.perf_counter()
+                            break
+                        continue
+                    new_wait = False
+                    par_why["new_wait"] = round(time.monotonic() - t_wait, 1)
                 if home is not None:
                     side = par.take_slot(int(home), side_need, owner=cid)
                     got = side is not None
@@ -5962,7 +5996,8 @@ class Handler(BaseHTTPRequestHandler):
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "home", "home_wait", "prefer_side")
+                                                          "home", "home_wait", "prefer_side",
+                                                          "new_wait")
                             if k in par_why)
             if side is not None:
                 # A request that shares only the client's head with slot 0's
@@ -8393,6 +8428,10 @@ def _load(a) -> None:
     with torch.no_grad():
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
                              4, set()))
+        # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
+        # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
+        # first two chats queued 24 s behind the router's cold questions)
+        _warm_prefill(generate_stream, tok, STATE.get("resident"))
     led.mark("warmup")
     # the verify graphs for every width at the first context class, here rather than
     # inside the first requests (one capture is a fraction of a second, thirty are several)
@@ -8498,6 +8537,31 @@ def _side_const_gb(a) -> float:
     return 7.5 if getattr(a, "side_graphs", "on") == "on" else SIDE_CONST_NO_GRAPHS_GB
 
 
+#: FX17: the warm-up prefill's length: past two chunks of the grid (1,024) plus a tail, the shape
+#: of the router's package question (about 2,400 tokens) and of a short chat's first turn
+WARM_PREFILL_TOKENS = int(_S.get("WARM_PREFILL_TOKENS") or 2600)
+
+
+def _warm_prefill(gen, tok, res=None) -> None:
+    """A warm-up generation over a WARM_PREFILL_TOKENS-token prompt on the slot the caller bound:
+    the prefill kernels at their chunk-sized shapes and the tail, and one block. Never fails a
+    start; `QWEN38_WARM_PREFILL_TOKENS=0` skips it."""
+    n = int(WARM_PREFILL_TOKENS)
+    if n <= 0:
+        return
+    try:
+        import torch
+        words = tok("warm up the kernels ", add_special_tokens=False).input_ids
+        ids = (words * (n // max(1, len(words)) + 1))[:n]
+        t0 = time.time()
+        list(gen(torch.tensor(ids, dtype=torch.long).cuda(), 2, set()))
+        if res is not None:
+            res.clear()                      # the warm-up's rows are nobody's conversation
+        print(f"[server] warm-up prefill of {n} tokens in {time.time() - t0:.1f}s", flush=True)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[server] warm-up prefill skipped: {type(exc).__name__}: {exc}", flush=True)
+
+
 def _side_resident(a, tok):
     """FX16: a side slot's own resident prefix (engine/cache.py `ResidentPrefix`), or None with
     `QSE_SIDE_RESIDENT_GB=0` or when slot 0 has none. The anchors it holds, its stash for a guest
@@ -8590,6 +8654,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
             with torch.no_grad():
                 list(_generate_stream(tok("warm up the kernels", return_tensors="pt")
                                       .input_ids[0].cuda(), 4, set()))
+                _warm_prefill(_generate_stream, tok, res_i)    # FX17: the router's question shape
                 if a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
                     e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
                                           else range(2, 17))

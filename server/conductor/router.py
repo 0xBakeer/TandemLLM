@@ -65,6 +65,25 @@ CLIENT_CWD = (_S.get("CLIENT_CWD") or "note").strip().lower()
 #: FX5b: `parts`: a class's note leaves out the parts a live note already holds with the same text
 #: (`Plan._fresh_block`); `block`: the whole note whenever its key is new
 NOTE_DEDUP = (_S.get("NOTE_DEDUP") or "parts").strip().lower()
+
+#: FX17: `on`: a note whose prefix hash broke stays live when its user message still ends with
+#: the same client tokens (`inject.locate_anchor`); `off`: the prefix hash alone (0.4.8-test)
+NOTE_ANCHOR = (_S.get("NOTE_ANCHOR") or "on").strip().lower()
+_MARKS: dict = {}
+
+
+def _marks(tok):
+    """The template's marks for `inject.message_anchor`, once per tokenizer."""
+    key = id(tok)
+    if key not in _MARKS:
+        try:
+            im_s = inject.special_id(tok, "<|im_start|>")
+            user = list(tok.encode("user", add_special_tokens=False))
+            _MARKS[key] = (im_s, user, inject.special_id(tok, inject.IM_END)) if (
+                im_s is not None and user) else None
+        except Exception:                                          # noqa: BLE001
+            _MARKS[key] = None
+    return _MARKS[key]
 #: SRV-243: `on`: a package whose steps need a tool the request does not offer (a shell, a file
 #: write) stays out of the turn, or its `fallback` goes in, and the turn says which tools it has;
 #: `off`: the packages chosen as before, whatever the tools
@@ -158,13 +177,22 @@ class Injection:
     """One note in a session: where it sits in the client's prompt and what it is."""
 
     __slots__ = ("pos", "hash", "ids", "text", "parts", "kinds", "key", "turn", "at", "row",
-                 "shas")
+                 "shas", "anchor")
 
-    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None):
+    def __init__(self, pos, hsh, ids, text, parts, kinds, key, turn, row, shas=None, anchor=None):
         self.pos, self.hash, self.ids, self.text = pos, hsh, ids, text
         self.parts, self.kinds, self.key, self.turn, self.row = parts, kinds, key, turn, row
         self.shas = shas          # each part's text hash, in `parts`' order (`Plan._fresh_block`)
+        self.anchor = anchor      # FX17: `inject.message_anchor`, the note's place by its message
         self.at = time.time()
+
+    def moved_to(self, pos: int, hsh: str) -> "Injection":
+        """FX17: the same note at a new insertion point (the client changed the prompt before
+        its message without touching the message's end)."""
+        n = Injection(pos, hsh, self.ids, self.text, self.parts, self.kinds, self.key, self.turn,
+                      self.row, self.shas, self.anchor)
+        n.at = self.at
+        return n
 
 
 class Session:
@@ -373,12 +401,13 @@ class Plan:
         im_end = inject.special_id(tok, inject.IM_END)
         at = inject.insertion_point(ids, im_end)
         notes, adds = [], []
+        marks = _marks(tok)
         if at is None:
             if sess.notes or self.block is not None or self.extras:
                 self.row["extra"].setdefault("errors", []).append("no_insertion_point")
         else:
             with sess.lock:
-                live, hashes = self._live(ids, at)
+                live, hashes = self._live(ids, at, marks=marks, im_end=im_end)
                 cap = int(inj_cfg.get("max_note_tokens", 8000))
                 keys = {n.key for n in live}
                 block = self.block
@@ -393,7 +422,8 @@ class Plan:
                     else:
                         adds.append((Injection(at, hashes[at], nids, text, block["parts"],
                                                block["kinds"], block["key"], sess.turns,
-                                               self.row["id"], shas=block.get("shas")),
+                                               self.row["id"], shas=block.get("shas"),
+                                               anchor=inject.message_anchor(ids, at, marks)),
                                      block["reason"]))
                 # J1: the outcome's note and the cards, after the class's block; a card goes in
                 # only while no live note carries the same card (the first turn, after a
@@ -410,7 +440,9 @@ class Plan:
                             f"note_too_long:{len(nids)}")
                         continue
                     adds.append((Injection(at, hashes[at], nids, text, x["parts"], x["kinds"],
-                                           x["key"], sess.turns, self.row["id"]), x["reason"]))
+                                           x["key"], sess.turns, self.row["id"],
+                                           anchor=inject.message_anchor(ids, at, marks)),
+                                 x["reason"]))
                     parts |= {(p["kind"], p["name"]) for p in x["parts"]}
                 notes = live + [n for n, _ in adds]
                 sess.notes = notes
@@ -468,18 +500,35 @@ class Plan:
                     parts=[it["part"] for it in fresh], shas=[it["sha"] for it in fresh],
                     kinds={it["kind"] for it in fresh}, items=fresh)
 
-    def _live(self, ids: list[int], at: int) -> tuple[list, dict]:
+    def _live(self, ids: list[int], at: int, marks=None, im_end=None) -> tuple[list, dict]:
         """The session's earlier notes this prompt still carries the text before (their
         decision types on, the newest within `max_replay_tokens`), and the prefix hashes.
-        Called with the session's lock held."""
+        Called with the session's lock held.
+
+        FX17: a note whose prefix hash broke is kept when its message is still there: the
+        ordinal-th user message ends with the same client tokens (`inject.locate_anchor`); it
+        moves to that message's new end. Open WebUI's retrieval block leaving an earlier message
+        (the 2026-10-08 12:14:30 turn: 4 notes dropped, 8,306 tokens put in again) no longer
+        drops the session's notes. `QWEN38_NOTE_ANCHOR=off` is the prefix hash alone."""
         inj_cfg = (self.router_cfg or {}).get("injection") or {}
         sess = self.session
         positions = [n.pos for n in sess.notes if n.pos <= at] + [at]
         hashes = inject.hashes_at(ids, positions)
         live = []
+        moved = 0
         for n in sess.notes:
             if n.pos > at or hashes.get(n.pos) != n.hash:
-                continue                          # the prompt parted before the note
+                if NOTE_ANCHOR == "on" and n.anchor is not None:
+                    p = inject.locate_anchor(ids, n.anchor, marks, im_end)
+                    if p is not None and p <= at:
+                        if p not in hashes:
+                            hashes.update(inject.hashes_at(ids, [p]))
+                        n = n.moved_to(p, hashes[p])
+                        moved += 1
+                    else:
+                        continue                  # the prompt parted before the note
+                else:
+                    continue                      # the prompt parted before the note
             if not inj_cfg.get("replay", True):
                 continue
             if any(self.decisions.get(k) != "on" for k in n.kinds):
@@ -488,6 +537,8 @@ class Plan:
         budget = int(inj_cfg.get("max_replay_tokens", 16000))
         while live and sum(len(n.ids) for n in live) > budget:
             live.pop(0)                           # the oldest goes first
+        if moved and self.row is not None:
+            self.row["extra"]["notes_moved"] = moved
         return live, hashes
 
     def replayed_ids(self, ids: list[int], tok) -> list[int]:
@@ -500,7 +551,8 @@ class Plan:
         if at is None:
             return list(ids)
         with self.session.lock:
-            live, _ = self._live(ids, at)
+            live, _ = self._live(ids, at, marks=_marks(tok),
+                                 im_end=inject.special_id(tok, inject.IM_END))
         return inject.splice(ids, [(n.pos, n.ids) for n in live])[0] if live else list(ids)
 
     def probe_row(self, prompt, tok) -> int | None:

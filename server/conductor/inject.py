@@ -61,6 +61,72 @@ def content_row(at: int | None, notes=()) -> int | None:
     return at - 1 + sum(len(n.ids) for n in notes or () if n.pos < at)
 
 
+#: FX17: how many of the client's tokens right before a note's insertion point make its anchor
+ANCHOR_TAIL = 32
+#: the least of a message's own tokens that must match when the message is shorter than the tail
+ANCHOR_MIN = 4
+
+
+def message_anchor(ids: list[int], at: int, marks) -> tuple | None:
+    """FX17: a note's place in the prompt that survives a change BEFORE it: the ordinal of the
+    user message it closes (counted by the template's `<|im_start|>user` marks) and the last
+    `ANCHOR_TAIL` client tokens before the insertion point (the user's own words). Open WebUI moves
+    its retrieval block from an earlier user message to its last one on every new message, so the
+    prefix hash of every earlier note broke and the router put its whole note in again (5.8k
+    tokens a message). None without the marks."""
+    if marks is None or at is None:
+        return None
+    im_s, user, _ = marks
+    u = len(user)
+    k = 0
+    i = 0
+    while True:
+        try:
+            i = ids.index(im_s, i)
+        except ValueError:
+            break
+        if i >= at:
+            break
+        if list(ids[i + 1:i + 1 + u]) == user:
+            k += 1
+        i += 1
+    return (k, tuple(int(t) for t in ids[max(0, at - ANCHOR_TAIL):at]))
+
+
+def locate_anchor(ids: list[int], anchor, marks, im_end: int | None) -> int | None:
+    """FX17: the insertion point in `ids` for a note with `anchor` (`message_anchor`): the end of
+    the ordinal-th user message, when the client tokens before it are the anchor's; else None."""
+    if anchor is None or marks is None or im_end is None:
+        return None
+    k, tail = anchor
+    im_s, user, _ = marks
+    u = len(user)
+    seen, i = 0, 0
+    while True:
+        try:
+            i = ids.index(im_s, i)
+        except ValueError:
+            return None
+        if list(ids[i + 1:i + 1 + u]) == user:
+            seen += 1
+            if seen == k:
+                try:
+                    p = ids.index(im_end, i + 1 + u)
+                except ValueError:
+                    return None
+                # the message's end must match the anchor's tail: all of it, or, for a message
+                # shorter than the tail (the client's block that left it was part of the tail),
+                # all of the message's own content, at least ANCHOR_MIN tokens of it
+                content = p - (i + 1 + u)
+                m = 0
+                while (m < len(tail) and m < p
+                       and int(ids[p - 1 - m]) == int(tail[len(tail) - 1 - m])):
+                    m += 1
+                need = min(len(tail), max(ANCHOR_MIN, content))
+                return p if m >= need and m >= 1 else None
+        i += 1
+
+
 def hashes_at(ids: list[int], positions) -> dict[int, str]:
     """sha256 of `ids[:p]` for every `p`, in one pass over the prompt."""
     buf = array("q", ids).tobytes()

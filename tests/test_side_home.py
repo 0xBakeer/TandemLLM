@@ -93,6 +93,16 @@ def test_a_new_conversation_beside_a_long_one_prefers_the_side_slot():
             app.SIDE_NEW_FIRST = was
     finally:
         _restore(saved)
+    # FX17: a short new chat beside the long one waits for a busy side slot (prefer_side_wait);
+    # a long new chat does not
+    pool, saved = _setup(FakeResident(big), view=big)
+    try:
+        need, why = _need(_session(6, HEAD, 2_000))
+        assert why.get("prefer_side_wait") is True, why
+        need, why = _need(_session(6, HEAD, 12_000))
+        assert need is not None and why.get("prefer_side") and "prefer_side_wait" not in why, why
+    finally:
+        _restore(saved)
     small = _session(1, HEAD, 3_000)                  # a side slot could hold this one
     pool, saved = _setup(FakeResident(small), view=small)
     try:
