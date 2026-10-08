@@ -72,6 +72,8 @@ SKINNY_MAX = 32                           # rows the decode-in-registers kernel 
 # rows up to which a call runs the skinny kernel in 32-row chunks instead of decoding a slab
 # (one weight read per chunk against a 2-byte write and read of the slab per weight)
 CHUNK_UNTIL = int(_S.get("EXL3_CHUNK_UNTIL"))
+# 33..CHUNK_UNTIL rows in one launch whose 32-row chunks are adjacent CTAs (ENG-213); 0 = one launch a chunk
+ROWGRID = _S.get("EXL3_ROWGRID") == "1"
 SLAB_N = 16384                            # columns a prefill slab decodes at once (fp16 Kin x SLAB_N)
 
 _CUDA = r"""
@@ -354,7 +356,7 @@ __global__ void __launch_bounds__(256) recon_kernel(const uint16_t* __restrict__
 template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32, bool XSM, int MINB>
 __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
         const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
-        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int ldt, int b1, int b2) {
+        void* __restrict__ Yv, int ldy, int Mtot, int Kin, int N, int ldt, int b1, int b2, int S) {
     constexpr int TW = 8 * KB;                      // uint32 a 16x16 tile
     // XSM: the activations ride the cp.async stages with the trellis; otherwise they are loaded
     // into registers one K tile ahead (no shared memory, so more CTAs fit an SM)
@@ -366,11 +368,18 @@ __global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int wn = warp % WN, wk = warp / WN;
     const int g = lane >> 2, t = lane & 3;
-    const int S = gridDim.x, rank = blockIdx.x;
+    // row grid (ENG-213): blockIdx.x = chunk * S + rank. A chunk is 16 MT rows; the chunks of one
+    // column block are adjacent CTAs, so the trellis the first streams is still in L2 for the next,
+    // and every chunk runs the instruction sequence a call with only its rows would (row bits do not
+    // depend on how many chunks there are).
+    const int rank = blockIdx.x % S, chunk = blockIdx.x / S;
     const int cb = blockIdx.y;
     const int KT = Kin / 16;               // ldt: tiles a trellis row (a group member is a view)
     const int member = (cb >= b1) + (cb >= b2);
-    const __half* xh = XH + (size_t)member * M * Kin;
+    const int M = min(16 * MT, Mtot - chunk * 16 * MT);
+    const __half* xh = XH + (size_t)member * Mtot * Kin + (size_t)chunk * 16 * MT * Kin;
+    Yv = OF32 ? (void*)(reinterpret_cast<float*>(Yv) + (size_t)chunk * 16 * MT * ldy)
+              : (void*)(reinterpret_cast<__nv_bfloat16*>(Yv) + (size_t)chunk * 16 * MT * ldy);
 
     uint32_t* stage = smem + (size_t)warp * ST * SW;
     float* red = reinterpret_cast<float*>(smem + (size_t)WN * WK * ST * SW);
@@ -552,7 +561,8 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
         attr = true;
     }
     cudaLaunchConfig_t cfg = {};
-    cfg.gridDim = dim3(S, N / 128, 1);
+    const int R = (M + 16 * MT - 1) / (16 * MT);    // row chunks (ENG-213 row grid)
+    cfg.gridDim = dim3(S * R, N / 128, 1);
     cfg.blockDim = dim3(32 * WN * WK, 1, 1);
     cfg.dynamicSmemBytes = smem;
     cfg.stream = stream;
@@ -563,7 +573,7 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
     cfg.numAttrs = S > 1 ? 1 : 0;           // one CTA a column block: a plain launch
     cudaError_t e = cudaLaunchKernelEx(&cfg, kern,
         (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (const __half*)svh.data_ptr(),
-        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2);
+        (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, ldt, b1, b2, S);
     TORCH_CHECK(e == cudaSuccess, "exl3 gemm launch: ", cudaGetErrorString(e));
 }
 
@@ -599,7 +609,7 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
     }
 
 void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y,
-               int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2) {
+               int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2, int64_t rmax) {
     const at::cuda::OptionalCUDAGuard guard(xh.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.dim() == 3, "xh: fp16 [G, M, Kin]");
@@ -610,7 +620,7 @@ void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tens
     TORCH_CHECK(t.size(0) * 16 == Kin, "trellis K tiles vs Kin");
     TORCH_CHECK(N % 128 == 0 && Kin % 128 == 0, "N and Kin must be multiples of 128");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
-    TORCH_CHECK(M >= 1 && M <= ((cfg == 2 || cfg == 3) ? 32 : 16), "rows ", M, " for cfg ", cfg);
+    TORCH_CHECK(M >= 1 && M <= ((cfg == 2 || cfg == 3) ? 32 : 16) * rmax, "rows ", M, " for cfg ", cfg, " and ", rmax, " row chunks");
     TORCH_CHECK(S >= 1 && S <= 16, "cluster size");
     TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
     if (y.dtype() == torch::kFloat) { EXL3_KB_CASES(true) }
@@ -678,7 +688,7 @@ void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off) {
 
 _CPP = (
     "void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
-    "int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2);\n"
+    "int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2, int64_t rmax);\n"
     "void exl3_rot_in(torch::Tensor x, torch::Tensor suh, torch::Tensor xh);\n"
     "void exl3_rot_out(torch::Tensor yp, torch::Tensor svh, torch::Tensor y);\n"
     "void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off);\n")
@@ -985,12 +995,20 @@ def exl3_matmul(x: torch.Tensor, w: EXL3Block, *, out: torch.Tensor | None = Non
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
     wk_ = tile["wk"] if wk is None else wk
+    if M > SKINNY_MAX and ROWGRID:
+        # ENG-213 row grid: one rotation and ONE launch for every 32-row chunk, the chunks of a
+        # column block adjacent CTAs (the second reads the trellis from L2); bit for bit the
+        # chunked launches below
+        c = cfg if cfg is not None else tile["cfg2"]
+        mod.exl3_gemm(rotate_in(x, w), w.t, w.svh, out, w.kb, c, wk_, S_, w.bounds[0], w.bounds[1],
+                      (M + SKINNY_MAX - 1) // SKINNY_MAX)
+        return out
     for r0 in range(0, M, SKINNY_MAX):
         r1 = min(M, r0 + SKINNY_MAX)
         xs = x[r0:r1]
         xh = rotate_in(xs, w)
         c = cfg if cfg is not None else (tile["cfg"] if r1 - r0 <= 16 else tile["cfg2"])
-        mod.exl3_gemm(xh, w.t, w.svh, out[r0:r1], w.kb, c, wk_, S_, w.bounds[0], w.bounds[1])
+        mod.exl3_gemm(xh, w.t, w.svh, out[r0:r1], w.kb, c, wk_, S_, w.bounds[0], w.bounds[1], 1)
     return out
 
 

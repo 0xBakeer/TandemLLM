@@ -8447,8 +8447,9 @@ def _load(a) -> None:
         with torch.no_grad():
             # a router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits
             # any row count up to 32; the others stay at 2..16 and capture the rest lazily
-            n_g = eng._graphs.precapture(widths=range(2, 33) if getattr(drafter, "calc", False)
-                                         else range(2, 17))
+            import engine.model as _M
+            n_g = eng._graphs.precapture(widths=range(2, min(_M.VERIFY_ROWS, getattr(drafter, "max_nodes", 31) + 1) + 1)
+                                         if getattr(drafter, "calc", False) else range(2, 17))
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
     led.mark("graphs")
     if int(getattr(a, "parallel", 1) or 1) > 1:
