@@ -63,6 +63,7 @@ SHAPES = {
     (10240, 5120): "qkv", (6144, 5120): "z", (5120, 6144): "out",
     (12288, 5120): "q", (1024, 5120): "k|v", (48, 5120): "a|b",
     (34816, 5120): "gate+up", (14336, 5120): "q+k+v", (16384, 5120): "qkv+z",
+    (10240 + 6144, 5120): "qkv+z",
 }
 
 
@@ -185,7 +186,11 @@ class Parts:
             return 2 * _nb(self.state.S, self.state.conv)
 
         patch(M, "linear", linear)
-        patch(M, "nvfp4_matmul_group", group)
+        # every fused group's one launch, whatever its format (NVFP4Group, FP8Group, an EXL3 group)
+        patch(M, "matmul_group", group)
+        # an EXL3 projection's input rotation (tools/exl3_linear.py), its own part under the projection
+        from tools import exl3_linear as XL
+        patch(XL, "rotate_in", method("rot", lambda x, w: _nb(x) + x.shape[0] * w.K * 2 * w.suh.shape[0]))
         patch(M, "rms_norm", norm)
         patch(M, "rms_norm_gated", norm)
         patch(M, "head_logits", head)
