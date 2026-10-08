@@ -46,10 +46,12 @@ def main():
     manifest["tokens_scored"] = int(ids.shape[0] * (a.length - 1))
 
     if a.disjoint_from:
-        trace = load_file(a.disjoint_from)["ids"].to(torch.long)
+        # sc_trace.py writes "input_ids" [rows, cols] padded, plus "lengths" [rows]
+        t = load_file(a.disjoint_from)
+        trace = [r[:n] for r, n in zip(t["input_ids"].tolist(), t["lengths"].tolist())]
         seen = set()
         w = a.window
-        for row in trace.tolist():
+        for row in trace:
             for i in range(0, len(row) - w + 1):
                 seen.add(hash(tuple(row[i:i + w])))
         hits = total = 0
