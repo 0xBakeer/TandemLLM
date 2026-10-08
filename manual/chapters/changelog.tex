@@ -17,11 +17,22 @@
 \code{v0.3.0} & 09-30 & image input; the text path unchanged \\
 0.4.0 & 10-06 & the conductor, memory notes, the caches for long agent sessions, parallel requests (off by default), and the dashboard as a standalone proxy in front of other engines and cloud APIs; not published, 0.4.7 replaces it \\
 \code{v0.4.7} & 10-08 & 0.4.0 plus the package library, Regenerate, long Open WebUI chats back from the NVMe, the compressed session spill and a daily NVMe write budget \\
+\code{v0.4.8} & 10-08 & two Open WebUI chats beside each other (a side slot keeps its conversation), a chat whose retrieval block moved resumes at its end, the park keeps the end anchor, the router's notes stay live by their message \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\section{What 0.4.7 adds}
+\section{What 0.4.8 adds}
+
+0.4.8 is 0.4.7 plus the 0.4.8-test builds of 2026-10-08; \code{CHANGELOG.md} has them with their live checks.
+
+\paragraph{Parallel requests.} A side slot takes a request whose window leaves it at least 16,384 rows of output, with \code{max_tokens} cut to the room (0.4.7 compared the window with the whole served limit, so a chat past about 24,000 tokens never took the side slot and two chats took turns on slot~0). A side slot has a resident prefix of its own: the next turn of the conversation it holds resumes at the end anchor there, beside slot~0's conversation; the router's question in between leaves it in place. A new conversation beside one a side slot could never hold takes the idle side slot first, and a short one waits up to 20~s for a busy side slot before it sends the long conversation to the NVMe.
+
+\paragraph{Caches.} The end alignment's third pass serves a block the client moved from an earlier user message to its last one (Open WebUI's retrieval block) from the rows where the model saw it, token-aligned on the bare bytes and only when the same bytes are in the last message; a message the user edited is served as sent. The router's notes stay live by their message when the prompt changed before them. The RAM park keeps the end anchor, so a parked Open WebUI chat comes back at its end. A long prompt the end anchor does not serve says where the copy parted and what was refused, in the log and the journal.
+
+\paragraph{Speed.} The speed guard's short gate on the 0.4.8 engine code: 50.64 against release 0.3.0's 49.75~tok/s (\measured, one run a side, store off).
+
+\section{What 0.4.7 added}
 
 0.4.7 is 0.4.0 plus the test builds 0.4.1-test to 0.4.7-test; \code{CHANGELOG.md} has each one with its live checks.
 

@@ -27,6 +27,7 @@
 \texttt{QWEN38\_\allowbreak{}DRAFT\_\allowbreak{}TEMP} & \texttt{1.0} & \texttt{0.3} \textbullet{} \texttt{engine/\allowbreak{}drafters/\allowbreak{}dflash2.py} \\
 \texttt{QWEN38\_\allowbreak{}DSPARK} & \texttt{none} & \texttt{engine/\allowbreak{}drafters/\allowbreak{}dspark.py} \\
 \texttt{QWEN38\_\allowbreak{}DSPARK\_\allowbreak{}NO\_\allowbreak{}YARN} & \texttt{none} & \texttt{engine/\allowbreak{}drafters/\allowbreak{}dspark.py} \\
+\texttt{QWEN38\_\allowbreak{}END\_\allowbreak{}ALIGN\_\allowbreak{}MOVED} & \texttt{on} & \texttt{server/\allowbreak{}endalign.py} \\
 \texttt{QWEN38\_\allowbreak{}END\_\allowbreak{}ALIGN\_\allowbreak{}REASONING} & \texttt{on} & \texttt{server/\allowbreak{}endalign.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}HEAD} & \texttt{none} & \texttt{engine/\allowbreak{}loader.py} \\
 \texttt{QWEN38\_\allowbreak{}FP8\_\allowbreak{}TILES} & \texttt{none} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
@@ -85,6 +86,7 @@
 \texttt{QWEN38\_\allowbreak{}NARRATOR\_\allowbreak{}DEVICE} & \texttt{auto} & \texttt{server/\allowbreak{}conductor/\allowbreak{}narrator.py} \\
 \texttt{QWEN38\_\allowbreak{}NARRATOR\_\allowbreak{}DIR} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}narrator.py} \\
 \texttt{QWEN38\_\allowbreak{}NARRATOR\_\allowbreak{}MODEL} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}narrator.py} \\
+\texttt{QWEN38\_\allowbreak{}NOTE\_\allowbreak{}ANCHOR} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}NOTE\_\allowbreak{}DEDUP} & \texttt{parts} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}NVFP4} & \texttt{none} & \texttt{engine/\allowbreak{}loader.py} \\
 \texttt{QWEN38\_\allowbreak{}NVFP4\_\allowbreak{}BLOCK\_\allowbreak{}TILES} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}linear.py} \\
@@ -110,6 +112,7 @@
 \texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TEMPERATURE} & \texttt{0.7} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TOP\_\allowbreak{}K} & \texttt{20} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TOP\_\allowbreak{}P} & \texttt{0.95} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}REREAD\_\allowbreak{}SAY\_\allowbreak{}TOKENS} & \texttt{8192} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SCALE\_\allowbreak{}ON} & \texttt{weight} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
 \texttt{QWEN38\_\allowbreak{}SESSION\_\allowbreak{}GENERATIONS} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DIR} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
@@ -124,6 +127,12 @@
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CONV} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}DISK} & \texttt{read} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}GUESTS} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}HOME\_\allowbreak{}WAIT\_\allowbreak{}S} & \texttt{10} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}MIN\_\allowbreak{}ROOM} & \texttt{16384} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}NEW\_\allowbreak{}FIRST} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}NEW\_\allowbreak{}WAIT\_\allowbreak{}S} & \texttt{20} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}RESIDENT\_\allowbreak{}GB} & \texttt{0.5} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}STASH\_\allowbreak{}GB} & \texttt{1.0} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}LDW} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}PDL} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}SRUN} & \texttt{0} & \texttt{1} \textbullet{} \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
@@ -155,6 +164,7 @@
 \texttt{QWEN38\_\allowbreak{}VERIFY\_\allowbreak{}GRAPH} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}VERIFY\_\allowbreak{}ROWS} & \texttt{16} & \texttt{32} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}VERIFY\_\allowbreak{}TILES} & \texttt{1} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}verify\_\allowbreak{}tiles.py} \\
+\texttt{QWEN38\_\allowbreak{}WARM\_\allowbreak{}PREFILL\_\allowbreak{}TOKENS} & \texttt{2600} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}WY\_\allowbreak{}BLOCK} & \texttt{8} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}wy\_\allowbreak{}kernels.py} \\
 \texttt{QWEN38\_\allowbreak{}WY\_\allowbreak{}BV} & \texttt{32} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}wy\_\allowbreak{}kernels.py} \\
 \texttt{QWEN38\_\allowbreak{}WY\_\allowbreak{}DBG} & \texttt{0} & \texttt{tools/\allowbreak{}gdn\_\allowbreak{}wy\_\allowbreak{}kernels.py} \\

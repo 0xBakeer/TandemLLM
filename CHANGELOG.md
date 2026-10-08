@@ -2,9 +2,17 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## 0.4.8-test, 2026-10-08
+## 0.4.8, 2026-10-08
 
 Two Open WebUI chats beside each other, after the owner's run of 2026-10-08 (two chats that took turns on slot 0 with the side slot idle, and a chat read again cold, 60,814 tokens in 91 s, after its retrieval block moved). The text does not change: every resume here is held to the end anchor's gate.
+
+Speed guard short gate on the 0.4.8-test engine code (2026-10-08 14:31, store off, one run a side, same hour): release 0.3.0 49.75, 0.4.8-test 50.64 tok/s mean (+1.8 %), 93.52 and 93.75 ms a round.
+
+### The router's notes
+
+- A note stays live when the client changed the prompt before its message: besides the prefix hash it remembers the user message it closes (its ordinal) and the last 32 client tokens before it, and moves to that message's new end when the hash breaks (`QWEN38_NOTE_ANCHOR`). Open WebUI's retrieval block leaving an earlier message had dropped every note of the session and put the whole class note in again on every new message (5.8k tokens a message).
+- A warm-up prefill of 2,600 tokens at start on slot 0 and on every side slot (`QWEN38_WARM_PREFILL_TOKENS`), so the first requests after a restart do not pay for the prefill kernels' first shapes.
+- A new chat of at most 16,384 rendered tokens beside a conversation a side slot could never hold waits up to `QWEN38_SIDE_NEW_WAIT_S` (20 s) for a busy side slot before it takes slot 0 and sends that conversation to the NVMe: the eviction costs the long chat's next turn, the wait costs the new chat's first token only.
 
 ### Parallel requests
 
