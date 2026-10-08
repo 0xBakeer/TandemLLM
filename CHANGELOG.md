@@ -2,7 +2,29 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased (on main; on the box as packages v25-v27 and router v21, documents only)
+## 0.4.7-test, 2026-10-08
+
+0.4.6-test (b7be6e8) with the fixes for UX3's first regressions (FX15) and PKG3's measured package documents (v25-v27, router v21, below). The package texts go in as the box's packages v28 (`tools/packages_migrate.py --put`, edit 34, and the everyday skill copies), the router as v22 (`classifier.package_sticky: class`). `~/rollback-0.4.7.sh` restores packages v27, router v21 and the skill copies and returns the box to 0.4.6-test.
+
+### A deploy that only registers a knob keeps the disk's heads and conversations (FX15)
+
+- 0.4.6-test changed nothing under `engine/` but `engine/settings.py`, where FX14 registered seven server knobs. The disk tier's fingerprint hashed every engine module's bytes, so that alone swept the 13 shared heads (12.4 GB) and the session spill's 13 conversations (29.6 GB) at its start: UX3's first Open WebUI chat read its 6.7k-token head cold (TTFT 14.3 s, 0.3.49 2.7 s), and the big chats kept on the NVMe went with it.
+- The fingerprint now reads `engine/settings.py` by the defaults of the knobs the engine and the kernels read (a server knob's registration changes nothing), and it reads the `tools/` modules the engine imports, which it never did (a kernel change kept rows another kernel wrote). The first start under the new formula adopts the files of the old one computed on the same tree and records that in `fp-equal.json`; later builds read them only under the same fingerprint. `tests/test_fp_equivalents.py`.
+
+### The package question once per class, on a side slot (FX15)
+
+- Router v21 offers 34 everyday options on every prose class, and the package question (about 2,360 tokens) ran on every new user message: W02's "make it shorter" asked again and got the package the first note already held. `classifier.package_sticky: class` (the default): a follow-up the class question keeps in the session's class takes the package picked for it (`how: sticky`); a class change or an answer of none asks again; `message` is the old rule. `tests/test_package_sticky.py`.
+- The router's questions take an idle side slot whenever slot 0 holds a conversation: the side-slot rule (`_guest_of_slot0`) no longer bounds a guest by a quarter of the conversation's length, a bound that belongs to a guest ON slot 0 (its stash). The package question over an 8.1k Open WebUI chat (limit 2,028) ran on slot 0, displaced the chat's end anchor (the next turn resumed at 0.96-0.98 and read 250-670 tokens again) and cost 3.3 s when it missed its own head there. `tests/test_resident_guard.py`.
+
+### Everyday answers draft first; no form, no stop to ask (FX15)
+
+- W04: "Help me write a short cover letter ..." picked cv-cover-letter, whose step 1 said to ask for the experience "if the whole document depends on it", and everyday-core said "ask that one question and stop there". The model opened Open WebUI's blocking `ask_user` form; the message never finished and the user's next two messages queued in the client. everyday-core now says to take the likely value, state it in one line, put a [placeholder] where only the user knows the fact and give the whole result; never ask through a tool or a form, never stop a draft to ask. Eleven packages lose their "ask the one question" lines the same way (cv-cover-letter, checklist-builder, budget-plan, difficult-conversation, homework-help, tech-troubleshoot, translate, decision-helper, compare-options, weekly-schedule, parenting-help); the quiz turn and the practice conversation keep their question, which is the task. cv-cover-letter's `max_tokens` 950 -> 1050. `tests/test_everyday_draft_first.py`.
+
+### The testing package deletes only the scratch its own run made (FX15)
+
+- PKG3's A01 run (opencode in the owner's existing project) ran `rm -rf /home/user/pago/.tandem`, a folder with the owner's own test kit, by the rule "a {tandem_scratch} left by an earlier run ... delete it before you start". The scratch is now the conversation's own folder (`.tandem/<session token>`, `.tandem/session` without one); the run marks it when it makes it and deletes it before "done" only with the mark; a leftover is reused and nothing is deleted at the start; files-care: never delete a file or folder this conversation did not create. `tests/test_scratch_owner.py` runs the commands themselves next to a user's `.tandem`.
+
+### Earlier on main (PKG3, packages v25-v27 and router v21, documents only)
 
 ### The everyday packages measured: five ship off; reply-format; write-message reworded (PKG3)
 
