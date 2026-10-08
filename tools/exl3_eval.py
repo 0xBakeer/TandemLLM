@@ -55,22 +55,41 @@ def load_rows(path: str):
 
 
 @torch.no_grad()
-def perplexity(eng, ids: torch.Tensor, ranges, vocab: int) -> dict:
+def perplexity(eng, ids: torch.Tensor, ranges, vocab: int, save_ref: str | None = None,
+               ref: str | None = None) -> dict:
+    """NLL over the scored positions; with `save_ref`, every scored position's full log-softmax
+    is written (fp16, one file a row) as the reference; with `ref`, the KL divergence
+    KL(ref || this) and the top-1 agreement against that reference, on the same positions."""
     lp_sum, n = 0.0, 0
     per_row = []
+    kl_sum, agree, kl_rows = 0.0, 0, []
     for r, (a, b) in enumerate(ranges):
         eng.reset()
         row = ids[r, :b].to(eng.device)
         logits = eng.forward(row, start=0)[0]
         lg = logits[a:b - 1, :vocab].float()
         tgt = row[a + 1:b]
-        lp = F.log_softmax(lg, dim=-1).gather(1, tgt[:, None]).squeeze(1)
+        lsm = F.log_softmax(lg, dim=-1)
+        lp = lsm.gather(1, tgt[:, None]).squeeze(1)
         lp_sum += float(lp.sum())
         n += tgt.numel()
         per_row.append(float(-lp.mean()))
-        del logits, lg, lp
+        if save_ref:
+            os.makedirs(save_ref, exist_ok=True)
+            torch.save(lsm.to(torch.float16).cpu(), os.path.join(save_ref, f"row{r}.pt"))
+        if ref:
+            rl = torch.load(os.path.join(ref, f"row{r}.pt")).to(lsm.device).float()
+            kl = (rl.exp() * (rl - lsm)).sum(-1)               # per position
+            kl_sum += float(kl.sum())
+            kl_rows.append(float(kl.mean()))
+            agree += int((rl.argmax(-1) == lsm.argmax(-1)).sum())
+            del rl, kl
+        del logits, lg, lp, lsm
     nll = -lp_sum / n
-    return {"nll": nll, "ppl": math.exp(nll), "tokens": n, "rows": len(ranges), "nll_by_row": per_row}
+    out = {"nll": nll, "ppl": math.exp(nll), "tokens": n, "rows": len(ranges), "nll_by_row": per_row}
+    if ref:
+        out.update(kl=kl_sum / n, top1=agree / n, kl_by_row=kl_rows, ref=ref)
+    return out
 
 
 @torch.no_grad()
@@ -125,6 +144,8 @@ def main() -> None:
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--gen", type=int, default=0)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--save-ref", default=None, help="write this configuration's log-softmax as the reference")
+    ap.add_argument("--ref", default=None, help="KL and top-1 agreement against a saved reference")
     ap.add_argument("--compare", nargs=2, default=None)
     a = ap.parse_args()
     if a.compare:
@@ -150,10 +171,14 @@ def main() -> None:
         if a.max_rows:
             ids, ranges = ids[:a.max_rows], ranges[:a.max_rows]
         t1 = time.time()
-        res["ppl_rows"] = perplexity(eng, ids, ranges, vocab)
+        res["ppl_rows"] = perplexity(eng, ids, ranges, vocab,
+                                     save_ref=os.path.expanduser(a.save_ref) if a.save_ref else None,
+                                     ref=os.path.expanduser(a.ref) if a.ref else None)
         res["ppl_rows"]["s"] = round(time.time() - t1, 1)
+        kl = (f", KL vs ref {res['ppl_rows']['kl']:.5f}, top-1 {res['ppl_rows']['top1']:.4f}"
+              if "kl" in res["ppl_rows"] else "")
         print(f"[eval] rows: ppl {res['ppl_rows']['ppl']:.6f} nll {res['ppl_rows']['nll']:.5f} over "
-              f"{res['ppl_rows']['tokens']} tokens ({res['ppl_rows']['s']} s)", flush=True)
+              f"{res['ppl_rows']['tokens']} tokens ({res['ppl_rows']['s']} s){kl}", flush=True)
     if a.gen:
         res["gen"] = {}
         for name, prompt in PROMPTS:
