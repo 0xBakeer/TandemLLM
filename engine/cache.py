@@ -1429,6 +1429,9 @@ class ResidentPrefix:
             self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
         self.end = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                     "mark": end.get("mark")}
+        if end.get("served_hidden"):
+            # FX16: the rows the client never sent travel with the end (the NVMe, the park)
+            self.end["served_hidden"] = [(int(a), int(b)) for a, b in end["served_hidden"]]
         if end.get("mm") or end.get("delta"):
             self.end.update(delta=int(end.get("delta") or 0), mm=bool(end.get("mm")))
         return self._end_bufs

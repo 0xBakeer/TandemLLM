@@ -220,8 +220,11 @@ class EndAlign:
             return False
         rows = _Rows(list(tokens[:e]),
                      {"at": e, "hidden": [(int(p), list(h)) for p, h in (end.get("hidden") or ())],
-                      "mark": end.get("mark")})
-        probe = EndAlign(self.tbytes, on=True, reasoning=self.reasoning)
+                      "mark": end.get("mark"),
+                      # FX16: the notes the client never sent, for the moved-block pass
+                      "served_hidden": [(int(a), int(b)) for a, b in (end.get("served_hidden") or ())]})
+        probe = EndAlign(self.tbytes, on=True, reasoning=self.reasoning, moved=self.moved)
+        probe.marks = self.marks
         probe.adopt(rows, regions or [])
         return probe._align(rows, list(copy)) is not None
 

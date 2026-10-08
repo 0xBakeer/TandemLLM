@@ -2678,8 +2678,8 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
     the hidden spans counted as the replay counts them. Under the engine lock. Never fails a
     request: the prefill then starts from what is in place."""
     sp, res = STATE.get("spill"), STATE.get("resident")
-    if sp is None or res is None or not sp.entries:
-        return
+    if sp is None or res is None:
+        return                 # FX16: with no entry the park's end still comes back here
     try:
         with torch.no_grad():
             info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,

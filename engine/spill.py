@@ -674,7 +674,10 @@ class SessionSpill:
         end = None
         if res.end is not None and res._end_bufs is not None and int(res.end["at"]) == n:
             end = {"at": n, "hidden": [[int(p), [int(x) for x in h]] for p, h in res.end["hidden"]],
-                   "mark": res.end.get("mark"), "pair": res._end_bufs}
+                   "mark": res.end.get("mark"), "pair": res._end_bufs,
+                   # FX16: the rows the client never sent (SRV-233), for the offer's third pass
+                   "served_hidden": [[int(a), int(b)] for a, b in
+                                     (res.end.get("served_hidden") or ())]}
             if res.end.get("mm") or res.end.get("delta"):
                 end.update(delta=int(res.end.get("delta") or 0), mm=bool(res.end.get("mm")))
         if end is None and not anchors:
@@ -953,6 +956,7 @@ class SessionSpill:
                    "state": [[str(S.dtype), list(S.shape)], [str(conv.dtype), list(conv.shape)]],
                    "anchors": [int(b) for b in keep], "anchor_files": files,
                    "end": ({"at": int(end["at"]), "hidden": end["hidden"], "mark": end["mark"],
+                            "served_hidden": list(end.get("served_hidden") or ()),
                             **({"delta": end["delta"], "mm": end["mm"]} if "mm" in end else {})}
                            if end is not None else carried),
                    "blocks": blocks, "bytes": nbytes,
@@ -1198,6 +1202,8 @@ class SessionSpill:
                            "hidden": [(int(p), [int(x) for x in h])
                                       for p, h in man["end"]["hidden"]],
                            "mark": man["end"].get("mark"),
+                           "served_hidden": [(int(a), int(b)) for a, b in
+                                             (man["end"].get("served_hidden") or ())],
                            **({"delta": int(man["end"].get("delta") or 0), "mm": True}
                               if man["end"].get("mm") else {})}
                 res.adopt(e.tokens, n, man.get("taint"), man.get("owner"))
