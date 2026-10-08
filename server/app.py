@@ -819,6 +819,14 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     view = dict.get(STATE, "slot0_view")
     if SIDE_CONTINUE != "resident" and view:
         vc = _shared_head(ids, view)
+        if not _continues_view(len(view), vc, chunk, conv):
+            # FX16: the client's block moved to its last message (server/endalign.py)
+            al0 = dict.get(STATE, "end_align")
+            if al0 is not None:
+                vm = al0.moved_common(view, ids)
+                if vm > vc:
+                    why["view_moved"] = vm - vc
+                    vc = vm
         why.update(view=len(view), view_common=vc)
         if _continues_view(len(view), vc, chunk, conv):
             why["wait"] = "view"
@@ -905,6 +913,10 @@ def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) ->
             if getattr(res, "end", None) is None or int(getattr(res, "valid", 0) or 0) < chunk:
                 continue
             vc = _shared_head(ids, view)
+            if not _continues_view(len(view), vc, chunk, conv):
+                al_s = vals.get("end_align")
+                if al_s is not None:
+                    vc = max(vc, al_s.moved_common(view, ids))     # FX16: a moved block
             if _continues_view(len(view), vc, chunk, conv):
                 return s.index
         except Exception:                                          # noqa: BLE001

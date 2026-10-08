@@ -228,6 +228,31 @@ class EndAlign:
         probe.adopt(rows, regions or [])
         return probe._align(rows, list(copy)) is not None
 
+    def moved_common(self, view: list[int], copy: list[int]) -> int:
+        """FX16: how many leading tokens `copy` shares with `view` (the last prompt served, as the
+        client rendered it) when a block the client moved to its last message is allowed for:
+        the shared length counted as if the moved runs were still in place, so a copy that holds
+        all of the view but those runs counts as holding the view. The plain shared head when
+        nothing moved or the marks are unknown. For the slot choice (server/app.py), where the
+        12:14:30 copy counted as a new conversation and took the other slot."""
+        c = _common(copy, view)
+        if not self.moved or self.marks is None or c >= len(view):
+            return c
+        try:
+            spans = self._moved_spans(_Rows(list(view), {"at": len(view), "hidden": []}), copy)
+        except Exception:                                          # noqa: BLE001
+            return c
+        if not spans:
+            return c
+        keep = []
+        i = 0
+        for a, b in spans:
+            keep.extend(view[i:a])
+            i = b
+        keep.extend(view[i:])
+        k = _common(copy, keep)
+        return k + sum(b - a for a, b in spans) if k >= len(keep) - 1 else c
+
     # ------------------------------------------------------------------ the walk
     def _align(self, res, copy: list[int]):
         """The copy aligned to the rows: first as the rows are, then (SRV-239) with every

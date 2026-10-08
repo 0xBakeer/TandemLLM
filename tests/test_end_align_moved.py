@@ -156,6 +156,38 @@ def test_with_a_thinking_answer_both_passes_work_together():
     assert got == _cold(ids, 8)
 
 
+def test_the_slot_choice_sees_the_moved_block_as_the_same_conversation():
+    """Live run 2 (0.4.8-test b2): A's next message with the block moved counted as a new
+    conversation on the client's tokens and took the other slot, where nothing of A was."""
+    from test_par_continue import CHUNK, FakeResident, _need, _restore, _setup
+    res, al = _setup_moved()
+    prompt = HEAD + user(BLOCK, [NL], Q1) + [NL]
+    out, _ = _first(prompt)
+    copy = HEAD + user(Q1) + [NL] + out + user(BLOCK, [NL], Q2) + [NL]
+    assert endalign._common(copy, prompt) < len(prompt) - 16
+    assert al.moved_common(prompt, copy) == len(prompt), al.moved_common(prompt, copy)
+    edited = list(Q1)
+    edited[3] = 2 if edited[3] != 2 else 3
+    bad = HEAD + user(edited) + [NL] + out + user(BLOCK, [NL], Q2) + [NL]
+    assert al.moved_common(prompt, bad) == endalign._common(bad, prompt)
+    # through the slot choice: a long view of the same shape with a block longer than the
+    # 1,024-token chunk, on token lists alone (no engine)
+    big, block = [1] * 3000, _ids(1500, 205)
+    view = big + HEAD + user(block, [NL], Q1) + [NL]
+    copy2 = big + HEAD + user(Q1) + [NL] + out + user(block, [NL], Q2) + [NL]
+    assert endalign._common(copy2, view) < len(view) - CHUNK
+    assert al.moved_common(view, copy2) == len(view)
+    pool, saved = _setup(FakeResident(view), view=view)
+    was = app.STATE.get("end_align")
+    app.STATE["end_align"] = al
+    try:
+        need, why = _need(copy2)
+        assert need is None and why["wait"] == "view" and why.get("view_moved", 0) > 0, why
+    finally:
+        app.STATE["end_align"] = was
+        _restore(saved)
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
