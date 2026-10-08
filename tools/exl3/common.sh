@@ -108,7 +108,7 @@ bget()  { hf buckets cp "$BROOT/$1" "$2" >/dev/null; }                  # one fi
 bput()  { hf buckets cp "$2" "$BROOT/$1" >/dev/null; }                  # one file up
 bdown() { mkdir -p "$2"; hf buckets sync "$BROOT/$1" "$2" >/dev/null; } # prefix -> dir
 bup()   { hf buckets sync "$1" "$BROOT/$2" >/dev/null; }                # dir -> prefix
-bhas()  { hf buckets ls "$BUCKET/exl3/$1" >/dev/null 2>&1; }
+bhas()  { hf buckets ls "$BUCKET/exl3/$1" 2>/dev/null | grep -qF "exl3/$1"; }   # ls exits 0 and prints (empty) when missing
 
 # Checkpoint safety net for convert.py: its work dir (checkpoint every 120 s) is mirrored to the
 # bucket every SYNC_EVERY seconds, so a job that hits its --timeout is resumed by `convert.sh`
