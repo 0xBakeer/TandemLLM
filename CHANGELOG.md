@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased (on main; on the box as packages v25-v27 and router v21, documents only)
+
+### The everyday packages measured: five ship off; reply-format; write-message reworded (PKG3)
+
+- The night A/B (2026-10-08, the stratified half of the 210 everyday eval prompts, n=1, the package attached alone against no package, same build and hour, judged by the served model at temperature 0 against each package's rubric, blind to the arm): 91 pairs, mean +1.19 of 5, 72 wins, 12 ties, 7 losses. Largest: gift-ideas +2.8, explain-simply +2.6, event-plan +2.6, fact-check +2.5, rewrite-text +2.47, tech-troubleshoot +2.4. A package costs 1.1-1.65k hidden tokens and 0.5-2.8 s of TTFT. The rubrics come from each package's own checks, so the judge favours the package's shape; a hand check of 16 pairs confirms the direction and finds the deltas too large. Indicative, not a release number.
+- `schema.EVERYDAY_OFF`: creative-writing, language-practice, translate, social-post and summarize-text gained at most +0.3 (translate 5.0 both ways) and ship with `enabled: false`; they stay options of the package question, so a request that picks one gets nothing rather than a wrong package. health-info (+0.33) and security-scam (-0.10 on 2 judged pairs) stay on: the hand check shows the package's answers keep to the verdict and the steps and invent no numbers (without it an answer gave a made-up courier hotline).
+- `reply-format` (new, about 270 tokens): an instruction about the reply itself ("Reply with just: OK", "answer in one word") picked write-message live (680 tokens on an OK); now reply-format takes it. write-message reads as a message from the user to someone they name. Over all 33+1 options in the live order: everyday 176/210 right (174 before), small talk picks a real package 3 times in 38 (6 before).
+
 ## 0.4.6-test, 2026-10-08
 
 0.4.5-test (41a5b3d) with FX14's dashboard index seeks and registered knobs and PKG3's wide everyday package lists, deployed on the box as 0.4.6-test. `~/rollback-0.4.6.sh` returns the box to 0.4.5-test (with the PKG3 schema cap of 01:28, router v20 kept or set back by `~/pkg3/wide/rollback-wide.sh`).

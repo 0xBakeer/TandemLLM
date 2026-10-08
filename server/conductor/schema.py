@@ -493,6 +493,11 @@ EVERYDAY: dict[str, list[str]] = {
 # packages' own classes (manifests, INDEX.md). `reply-format` (last, as measured) takes an
 # instruction about the reply itself ("Reply with just: OK" picked write-message live): about 267
 # tokens instead of a whole package
+# PKG3's night A/B (2026-10-08, n=3-4 a package, judged at T 0 by the served model, plus a hand check):
+# these five gained at most +0.3 of 5 over no package (translate 5.0 both ways, creative-writing 4.93
+# against 5.0) for 1.1-1.5k tokens and 1-2 s of TTFT, so they ship off (enabled: false). They stay
+# options of the package question: a request that picks one gets nothing, not a wrong package
+EVERYDAY_OFF = ("creative-writing", "language-practice", "translate", "social-post", "summarize-text")
 EVERYDAY_ALL: list[str] = list(dict.fromkeys(
     p for k in ("writing", "plan", "research", "summarize", "chat") for p in EVERYDAY[k]
     if p != "everyday-core"))

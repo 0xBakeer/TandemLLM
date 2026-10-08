@@ -851,7 +851,7 @@
    "description": "Translate a text, message, document or phrase between languages (for example German, English, Arabic, Turkish, French, Spanish) keeping the meaning, tone and layout, with a note on words that have no exact match - or explain what a foreign text says.",
    "body": "",
    "max_tokens": 950,
-   "enabled": true,
+   "enabled": false,
    "requires_tools": []
   },
   "social-post": {
@@ -861,7 +861,7 @@
    "description": "Write a post, caption, bio, announcement or short ad for social media or a group chat - Instagram, LinkedIn, Facebook, X, TikTok, WhatsApp groups, a marketplace listing - in the user's voice, the right length for the platform, with hashtags only where they help.",
    "body": "",
    "max_tokens": 750,
-   "enabled": true,
+   "enabled": false,
    "requires_tools": []
   },
   "creative-writing": {
@@ -871,7 +871,7 @@
    "description": "Write something creative for the user - a bedtime story for a child, a short story, a poem, a song lyric, a birthday or wedding speech, a toast, a greeting-card verse, a riddle, or ideas for names - with the length, age, tone and names the user gives.",
    "body": "",
    "max_tokens": 850,
-   "enabled": true,
+   "enabled": false,
    "requires_tools": []
   },
   "difficult-conversation": {
@@ -891,7 +891,7 @@
    "description": "Summarise a long text the user pasted or uploaded - an article, report, PDF, email thread, meeting notes, transcript, contract or chat - into the key points, decisions, open questions and next actions, at the length the user wants, without adding anything.",
    "body": "",
    "max_tokens": 850,
-   "enabled": true,
+   "enabled": false,
    "requires_tools": []
   },
   "explain-simply": {
@@ -1031,7 +1031,7 @@
    "description": "Practise a language with the user - German, English, Arabic, French, Spanish, Turkish or another - as a conversation partner at their level, correcting their mistakes gently, explaining a grammar point with examples, or answering \"how do I say\", \"what is the difference between\", \"is this sentence right\".",
    "body": "",
    "max_tokens": 1050,
-   "enabled": true,
+   "enabled": false,
    "requires_tools": []
   },
   "homework-help": {

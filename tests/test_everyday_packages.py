@@ -76,12 +76,15 @@ def test_registered_and_uncut():
     for n in names():
         p = pk["packages"].get(n)
         assert p is not None, f"{n} not in the shipped packages"
-        assert p["source"] == f"skill:{n}" and p["enabled"] and p.get("requires_tools") == [], (n, p)
+        # PKG3: the measured-neutral ones ship off (schema.EVERYDAY_OFF)
+        assert p["enabled"] == (n not in schema.EVERYDAY_OFF), (n, p["enabled"])
+        assert p["source"] == f"skill:{n}" and p.get("requires_tools") == [], (n, p)
         assert bool(p.get("general")) == (n == CORE), n
         assert not p.get("library"), n
         path = lib.path(pk, n)
         assert path and path.startswith(EVERYDAY), (n, path)
-        text, err = lib.text(pk, n)
+        # the text is checked whole even for a package that ships off (it can be switched on)
+        text, err = lib.text(dict(pk, packages={**pk["packages"], n: dict(p, enabled=True)}), n)
         assert err is None and text, (n, err)
         assert packages_mod.CUT_NOTE not in text, f"{n}: cut at max_tokens {p['max_tokens']}"
         assert lib.requires(pk, n) == (), n
