@@ -59,12 +59,13 @@ setup_env() {
     || pip install -q --no-input 'huggingface_hub[hf_xet]>=1.3' safetensors tokenizers pyyaml rich \
       marisa_trie pydantic 'llguidance>=1.7.0' pillow ninja typing_extensions \
       transformers datasets matplotlib pandas tabulate seaborn
-  if [ ! -d $EXL3_SRC/.git ]; then
+  if [ ! -f $EXL3_SRC/sc_trace.py ]; then
+    # the image has no git: fetch the pinned commit as a tarball
     el "exllamav3 source at $EXL3_COMMIT"
-    mkdir -p $EXL3_SRC && cd $EXL3_SRC
-    git init -q && git remote add origin https://github.com/turboderp-org/exllamav3.git
-    git fetch -q --depth 1 origin $EXL3_COMMIT && git checkout -q FETCH_HEAD
-    cd - >/dev/null
+    mkdir -p $EXL3_SRC
+    python3 -c "import urllib.request; urllib.request.urlretrieve('https://codeload.github.com/turboderp-org/exllamav3/tar.gz/$EXL3_COMMIT', '/tmp/exl3src.tgz')"
+    tar -xzf /tmp/exl3src.tgz -C $EXL3_SRC --strip-components=1
+    echo $EXL3_COMMIT > $EXL3_SRC/COMMIT
   fi
   local pytag torchmm whl url
   pytag=$(python3 -c 'import sys; print(f"cp{sys.version_info[0]}{sys.version_info[1]}")')
@@ -73,18 +74,19 @@ setup_env() {
   url="https://github.com/turboderp-org/exllamav3/releases/download/v${EXL3_VERSION}/${whl}"
   if ! python3 -c "import exllamav3, exllamav3.ext" >/dev/null 2>&1; then
     el "exllamav3 wheel $whl"
-    if ! pip install -q --no-input "$url" || ! python3 -c "import exllamav3, exllamav3.ext"; then
+    if ! pip install -q --no-input --no-deps "$url" || ! python3 -c "import exllamav3, exllamav3.ext"; then
       el "wheel did not import; building from source for sm_90 (this takes 10-15 min)"
       pip uninstall -q -y exllamav3 || true
-      (cd $EXL3_SRC && TORCH_CUDA_ARCH_LIST="9.0" pip install -q --no-input --no-build-isolation .)
+      (cd $EXL3_SRC && TORCH_CUDA_ARCH_LIST="9.0" pip install -q --no-input --no-deps --no-build-isolation .)
     fi
   fi
   python3 - <<'PY'
-import exllamav3, torch, sys, json, subprocess, os
-v = {"exllamav3": exllamav3.__version__, "torch": torch.__version__, "python": sys.version.split()[0],
+import exllamav3, torch, sys, json, os
+from importlib.metadata import version
+v = {"exllamav3": version("exllamav3"), "torch": torch.__version__, "python": sys.version.split()[0],
      "cuda_cap": list(torch.cuda.get_device_capability()) if torch.cuda.is_available() else None,
      "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-     "exllamav3_src": subprocess.run(["git", "-C", "/tmp/exl3src", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()}
+     "exllamav3_src": open("/tmp/exl3src/COMMIT").read().strip()}
 print("versions", json.dumps(v))
 os.makedirs("/tmp/cal", exist_ok=True)
 json.dump(v, open("/tmp/cal/versions.json", "w"), indent=1)
