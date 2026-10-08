@@ -97,7 +97,9 @@ def test_the_tokens():
     # in the project by default: opencode's sandbox asks before any path outside it, and its
     # `run` mode rejects the request (the live check of 2026-10-06 stopped at its first log)
     assert P.with_url("{tandem_url}/v1/laya/ask > {tandem_scratch}/run.log", url) == \
-        f"{url}/v1/laya/ask > .tandem/run.log"
+        f"{url}/v1/laya/ask > .tandem/Ab3xYz9_kLmn/run.log"
+    # FX15: the conversation's own folder under .tandem; without a token, one shared name
+    assert P.with_url("{tandem_scratch}/a", None) == ".tandem/session/a"
     assert P.with_url("{tandem_url}", None) == P.URL_DEFAULT
     old_s = os.environ.pop(P.SCRATCH_ENV, None)
     try:
@@ -118,7 +120,8 @@ def test_the_tokens():
         os.environ.pop(P.URL_ENV, None)
         if old is not None:
             os.environ[P.URL_ENV] = old
-    return "the request's address or QWEN38_TANDEM_URL; .tandem, or QWEN38_TANDEM_SCRATCH with {token}"
+    return ("the request's address or QWEN38_TANDEM_URL; .tandem/<token>, or QWEN38_TANDEM_SCRATCH "
+            "with {token}")
 
 
 def test_the_shipped_texts_are_clean():
@@ -131,7 +134,7 @@ def test_the_shipped_texts_are_clean():
         assert M.migrate_text(path, text)[1] == [], (path, M.migrate_text(path, text)[1])
     with open(os.path.join(ROOT, "packages", "inline", "testing.md")) as f:
         t = f.read()
-    assert M.SCRATCH_RULE in t and "tandem-test-hook:start" in t
+    assert M.SCRATCH_RULE_V3 in t and M.LEFTOVER_NEW in t and "tandem-test-hook:start" in t
     assert M.RUNTIME_RULE.replace(M.RUNTIME_OLD_PAGE, M.RUNTIME_NEW_PAGE) in t
     with open(os.path.join(ROOT, "packages", "inline", "laya-testing.md")) as f:
         # edit 2's bullet, as edit 29 words its end (FX10)

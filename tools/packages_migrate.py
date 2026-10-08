@@ -213,6 +213,32 @@ SCRATCH_RULE = ('''- Scratch: logs, helper scripts and kits go to {tandem_scratc
                 '''"$(git rev-parse --git-dir)/info/exclude"; true)`, so git never lists it, and delete it (`rm -rf '''
                 '''{tandem_scratch}`) as your last step before "done". The project gets only what the user asked for; '''
                 '''never list scratch files as deliverables.''')
+# 34 (FX15, UX3 2026-10-08): A01 ran `rm -rf /home/user/pago/.tandem` in Khaled's own project (his
+# test kit of 18:43), by the leftover rule below, right after writing "let me not touch pago's files".
+# The scratch is this conversation's own folder (`.tandem/<session token>`, packages.scratch_for),
+# marked when this run makes it; only a marked folder is deleted, never one that was there before
+SCRATCH_RULE_V3 = ("""- Scratch: logs, helper scripts and kits go to {tandem_scratch}/, this conversation's own """
+                   """folder. Create it once with `[ -d {tandem_scratch} ] || { mkdir -p {tandem_scratch} && """
+                   """echo made-by-this-run > {tandem_scratch}/.made-by-this-run; }; (git rev-parse --git-dir """
+                   """>/dev/null 2>&1 && echo '{tandem_scratch}/' >> "$(git rev-parse --git-dir)/info/exclude"; """
+                   """true)`, so git never lists it. As your last step before "done", delete it only when this """
+                   """run made it: `[ -f {tandem_scratch}/.made-by-this-run ] && rm -rf {tandem_scratch}`. Never """
+                   """delete a folder or file you did not create, another `.tandem` folder included: what was """
+                   """there before you started is the user's. The project gets only what the user asked for; """
+                   """never list scratch files as deliverables.""")
+LEFTOVER_OLD = ("""- A {tandem_scratch} left by an earlier run that was cut off: stop the server its server.pid """
+                """names (`kill $(cat {tandem_scratch}/server.pid) 2>/dev/null`) and delete it before you start.""")
+LEFTOVER_NEW = ("""- A {tandem_scratch} that is there when you start is this conversation's, from a run that was """
+                """cut off: stop the server its server.pid names (`kill $(cat {tandem_scratch}/server.pid) """
+                """2>/dev/null`) and go on using it. Delete nothing at the start, in it or anywhere else.""")
+FILES_ANCHOR = ("""- If you must replace a file you did not create, copy it first (index.html.bak) and say so in """
+                """the answer.""")
+NO_DELETE_RULE = ("""- Never delete a file or folder you did not create in this conversation (`rm`, `rm -rf`, `git """
+                  """clean`, a move over it), a `.tandem` folder included: one that was there when you started """
+                  """is the user's, whatever it holds.""")
+NOTE_047 = ("0.4.7: the scratch is the conversation's own folder (.tandem/<session>), deleted only when this run "
+            "made it; a leftover is reused, never deleted; files-care: never delete what you did not create (FX15)")
+ROUND7 = ("testing: scratch marked", "testing: a leftover is reused", "files-care: never delete")
 STATE_OLD = ('''Keep it under 4 KB. Read it after real input, never before.''')
 STATE_NEW = ('''Keep it under 4 KB. Read it after real input, never before. It is test scaffolding: wrap it in '''
              '''`tandem-test-hook:start` and `tandem-test-hook:end` comments and remove it as your last edit '''
@@ -494,7 +520,7 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     if SCRATCH_RULE_V1 in out:                       # the first wording (outside the project)
         out = out.replace(SCRATCH_RULE_V1, SCRATCH_RULE)
         changes.append("testing: scratch inside the project, excluded and deleted")
-    if LOGS_OLD in out and SCRATCH_RULE not in out:
+    if LOGS_OLD in out and SCRATCH_RULE not in out and SCRATCH_RULE_V3 not in out:
         out = out.replace(LOGS_OLD, SCRATCH_RULE + "\n" + LOGS_OLD, 1)
         changes.append("testing: the scratch rule")
     if STATE_OLD in out and STATE_NEW not in out and "tandem-test-hook:start" not in out:  # 15 rewords it
@@ -614,6 +640,14 @@ def migrate_text(name: str, text: str) -> tuple[str, list[str]]:
     # 33
     out = _once(out, FAIL_BULLET.replace(WRITE_UNAVAIL_OLD, WRITE_UNAVAIL_NEW), REFUSED_BULLET, changes,
                 "laya-testing: a refused request is the model's to fix")
+    # 34: the scratch is marked by the run that makes it and deleted only then; a leftover is reused
+    for old, new, what in ((SCRATCH_RULE, SCRATCH_RULE_V3, "testing: scratch marked, deleted only when made"),
+                           (LEFTOVER_OLD, LEFTOVER_NEW, "testing: a leftover is reused, never deleted")):
+        if old in out and new not in out:
+            out = out.replace(old, new, 1)
+            changes.append(what)
+    out = _once(out, FILES_ANCHOR, NO_DELETE_RULE, changes,
+                "files-care: never delete what this conversation did not create")
     return out, changes
 
 
@@ -709,7 +743,8 @@ def main(argv=None) -> int:
             print(f"[packages_migrate] dry run: v{cur.get('version')} would get a new version")
             return 0
         got = _call("PUT", a.put.rstrip("/") + "/v1/conductor/packages", tok,
-                    {"doc": new, "note": NOTE_045 if any(
+                    {"doc": new, "note": NOTE_047 if any(
+                        c.startswith(ROUND7) for ch in rep.values() for c in ch) else NOTE_045 if any(
                         c.startswith(ROUND6) for ch in rep.values() for c in ch) else NOTE_041 if any(
                         c.startswith(ROUND5) for ch in rep.values() for c in ch) else NOTE_351 if any(
                         c.startswith(ROUND4) for ch in rep.values() for c in ch) else NOTE_345 if any(

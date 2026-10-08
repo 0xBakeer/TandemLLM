@@ -63,6 +63,8 @@ URL_TOKEN = "{tandem_url}"
 # SRV-171: the session's scratch directory, outside the user's project
 SCRATCH_TOKEN = "{tandem_scratch}"
 SCRATCH_DEFAULT = ".tandem"
+#: FX15: the default, one folder per conversation under `.tandem`
+SCRATCH_SESSION = ".tandem/{token}"
 SCRATCH_ENV = "QWEN38_TANDEM_SCRATCH"
 # where a request without a Host header (a test, a tool on the box) reaches the server
 URL_DEFAULT = "http://127.0.0.1:8000"
@@ -110,9 +112,12 @@ def request_url(headers) -> str | None:
 
 def scratch_for(url: str | None) -> str:
     """SRV-171: the scratch directory the notes name: `QWEN38_TANDEM_SCRATCH` (its `{token}` the
-    session token from the address, `.../s/<token>`), else `.tandem` in the project."""
+    session token from the address, `.../s/<token>`), else `.tandem/<token>` in the project
+    (FX15: the conversation's own folder, so a `.tandem` the user or another conversation left is
+    never the one the testing package creates, marks and deletes; `.tandem/session` without a
+    token)."""
     from engine.settings import SETTINGS as _S
-    want = _S.get("TANDEM_SCRATCH").strip() or SCRATCH_DEFAULT
+    want = _S.get("TANDEM_SCRATCH").strip() or SCRATCH_SESSION
     if "{token}" in want:
         m = re.search(r"/s/([A-Za-z0-9_-]{8,32})/?$", url or "")
         want = want.replace("{token}", m.group(1) if m else "session")
