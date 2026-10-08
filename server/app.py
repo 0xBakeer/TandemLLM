@@ -2297,6 +2297,14 @@ def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
     if slot is None or SIDE_CARRY == "off":
         return "off"
     slot.carry = None
+    if getattr(slot, "no_carry", False):
+        # FX15: the router's own question (its User-Agent, `me["own"]`, at any length: the
+        # package question is longer than the side lane's 2,048) or a side-lane job (a client's
+        # title task) is no conversation, however long. The package question (2.4k tokens, 34 options) shares its
+        # options with the next one: noted as a conversation, the next question was carried into
+        # slot 0 over the chat (which was parked) and kept the next guests off the side slot for
+        # CARRY_KEEP_S (live 0.4.7-test b1, W01/W02)
+        return "lane"
     eng, drafter = STATE["engine"], STATE["drafter"]
     n_prompt = int(STATE.get("last_prompt_n") or 0)
     e, n_c = int(eng.kv.length), len(committed)
@@ -5617,6 +5625,8 @@ class Handler(BaseHTTPRequestHandler):
                                      keep_carry_s=CARRY_KEEP_S if SIDE_CARRY != "off" else 0.0)
                 got = side is not None
                 if got:
+                    side.no_carry = bool(me["own"]) or lane_kind is not None  # FX15
+                if got:
                     with par._lk:
                         par.stats["guest_side"] = par.stats.get("guest_side", 0) + 1
             if not got:
@@ -5624,6 +5634,8 @@ class Handler(BaseHTTPRequestHandler):
             if not got and side_need is not None and _side_ok(0.0, _own_holder()):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
+                if got:
+                    side.no_carry = bool(me["own"]) or lane_kind is not None
             micro = not got and lane_kind is not None
             while not got and not micro:
                 if self._client_gone():
@@ -5655,6 +5667,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not got and side_need is not None and _side_ok(time.monotonic() - t_wait,
                                                                   _own_holder()):
                     side = par.take_side(side_need, owner=cid)
+                    if side is not None:
+                        side.no_carry = bool(me["own"]) or lane_kind is not None
                     got = side is not None
         finally:
             # Off the waiting list whatever happened, including an exception in `acquire` itself.

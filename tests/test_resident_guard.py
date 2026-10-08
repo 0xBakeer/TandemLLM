@@ -241,6 +241,30 @@ def test_a_guest_of_slot_0_takes_an_idle_side_slot_first():
                 A.STATE[k] = v
 
 
+def test_the_routers_question_on_a_side_slot_is_no_conversation_to_carry():
+    """FX15 (0.4.7-test b1, live W01/W02): with the router's questions on the side slot, the package
+    question (2,364 tokens) was longer than two chunks, so its end was noted as a conversation;
+    the next package question shares its options, was carried into slot 0 over the chat (parked),
+    and the note kept the next guests off the side slot for CARRY_KEEP_S. A slot taken by the
+    router's own question or a side-lane job notes no end; a client's turn still does."""
+    from server import app as A
+    from server import slots as S
+    slot = S.Slot(1, 65_536)
+    slot.carry = {"gen": 0, "t": 0.0, "at": 1}
+    slot.no_carry = True
+    was = A.SIDE_CARRY
+    A.SIDE_CARRY = "on"
+    S.bind(slot)
+    try:
+        assert A._side_keep_end(list(range(3000)), [], [], "c:x") == "lane"
+        assert slot.carry is None
+    finally:
+        S.bind(None)
+        A.SIDE_CARRY = was
+    src = open(A.__file__).read()
+    assert src.count('side.no_carry = bool(me["own"]) or lane_kind is not None') == 3
+
+
 # ------------------------------------------------------------------ 4. the working directory
 
 def _owui_tools(cwd: str) -> list:
