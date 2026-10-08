@@ -27,6 +27,7 @@ from engine.loader import Weights  # noqa: E402
 from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
 from tools.gdn_prefill_kernels import fused_prefill_refusal  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
+from tools.exl3_linear import EXL3Block  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 from tools.nvfp4_linear_v2 import nvfp4_matmul_group  # noqa: E402
 from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (registers on import)
@@ -302,16 +303,18 @@ def head_logits(h: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # docstring above.
         from tools.head_gemv import head_matmul_fp8
         return head_matmul_fp8(h, weight).view(*h.shape[:-1], weight.N)
-    if FUSED["head"] and m == 1 and not isinstance(weight, (FP8Block, NVFP4Block)):
+    if FUSED["head"] and m == 1 and not isinstance(weight, (FP8Block, NVFP4Block, EXL3Block)):
         from tools.head_gemv import head_matmul
         return head_matmul(h, weight, bm=1).view(*h.shape[:-1], weight.shape[0])
     return linear(h, weight)
 
 
 def matmul_group(x: torch.Tensor, g) -> torch.Tensor:
-    """One launch for a fused projection group: an NVFP4Group, or an FP8Group."""
+    """One launch for a fused projection group: an NVFP4Group, an FP8Group, or an EXL3 group."""
     if isinstance(g, FP8Group):
         return fp8_matmul(x, g)
+    if isinstance(g, EXL3Block):
+        return g.matmul(x)
     return nvfp4_matmul_group(x, g)
 
 

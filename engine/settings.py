@@ -198,6 +198,11 @@ KNOBS: dict[str, tuple] = {
     'SHADOW_DISK_GB': ('20', 'server/conductor/shadow.py'),
     'SHADOW_POOL_SLACK_GIB': ('2', 'server/conductor/shadow.py'),
     'NVFP4': (None, 'engine/loader.py'),
+    # ENG-E6: an EXL3 checkpoint (exllamav3 trellis) for every projection and the head; unset = off
+    'EXL3': (None, 'engine/loader.py'),
+    'EXL3_TILES': (None, 'tools/exl3_linear.py'),
+    'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
+    'EXL3_FUSE': ('0', 'engine/loader.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),
     'NVFP4_DEQUANT_FROM': ('512', 'tools/nvfp4_linear.py'),
     'NVFP4_PREFILL_V2': ('0', 'tools/nvfp4_linear.py'),
