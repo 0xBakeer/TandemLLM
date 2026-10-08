@@ -282,6 +282,29 @@ def test_another_conversation_on_the_side_slot_takes_the_home():
         app.SIDE_CARRY = old
 
 
+def test_a_guest_never_swaps_the_park_in_or_takes_the_end_anchor():
+    """0.4.8 run 4: two router questions ran on slot 0 as guests while the side slot was busy;
+    the park (another conversation with its end anchor) was swapped in for them and the
+    15,8k-token chat lost its rows and end anchor (its next turn re-read it). A copy shorter than
+    the parked end is another request: `unpark_end` moves nothing, the resident keeps its end."""
+    res = _state(park_bytes=BIG)
+    eng = app.STATE["engine"]
+    out_p, _, _ = turn(S_PROMPT, 30, session="P")                 # P: later parked with its end
+    out_a, _, _ = turn(R_PROMPT, 40, session="A")                 # A replaces P: P parked
+    assert res.park_owner == "P" and res.park_end is not None, (res.park_owner, res.park_end)
+    a_end, a_valid, a_tokens = res.end["at"], res.valid, list(res.tokens)
+    question = S_PROMPT[:40] + tokens(30, seed=96)                 # a short request, shares P's head
+    with torch.no_grad():
+        moved = res.unpark_end(eng, None, question, 512)
+    assert moved == 0, moved
+    assert res.owner == "A" and res.end["at"] == a_end and res.valid == a_valid
+    assert res.tokens[:a_valid] == a_tokens[:a_valid] and res.park_owner == "P"
+    # and A's next turn still resumes at its end
+    _, pre, _ = turn(R_PROMPT + out_a + TOOL, 8, session="A")
+    assert pre["kind"] == "end" and pre["reused"] == a_end, pre
+    return f"park kept for P, A resumed at {a_end}"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

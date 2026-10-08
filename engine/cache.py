@@ -1882,6 +1882,8 @@ class ResidentPrefix:
         if pe is None or not self.park_rows or self._stash is not None:
             return 0
         e = int(pe["at"])
+        if len(ids) <= e:
+            return 0           # FX17: a continuation goes past the end; a shorter copy is another request
         c = self.common(ids)
         if self.park_offer(ids, c, max_len) != e:
             return 0

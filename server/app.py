@@ -6128,7 +6128,14 @@ class Handler(BaseHTTPRequestHandler):
                           plan, "changed", False) else ())]
             hid_tail = max(0, plan_hidden - sum(b - a for a, b in hid_at))
             s1_len = int(prompt.numel())
-            if res_ is not None and not images and not (comp and comp["prepared"] is not None):
+            # FX17 (0.4.8 run 4): a guest of slot 0's conversation (the router's own question,
+            # a side-lane job, a short unrelated request) is served over the resident rows with
+            # the stash and leaves every other cache alone: no carry, no NVMe restore, no park
+            # swap for it (two router questions on slot 0 while the side slot was busy swapped
+            # the park in and the 15,8k-token chat lost its end anchor; its next turn re-read it)
+            guest = bool(par_why.get("guest")) or bool(me.get("own")) or lane_kind is not None
+            if (res_ is not None and not images and not (comp and comp["prepared"] is not None)
+                    and not guest):
                 if comp is None:
                     # FX10 (SRV-213): a conversation that ran on a side slot is carried over first
                     with torch.no_grad():
