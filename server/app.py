@@ -699,12 +699,16 @@ def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
     0 holds a conversation of at least two chunks. On slot 0 it writes over the rows that
     conversation's next turn resumes from, and only the stash puts them back; on an idle side slot
     it costs the same prefill and touches nothing of slot 0. The router's own questions (the class,
-    the package) and a client's title, tags and follow-up tasks are such requests."""
+    the package) and a client's title, tags and follow-up tasks are such requests.
+    FX15 (2026-10-08): no share of the resident's length here. `guest_frac` bounds what the stash
+    copies for a guest that runs ON slot 0; a side slot copies nothing. With it, the package
+    question (2,354 tokens, 34 options) was no guest of an 8.1k Open WebUI chat (limit 2,028): it
+    ran on slot 0 every turn, displaced the chat's end anchor (the turn resumed at 0.96-0.98 and
+    re-read 250-670 tokens) and cost 3.3 s when it missed its own head there (UX3 W02/W05)."""
     try:
         valid = int(getattr(res, "valid", 0) or 0)
         return (valid >= 2 * chunk and rc < chunk
-                and n <= int(getattr(res, "guest_max", 0) or 0)
-                and n < float(getattr(res, "guest_frac", 0.25)) * valid)
+                and n <= int(getattr(res, "guest_max", 0) or 0))
     except Exception:                                              # noqa: BLE001
         return False
 

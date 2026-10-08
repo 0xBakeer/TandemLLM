@@ -198,6 +198,14 @@ def test_a_guest_of_slot_0_takes_an_idle_side_slot_first():
         # 0.3.47 build it was not, and ran on slot 0)
         need, why = need_for(question, lane="short")
         assert need is not None and why["guest"] == 41_474, why
+        # FX15: the package question (2,354 tokens) over a fresh Open WebUI chat of 8,112 rows is a
+        # guest too: more than a quarter of the chat, which bounds only a guest ON slot 0's stash
+        chat = conv[:8112]
+        A.STATE["resident"], A.STATE["slot0_view"] = Res(chat), chat
+        package_q = [5, 6, 7] + [700_000 + i for i in range(2351)]
+        need, why = need_for(package_q, lane="short")
+        assert need is not None and why.get("guest") == 8112, {k: v for k, v in why.items()
+                                                                 if k != "ids"}
         # a lane job that is no guest stays the lane's (slot 0's safe points), as before
         A.STATE["resident"], A.STATE["slot0_view"] = Res(conv[:1500]), conv[:1500]
         need, why = need_for(question, lane="short")

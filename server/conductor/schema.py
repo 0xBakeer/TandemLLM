@@ -1302,6 +1302,21 @@ def tool_fit(router: dict) -> dict:
     return {**TOOL_FIT, **(router.get("tool_fit") or {})}
 
 
+#: FX15 (UX3, 2026-10-08): how long the package question's answer holds in a session. `class`: a
+#: package it picked stays the pick for the follow-ups while the class question keeps the session's
+#: class; the question is asked again when the class question moves the session to another class,
+#: and after an answer of none (a later message may fit a package). `message`: asked again for
+#: every new user message, as 0.4.6 did (2.4k tokens, 0.55 s warm, 3.3 s on slot 0; UX3 W02 re-asked
+#: "make it shorter" and got the package the note already held)
+PACKAGE_STICKY = ("class", "message")
+
+
+def package_sticky(router: dict) -> str:
+    """The router's `classifier.package_sticky`; a router stored before FX15 has none: `class`."""
+    v = (router.get("classifier") or {}).get("package_sticky")
+    return v if v in PACKAGE_STICKY else "class"
+
+
 def package_prompt(router: dict) -> str | None:
     """The router's own Qwen prompt for the package question (FX6), None when it has none (the
     class question's prompt then, as always)."""
@@ -1478,6 +1493,9 @@ SCHEMAS: dict[str, dict] = {
             "context_line": {"type": "boolean"},
             "package_question": {"type": "string", "minLength": 4, "maxLength": 400},
             "package_accept": _PROB,
+            # FX15: `class` = a package picked for a class stays the session's pick for that
+            # class's follow-ups; `message` = asked again for every new user message (0.4.6)
+            "package_sticky": {"enum": list(PACKAGE_STICKY)},
             "qwen_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
             "package_prompt": {"type": "string", "minLength": 10, "maxLength": 4000},
             "reading": _obj({

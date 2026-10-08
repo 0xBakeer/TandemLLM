@@ -1452,6 +1452,14 @@ class Router:
             else:
                 pk = (cls, sh.user_hash)
                 hit = sess.package_pick.get(pk)
+                # FX15: a follow-up in the class the session stays in keeps the package the
+                # question picked for that class; the class question decides a new kind of
+                # request (`plan.class_new`), the package question is not asked again for it
+                held = sess.package_pick.get(("class", cls))
+                if hit is None and held is not None and held[0] in cands and \
+                        not getattr(plan, "class_new", True) and \
+                        schema.package_sticky(router) == "class":
+                    hit = (held[0], "sticky")
                 if hit is not None:
                     chosen, how = hit
                 else:
@@ -1471,6 +1479,10 @@ class Router:
                     if len(sess.package_pick) > 32:
                         sess.package_pick.clear()
                     sess.package_pick[pk] = (chosen, how)
+                    if chosen:
+                        sess.package_pick[("class", cls)] = (chosen, how)
+                    else:
+                        sess.package_pick.pop(("class", cls), None)
             row["extra"]["package_choice"] = {"candidates": cands, "chosen": chosen, "how": how}
             if chosen:
                 text, err = self.library.text(packages, chosen)
