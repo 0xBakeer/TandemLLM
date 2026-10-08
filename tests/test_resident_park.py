@@ -12,6 +12,10 @@ prefill of its whole prompt, as in tests/test_resident.py and tests/test_residen
   * a refused allocation (the memory policy says no) leaves the cold path, never a wrong state.
   * the trace replay: one opencode-shaped trace with the caches off, small and large; the token
     streams are identical, only where each prefill started differs (the plan's gate a).
+  * the parked end: an Open WebUI chat (its copy leaves the first answer's reasoning out) parked
+    by another chat comes back at its end anchor, with the same greedy tokens and the same engine
+    state as the turn that never left; the swap parks the other chat's end the same way; a
+    conversation without an end, or an end the park cannot hold, parks as before.
 
 Run: python tests/test_resident_park.py
 """
@@ -366,6 +370,138 @@ def test_the_trace_gives_the_same_tokens_with_the_caches_off_small_and_large():
     s8, r8 = _replay(large)
     assert s0 == s2 == s8, "a cache limit changed a token"
     assert sum(r0) == 0 and sum(r8) > sum(r2) > 0, (r0, r2, r8)
+
+
+# ------------------------------------------------------------------ the parked end
+
+def _owui(park: bool):
+    """Chat A (an Open WebUI chat whose first answer thinks), then, with `park`, chat B (not a
+    guest: A is parked with its end), then A's next turn as Open WebUI sends it: the first answer
+    without its reasoning (`<think>\n\n</think>\n\n` + the answer), and a new message. The server's
+    order: `unpark_end` (engine/spill.py `maybe_restore` calls it before the replay), the end
+    alignment's replay, the turn. Returns what the turn served, wrote and left in the engine."""
+    import test_end_align as EA
+    from server import app, diskcache, endalign
+    from test_end_anchor import TOOL, _state, turn
+    head = tokens(4 * CH, seed=110)
+    a = head + tokens(99, seed=111) + [EA.NL]          # the prompt ends `<think>\n`
+    _state()
+    out0, _, _ = turn(a, 60, session="A")
+    k = next(i for i in range(12, 30) if out0[i] not in out0[:i] and out0[i] not in a
+             and out0[i] not in (EA.NL, EA.SP))
+    res = _state(park_bytes=BIG, guest_max=10)
+    al = app.STATE["end_align"] = endalign.EndAlign(EA.tb_of({out0[k]: endalign.THINK_END}))
+    diskcache.wire_end_align(None, al, res)
+    eng = app.STATE["engine"]
+    out, _, _ = turn(a, 60, session="A")
+    assert out == out0
+    e = res.end["at"]
+    regions = [list(r) for r in al.regions(res)]
+    assert regions == [[len(a), e, len(a) + k]], regions
+    copy = a[:-1] + [EA.SP] + out[k:] + TOOL
+    info = {"e": e, "res": res, "eng": eng, "al": al}
+    if park:
+        b = head + tokens(140, seed=112)
+        out_b, _, _ = turn(b, 10, session="B")
+        e_b = res.end["at"]
+        assert res.park_owner == "A" and res.park_base == len(head), res.report()
+        assert res.park_end["at"] == e and res.park_base + res.park_rows == e
+        assert res.park_regions == regions and res.stats["park_ends"] == 1
+        assert res.owner == "B" and res.end["at"] == e_b
+        c = res.common(copy)
+        # the copy reaches the parked end through the alignment only, as the server's copy
+        assert res.park_offer(copy, c, len(copy) - 1) == e
+        assert res.park_offer(copy, c, len(copy) - 1, align=False) < len(a)
+        assert res.unpark_end(eng, None, copy, len(copy) - 1) == e
+        assert res.owner == "A" and res.end["at"] == e and al.regions(res) == [tuple(regions[0])]
+        # the swap parked B with its end, its regions too
+        assert res.park_owner == "B" and res.park_end["at"] == e_b
+        assert res.park_regions and res.park_regions[0][:2] == [len(b), e_b]
+        info.update(b=b, out_b=out_b, e_b=e_b)
+    ids, spans, aligned = app._end_replay(res, copy)
+    assert aligned > 0 and ids[:e] == res.tokens[:e], (aligned, len(ids), e)
+    out2, pre, _ = turn(ids, 12, session="A")
+    assert pre["kind"] == "end" and pre["reused"] == e, pre
+    info.update(ids=ids, out2=out2, n=int(eng.kv.length))
+    return info
+
+
+def test_a_parked_chat_without_its_reasoning_comes_back_at_its_end():
+    """0.4.7 live (2026-10-08, Open WebUI chats A and B): `parks 4, park_hits 0`; the park held
+    rows and grid anchors only, and a copy without the first answer's reasoning parts from the
+    rows below every one the disk head did not already give: chat B came back with 16,370 tokens
+    re-read (23.7 s). The park keeps the end anchor now, and the copy resumes there: the same
+    served prompt, the same 12 greedy tokens, the same engine state as the turn that never left
+    (the end anchor's gate, and here bit for bit: the rows and the state are the bytes that were
+    in place)."""
+    from test_end_anchor import TOOL2, turn
+    ref = _owui(park=False)
+    got = _owui(park=True)
+    res = got["res"]
+    assert got["ids"] == ref["ids"] and got["out2"] == ref["out2"], "the same served prompt and tokens"
+    assert got["n"] == ref["n"]
+    same_state(got["eng"], ref["eng"], got["n"])
+    assert res.stats["park_hits"] == 1 and res.stats["park_tokens_reused"] == got["e"], res.stats
+    assert res.stats["park_end_hits"] == 1
+    # and B's turn after it: its end came back with the swap (the prefill's own park path: the
+    # copy holds every token up to it), the end anchor's gate against a cold prefill
+    b_ids = got["b"] + got["out_b"] + TOOL2
+    out_b2, pre_b, _ = turn(b_ids, 6, session="B")
+    assert pre_b["kind"] == "end" and pre_b["reused"] == got["e_b"], pre_b
+    assert res.stats["park_hits"] == 2 and res.stats["park_tokens_reused"] == got["e"] + got["e_b"]
+    import test_end_align as EA
+    assert out_b2 == EA._cold(b_ids, 6), "the end anchor's gate: the same greedy tokens as cold"
+    return f"A back at its end {got['e']} from the park, B at {got['e_b']}; tokens and state equal"
+
+
+def _plain_abab(end: bool):
+    """A, B, A, B on the cache alone (no generation keeps an end): what each prefill reused, its
+    logits, the park after each."""
+    eng = fresh()
+    res = resident(eng, end=end)
+    a = HEAD + tokens(150, seed=120)
+    b = HEAD + tokens(140, seed=121)
+    seen = []
+    for ids, s in ((a, "A"), (b, "B"), (grow(a, 122), "A"), (grow(b, 123), "B")):
+        lg, reused, info = turn(eng, res, ids, s)
+        decode(eng, len(ids), k=5, seed=124)
+        seen.append((reused, info["kind"], lg, res.park_owner, res.park_base, res.park_rows,
+                     sorted(res.park_anchors)))
+        assert res.park_end is None
+    return seen, res
+
+
+def test_a_parked_conversation_without_an_end_parks_as_before():
+    off, r0 = _plain_abab(False)
+    on, r1 = _plain_abab(True)
+    for x, y in zip(off, on):
+        assert x[:2] == y[:2] and x[3:] == y[3:], (x[:2], y[:2], x[3:], y[3:])
+        assert torch.equal(x[2], y[2])
+    for k in ("parks", "park_hits", "park_swaps", "park_tokens_reused"):
+        assert r0.stats[k] == r1.stats[k], k
+    assert r1.stats["park_ends"] == 0 and r1.stats["park_hits"] == 2
+
+
+def test_an_end_the_park_cannot_hold_parks_the_grid_as_before():
+    """Rows up to the end that do not fit the park: the rows up to the newest anchor that fits
+    are parked, as before, and the end anchor is dropped with the rows in place."""
+    from server import app
+    from test_end_anchor import TOOL, _state, turn as served
+    eng0 = fresh()
+    rows = 70
+    res = _state(park_bytes=rows * per_row(eng0) + 2 * eng0.state.nbytes, park_anchors=2,
+                 guest_max=10)
+    a = HEAD + tokens(150, seed=125)
+    out, _, _ = served(a, 20, session="A")
+    e = res.end["at"]
+    assert e - 128 > rows
+    served(HEAD + tokens(140, seed=126), 6, session="B")
+    assert res.park_owner == "A" and res.park_end is None and res.stats["park_ends"] == 0
+    assert res.park_base == 128 and res.park_rows == 64, res.report()     # 192, the grid line
+    assert res.park_bytes <= res.park_budget
+    _, pre, _ = served(a + out + TOOL, 4, session="A")
+    assert pre["kind"] == "resident" and pre["reused"] == 192, pre
+    assert app.STATE["resident"].stats["park_hits"] == 1
 
 
 def _main():

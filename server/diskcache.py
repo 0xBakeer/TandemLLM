@@ -194,6 +194,9 @@ def start_spill(state, a, tier, journal=None):
     still reads its sessions back."""
     from engine import spill as sp
     res = state.get("resident")
+    al = state.get("end_align")
+    if res is not None and al is not None:
+        wire_end_align(None, al, res)          # the park's end anchor, with or without a spill
     if tier is None or res is None or getattr(a, "session_spill", "on") == "off":
         print("[spill] off", flush=True)
         return None
@@ -215,7 +218,6 @@ def start_spill(state, a, tier, journal=None):
                                       "codec": str(getattr(a, "session_spill_codec", "zstd")),
                                       **spill_of(_settings_doc(state)[1])}).open()
     spill.guard = getattr(tier, "guard", None)
-    al = state.get("end_align")
     if al is not None:
         wire_end_align(spill, al)
     res.spiller = spill
@@ -227,15 +229,23 @@ def start_spill(state, a, tier, journal=None):
     return spill
 
 
-def wire_end_align(spill, al) -> None:
+def wire_end_align(spill, al, res=None) -> None:
     """The end alignment's part in the NVMe entries (server/endalign.py): its regions written with
     an entry and read back with it, and (SRV-269) the restore's offer aligning a copy the way the
     resume after the restore will, so a chat whose client leaves the reasoning out comes back
-    from the disk instead of being read again."""
-    spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
-    spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
-    spill.offer_align = lambda toks, end, extra, keys: al.offers(
-        toks, end, (extra or {}).get("end_regions") or [], keys)
+    from the disk instead of being read again. A parked conversation's end (`res`, engine/cache.py
+    `ResidentPrefix._park`) the same way: its regions parked with it and adopted when it comes
+    back, the park's offer aligning the copy, and the parked end written to the NVMe with them."""
+    if spill is not None:
+        spill.extra_of = lambda r: {"end_regions": [list(x) for x in al.regions(r)]}
+        spill.on_adopt = lambda r, extra: al.adopt(r, extra.get("end_regions") or [])
+        spill.offer_align = lambda toks, end, extra, keys: al.offers(
+            toks, end, (extra or {}).get("end_regions") or [], keys)
+        spill.park_extra_of = lambda r: {"end_regions": [list(x) for x in r.park_regions]}
+    if res is not None:
+        res.end_extra_of = al.regions
+        res.end_adopt = lambda r, regions: al.adopt(r, regions or [])
+        res.park_align = lambda toks, end, regions, keys: al.offers(toks, end, regions or [], keys)
 
 
 def refresh(state, tier=None) -> list[str]:
