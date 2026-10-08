@@ -1,6 +1,6 @@
 ---
 name: write-message
-description: Write or reply to an email, text or chat message for the user - to a boss, colleague, landlord, teacher, customer, friend or family - with the right tone (formal, friendly, firm, apologetic), the right length, and ready to send.
+description: Draft an email, text or chat message that the user will send to someone else - a boss, colleague, landlord, teacher, customer, friend or family - or a reply to a message the user received, with the right tone (formal, friendly, firm, apologetic), the right length, and ready to send. Not for how you yourself should answer the user (an instruction to reply with one word, OK, yes or no, or in a set format).
 ---
 # Writing a message
 
