@@ -639,6 +639,7 @@ LEDGER_NOTES = {
     "engine_cached": "the prompt tokens the engine read from a cache, the hidden notes included (cached_tokens counts the client's among them)",
     "forwarded_tokens": "what the prefill forwarded, hidden tokens included",
     "wait_mem_ms": "ms the parallel memory admission held the request (inside queue_ms)",
+    "sampling": "how the request sampled: null greedy, client (its own temperature), regenerate (TandemLLM sampled a regenerate)",
 }
 
 
@@ -676,6 +677,8 @@ def gen_ledger(root: str) -> str:
             v = 7
         if name == "engine_cached":
             v = 8
+        if name == "sampling":
+            v = 9
         version_of[name] = str(v)
         cols.append((name, kind, str(v)))
     lines = [HEADER, r"\begin{reftable}{The usage ledger's requests table (schema version "

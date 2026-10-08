@@ -78,6 +78,7 @@
 \texttt{QWEN38\_\allowbreak{}LEN\_\allowbreak{}MODE} & \texttt{none} & \texttt{wide} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}LEN\_\allowbreak{}SWITCH} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}LOWER\_\allowbreak{}RIGHT\_\allowbreak{}FROM} & \texttt{64} & \texttt{engine/\allowbreak{}model.py} \\
+\texttt{QWEN38\_\allowbreak{}MEMORY\_\allowbreak{}PROXIES} & \texttt{none} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}MEMORY\_\allowbreak{}WRITER\_\allowbreak{}TEXT} & \texttt{none} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}MODEL} & \texttt{none} & \texttt{engine/\allowbreak{}config.py} \\
 \texttt{QWEN38\_\allowbreak{}MODEL\_\allowbreak{}NAME} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}schema.py} \\
@@ -105,6 +106,10 @@
 \texttt{QWEN38\_\allowbreak{}PROBE\_\allowbreak{}EVERY} & \texttt{1024} & \texttt{server/\allowbreak{}probe.py} \\
 \texttt{QWEN38\_\allowbreak{}PROBE\_\allowbreak{}SNAPSHOTS} & \texttt{off} & \texttt{off} \textbullet{} \texttt{server/\allowbreak{}probe.py} \\
 \texttt{QWEN38\_\allowbreak{}RANKK} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\
+\texttt{QWEN38\_\allowbreak{}REGENERATE} & \texttt{sample} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TEMPERATURE} & \texttt{0.7} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TOP\_\allowbreak{}K} & \texttt{20} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TOP\_\allowbreak{}P} & \texttt{0.95} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SCALE\_\allowbreak{}ON} & \texttt{weight} & \texttt{tools/\allowbreak{}fp8\_\allowbreak{}linear.py} \\
 \texttt{QWEN38\_\allowbreak{}SESSION\_\allowbreak{}GENERATIONS} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}DIR} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
@@ -114,6 +119,7 @@
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}GRID} & \texttt{512} & \texttt{512} \textbullet{} \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}MODEL} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
 \texttt{QWEN38\_\allowbreak{}SHADOW\_\allowbreak{}POOL\_\allowbreak{}SLACK\_\allowbreak{}GIB} & \texttt{2} & \texttt{server/\allowbreak{}conductor/\allowbreak{}shadow.py} \\
+\texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CARRY} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CONTINUE} & \texttt{view} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}CONV} & \texttt{on} & \texttt{server/\allowbreak{}app.py} \\
 \texttt{QWEN38\_\allowbreak{}SIDE\_\allowbreak{}DISK} & \texttt{read} & \texttt{server/\allowbreak{}app.py} \\
@@ -128,11 +134,14 @@
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}TILES\_\allowbreak{}WIDE} & \texttt{none} & \texttt{(a path)} \textbullet{} \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}TILES\_\allowbreak{}WIDE\_\allowbreak{}B} & \texttt{none} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
 \texttt{QWEN38\_\allowbreak{}SKINNY\_\allowbreak{}XSTUB} & \texttt{0} & \texttt{tools/\allowbreak{}nvfp4\_\allowbreak{}skinny.py} \\
+\texttt{QWEN38\_\allowbreak{}SPILL\_\allowbreak{}PARK} & \texttt{on} & \texttt{engine/\allowbreak{}cache.py} \\
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}RHO} & \texttt{none} & \texttt{(a path)} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}SKIP} & \texttt{0} & \texttt{1} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}STAIR\_\allowbreak{}TABLES} & \texttt{none} & \texttt{(a path)} \textbullet{} \texttt{engine/\allowbreak{}lenrouter.py} \\
 \texttt{QWEN38\_\allowbreak{}STATUS\_\allowbreak{}CLIENTS} & \texttt{open-\allowbreak{}webui} & \texttt{server/\allowbreak{}conductor/\allowbreak{}states.py} \\
 \texttt{QWEN38\_\allowbreak{}SUFFIX\_\allowbreak{}STORE} & \texttt{\textasciitilde{}/\allowbreak{}.qwen38-\allowbreak{}spark-\allowbreak{}engine/\allowbreak{}suffix} & \texttt{server/\allowbreak{}app.py} \\
+\texttt{QWEN38\_\allowbreak{}TANDEM\_\allowbreak{}SCRATCH} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}packages.py} \\
+\texttt{QWEN38\_\allowbreak{}TANDEM\_\allowbreak{}URL} & \texttt{none} & \texttt{server/\allowbreak{}conductor/\allowbreak{}packages.py} \\
 \texttt{QWEN38\_\allowbreak{}TOOL\_\allowbreak{}FIT} & \texttt{on} & \texttt{server/\allowbreak{}conductor/\allowbreak{}router.py} \\
 \texttt{QWEN38\_\allowbreak{}TREE\_\allowbreak{}ALIAS\_\allowbreak{}STATE} & \texttt{0} & \texttt{0} \textbullet{} \texttt{engine/\allowbreak{}model.py} \\
 \texttt{QWEN38\_\allowbreak{}TREE\_\allowbreak{}CHAIN\_\allowbreak{}DELEGATE} & \texttt{1} & \texttt{engine/\allowbreak{}model.py} \\

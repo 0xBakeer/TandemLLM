@@ -12,7 +12,7 @@
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}MAX\_\allowbreak{}INFLIGHT} & \texttt{none} & requests at once, past it a fallback or a 503; none (the default): no limit from the proxy, the backend takes what it accepts \\
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}ENABLED} & \texttt{1} &  \\
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}INJECT\_\allowbreak{}USAGE} & \texttt{1} & ask a stream for its usage frame \\
-\texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}HARNESS} & \texttt{off} & off \textbar{} shadow \textbar{} on (the harness) \\
+\texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}HARNESS} & \texttt{off} & off \textbar{} shadow \textbar{} on \\
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}HARNESS\_\allowbreak{}PROFILE} & \texttt{coding} & the conductor profile of its requests \\
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}WRITER} & \texttt{auto} & the background memory writer on this backend (proxy/memwriter.py): auto (on, off for a paid cloud model) \textbar{} off \textbar{} shadow \textbar{} on \\
 \texttt{TANDEM\_\allowbreak{}BACKEND\_\allowbreak{}\textless{}ID\textgreater{}\_\allowbreak{}WRITER\_\allowbreak{}USD\_\allowbreak{}DAY} & \texttt{0.25} & its spend cap a day on a paid model \\
@@ -59,7 +59,8 @@
 \texttt{TANDEM\_\allowbreak{}REF} & & read in \texttt{install.sh} \\
 \texttt{TANDEM\_\allowbreak{}REPO} & & read in \texttt{install.sh} \\
 \texttt{TANDEM\_\allowbreak{}ROUTE\_\allowbreak{}1} & & read in \texttt{ops/\allowbreak{}dash.env.example} \\
+\texttt{TANDEM\_\allowbreak{}SCRATCH} & & read in \texttt{server/\allowbreak{}conductor/\allowbreak{}packages.py} \\
 \texttt{TANDEM\_\allowbreak{}SKIP\_\allowbreak{}MEMCHECK} & & read in \texttt{install.sh} \\
-\texttt{TANDEM\_\allowbreak{}URL} & & read in \texttt{server/\allowbreak{}laya\_\allowbreak{}kit/\allowbreak{}laya\_\allowbreak{}drive.py,\allowbreak{} server/\allowbreak{}session\_\allowbreak{}tokens.py} \\
+\texttt{TANDEM\_\allowbreak{}URL} & & read in \texttt{server/\allowbreak{}conductor/\allowbreak{}packages.py,\allowbreak{} server/\allowbreak{}laya\_\allowbreak{}kit/\allowbreak{}laya\_\allowbreak{}drive.py} \\
 \texttt{TANDEM\_\allowbreak{}USAGE\_\allowbreak{}LEDGER} & & read in \texttt{ops/\allowbreak{}dash.env.example,\allowbreak{} proxy/\allowbreak{}\_\allowbreak{}\_\allowbreak{}main\_\allowbreak{}\_\allowbreak{}.py} \\
 \end{reftable}

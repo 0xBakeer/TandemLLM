@@ -8,6 +8,7 @@
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}User} & in, engine & a proxy's user name for the memory notes, honoured from loopback or QWEN38\_MEMORY\_PROXIES \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Relay-\allowbreak{}Id} & in, engine & a proxy's id for a relayed request, for the live counts; a relayed request without X-Tandem-User touches no memory \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Parent} & in, engine & the request a call of TandemLLM to itself serves; the row becomes client kind internal \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Regenerate} & in, engine & 1 serves the request as a regenerate (sampled, a fresh seed); 0 turns the detection off for it \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Images-\allowbreak{}Left-\allowbreak{}Out} & out, engine & how many earlier images were left out of the prompt \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Backend} & out, proxy & the id of the backend that answered a relayed request \\
 \texttt{X-\allowbreak{}Engine-\allowbreak{}Stop} & out, engine & pattern-stop(\textless{}label\textgreater{}) on a response without a stream that a stop pattern ended \\

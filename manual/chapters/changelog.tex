@@ -15,10 +15,23 @@
 \code{v0.2.0-staircut} & 09-29 & StairCut, on in the served profile: the paper's release \\
 \code{v0.2.1} & 09-29 & the dashboard login off by default; no decode path changed \\
 \code{v0.3.0} & 09-30 & image input; the text path unchanged \\
-\code{v0.4.0} & 10-06 & the conductor, memory notes, the caches for long agent sessions, parallel requests (off by default), and the dashboard as a standalone proxy in front of other engines and cloud APIs \\
+0.4.0 & 10-06 & the conductor, memory notes, the caches for long agent sessions, parallel requests (off by default), and the dashboard as a standalone proxy in front of other engines and cloud APIs; not published, 0.4.7 replaces it \\
+\code{v0.4.7} & 10-08 & 0.4.0 plus the package library, Regenerate, long Open WebUI chats back from the NVMe, the compressed session spill and a daily NVMe write budget \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{What 0.4.7 adds}
+
+0.4.7 is 0.4.0 plus the test builds 0.4.1-test to 0.4.7-test; \code{CHANGELOG.md} has each one with its live checks.
+
+\paragraph{Packages.} The system set (\code{tandem-core}, \code{render-tools}, \code{eval-judge}), four library packages (\code{creative-coding}, \code{charts}, \code{voxel-worlds}, \code{explainer-video}) and 34 everyday packages with \code{everyday-core} and \code{reply-format}. Every prose class offers the whole everyday set; the package question runs once per class (\code{package_sticky: class}) on an idle side slot. Measured against no package, 91 pairs judged by the served model: a mean of +1.19 of 5, indicative only; five everyday packages ship off. Everyday answers draft first and never stop on a form.
+
+\paragraph{Requests.} Regenerate samples (temperature 0.7, top-p 0.95, top-k 20, a fresh seed; \code{X-Tandem-Regenerate}); every other answer stays greedy, and the ledger's \code{sampling} column (schema 9) says which. Continue Response continues the partial answer. A memory note the store refuses is never shown, and a project note without a working directory lands at user scope.
+
+\paragraph{Caches.} A long Open WebUI chat comes back from the NVMe after other chats ran (a 48k-token chat in 1.0~s, TTFT 2.3~s). The session spill is compressed without loss (1.71$\times$ on a real entry's rows), the spill budget is 64~GB and the disk tier 16~GB, and the NVMe writes at most 200~GB a day. A conversation that ran on a side slot is carried into slot~0. Open WebUI chats own their NVMe entries, and a deploy that only registers a knob keeps the disk's files.
+
+\paragraph{Speed.} The speed guard's short gate on the 0.4.7 engine code: 49.93 against release 0.3.0's 50.38~tok/s (\measured, one run a side, store off).
 
 \section{What 0.4.0 brought}
 
