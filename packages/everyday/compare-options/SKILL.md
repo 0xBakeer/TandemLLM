@@ -15,7 +15,7 @@ Steps:
 6. Stop there unless the user asked for more.
 
 Defaults:
-- 2 to 4 options. More than 4: group them or ask the user to pick the top 4.
+- 2 to 4 options. More than 4: group them, or compare the 4 most likely and name the ones left out.
 - Do not invent prices, specifications, ratings or dates. Use ranges or "usually" when you do not know the exact value, and say that it must be checked.
 - Keep facts and judgement apart: "16 GB" is a fact, "enough for most" is a judgement.
 - When the options are equally good, say so and give the tie-breaker (the one the user already has, the cheaper one, the one easier to leave).

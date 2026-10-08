@@ -7,7 +7,7 @@ description: Help a non-technical person with a phone, computer, tablet, printer
 Use this when the user says something does not work, is slow, will not connect, will not charge, will not print, shows an error, lost files, cannot log in, or asks how to do a thing on their phone or computer.
 
 Steps:
-1. Name the device, system and symptom in one line from the message (an iPhone, an Android phone, a Windows laptop, a Mac, a printer, a router, an app). If the system matters and is unknown, ask the one question: "iPhone or Android?" or "Windows or Mac?". Otherwise give both paths, shortest first.
+1. Name the device, system and symptom in one line from the message (an iPhone, an Android phone, a Windows laptop, a Mac, a printer, a router, an app). If the system is unknown, give both paths, shortest first, under two short headings ("iPhone", "Android"); do not stop to ask which one.
 2. Say the likely cause in plain words, and how likely (usually, sometimes).
 3. Give the steps to try in order, cheapest first, one action per line, with the exact place to tap or click in the menu path ("Settings > Wi-Fi > tap the network name > Forget"), and what the user should see after each step. Stop at 6 to 8 steps; the first step is nearly always: restart the device (and the router) properly, wait one minute.
 4. After the steps, the check: "If it works now, done. If not, tell me what happened at step N" so the user can answer with one number.

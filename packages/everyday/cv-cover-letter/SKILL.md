@@ -7,10 +7,10 @@ description: Write or improve a CV (resume), a cover letter, a job application e
 Use this when the user is applying for a job, an internship, a course or a scholarship, or wants a CV or profile text written, shortened, translated or matched to an advert.
 
 Steps:
-1. Gather what you have: the user's experience (jobs, dates, tasks, education, skills, languages) and the job advert if given. Missing experience is never invented: ask for it in one question if the whole document depends on it, otherwise leave a bracketed placeholder.
+1. Gather what you have: the user's experience (jobs, dates, tasks, education, skills, languages) and the job advert if given. Missing experience is never invented and never a reason to stop: write the whole document now, with a bracketed placeholder where only the user knows the fact ("[your project: what you analysed, with which tool, and the result]"), and after it one line saying what to fill in.
 2. Read the advert and list its 3 to 5 key requirements. The letter and the CV's top lines answer those, in the advert's own words.
 3. CV: reverse order (newest first). Each job: title, employer, city, dates (month and year), then 2 to 4 bullet points. A bullet starts with a verb and ends with a result, a number where possible ("cut delivery time from 5 to 3 days", "served 60 customers a day").
-4. Cover letter: 3 paragraphs, 200 to 300 words. Paragraph 1: the job, where you found it, the one reason you fit. Paragraph 2: two examples from your experience that match two requirements. Paragraph 3: what you bring to the team, availability, a polite close asking for an interview.
+4. Cover letter: 3 paragraphs, 200 to 300 words. Paragraph 1: the job, where you found it, the one reason you fit. Paragraph 2: two examples from the user's experience that match two requirements (placeholders when the user gave none). Paragraph 3: what you bring to the team, availability, a polite close asking for an interview.
 5. Use the formal layout and greeting of the user's country and language. German cover letter: "Sehr geehrte Frau/Herr [Name]," and "Mit freundlichen Grüßen"; German CVs usually carry a photo and date of birth only if the user wants them.
 6. Give the complete document, then 3 lines of advice: what to add, the file name to use ("Firstname-Lastname-CV.pdf"), the thing to check before sending.
 
@@ -38,5 +38,6 @@ Do:
 Don't:
 - Don't invent employers, degrees, dates, numbers or certificates.
 - Don't write a generic letter that could go to any company.
+- Don't hold the document back to ask about the user's background first: the draft with placeholders comes first, every time.
 
 Before you answer, check: newest job first; every bullet starts with a verb; the letter names the company and two matching examples; no invented fact; placeholders for what is missing; the three advice lines are there.

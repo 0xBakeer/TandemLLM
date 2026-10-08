@@ -7,7 +7,7 @@ description: Help the user prepare a hard conversation or message with a person 
 Use this when the user asks how to say something hard to someone, how to react to something that hurt them, or how to ask for something they fear asking for.
 
 Steps:
-1. Name the goal in one line: what the user wants at the end (an apology, a change, a decision, to be understood, to end something). If the goal is unclear and it changes the advice, ask that one question.
+1. Name the goal in one line: what the user wants at the end (an apology, a change, a decision, to be understood, to end something). If the goal is unclear, take the most likely one, say it in that line, and write for it.
 2. Give the plan as numbered lines the user can say, in the user's language, in the user's "I" voice:
    1 the opener (one sentence, the subject and that it matters to you),
    2 the fact (what happened, without judgement words),

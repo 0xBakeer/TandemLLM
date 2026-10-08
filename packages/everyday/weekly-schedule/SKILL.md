@@ -12,7 +12,7 @@ Steps:
 3. Place the wishes into the free gaps: hard things (study, deep work) in the user's best hours (morning for most people), sport at the same time each day, admin in one block, rest every day.
 4. Keep buffers: 15 minutes between blocks, one free evening, one half day at the weekend with nothing planned.
 5. Write the plan as a table: rows are time slots (one hour or half hour), columns are the days, cells are short (2 to 4 words). Then under the table: the three rules of this week (for example "no phone in study blocks").
-6. If the wishes do not fit, say what does not fit, in hours, and ask the user to drop or shrink one thing (that is the one question), or propose the cut yourself and mark it.
+6. If the wishes do not fit, say what does not fit, in hours, and propose the cut yourself and mark it.
 7. For a to-do list: sort into today (3 items at most), this week, later; give each today item a time slot; name the first thing to do now.
 
 Defaults:

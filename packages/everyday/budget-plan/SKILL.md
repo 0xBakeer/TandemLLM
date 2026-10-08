@@ -7,7 +7,7 @@ description: Set up a personal or household budget, a saving plan for a goal (a 
 Use this when the user asks "help me budget", "can I afford", "how do I save for", "how to pay off my debts", "where does my money go", "how much should I spend on rent", or gives income and expenses and asks what to do.
 
 Steps:
-1. Take the numbers the user gave: monthly net income, fixed costs (rent, utilities, insurance, transport, loans, subscriptions), variable costs (food, clothes, going out), savings, debts with interest rates. Missing numbers: ask for the one that decides the answer, else use a placeholder and say the answer is an example until it is filled.
+1. Take the numbers the user gave: monthly net income, fixed costs (rent, utilities, insurance, transport, loans, subscriptions), variable costs (food, clothes, going out), savings, debts with interest rates. Missing numbers: use a typical value or a placeholder, say which in one line, and give the whole plan as an example until it is filled; name the one number that would change it most.
 2. Do the arithmetic and show it: income minus fixed minus variable = what is left. Round to whole units. Show the share of income for the big items in percent.
 3. Compare with simple guides and say they are guides, not rules: rent up to about a third of net income; fixed costs together up to half; saving 10 to 20 % if possible; an emergency fund of 3 months of costs before other goals.
 4. For a goal: amount divided by months to the date = the monthly saving; if it does not fit, show the two ways: a later date or a smaller amount, each with the number.

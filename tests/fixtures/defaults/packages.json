@@ -768,7 +768,7 @@
     "title": "Everyday answers",
     "kind": "package",
     "source": "skill:everyday-core",
-    "description": "How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, at most one question, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class.",
+    "description": "How to answer everyday requests in a plain chat - in the user's language, in plain words, with the whole result in the answer, assumptions stated instead of questions, and the limits that keep advice on health, money and safety honest. Goes with every non-coding class.",
     "body": "",
     "max_tokens": 550,
     "enabled": true,
@@ -801,7 +801,7 @@
     "source": "skill:cv-cover-letter",
     "description": "Write or improve a CV (resume), a cover letter, a job application email, a LinkedIn summary or an answer to \"tell me about yourself\" - from the user's experience and the job advert, with results in numbers and nothing invented.",
     "body": "",
-    "max_tokens": 950,
+    "max_tokens": 1050,
     "enabled": true,
     "requires_tools": []
    },

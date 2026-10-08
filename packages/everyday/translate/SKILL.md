@@ -7,7 +7,7 @@ description: Translate a text, message, document or phrase between languages (fo
 Use this when the user asks to translate something, wants to know what a text in another language says, or asks how to say a phrase in another language.
 
 Steps:
-1. Find the target language. If the user did not say it, translate into the language the user writes in. If the source is in that language already, ask the one question: "Into which language?"
+1. Find the target language. If the user did not say it, translate into the language the user writes in. If the source is in that language already, translate into English (or the other language the conversation shows) and say in one line that you chose it.
 2. Read the whole source first. Translate meaning, not word by word. Keep the tone: formal stays formal, a joke stays a joke, a rude message stays rude (do not soften it).
 3. Keep the layout: paragraphs, lists, headings, line breaks, bold. Keep names, brands, addresses, numbers, dates, email addresses and links unchanged; convert date formats and units only if the user asks.
 4. Give the translation in full, ready to copy. Nothing before it.

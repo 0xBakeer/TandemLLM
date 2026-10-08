@@ -7,7 +7,7 @@ description: Help a parent with a child or teenager - sleep, tantrums, eating, s
 Use this when a parent or carer asks "my child does X, what do I do", "is this normal at age N", "how do I get my toddler to", "my teenager won't", or asks for rules on screens, chores, pocket money or bedtime.
 
 Steps:
-1. Take the facts: the child's age (ask if missing; it changes everything), what happens and how often, what the parent has tried, any recent change (a move, a new sibling, school start, a separation).
+1. Take the facts: the child's age (if missing, answer for the most likely age band, say which, and how the advice changes for younger or older), what happens and how often, what the parent has tried, any recent change (a move, a new sibling, school start, a separation).
 2. Say what is usual at this age in 2 or 3 lines, without judging the parent or the child: most two-year-olds have tantrums daily; many four-year-olds wake at night; most thirteen-year-olds talk less to parents.
 3. Give the approach as numbered steps the parent can start today: the one change in the parent's behaviour, the routine (with clock times for sleep and screens), the words to say to the child (one or two short sentences at the child's level), what to do in the moment (stay calm, get down to eye level, name the feeling, hold the limit), and what to do after.
 4. Give the time frame: try it the same way for 2 weeks; say what better looks like (fewer minutes, fewer nights) and that things often get worse for a few days first.
@@ -39,7 +39,7 @@ User: "My 3-year-old screams at bedtime every night, takes an hour."
 Good shape: usual at 3, more so after a change; the routine: dinner 18:00, bath 18:45, 2 books in dim light, the same goodnight sentence, lights out 19:30; the words: "I know you want to stay up. It's time to sleep. I'm right outside."; in the moment: calm, short, back to bed each time without talk; after 2 weeks most children settle within 15 minutes; get help if the screaming comes with fear, nightly night terrors or snoring with pauses; for you: swap nights with a partner if you can.
 
 Do:
-- Ask the age if it is missing.
+- If the age is missing, answer first for the likely age and ask it in one line at the end.
 - Give the words to say, at the child's level.
 Don't:
 - Don't blame the parent or the child.

@@ -7,7 +7,7 @@ description: Make a complete, ordered checklist for a big life task - moving hou
 Use this when the user asks "what do I need to do for", "a checklist for", "don't let me forget anything when I", "packing list", or names a big change and asks where to start.
 
 Steps:
-1. Name the task and the date it happens (or ask for it if everything hangs on it; that is the one question). Count backwards from that date.
+1. Name the task and the date it happens (no date given: count in weeks before the day, or assume one and say it). Count backwards from that date.
 2. Split the list into time blocks: as soon as possible, 4 weeks before, 2 weeks before, the last week, the day, the first week after. For packing: a week before, the night before, the morning, in the hand luggage.
 3. Inside each block, list the items as short actions ("cancel the internet contract, notice period 1 month", "order 5 copies of the birth certificate"), each on its own line, with a checkbox. Put the items with the longest notice period or the longest waiting time first.
 4. Add the groups that are easy to forget, as their own short lists: documents to have, people and offices to inform (address changes, insurers, bank, employer, school, doctor, subscriptions, the post forwarding), things to measure or photograph (the meter readings, the flat's condition), money (deposits, fees, refunds).
