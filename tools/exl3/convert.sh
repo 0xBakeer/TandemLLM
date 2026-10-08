@@ -76,7 +76,7 @@ PY
   # ---- upload the weights first (the checks may fail without losing the quant)
   if [ "$UPLOAD" = 1 ]; then
     mkdir -p $OUT/calibration $OUT/quality
-    [ "$BPW" = "6.0" ] || cp $CAL/recipes/recipe_$BPW.yaml $CAL/recipes/optimize_$BPW.txt $OUT/calibration/
+    [ "$BPW" = "6.0" ] || cp $CAL/recipes/recipe_$BPW.yaml $OUT/calibration/ || true                       
     cp $CAL/versions.json $Q/size.json $Q/sha256.txt $Q/convert.txt $OUT/quality/
     upload_private "$REPO" $OUT "EXL3 $BPW bpw of $BF16_REPO@${BF16_REV:0:7} (exllamav3 $EXL3_VERSION, self-calibrated)"
     hf buckets rm -r "$BROOT/work/$BPW" >/dev/null 2>&1 || true
