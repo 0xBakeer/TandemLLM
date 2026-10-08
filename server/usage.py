@@ -182,6 +182,8 @@ class RequestRecord:
         # `[(start, end)]` in served positions (the router's notes, the end anchor's replay, a
         # reasoning the client left out, SP4's note); None: not known (the clamp of SRV-165)
         self.hidden_at: list | None = None
+        # FX16: the same ranges without the usage count check, for the end anchor's record
+        self.note_at: list | None = None
         # VIS-60: an internal row's request (the turn the router's question served)
         self.parent_request = None
         # ledger v3 (the proxy, P1): a request relayed to another backend (proxy/relay.py fills

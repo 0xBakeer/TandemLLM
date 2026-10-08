@@ -2401,6 +2401,8 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
             return
         e = int(res.end["at"])
         c = _shared_head(copy, res.tokens[:e])
+        if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048):
+            return          # another conversation's rows: nothing of this copy was ever kept
         al = STATE.get("end_align")
         ref = dict(al.last_refusal) if al is not None and al.last_refusal else {}
         marks = _conv_marks()
@@ -6209,6 +6211,11 @@ class Handler(BaseHTTPRequestHandler):
             rec.hidden_prompt = max(0, int(hidden_prompt))
             rec.hidden_at = _hidden_positions(hid_at, hid_tail, s1_len, n_prompt,
                                               rec.hidden_prompt, plan)
+            # FX16: the same ranges without the count check, for the end anchor's record of what
+            # the client never sent (the moved-block pass needs the notes' positions, which the
+            # usage accounting may decline as `hidden_at_off`)
+            rec.note_at = _hidden_positions(hid_at, hid_tail, s1_len, n_prompt,
+                                            rec.hidden_prompt, plan, strict=False)
             if comp is not None:
                 # what the client sent; the tokens the continuation reused count as cached
                 rec.prompt_tokens = rec.prompt_client = comp["client_n"]
@@ -6500,7 +6507,8 @@ class Handler(BaseHTTPRequestHandler):
                         _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
                                   hidden=hidden_spans + mem_taken[1],
                                   delta=comp["record"].delta if comp is not None else 0,
-                                  served_hidden=rec.hidden_at)
+                                  served_hidden=(rec.hidden_at if rec.hidden_at is not None
+                                                 else getattr(rec, "note_at", None)))
                         if rkey is not None and not ci and not (sup is not None and sup.acted) \
                                 and not mem_taken[0]:
                             rcache.put(rkey, ids, prompt_ids)
@@ -7058,7 +7066,8 @@ class Handler(BaseHTTPRequestHandler):
                 _remember(client_ids or prompt_ids, ids, conv_id, mm=mm,
                           hidden=hidden_spans + mem_taken[1],
                           delta=comp["record"].delta if comp is not None else 0,
-                          served_hidden=rec.hidden_at)
+                          served_hidden=(rec.hidden_at if rec.hidden_at is not None
+                                                 else getattr(rec, "note_at", None)))
                 if rkey is not None and not (sup is not None and sup.acted) and \
                         not mem_taken[0]:
                     rcache.put(rkey, ids, prompt_ids)
@@ -7361,12 +7370,14 @@ def _memory_row(plan, failed: list[str], shown=()) -> None:
         info["shown"] = list(shown)
 
 
-def _hidden_positions(hid_at, tail: int, s_len: int, n_prompt: int, hidden: int, plan):
+def _hidden_positions(hid_at, tail: int, s_len: int, n_prompt: int, hidden: int, plan,
+                      strict: bool = True):
     """SRV-233: the served prompt's hidden tokens as merged `[(start, end)]`, the closed think
     block at the tail included; None when they are not known (an insertion that was not one run,
     a prompt changed after, or a count that does not add up to the hidden total within the
-    whitespace the end alignment moves), and `usage` falls back to the clamp."""
-    if hid_at is None or s_len != n_prompt:
+    whitespace the end alignment moves), and `usage` falls back to the clamp. `strict=False`
+    (FX16): the ranges as known, without the count check."""
+    if hid_at is None or (strict and s_len != n_prompt):
         return None
     spans = sorted((max(0, a), min(n_prompt, b)) for a, b in hid_at if b > a)
     if tail:
@@ -7378,7 +7389,7 @@ def _hidden_positions(hid_at, tail: int, s_len: int, n_prompt: int, hidden: int,
         else:
             out.append([a, b])
     total = sum(b - a for a, b in out)
-    if abs(total - int(hidden)) > max(64, int(hidden) // 50):
+    if strict and abs(total - int(hidden)) > max(64, int(hidden) // 50):
         if plan is not None and plan.row is not None:
             plan.row["extra"]["hidden_at_off"] = [total, int(hidden)]
         return None
