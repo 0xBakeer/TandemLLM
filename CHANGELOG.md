@@ -2,6 +2,44 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.4.7, 2026-10-08
+
+The release after the 0.4.0 tree. It is 0.3.51-test (the 0.4.0 candidate) plus everything in 0.4.1-test to 0.4.7-test below, the manual, and the proxy documentation of the in-process DeepSeek relay. The 0.4.0 tree was never published; 0.4.7 replaces it. The text changes on purpose in three places: a regenerate under TandemLLM samples, Continue Response continues the partial answer, and the package documents change what the router attaches.
+
+Speed guard short gate on the same engine code (0.4.7-test, 2026-10-08, store off, one run a side, same hour): release 0.3.0 50.38, 0.4.7 49.93 tok/s mean (-0.9 %), 93.73 and 93.74 ms a round.
+
+### Caches
+
+- A long Open WebUI chat comes back from the NVMe after other chats ran: the restore offer asks the end alignment too, and a restore never evicts the entry it reads next. A 48k-token chat came back in 1.0 s with a TTFT of 2.3 s; a cold read takes about 70 s (0.4.2-test).
+- The session spill is compressed losslessly: byte planes plus zstd level 1, 1.71x on the rows of a real 48,853-token entry, checked bit for bit. The spill budget is 64 GB, the disk tier 16 GB, and the NVMe gets a daily write budget of 200 GB (`/health` `cache.disk_writes`) (0.4.3-test).
+- A conversation that ran on a side slot is carried into slot 0 with its rows and end state. A non-streamed answer keeps its end anchor. The park writes a conversation it gives up to the NVMe first (0.4.1-test).
+- A deploy that only registers a knob keeps the disk's heads and conversations. The fingerprint reads `engine/settings.py` by the defaults of the knobs the engine reads, and it now reads the `tools/` modules the engine imports. The first start adopts the old formula's files once (`fp-equal.json`). 0.4.6-test had swept 13 heads (12.4 GB) and 13 spilled conversations (29.6 GB) at its start (0.4.7-test).
+- Open WebUI chats own their NVMe entries (`X-OpenWebUI-Chat-Id`), so one chat no longer takes another chat's entry: back in a chat after two others in 1.9 s, 6.9 s before (0.4.7-test).
+
+### Packages
+
+- The first packages (the system set `tandem-core`, `render-tools`, `eval-judge`, and `creative-coding`, `charts`, `voxel-worlds`, `explainer-video`) and the everyday library: 34 tool-free packages plus `everyday-core` and `reply-format` (0.4.4-test to 0.4.7-test).
+- Every prose class offers the whole everyday set; the router asks for a package once per class (`package_sticky: class`) and on an idle side slot, not on every new message and never over slot 0's conversation (0.4.6-test, 0.4.7-test).
+- The everyday packages were measured against no package: 91 pairs, mean +1.19 of 5, judged by the served model, indicative only. Five ship off (`schema.EVERYDAY_OFF`). Everyday answers draft first, with a placeholder where only the user knows the fact, and never stop on a form (0.4.7-test).
+- The testing package deletes only the scratch folder its own run made (`.tandem/<session token>`), and files-care never deletes what the conversation did not create (0.4.7-test).
+
+### Requests and answers
+
+- Regenerate gives a different answer: it samples at temperature 0.7, top-p 0.95, top-k 20 with a fresh seed, and every other answer stays greedy (ledger schema 9, `sampling`) (0.4.4-test).
+- Open WebUI's Continue Response continues the partial answer instead of writing a new one from the title (0.4.7-test).
+- A memory note the store refuses is never shown as text, and a project note without a working directory lands at user scope (0.4.5-test).
+- Laya stays out of the plan and the lines between tool calls; a refused Laya request says what was wrong and exits 2, a network failure still exits 3 (0.4.1-test, 0.4.5-test).
+
+### Dashboard, settings, tests
+
+- The usage filter lists come from two new ledger indexes: the 365-day query is 845 ms cold and 110 ms warm (1,096 and 341 ms before). Seven server knobs are in the settings registry, and the CPU suite is green (0.4.6-test).
+- The Deciders screen says why a model is not loaded (0.4.1-test).
+
+### Manual and documentation
+
+- `manual/`: the TandemLLM manual as a LaTeX book, with the HTTP reference (`manual/tools/http_ref.py`) and the reference tables (`manual/tools/gen_reference.py`) generated from the code. `.github/workflows/manual.yml` builds the PDF only for a pushed `v*` tag and attaches it to that release.
+- `docs/proxy.md`: the in-process relay's first live run and the `serve.env` lines. The proxy's start line names the config database's schema version.
+
 ## 0.4.7-test, 2026-10-08
 
 0.4.6-test (b7be6e8) with the fixes for UX3's first regressions (FX15) and PKG3's measured package documents (v25-v27, router v21, below). The package texts go in as the box's packages v28 (`tools/packages_migrate.py --put`, edit 34, and the everyday skill copies), the router as v22 (`package_sticky: class` on the five prose classes). `~/rollback-0.4.7.sh` restores packages v27, router v21 and the skill copies and returns the box to 0.4.6-test. Speed guard short gate (2026-10-08, store off, one run a side, same hour): release 0.3.0 50.38 -> 0.4.7-test 49.93 tok/s mean (-0.9 %), 93.73 -> 93.74 ms a round; no noise estimate by design.
