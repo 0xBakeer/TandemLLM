@@ -351,14 +351,13 @@ __global__ void __launch_bounds__(256) recon_kernel(const uint16_t* __restrict__
 // grid (S, N/128), cluster (S, 1, 1); block 32 WN WK. A CTA owns the 128 columns [128 by, +128):
 // warp (wn, wk) the 16 NTW columns wn*16*NTW.. of them over its slice of the CTA's K-tile range.
 // KB: bits a weight. ST: cp.async stages of a warp's (NTW tiles x one K tile) of trellis.
-template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32>
-__global__ void __launch_bounds__(32 * WN * WK) gemm_kernel(
+template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32, bool XSM, int MINB>
+__global__ void __launch_bounds__(32 * WN * WK, MINB) gemm_kernel(
         const __half* __restrict__ XH, const uint32_t* __restrict__ T, const __half* __restrict__ SVH,
         void* __restrict__ Yv, int ldy, int M, int Kin, int N, int ldt, int b1, int b2) {
     constexpr int TW = 8 * KB;                      // uint32 a 16x16 tile
-    // 1..16 rows: the activations ride the cp.async stages with the trellis (XSM); 17..32 rows
-    // would double the stage, so they are loaded into registers one K tile ahead instead
-    constexpr bool XSM = MT == 1;
+    // XSM: the activations ride the cp.async stages with the trellis; otherwise they are loaded
+    // into registers one K tile ahead (no shared memory, so more CTAs fit an SM)
     constexpr int XR = 12;                          // uint32 a staged activation row (16 fp16 + pad)
     constexpr int XW = XSM ? 16 * MT * XR : 0;      // uint32 of a stage's activation rows
     constexpr int SW = NTW * TW + XW;               // uint32 a warp's stage: trellis, then rows
@@ -540,12 +539,12 @@ __global__ void __launch_bounds__(32 * WN * WK) gemm_kernel(
     }
 }
 
-template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32>
+template <int KB, int MT, int NTW, int WN, int WK, int ST, bool OF32, bool XSM, int MINB>
 void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& svh, at::Tensor& y,
                  int M, int Kin, int N, int ldt, int S, int b1, int b2, cudaStream_t stream) {
     constexpr int TW = 8 * KB;
-    const size_t smem = (size_t)WN * WK * ST * (NTW * TW + (MT == 1 ? 16 * 12 : 0)) * 4 + (size_t)16 * MT * 132 * 4;
-    auto kern = gemm_kernel<KB, MT, NTW, WN, WK, ST, OF32>;
+    const size_t smem = (size_t)WN * WK * ST * (NTW * TW + (XSM ? 16 * MT * 12 : 0)) * 4 + (size_t)16 * MT * 132 * 4;
+    auto kern = gemm_kernel<KB, MT, NTW, WN, WK, ST, OF32, XSM, MINB>;
     static bool attr = false;
     if (!attr) {
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -570,19 +569,21 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
 
 }  // namespace
 
-// cfg: 0 -> MT1 NTW8 WN1, 1 -> MT1 NTW4 WN2, 2 -> MT2 NTW4 WN2, 3 -> MT2 NTW2 WN4
-#define EXL3_WK_CASES(KB, MT, NTW, WN, OF32)                                                     \
+// cfg: 0 -> MT1 NTW8 WN1 (activations staged), 1 -> MT1 NTW4 WN2 (registers, 2 CTAs an SM),
+//      2 -> MT2 NTW4 WN2, 3 -> MT2 NTW2 WN4, 4 -> MT1 NTW8 WN1 (registers)
+#define EXL3_WK_CASES(KB, MT, NTW, WN, OF32, XSM, MINB)                                          \
     switch (wk) {                                                                                \
-        case 4: launch_gemm<KB, MT, NTW, WN, 4, 3, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
-        case 8: launch_gemm<KB, MT, NTW, WN, 8, 3, OF32>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        case 4: launch_gemm<KB, MT, NTW, WN, 4, 3, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        case 8: launch_gemm<KB, MT, NTW, WN, 8, 3, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
         default: TORCH_CHECK(false, "exl3 gemm: wk must be 4 or 8, got ", wk);                   \
     }
 #define EXL3_CFG_CASES(KB, OF32)                                                                 \
     switch (cfg) {                                                                               \
-        case 0: EXL3_WK_CASES(KB, 1, 8, 1, OF32)                                                 \
-        case 1: EXL3_WK_CASES(KB, 1, 4, 2, OF32)                                                 \
-        case 2: EXL3_WK_CASES(KB, 2, 4, 2, OF32)                                                 \
-        case 3: EXL3_WK_CASES(KB, 2, 2, 4, OF32)                                                 \
+        case 0: EXL3_WK_CASES(KB, 1, 8, 1, OF32, true, 1)                                        \
+        case 1: EXL3_WK_CASES(KB, 1, 4, 2, OF32, false, 1)                                       \
+        case 2: EXL3_WK_CASES(KB, 2, 4, 2, OF32, false, 1)                                       \
+        case 3: EXL3_WK_CASES(KB, 2, 2, 4, OF32, false, 1)                                       \
+        case 4: EXL3_WK_CASES(KB, 1, 8, 1, OF32, false, 1)                                       \
         default: TORCH_CHECK(false, "exl3 gemm: bad cfg ", cfg);                                 \
     }
 #define EXL3_KB_CASES(OF32)                                                                      \
@@ -609,7 +610,7 @@ void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tens
     TORCH_CHECK(t.size(0) * 16 == Kin, "trellis K tiles vs Kin");
     TORCH_CHECK(N % 128 == 0 && Kin % 128 == 0, "N and Kin must be multiples of 128");
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
-    TORCH_CHECK(M >= 1 && M <= (cfg >= 2 ? 32 : 16), "rows ", M, " for cfg ", cfg);
+    TORCH_CHECK(M >= 1 && M <= ((cfg == 2 || cfg == 3) ? 32 : 16), "rows ", M, " for cfg ", cfg);
     TORCH_CHECK(S >= 1 && S <= 16, "cluster size");
     TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh fp16 [N]");
     if (y.dtype() == torch::kFloat) { EXL3_KB_CASES(true) }
@@ -747,7 +748,8 @@ class EXL3Block:
     `out_fp32`: the vocabulary head returns fp32 logits, as the e4m3 head does.
     """
 
-    __slots__ = ("t", "suh", "svh", "kb", "N", "K", "sizes", "names", "bounds", "out_fp32", "_bf16")
+    __slots__ = ("t", "suh", "svh", "kb", "N", "K", "sizes", "names", "bounds", "out_fp32", "_bf16",
+                 "tile_n")
 
     def __init__(self, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, *,
                  sizes: list[int] | None = None, names: list[str] | None = None,
@@ -779,6 +781,9 @@ class EXL3Block:
             self.bounds = (1 << 30, 1 << 30)
         self.out_fp32 = out_fp32
         self._bf16 = None
+        # the N the tile table is read at: a group member reads its group's entry, so a member
+        # used on its own sums K in the order the group's launch does (one order a weight)
+        self.tile_n = self.N
 
     @classmethod
     def group(cls, blocks: list["EXL3Block"], names: list[str]) -> "EXL3Block":
@@ -794,8 +799,10 @@ class EXL3Block:
         """Member i of a group as its own EXL3Block, a view into the group's tensors."""
         off = sum(self.sizes[:i])
         n = self.sizes[i]
-        return EXL3Block(self.t[:, off // 16:(off + n) // 16], self.suh[i], self.svh[off:off + n],
-                         out_fp32=self.out_fp32)
+        m = EXL3Block(self.t[:, off // 16:(off + n) // 16], self.suh[i], self.svh[off:off + n],
+                      out_fp32=self.out_fp32)
+        m.tile_n = self.N
+        return m
 
     @property
     def shape(self):
@@ -975,7 +982,7 @@ def exl3_matmul(x: torch.Tensor, w: EXL3Block, *, out: torch.Tensor | None = Non
     mod = _module()
     if M > CHUNK_UNTIL:
         return _slab_matmul(x, w, out)
-    tile = pick(w.N, w.K, w.kb)
+    tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
     wk_ = tile["wk"] if wk is None else wk
     for r0 in range(0, M, SKINNY_MAX):

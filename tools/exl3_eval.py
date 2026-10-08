@@ -79,17 +79,20 @@ def greedy(eng, tok, prompt: str, new: int) -> list[int]:
     ids = tok.apply_chat_template(msg, add_generation_prompt=True, return_tensors="pt",
                                   return_dict=True, enable_thinking=False)["input_ids"][0]
     eng.reset()
-    out = []
+    out, gaps = [], []
     logits = eng.forward(ids.to(eng.device), start=0, last_only=True)[0, -1]
     pos = ids.numel()
     eos = set(getattr(eng.cfg, "eos_token_ids", None) or [tok.eos_token_id])
     for _ in range(new):
-        nxt = int(logits.argmax())
+        top = logits.float().topk(2)
+        nxt = int(top.indices[0])
+        gaps.append(float(top.values[0] - top.values[1]))   # the margin a numeric change must beat
         out.append(nxt)
         if nxt in eos:
             break
         logits = eng.forward(torch.tensor([nxt], device=eng.device), start=pos, last_only=True)[0, -1]
         pos += 1
+    greedy.gaps = gaps
     return [int(v) for v in ids.tolist()], out
 
 
@@ -106,7 +109,10 @@ def compare(a_path: str, b_path: str) -> None:
             same += 1
         n = min(len(a), len(b))
         agree = sum(1 for x, y in zip(a, b) if x == y) / max(n, 1)
-        print(f"{name:8s} first divergence at token {same} of {n}  (positional agreement {agree:.3f})")
+        gap = A["gen"][name].get("gap") or []
+        g = f", our top-2 logit gap there {gap[same]:.3f} (median gap {sorted(gap)[len(gap) // 2]:.2f})" \
+            if same < len(gap) else ""
+        print(f"{name:8s} first divergence at token {same} of {n}  (positional agreement {agree:.3f}){g}")
 
 
 def main() -> None:
@@ -155,7 +161,8 @@ def main() -> None:
             p_ids, out = greedy(eng, tok, prompt, a.gen)
             dt = time.time() - t1
             text = tok.decode(out, skip_special_tokens=True)
-            res["gen"][name] = {"prompt_ids": p_ids, "ids": out, "text": text, "s": round(dt, 1)}
+            res["gen"][name] = {"prompt_ids": p_ids, "ids": out, "text": text, "s": round(dt, 1),
+                                "gap": [round(v, 4) for v in greedy.gaps]}
             print(f"[eval] gen/{name}: {len(out)} tokens in {dt:.1f} s: {text[:200]!r}", flush=True)
     if a.json:
         json.dump(res, open(os.path.expanduser(a.json), "w"), indent=1)

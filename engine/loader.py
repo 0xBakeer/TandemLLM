@@ -398,7 +398,7 @@ class Weights:
         print(f"[exl3] {found} tensors from {path}: {added / 1e9:.2f} GB ({hist})")
 
     def fuse_exl3_groups(self, n_layers: int) -> int:
-        """QWEN38_EXL3_FUSE=1: each projection group (PROJ_GROUPS) whose members share the rate
+        """QWEN38_EXL3_FUSE (on by default with EXL3; 0 = separate launches): each projection group (PROJ_GROUPS) whose members share the rate
         becomes one EXL3 group (one rotation launch, one GEMM launch), and the members become
         views into it (`EXL3Block.member`), so nothing is held twice."""
         from tools.exl3_linear import EXL3Block
