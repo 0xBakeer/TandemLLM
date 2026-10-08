@@ -24,6 +24,11 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - PKG3's A01 run (opencode in the owner's existing project) ran `rm -rf /home/user/pago/.tandem`, a folder with the owner's own test kit, by the rule "a {tandem_scratch} left by an earlier run ... delete it before you start". The scratch is now the conversation's own folder (`.tandem/<session token>`, `.tandem/session` without one); the run marks it when it makes it and deletes it before "done" only with the mark; a leftover is reused and nothing is deleted at the start; files-care: never delete a file or folder this conversation did not create. `tests/test_scratch_owner.py` runs the commands themselves next to a user's `.tandem`.
 
+### Continue Response continues; Open WebUI chats own their NVMe entries (FX15; W17, SRV-285)
+
+- W17: Open WebUI's "Continue Response" after Stop sends the conversation with the partial answer last. Every prompt was rendered with a generation prompt, so the partial was closed and a new answer started from the title (chatcmpl-9ea66357: 77 reasoning tokens, then 1,613 tokens; the saved answer held the story twice). A last assistant message with text and no tool calls is now continued (`app.continues_final`: the template's `continue_final_message`, the turn left open after its closed think block, no new reasoning); the body's `continue_final_message` or `add_generation_prompt` decide when given. The head is the earlier prompt's to the user turn's end, the note stays there, and a Continue is still not a regenerate. `tests/test_continue_final.py`.
+- SRV-285: the caches' owner key read the body's ids and opencode's `x-session-id`, never `X-OpenWebUI-Chat-Id`, so every Open WebUI spill entry had no owner and a chat that shared a pasted document with another took the other's entry (F57: back in 6.9 s against 1.8 s on 0.4.1). The owner is now `c:<chat id>` when the body names none; an owned save never takes another owner's entry and an owner-less one never takes an owned one. `tests/test_session_spill.py`.
+
 ### Earlier on main (PKG3, packages v25-v27 and router v21, documents only)
 
 ### The everyday packages measured: five ship off; reply-format; write-message reworded (PKG3)

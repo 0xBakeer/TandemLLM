@@ -2567,6 +2567,13 @@ def _session_header(headers) -> str | None:
     start is checked against the prompt's own tokens."""
     try:
         v = headers.get("x-session-id") or headers.get("X-Session-Id")
+        # SRV-285 (FX15): Open WebUI's chat id, which it sends with every request of a chat when its
+        # connection has `X-OpenWebUI-Chat-Id: {{CHAT_ID}}` (the router already keys its session on
+        # it). Without it every Open WebUI spill entry had no owner, and a chat that shared a pasted
+        # document with another took the other's entry (F57: back in 6.9 s, 1.8 s on 0.4.1)
+        if not v:
+            w = headers.get("X-OpenWebUI-Chat-Id")
+            v = "c:" + w if isinstance(w, str) and w else None
     except Exception:                                              # noqa: BLE001
         v = None
     return v[:128] if isinstance(v, str) and v else None
@@ -3521,6 +3528,33 @@ def _with_directive(messages: list, note: str) -> list:
     return [{"role": "system", "content": note}] + list(messages)
 
 
+def continues_final(body: dict, messages: list | None = None) -> bool:
+    """W17 (FX15, 2026-10-08): whether the prompt continues the request's last message, an
+    assistant's partial answer, instead of closing it and starting a new answer. Open WebUI's
+    "Continue Response" after Stop sends the conversation with the partial answer last; rendered
+    with a generation prompt, the partial was closed as a finished turn and the model wrote the
+    story again from its title (chatcmpl-9ea66357: 1,613 new tokens, the saved answer twice). A
+    last message from the assistant with text and no tool calls is continued: the template's
+    `continue_final_message` leaves it open, after its closed (empty) think block, so no new turn
+    and no new reasoning. The body's `continue_final_message` (vLLM's name) or
+    `add_generation_prompt` says otherwise when it is given."""
+    explicit = body.get("continue_final_message")
+    if isinstance(explicit, bool) and not explicit:
+        return False
+    if body.get("add_generation_prompt") is True and explicit is not True:
+        return False
+    msgs = messages if messages is not None else body.get("messages")
+    if not isinstance(msgs, list) or not msgs or not isinstance(msgs[-1], dict):
+        return False
+    last = msgs[-1]
+    if last.get("role") != "assistant" or last.get("tool_calls"):
+        return False
+    c = last.get("content")
+    if isinstance(c, list):
+        c = "".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+    return isinstance(c, str) and bool(c.strip())
+
+
 def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, count: bool = False,
                  left_out: int = 0) -> tuple[torch.Tensor, str, bool]:
     """The prompt ids, what kind of request it was, and whether it ends inside `<think>`.
@@ -3591,10 +3625,15 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         effort = STATE.get("reasoning_effort")
         if effort:
             kwargs.setdefault("reasoning_effort", effort)
+        # W17: a trailing partial answer is continued, not closed and answered again
+        if continues_final(body, messages):
+            kwargs.update(add_generation_prompt=False, continue_final_message=True)
+        else:
+            kwargs["add_generation_prompt"] = True
         seg = STATE.get("segments")
         if seg is None:
-            enc = tok.apply_chat_template(messages, add_generation_prompt=True,
-                                          return_tensors="pt", return_dict=True, **kwargs)
+            enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
+                                          **kwargs)
             if count == "ids":
                 return _as_ids(enc, device="cpu").tolist()
             if count == "think":
@@ -3609,8 +3648,7 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
         # the same ids a message at a time, the messages earlier turns already had looked up
         # (server/tokcache.py); the reasoning tag read from the prompt's decoded tail
-        text = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
-                                       **kwargs)
+        text = tok.apply_chat_template(messages, tokenize=False, **kwargs)
         ids = seg.encode(text)
         if count == "ids":
             return list(ids)

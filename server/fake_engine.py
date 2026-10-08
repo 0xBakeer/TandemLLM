@@ -141,12 +141,17 @@ class FakeTokenizer:
             names = [((t.get("function") or {}).get("name") or "?") for t in tools
                      if isinstance(t, dict)]
             parts.append(f"<|im_start|>system\n# Tools: {', '.join(names)}<|im_end|>\n")
-        for m in messages:
+        cont = bool(kw.get("continue_final_message"))
+        for i, m in enumerate(messages):
             c = m.get("content")
             if isinstance(c, list):
                 c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
+            if cont and i == len(messages) - 1:
+                # the real template's shape: the last answer open after its closed think block
+                parts.append(f"<|im_start|>{m.get('role', 'user')}\n<think>\n\n</think>\n\n{c or ''}")
+                continue
             parts.append(f"<|im_start|>{m.get('role', 'user')}\n{c or ''}<|im_end|>\n")
-        if add_generation_prompt:
+        if add_generation_prompt and not cont:
             parts.append("<|im_start|>assistant\n" + ("<think>\n" if enable_thinking
                                                         else "<think>\n\n</think>\n\n"))
         ids = self.encode_text("".join(parts))

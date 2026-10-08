@@ -452,6 +452,37 @@ def test_fx10b_the_same_conversation_written_again_keeps_its_entry():
     assert sp._eid_for(None, head + tokens(130, seed=92)) != "aaaa"             # another chat
 
 
+def test_srv285_open_webui_chats_own_their_entries():
+    """SRV-285 (UX3, 2026-10-08): the caches' owner key read the body's ids and opencode's
+    x-session-id, never Open WebUI's X-OpenWebUI-Chat-Id, so every Open WebUI entry had no owner.
+    Two chats sharing a pasted 12k document: B's save took A's entry (A's tail past the shared head
+    was under 4 chunks) and A came back from a park that wrote nothing. The chat id is the owner; an
+    owned save never takes another owner's entry, and an owner-less one never takes an owned one."""
+    class H(dict):
+        def get(self, k, d=None):
+            return {kk.lower(): v for kk, v in self.items()}.get(k.lower(), d)
+    assert app._session_header(H({"X-OpenWebUI-Chat-Id": "4f1c-a"})) == "c:4f1c-a"
+    assert app._session_header(H({"x-session-id": "ses_1", "X-OpenWebUI-Chat-Id": "x"})) == "ses_1"
+    assert app._session_header(H({})) is None
+    body = {"metadata": {"chat_id": "ignored"}, "conversation_id": "body-id"}
+    assert (app.conversation_id(body, H({"X-OpenWebUI-Chat-Id": "x"}))
+            or app._session_header(H({"X-OpenWebUI-Chat-Id": "x"}))) == "body-id"
+    sp = spill.SessionSpill.__new__(spill.SessionSpill)
+    import threading
+    sp.lock, sp.chunk, sp.clock = threading.Lock(), CH, (lambda: 0)
+    doc = tokens(12 * CH, seed=96)                               # the pasted document, both chats
+    a = doc + tokens(2 * CH, seed=97)
+    b = doc + tokens(2 * CH + 5, seed=98)
+    # before: no owner, and B's tail is within 4 chunks of A's entry -> B took A's entry
+    sp.entries = {"aaaa": spill.Entry("/x", {"eid": "aaaa", "owner": None}, a)}
+    assert sp._eid_for(None, b) == "aaaa", "the hazard an owner-less chat has"
+    # with the chat ids: each its own
+    sp.entries = {"aaaa": spill.Entry("/x", {"eid": "aaaa", "owner": "c:A"}, a)}
+    assert sp._eid_for("c:B", b) != "aaaa"
+    assert sp._eid_for("c:A", a + tokens(40, seed=99)) == "aaaa"
+    assert sp._eid_for(None, b) != "aaaa", "an owner-less save never takes an owned entry"
+
+
 # ------------------------------------------------------------------ its own I/O path
 
 def test_its_own_lock_and_buffers_the_tier_waits_and_unchanged_anchors_stay():
