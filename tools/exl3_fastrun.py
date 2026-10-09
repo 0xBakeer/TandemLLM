@@ -154,7 +154,11 @@ def main() -> None:
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--new", type=int, default=512)
     p.add_argument("--prefill", default="8192,32768")
-    p.add_argument("--workloads", default="prose,chat", help="any of prose, chat, code")
+    p.add_argument("--workloads", default="prose,chat",
+                   help="any of prose, chat, code, and long<N>k (the code task after N*1024 tokens of "
+                        "held-out text: decode at long context, Khaled's opencode shape)")
+    p.add_argument("--long-reps", type=int, default=2,
+                   help="reps of a long<N>k workload (each pays its prefill unless --caches)")
     p.add_argument("--temperature", type=float, default=0.0,
                    help="decode workloads sampled at this temperature (prefill stays greedy)")
     p.add_argument("--top-p", type=float, default=None)
@@ -219,9 +223,15 @@ def main() -> None:
                             | ({"top_p": a.top_p} if a.top_p is not None else {}))
         prompts = {"prose": PROSE, "chat": CHAT, "code": CODE}
         for name in a.workloads.split(","):
-            prompt = prompts[name]
+            if name.startswith("long"):
+                n_ctx = int(name[4:].rstrip("k")) * 1024
+                prompt = prefill_text(repo, tok, n_ctx) + "\n\n---\n\n" + CODE
+                reps = a.long_reps
+            else:
+                prompt = prompts[name]
+                reps = a.reps
             runs = []
-            for i in range(a.reps):
+            for i in range(reps):
                 at = logpos()
                 r = stream(a.port, a.served_model, prompt, a.new)
                 time.sleep(0.3)
