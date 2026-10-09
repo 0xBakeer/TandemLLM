@@ -4885,7 +4885,7 @@ class Handler(BaseHTTPRequestHandler):
                 # a forward of hundreds to thousands of rows); no sync, so `done` is what the host
                 # has issued. The marks stay for the whole prefill, at most prompt/chunk of them:
                 # the live rate leaves out the first chunk and reads the last ~2 s after it
-                rec.pf_marks.append((done, total, now))
+                activity_mod.pf_mark(rec.pf_marks, done, total, now, watch.info.get("window"))
             if stream and hb > 0 and now - t0 >= hb and now - last[0] >= HEARTBEAT_EVERY_S:
                 last[0] = now
                 self.wfile.write(f": prefill {done}/{total}\n\n".encode())

@@ -61,6 +61,7 @@ import threading
 import time
 
 from server import activity as act
+from server.usage import client_cached_of
 
 CONTRACT = "1.0"
 NOW_S = 2.0              # the lanes' now-rate window
@@ -446,13 +447,19 @@ class ParallelBoard:
                            "cached": p.get("cached"),
                            "tps": p.get("tps_live") or p.get("tps_avg"),
                            "tps_avg": p.get("tps_avg"), "eta_ms": p.get("eta_ms")}
-        # the prompt and its cache
+        # the prompt and its cache. `prompt_tokens` is the client's count (SRV-165); the engine's
+        # cached rows also hold the prompt's hidden tokens (the router's notes, the end anchor's
+        # replay), so an engine request's cached figure is the client's share of them
+        # (usage.client_cached_of), as `usage`, the ledger and the live view count it: the raw
+        # figure read 112K cached of 95.3K prompt tokens, a 117 % hit (2026-10-09)
         prompt = rec.prompt_tokens
         cached = rec.cached_tokens if (not relayed or rec.usage_source == "backend") else None
         if relayed and ended is None:
             prompt = cached = None                       # the usage arrives at the end
         if not relayed and ended is None:
             cached = (prefill or {}).get("cached")       # the record absorbs it at the end
+        if not relayed and cached is not None:
+            cached = client_cached_of(rec, cached)
         hit = (cached / prompt) if (cached is not None and prompt) else None
         # the cost
         cost, partial = None, False

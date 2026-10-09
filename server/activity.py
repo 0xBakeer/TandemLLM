@@ -200,6 +200,26 @@ def tool_of(rec) -> dict | None:
     return _safe(read)
 
 
+def pf_mark(marks: list, done: int, total: int, now: float, window=None) -> None:
+    """One prefill progress mark `(done, total, t)` for the live view (VIS-40).
+
+    A layer-major prefill window (`engine/cache.py`, `prefill_window`) computes several chunks
+    in one pass and then reports them chunk by chunk within milliseconds: timed as they are
+    reported, two marks of one window read 1,024 rows in ~57 ms, an 18k tok/s "live rate" for
+    an 800 tok/s prefill (2026-10-09). A chunk inside the running window (`window` = the
+    engine's `(first row, end row, t)`) carries the window's own time and replaces the window's
+    earlier mark, so every mark is rows computed at the time they were: one mark a window, one
+    a chunk-major chunk. The list's length only grows (readers index it)."""
+    if window is not None and window[0] < done <= window[1]:
+        t = float(window[2])
+        if marks and marks[-1][2] == t:
+            marks[-1] = (done, total, t)
+            return
+        marks.append((done, total, t))
+        return
+    marks.append((done, total, now))
+
+
 # ------------------------------------------------------------------ the blocks of one activity
 def prefill_live(rec, warm: int = 1, window_s: float = 2.0, end_p: float | None = None) -> dict:
     """The prefill's rate with its warm-up left out, off the chunk hook's marks (VIS-40).
@@ -274,16 +294,23 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
         return None
 
     def read():
-        total = int(rec.prompt_tokens)
+        # the served prompt (the client's tokens and the hidden ones), as the hook's marks and
+        # `start` count it: rows restored plus rows computed
+        total = int(rec.prompt_tokens) + int(getattr(rec, "hidden_prompt", 0) or 0)
         info = getattr(rec, "prefill_info", None) or {}
         chunk = info.get("chunk")
         mode = None if chunk is None else ("chunked" if chunk > 0 else "single_call")
         start = info.get("start")
         if rec.t_first is not None:
+            # the rate is the rows computed over the prefill, never the rows restored
             cached = int(rec.cached_tokens or 0)
-            if rec.prompt_n is None and last_prefill:
+            fwd = rec.prompt_n
+            if fwd is None and last_prefill:
                 cached = int(last_prefill.get("reused") or 0)
-            fwd = total - cached
+                fwd = int(last_prefill.get("forwarded") or 0) or None
+            if fwd is None:
+                fwd = max(0, total - cached)
+            total = max(total, cached + int(fwd))
             ms = rec.prompt_ms
             pl = prefill_live(rec, warm, window_s, end_p=rec.t_first)
             return {"done": total, "total": total, "cached": cached, "pct": 100.0,

@@ -91,6 +91,7 @@ import time
 
 from server import activity as act
 from server.activity import REPLAY
+from server.usage import client_cached_of
 
 
 def _own_blocks(rec, bs):
@@ -1021,7 +1022,6 @@ class LiveRegistry:
 def _client_cached(rec, cached: int) -> int:
     """VIS-58: the cached tokens as a share of what the client sent, as the ledger row and `usage`
     count them (usage.Record.client_cached, SRV-165): with hidden notes in the prompt the engine's
-    figure counts them too and could read 19,456 cached of a 15,957-token prompt."""
-    if not getattr(rec, "hidden_prompt", 0) or rec.prompt_tokens is None:
-        return cached
-    return min(cached, int(rec.prompt_tokens))
+    figure counts them too and could read 19,456 cached of a 15,957-token prompt. The one
+    definition (usage.client_cached_of), the hidden tokens' positions included."""
+    return client_cached_of(rec, cached)

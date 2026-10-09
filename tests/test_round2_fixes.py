@@ -241,7 +241,11 @@ def test_live_cached_is_clamped():
     got = live_mod.LiveRegistry._cache_of(rec)
     assert got["cached_tokens"] == 15957 and got["hidden_tokens"] == 4625, got
     rec.hidden_prompt = 0
-    assert live_mod.LiveRegistry._cache_of(rec)["cached_tokens"] == 19456      # no notes: as before
+    # no notes: the cached rows are the client's, and never more than its prompt (2026-10-09:
+    # the one definition, usage.client_cached_of; the engine's figure stays in timings.cache_n)
+    assert live_mod.LiveRegistry._cache_of(rec)["cached_tokens"] == 15957
+    rec.cached_tokens = 12000
+    assert live_mod.LiveRegistry._cache_of(rec)["cached_tokens"] == 12000
 
 
 # ------------------------------------------------------------------ VIS-60

@@ -2432,6 +2432,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 toks = [torch.tensor(ids[a:a + t], device=device, dtype=torch.long)
                         for a, t in plan]
                 logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
+                if info is not None:
+                    # the window's rows were all computed by now: the chunk hook below reports
+                    # them chunk by chunk within milliseconds, so the live view times them here
+                    # (rows a, end, the host's clock once the window's forwards were issued)
+                    info["window"] = (plan[0][0], plan[-1][0] + plan[-1][1], time.perf_counter())
                 if bufs is not None:
                     bufs[-1][0].copy_(eng.state.S)
                     bufs[-1][1].copy_(eng.state.conv)
@@ -2453,6 +2458,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 del bufs, toks, hid, taps
                 assert i == end
                 continue
+            if info is not None and info.get("window") is not None:
+                info["window"] = None                  # a chunk-major forward times itself
             if chunk > 0:
                 # The grid is anchored at absolute position 0, not at the resume point: a resume
                 # that lands off the grid -- which is what a session boundary is -- takes a SHORT

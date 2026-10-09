@@ -85,6 +85,30 @@ def reasoning_count(ids: list[int], end_id: int | None, end_text: list[int] | No
     return len(ids)
 
 
+def client_cached_of(rec, cached) -> int:
+    """`cached` (the engine's rows read from a cache, in served positions) as the client's
+    tokens: the one definition every view of a request uses (`usage`, the ledger row, the live
+    view, the parallel view), so `cached_tokens <= prompt_tokens` holds wherever both are shown.
+
+    `prompt_tokens` is the client's count (SRV-165); the engine's figure also counts the prompt's
+    hidden tokens (the router's notes, the end anchor's replay, SP4's note). With their positions
+    known (`hidden_at`, SRV-233) the hidden tokens inside the cached span come off; without them
+    the clamp to `prompt_tokens` holds. A prompt with no hidden tokens is the client's own, and
+    its cached rows never exceed it; the clamp holds there too (a prompt the client sent is all
+    a cache can hold of it)."""
+    c = int(cached or 0)
+    p = getattr(rec, "prompt_tokens", None)
+    if p is None:
+        return c
+    p = int(p)
+    hidden_at = getattr(rec, "hidden_at", None)
+    if (getattr(rec, "hidden_prompt", 0) and hidden_at is not None
+            and getattr(rec, "prompt_client", None) is None):
+        below = sum(max(0, min(int(b), c) - int(a)) for a, b in hidden_at if int(a) < c)
+        c -= below
+    return max(0, min(c, p))
+
+
 class RequestRecord:
     """Everything one request did, filled in as it happens.
 
@@ -331,13 +355,7 @@ class RequestRecord:
         tokens, resumed at 26,624 and forwarded 3,827, reported 24,706 of 24,706 cached. With the
         hidden tokens' positions known (`hidden_at`), the client's cached tokens are the cached
         span less the hidden tokens in it: 26,624 - 5,745 = 20,879."""
-        c = int(self.cached_tokens or 0)
-        if not self.hidden_prompt or self.prompt_tokens is None:
-            return c                        # the client's prompt is the whole prompt
-        if self.hidden_at is not None and self.prompt_client is None:
-            below = sum(max(0, min(int(b), c) - int(a)) for a, b in self.hidden_at if int(a) < c)
-            return max(0, min(c - below, int(self.prompt_tokens)))
-        return min(c, int(self.prompt_tokens))
+        return client_cached_of(self, self.cached_tokens)
 
     def timings(self) -> dict:
         """Llama.cpp's `timings`, the one speed shape Open WebUI displays, plus the engine's keys."""
