@@ -29,8 +29,14 @@ REPO = Path(__file__).resolve().parent.parent
 def default_paths() -> list[Path]:
     """The files the engine reads at load and never again: the target checkpoint, the NVFP4 sets,
     the drafters. Not the suffix corpus, which the lookup drafter keeps reading."""
-    return [HOME / ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8", HOME / "nvfp4",
-            REPO / "train/ft-b8-v2", REPO / "train/ft-b16"]
+    out = [HOME / ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8", HOME / "nvfp4",
+           REPO / "train/ft-b8-v2", REPO / "train/ft-b16"]
+    # ENG-E6: an EXL3 build reads its trellis checkpoint, the EXL3 drafters and the draft head at
+    # load and never again (ops/start.sh exports serve.env, so these are what the engine loaded)
+    for k in ("QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EXL3"):
+        if os.environ.get(k):
+            out.append(Path(os.environ[k]))
+    return out
 
 
 def _files(paths) -> list[str]:

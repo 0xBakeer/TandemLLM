@@ -50,6 +50,26 @@ def test_the_defaults_leave_the_suffix_corpus_alone():
     assert not any("corpus" in n or "suffix" in n for n in names), names
 
 
+def test_the_exl3_weights_join_the_defaults_when_set():
+    keys = ("QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EXL3")
+    old = {k: os.environ.get(k) for k in keys}
+    try:
+        for k in keys:
+            os.environ.pop(k, None)
+        base = [str(p) for p in default_paths()]
+        assert len(base) == 4, base
+        os.environ.update({"QWEN38_EXL3": "/w/exl3-quants/4.5", "QWEN38_DRAFT_EXL3": "/w/k3",
+                           "QWEN38_DRAFT_HEAD_EXL3": "/w/head-k4"})
+        names = [str(p) for p in default_paths()]
+        assert names[:len(base)] == base and names[len(base):] == ["/w/exl3-quants/4.5", "/w/k3", "/w/head-k4"]
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_cached_is_read_in_gb():
     assert abs(cached_gb("MemTotal: 1 kB\nCached:  1048576 kB\n") - 1048576 * 1024 / 1e9) < 1e-9
 
