@@ -294,7 +294,23 @@ def main() -> None:
                                                     "overwrite the first one's sequences")
     ap.add_argument("--budget-min", type=float, default=0.0,
                     help="stop generating after this many minutes (0 = no limit)")
+    ap.add_argument("--teacher-force", default=None,
+                    help="a JSONL of sequences whose text already exists (`name, topic, prompt_ids, "
+                         "gen_ids`, optional `split`, `think`): each is pushed through the loaded "
+                         "target once for its taps and ITS OWN argmax / top-k labels, and nothing is "
+                         "generated. The text can come from another weight set; the labels never do")
+    ap.add_argument("--traces", default=None,
+                    help="a directory of lattice traces (`*.json` with prompt_ids + output_ids), "
+                         "recorded the same way and marked held out: the gate's own positions, so "
+                         "the trainer's in-loop eval reads the text the Spark replay reads")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="with --teacher-force / --traces: keep a sequence whose .pt is already "
+                         "there (a resumed recording)")
     a = ap.parse_args()
+
+    if a.teacher_force or a.traces:
+        teacher_force_main(a)
+        return
 
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
@@ -389,6 +405,94 @@ def main() -> None:
     n_tok = sum(m["n"] for m in manifest)
     print(f"\n{len(manifest)} sequences, {n_tok} positions, {len(held)} held out, "
           f"{(time.perf_counter() - t_start)/60:.1f} min")
+
+
+def _tf_items(a) -> list[dict]:
+    items: list[dict] = []
+    if a.teacher_force:
+        with open(a.teacher_force) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                items.append({"name": r["name"], "topic": r.get("topic") or r.get("klass", "prose"),
+                              "split": r.get("split", "train"), "think": bool(r.get("think", False)),
+                              "prompt_ids": [int(t) for t in r["prompt_ids"]],
+                              "gen_ids": [int(t) for t in (r.get("gen_ids") or r["output_ids"])]})
+    if a.traces:
+        import glob
+        for path in sorted(glob.glob(os.path.join(a.traces, "*.json"))):
+            with open(path) as f:
+                tr = json.load(f)
+            items.append({"name": tr["name"], "topic": tr.get("klass", "prose"), "split": "heldout",
+                          "think": bool(tr.get("thinking", False)),
+                          "prompt_ids": [int(t) for t in tr["prompt_ids"]],
+                          "gen_ids": [int(t) for t in tr["output_ids"]]})
+    return items
+
+
+def teacher_force_main(a) -> None:
+    """Record taps and labels for text that already exists. One forward pass a sequence."""
+    os.makedirs(a.out, exist_ok=True)
+    items = _tf_items(a)
+    if not items:
+        raise SystemExit("nothing to record")
+    names = [it["name"] for it in items]
+    if len(set(names)) != len(names):
+        raise SystemExit("duplicate sequence names in the input")
+    cfg = load_config(a.model)
+    w = Weights(cfg.path, device=a.device, skip_mtp=True, nvfp4=a.nvfp4, fp8_head=a.fp8_head)
+    eng = Qwen38Engine(cfg, w, max_len=a.max_len, device=a.device)
+    mpath = os.path.join(a.out, "manifest.json")
+    old: dict[str, dict] = {}
+    if os.path.exists(mpath):
+        with open(mpath) as f:
+            old = {m["name"]: m for m in json.load(f)["sequences"]}
+    manifest: dict[str, dict] = dict(old)
+    t0 = time.perf_counter()
+    done_pos = 0
+
+    def flush() -> None:
+        tmp = mpath + ".part"
+        with open(tmp, "w") as f:
+            json.dump({"created": time.strftime("%Y-%m-%dT%H:%M:%S"), "topk": a.topk,
+                       "target": os.environ.get("QWEN38_EXL3") or a.nvfp4 or cfg.path,
+                       "teacher_forced": True, "tap_layers": list(TAP_LAYERS),
+                       "sequences": list(manifest.values())}, f, indent=1)
+        os.replace(tmp, mpath)
+
+    for i, it in enumerate(items):
+        dst = os.path.join(a.out, f"{it['name']}.pt")
+        full = it["prompt_ids"] + it["gen_ids"]
+        if len(full) > a.max_len:
+            full = full[:a.max_len]
+        if a.skip_existing and os.path.exists(dst) and it["name"] in manifest:
+            continue
+        rec = record(eng, full, a.topk)
+        rec.update({"name": it["name"], "topic": it["topic"], "kind": "gen",
+                    "gen_start": len(it["prompt_ids"])})
+        torch.save(rec, dst + ".part")
+        os.replace(dst + ".part", dst)
+        # agreement of the recorded labels with the text: 1.0 on the target's own greedy text,
+        # lower on another model's text (how off-policy the input is)
+        gs = len(it["prompt_ids"])
+        lab = rec["label"][gs - 1:len(full) - 1].long()
+        nxt = torch.tensor(full[gs:], dtype=torch.long)
+        agree = float((lab == nxt).float().mean()) if nxt.numel() else 0.0
+        manifest[it["name"]] = {"name": it["name"], "topic": it["topic"], "kind": "gen",
+                                "n": len(full), "gen_start": gs, "split": it["split"],
+                                "think": it["think"], "label_agree": round(agree, 4)}
+        done_pos += len(full)
+        if i % 25 == 0 or i == len(items) - 1:
+            dt = time.perf_counter() - t0
+            print(f"[{i + 1:5d}/{len(items)}] {it['name']:24s} {len(full):5d} tok  agree {agree:.3f}  "
+                  f"{done_pos / max(dt, 1e-9):7.1f} pos/s  {dt / 60:6.1f} min", flush=True)
+            flush()
+    flush()
+    n_tok = sum(m["n"] for m in manifest.values())
+    held = sum(1 for m in manifest.values() if m["split"] == "heldout")
+    print(f"\n{len(manifest)} sequences, {n_tok} positions, {held} held out, "
+          f"{(time.perf_counter() - t0) / 60:.1f} min")
 
 
 if __name__ == "__main__":
