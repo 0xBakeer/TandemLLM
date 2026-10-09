@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,9 @@ KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EX
 
 def _env(profile: str | None, extra: dict | None = None) -> dict:
     with tempfile.TemporaryDirectory() as home:
-        os.symlink(ROOT, os.path.join(home, "qwen38-spark-engine"))      # serve.env's REPO
+        # serve.env's REPO (${HOME}/<dir>: the repository's, or a deploy tree's own name)
+        m = re.search(r"^REPO=\$\{HOME\}/(\S+)$", open(os.path.join(ROOT, "ops/serve.env")).read(), re.M)
+        os.symlink(ROOT, os.path.join(home, m.group(1) if m else "qwen38-spark-engine"))
         script = (f"set -a; . {ROOT}/ops/serve.env; "
                   + "; ".join(f'echo "{k}=${{{k}-<unset>}}"' for k in KEYS))
         env = {"HOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
