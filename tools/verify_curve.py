@@ -123,6 +123,11 @@ def main() -> None:
     ap.add_argument("--prompt", type=int, default=300, help="context tokens before the verify")
     ap.add_argument("--kernels", default="16,17,24,32", help="row counts to itemise ('' = none)")
     ap.add_argument("--out", default="")
+    ap.add_argument("--contexts", default="",
+                    help="several context lengths in one load (e.g. 1024,4096,8192,16384,32768); "
+                         "with --stair-out the per-class staircase (chain, tree = the spine shape) "
+                         "the lenrouter reads as QWEN38_STAIR_TABLES")
+    ap.add_argument("--stair-out", default="")
     a = ap.parse_args()
 
     import engine.model as M
@@ -133,7 +138,29 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     text = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "bench", "calib.txt")).read()
-    ids = tok(text, return_tensors="pt").input_ids[0]
+    ids_all = tok(text, return_tensors="pt").input_ids[0]
+    ctxs = [int(c) for c in a.contexts.split(",") if c] or [a.prompt]
+    stair: dict = {}
+    for ctx in ctxs:
+        a.prompt = ctx
+        res = _one(a, eng, ids_all, M)
+        stair[str(ctx)] = {"chain": {str(k): v for k, v in res["ms"].get("chain", {}).items()},
+                           "tree": {str(k): v for k, v in res["ms"].get("spine", {}).items()}}
+        if a.out and len(ctxs) > 1:
+            root, ext = os.path.splitext(a.out)
+            json.dump(res, open(f"{root}-{ctx}{ext or '.json'}", "w"), indent=1)
+        elif a.out:
+            os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
+            json.dump(res, open(a.out, "w"), indent=1)
+            print(f"[curve] {a.out}")
+        a.kernels = ""                            # the itemisation once, at the first context
+    if a.stair_out:
+        json.dump(stair, open(a.stair_out, "w"), indent=1)
+        print(f"[curve] staircase -> {a.stair_out}")
+
+
+def _one(a, eng, ids_all, M) -> dict:
+    ids = ids_all
     while ids.numel() < a.prompt:                 # a long context repeats the text
         ids = torch.cat([ids, ids])
     ids = ids[:a.prompt].to("cuda")
@@ -184,10 +211,8 @@ def main() -> None:
                 print(f"{'TOTAL':<70} " + " ".join(f"{tot[T]:8.2f}" for T in krows))
                 for k in names[:24]:
                     print(f"{k:<70} " + " ".join(f"{per[T].get(k, 0.0):8.2f}" for T in krows))
-    if a.out:
-        os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-        json.dump(res, open(a.out, "w"), indent=1)
-        print(f"[curve] {a.out}")
+            M.VERIFY_GRAPH = True if res["graph"] else M.VERIFY_GRAPH
+    return res
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from engine.settings import KNOBS, SETTINGS, EngineSettings  # noqa: E402
 
-KERNEL = re.compile(r"_kernels|fp8_linear|nvfp4_linear|nvfp4_skinny|nvfp4_verify_tiles|head_gemv|"
+KERNEL = re.compile(r"_kernels|fp8_linear|nvfp4_linear|exl3_linear|nvfp4_skinny|nvfp4_verify_tiles|head_gemv|"
                     r"attn_|small_linear|loop_sync")
 # reads that are a tool's own __main__ bench knobs, not the engine's
 ALLOWED = {("tools/gdn_wy_kernels.py", "QWEN38_WY_GRID"), ("tools/gdn_wy_kernels.py", "QWEN38_WY_SIZES")}

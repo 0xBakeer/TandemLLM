@@ -33,6 +33,15 @@ import torch.nn.functional as F
 from engine import capture_lock
 
 
+
+def dflash2_head(eng):
+    """The head the draft reads: the target's, or QWEN38_DRAFT_HEAD_EXL3's (engine/drafters/dflash2.py)."""
+    from engine.drafters import dflash2
+    if dflash2.DRAFT_HEAD_EXL3:
+        return dflash2.exl3_draft_head(eng)
+    return eng.w.norm("lm_head.weight")
+
+
 class DraftGraph:
     def __init__(self, drafter):
         self.d = drafter
@@ -51,7 +60,7 @@ class DraftGraph:
         self.stats = {"captured": 0, "replayed": 0}
 
     @staticmethod
-    def eligible(drafter) -> bool:
+    def eligible(drafter) -> bool:  # noqa: D401
         from engine.drafters import dflash2
         return (drafter.blocks == 1 and drafter.head is None and not dflash2.DRAFT_HEAD_NVFP4
                 and drafter.use_selector and drafter.path == "greedy"
@@ -90,7 +99,7 @@ class DraftGraph:
         hidden = m.forward_block(noise, positions, ctx_kv, idx, masks=(mask, mask))
         pred = hidden[1:]
         from engine.model import head_logits
-        logits = head_logits(pred, eng.w.norm("lm_head.weight"))
+        logits = head_logits(pred, dflash2_head(eng))
         cand, unary = m.unary_candidates(logits)
         scores = m.lattice(pred, cand, unary, anchor)
         if temp is None:
@@ -163,7 +172,7 @@ def _packed_body(ds: list, scals: list, spans: list, temp):
         anchors.append(anchor)
     hidden = forward_block_multi(m, items)
     preds = [h[1:] for h in hidden]
-    logits = head_logits(torch.cat(preds, dim=0), eng.w.norm("lm_head.weight"))
+    logits = head_logits(torch.cat(preds, dim=0), dflash2_head(eng))
     out = []
     for a_t, lg, pred in zip(anchors, logits.split([p.shape[0] for p in preds], dim=0), preds):
         cand, unary = m.unary_candidates(lg)

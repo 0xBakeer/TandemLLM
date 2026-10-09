@@ -1474,8 +1474,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # Rejection accept down the tree: the target's own token is
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
-                        path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents, start=len(ctx), q=tree.q)
+                        path, new = sampler.tree_walk_logits(lg, tree.tokens, tree.parents,
+                                                             start=len(ctx), q=tree.q)
                     else:
                         # a graphed verify took the argmax itself; a penalty changed the
                         # logits after it, so then the loop takes it
@@ -4172,7 +4172,7 @@ def _system() -> dict:
                    "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
                    "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                    "pid": os.getpid(), "model": served_name(), "base_model": STATE.get("model"),
-                   "max_len": STATE.get("max_len"),
+                   "weights": weights_profile(), "max_len": STATE.get("max_len"),
                    "drafter": type(STATE.get("drafter")).__name__
                    if STATE.get("drafter") is not None else None,
                    "tree": bool(STATE.get("tree")),
@@ -4954,6 +4954,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "model": served_name(), "base_model": STATE.get("model"),
+                "version": STATE.get("version", ""), "weights": weights_profile(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                 "engine_busy": LOCK.locked(),
                 "inflight": dict(INFLIGHT),
@@ -8447,8 +8448,9 @@ def _load(a) -> None:
         with torch.no_grad():
             # a router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits
             # any row count up to 32; the others stay at 2..16 and capture the rest lazily
-            n_g = eng._graphs.precapture(widths=range(2, 33) if getattr(drafter, "calc", False)
-                                         else range(2, 17))
+            import engine.model as _M
+            n_g = eng._graphs.precapture(widths=range(2, min(_M.VERIFY_ROWS, getattr(drafter, "max_nodes", 31) + 1) + 1)
+                                         if getattr(drafter, "calc", False) else range(2, 17))
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
     led.mark("graphs")
     if int(getattr(a, "parallel", 1) or 1) > 1:
@@ -8957,7 +8959,27 @@ def identity() -> dict:
             out["git_sha"] = open(os.path.join(root, ".git-sha")).read().strip()[:12]
         except OSError:
             pass
+    # the weight profile ops/use-profile.sh started (ops/profiles/<name>.env): it joins the version,
+    # so the dashboard's header, /metrics' info and every ledger row (engine_version) carry it
+    prof = weights_profile()["name"]
+    if prof and out["version"]:
+        out["version"] = f"{out['version']}+{prof}"
     return out
+
+
+def weights_profile() -> dict:
+    """The weight profile this process serves (QSE_WEIGHTS, exported from ops/profiles/<name>.env):
+    its name, the target's weights, the drafters, the draft head and the sampler's nucleus."""
+    e = os.environ
+    exl3 = _S.get("EXL3") or None
+    nv = e.get("NV") or _S.get("NVFP4") or None
+    return {"name": e.get("QSE_WEIGHTS") or None,
+            "format": "exl3" if exl3 else ("nvfp4" if nv else None),
+            "weights": exl3 or nv,
+            "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
+            "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
+            "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
+            "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
 
 
 def serve_until_drained(httpd) -> None:

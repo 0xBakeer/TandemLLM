@@ -486,7 +486,9 @@ class LengthRouter(Drafter):
         # "calc": the node count of every block from the staircase (each arm's MergedRouter cuts
         # its candidates to the count that maximises calibrated committed tokens per ms), and the
         # arm from realised tokens per ms, narrow first, inside the dwell and the switch cap.
-        self.max_nodes = int(max_nodes)
+        # ENG-213: QWEN38_STAIR_MAX_NODES raises the staircase cut's ceiling past a 32-row verify
+        # (63 = a 64-row step, which needs QWEN38_VERIFY_ROWS 64 and a staircase measured that far)
+        self.max_nodes = int(_S.get("STAIR_MAX_NODES") or max_nodes)
         self.calc_start = calc_start
         self.stair_table = dict(stair_table or STAIR_MS)
         # "wide": the wide checkpoint on every block, its node count from the staircase, and the
@@ -627,6 +629,22 @@ class LengthRouter(Drafter):
             self.head_small._on_tap(h)
         if self.idle != "l":
             self.head_large._on_tap(h)
+
+    def tap_indices(self):
+        """The union of the tap invocations the arms that receive the tap keep; None when an arm
+        cannot say (engine/model.py `prefill_window` then runs chunk-major)."""
+        out = set()
+        for key, head in (("s", self.head_small), ("l", self.head_large)):
+            if self.idle == key:
+                continue
+            fn = getattr(head, "tap_indices", None)
+            if fn is None:
+                return None
+            got = fn()
+            if got is None:
+                return None
+            out |= set(got)
+        return out
 
     def tapped(self):
         """The tapped rows of an arm that still receives the tap (`DFlash2Drafter.tapped`)."""
@@ -1378,7 +1396,7 @@ class LengthRouter(Drafter):
 
     @staticmethod
     def _tile(rows: int) -> int:
-        return 0 if rows <= 16 else 1 if rows <= 24 else 2
+        return 0 if rows <= 16 else 1 if rows <= 24 else 2 if rows <= 32 else 3
 
     def _stair_factor(self, rows: int, chain: bool) -> float:
         """Measured over priced block time for this shape at the current context class."""
@@ -1397,8 +1415,9 @@ class LengthRouter(Drafter):
             cache = self._price_cache = (n >> 8, {})
         tab = cache[1].get(bool(chain))
         if tab is None:
-            tab = cache[1][bool(chain)] = [self._class_price_raw(r, chain, n) for r in range(34)]
-        return tab[min(max(int(rows), 0), 33)]
+            top = max(34, self.max_nodes + 3)
+            tab = cache[1][bool(chain)] = [self._class_price_raw(r, chain, n) for r in range(top)]
+        return tab[min(max(int(rows), 0), len(tab) - 1)]
 
     def _class_price_raw(self, rows: int, chain: bool, n: int) -> float:
         import math

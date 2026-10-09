@@ -31,8 +31,19 @@ losslessness gate meaningful. `check()` compares against a float32 reference.
 from __future__ import annotations
 
 import math
+import os
+import sys
 
 import torch
+
+if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.settings import SETTINGS as _S  # noqa: E402
+
+# Three software-pipeline stages for the split-KV loop instead of two: the same arithmetic (the
+# stage count only moves when a tile's loads are issued), 2-4 % faster from 8k to 128k of context
+# (tools/attn_sweep.py, 2026-10-09). QWEN38_ATTN_STAGES3=0 restores two.
+STAGES3 = _S.get("ATTN_STAGES3") == "1"
 
 try:
     import triton
@@ -161,7 +172,7 @@ def pick_launch(T: int, rep: int, lc: int, *, min_chunk: int = 512, max_splits: 
 def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: int,
                      block_mask: torch.Tensor, *, ks: torch.Tensor | None = None,
                      vs: torch.Tensor | None = None, scale: float | None = None,
-                     bn: int = 32, num_warps: int = 4, num_stages: int = 2, bm: int = 32,
+                     bn: int = 32, num_warps: int = 4, num_stages: int | None = None, bm: int = 32,
                      max_splits: int = 64) -> torch.Tensor:
     """Softmax(q k^T * scale, masked) v, with q [1, Hq, T, D] and the cache k, v [1, Hkv, L, D].
 
@@ -175,6 +186,7 @@ def decode_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, start: i
     assert hq == 24 or hq == rep * hkv, (hq, hkv)
     fp8 = ks is not None
     scale = 1.0 / math.sqrt(D) if scale is None else scale
+    num_stages = (3 if STAGES3 else 2) if num_stages is None else num_stages
     out = torch.empty(T, hq, D, dtype=torch.bfloat16, device=q.device)
     bm, groups, ns, chunk = pick_launch(T, rep, lc, bm=bm, max_splits=max_splits)
     R = rep * T
@@ -217,7 +229,8 @@ def dev_chunk(T: int, rep: int, max_lc: int) -> int:
 
 def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp: torch.Tensor,
                          block_mask: torch.Tensor, max_lc: int, *, scale: float | None = None,
-                         bn: int = 32, num_warps: int = 4, num_stages: int = 2) -> torch.Tensor:
+                         bn: int = 32, num_warps: int = 4,
+                         num_stages: int | None = None) -> torch.Tensor:
     """`decode_attention` with the start and the context length in a device tensor.
 
     `lenp` is int32 [start, start + T]; `k`, `v` are the whole cache buffers [1, Hkv, max_len, D];
@@ -232,6 +245,7 @@ def decode_attention_dev(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, lenp
     _, hkv, _, _ = k.shape
     rep = hq // hkv
     scale = 1.0 / math.sqrt(D) if scale is None else scale
+    num_stages = (3 if STAGES3 else 2) if num_stages is None else num_stages
     bm, groups, ns, chunk = pick_launch(T, rep, max_lc)
     dev_chunk(T, rep, max_lc)
     ns = max(ns, 2)

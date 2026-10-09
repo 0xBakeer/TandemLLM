@@ -88,7 +88,8 @@ class Weights:
     """Every tensor the text model needs, addressed by its checkpoint name."""
 
     def __init__(self, snapshot: str, device: str = "cuda", *, skip_mtp: bool = False,
-                 nvfp4: str | None = None, fp8_head: str | None = None, tied: bool | None = None):
+                 nvfp4: str | None = None, fp8_head: str | None = None, tied: bool | None = None,
+                 exl3: str | None = None):
         self.snapshot = snapshot
         self.device = device
         self.t: dict[str, torch.Tensor] = {}
@@ -98,8 +99,18 @@ class Weights:
         self.bytes_other = 0
         self.nvfp4_source: str | None = None
         self.fp8_head_source: str | None = None
+        self.exl3_source: str | None = None
+        # ENG-197: an EXL3 checkpoint replaces every projection it quantises and the head. The
+        # base snapshot still gives everything else (norms, embedding, the GDN gates and
+        # convolutions in their original bf16), and its copies of the replaced projections are
+        # never read off the disk. Unset (the default), nothing below this line changes.
+        exl3 = exl3 if exl3 is not None else _S.get("EXL3")
+        self._skip: set[str] = set()
+        if exl3:
+            exl3 = os.path.expanduser(str(exl3))
+            self._skip = exl3_bases(exl3)
         self._load(skip_mtp)
-        if Layout.head not in self.t and Layout.embed in self.t:
+        if Layout.head not in self.t and Layout.embed in self.t and "lm_head" not in self._skip:
             if tied is None:
                 tied = _config_tied(snapshot)
             if not tied:
@@ -109,6 +120,13 @@ class Weights:
             # replace only the head's entry, the embedding stays what it is
             self.t[Layout.head] = self.t[Layout.embed]
         nvfp4 = nvfp4 if nvfp4 is not None else _S.get("NVFP4")
+        fp8_head = fp8_head if fp8_head is not None else _S.get("FP8_HEAD")
+        if exl3:
+            if nvfp4 or fp8_head:
+                print(f"[exl3] {exl3} replaces the projections and the head: "
+                      f"--nvfp4 {nvfp4!r} and --fp8-head {fp8_head!r} are not loaded")
+            nvfp4 = fp8_head = None
+            self.load_exl3(exl3)
         if nvfp4:
             # A comma-separated list, because the quality gate decides which GROUPS of projections
             # are quantised and that decision has to be expressible without re-running the
@@ -116,7 +134,6 @@ class Weights:
             for part in str(nvfp4).split(","):
                 if part.strip():
                     self.load_nvfp4_mlp(os.path.expanduser(part.strip()))
-        fp8_head = fp8_head if fp8_head is not None else _S.get("FP8_HEAD")
         if fp8_head:
             ratios = parse_head_build(fp8_head)
             if ratios is not None:
@@ -124,7 +141,11 @@ class Weights:
             else:
                 self.load_fp8_head(os.path.expanduser(fp8_head))
         from tools.nvfp4_linear_v2 import FUSE_PROJ
-        if FUSE_PROJ:
+        if exl3 and _S.get("EXL3_FUSE") == "1":
+            layers = [int(k.split(".")[1]) for k in self.q if k.startswith("layers.")]
+            if layers:
+                self.fuse_exl3_groups(max(layers) + 1)
+        elif FUSE_PROJ:
             layers = [int(k.split(".")[1]) for k in self.q if k.startswith("layers.")]
             if layers:
                 self.fuse_nvfp4_groups(max(layers) + 1)
@@ -152,6 +173,8 @@ class Weights:
                         # the BF16 release keeps the MTP layer inside its last shard, not in a file
                         # of its own: skipped by name, as the FP8 release's file is skipped by name
                         continue
+                    if self._skip and name.rsplit(".", 1)[0] in self._skip:
+                        continue          # replaced by the EXL3 checkpoint: never read
                     if name.endswith(".weight_scale_inv"):
                         base = name[: -len(".weight_scale_inv")]
                         s = f.get_tensor(key)
@@ -327,6 +350,79 @@ class Weights:
         print(f"[nvfp4] {found} projections from {path}: "
               f"{freed / 1e9:.2f} GB fp8 -> {added / 1e9:.2f} GB nvfp4")
 
+    # ------------------------------------------------------------------ EXL3 (ENG-197)
+    def load_exl3(self, path: str) -> None:
+        """Every projection and the head from an EXL3 checkpoint (tools/exl3_linear.py).
+
+        Read: `<base>.trellis/.suh/.svh/.mul1` of the language model's projections and of
+        `lm_head`; the MTP layer, the vision tower and every plain tensor of the EXL3 checkpoint
+        are not read (the base snapshot's originals serve: the converter stores some of them as
+        fp16 copies of the bf16 originals, e.g. in_proj_a/b). A projection the base has and the
+        EXL3 checkpoint does not quantise stays what the base loaded, and is named."""
+        from tools.exl3_linear import read_block
+        files = _exl3_files(path)
+        found, added, kbits = 0, 0, {}
+        for fpath in files:
+            with safe_open(fpath, framework="pt", device=self.device) as f:
+                bases = sorted({k[: -len(".trellis")] for k in f.keys() if k.endswith(".trellis")})
+                for base in bases:
+                    name = Layout.canonical(base)
+                    if name is None or name.startswith(Layout.mtp_prefix):
+                        continue
+                    if name == Layout.head[: -len(".weight")]:
+                        blk = read_block(f, base, out_fp32=True)
+                        old = self.t.get(Layout.head)
+                        if old is not None:
+                            assert tuple(blk.shape) == tuple(old.shape), (blk.shape, old.shape)
+                            was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
+                            self.bytes_other -= was
+                        self.t[Layout.head] = blk
+                        self.bytes_other += blk.nbytes
+                    else:
+                        blk = read_block(f, base)
+                        self.q[name] = blk
+                        self.bytes_fp8 += blk.nbytes
+                    added += blk.nbytes
+                    kbits[blk.kb] = kbits.get(blk.kb, 0) + 1
+                    found += 1
+        if not found:
+            raise RuntimeError(f"no EXL3 tensors found in {path}")
+        from tools.exl3_linear import EXL3Block
+        left = sorted(n for n, b in self.q.items() if not isinstance(b, EXL3Block))
+        if left:
+            print(f"[exl3] {len(left)} projections not in the EXL3 checkpoint keep the base's "
+                  f"format: {left[:6]}{' ...' if len(left) > 6 else ''}")
+        torch.cuda.empty_cache()
+        self.exl3_source = path
+        hist = ", ".join(f"K{k}: {v}" for k, v in sorted(kbits.items()))
+        print(f"[exl3] {found} tensors from {path}: {added / 1e9:.2f} GB ({hist})")
+
+    def fuse_exl3_groups(self, n_layers: int) -> int:
+        """QWEN38_EXL3_FUSE (on by default with EXL3; 0 = separate launches): each projection group (PROJ_GROUPS) whose members share the rate
+        becomes one EXL3 group (one rotation launch, one GEMM launch), and the members become
+        views into it (`EXL3Block.member`), so nothing is held twice."""
+        from tools.exl3_linear import EXL3Block
+        made, fused = 0, 0
+        for layer in range(n_layers):
+            p = f"layers.{layer}"
+            for key, members in PROJ_GROUPS:
+                names = [f"{p}.{m}" for m in members]
+                blocks = [self.q.get(n) for n in names]
+                if not all(isinstance(b, EXL3Block) for b in blocks):
+                    continue
+                if len({b.kb for b in blocks}) != 1:
+                    continue
+                grp = EXL3Block.group(blocks, names)
+                for i, n in enumerate(names):
+                    self.q[n] = grp.member(i)
+                self.g[f"{p}.{key}"] = grp
+                fused += grp.nbytes
+                made += 1
+        torch.cuda.empty_cache()
+        if made:
+            print(f"[fuse] {made} EXL3 projection groups, {fused / 1e9:.2f} GB in one launch each")
+        return made
+
     # ------------------------------------------------------------------ fp8 lm_head
     def load_fp8_head(self, path: str) -> None:
         """Swap the bf16 `lm_head` for the e4m3 one written by `tools/quant_head.py`.
@@ -376,6 +472,38 @@ class Weights:
         self.fp8_head_source = "build:" + ",".join(f"{r:g}" for r in ratios)
         print(f"[fp8-head] {was / 1e9:.2f} GB bf16 -> {head.nbytes / 1e9:.2f} GB e4m3 "
               f"(per-row scales) built at load, ratios {ratios}")
+
+
+def _exl3_files(path: str) -> list[str]:
+    if os.path.isfile(path):
+        return [path]
+    idx = os.path.join(path, "model.safetensors.index.json")
+    if os.path.isfile(idx):
+        import json
+        names = sorted(set(json.load(open(idx))["weight_map"].values()))
+        return [os.path.join(path, n) for n in names]
+    return sorted(glob_safetensors(path))
+
+
+def exl3_bases(path: str) -> set[str]:
+    """The engine names of the projections an EXL3 checkpoint quantises (from its index, else its
+    files' keys): the base snapshot skips reading those."""
+    keys: list[str] = []
+    idx = os.path.join(path, "model.safetensors.index.json") if os.path.isdir(path) else None
+    if idx and os.path.isfile(idx):
+        import json
+        keys = list(json.load(open(idx))["weight_map"])
+    else:
+        for fpath in _exl3_files(path):
+            with safe_open(fpath, framework="pt", device="cpu") as f:
+                keys.extend(f.keys())
+    out = set()
+    for k in keys:
+        if k.endswith(".trellis"):
+            name = Layout.canonical(k[: -len(".trellis")])
+            if name and not name.startswith(Layout.mtp_prefix):
+                out.add(name)                 # "lm_head" too: the base's bf16 head is not read
+    return out
 
 
 def _config_tied(snapshot: str) -> bool:

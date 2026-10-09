@@ -670,6 +670,22 @@ def test_the_routes():
     assert call("POST", "/v1/conductor/narrator/unload")[0] == 200 and s.state == "not_loaded"
 
 
+def test_the_small_models_never_take_the_served_weight_overrides():
+    """The narrator / shadow load (engine/generative/qwen35.py) turns NVFP4, the FP8 head and EXL3 off
+    by argument: QWEN38_EXL3 of an EXL3 weight profile names the 27B's checkpoint (2026-10-09:
+    'EXL3Block' object has no attribute 'to' on every narrator load)."""
+    import ast
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "engine/generative/qwen35.py")).read()
+    calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "Weights"]
+    assert calls, "no Weights(...) load found"
+    for c in calls:
+        kw = {k.arg: k.value for k in c.keywords}
+        for name in ("nvfp4", "fp8_head", "exl3"):
+            assert name in kw and isinstance(kw[name], ast.Constant) and kw[name].value == "", (name, ast.dump(c))
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

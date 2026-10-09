@@ -80,6 +80,8 @@ from engine.settings import SETTINGS as _S
 #: FX10: a parked conversation a new park gives up goes to the NVMe spill first (`on`); `off`
 #: gives it up as before (`ResidentPrefix._spill_park`)
 SPILL_PARK = (_S.get("SPILL_PARK") or "on").strip().lower()
+PREFILL_WINDOW = int(_S.get("PREFILL_WINDOW") or 0)
+PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
 
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
@@ -2178,6 +2180,51 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     return prefix_chunk if prefix_on else max(0, int(max_rows))
 
 
+def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
+    """The chunks (start, rows) one layer-major window takes from row `i`: the chunk loop's own
+    grid, as many chunks as fit in `win` rows; None when fewer than two would (or the engine
+    cannot run the window), and the loop forwards one chunk the usual way."""
+    if win <= 0 or chunk <= 0 or n - i <= chunk or not hasattr(eng, "prefill_window"):
+        return None
+    if not eng.window_ok(i):
+        return None
+    plan, j = [], i
+    while j < n:
+        t = min(chunk - (j % chunk), n - j)
+        if plan and (j + t) - i > max(win, chunk):
+            break
+        plan.append((j, t))
+        j += t
+    return plan if len(plan) > 1 else None
+
+
+def _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim, keys,
+                 hashes, conv_id, mem) -> None:
+    """What the prefill takes at the line `i` a chunk has just reached: the resident anchor, the
+    disk's anchor and the store's snapshot (the engine stands at `i`)."""
+    if res is not None:
+        res.advanced(i)
+        if i < n and i % chunk == 0:
+            res.anchor(eng, i)
+    if job is not None and i < lim and i % chunk == 0:
+        _disk(disk, "capture", job, eng, i)
+    if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
+            and (ckpt is None or i in ckpt)):
+        # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
+        est = _snapshot_estimate(eng, i, drafter)
+        snap = None
+        if not store.reserve(est):
+            store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+        elif mem is not None and not mem.admit("store", est):
+            store.stats["skipped_mem"] = store.stats.get("skipped_mem", 0) + 1
+        else:
+            snap = capture(eng, drafter, max_bytes=store.max_entry)
+            if snap is not None:
+                store.put(keys, snap, conv_id, hashes)
+            else:
+                store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+
+
 def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = None,
             chunk: int = 0, conv_id: str | None = None, checkpoint: bool = False,
             resident: "ResidentPrefix | None" = None, on_chunk=None, info: dict | None = None,
@@ -2367,8 +2414,45 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
            if disk is not None and not scratch else None)
     if mem is not None:
         mem.mark()
+    lines = res is not None or job is not None or (store is not None and checkpoint and chunk > 0)
+    win = PREFILL_WINDOW if lines else PREFILL_WINDOW_FREE
     try:
         while i < n:
+            plan = _window_plan(eng, i, n, chunk, win)
+            if plan is not None:
+                # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
+                # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The
+                # chunk loop below then runs for each chunk in order with the engine put back at
+                # that chunk's line, so every anchor, snapshot and drafter sync is the one a
+                # chunk-major prefill takes.
+                bufs = None
+                if lines:
+                    bufs = [(torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
+                            for _ in plan]
+                toks = [torch.tensor(ids[a:a + t], device=device, dtype=torch.long)
+                        for a, t in plan]
+                logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
+                if bufs is not None:
+                    bufs[-1][0].copy_(eng.state.S)
+                    bufs[-1][1].copy_(eng.state.conv)
+                end = plan[-1][0] + plan[-1][1]
+                for c, (a, t) in enumerate(plan):
+                    last = c == len(plan) - 1
+                    if bufs is not None:
+                        eng.state.S.copy_(bufs[c][0])
+                        eng.state.conv.copy_(bufs[c][1])
+                    eng.kv.length = a + t
+                    eng.replay_taps(taps[c])
+                    if drafter is not None and hasattr(drafter, "sync"):
+                        drafter.sync(ids[a:a + t], hid[c][0], a)
+                    i = a + t
+                    _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n,
+                                 lim, keys, hashes, conv_id, mem)
+                    if on_chunk is not None and i < n:
+                        on_chunk(i, n)
+                del bufs, toks, hid, taps
+                assert i == end
+                continue
             if chunk > 0:
                 # The grid is anchored at absolute position 0, not at the resume point: a resume
                 # that lands off the grid -- which is what a session boundary is -- takes a SHORT
@@ -2381,31 +2465,13 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             else:
                 t = n - i
             blk = torch.tensor(ids[i:i + t], device=device, dtype=torch.long)
-            logits = eng.forward(blk, start=i, last_only=(i + t >= n))
+            # a chunk before the last one returns logits nobody reads: one row, not `t` of them
+            logits = eng.forward(blk, start=i, last_only=True)
             if drafter is not None and hasattr(drafter, "sync"):
                 drafter.sync(ids[i:i + t], eng.hidden_post_norm[0], i)
             i += t
-            if res is not None:
-                res.advanced(i)
-                if i < n and i % chunk == 0:
-                    res.anchor(eng, i)
-            if job is not None and i < lim and i % chunk == 0:
-                _disk(disk, "capture", job, eng, i)
-            if (store is not None and checkpoint and i < lim and chunk > 0 and i % chunk == 0
-                    and (ckpt is None or i in ckpt)):
-                # room is made BEFORE the clone (OPS-47): evicting after it held store + snapshot
-                est = _snapshot_estimate(eng, i, drafter)
-                snap = None
-                if not store.reserve(est):
-                    store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
-                elif mem is not None and not mem.admit("store", est):
-                    store.stats["skipped_mem"] = store.stats.get("skipped_mem", 0) + 1
-                else:
-                    snap = capture(eng, drafter, max_bytes=store.max_entry)
-                    if snap is not None:
-                        store.put(keys, snap, conv_id, hashes)
-                    else:
-                        store.stats["skipped_big"] = store.stats.get("skipped_big", 0) + 1
+            _after_chunk(eng, drafter, res, store, disk, job, ckpt, checkpoint, chunk, i, n, lim,
+                         keys, hashes, conv_id, mem)
             if on_chunk is not None and i < n:
                 on_chunk(i, n)
     finally:

@@ -52,6 +52,31 @@ import os
 
 import torch
 
+from engine.settings import SETTINGS as _S
+
+# The top-p filter without the full-row sort (`_top_p_fast`): the nucleus is read off the row's
+# top TOPP_K logits whenever their mass already crosses top_p (a row whose nucleus is wider falls
+# back to the sort). The kept set is the sort's; the cumulative mass is summed under the full
+# row's logsumexp instead of the sorted row's softmax normaliser, which can move a token whose
+# cumulative mass sits within float rounding of top_p (counted by tools/sample_filter_check.py).
+# 0 = the sort, as before.
+TOPP_K = int(_S.get("SAMPLE_TOPP_K") or 0)
+# The tree walk's and the drafter's draws batched on the device and brought to the host in ONE
+# copy (`tree_walk_batched`): every node's draw is taken up front, which leaves each visited
+# node's draw distributed exactly as the one-at-a-time walk's. Unseeded requests only (a seeded
+# request keeps its position-keyed draws). 0 = one draw and one copy a node, as before.
+BATCH = _S.get("SAMPLE_BATCH") == "1"
+# The batched walk's draws taken inside each row's nucleus (`row_draws`): the kept set is
+# `_top_p_fast`'s, computed by the same ops on the same tensors (bit-identical), and the draw is a
+# multinomial over that row's top TOPP_K slice instead of over the [n, V] probabilities `_filter`
+# materialises (four full-vocabulary passes fewer a row). The same distribution: p(i) proportional
+# to exp(logit_i / T) over the nucleus either way. A row whose nucleus is wider than TOPP_K takes the
+# sort as `_top_p_fast` does. Unseeded det walks only (no q, no min_p / top_k); everything else is
+# `probs_rows` + `tree_walk` as before. Default on since 2026-10-09 19:10 (sampled 50-prompt row
+# base vs nucleus 2 x 2 runs a side: no class worse beyond the run-to-run spread; board gate
+# tools/sampled_dist.py nospec/det/cool PASS, greedy identical). 0 = the probs_rows path.
+NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
+
 
 _MASK64 = (1 << 64) - 1
 
@@ -149,7 +174,9 @@ class Sampler:
             k = min(self.top_k, logits.shape[-1])
             cutoff = torch.topk(logits, k, dim=-1).values[..., -1, None]
             logits = torch.where(logits < cutoff, torch.full_like(logits, float("-inf")), logits)
-        if self.top_p < 1.0:
+        if self.top_p < 1.0 and TOPP_K > 0:
+            logits = self._top_p_fast(logits, TOPP_K)
+        elif self.top_p < 1.0:
             sorted_logits, order = torch.sort(logits, descending=True, dim=-1)
             probs = torch.softmax(sorted_logits, dim=-1)
             cumulative = torch.cumsum(probs, dim=-1)
@@ -159,6 +186,102 @@ class Sampler:
             sorted_logits = sorted_logits.masked_fill(drop, float("-inf"))
             logits = torch.empty_like(logits).scatter_(-1, order, sorted_logits)
         return torch.softmax(logits, dim=-1)
+
+    @torch.no_grad()
+    def _top_p_fast(self, logits: torch.Tensor, k0: int) -> torch.Tensor:
+        """`_filter`'s top-p step from the top `k0` logits of each row (see TOPP_K)."""
+        V = logits.shape[-1]
+        k0 = min(int(k0), V)
+        flat = logits.reshape(-1, V)
+        vals, idx = torch.topk(flat, k0, dim=-1, sorted=True)
+        lse = torch.logsumexp(flat, dim=-1, keepdim=True)
+        cumulative = torch.cumsum(torch.exp(vals - lse), dim=-1)
+        drop = cumulative > self.top_p
+        drop[..., 1:] = drop[..., :-1].clone()   # keep the first token that crosses
+        drop[..., 0] = False
+        out = torch.full_like(flat, float("-inf")).scatter_(-1, idx, vals.masked_fill(drop, float("-inf")))
+        wide = cumulative[:, -1] <= self.top_p    # the nucleus is wider than k0: the sort
+        if k0 < V and bool(wide.any()):
+            rows = wide.nonzero().flatten()
+            sorted_logits, order = torch.sort(flat[rows], descending=True, dim=-1)
+            probs = torch.softmax(sorted_logits, dim=-1)
+            cum = torch.cumsum(probs, dim=-1)
+            d = cum > self.top_p
+            d[..., 1:] = d[..., :-1].clone()
+            d[..., 0] = False
+            sorted_logits = sorted_logits.masked_fill(d, float("-inf"))
+            out[rows] = torch.empty_like(sorted_logits).scatter_(-1, order, sorted_logits)
+        return out.view_as(logits)
+
+    def nucleus_ok(self) -> bool:
+        """`row_draws` applies: sampling with a top-p and no other filter, the fast filter on."""
+        return (self.on and TOPP_K > 0 and self.top_p < 1.0 and self.top_k == 0
+                and self.min_p == 0.0)
+
+    @torch.no_grad()
+    def row_draws(self, rows: torch.Tensor) -> torch.Tensor:
+        """One token a row of `rows` [n, V] (logits, penalties applied), drawn from `_filter`'s
+        distribution without building it (`nucleus_ok()` must hold). The kept set is computed by
+        `_top_p_fast`'s own ops on the same tensors; the draw is a multinomial over the kept part
+        of the row's top-k slice. Rows whose nucleus is wider than k take the sort, as there."""
+        V = rows.shape[-1]
+        flat = rows.reshape(-1, V).float() / self.temperature
+        k0 = min(int(TOPP_K), V)
+        vals, idx = torch.topk(flat, k0, dim=-1, sorted=True)
+        lse = torch.logsumexp(flat, dim=-1, keepdim=True)
+        cumulative = torch.cumsum(torch.exp(vals - lse), dim=-1)
+        drop = cumulative > self.top_p
+        drop[..., 1:] = drop[..., :-1].clone()   # keep the first token that crosses
+        drop[..., 0] = False
+        g = self._rng(rows.device)
+        pick = torch.multinomial(torch.softmax(vals.masked_fill(drop, float("-inf")), dim=-1),
+                                 1, generator=g)
+        x = idx.gather(1, pick).squeeze(1)
+        wide = cumulative[:, -1] <= self.top_p
+        if k0 < V and bool(wide.any()):
+            rws = wide.nonzero().flatten()
+            sorted_logits, order = torch.sort(flat[rws], descending=True, dim=-1)
+            probs = torch.softmax(sorted_logits, dim=-1)
+            cum = torch.cumsum(probs, dim=-1)
+            d = cum > self.top_p
+            d[..., 1:] = d[..., :-1].clone()
+            d[..., 0] = False
+            p = torch.softmax(sorted_logits.masked_fill(d, float("-inf")), dim=-1)
+            x[rws] = order.gather(1, torch.multinomial(p, 1, generator=g)).squeeze(1)
+        return x
+
+    def walk_draws(self, xs: list[int], tokens: list[int], parents: list[int]
+                   ) -> tuple[list[int], list[int]]:
+        """`tree_walk` on draws already taken, one a node (`row_draws`; no q)."""
+        n = len(tokens)
+        kids: list[list[int]] = [[] for _ in range(n)]
+        for c in range(1, n):
+            kids[parents[c]].append(c)
+        path, node = [0], 0
+        while True:
+            x = xs[node]
+            nxt = next((k for k in kids[node] if tokens[k] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        return path, [tokens[i] for i in path[1:]] + [x]
+
+    def tree_walk_logits(self, rows: torch.Tensor, tokens: list[int], parents: list[int],
+                         start: int | None = None, q: list | None = None
+                         ) -> tuple[list[int], list[int]]:
+        """`tree_walk(probs_rows(rows), ...)`, by `row_draws` where NUCLEUS and the walk allow."""
+        keyed = self.coupled and start is not None
+        if (NUCLEUS and BATCH and not keyed and (q is None or all(v is None for v in q))
+                and self.nucleus_ok()):
+            n = len(tokens)
+            return self.walk_draws(self.row_draws(rows[:n]).tolist(), tokens, parents)
+        return self.tree_walk(self.probs_rows(rows), tokens, parents, start=start, q=q)
+
+    @torch.no_grad()
+    def draws(self, probs: torch.Tensor) -> torch.Tensor:
+        """One token from every row of `probs` [n, V], on the device, on the request's RNG."""
+        return torch.multinomial(probs, 1, generator=self._rng(probs.device)).squeeze(-1)
 
     @torch.no_grad()
     def probs_rows(self, rows: torch.Tensor) -> torch.Tensor:
@@ -269,6 +392,8 @@ class Sampler:
         the rejection step. A seeded request ignores q and takes the keyed walk (as `chain_accept`).
         """
         keyed = self.coupled and start is not None
+        if BATCH and not keyed:
+            return self._tree_walk_batched(dists, tokens, parents, q)
         path, node = [0], 0
         while True:
             kids = [c for c in range(node + 1, len(tokens)) if parents[c] == node]
@@ -289,6 +414,65 @@ class Sampler:
             else:
                 x = (self.pick_at(p_row, start + len(path) - 1) if keyed else self.pick(p_row))
             nxt = next((c for c in kids if tokens[c] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        new = [tokens[i] for i in path[1:]] + [x]
+        return path, new
+
+    @torch.no_grad()
+    def _tree_walk_batched(self, dists: torch.Tensor, tokens: list[int], parents: list[int],
+                           q: list | None) -> tuple[list[int], list[int]]:
+        """`tree_walk` (unseeded) with every node's randomness drawn up front on the device and
+        brought over in one copy: per node the target's own draw from p, and where a child
+        carries a q, the accept's uniform, p(d), q(d) and a draw from the residual (p - q)+ (from
+        p where the residual is empty). Each visited node uses exactly the draws the one-at-a-time
+        walk would take there, all independent: the same distribution of paths."""
+        n = len(tokens)
+        kids: list[list[int]] = [[] for _ in range(n)]
+        for c in range(1, n):
+            kids[parents[c]].append(c)
+        qc = [next((c for c in kids[i] if q[c] is not None), None) if q is not None else None
+              for i in range(n)]
+        dev = dists.device
+        g = self._rng(dev)
+        x_all = torch.multinomial(dists[:n], 1, generator=g).squeeze(-1)
+        qn = [i for i in range(n) if qc[i] is not None]
+        if qn:
+            rows = torch.tensor(qn, device=dev)
+            p_rows = dists[rows]
+            q_rows = torch.stack([q[qc[i]] for i in qn]).to(p_rows.dtype)
+            d = torch.tensor([tokens[qc[i]] for i in qn], device=dev).view(-1, 1)
+            pd = p_rows.gather(1, d).squeeze(1)
+            qd = q_rows.gather(1, d).squeeze(1)
+            u = torch.rand(len(qn), generator=g, device=dev)
+            r = torch.clamp(p_rows - q_rows, min=0.0)
+            total = r.sum(-1, keepdim=True)
+            r = torch.where(total > 0.0, r / total.clamp_min(1e-38), p_rows)
+            xr = torch.multinomial(r, 1, generator=g).squeeze(-1)
+            host = torch.cat([x_all.double(), pd.double(), qd.double(), u.double(),
+                              xr.double()]).tolist()
+            m = len(qn)
+            xs = [int(v) for v in host[:n]]
+            pdl, qdl, ul = host[n:n + m], host[n + m:n + 2 * m], host[n + 2 * m:n + 3 * m]
+            xrl = [int(v) for v in host[n + 3 * m:]]
+            slot = {i: j for j, i in enumerate(qn)}
+        else:
+            xs = x_all.tolist()
+        path, node = [0], 0
+        while True:
+            c = qc[node]
+            if c is not None:
+                j = slot[node]
+                if qdl[j] > 0.0 and ul[j] * qdl[j] < pdl[j]:
+                    path.append(c)
+                    node = c
+                    continue
+                x = xrl[j]
+            else:
+                x = xs[node]
+            nxt = next((k for k in kids[node] if tokens[k] == x), None)
             if nxt is None:
                 break
             path.append(nxt)
