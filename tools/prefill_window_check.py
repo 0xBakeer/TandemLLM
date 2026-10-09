@@ -161,8 +161,15 @@ def main() -> None:
             for arm in ("off", "on", "off", "on")[:2 * a.reps]:
                 if a.toggle:
                     import importlib
-                    modname, attr = a.toggle.rsplit(".", 1)
-                    setattr(importlib.import_module(modname), attr, arm == "on")
+                    spec, _, vals = a.toggle.partition("=")
+                    modname, attr = spec.rsplit(".", 1)
+                    if vals:                     # module.ATTR=off_value:on_value (ints or strings)
+                        lo, hi = vals.split(":")
+                        conv = (lambda v: int(v)) if lo.lstrip("-").isdigit() else (lambda v: v)
+                        val = conv(hi) if arm == "on" else conv(lo)
+                    else:
+                        val = arm == "on"
+                    setattr(importlib.import_module(modname), attr, val)
                     cache.PREFILL_WINDOW, cache.PREFILL_WINDOW_FREE = a.window, a.window_free
                 else:
                     cache.PREFILL_WINDOW = a.window if arm == "on" else 0
