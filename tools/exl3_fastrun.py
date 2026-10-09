@@ -37,6 +37,10 @@ from tools import rowlog  # noqa: E402
 HOME = Path(os.path.expanduser("~"))
 PROSE = ("Write three paragraphs about why the memory system, and not the arithmetic units, "
          "sets the speed of a language model that generates one token at a time.")
+# block_budget's code request (its answer is not in its prompt): the class the wide tree pays on
+CODE = ("Write a Python function that parses an ISO-8601 duration such as P3DT4H5M6S into a "
+        "number of seconds. Validate the input, raise ValueError with a useful message, and "
+        "include three doctest examples.")
 CHAT = ("I have a machine with 121 GB of unified memory and about 273 GB/s of bandwidth. "
         "Explain in plain language what that means for running a 27-billion-parameter model.")
 
@@ -142,6 +146,7 @@ def main() -> None:
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--new", type=int, default=512)
     p.add_argument("--prefill", default="8192,32768")
+    p.add_argument("--workloads", default="prose,chat", help="any of prose, chat, code")
     p.add_argument("--keep", action="store_true", help="leave the server up afterwards")
     p.add_argument("--no-server", action="store_true", help="measure a server already on --port")
     p.add_argument("--json", required=True)
@@ -193,7 +198,9 @@ def main() -> None:
                 return rowlog.parse_requests(f.read().decode("utf-8", "replace"))
 
         stream(a.port, a.served_model, "Say hello.", 16)          # warm-up
-        for name, prompt in (("prose", PROSE), ("chat", CHAT)):
+        prompts = {"prose": PROSE, "chat": CHAT, "code": CODE}
+        for name in a.workloads.split(","):
+            prompt = prompts[name]
             runs = []
             for i in range(a.reps):
                 at = logpos()
@@ -210,9 +217,12 @@ def main() -> None:
                 print(f"[fastrun] {name} {i}: {r['tok_s']:.2f} tok/s, {r['completion']} tokens, "
                       f"tok/round {r.get('tok_round')}, ttft {r['ttft_s']:.3f} s", flush=True)
             rates = [r["tok_s"] for r in runs if r["tok_s"]]
+            srt = sorted(rates)
             tr = [r["tok_round"] for r in runs if r.get("tok_round")]
             mr = [r["ms_round"] for r in runs if r.get("ms_round")]
             rep[name] = {"runs": runs, "tok_s_median": statistics.median(rates) if rates else None,
+                         "tok_s_mean": statistics.mean(rates) if rates else None,
+                         "tok_s_min": srt[0] if srt else None, "tok_s_max": srt[-1] if srt else None,
                          "tok_round_median": statistics.median(tr) if tr else None,
                          "ms_round_median": statistics.median(mr) if mr else None,
                          "same_text": len({r["text"] for r in runs}) == 1}
@@ -234,9 +244,9 @@ def main() -> None:
                 os.killpg(os.getpgid(proc.pid), 9)
         rep["finished"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         json.dump(rep, open(os.path.expanduser(a.json), "w"), indent=1, default=str)
-    print(f"[fastrun] {a.label}: prose {rep['prose']['tok_s_median']:.2f} tok/s "
-          f"({rep['prose']['tok_round_median']} tok/round), chat {rep['chat']['tok_s_median']:.2f} "
-          f"tok/s ({rep['chat']['tok_round_median']} tok/round)")
+    print(f"[fastrun] {a.label}: " + ", ".join(
+        f"{w} {rep[w]['tok_s_median']:.2f} tok/s ({rep[w]['tok_round_median']} tok/round)"
+        for w in a.workloads.split(",") if w in rep and rep[w].get("tok_s_median")))
 
 
 if __name__ == "__main__":
