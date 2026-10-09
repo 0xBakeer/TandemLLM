@@ -1474,8 +1474,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # Rejection accept down the tree: the target's own token is
                         # sampled at every node and the walk follows the child carrying it; where
                         # no child carries it, the draw is the token and the walk stops.
-                        path, new = sampler.tree_walk(sampler.probs_rows(lg), tree.tokens,
-                                                      tree.parents, start=len(ctx), q=tree.q)
+                        path, new = sampler.tree_walk_logits(lg, tree.tokens, tree.parents,
+                                                             start=len(ctx), q=tree.q)
                     else:
                         # a graphed verify took the argmax itself; a penalty changed the
                         # logits after it, so then the loop takes it

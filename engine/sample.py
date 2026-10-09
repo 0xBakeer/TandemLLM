@@ -66,6 +66,14 @@ TOPP_K = int(_S.get("SAMPLE_TOPP_K") or 0)
 # node's draw distributed exactly as the one-at-a-time walk's. Unseeded requests only (a seeded
 # request keeps its position-keyed draws). 0 = one draw and one copy a node, as before.
 BATCH = _S.get("SAMPLE_BATCH") == "1"
+# The batched walk's draws taken inside each row's nucleus (`row_draws`): the kept set is
+# `_top_p_fast`'s, computed by the same ops on the same tensors (bit-identical), and the draw is a
+# multinomial over that row's top TOPP_K slice instead of over the [n, V] probabilities `_filter`
+# materialises (four full-vocabulary passes fewer a row). The same distribution: p(i) proportional
+# to exp(logit_i / T) over the nucleus either way. A row whose nucleus is wider than TOPP_K takes the
+# sort as `_top_p_fast` does. Unseeded det walks only (no q, no min_p / top_k); everything else is
+# `probs_rows` + `tree_walk` as before. 0 = off.
+NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
 
 
 _MASK64 = (1 << 64) - 1
@@ -202,6 +210,71 @@ class Sampler:
             sorted_logits = sorted_logits.masked_fill(d, float("-inf"))
             out[rows] = torch.empty_like(sorted_logits).scatter_(-1, order, sorted_logits)
         return out.view_as(logits)
+
+    def nucleus_ok(self) -> bool:
+        """`row_draws` applies: sampling with a top-p and no other filter, the fast filter on."""
+        return (self.on and TOPP_K > 0 and self.top_p < 1.0 and self.top_k == 0
+                and self.min_p == 0.0)
+
+    @torch.no_grad()
+    def row_draws(self, rows: torch.Tensor) -> torch.Tensor:
+        """One token a row of `rows` [n, V] (logits, penalties applied), drawn from `_filter`'s
+        distribution without building it (`nucleus_ok()` must hold). The kept set is computed by
+        `_top_p_fast`'s own ops on the same tensors; the draw is a multinomial over the kept part
+        of the row's top-k slice. Rows whose nucleus is wider than k take the sort, as there."""
+        V = rows.shape[-1]
+        flat = rows.reshape(-1, V).float() / self.temperature
+        k0 = min(int(TOPP_K), V)
+        vals, idx = torch.topk(flat, k0, dim=-1, sorted=True)
+        lse = torch.logsumexp(flat, dim=-1, keepdim=True)
+        cumulative = torch.cumsum(torch.exp(vals - lse), dim=-1)
+        drop = cumulative > self.top_p
+        drop[..., 1:] = drop[..., :-1].clone()   # keep the first token that crosses
+        drop[..., 0] = False
+        g = self._rng(rows.device)
+        pick = torch.multinomial(torch.softmax(vals.masked_fill(drop, float("-inf")), dim=-1),
+                                 1, generator=g)
+        x = idx.gather(1, pick).squeeze(1)
+        wide = cumulative[:, -1] <= self.top_p
+        if k0 < V and bool(wide.any()):
+            rws = wide.nonzero().flatten()
+            sorted_logits, order = torch.sort(flat[rws], descending=True, dim=-1)
+            probs = torch.softmax(sorted_logits, dim=-1)
+            cum = torch.cumsum(probs, dim=-1)
+            d = cum > self.top_p
+            d[..., 1:] = d[..., :-1].clone()
+            d[..., 0] = False
+            p = torch.softmax(sorted_logits.masked_fill(d, float("-inf")), dim=-1)
+            x[rws] = order.gather(1, torch.multinomial(p, 1, generator=g)).squeeze(1)
+        return x
+
+    def walk_draws(self, xs: list[int], tokens: list[int], parents: list[int]
+                   ) -> tuple[list[int], list[int]]:
+        """`tree_walk` on draws already taken, one a node (`row_draws`; no q)."""
+        n = len(tokens)
+        kids: list[list[int]] = [[] for _ in range(n)]
+        for c in range(1, n):
+            kids[parents[c]].append(c)
+        path, node = [0], 0
+        while True:
+            x = xs[node]
+            nxt = next((k for k in kids[node] if tokens[k] == x), None)
+            if nxt is None:
+                break
+            path.append(nxt)
+            node = nxt
+        return path, [tokens[i] for i in path[1:]] + [x]
+
+    def tree_walk_logits(self, rows: torch.Tensor, tokens: list[int], parents: list[int],
+                         start: int | None = None, q: list | None = None
+                         ) -> tuple[list[int], list[int]]:
+        """`tree_walk(probs_rows(rows), ...)`, by `row_draws` where NUCLEUS and the walk allow."""
+        keyed = self.coupled and start is not None
+        if (NUCLEUS and BATCH and not keyed and (q is None or all(v is None for v in q))
+                and self.nucleus_ok()):
+            n = len(tokens)
+            return self.walk_draws(self.row_draws(rows[:n]).tolist(), tokens, parents)
+        return self.tree_walk(self.probs_rows(rows), tokens, parents, start=start, q=q)
 
     @torch.no_grad()
     def draws(self, probs: torch.Tensor) -> torch.Tensor:
