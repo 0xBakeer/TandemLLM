@@ -345,7 +345,10 @@ def test_a_prefix_hit_reports_cached_and_forwarded():
     head, raw, _ = _run(_chat(), engine=_engine_with_blocks(
         5, [(15, 3, 1)], prefill={"reused": 1536, "forwarded": 188, "ms": 1.0}))
     t = _chunks(raw)[_carriers(_chunks(raw))[0]]
-    assert t["usage"]["prompt_tokens_details"]["cached_tokens"] == 1536
+    # the fake's prefill reuses more rows than its 21-token prompt holds: `usage` counts at most
+    # the client's prompt (usage.client_cached_of, 2026-10-09), `timings` keeps the engine's own
+    u = t["usage"]
+    assert u["prompt_tokens_details"]["cached_tokens"] == min(1536, u["prompt_tokens"]), u
     assert t["timings"]["cache_n"] == 1536 and t["timings"]["prompt_n"] == 188
     assert t["timings"]["cache_source"] == "prefix"
 
