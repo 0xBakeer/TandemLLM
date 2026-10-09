@@ -630,6 +630,22 @@ class LengthRouter(Drafter):
         if self.idle != "l":
             self.head_large._on_tap(h)
 
+    def tap_indices(self):
+        """The union of the tap invocations the arms that receive the tap keep; None when an arm
+        cannot say (engine/model.py `prefill_window` then runs chunk-major)."""
+        out = set()
+        for key, head in (("s", self.head_small), ("l", self.head_large)):
+            if self.idle == key:
+                continue
+            fn = getattr(head, "tap_indices", None)
+            if fn is None:
+                return None
+            got = fn()
+            if got is None:
+                return None
+            out |= set(got)
+        return out
+
     def tapped(self):
         """The tapped rows of an arm that still receives the tap (`DFlash2Drafter.tapped`)."""
         for key, head in (("s", self.head_small), ("l", self.head_large)):

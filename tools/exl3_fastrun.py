@@ -147,6 +147,9 @@ def main() -> None:
     p.add_argument("--new", type=int, default=512)
     p.add_argument("--prefill", default="8192,32768")
     p.add_argument("--workloads", default="prose,chat", help="any of prose, chat, code")
+    p.add_argument("--prefill-salt", action="store_true",
+                   help="start every prefill prompt with its own line, so no prefill reuses another's "
+                        "rows from the caches (a list may repeat a length)")
     p.add_argument("--keep", action="store_true", help="leave the server up afterwards")
     p.add_argument("--no-server", action="store_true", help="measure a server already on --port")
     p.add_argument("--json", required=True)
@@ -227,12 +230,14 @@ def main() -> None:
                          "ms_round_median": statistics.median(mr) if mr else None,
                          "same_text": len({r["text"] for r in runs}) == 1}
         rep["prefill"] = {}
-        for n in [int(x) for x in a.prefill.split(",") if x]:
+        for j, n in enumerate(int(x) for x in a.prefill.split(",") if x):
             text = prefill_text(repo, tok, n)
+            if a.prefill_salt:
+                text = f"[{a.label} {time.time():.6f} {j}]\n" + text
             r = stream(a.port, a.served_model, text, 1)
             r["prefill_tok_s"] = (r["prompt"] or n) / r["ttft_s"] if r["ttft_s"] else None
             r.pop("text", None)
-            rep["prefill"][str(n)] = r
+            rep["prefill"][str(n) if not a.prefill_salt else f"{n}#{j}"] = r
             print(f"[fastrun] prefill {n}: prompt {r['prompt']} ttft {r['ttft_s']:.2f} s "
                   f"= {r['prefill_tok_s']:.0f} tok/s", flush=True)
     finally:

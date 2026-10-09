@@ -1132,6 +1132,101 @@ class Qwen38Engine:
             x = x[:, -1:]
         return head_logits(x, self.w.norm("lm_head.weight"))
 
+    def window_ok(self, start: int) -> bool:
+        """Can `prefill_window` run prompt rows from `start` on: a plain text prefill with the
+        fused add-norm loop, and a tap whose rows it can hand on (or none)."""
+        if not (FUSED_ADDNORM and FUSED["norm"]):
+            return False
+        if self.trace is not None or self.tree is not None or self._gv is not None:
+            return False
+        if self.mm is not None and start < self.mm.n:
+            return False
+        return self.tap is None or self.tap_indices() is not None
+
+    def tap_indices(self):
+        """The tap invocations (0 = the embedding, l + 1 = layer l's output) the tap's owner keeps,
+        or None when it cannot say."""
+        owner = getattr(self.tap, "__self__", None)
+        fn = getattr(owner, "tap_indices", None)
+        return None if fn is None else fn()
+
+    def prefill_window(self, toks: list, starts: list, bufs: list | None = None):
+        """Consecutive prompt chunks, LAYER-major: every chunk passes layer l before any passes
+        layer l + 1, so an EXL3 projection decodes its fp16 slab once a window instead of once a
+        chunk (`tools.exl3_linear` slab cache). Each chunk runs exactly the operations its own
+        `forward` would (same row count, same entry state, same kernels), in another order: bit
+        for bit the chunk-major forwards.
+
+        `bufs[c]` (for c < len(toks) - 1): an (S, conv) pair that receives the recurrent state
+        at the end of chunk c, which a chunk-major loop would have had in `state` at that line.
+        Returns (the last row's logits of the last chunk, each chunk's post-norm hidden, each
+        chunk's kept tap rows as {invocation: rows})."""
+        from tools.norm_kernels import add_rms_norm
+        try:
+            from tools import exl3_linear as _x3
+        except Exception:                                          # noqa: BLE001
+            _x3 = None
+        cfg = self.cfg
+        n = cfg.num_hidden_layers
+        if self.trace is None and self._gv is None:
+            self._settle()
+        keep = self.tap_indices() if self.tap is not None else set()
+        keep = set(keep or ())
+        C = len(toks)
+        primed0 = self.state.primed
+        emb = self.w.norm("embed_tokens.weight")
+        w0 = self.w.norm("layers.0.input_layernorm.weight")
+        hs, xs, pos, taps = [], [], [], []
+        for c in range(C):
+            T = toks[c].numel()
+            h = F.embedding(toks[c].view(1, T), emb)
+            taps.append({0: h[0].detach()} if 0 in keep else {})
+            s0 = starts[c] + self.pos_delta
+            pos.append(torch.arange(s0, s0 + T, device=self.device))
+            hs.append(h)
+            xs.append(rms_norm(h, w0, cfg.rms_norm_eps))
+        if _x3 is not None:
+            _x3.slab_cache_on()
+        try:
+            for layer in range(n):
+                p = f"layers.{layer}"
+                lin = cfg.is_linear(layer)
+                si = self.state.slot[layer] if lin else None
+                wpost = self.w.norm(f"{p}.post_attention_layernorm.weight")
+                wnext = self.w.norm(f"layers.{layer + 1}.input_layernorm.weight" if layer + 1 < n
+                                    else "norm.weight")
+                for c in range(C):
+                    if lin:
+                        a = self.linear_attention(xs[c], p, layer, primed0 or c > 0)
+                        if bufs is not None and c < C - 1:
+                            bufs[c][0][si].copy_(self.state.S[si])
+                            bufs[c][1][si].copy_(self.state.conv[si])
+                    else:
+                        a = self.attention(xs[c], p, layer, starts[c], pos[c])
+                    h, x = add_rms_norm(hs[c], a, wpost, cfg.rms_norm_eps)
+                    m = self.mlp(x, p)
+                    hs[c], xs[c] = add_rms_norm(h, m, wnext, cfg.rms_norm_eps)
+                    if layer + 1 in keep:
+                        taps[c][layer + 1] = hs[c][0].detach()
+                if _x3 is not None:
+                    _x3.slab_cache_clear()
+        finally:
+            if _x3 is not None:
+                _x3.slab_cache_off()
+        self.state.primed = True
+        self.kv.length = starts[-1] + toks[-1].numel()
+        self.hidden_pre_norm = hs[-1]
+        self.hidden_post_norm = xs[-1]
+        return head_logits(xs[-1][:, -1:], self.w.norm("lm_head.weight")), xs, taps
+
+    def replay_taps(self, kept: dict) -> None:
+        """Hand the tap one chunk's rows in a forward's order: one invocation per layer and the
+        embedding, the kept rows where the owner keeps them."""
+        if self.tap is None:
+            return
+        for i in range(self.cfg.num_hidden_layers + 1):
+            self.tap(kept.get(i))
+
     def forward_block(self, tokens: torch.Tensor, start: int) -> torch.Tensor:
         """Verify a block of tokens in one pass, keeping what a rollback would need.
 

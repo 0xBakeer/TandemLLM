@@ -1018,11 +1018,51 @@ def exl3_matmul(x: torch.Tensor, w: EXL3Block, *, out: torch.Tensor | None = Non
     return out
 
 
+# The layer-major prefill's slab cache (engine/model.py `prefill_window`): while it is on, a
+# weight's decoded fp16 slabs are kept from its first prefill call to `slab_cache_clear`, so the
+# chunks of a window that pass one layer's weights decode each slab once instead of once a chunk.
+# The slab is the same fp16 tensor either way and every GEMM keeps its shape: bit for bit the
+# uncached calls. Holds one layer's projections (~0.8 GB at 4.5 bpw) between clears.
+_SLAB_CACHE: dict | None = None
+
+
+def slab_cache_on() -> None:
+    global _SLAB_CACHE
+    _SLAB_CACHE = {}
+
+
+def slab_cache_clear() -> None:
+    if _SLAB_CACHE is not None:
+        _SLAB_CACHE.clear()
+
+
+def slab_cache_off() -> None:
+    global _SLAB_CACHE
+    _SLAB_CACHE = None
+
+
+def _slabs(w: EXL3Block) -> list:
+    """(member, n0, n1, Wi[:, n0:n1]) for every slab of `w`; cached while the cache is on."""
+    c = _SLAB_CACHE
+    if c is None:
+        return None
+    got = c.get(id(w))
+    if got is None or got[0] is not w:
+        got = c[id(w)] = (w, [(g, n0, n1, w.inner(n0, n1)) for g, n0, n1 in segments(w, SLAB_N)])
+    return got[1]
+
+
 def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor) -> torch.Tensor:
     """Prefill: decode a column slab of Wi to fp16, the library GEMM, the output rotation."""
     mod = _module()
     xh = rotate_in(x, w)                                    # [G, M, K]
-    M = x.shape[0]
+    cached = _slabs(w)
+    if cached is not None:
+        for g, n0, n1, wi in cached:
+            yp = _mm_fp32(xh[g], wi)
+            mod.exl3_rot_out(yp, w.svh[n0:n1], out[:, n0:n1])
+            del yp
+        return out
     for g, n0, n1 in segments(w, SLAB_N):
         wi = w.inner(n0, n1)
         yp = _mm_fp32(xh[g], wi)

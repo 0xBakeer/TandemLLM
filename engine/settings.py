@@ -204,6 +204,11 @@ KNOBS: dict[str, tuple] = {
     'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
+    # the layer-major prefill (engine/model.py `prefill_window`): rows a window takes when its chunk
+    # lines hand out anchors/snapshots (each line holds a recurrent-state copy), and when none do;
+    # 0 = chunk-major as before. Bit for bit the chunk-major forwards either way.
+    'PREFILL_WINDOW': ('8192', 'engine/cache.py'),
+    'PREFILL_WINDOW_FREE': ('32768', 'engine/cache.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),
     'NVFP4_DEQUANT_FROM': ('512', 'tools/nvfp4_linear.py'),
     'NVFP4_PREFILL_V2': ('0', 'tools/nvfp4_linear.py'),

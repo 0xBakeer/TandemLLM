@@ -1115,6 +1115,10 @@ class DFlash2Drafter(Drafter):
             self._tap_rows[j] = h
         self._tap_i = (i + 1) % self._n_taps
 
+    def tap_indices(self) -> set:
+        """The tap invocations `_on_tap` keeps (engine/model.py `prefill_window`)."""
+        return set(self._want)
+
     def tapped(self):
         """(the target layer ids, the tap mode, their rows of the last forward), the rows one
         `[positions, hidden]` tensor a layer in sorted id order; None before a forward or once
