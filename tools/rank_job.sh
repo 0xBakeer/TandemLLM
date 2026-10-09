@@ -34,12 +34,13 @@ export PYTHONPATH=$CODE PY=python3 QWEN38_MODEL=/tmp/models/target
 # touches). Drafters: the served bf16 checkpoints, checked against the box's sha256.
 log "models: download"
 t0=$(date +%s)
-hf download Qwen/Qwen3.8-27B-FP8 --include "*.json" "outside.safetensors" --local-dir /tmp/models/target >/dev/null 2>&1 || exit 1
+hf download Qwen/Qwen3.8-27B-FP8 --include "*.json" --include "outside.safetensors" --local-dir /tmp/models/target >/dev/null 2>&1 || exit 1
 hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8 --local-dir /tmp/models/b8 >/dev/null 2>&1 || exit 1
 hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16 --local-dir /tmp/models/b16 >/dev/null 2>&1 || exit 1
 echo "32ed444f1b2e1d443f9330a5d1c6e3dc9dcfee648eba9f282a1a351dab582f02  /tmp/models/b8/model.safetensors
 843d7698e043118863847a560b0375e93db253f00352282d20ff0d6b6816356a  /tmp/models/b16/model.safetensors" \
   | sha256sum -c - || { log "drafter sha mismatch"; exit 1; }
+ls /tmp/models/target | tr "\n" " "; echo
 log "models: $(du -sh /tmp/models | cut -f1) in $(( $(date +%s) - t0 )) s"
 
 log "taps: bucket -> local disk"
