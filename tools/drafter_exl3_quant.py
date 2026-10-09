@@ -10,6 +10,11 @@ safetensors file that `engine/drafters/dflash2.py` loads with QWEN38_DRAFT_EXL3=
 --k 3 --k-mlp 2 --k-down 3). The mul1 codebook only (what the engine's kernels decode).
 
 Usage: ~/exl3k/venv/bin/python tools/drafter_exl3_quant.py --ckpt train/ft-b16 --hess DIR --k 3 --out F
+
+`--head-only --head-src BF16_DIR --hess DIR1,DIR2 --k 3`: the target's bf16 `lm_head` alone, quantised
+against the draft head's input Hessian (`head.pt`, summed over the given drafters' capture dirs: both
+arms read one head), written as `lm_head.*` for QWEN38_DRAFT_HEAD_EXL3=<file> (drafter only; the
+verify keeps the target's own head, so the output stays exact).
 """
 
 from __future__ import annotations
@@ -40,9 +45,14 @@ def main() -> None:
     ap.add_argument("--k-fc", type=int, default=0, help="fc bits (0 = --k)")
     ap.add_argument("--exllamav3", default=os.path.expanduser("~/exl3k/exllamav3-160"))
     ap.add_argument("--out", required=True)
+    ap.add_argument("--head-only", action="store_true")
+    ap.add_argument("--head-src", default=os.path.expanduser("~/bf16-qwen38"))
     a = ap.parse_args()
     sys.path.insert(0, a.exllamav3)
     from exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3
+    if a.head_only:
+        quant_head(a, quantize_exl3)
+        return
 
     w = {}
     for path in sorted(glob.glob(os.path.join(a.ckpt, "*.safetensors"))):
@@ -94,6 +104,39 @@ def main() -> None:
                                     "report": json.dumps(report)})
     nb = sum(t.numel() * t.element_size() for k, t in out.items() if k.endswith(".trellis"))
     print(f"[quant] {len(jobs)} projections -> {a.out}  trellis {nb / 1e9:.3f} GB", flush=True)
+
+
+def quant_head(a, quantize_exl3) -> None:
+    """lm_head from --head-src against the summed `head.pt` of every --hess dir."""
+    W = None
+    for path in sorted(glob.glob(os.path.join(a.head_src, "*.safetensors"))):
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key.endswith("lm_head.weight"):
+                    W = f.get_tensor(key)
+    if W is None:
+        raise SystemExit(f"no lm_head.weight in {a.head_src}")
+    H, count = None, 0
+    for d in a.hess.split(","):
+        h = torch.load(os.path.join(d, "head.pt"))
+        H = h["H"] if H is None else H + h["H"]
+        count += int(h["count"])
+    H = H.cuda()
+    hd = {"H": H, "first_key": "head", "count": count, "finalized": False,
+          "num_total": count * H.shape[0], "inf_nan": torch.zeros(2, dtype=torch.long, device="cuda"),
+          "device": torch.device("cuda")}
+    qa = {"seed": 0, "K": a.k, "devices": [0], "apply_out_scales": None, "mul1": True,
+          "debug_dir": os.path.join(os.path.dirname(a.out) or ".", "debug")}
+    t0 = time.perf_counter()
+    _, proxy_err, tensors = quantize_exl3(W.float().T.contiguous().cuda(), hd, qa, False)
+    out = {f"lm_head.{sub}": t.contiguous().cpu() for sub, t in tensors.items() if t is not None}
+    save_file(out, a.out, metadata={"source": a.head_src, "format": "exl3-mul1", "hess": a.hess,
+                                    "report": json.dumps({"lm_head": {"K": a.k,
+                                                                      "proxy_err": float(proxy_err),
+                                                                      "rows": count}})})
+    nb = sum(t.numel() * t.element_size() for k, t in out.items() if k.endswith(".trellis"))
+    print(f"[quant] lm_head K{a.k} proxy err {float(proxy_err):.6f}  {time.perf_counter() - t0:.0f} s  "
+          f"trellis {nb / 1e9:.3f} GB -> {a.out}", flush=True)
 
 
 if __name__ == "__main__":

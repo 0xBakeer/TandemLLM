@@ -13,6 +13,8 @@ input added to its Hessian:
     gate_up layers.i.mlp.{gate,up}_proj share one H
     down    layers.i.mlp.down_proj
     fc      fc (the five tapped target layers, [N, 25600]), its own H
+    head    the draft head's input (the drafter's normed block rows `_tokens_from` multiplies by
+            lm_head), for a drafter-calibrated EXL3 head (`drafter_exl3_quant.py --head-only`)
 
 Writes one `<name>.pt` per Hessian ({"H": fp32 [in, in] on the CPU, "count": rows}) and an index.
 
@@ -90,6 +92,12 @@ def main() -> None:
         add("fc", target_hidden)
         return pc0(self, target_hidden)
     D2.DFlash2Module.project_context = project_context
+    tf0 = D2.DFlash2Drafter._tokens_from
+
+    def tokens_from(self, m, pred, anchor, first=0):
+        add("head", pred)
+        return tf0(self, m, pred, anchor, first)
+    D2.DFlash2Drafter._tokens_from = tokens_from
 
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(cfg.path)
