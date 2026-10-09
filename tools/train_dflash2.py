@@ -836,6 +836,10 @@ def main() -> None:
                     help="in-loop eval on the served TREE instead of the chain: a node budget, or "
                          "`auto` = 16 at block 8 and 32 at block 16 (the served cuts). `best` and "
                          "the checkpoint choice follow its ALL (thinking-on sequences excluded)")
+    ap.add_argument("--export-final", action="store_true",
+                    help="with --probe-out, also write every configuration's FINAL weights to "
+                         "<dir>/<tag>-final, whether or not the in-loop eval improved: the gate "
+                         "that decides is the Spark's replay, not this eval")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -894,8 +898,15 @@ def main() -> None:
 
     if a.probe:
         base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
+        rank0 = a.rank_loss
         for spec in a.probe.split(","):
             tag, mode, lr, blk = parse_probe(spec, a, cfg)
+            # `rank@0.5` in the train field: this configuration's --rank-loss (RND-37 sweeps the
+            # ranking weight inside one data load)
+            a.rank_loss = rank0
+            if "@" in mode:
+                mode, lam = mode.split("@", 1)
+                a.rank_loss = float(lam)
             if a.resume and a.state_dir and os.path.exists(done_path(a.state_dir, tag)):
                 print(f"\n--- probe {tag}: already finished (its .done marker is in "
                       f"{a.state_dir}), skipping ---", flush=True)
@@ -951,6 +962,10 @@ def main() -> None:
                 logf = None
             # The checkpoint worth keeping is the best one the gate saw, and the last step is not
             # always it -- so the final weights are written only if they beat every eval before.
+            if out and a.export_final:
+                export(w, snap, out + "-final", block=blk)
+                print(f"  [saved] {out}-final at {ev['ALL']:.3f} (final weights, --export-final)",
+                      flush=True)
             if out and ev["ALL"] > best:
                 export(w, snap, out, block=blk)
                 print(f"  [saved] {out} at {ev['ALL']:.3f} accepted/block (final)", flush=True)
