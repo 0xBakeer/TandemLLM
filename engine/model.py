@@ -28,6 +28,7 @@ from tools.fp8_linear import FP8Block, FP8Group, fp8_matmul  # noqa: E402
 from tools.gdn_prefill_kernels import fused_prefill_refusal  # noqa: E402
 from tools.head_gemv import FP8Head  # noqa: E402
 from tools.exl3_linear import EXL3Block  # noqa: E402
+from tools import exl3_linear as _x3  # noqa: E402
 from tools.nvfp4_linear import NVFP4Block, nvfp4_matmul  # noqa: E402
 from tools.nvfp4_linear_v2 import nvfp4_matmul_group  # noqa: E402
 from tools import nvfp4_verify_tiles as _verify_tiles  # noqa: E402,F401  (registers on import)
@@ -612,10 +613,24 @@ class Qwen38Engine:
             # other's output, so the only thing that made them two kernels was that they are two
             # names -- and two kernels is 272 programs apiece on 48 SMs, twice, with the board
             # draining between them.
+            wd = self.w.proj(f"{p}.mlp.down_proj")
+            if (_x3.MLP_BRIDGE and isinstance(g, EXL3Block) and isinstance(wd, EXL3Block)
+                    and h.is_cuda and h.numel() // h.shape[-1] > _x3.CHUNK_UNTIL):
+                # a prefill MLP: gate|up's fp32 products straight into down's rotated input
+                x2 = h.reshape(-1, h.shape[-1])
+                if x2.stride(1) != 1 or x2.stride(0) % 4 or x2.data_ptr() % 8:
+                    x2 = x2.contiguous()
+                out = _x3.exl3_mlp_slab(x2, g, wd)
+                if out is not None:
+                    return out.view(*h.shape[:-1], -1)
             y = matmul_group(h.reshape(-1, h.shape[-1]), g)
+            if (isinstance(wd, EXL3Block) and _x3.SILU_FUSED and y.is_cuda
+                    and g.sizes[0] == g.sizes[1] == wd.K):
+                # silu(gate) * up inside the down projection's input rotation: the same bits
+                return _x3.exl3_down_silu(y, wd).view(*h.shape[:-1], -1)
             gate, up = y.split(g.sizes, dim=-1)
             act = F.silu(gate) * up
-            return linear(act, self.w.proj(f"{p}.mlp.down_proj")).view(*h.shape[:-1], -1)
+            return linear(act, wd).view(*h.shape[:-1], -1)
         if TWO_STREAM:
             wg, wu = self.w.proj(f"{p}.mlp.gate_proj"), self.w.proj(f"{p}.mlp.up_proj")
             gate, up = par2(lambda: linear(h, wg), lambda: linear(h, wu), reads=(h,))

@@ -74,6 +74,9 @@ SKINNY_MAX = 32                           # rows the decode-in-registers kernel 
 CHUNK_UNTIL = int(_S.get("EXL3_CHUNK_UNTIL"))
 # 33..CHUNK_UNTIL rows in one launch whose 32-row chunks are adjacent CTAs (ENG-213); 0 = one launch a chunk
 ROWGRID = _S.get("EXL3_ROWGRID") == "1"
+# cp.async stages of the skinny GEMM's trellis pipeline (a warp's stages in flight); the
+# summation order does not depend on it
+STAGES = int(_S.get("EXL3_STAGES"))
 SLAB_N = 16384                            # columns a prefill slab decodes at once (fp16 Kin x SLAB_N)
 
 _CUDA = r"""
@@ -290,6 +293,71 @@ __global__ void __launch_bounds__(128) rot_in_kernel(const __nv_bfloat16* __rest
     __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
     uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
     *reinterpret_cast<uint2*>(XH + ((size_t)g * M + m) * Kin + k) = o;
+}
+
+// The MLP's activation and the down projection's input rotation in one pass, bit for bit the two
+// torch kernels and rot_in: A = bf16(bf16(silu(G)) * U) with silu(x) = x / (1 + exp(-x)) in fp32 (ATen's
+// silu), then XH = fp16(H(fp32(A) * SUH) / sqrt(128)). Y holds gate | up: gate at column k, up at Kin + k.
+__global__ void __launch_bounds__(128) rot_in_silu_kernel(const __nv_bfloat16* __restrict__ Y, int ldy,
+        const __half* __restrict__ SUH, __half* __restrict__ XH, int M, int Kin) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int blk = blockIdx.x * 4 + warp;
+    if (blk * 128 >= Kin) return;
+    const int m = blockIdx.y;
+    const int k = blk * 128 + 4 * lane;
+    const uint2 gr = *reinterpret_cast<const uint2*>(Y + (size_t)m * ldy + k);
+    const uint2 ur = *reinterpret_cast<const uint2*>(Y + (size_t)m * ldy + Kin + k);
+    const uint2 sr = *reinterpret_cast<const uint2*>(SUH + k);
+    float gv[4] = {__uint_as_float(gr.x << 16), __uint_as_float(gr.x & 0xffff0000u),
+                   __uint_as_float(gr.y << 16), __uint_as_float(gr.y & 0xffff0000u)};
+    float uv[4] = {__uint_as_float(ur.x << 16), __uint_as_float(ur.x & 0xffff0000u),
+                   __uint_as_float(ur.y << 16), __uint_as_float(ur.y & 0xffff0000u)};
+    float v[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+        const float sl = __bfloat162float(__float2bfloat16_rn(gv[e] / (1.0f + ::expf(-gv[e]))));
+        v[e] = __bfloat162float(__float2bfloat16_rn(sl * uv[e]));
+    }
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+    float v0 = v[0] * __low2float(s01), v1 = v[1] * __high2float(s01);
+    float v2 = v[2] * __low2float(s23), v3 = v[3] * __high2float(s23);
+    wht128(v0, v1, v2, v3, lane);
+    __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+    __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+    uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+    *reinterpret_cast<uint2*>(XH + (size_t)m * Kin + k) = o;
+}
+
+// The MLP of a prefill slab in one pass between the two GEMMs, bit for bit rot_out (gate and up,
+// fp32 products -> bf16), ATen's silu and mul, and rot_in of the down projection: per row and
+// 128-column block, YG/YU the library GEMM's fp32 products of gate and up, XH the down's rotated
+// input. grid (n/128/4, M), 4 warps, one 128-block a warp.
+__global__ void __launch_bounds__(128) mlp_bridge_kernel(const float* __restrict__ YG, const float* __restrict__ YU,
+        int ldp, const __half* __restrict__ SVG, const __half* __restrict__ SVU,
+        const __half* __restrict__ SUH, __half* __restrict__ XH, int ldx, int N) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int blk = blockIdx.x * 4 + warp;
+    if (blk * 128 >= N) return;
+    const int m = blockIdx.y;
+    const int n = blk * 128 + 4 * lane;
+    float g[4], u[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { g[e] = YG[(size_t)m * ldp + n + e]; u[e] = YU[(size_t)m * ldp + n + e]; }
+    wht128(g[0], g[1], g[2], g[3], lane);
+    wht128(u[0], u[1], u[2], u[3], lane);
+    float v[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+        const float gb = __bfloat162float(__float2bfloat16_rn(g[e] * RSQRT128 * __half2float(SVG[n + e])));
+        const float ub = __bfloat162float(__float2bfloat16_rn(u[e] * RSQRT128 * __half2float(SVU[n + e])));
+        const float sl = __bfloat162float(__float2bfloat16_rn(gb / (1.0f + ::expf(-gb))));
+        v[e] = __bfloat162float(__float2bfloat16_rn(sl * ub)) * __half2float(SUH[n + e]);
+    }
+    wht128(v[0], v[1], v[2], v[3], lane);
+    __half2 o01 = __floats2half2_rn(v[0] * RSQRT128, v[1] * RSQRT128);
+    __half2 o23 = __floats2half2_rn(v[2] * RSQRT128, v[3] * RSQRT128);
+    uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+    *reinterpret_cast<uint2*>(XH + (size_t)m * ldx + n) = o;
 }
 
 __device__ __forceinline__ float to_f(float v) { return v; }
@@ -583,8 +651,8 @@ void launch_gemm(const at::Tensor& xh, const at::Tensor& t, const at::Tensor& sv
 //      2 -> MT2 NTW4 WN2, 3 -> MT2 NTW2 WN4, 4 -> MT1 NTW8 WN1 (registers)
 #define EXL3_WK_CASES(KB, MT, NTW, WN, OF32, XSM, MINB)                                          \
     switch (wk) {                                                                                \
-        case 4: launch_gemm<KB, MT, NTW, WN, 4, 3, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
-        case 8: launch_gemm<KB, MT, NTW, WN, 8, 3, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        case 4: launch_gemm<KB, MT, NTW, WN, 4, EXL3_ST, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
+        case 8: launch_gemm<KB, MT, NTW, WN, 8, EXL3_ST, OF32, XSM, MINB>(xh, t, svh, y, M, Kin, N, ldt, S, b1, b2, st); return; \
         default: TORCH_CHECK(false, "exl3 gemm: wk must be 4 or 8, got ", wk);                   \
     }
 #define EXL3_CFG_CASES(KB, OF32)                                                                 \
@@ -640,6 +708,36 @@ void exl3_rot_in(torch::Tensor x, torch::Tensor suh, torch::Tensor xh) {
         (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
 }
 
+void exl3_rot_in_silu(torch::Tensor y, torch::Tensor suh, torch::Tensor xh) {
+    const at::cuda::OptionalCUDAGuard guard(y.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.dim() == 2 && y.stride(1) == 1, "y bf16 [M, 2 Kin]");
+    TORCH_CHECK(suh.dtype() == torch::kHalf && suh.dim() == 2 && suh.size(0) == 1 && suh.is_contiguous(), "suh fp16 [1, Kin]");
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous(), "xh fp16 [1, M, Kin]");
+    const int M = y.size(0), Kin = suh.size(1);
+    TORCH_CHECK(Kin % 128 == 0 && y.size(1) == 2 * Kin && xh.numel() == (int64_t)M * Kin, "shapes");
+    TORCH_CHECK(y.stride(0) % 4 == 0 && ((uintptr_t)y.data_ptr()) % 8 == 0, "y alignment");
+    dim3 grid((Kin / 128 + 3) / 4, M, 1);
+    rot_in_silu_kernel<<<grid, 128, 0, st>>>((const __nv_bfloat16*)y.data_ptr(), (int)y.stride(0),
+        (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
+}
+
+void exl3_mlp_bridge(torch::Tensor yg, torch::Tensor yu, torch::Tensor svg, torch::Tensor svu,
+                     torch::Tensor suh, torch::Tensor xh) {
+    const at::cuda::OptionalCUDAGuard guard(yg.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(yg.dtype() == torch::kFloat && yu.dtype() == torch::kFloat && yg.sizes() == yu.sizes(), "yg/yu fp32, same shape");
+    TORCH_CHECK(yg.stride(1) == 1 && yu.stride(1) == 1 && yg.stride(0) == yu.stride(0), "yg/yu rows");
+    const int M = yg.size(0), N = yg.size(1);
+    TORCH_CHECK(N % 128 == 0 && svg.numel() == N && svu.numel() == N && suh.numel() == N, "bridge columns");
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.stride(1) == 1 && xh.size(0) == M && xh.size(1) == N, "xh fp16 [M, N] view");
+    TORCH_CHECK(svg.is_contiguous() && svu.is_contiguous() && suh.is_contiguous(), "factors contiguous");
+    dim3 grid((N / 128 + 3) / 4, M);
+    mlp_bridge_kernel<<<grid, 128, 0, st>>>((const float*)yg.data_ptr(), (const float*)yu.data_ptr(), (int)yg.stride(0),
+        (const __half*)svg.data_ptr(), (const __half*)svu.data_ptr(), (const __half*)suh.data_ptr(),
+        (__half*)xh.data_ptr(), (int)xh.stride(0), N);
+}
+
 void exl3_rot_out(torch::Tensor yp, torch::Tensor svh, torch::Tensor y) {
     const at::cuda::OptionalCUDAGuard guard(yp.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -690,6 +788,9 @@ _CPP = (
     "void exl3_gemm(torch::Tensor xh, torch::Tensor t, torch::Tensor svh, torch::Tensor y, "
     "int64_t kb, int64_t cfg, int64_t wk, int64_t S, int64_t b1, int64_t b2, int64_t rmax);\n"
     "void exl3_rot_in(torch::Tensor x, torch::Tensor suh, torch::Tensor xh);\n"
+    "void exl3_rot_in_silu(torch::Tensor y, torch::Tensor suh, torch::Tensor xh);\n"
+    "void exl3_mlp_bridge(torch::Tensor yg, torch::Tensor yu, torch::Tensor svg, torch::Tensor svu, "
+    "torch::Tensor suh, torch::Tensor xh);\n"
     "void exl3_rot_out(torch::Tensor yp, torch::Tensor svh, torch::Tensor y);\n"
     "void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off);\n")
 
@@ -703,9 +804,11 @@ def _module():
         venv_bin = os.path.dirname(sys.executable)
         if venv_bin not in os.environ.get("PATH", "").split(os.pathsep):
             os.environ["PATH"] = venv_bin + os.pathsep + os.environ.get("PATH", "")
-        tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
-        _MOD = load_inline(name=f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
-                           functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon"],
+        src = f"#define EXL3_ST {STAGES}\n" + _CUDA
+        tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
+        _MOD = load_inline(name=f"qwen38_exl3_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
+                           functions=["exl3_gemm", "exl3_rot_in", "exl3_rot_out", "exl3_recon",
+                                      "exl3_rot_in_silu", "exl3_mlp_bridge"],
                            extra_cuda_cflags=["-O3", "-lineinfo",
                                               "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
@@ -981,23 +1084,77 @@ def rotate_in(x: torch.Tensor, w: EXL3Block) -> torch.Tensor:
     return xh
 
 
-def exl3_matmul(x: torch.Tensor, w: EXL3Block, *, out: torch.Tensor | None = None,
-                cfg: int | None = None, S: int | None = None, wk: int | None = None) -> torch.Tensor:
-    """Y[M, N] = x[M, K] @ W^T for an EXL3Block (or group). x bf16."""
-    assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.dtype, x.shape, w.shape)
+# The MLP's silu(gate) * up fused into the down projection's input rotation (`exl3_down_silu`):
+# the same bits as the two torch kernels and rot_in (tests/gpu/test_exl3_silu_gpu.py), two launches
+# fewer a layer. 0 = the torch path.
+SILU_FUSED = _S.get("EXL3_SILU_FUSED") == "1"
+# A prefill MLP's gate|up products straight into the down projection's rotated input
+# (`exl3_mlp_slab`): the same bits, the bf16 gate|up and the activation never written. 0 = off.
+MLP_BRIDGE = _S.get("EXL3_MLP_BRIDGE") == "1"
+
+
+def exl3_down_silu(y: torch.Tensor, w: EXL3Block) -> torch.Tensor:
+    """down(silu(gate) * up) for y = [gate | up] (bf16 [M, 2 Kin]), w the down projection."""
+    assert y.dtype == torch.bfloat16 and y.dim() == 2 and y.shape[1] == 2 * w.K and w.suh.shape[0] == 1
+    if y.stride(1) != 1 or y.stride(0) % 4 or y.data_ptr() % 8:
+        y = y.contiguous()
+    xh = torch.empty(1, y.shape[0], w.K, dtype=torch.float16, device=y.device)
+    _module().exl3_rot_in_silu(y, w.suh, xh)
+    return exl3_matmul(None, w, xh=xh, M=y.shape[0], dev=y.device)
+
+
+def exl3_mlp_slab(x: torch.Tensor, gu: EXL3Block, wd: EXL3Block) -> torch.Tensor | None:
+    """A prefill MLP (rows past CHUNK_UNTIL) whose gate+up products go straight from the library
+    GEMM's fp32 into the down projection's rotated input (`mlp_bridge_kernel`): the bits of
+    rot_out -> silu * up -> rot_in without writing the bf16 gate|up and the activation. None when
+    the shapes do not pair (the caller takes the usual path)."""
+    F = wd.K
+    if not (gu.sizes and len(gu.sizes) == 2 and gu.sizes[0] == gu.sizes[1] == F
+            and wd.suh.shape[0] == 1 and x.shape[0] > CHUNK_UNTIL):
+        return None
+    if _mm_out_fp32() is False:
+        return None
+    mod = _module()
     M = x.shape[0]
-    if not x.is_cuda:
-        return reference_matmul(x, w)
-    if x.stride(1) != 1 or x.stride(0) % 4 or x.data_ptr() % 8:
-        x = x.contiguous()
-        if x.data_ptr() % 8:
-            x = x.clone()
+    xh = rotate_in(x, gu)                                    # [2, M, K]
+    segs = _slabs(gu) or [(g, n0, n1, None) for g, n0, n1 in segments(gu, SLAB_N)]
+    gs = [t for t in segs if t[0] == 0]
+    us = [t for t in segs if t[0] == 1]
+    if len(gs) != len(us):
+        return None
+    xd = torch.empty(1, M, F, dtype=torch.float16, device=x.device)
+    for (_, a0, a1, wg), (_, b0, b1, wu) in zip(gs, us):
+        if b0 - F != a0 or b1 - a1 != b0 - a0:
+            return None
+        yg = _mm_fp32(xh[0], wg if wg is not None else gu.inner(a0, a1))
+        yu = _mm_fp32(xh[1], wu if wu is not None else gu.inner(b0, b1))
+        mod.exl3_mlp_bridge(yg, yu, gu.svh[a0:a1], gu.svh[b0:b1], wd.suh[0, a0:a1].contiguous(),
+                            xd[0, :, a0:a1])
+        del yg, yu
+    return exl3_matmul(None, wd, xh=xd, M=M, dev=x.device)
+
+
+def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | None = None,
+                cfg: int | None = None, S: int | None = None, wk: int | None = None,
+                xh: torch.Tensor | None = None, M: int | None = None, dev=None) -> torch.Tensor:
+    """Y[M, N] = x[M, K] @ W^T for an EXL3Block (or group). x bf16. `xh`: the input already
+    rotated ([G, M, K] fp16, what `rotate_in(x, w)` returns) in place of x."""
+    if xh is None:
+        assert x.dtype == torch.bfloat16 and x.dim() == 2 and x.shape[1] == w.K, (x.dtype, x.shape, w.shape)
+        M = x.shape[0]
+        if not x.is_cuda:
+            return reference_matmul(x, w)
+        if x.stride(1) != 1 or x.stride(0) % 4 or x.data_ptr() % 8:
+            x = x.contiguous()
+            if x.data_ptr() % 8:
+                x = x.clone()
+        dev = x.device
     odt = torch.float32 if w.out_fp32 else torch.bfloat16
     if out is None:
-        out = torch.empty(M, w.N, dtype=odt, device=x.device)
+        out = torch.empty(M, w.N, dtype=odt, device=dev)
     mod = _module()
     if M > CHUNK_UNTIL:
-        return _slab_matmul(x, w, out)
+        return _slab_matmul(x, w, out, xh=xh)
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
     wk_ = tile["wk"] if wk is None else wk
@@ -1006,15 +1163,17 @@ def exl3_matmul(x: torch.Tensor, w: EXL3Block, *, out: torch.Tensor | None = Non
         # column block adjacent CTAs (the second reads the trellis from L2); bit for bit the
         # chunked launches below
         c = cfg if cfg is not None else tile["cfg2"]
-        mod.exl3_gemm(rotate_in(x, w), w.t, w.svh, out, w.kb, c, wk_, S_, w.bounds[0], w.bounds[1],
-                      (M + SKINNY_MAX - 1) // SKINNY_MAX)
+        mod.exl3_gemm(rotate_in(x, w) if xh is None else xh, w.t, w.svh, out, w.kb, c, wk_, S_,
+                      w.bounds[0], w.bounds[1], (M + SKINNY_MAX - 1) // SKINNY_MAX)
         return out
     for r0 in range(0, M, SKINNY_MAX):
         r1 = min(M, r0 + SKINNY_MAX)
-        xs = x[r0:r1]
-        xh = rotate_in(xs, w)
+        if xh is None:
+            xs = rotate_in(x[r0:r1], w)
+        else:
+            xs = xh[:, r0:r1].contiguous()
         c = cfg if cfg is not None else (tile["cfg"] if r1 - r0 <= 16 else tile["cfg2"])
-        mod.exl3_gemm(xh, w.t, w.svh, out[r0:r1], w.kb, c, wk_, S_, w.bounds[0], w.bounds[1], 1)
+        mod.exl3_gemm(xs, w.t, w.svh, out[r0:r1], w.kb, c, wk_, S_, w.bounds[0], w.bounds[1], 1)
     return out
 
 
@@ -1052,10 +1211,12 @@ def _slabs(w: EXL3Block) -> list:
     return got[1]
 
 
-def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor) -> torch.Tensor:
+def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor,
+                 xh: torch.Tensor | None = None) -> torch.Tensor:
     """Prefill: decode a column slab of Wi to fp16, the library GEMM, the output rotation."""
     mod = _module()
-    xh = rotate_in(x, w)                                    # [G, M, K]
+    if xh is None:
+        xh = rotate_in(x, w)                                # [G, M, K]
     cached = _slabs(w)
     if cached is not None:
         for g, n0, n1, wi in cached:
@@ -1072,6 +1233,14 @@ def _slab_matmul(x: torch.Tensor, w: EXL3Block, out: torch.Tensor) -> torch.Tens
 
 
 _MM_OUT_DTYPE: bool | None = None
+
+
+def _mm_out_fp32() -> bool | None:
+    """Whether the library GEMM keeps the fp32 product (None before the first prefill asked)."""
+    if _MM_OUT_DTYPE is None and torch.cuda.is_available():
+        a = torch.zeros(16, 16, dtype=torch.float16, device="cuda")
+        _mm_fp32(a, a)
+    return _MM_OUT_DTYPE
 
 
 def _mm_fp32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

@@ -66,6 +66,7 @@ def main() -> None:
     ap.add_argument("--window", type=int, default=None)
     ap.add_argument("--max-len", type=int, default=40960)
     ap.add_argument("--mm", action="store_true", help="also the library GEMM's rate on the shapes")
+    ap.add_argument("--shapes", action="store_true", help="aten ops grouped by input shape")
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     if a.window is not None:
@@ -96,11 +97,21 @@ def main() -> None:
     once()
     wall = time.perf_counter() - t0
     from torch.profiler import ProfilerActivity, profile
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                 record_shapes=a.shapes) as prof:
         once()
     by = collections.Counter()
     names = collections.Counter()
+    ops = collections.Counter()
+    for e in prof.key_averages(group_by_input_shape=a.shapes):
+        if e.key.startswith("aten::") or e.key.startswith("triton") or "::" in e.key:
+            sd = getattr(e, "self_device_time_total", None) or getattr(e, "self_cuda_time_total", 0)
+            if sd > 0 and e.device_type.name == "CPU":
+                shp = str(getattr(e, "input_shapes", ""))[:120] if a.shapes else ""
+                ops[(e.key + " " + shp)[:200]] += sd / 1e6
     for e in prof.key_averages():
+        if e.device_type.name == "CPU":
+            continue
         dt = getattr(e, "device_time_total", None) or getattr(e, "cuda_time_total", 0)
         if dt <= 0:
             continue
@@ -110,7 +121,8 @@ def main() -> None:
     out = {"n": a.n, "chunk": a.chunk, "cached": a.cached, "window": a.window,
            "wall_s": round(wall, 3), "gpu_s": round(tot, 3),
            "by_kind_s": {k: round(v, 3) for k, v in by.most_common()},
-           "top": [(k, round(v, 3)) for k, v in names.most_common(25)]}
+           "top": [(k, round(v, 3)) for k, v in names.most_common(25)],
+           "ops_self_device_s": [(k, round(v, 3)) for k, v in ops.most_common(40)]}
     if a.mm:
         out["mm_tflops"] = {f"{M}x{K}x{N}": round(mm_rate(M, K, N), 1)
                             for M in (a.chunk, 8192) for K, N in

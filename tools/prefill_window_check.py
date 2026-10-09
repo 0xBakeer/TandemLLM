@@ -135,6 +135,9 @@ def main() -> None:
     ap.add_argument("--max-len", type=int, default=40960)
     ap.add_argument("--ckpt8", default="train/ft-b8-v2")
     ap.add_argument("--ckpt16", default="train/ft-b16")
+    ap.add_argument("--toggle", default="",
+                    help="module.ATTR: the two arms flip this boolean instead of the windows "
+                         "(windows on in both), e.g. tools.exl3_linear.MLP_BRIDGE")
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     repo = Path(__file__).resolve().parent.parent
@@ -156,8 +159,14 @@ def main() -> None:
             row = {"n": n, "case": case, "chunk": chunk}
             refs = {}
             for arm in ("off", "on", "off", "on")[:2 * a.reps]:
-                cache.PREFILL_WINDOW = a.window if arm == "on" else 0
-                cache.PREFILL_WINDOW_FREE = a.window_free if arm == "on" else 0
+                if a.toggle:
+                    import importlib
+                    modname, attr = a.toggle.rsplit(".", 1)
+                    setattr(importlib.import_module(modname), attr, arm == "on")
+                    cache.PREFILL_WINDOW, cache.PREFILL_WINDOW_FREE = a.window, a.window_free
+                else:
+                    cache.PREFILL_WINDOW = a.window if arm == "on" else 0
+                    cache.PREFILL_WINDOW_FREE = a.window_free if arm == "on" else 0
                 got, dt, peak = run(eng, lr, ids, chunk, cached)
                 row.setdefault(f"s_{arm}", []).append(round(dt, 3))
                 row.setdefault(f"peak_gib_{arm}", []).append(round(peak / (1 << 30), 2))
