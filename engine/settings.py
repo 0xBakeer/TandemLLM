@@ -202,7 +202,7 @@ KNOBS: dict[str, tuple] = {
     'EXL3': (None, 'engine/loader.py'),
     'EXL3_TILES': (None, 'tools/exl3_linear.py'),
     'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
-    'EXL3_ROWGRID': ('0', 'tools/exl3_linear.py'),
+    'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
     'NVFP4_BLOCK_TILES': ('0', 'tools/nvfp4_linear.py'),
     'NVFP4_DEQUANT_FROM': ('512', 'tools/nvfp4_linear.py'),

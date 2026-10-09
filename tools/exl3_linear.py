@@ -717,9 +717,15 @@ def _module():
 # summation order, so they are keyed by the weight's shape and rate only; the column tiling
 # ("cfg" for 1..16 rows, "cfg2" for 17..32) does not touch the order and may differ by row count.
 _CONFIG: dict[tuple[int, int, int], dict] = {}
-if _S.get("EXL3_TILES") and os.path.isfile(_S.get("EXL3_TILES")):
+# QWEN38_EXL3_TILES unset: ops/exl3-tiles-fused.json, the fused group shapes' column tiling at the
+# default order (bit-identical to default_tile, faster; 2026-10-09 A/B). "none" = default_tile only.
+_TILES = _S.get("EXL3_TILES") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                              "ops", "exl3-tiles-fused.json")
+if _TILES != "none" and os.path.isfile(_TILES):
     import json as _json
-    for _k, _v in _json.load(open(_S.get("EXL3_TILES"))).items():
+    for _k, _v in _json.load(open(_TILES)).items():
+        if _k.startswith("_"):                  # provenance
+            continue
         _n, _kk, _kb = (int(v) for v in _k.split("x"))
         _CONFIG[(_n, _kk, _kb)] = {"S": int(_v["S"]), "wk": int(_v["wk"]),
                                    "cfg": int(_v.get("cfg", 0)), "cfg2": int(_v.get("cfg2", 2))}

@@ -401,6 +401,10 @@ def wy_recurrence(q, k, v, s_t: int, g, beta, gc, state, out, delta, kk, T: int,
     kc = V.WY_KC if kc is None else kc
     kc = kc if tp > 16 and 0 < kc < dk else dk
     blk = min(block or BLOCK, tp)
+    if block is None and tp // blk > 4:
+        # ENG-213: a 64-row tile in 16-row blocks (the polynomial carries 4); a tile of 32 rows or
+        # less keeps QWEN38_WY_BLOCK, so its bits do not move
+        blk = tp // 4
     if tp // blk > 4:
         raise ValueError(f"the block inverse's polynomial carries 4 blocks, not {tp // blk}")
     dev = state.device

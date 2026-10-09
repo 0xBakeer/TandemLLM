@@ -1,0 +1,123 @@
+{
+ "_about": "ENG-E6 phase 2 (2026-10-09): column tiling for the FUSED group shapes of the EXL3 builds at the default order (S, wk unchanged = bit-identical); tools/exl3_linear.py reads it via QWEN38_EXL3_TILES. Source: ~/exl3k/runs/tiles-fused.json (cold ring, CUDA graph).",
+ "34816x5120x4": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 417.1,
+  "us_m16": 391.8
+ },
+ "34816x5120x5": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 0,
+  "cfg2": 2,
+  "us_m16_default": 491.5,
+  "us_m16": 491.5
+ },
+ "34816x5120x6": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 590.3,
+  "us_m16": 585.8
+ },
+ "5120x17408x4": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 202.7,
+  "us_m16": 199.5
+ },
+ "5120x17408x5": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 252.6,
+  "us_m16": 248.0
+ },
+ "5120x17408x6": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 298.8,
+  "us_m16": 291.7
+ },
+ "16384x5120x4": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 194.0,
+  "us_m16": 187.4
+ },
+ "16384x5120x5": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 237.3,
+  "us_m16": 232.8
+ },
+ "16384x5120x6": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 277.5,
+  "us_m16": 273.9
+ },
+ "14336x5120x4": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 183.1,
+  "us_m16": 166.6
+ },
+ "14336x5120x5": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 209.8,
+  "us_m16": 206.1
+ },
+ "14336x5120x6": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 245.7,
+  "us_m16": 243.3
+ },
+ "5120x6144x4": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 75.1,
+  "us_m16": 72.1
+ },
+ "5120x6144x5": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 4,
+  "cfg2": 2,
+  "us_m16_default": 92.2,
+  "us_m16": 90.9
+ },
+ "5120x6144x6": {
+  "S": 1,
+  "wk": 8,
+  "cfg": 1,
+  "cfg2": 2,
+  "us_m16_default": 108.8,
+  "us_m16": 106.2
+ }
+}

@@ -51,18 +51,28 @@ def main() -> None:
     ap.add_argument("--host-ms", type=float, default=3.5)
     ap.add_argument("--v64-over", type=float, default=8.0, help="V(64) = V(16) + this")
     ap.add_argument("--budget", type=int, default=16, help="the served narrow node budget")
+    ap.add_argument("--extra", default="", help="staircase rows past 32 'rows:ms,...' (measured "
+                    "or projected); with it the host cut may use up to --budget-wide nodes")
+    ap.add_argument("--budget-wide", type=int, default=63)
     ap.add_argument("--temp", type=float, default=1.0)
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     tab = {int(k): float(v) for k, v in json.load(open(a.stair))[a.ctx]["tree"].items()}
     v16 = verify_ms(16, tab)
-    price = lambda T: verify_ms(T, tab) if T <= 32 else v16 + a.v64_over  # noqa: E731
+    extra = {int(k): float(v) for k, v in (x.split(":") for x in a.extra.split(",") if x)}
+    wide = {**tab, **extra}
+    if extra:
+        price = lambda T: verify_ms(T, wide)  # noqa: E731
+    else:
+        price = lambda T: verify_ms(T, tab) if T <= 32 else v16 + a.v64_over  # noqa: E731
     out = {}
     for d in a.dirs:
         traces = load(os.path.expanduser(d))
         ident = collections.Counter()
         npos = 0
         pol = ["host16", "rung16", "rung32", "rung64", "pick16-32", "pick16-64"]
+        if extra:
+            pol.append("hostwide")
         by = collections.defaultdict(lambda: {p: [0, 0, 0.0] for p in pol})   # blocks, committed, ms
         for tr in traces:
             target = tr["target"]
@@ -98,6 +108,10 @@ def main() -> None:
                     if p == "host16":
                         t = host_cut(lattice_tree(anchor, cl, logp, greedy, a.budget), tab,
                                      a.draft_ms, a.host_ms, a.budget)
+                        rows = len(t.tokens)
+                    elif p == "hostwide":
+                        t = host_cut(lattice_tree(anchor, cl, logp, greedy, a.budget_wide), wide,
+                                     a.draft_ms, a.host_ms, a.budget_wide)
                         rows = len(t.tokens)
                     else:
                         f = rung.fill(anchor, cl, logp, greedy)
