@@ -258,10 +258,15 @@ def run_blocks(m: DFlash2Module, embed: torch.Tensor, s: Sample, anchors: torch.
 
 
 def loss_of(pred: torch.Tensor, head: torch.Tensor, s: Sample, anchors: torch.Tensor,
-            kl_weight: float, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Cross-entropy to the target's argmax plus KL to its top-64. Returns (loss, hits)."""
+            kl_weight: float, device: str,
+            logits: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cross-entropy to the target's argmax plus KL to its top-64. Returns (loss, hits).
+
+    `logits` lets a caller that also needs the head's output (the ranking term) compute it once;
+    passing it changes nothing about the result."""
     b, l, h = pred.shape
-    logits = F.linear(pred.reshape(-1, h), head).float()                  # [b*l, V]
+    if logits is None:
+        logits = F.linear(pred.reshape(-1, h), head).float()              # [b*l, V]
     # Row j of a block (j counted from 1, because row 0 is the anchor and dead) predicts the token
     # at anchor + j, and `label[i]` is the token that follows position i -- so the label wanted is
     # `label[anchor + j - 1]`. Getting this one index wrong costs nothing visible: the loss still
@@ -279,6 +284,151 @@ def loss_of(pred: torch.Tensor, head: torch.Tensor, s: Sample, anchors: torch.Te
     q = torch.log_softmax(logits, dim=-1).gather(-1, top_ids)
     kl = (p * (torch.log(p.clamp_min(1e-9)) - q)).sum(-1).mean()
     return ce + kl_weight * kl, hits
+
+
+# ----------------------------------------------------------------------------- the ranking term
+
+PRED_CB = "candidate_selector.predecessor_codebook"
+SUCC_CB = "candidate_selector.successor_codebook"
+HPROJ = "candidate_selector.hidden_projection.weight"
+
+
+def rank_loss_of(m: DFlash2Module, pred: torch.Tensor, logits: torch.Tensor, s: Sample,
+                 anchors: torch.Tensor, device: str) -> tuple[torch.Tensor, int, int]:
+    """The engine's own ranking objective on the served candidate set (RND-37).
+
+    The tree builder orders a slot's 16 candidates by the selector's lattice score
+    (`DFlash2Module.lattice`):
+
+        Score[j, p, c] = unary[j, c] + < A[pred[j, p]] * P h[j], B[cand[j, c]] >
+
+    with `unary` the head's top-16 logits (`unary_candidates`). On the TRUE path, the row that
+    matters at slot j is the one whose predecessor is the true token before it (the anchor at slot
+    0). This is the cross-entropy over the 16 candidates on that row, against the index of the true
+    token at slot j -- counted only where the true path is still inside the lattice (the true tokens
+    of slots 0..j are all among their slot's candidates), because no tree can reach slot j otherwise.
+
+    The codebooks are read through `F.embedding(..., sparse=True)`: a step touches at most
+    (1 + 16) rows a slot of a 248,320-row table, and a sparse gradient is what lets the optimiser
+    leave every other row bit for bit where it was.
+
+    Returns (mean CE over the counted slots, counted slots, slots where the true token already
+    ranks first)."""
+    b, l, h = pred.shape
+    w = m.w
+    k = m.cfg.selector_top_k
+    cand, unary = m.unary_candidates(logits)                         # [b*l, k] (unary has grad)
+    cand = cand.view(b, l, k)
+    unary = unary.view(b, l, k)
+    idx = anchors[:, None] + torch.arange(l, device=device)[None, :]  # label index of slot j
+    lab = s.label.to(device, non_blocking=True)[idx]                  # true token at slot j
+    hit = cand == lab[..., None]
+    inl = hit.any(-1)
+    tgt = hit.long().argmax(-1)
+    reach = torch.cumprod(inl.long(), dim=1).bool()                   # slots 0..j all in-lattice
+    anchor_ids = s.ids.to(device, non_blocking=True)[anchors]
+    prev = torch.cat([anchor_ids[:, None], lab[:, :-1]], dim=1)       # true predecessor of slot j
+    hidden = F.linear(pred, w[HPROJ])                                 # [b, l, r]
+    a_rows = F.embedding(prev, w[PRED_CB], sparse=True)               # [b, l, r]
+    b_rows = F.embedding(cand, w[SUCC_CB], sparse=True)               # [b, l, k, r]
+    pair = a_rows.float() * hidden.float()
+    scores = unary + torch.einsum("blr,blkr->blk", pair, b_rows.float())
+    n = int(reach.sum())
+    if n == 0:
+        return scores.sum() * 0.0, 0, 0
+    sc, tg = scores[reach], tgt[reach]
+    top1 = int((sc.argmax(-1) == tg).sum())
+    return F.cross_entropy(sc, tg), n, top1
+
+
+@torch.no_grad()
+def tree_acceptance(m: DFlash2Module, embed: torch.Tensor, head: torch.Tensor,
+                    samples: list[Sample], device: str, budget: int, block: int = 0,
+                    max_blocks: int = 64, temp: float = 1.0) -> dict:
+    """Committed tokens a block of the SERVED tree on held-out sequences, and the true token's rank.
+
+    Each block: the drafter's lattice at the anchor (`unary_candidates` + `lattice`, exactly as the
+    engine builds it), `engine.tree.lattice_tree` at `budget` nodes (nodes mode, temperature
+    `temp`, as `tools/lattice_oracle.py` replays it), the accepted run against the target's own
+    labels, plus the target's token; the anchor moves by that. Also, following the true path at
+    slots 0..2, the share of positions where the true token is the row's first choice.
+
+    Classes are the sequences' topics (`think-*` sequences reported as `think`)."""
+    import numpy as np
+    from engine.tree import lattice_tree
+    cfg = m.cfg
+    bs = block or cfg.block_size
+    acc: dict[str, list[float]] = {}
+    r1: dict[str, list[int]] = {}
+    ac = torch.autocast("cuda", dtype=torch.bfloat16, enabled=(device == "cuda"))
+    for s in samples:
+        kl = "think" if s.name.startswith("think-") else s.topic
+        n = len(s)
+        fused = s.fused.to(device, non_blocking=True)
+        ids = s.ids.to(device, non_blocking=True)
+        label = s.label.tolist()
+        with ac:
+            ctx_hidden = m.project_context(fused.to(m.dtype))
+            ctx_pos_all = torch.arange(n, device=device)
+            kv_all = [(kk.to(torch.bfloat16), vv.to(torch.bfloat16))
+                      for kk, vv in m.context_kv(ctx_hidden, ctx_pos_all)]
+        p = max(1, s.gen_start - 1)
+        got: list[float] = []
+        firsts = [0, 0, 0, 0, 0, 0]                      # (rank-1, reached) for slots 0..2
+        while p <= n - bs and len(got) < max_blocks:
+            lo = 0 if cfg.sliding_window is None else max(0, p - cfg.sliding_window + 1)
+            ctx_kv = [(kk[:, lo:p], vv[:, lo:p]) for kk, vv in kv_all]
+            block_ids = torch.full((bs,), cfg.mask_token_id, dtype=torch.long, device=device)
+            block_ids[0] = ids[p]
+            noise = F.embedding(block_ids, embed).to(m.dtype)
+            positions = torch.arange(p, p + bs, device=device)
+            with ac:
+                pred = m.forward_block(noise, positions, ctx_kv, ctx_pos_all[lo:p],
+                                       block_size=bs)[1:]
+                logits = F.linear(pred.to(head.dtype), head).float()
+                cand, unary = m.unary_candidates(logits)
+                scores = m.lattice(pred, cand, unary, int(ids[p]))
+            cand_l = cand.tolist()
+            sc = scores.float().cpu().numpy()
+            y = sc / temp
+            y = y - y.max(axis=-1, keepdims=True)
+            logp = y - np.log(np.exp(y).sum(axis=-1, keepdims=True))
+            greedy = [int(sc[0, 0].argmax())]
+            for e in range(1, sc.shape[0]):
+                greedy.append(int(sc[e, greedy[-1]].argmax()))
+            t = lattice_tree(int(ids[p]), cand_l, logp.tolist(), greedy, budget - 1)
+            kids: dict[int, dict[int, int]] = {}
+            for i, par in enumerate(t.parents[1:], start=1):
+                kids.setdefault(par, {})[t.tokens[i]] = i
+            node, a_n = 0, 0
+            while p + a_n < n - 1 and a_n < bs - 1:
+                nxt = kids.get(node, {}).get(label[p + a_n])
+                if nxt is None:
+                    break
+                node, a_n = nxt, a_n + 1
+            row = 0
+            for e in range(3):
+                tt = label[p + e]
+                if tt not in cand_l[e]:
+                    break
+                c = cand_l[e].index(tt)
+                firsts[2 * e + 1] += 1
+                firsts[2 * e] += int(int(sc[e, row].argmax()) == c)
+                row = c
+            got.append(a_n + 1.0)
+            p += a_n + 1
+        acc.setdefault(kl, []).extend(got)
+        r1.setdefault(kl, [0] * 6)
+        r1[kl] = [x + y_ for x, y_ in zip(r1[kl], firsts)]
+    out = {k_: sum(v) / len(v) for k_, v in acc.items() if v}
+    allv = [x for k_, v in acc.items() if k_ != "think" for x in v]
+    out["ALL"] = sum(allv) / max(1, len(allv))
+    out["blocks"] = float(len(allv))
+    for k_, f in r1.items():
+        for e in range(3):
+            if f[2 * e + 1]:
+                out[f"r1s{e}_{k_}"] = f[2 * e] / f[2 * e + 1]
+    return out
 
 
 # ----------------------------------------------------------------------------- the gate
@@ -369,6 +519,17 @@ def select_params(w: dict, cfg, mode: str) -> list[str]:
     if mode == "all":
         return [k for k in w if not k.startswith("candidate_selector.")]
     base = ["fc.weight", "hidden_norm.weight", "norm.weight"]
+    if mode == "ranksel":
+        # the selector alone: the head's marginal (and so every unary score) stays exactly as served,
+        # only the bilinear order term learns
+        return [HPROJ, PRED_CB, SUCC_CB]
+    if mode.startswith("rank"):
+        # RND-37: the selector (its projection dense, its two codebooks sparse) plus the top of the
+        # drafter: fc, the norms and the last N layers (`rank` = last 2, `rank3` = last 3).
+        n = int(mode[4:] or 2)
+        keep = set(range(cfg.num_hidden_layers - n, cfg.num_hidden_layers))
+        return ([HPROJ, PRED_CB, SUCC_CB] + base
+                + [k for k in w if k.startswith("layers.") and int(k.split(".")[1]) in keep])
     if mode == "fc":
         return base
     if mode.startswith("last"):
@@ -498,6 +659,16 @@ def parse_probe(spec: str, a, cfg) -> tuple[str, str, float, int]:
     return tag, mode, lr, blk
 
 
+def evaluate(m, embed, head, held, dev, a, blk) -> dict:
+    """The in-loop gate: the chain walk (`acceptance`), or the served tree with --eval-tree."""
+    spec = str(getattr(a, "eval_tree", "0") or "0")
+    if spec == "0":
+        return acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+    bs = blk or m.cfg.block_size
+    budget = (16 if bs <= 8 else 32) if spec == "auto" else int(spec)
+    return tree_acceptance(m, embed, head, held, dev, budget, block=bs, max_blocks=a.eval_blocks)
+
+
 def arm(w: dict, cfg, mode: str) -> list[torch.Tensor]:
     out = []
     for k in select_params(w, cfg, mode):
@@ -505,6 +676,72 @@ def arm(w: dict, cfg, mode: str) -> list[torch.Tensor]:
             w[k].requires_grad_(True)
             out.append(w[k])
     return out
+
+
+class Optim:
+    """AdamW over the dense tensors (backbone at `lr`, the selector's projection at `sel_lr`) and,
+    when the codebooks train, SparseAdam over their gathered rows at `sel_lr`.
+
+    One object so the training loop has one `step`, one `zero_grad` and one learning-rate schedule:
+    every group keeps its own base rate and the schedule scales them all by the same factor.
+    SparseAdam is the lazy Adam: a row's moments and value change only on a step that gathered it,
+    so a row no batch ever touched leaves training bit for bit as it came in."""
+
+    def __init__(self, w: dict, params: list[torch.Tensor], lr: float, sel_lr: float, wd: float):
+        cb = {id(w[k]) for k in (PRED_CB, SUCC_CB) if k in w}
+        sel = {id(w[HPROJ])} if HPROJ in w else set()
+        dense = [p for p in params if id(p) not in cb and id(p) not in sel]
+        sel_p = [p for p in params if id(p) in sel]
+        self.sparse_params = [p for p in params if id(p) in cb]
+        groups = [{"params": dense, "lr": lr, "base_lr": lr}] if dense else []
+        if sel_p:
+            groups.append({"params": sel_p, "lr": sel_lr, "base_lr": sel_lr})
+        self.dense = torch.optim.AdamW(groups, lr=lr, weight_decay=wd, betas=(0.9, 0.95), eps=1e-8)
+        self.sparse = (torch.optim.SparseAdam(self.sparse_params, lr=sel_lr, betas=(0.9, 0.95),
+                                              eps=1e-8) if self.sparse_params else None)
+        if self.sparse is not None:
+            for g in self.sparse.param_groups:
+                g["base_lr"] = sel_lr
+        self.dense_params = dense + sel_p
+        self.param_groups = self.dense.param_groups + (self.sparse.param_groups
+                                                       if self.sparse is not None else [])
+
+    def set_scale(self, f: float) -> None:
+        for g in self.param_groups:
+            g["lr"] = g["base_lr"] * f
+
+    def clip(self, max_norm: float) -> float:
+        """Clip the dense and the sparse gradients to `max_norm` each; returns the dense norm."""
+        gn = torch.nn.utils.clip_grad_norm_(self.dense_params, max_norm)
+        for p in self.sparse_params:
+            if p.grad is None:
+                continue
+            p.grad = p.grad.coalesce()
+            n = p.grad.values().norm()
+            if float(n) > max_norm:
+                p.grad = torch.sparse_coo_tensor(p.grad.indices(), p.grad.values() * (max_norm / n),
+                                                 p.grad.shape)
+        return float(gn)
+
+    def step(self) -> None:
+        self.dense.step()
+        if self.sparse is not None:
+            self.sparse.step()
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        self.dense.zero_grad(set_to_none=set_to_none)
+        if self.sparse is not None:
+            self.sparse.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self) -> dict:
+        if self.sparse is not None:
+            raise SystemExit("--state-dir is not supported with a sparse (codebook) optimiser")
+        return self.dense.state_dict()
+
+    def load_state_dict(self, sd: dict) -> None:
+        if self.sparse is not None:
+            raise SystemExit("--resume is not supported with a sparse (codebook) optimiser")
+        self.dense.load_state_dict(sd)
 
 
 def main() -> None:
@@ -593,6 +830,20 @@ def main() -> None:
                     help="with --probe, export each configuration to <dir>/<tag>. Without it a "
                          "probe measures and throws the weights away, which is what it was for "
                          "when it only compared learning rates")
+    ap.add_argument("--rank-loss", type=float, default=0.0,
+                    help="RND-37: weight of the lattice ranking term (`rank_loss_of`), added to the "
+                         "CE + KL. 0 = the objective as before, bit for bit")
+    ap.add_argument("--selector-lr", type=float, default=1e-4,
+                    help="learning rate of the selector's projection and codebooks (a `rank*` "
+                         "--train mode); the rest trains at --lr")
+    ap.add_argument("--eval-tree", default="0",
+                    help="in-loop eval on the served TREE instead of the chain: a node budget, or "
+                         "`auto` = 16 at block 8 and 32 at block 16 (the served cuts). `best` and "
+                         "the checkpoint choice follow its ALL (thinking-on sequences excluded)")
+    ap.add_argument("--export-final", action="store_true",
+                    help="with --probe-out, also write every configuration's FINAL weights to "
+                         "<dir>/<tag>-final, whether or not the in-loop eval improved: the gate "
+                         "that decides is the Spark's replay, not this eval")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -630,9 +881,12 @@ def main() -> None:
     print(f"--train {a.train}: {len(params)} tensors, "
           f"{sum(p.numel() for p in params)/1e9:.3f} B parameters", flush=True)
 
-    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
-    print("accept/block before: " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
-          flush=True)
+    if a.probe and not a.eval_only:
+        ev = {}                       # every probe configuration measures its own base
+    else:
+        ev = evaluate(m, embed, head, held, dev, a, a.block)
+        print("accept/block before: " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
+              flush=True)
     if a.eval_only:
         if a.eval_ckpts:
             for spec in a.eval_ckpts.split(","):
@@ -641,16 +895,25 @@ def main() -> None:
                                          device="cpu")
                     for k, v in fresh.items():
                         w[k].detach().copy_(v.to(w[k].device).to(w[k].dtype))
-                ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks,
-                                block=a.block)
+                ev = evaluate(m, embed, head, held, dev, a, a.block)
                 print(f"{spec:44s} " + " ".join(f"{k}={v:.3f}"
                                                 for k, v in sorted(ev.items())), flush=True)
         return
 
     if a.probe:
         base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
+        rank0, sel0 = a.rank_loss, a.selector_lr
         for spec in a.probe.split(","):
             tag, mode, lr, blk = parse_probe(spec, a, cfg)
+            # `rank@0.5` in the train field: this configuration's --rank-loss (RND-37 sweeps the
+            # ranking weight inside one data load)
+            a.rank_loss = rank0
+            a.selector_lr = sel0
+            if "@" in mode:
+                parts = mode.split("@")
+                mode, a.rank_loss = parts[0], float(parts[1])
+                if len(parts) > 2 and parts[2]:
+                    a.selector_lr = float(parts[2])     # `rank@1@1e-3`: this config's --selector-lr
             if a.resume and a.state_dir and os.path.exists(done_path(a.state_dir, tag)):
                 print(f"\n--- probe {tag}: already finished (its .done marker is in "
                       f"{a.state_dir}), skipping ---", flush=True)
@@ -670,6 +933,8 @@ def main() -> None:
             start, opt = 0, None
             sp = state_path(a.state_dir, tag) if a.state_dir else None
             if a.resume and sp and os.path.exists(sp):
+                if mode.startswith("rank") or a.rank_loss > 0:
+                    raise SystemExit("--resume is not supported for the ranking runs")
                 opt = torch.optim.AdamW(pp, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
                 blob = load_state(sp, w=w, opt=opt, rng=rng, fingerprint=fingerprint,
                                   tag=tag, block=blk)
@@ -683,7 +948,7 @@ def main() -> None:
             # The base acceptance has to be re-measured at THIS configuration's block length. A
             # released drafter accepts a different number at 8 and at 16, and `best` is what
             # decides whether a checkpoint is written at all.
-            ev0 = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+            ev0 = evaluate(m, embed, head, held, dev, a, blk)
             print("  accept/block " + ("at resume:   " if start else "before: ")
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev0.items())), flush=True)
             if logf:
@@ -694,7 +959,7 @@ def main() -> None:
                               cfg=cfg, block=blk, snap=snap, out=out, best=best0, logf=logf,
                               tag=tag, start_step=start, state_dir=a.state_dir,
                               fingerprint=fingerprint, mode=mode, opt=opt)
-            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+            ev = evaluate(m, embed, head, held, dev, a, blk)
             print(f"  probe {tag} -> "
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
             if logf:
@@ -704,6 +969,10 @@ def main() -> None:
                 logf = None
             # The checkpoint worth keeping is the best one the gate saw, and the last step is not
             # always it -- so the final weights are written only if they beat every eval before.
+            if out and a.export_final:
+                export(w, snap, out + "-final", block=blk)
+                print(f"  [saved] {out}-final at {ev['ALL']:.3f} (final weights, --export-final)",
+                      flush=True)
             if out and ev["ALL"] > best:
                 export(w, snap, out, block=blk)
                 print(f"  [saved] {out} at {ev['ALL']:.3f} accepted/block (final)", flush=True)
@@ -734,7 +1003,7 @@ def main() -> None:
                snap=snap, out=a.out, best=best0, logf=logf, cfg=cfg, tag=tag,
                start_step=start, state_dir=a.state_dir, fingerprint=fingerprint, mode=a.train,
                opt=opt, block=a.block or cfg.block_size)
-    ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=a.block)
+    ev = evaluate(m, embed, head, held, dev, a, a.block)
     print("accept/block after:  " + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())),
           flush=True)
     export(w, snap, a.out, block=a.block)
@@ -757,8 +1026,13 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
     """
     cfg = cfg or m.cfg
     blk = a.block if block is None else block
+    rank_run = (mode or a.train).startswith("rank") or getattr(a, "rank_loss", 0.0) > 0
     if opt is None:
-        opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+        if rank_run:
+            opt = Optim(w, params, lr, a.selector_lr, a.wd)
+        else:
+            opt = torch.optim.AdamW(params, lr=lr, weight_decay=a.wd, betas=(0.9, 0.95), eps=1e-8)
+    rank_n = rank_t = 0
     t0 = time.perf_counter()
     t_eval = 0.0
     t_state = 0.0
@@ -767,9 +1041,13 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
     hist = []
     step = start_step
     for step in range(start_step + 1, a.steps + 1):
-        for g in opt.param_groups:
-            g["lr"] = lr * min(1.0, step / max(1, a.warmup)) * \
-                (0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))) * 0.9 + 0.1)
+        f_lr = min(1.0, step / max(1, a.warmup)) * \
+            (0.5 * (1 + math.cos(math.pi * min(1.0, step / a.steps))) * 0.9 + 0.1)
+        if isinstance(opt, Optim):
+            opt.set_scale(f_lr)
+        else:
+            for g in opt.param_groups:
+                g["lr"] = lr * f_lr
         pool = train_gen if (train_gen and train_corp and rng.random() < a.gen_weight) \
             else (train_corp or train_gen)
         s = pool[rng.randrange(len(pool))]
@@ -783,9 +1061,18 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
                                dtype=torch.long, device=dev)
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=(dev == "cuda")):
             pred = run_blocks(m, embed, s, anchors, dev, block=blk)
-            loss, hits = loss_of(pred, head, s, anchors, a.kl, dev)
+            if a.rank_loss > 0:
+                logits = F.linear(pred.reshape(-1, pred.shape[-1]), head).float()
+                loss, hits = loss_of(pred, head, s, anchors, a.kl, dev, logits=logits)
+                rl, rn, rt = rank_loss_of(m, pred, logits, s, anchors, dev)
+                loss = loss + a.rank_loss * rl
+                rank_n += rn
+                rank_t += rt
+            else:
+                loss, hits = loss_of(pred, head, s, anchors, a.kl, dev)
         loss.backward()
-        gn = torch.nn.utils.clip_grad_norm_(params, a.clip)
+        gn = opt.clip(a.clip) if isinstance(opt, Optim) else \
+            torch.nn.utils.clip_grad_norm_(params, a.clip)
         opt.step()
         opt.zero_grad(set_to_none=True)
         acc = float(hits) / (anchors.numel() * (bs - 1))
@@ -796,17 +1083,20 @@ def train_loop(m, w, params, embed, head, train_gen, train_corp, held, a, dev, l
                    + f"step {step:5d}  loss {sum(x[0] for x in k)/len(k):.4f}  "
                    f"row-hit {sum(x[1] for x in k)/len(k):.3f}  gn {float(gn):.2f}  "
                    f"lr {opt.param_groups[0]['lr']:.2e}  "
-                   f"{(time.perf_counter()-t0-t_eval-t_state)/max(1, step-start_step)*1000:.0f}"
+                   + (f"rank-top1 {rank_t / max(rank_n, 1):.3f} ({rank_n})  " if rank_n else "")
+                   + f"{(time.perf_counter()-t0-t_eval-t_state)/max(1, step-start_step)*1000:.0f}"
                    " ms/step")
             print(msg, flush=True)
             if logf:
                 logf.write(json.dumps({"tag": tag, "step": step,
                                        "loss": sum(x[0] for x in k)/len(k),
-                                       "row_hit": sum(x[1] for x in k)/len(k)}) + "\n")
+                                       "row_hit": sum(x[1] for x in k)/len(k),
+                                       "rank_top1": rank_t / max(rank_n, 1)}) + "\n")
                 logf.flush()
+            rank_n = rank_t = 0
         if a.eval_every and step % a.eval_every == 0:
             t_ev = time.perf_counter()
-            ev = acceptance(m, embed, head, held, dev, max_blocks=a.eval_blocks, block=blk)
+            ev = evaluate(m, embed, head, held, dev, a, blk)
             t_eval += time.perf_counter() - t_ev
             print(f"  {'[' + tag + '] ' if tag else ''}[eval @{step}] "
                   + " ".join(f"{k}={v:.3f}" for k, v in sorted(ev.items())), flush=True)
