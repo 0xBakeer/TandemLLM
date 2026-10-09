@@ -136,8 +136,10 @@ class Qwen35Model(GenerativeModel):
         tok = AutoTokenizer.from_pretrained(self.dir)
         device = where.device if where is not None else torch.device("cpu")
         gpu = where.gpu if where is not None else contextlib.nullcontext
-        # read on the host, outside the lock; copied in batches under it
-        w = Weights(cfg.path, device="cpu", skip_mtp=True, nvfp4="", fp8_head="")
+        # read on the host, outside the lock; copied in batches under it. Every weight override off
+        # explicitly: the served engine's QWEN38_NVFP4 / FP8_HEAD / EXL3 name ITS checkpoints, and the
+        # environment is shared (an EXL3 profile's QWEN38_EXL3 put the 27B's trellis blocks in the narrator)
+        w = Weights(cfg.path, device="cpu", skip_mtp=True, nvfp4="", fp8_head="", exl3="")
         if device.type != "cpu":
             _to_device(w, device, gpu)
         with gpu():

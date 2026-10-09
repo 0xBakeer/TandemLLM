@@ -73,6 +73,11 @@ fi
 
 exec 9<>"$BOX_LOCK"
 flock -w 900 9 || { say "the box lock stayed held for 15 min; not switching"; exit 6; }
+# start.sh refuses under a fresh pause file: find that out before the stop, not after it
+if [ -f "$REPO_DIR/.watchdog.off" ]; then
+    AGE=$(( $(date +%s) - $(stat -c %Y "$REPO_DIR/.watchdog.off") ))
+    [ "$AGE" -lt "${WATCHDOG_PAUSE_MAX:-2400}" ] && { say "REFUSING: a hold owns the board ($REPO_DIR/.watchdog.off, ${AGE}s old)"; exit 6; }
+fi
 
 memavail() { awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo; }
 start_profile() {   # $1 = profile; returns start.sh's status
