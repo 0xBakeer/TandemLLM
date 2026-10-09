@@ -329,6 +329,32 @@ def test_the_served_loop_passes_q_and_a_seed_still_reproduces():
     return "mixed and det: seeded == the drafter-less keyed run; unseeded runs the q walk"
 
 
+
+def test_the_cut_spine_tree_walk_emits_the_target_exactly():
+    """SAMPLED_CUT (`DraftTree.cut_like`): the spine tree cut to a deterministic tree's depth
+    profile (fewer levels, fewer siblings) still emits the target exactly, and keeps q."""
+    P = _markov()
+    L = 4
+    cand, logp = _lattice(L)
+    worst = 0.0
+    for budget in (2, 4, 7):
+        det = lattice_tree(ANCHOR, cand, logp, [0] * L, budget)
+        prof = sorted(det.depths()[1:])
+        for quota, q in (([2, 1, 1, 0], _qrows(L)), ([4, 2, 0, 1], _qrows(L, seed=6, sharp=6.0))):
+            base = _spine_builder(L, quota, q, cand, logp)
+
+            def build(gen, base=base, det=det):
+                t = base(gen).cut_like(det)
+                t.check()
+                assert t.q is not None and t.n_draft <= det.n_draft
+                assert all(max(t.depths()) <= max(det.depths()) for _ in (0,))
+                return t
+            w = _worst(_emitted_prefixes(build, P, N), P)
+            assert w < TOL, (budget, quota, w)
+            worst = max(worst, w)
+    return f"3 cut profiles x 2 quotas, {N} walks each: worst prefix gap {worst:.4f} < {TOL}"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -80,11 +80,15 @@ def health(port: int) -> bool:
         return False
 
 
+SAMPLING: dict = {}
+
+
 def stream(port: int, model: str, content: str, max_tokens: int) -> dict:
     body = {"model": model, "messages": [{"role": "user", "content": content}], "stream": True,
             "temperature": 0, "max_tokens": max_tokens,
             "chat_template_kwargs": {"enable_thinking": False},
             "stream_options": {"include_usage": True}}
+    body.update(SAMPLING)
     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -147,6 +151,9 @@ def main() -> None:
     p.add_argument("--new", type=int, default=512)
     p.add_argument("--prefill", default="8192,32768")
     p.add_argument("--workloads", default="prose,chat", help="any of prose, chat, code")
+    p.add_argument("--temperature", type=float, default=0.0,
+                   help="decode workloads sampled at this temperature (prefill stays greedy)")
+    p.add_argument("--top-p", type=float, default=None)
     p.add_argument("--prefill-salt", action="store_true",
                    help="start every prefill prompt with its own line, so no prefill reuses another's "
                         "rows from the caches (a list may repeat a length)")
@@ -201,6 +208,9 @@ def main() -> None:
                 return rowlog.parse_requests(f.read().decode("utf-8", "replace"))
 
         stream(a.port, a.served_model, "Say hello.", 16)          # warm-up
+        if a.temperature > 0:
+            SAMPLING.update({"temperature": a.temperature}
+                            | ({"top_p": a.top_p} if a.top_p is not None else {}))
         prompts = {"prose": PROSE, "chat": CHAT, "code": CODE}
         for name in a.workloads.split(","):
             prompt = prompts[name]
@@ -229,6 +239,7 @@ def main() -> None:
                          "tok_round_median": statistics.median(tr) if tr else None,
                          "ms_round_median": statistics.median(mr) if mr else None,
                          "same_text": len({r["text"] for r in runs}) == 1}
+        SAMPLING.clear()
         rep["prefill"] = {}
         for j, n in enumerate(int(x) for x in a.prefill.split(",") if x):
             text = prefill_text(repo, tok, n)

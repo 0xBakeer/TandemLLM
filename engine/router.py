@@ -24,6 +24,10 @@ from __future__ import annotations
 from engine.drafters import Drafter, run_steps, tree_steps
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 
+# A sampled request's spine tree cut to the node profile the staircase chose for the head's
+# deterministic tree (`DraftTree.cut_like`), instead of the whole spine plus its uncut quota.
+SAMPLED_CUT = _S.get("SAMPLED_CUT") == "1"
+
 # verify(B) in seconds, measured on this board (verify cost against block length). Linear between the measured points, flat-extrapolated past the ends.
 VERIFY_MS = {1: 151.0, 2: 161.4, 4: 164.9, 6: 167.4, 8: 169.7, 12: 173.6, 16: 179.4, 32: 209.8}
 MTP_MS_PER_TOKEN = 16.6      # measured: 846 ms of drafting over 17 three-token proposals
@@ -713,9 +717,17 @@ class MergedRouter(Drafter):
             self._cal_last = (best, [(n, r, self._node_q(n, best, dep[n], 0))
                                      for r, n in enumerate(order, start=1)])
         if spine is not None and label == "mtp":
-            best = spine
+            # SAMPLED_CUT: the spine tree to the node profile the cut chose for the head's
+            # deterministic tree (else the whole spine and its uncut quota, ~17 rows a block)
+            best = spine.cut_like(best) if SAMPLED_CUT else spine
         elif spine is not None and label == "chain":
-            best = spine.spine_chain()
+            sc = spine.spine_chain()
+            n = best.n_draft + 1
+            if SAMPLED_CUT and n < len(sc.tokens):
+                from engine.tree import DraftTree
+                sc = DraftTree(sc.tokens[:n], sc.parents[:n], sc.scores[:n], sc.source[:n],
+                               q=sc.q[:n])
+            best = sc
         self.last, self.last_n = label, best.n_draft
         self.stats[label] = self.stats.get(label, 0) + 1
         self.stats["ngram_tokens" if label == "ngram" else "mtp_tokens"] += best.n_draft

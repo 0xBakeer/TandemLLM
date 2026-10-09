@@ -60,6 +60,7 @@ KNOBS: dict[str, tuple] = {
     'DRAFT_GRAPH': ('0', 'engine/drafters/dflash2.py'),
     'DRAFT_HEAD': (None, 'engine/drafters/dflash2.py'),
     'DRAFT_HEAD_NVFP4': ('0', 'engine/drafters/dflash2.py'),
+    'DRAFT_HEAD_EXL3': (None, 'engine/drafters/dflash2.py'),
     'DRAFT_NVFP4': ('0', 'engine/drafters/dflash2.py'),
     'DRAFT_TEMP': ('1.0', 'engine/drafters/dflash2.py'),
     'DSPARK': (None, 'engine/drafters/dspark.py'),
@@ -204,6 +205,12 @@ KNOBS: dict[str, tuple] = {
     'EXL3_CHUNK_UNTIL': ('128', 'tools/exl3_linear.py'),
     'EXL3_ROWGRID': ('1', 'tools/exl3_linear.py'),
     'EXL3_FUSE': ('1', 'engine/loader.py'),
+    'EXL3_SILU_FUSED': ('0', 'tools/exl3_linear.py'),
+    'EXL3_MLP_BRIDGE': ('0', 'tools/exl3_linear.py'),
+    'EXL3_STAGES': ('3', 'tools/exl3_linear.py'),
+    'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),
+    'SAMPLE_BATCH': ('1', 'engine/sample.py'),
+    'SAMPLED_CUT': ('0', 'engine/router.py'),
     # the layer-major prefill (engine/model.py `prefill_window`): rows a window takes when its chunk
     # lines hand out anchors/snapshots (each line holds a recurrent-state copy), and when none do;
     # 0 = chunk-major as before. Bit for bit the chunk-major forwards either way.

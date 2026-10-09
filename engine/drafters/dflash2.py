@@ -336,6 +336,32 @@ HOST_WALK = _S.get("HOST_WALK") == "1"
 # anchor, position and length on the device. Needs QWEN38_HOST_WALK (the walk after the replay).
 DRAFT_GRAPH = _S.get("DRAFT_GRAPH") == "1"
 _NVFP4_HEADS: dict = {}
+# The drafter's vocabulary head from another EXL3 checkpoint (a lower-K trellis head, e.g. the 3.0
+# quant's K4 head at 0.64 GB against the 4.5 target's K6 at 0.96): drafter only, so the output stays
+# exact and what it can cost is acceptance. Unset = the target's own head, as before.
+DRAFT_HEAD_EXL3 = _S.get("DRAFT_HEAD_EXL3") or ""
+_EXL3_HEADS: dict = {}
+
+
+def exl3_draft_head(eng):
+    """The `lm_head` EXL3 block of DRAFT_HEAD_EXL3's checkpoint, read once an engine."""
+    key = (id(eng), DRAFT_HEAD_EXL3)
+    if key not in _EXL3_HEADS:
+        from safetensors import safe_open
+        from engine.loader import _exl3_files
+        from tools.exl3_linear import read_block
+        blk = None
+        for fpath in _exl3_files(DRAFT_HEAD_EXL3):
+            with safe_open(fpath, framework="pt", device=str(eng.device)) as f:
+                bases = {k[: -len(".trellis")] for k in f.keys() if k.endswith(".trellis")}
+                for base in bases:
+                    if base.endswith("lm_head"):
+                        blk = read_block(f, base, out_fp32=True)
+        if blk is None:
+            raise RuntimeError(f"no lm_head trellis in {DRAFT_HEAD_EXL3}")
+        print(f"[drafter] head from {DRAFT_HEAD_EXL3}: K{blk.kb}, {blk.nbytes / 1e9:.2f} GB")
+        _EXL3_HEADS[key] = blk
+    return _EXL3_HEADS[key]
 
 
 def nvfp4_head(eng):
@@ -1359,6 +1385,8 @@ class DFlash2Drafter(Drafter):
             logits = linear(pred, self.head)
         elif DRAFT_HEAD_NVFP4:
             logits = linear(pred, nvfp4_head(self.eng))
+        elif DRAFT_HEAD_EXL3:
+            logits = head_logits(pred, exl3_draft_head(self.eng))
         else:
             # The same 2.54 GB the verify step reads, read again for seven rows. It goes through
             # the engine's own head kernel for the same reason the verify path does.
@@ -1373,8 +1401,18 @@ class DFlash2Drafter(Drafter):
             ids: list[int] = []
             if self.last_q is None:
                 self.last_q = []
+            from engine import sample as _smp
+            batch = (_smp.BATCH and not self.sampler.coupled and self.head_index is None
+                     and hasattr(self.sampler, "draws"))
+            if batch:
+                # every row's proposal in one device draw and one copy (engine/sample.py BATCH)
+                drawn = self.sampler.draws(rows).tolist()
             for r in range(rows.shape[0]):
                 row = rows[r]
+                if batch:
+                    ids.append(int(drawn[r]))
+                    self.last_q.append(row)
+                    continue
                 t = self.sampler.pick(row) if not self.sampler.coupled else None
                 if self.head_index is not None:
                     # A reduced draft head: q lives on the reduced vocabulary and must be

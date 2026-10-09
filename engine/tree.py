@@ -262,6 +262,41 @@ class DraftTree:
         walk(0, -1)
         return DraftTree(tokens, parents, scores, source)
 
+    def cut_like(self, det: "DraftTree") -> "DraftTree":
+        """A sampled spine tree (`spine_tree`) cut to the depth profile of `det`, the deterministic
+        tree the router's staircase cut chose for the same lattice: spine nodes to det's depth, and
+        at each depth at most (det's nodes there - 1) siblings, the best-scored first. Every kept
+        count comes from det, which never looks at the draw, and a sibling's score depends only
+        on the spine above it, so the spine stays distributed as its q and the walk stays exact
+        (as `spine_tree`'s own quota). q is carried over. A tree without q is returned as is."""
+        if self.q is None or det is None or det.n_draft == 0:
+            return self
+        from collections import Counter
+        want = Counter(det.depths()[1:])
+        maxd = max(want)
+        dep = self.depths()
+        keep = {0}
+        used: Counter = Counter()
+        for i in range(1, len(self.tokens)):
+            if self.q[i] is not None and dep[i] <= maxd and self.parents[i] in keep:
+                keep.add(i)
+                used[dep[i]] += 1
+        sibs = sorted((i for i in range(1, len(self.tokens)) if self.q[i] is None),
+                      key=lambda i: -self.scores[i])
+        for i in sibs:
+            d = dep[i]
+            if self.parents[i] in keep and used[d] < want.get(d, 0):
+                keep.add(i)
+                used[d] += 1
+        if len(keep) == len(self.tokens):
+            return self
+        order = [i for i in range(len(self.tokens)) if i in keep]   # a pre-order subsequence
+        new = {old: n for n, old in enumerate(order)}
+        return DraftTree([self.tokens[i] for i in order],
+                         [-1] + [new[self.parents[i]] for i in order[1:]],
+                         [self.scores[i] for i in order], [self.source[i] for i in order],
+                         q=[self.q[i] for i in order])
+
     def merge(self, other: "DraftTree", prefer: str = "max") -> "DraftTree":
         """Graft `other` onto this tree. Both must share the same anchor.
 
