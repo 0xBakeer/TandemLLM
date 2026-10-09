@@ -61,7 +61,8 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(cfg.path)
     text = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "bench", "calib.txt")).read()
-    ids = tok(text).input_ids[:a.ctx]
+    ids = tok(text).input_ids
+    ids = (ids * (a.ctx // max(1, len(ids)) + 1))[:a.ctx]      # repeated to reach the context
     rng = random.Random(3)
     out = []
     with torch.no_grad():
