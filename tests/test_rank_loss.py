@@ -190,6 +190,7 @@ def test_rank_mode_selects_the_top_and_the_selector():
     assert {T.HPROJ, T.PRED_CB, T.SUCC_CB, "fc.weight", "norm.weight", "hidden_norm.weight"} <= sel
     assert all(not k.startswith(("layers.0.", "layers.1.")) for k in sel)
     assert any(k.startswith("layers.2.") for k in sel) and any(k.startswith("layers.3.") for k in sel)
+    assert set(T.select_params(m.w, m.cfg, "ranksel")) == {T.HPROJ, T.PRED_CB, T.SUCC_CB}
     sel3 = set(T.select_params(m.w, m.cfg, "rank3"))
     assert any(k.startswith("layers.1.") for k in sel3)
 
@@ -221,6 +222,16 @@ def test_tree_eval_and_a_short_run():
                  cfg=m.cfg, block=8, mode="rank")
     moved = sum(int(not torch.equal(m.w[T.PRED_CB][r], before[T.PRED_CB][r])) for r in range(v))
     assert 0 < moved < v, moved
+    # the selector alone: the backbone stays bit for bit, the selector moves
+    m2, embed2, head2 = tiny(seed=8, v=v, k=k)
+    for kk in list(m2.w):
+        m2.w[kk] = m2.w[kk].detach().clone().float()
+    frozen = {kk: t.clone() for kk, t in m2.w.items() if not kk.startswith("candidate_selector.")}
+    hp = m2.w[T.HPROJ].clone()
+    T.train_loop(m2, m2.w, T.arm(m2.w, m2.cfg, "ranksel"), embed2, head2, train, [], held, _args(),
+                 "cpu", 1e-3, random.Random(0), cfg=m2.cfg, block=8, mode="ranksel")
+    assert all(torch.equal(m2.w[kk], t) for kk, t in frozen.items())
+    assert not torch.equal(m2.w[T.HPROJ], hp)
     never = set(range(v)) - set(ids.tolist()) - set(label.tolist())
     for r in never:                                   # a token that never occurs is never a predecessor
         assert torch.equal(m.w[T.PRED_CB][r], before[T.PRED_CB][r]), r

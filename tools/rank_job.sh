@@ -66,7 +66,10 @@ arm() {   # arm <b8|b16> <block> <ckpt>   (STEPS_B16 / FINAL_B16 override the b1
   # SEL_LRS: sweep the selector's learning rate at the first ranking weight instead
   if [ -n "${SEL_LRS:-}" ]; then
     specs=""; l=${LAMBDAS%%,*}
-    for q in ${SEL_LRS//,/ }; do specs="$specs,$A-l$l-s$q=rank@$l@$q:$LR:$B"; done
+    for q in ${SEL_LRS//,/ }; do
+      md=${q%%/*}; q2=${q#*/}; [ "$md" = "$q" ] && { md=rank; q2=$q; }
+      specs="$specs,$A-$md-l$l-s$q2=$md@$l@$q2:$LR:$B"
+    done
     specs=${specs#,}
   fi
   log "$A probe: $specs, $STEPS steps"
@@ -75,9 +78,9 @@ arm() {   # arm <b8|b16> <block> <ckpt>   (STEPS_B16 / FINAL_B16 override the b1
     --selector-lr $SEL_LR --eval-tree auto --eval-every $(( STEPS / 2 )) --gen-weight 1.0 \
     2>&1 | tee $OUT/$A-probe.log | grep --line-buffered -E "eval @|probe |saved|NOTE|Traceback|Error|step +(1|25|1000|2000|3000|4000|6000|8000) " | sed -u "s/^/[$A] /"
   local best
-  best=$(grep -E "^  probe $A-l" $OUT/$A-probe.log | sed -E 's/^  probe ([^ ]+) -> .*ALL=([0-9.]+).*/\2 \1/' \
+  best=$(grep -E "^  probe $A-(l|rank)" $OUT/$A-probe.log | sed -E 's/^  probe ([^ ]+) -> .*ALL=([0-9.]+).*/\2 \1/' \
          | sort -rn | head -1 | awk '{print $2}')
-  log "$A best: $best ($(grep -E "^  probe $A-l" $OUT/$A-probe.log | sed -E 's/.*probe ([^ ]+) -> .*ALL=([0-9.]+).*/\1=\2/' | tr '\n' ' '))"
+  log "$A best: $best ($(grep -E "^  probe $A-(l|rank)" $OUT/$A-probe.log | sed -E 's/.*probe ([^ ]+) -> .*ALL=([0-9.]+).*/\1=\2/' | tr '\n' ' '))"
   [ -z "$best" ] && return 1
   [ "$FINAL_STEPS" = 0 ] && return 0
   l=${best#$A-l}

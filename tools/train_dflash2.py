@@ -519,6 +519,10 @@ def select_params(w: dict, cfg, mode: str) -> list[str]:
     if mode == "all":
         return [k for k in w if not k.startswith("candidate_selector.")]
     base = ["fc.weight", "hidden_norm.weight", "norm.weight"]
+    if mode == "ranksel":
+        # the selector alone: the head's marginal (and so every unary score) stays exactly as served,
+        # only the bilinear order term learns
+        return [HPROJ, PRED_CB, SUCC_CB]
     if mode.startswith("rank"):
         # RND-37: the selector (its projection dense, its two codebooks sparse) plus the top of the
         # drafter: fc, the norms and the last N layers (`rank` = last 2, `rank3` = last 3).
@@ -689,7 +693,7 @@ class Optim:
         dense = [p for p in params if id(p) not in cb and id(p) not in sel]
         sel_p = [p for p in params if id(p) in sel]
         self.sparse_params = [p for p in params if id(p) in cb]
-        groups = [{"params": dense, "lr": lr, "base_lr": lr}]
+        groups = [{"params": dense, "lr": lr, "base_lr": lr}] if dense else []
         if sel_p:
             groups.append({"params": sel_p, "lr": sel_lr, "base_lr": sel_lr})
         self.dense = torch.optim.AdamW(groups, lr=lr, weight_decay=wd, betas=(0.9, 0.95), eps=1e-8)
