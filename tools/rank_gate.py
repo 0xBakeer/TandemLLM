@@ -21,8 +21,35 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.tree import lattice_tree  # noqa: E402
 from tools.lattice_oracle import replay  # noqa: E402
-from tools.tree_sweep import load  # noqa: E402
+from tools.tree_sweep import accepted, greedy_walk, load, log_softmax  # noqa: E402
+
+THINK_CLOSE = 248069
+
+
+def split_replay(tr: dict, budget: int) -> dict:
+    """`lattice_oracle.replay(tr, "tree", budget)` with each block credited to the part of a
+    thinking-on answer its anchor sits in: `reason` (before `</think>`, or no close at all) or
+    `answer` (after it). Returns {part: [blocks, committed]}."""
+    target = tr["target"]
+    close = target.index(THINK_CLOSE) if THINK_CLOSE in target else len(target)
+    out = {"reason": [0, 0], "answer": [0, 0]}
+    a = 0
+    while a < len(target) - 1:
+        i = tr["index"].get(a)
+        if i is None:
+            a += 1
+            continue
+        cand, scores = tr["cand"][i], tr["scores"][i]
+        t = lattice_tree(int(target[a]), cand.tolist(), log_softmax(scores, 1.0).tolist(),
+                         greedy_walk(scores), budget - 1)
+        acc = accepted(t, target, a)
+        part = "reason" if a < close else "answer"
+        out[part][0] += 1
+        out[part][1] += min(acc + 1, len(target) - 1 - a)
+        a += acc + 1
+    return out
 
 
 def ranks(tr: dict) -> np.ndarray:
@@ -67,6 +94,10 @@ def main() -> None:
                 by[k][0] += bl
                 by[k][1] += cm
                 rk[k] += ranks(tr)
+            if THINK_CLOSE in tr["target"] or tr["name"].startswith("think-"):
+                for part, (b_, c_) in split_replay(tr, budget).items():
+                    by[f"~{part}"][0] += b_
+                    by[f"~{part}"][1] += c_
         res[label] = {"dir": d, "budget": budget, "traces": len(traces),
                       "committed": {k: v[1] / max(v[0], 1) for k, v in by.items()},
                       "blocks": {k: v[0] for k, v in by.items()},
