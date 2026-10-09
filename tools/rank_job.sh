@@ -69,9 +69,30 @@ arm() {   # arm <b8|b16> <block> <ckpt>
   log "$A final: $(grep -E '^  probe ' $OUT/$A-final.log | tail -1)"
 }
 
+held_eval() {   # held_eval <block> <base ckpt> <label> [ckpt,...]: the gate's 62 + 20 traces, tree eval, bf16
+  local B=$1 CK=$2 L=$3 E=${4:-base}
+  [ -d /tmp/held ] || { mkdir -p /tmp/held; hf buckets sync "$BUCKET/rank/data/held" /tmp/held >/dev/null 2>&1 \
+    || cp -r $W/data/held/. /tmp/held/; }
+  python3 -u tools/train_dflash2.py --data /tmp/held --ckpt $CK --model /models/target --block $B \
+    --eval-only --eval-ckpts "$E" --eval-tree auto --eval-blocks 1000 > $OUT/held-$L.log 2>&1
+  log "held $L: $(grep -vE '^\s*\[|^data|^drafter|^--train|training seq' $OUT/held-$L.log | tail -n +1 | tr '\n' ' ' | cut -c1-900)"
+}
+
+if [ "$SMOKE" = 1 ]; then
+  held_eval 8 /models/b8 base-b8
+  held_eval 16 /models/b16 base-b16
+fi
+
 arm b8 8 /models/b8 & P8=$!
 arm b16 16 /models/b16 & P16=$!
 wait $P8; R8=$?; wait $P16; R16=$?
+if [ "$SMOKE" != 1 ]; then
+  for A in b8 b16; do
+    B=8; [ $A = b16 ] && B=16
+    E=base; for d in $(ls -d $OUT/$A/*/ 2>/dev/null); do E="$E,${d%/}"; done
+    held_eval $B /models/$A held-$A "$E"
+  done
+fi
 kill $SYNC 2>/dev/null
 log "arms done (b8 rc $R8, b16 rc $R16); final sync"
 hf buckets sync $OUT "$BUCKET/$RUN" 2>&1 | tail -2
