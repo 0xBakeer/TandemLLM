@@ -79,6 +79,13 @@
             "null"
           ]
         },
+        "weights": {
+          "description": "the weight profile (ops/profiles/<name>.env): name, format, weights, hf_repo, drafters, draft_head, sample_nucleus; optional",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": [
