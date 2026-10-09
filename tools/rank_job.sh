@@ -63,6 +63,12 @@ arm() {   # arm <b8|b16> <block> <ckpt>   (STEPS_B16 / FINAL_B16 override the b1
   [ $A = b16 ] && { STEPS=${STEPS_B16:-$STEPS}; FINAL_STEPS=${FINAL_B16:-$FINAL_STEPS}; }
   for l in ${LAMBDAS//,/ }; do specs="$specs,$A-l$l=rank@$l:$LR:$B"; done
   specs=${specs#,}
+  # SEL_LRS: sweep the selector's learning rate at the first ranking weight instead
+  if [ -n "${SEL_LRS:-}" ]; then
+    specs=""; l=${LAMBDAS%%,*}
+    for q in ${SEL_LRS//,/ }; do specs="$specs,$A-l$l-s$q=rank@$l@$q:$LR:$B"; done
+    specs=${specs#,}
+  fi
   log "$A probe: $specs, $STEPS steps"
   python3 -u tools/train_dflash2.py --data $DATA --ckpt $CK --model /tmp/models/target \
     --probe "$specs" --probe-out $OUT/$A --export-final --heldout "$VAL" --steps $STEPS \

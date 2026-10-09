@@ -898,15 +898,18 @@ def main() -> None:
 
     if a.probe:
         base_cpu = {k: v.detach().to("cpu", copy=True) for k, v in w.items()}
-        rank0 = a.rank_loss
+        rank0, sel0 = a.rank_loss, a.selector_lr
         for spec in a.probe.split(","):
             tag, mode, lr, blk = parse_probe(spec, a, cfg)
             # `rank@0.5` in the train field: this configuration's --rank-loss (RND-37 sweeps the
             # ranking weight inside one data load)
             a.rank_loss = rank0
+            a.selector_lr = sel0
             if "@" in mode:
-                mode, lam = mode.split("@", 1)
-                a.rank_loss = float(lam)
+                parts = mode.split("@")
+                mode, a.rank_loss = parts[0], float(parts[1])
+                if len(parts) > 2 and parts[2]:
+                    a.selector_lr = float(parts[2])     # `rank@1@1e-3`: this config's --selector-lr
             if a.resume and a.state_dir and os.path.exists(done_path(a.state_dir, tag)):
                 print(f"\n--- probe {tag}: already finished (its .done marker is in "
                       f"{a.state_dir}), skipping ---", flush=True)
