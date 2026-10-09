@@ -34,7 +34,7 @@ def test_rowgrid_and_tiles_bit_identical():
     keep = dict(X._CONFIG), X.ROWGRID
     try:
         for N, K in SHAPES:
-            for kb in (3, 4, 5, 6):
+            for kb in (2, 3, 4, 5, 6):
                 w = X.random_block(N, K, kb, seed=kb)
                 x = (torch.randn(max(ROWS), K, device="cuda") * 0.5).to(torch.bfloat16)
                 tile = tab.get(f"{N}x{K}x{kb}")
