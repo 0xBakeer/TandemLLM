@@ -545,14 +545,16 @@ def test_the_prefill_live_rate_with_no_warm_up_starts_at_the_loop():
 
 # ------------------------------------------------------------------ the hot path
 def test_the_chunk_hook_appends_one_tuple_and_nothing_runs_per_token():
-    """The chunk hook gained no work: one tuple a chunk, as it built before. The token path
-    (`RequestRecord.track`) is unchanged (tests/test_live.py holds it)."""
+    """The chunk hook gained no work: one tuple a chunk, as it built before (a chunk of a
+    prefill window replaces its window's mark instead, `activity.pf_mark`, 2026-10-09). The
+    token path (`RequestRecord.track`) is unchanged (tests/test_live.py holds it)."""
     src = open(os.path.join(ROOT, "server", "app.py")).read()
     watch = src.split("        def watch(done: int, total: int) -> None:")[1].split(
         "        watch.info = {}")[0]
     code = "\n".join(ln.split("#")[0] for ln in watch.splitlines())
-    assert code.count("rec.pf_marks.append((done, total, now))") == 1, code
-    assert code.count("(") - code.count("()") <= 12 and ".pf =" not in code, code
+    mark = 'activity_mod.pf_mark(rec.pf_marks, done, total, now, watch.info.get("window"))'
+    assert code.count(mark) == 1, code
+    assert code.count("(") - code.count("()") <= 13 and ".pf =" not in code, code
     track = open(os.path.join(ROOT, "server", "usage.py")).read().split(
         "def track(self, source):")[1].split("def lock_acquired")[0]
     assert "anchor" not in track and "pf_marks" not in track
