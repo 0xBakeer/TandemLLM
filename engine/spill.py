@@ -72,6 +72,7 @@ import threading
 import time
 
 from engine import disk_cache as dc
+from engine import kvpool as _kvp
 
 FORMAT = 1
 MAGIC = b"QSESPIL1"
@@ -1183,6 +1184,7 @@ class SessionSpill:
                             return self._failed(e, "read", res, low)
                         low = b if low is None else min(low, b)
                         for (t, ax), (off, nb) in zip(views, meta["sections"]):
+                            _kvp.ensure_for(t, b + r)          # SRV-307
                             if bl.get("z"):
                                 _planes_from_host(buf.tensor()[off:off + nb], t.narrow(ax, b, r),
                                                   cuda and buf.pinned)

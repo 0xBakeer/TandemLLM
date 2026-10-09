@@ -75,6 +75,8 @@ from collections import OrderedDict, deque
 
 import torch
 
+from engine import kvpool as _kvp
+
 from engine.settings import SETTINGS as _S
 
 #: FX10: a parked conversation a new park gives up goes to the NVMe spill first (`on`); `off`
@@ -232,6 +234,7 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
 def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     """Put `snap` back. After this the engine is exactly where `capture` was called."""
     n = snap.length
+    _kvp.ensure_for(eng.kv.k, n)      # SRV-307: the rows must exist before they are written
     eng.kv.k[:, :, :, :n, :].copy_(snap.k)
     eng.kv.v[:, :, :, :n, :].copy_(snap.v)
     if snap.ks is not None:
@@ -865,6 +868,7 @@ class Borrow:
     def give_back(self) -> None:
         eng = self.eng
         for (t, ax), buf in zip(self.views, self.saved):
+            _kvp.ensure_for(t, self.rows)     # SRV-307
             t.narrow(ax, 0, self.rows).copy_(buf)
         eng.state.S.copy_(self.S)
         eng.state.conv.copy_(self.conv)
@@ -1124,6 +1128,7 @@ class ResidentPrefix:
         self._stash = None
         s, r = st["start"], st["rows"]
         for (t, ax), buf in zip(st["views"], self._stash_bufs):
+            _kvp.ensure_for(t, s + r)         # SRV-307
             t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
         self.stats["stash_restored"] += 1
         reach = int(eng.kv.length) + GUEST_SLACK_ROWS
@@ -1666,6 +1671,7 @@ class ResidentPrefix:
             self._free.append(self.anchors.pop(b))
         r = self.pin_rows
         for (t, ax), buf in zip(views, self._pin_bufs):
+            _kvp.ensure_for(t, r)             # SRV-307
             t.narrow(ax, 0, r).copy_(buf.narrow(ax, 0, r))
         for b, (S0, c0) in sorted(self.pin_anchors.items()):
             S, conv = self._buffers(eng)
@@ -1927,6 +1933,7 @@ class ResidentPrefix:
                 rb = 0
         step = 4 * self.chunk
         for (t, ax), buf in zip(views, self._park_bufs):
+            _kvp.ensure_for(t, base + max(ra, rb))     # SRV-307
             both = min(ra, rb)
             for j in range(0, both, step):
                 w = min(step, both - j)
