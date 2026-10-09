@@ -173,6 +173,7 @@ TREE_CHAIN_DELEGATE = _S.get("TREE_CHAIN_DELEGATE") == "1"
 # not a semantic one: the chunk loop is serial in Tp/chunk, and the intra-chunk work grows with the
 # square of the chunk, so the best value is a measurement. See tools/profile_prefill.py --gdn-chunk.
 GDN_PREFILL_CHUNK = int(_S.get("GDN_CHUNK"))
+GDN_PREFILL_NOREP = _S.get("GDN_PREFILL_NOREP") == "1"
 
 # The fused prefill pair is the one fused path that RAISES instead of degrading when its
 # preconditions are not met -- it is built for chunk 64 and it needs Triton -- and it raises inside
@@ -838,7 +839,11 @@ class Qwen38Engine:
         dt_bias = self.w.norm(f"{p}.linear_attn.dt_bias")
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias.float())
         rep = cfg.num_v_per_k
-        if rep > 1:
+        # the fused prefill reads q and k at key head h // rep itself (GDN_PREFILL_NOREP): the
+        # widened copies and two thirds of the l2 norms are not made; every value is the same
+        norep = (GDN_PREFILL_NOREP and FUSED_GDNPREFILL and self.tree is None and self.trace is None
+                 and T >= GDN_PREFILL_CHUNK and B == 1)
+        if rep > 1 and not norep:
             q = q.repeat_interleave(rep, dim=2)
             k = k.repeat_interleave(rep, dim=2)
         if self.trace is not None:

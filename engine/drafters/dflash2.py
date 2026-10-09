@@ -392,10 +392,60 @@ def quantise_projections(w: dict, n_layers: int, key: str | None = None) -> dict
     return out
 
 
+# The drafter's projections (and its context fc) as EXL3 blocks from a file written by
+# tools/drafter_exl3_quant.py (ENG-215): drafter only, so the output stays exact and what the bits
+# can cost is acceptance. Unset = the NVFP4 / bf16 projections as before (the fallback).
+DRAFT_EXL3 = _S.get("DRAFT_EXL3") or ""
+_EXL3_PROJ: dict = {}
+
+
+def exl3_projections(w: dict, path: str, key: str) -> dict:
+    """A copy of `w` with every projection of `path` as an EXL3 block (the fc as `fc.exl3`)."""
+    if key in _EXL3_PROJ:
+        return _EXL3_PROJ[key]
+    from tools.exl3_linear import read_block
+    out = dict(w)
+    dev = w["fc.weight"].device
+    n, nb = 0, 0
+    with safe_open(path, framework="pt", device=str(dev)) as f:
+        bases = sorted({k[: -len(".trellis")] for k in f.keys() if k.endswith(".trellis")})
+        for base in bases:
+            blk = read_block(f, base)
+            target = "fc.exl3" if base == "fc" else f"{base}.weight"
+            if base != "fc":
+                old = w[target]
+                assert tuple(blk.shape) == tuple(old.shape), (base, blk.shape, old.shape)
+            out[target] = blk
+            n += 1
+            nb += blk.nbytes
+    # q|k|v and gate|up as one launch each where the members share the rate (the members become
+    # views of the group, which sum in the group's order alone too)
+    from tools.exl3_linear import EXL3Block
+    fused = 0
+    for i in range(1 + max(int(k.split(".")[1]) for k in out if k.startswith("layers."))):
+        for gname, members in ((f"layers.{i}.self_attn.qkv", ("self_attn.q_proj", "self_attn.k_proj",
+                                                               "self_attn.v_proj")),
+                               (f"layers.{i}.mlp.gate_up", ("mlp.gate_proj", "mlp.up_proj"))):
+            blocks = [out.get(f"layers.{i}.{m}.weight") for m in members]
+            if not all(isinstance(b, EXL3Block) for b in blocks) or len({b.kb for b in blocks}) != 1:
+                continue
+            grp = EXL3Block.group(blocks, list(members))
+            out[gname] = grp
+            for j, m in enumerate(members):
+                out[f"layers.{i}.{m}.weight"] = grp.member(j)
+            fused += 1
+    print(f"[drafter] {n} EXL3 projections from {path}: {nb / 1e9:.3f} GB, {fused} fused groups")
+    _EXL3_PROJ[key] = out
+    return out
+
+
 def _lin(x: torch.Tensor, w) -> torch.Tensor:
-    """`F.linear` for a bf16 weight, the W4A16 kernel for an NVFP4 one."""
+    """`F.linear` for a bf16 weight, the W4A16 kernel for an NVFP4 one, the trellis kernel for an
+    EXL3 one."""
     if isinstance(w, torch.Tensor):
         return F.linear(x, w)
+    if type(w).__name__ == "EXL3Block":
+        return w.matmul(x.contiguous() if x.dim() == 2 else x)
     from tools.nvfp4_linear import nvfp4_matmul
     return nvfp4_matmul(x.reshape(-1, x.shape[-1]), w).view(*x.shape[:-1], w.N)
 
@@ -567,6 +617,9 @@ class DFlash2Module:
         if target_hidden.ndim != 2 or target_hidden.shape[-1] != expected:
             raise ValueError(f"target_hidden must be [N, {expected}], got "
                              f"{tuple(target_hidden.shape)}")
+        if "fc.exl3" in self.w:
+            return _rms(_lin(target_hidden, self.w["fc.exl3"]), self.w["hidden_norm.weight"],
+                        cfg.rms_norm_eps)
         if DRAFT_FC_NVFP4:
             fc = self.w.get("fc.nvfp4")
             if fc is None:
@@ -639,11 +692,16 @@ class DFlash2Module:
             if conv is not None:
                 x, akernel = conv[0].prepare(x, block_pos)
 
-            q = _lin(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
+            qkv = self.w.get(f"{p}.self_attn.qkv")
+            if qkv is not None:
+                qy, ky, vy = _lin(x, qkv).split(qkv.sizes, dim=-1)
+                q, k, v = qy.reshape(t, nh, hd), ky.reshape(t, nkv, hd), vy.reshape(t, nkv, hd)
+            else:
+                q = _lin(x, self.w[f"{p}.self_attn.q_proj.weight"]).view(t, nh, hd)
+                k = _lin(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
+                v = _lin(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
             q = _rms(q, self.w[f"{p}.self_attn.q_norm.weight"], cfg.rms_norm_eps)
-            k = _lin(x, self.w[f"{p}.self_attn.k_proj.weight"]).view(t, nkv, hd)
             k = _rms(k, self.w[f"{p}.self_attn.k_norm.weight"], cfg.rms_norm_eps)
-            v = _lin(x, self.w[f"{p}.self_attn.v_proj.weight"]).view(t, nkv, hd)
             q = _apply_rope(q.transpose(0, 1)[None], cos, sin)
             k = _apply_rope(k.transpose(0, 1)[None], cos, sin)
             v = v.transpose(0, 1)[None]
@@ -667,8 +725,12 @@ class DFlash2Module:
             mkernel = None
             if conv is not None:
                 x, mkernel = conv[1].prepare(x, block_pos)
-            g = _lin(x, self.w[f"{p}.mlp.gate_proj.weight"])
-            u = _lin(x, self.w[f"{p}.mlp.up_proj.weight"])
+            gu = self.w.get(f"{p}.mlp.gate_up")
+            if gu is not None:
+                g, u = _lin(x, gu).split(gu.sizes, dim=-1)
+            else:
+                g = _lin(x, self.w[f"{p}.mlp.gate_proj.weight"])
+                u = _lin(x, self.w[f"{p}.mlp.up_proj.weight"])
             x = _lin(F.silu(g) * u, self.w[f"{p}.mlp.down_proj.weight"])
             if conv is not None:
                 x = conv[1].finish(x, mkernel, block_pos)
@@ -1073,7 +1135,10 @@ class DFlash2Drafter(Drafter):
         if missing:
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
-        if DRAFT_NVFP4:
+        if DRAFT_EXL3:
+            self._w = exl3_projections(self._w, os.path.expanduser(self._exl3_file()),
+                                       key=f"{self.snapshot}|{self._exl3_file()}")
+        elif DRAFT_NVFP4:
             self._w = quantise_projections(self._w, self.cfg.num_hidden_layers, key=self.snapshot)
         self.module = DFlash2Module(self.cfg, self._w)
         self._alloc_cache()
@@ -1081,6 +1146,14 @@ class DFlash2Drafter(Drafter):
             from tools.draft_head import load_draft_head
             self.head, self.head_index = load_draft_head(self._draft_head_path, self.eng.device)
         return self.module
+
+    def _exl3_file(self) -> str:
+        """QWEN38_DRAFT_EXL3: one file, or a directory holding `<checkpoint dir name>.safetensors`
+        for each arm (the length router builds both)."""
+        p = os.path.expanduser(DRAFT_EXL3)
+        if os.path.isdir(p):
+            return os.path.join(p, os.path.basename(os.path.normpath(self.snapshot)) + ".safetensors")
+        return p
 
     def _alloc_cache(self) -> None:
         cfg = self.cfg

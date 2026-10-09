@@ -127,7 +127,8 @@ if HAVE_TRITON:
     def _intra(K, V, G, BETA, UB, KCD,
                T, s_kt, s_kh, s_vt, s_vh, s_gt, s_gh,
                C: tl.constexpr, DK: tl.constexpr, DV: tl.constexpr,
-               STEPS: tl.constexpr, PREC: tl.constexpr, SERIES: tl.constexpr):
+               STEPS: tl.constexpr, PREC: tl.constexpr, SERIES: tl.constexpr,
+               REP: tl.constexpr = 1):
         """One (head, chunk): everything that does not read the recurrent state."""
         h = tl.program_id(0)
         c = tl.program_id(1)
@@ -137,7 +138,7 @@ if HAVE_TRITON:
         ok = tl.arange(0, DK)
         ov = tl.arange(0, DV)
 
-        k = tl.load(K + rows[:, None] * s_kt + h * s_kh + ok[None, :],
+        k = tl.load(K + rows[:, None] * s_kt + (h // REP) * s_kh + ok[None, :],
                     mask=m[:, None], other=0.0).to(tl.float32)
         v = tl.load(V + rows[:, None] * s_vt + h * s_vh + ov[None, :],
                     mask=m[:, None], other=0.0).to(tl.float32)
@@ -190,9 +191,12 @@ if HAVE_TRITON:
     def _scan(Q, K, G, UB, KCD, OUT, S,
               T, NC, s_kt, s_kh, s_gt, s_gh, s_ot, s_oh,
               C: tl.constexpr, DK: tl.constexpr, DV: tl.constexpr, BV: tl.constexpr,
-              SCALE: tl.constexpr, PREC: tl.constexpr, PREC_A: tl.constexpr):
-        """One (head, value block): the chunks in order, with the state tile in registers."""
+              SCALE: tl.constexpr, PREC: tl.constexpr, PREC_A: tl.constexpr,
+              REP: tl.constexpr = 1):
+        """One (head, value block): the chunks in order, with the state tile in registers.
+        q and k are read at key head h // REP (REP > 1: the caller did not widen them)."""
         h = tl.program_id(0)
+        hq = h // REP
         vbk = tl.program_id(1)
         i = tl.arange(0, C)
         ok = tl.arange(0, DK)
@@ -203,9 +207,9 @@ if HAVE_TRITON:
         for c in range(NC):
             rows = c * C + i
             m = rows < T
-            q = tl.load(Q + rows[:, None] * s_kt + h * s_kh + ok[None, :],
+            q = tl.load(Q + rows[:, None] * s_kt + hq * s_kh + ok[None, :],
                         mask=m[:, None], other=0.0).to(tl.float32)
-            k = tl.load(K + rows[:, None] * s_kt + h * s_kh + ok[None, :],
+            k = tl.load(K + rows[:, None] * s_kt + hq * s_kh + ok[None, :],
                         mask=m[:, None], other=0.0).to(tl.float32)
             g = tl.load(G + rows * s_gt + h * s_gh, mask=m, other=0.0).to(tl.float32)
             q = q * SCALE          # already l2-normalised by the caller, as in _intra
@@ -289,8 +293,11 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
     """
     if not HAVE_TRITON:
         raise RuntimeError("triton is not available")
-    B, T, H, Dk = query.shape
-    Dv = value.shape[-1]
+    B, T, Hk, Dk = query.shape
+    H, Dv = value.shape[2], value.shape[-1]
+    if H % Hk:
+        raise ValueError(f"{H} value heads over {Hk} key heads")
+    rep = H // Hk
     if B != 1:
         raise ValueError(f"fused_chunk_prefill is a single sequence, got B={B}")
     if chunk_size != CHUNK:
@@ -307,8 +314,8 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
     # does it: two elementwise passes over a bf16 tensor, against a state that sums over the whole
     # sequence and would carry any difference in them to the end of it.
     from engine import gdn as _gdn
-    q = _gdn.l2norm(query, dim=-1, eps=1e-6).reshape(T, H, Dk).contiguous()
-    k = _gdn.l2norm(key, dim=-1, eps=1e-6).reshape(T, H, Dk).contiguous()
+    q = _gdn.l2norm(query, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
+    k = _gdn.l2norm(key, dim=-1, eps=1e-6).reshape(T, Hk, Dk).contiguous()
     v = value.reshape(T, H, Dv).contiguous()
     gg = g.reshape(T, H).contiguous()
     bb = beta.reshape(T, H).contiguous()
@@ -324,13 +331,13 @@ def fused_chunk_prefill(query, key, value, g, beta, state=None, *, chunk_size: i
                     T, k.stride(0), k.stride(1), v.stride(0), v.stride(1),
                     gg.stride(0), gg.stride(1),
                     C=chunk_size, DK=Dk, DV=Dv, STEPS=STEPS, PREC=prec, SERIES=series,
-                    num_warps=WARPS_INTRA)
+                    REP=rep, num_warps=WARPS_INTRA)
     _scan[(H, Dv // bv)](q, k, gg, ub, kcd, out, S,
                          T, nc, q.stride(0), q.stride(1), gg.stride(0), gg.stride(1),
                          out.stride(0), out.stride(1),
                          C=chunk_size, DK=Dk, DV=Dv, BV=bv,
-                         SCALE=Dk ** -0.5, PREC=prec_scan, PREC_A=prec_a, num_warps=WARPS_SCAN,
-                         num_stages=STAGES_SCAN)
+                         SCALE=Dk ** -0.5, PREC=prec_scan, PREC_A=prec_a, REP=rep,
+                         num_warps=WARPS_SCAN, num_stages=STAGES_SCAN)
     return out.reshape(B, T, H, Dv), S.reshape(B, H, Dk, Dv)
 
 
