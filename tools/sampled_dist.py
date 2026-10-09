@@ -209,7 +209,8 @@ def serve(a) -> dict:
         sargs, temp = CONFIGS[cfg]
         ns = argparse.Namespace(port=a.port, python=Path(a.python), pythonpath=Path(a.pythonpath),
                                 repo=Path(a.repo), max_len=a.max_len, len_fixed=0, budget=16,
-                                nvfp4=row3.DEFAULT_NV, head=row3.DEFAULT_HEAD,
+                                nvfp4=os.environ.get("NV") or row3.DEFAULT_NV,
+                                head=os.environ.get("HEAD") or row3.DEFAULT_HEAD,
                                 server_arg=["--drop-idle"] + sargs, len_latch=True, start_timeout=600, tree=True)
         proc = row3.start_server(ns, {}, Path(a.log_dir) / f"{cfg}.log")
         t0 = time.time()
