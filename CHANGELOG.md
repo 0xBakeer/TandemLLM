@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.5.1, 2026-10-10
+
+Two dashboard numbers were wrong, and :8000 now runs four requests at once. The text does not change.
+
+- The cache hit counts only the client's own prompt tokens that came from a cache. Rows the conductor adds are reported apart as `hidden_tokens`. The Parallel view had shown 117.2 % (112K cached of 95.3K prompt tokens).
+- The live prefill rate counts only the rows the engine computed, so reused and restored rows no longer raise it. It had shown 17,892 tok/s on a prompt that ran at about 800.
+- Four parallel requests on :8000 (`QSE_PARALLEL=4`): slot 0 keeps its 262,144-token window, and the three side slots get 32,768 tokens each. With 4 slots the memory guard leaves the narrator unloaded, and about 29 GB stays free after warm-up. A load test of 2 against 4 slots is still to come.
+
 ## 0.5.0, 2026-10-09
 
 Weight profiles. The engine serves either our NVFP4 set or an EXL3 quant of Qwen3.8-27B, from 2.5 to 6.0 bits a weight, one at a time. `ops/use-profile.sh <name>` switches between them, and the model is still `TandemLLM`. The `nvfp4` profile gives the same greedy text as 0.4.8 on the three prompts checked. An `exl3-*` profile serves other weights, so its text differs from NVFP4's. Either way, speculative decoding stays exact against whichever weights run.
