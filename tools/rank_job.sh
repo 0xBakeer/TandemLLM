@@ -57,14 +57,16 @@ VAL=$(cat $W/val.txt 2>/dev/null | tr -d '\n')
 ( while true; do sleep 300; hf buckets sync $OUT "$BUCKET/$RUN" >/dev/null 2>&1; done ) &
 SYNC=$!
 
-arm() {   # arm <b8|b16> <block> <ckpt>
+arm() {   # arm <b8|b16> <block> <ckpt>   (STEPS_B16 / FINAL_B16 override the b16 arm's budget)
   local A=$1 B=$2 CK=$3 specs="" l
+  local STEPS=$STEPS FINAL_STEPS=$FINAL_STEPS
+  [ $A = b16 ] && { STEPS=${STEPS_B16:-$STEPS}; FINAL_STEPS=${FINAL_B16:-$FINAL_STEPS}; }
   for l in ${LAMBDAS//,/ }; do specs="$specs,$A-l$l=rank@$l:$LR:$B"; done
   specs=${specs#,}
   log "$A probe: $specs, $STEPS steps"
   python3 -u tools/train_dflash2.py --data $DATA --ckpt $CK --model /tmp/models/target \
     --probe "$specs" --probe-out $OUT/$A --export-final --heldout "$VAL" --steps $STEPS \
-    --selector-lr $SEL_LR --eval-tree auto --eval-every $(( STEPS / 4 )) --gen-weight 1.0 \
+    --selector-lr $SEL_LR --eval-tree auto --eval-every $(( STEPS / 2 )) --gen-weight 1.0 \
     2>&1 | tee $OUT/$A-probe.log | grep --line-buffered -E "eval @|probe |saved|NOTE|Traceback|Error|step +(1|25|1000|2000|3000|4000|6000|8000) " | sed -u "s/^/[$A] /"
   local best
   best=$(grep -E "^  probe $A-l" $OUT/$A-probe.log | sed -E 's/^  probe ([^ ]+) -> .*ALL=([0-9.]+).*/\2 \1/' \
@@ -77,7 +79,7 @@ arm() {   # arm <b8|b16> <block> <ckpt>
   python3 -u tools/train_dflash2.py --data $DATA --ckpt $CK --model /tmp/models/target \
     --probe "$A-l$l-s$FINAL_STEPS=rank@$l:$LR:$B" --probe-out $OUT/$A --export-final \
     --heldout "$VAL" --steps $FINAL_STEPS --selector-lr $SEL_LR --eval-tree auto \
-    --eval-every $(( FINAL_STEPS / 4 )) --gen-weight 1.0 2>&1 | tee $OUT/$A-final.log | grep --line-buffered -E "eval @|probe |saved|NOTE|Traceback|Error|step +(1|25|1000|2000|3000|4000|6000|8000) " | sed -u "s/^/[$A] /"
+    --eval-every $(( FINAL_STEPS / 2 )) --gen-weight 1.0 2>&1 | tee $OUT/$A-final.log | grep --line-buffered -E "eval @|probe |saved|NOTE|Traceback|Error|step +(1|25|1000|2000|3000|4000|6000|8000) " | sed -u "s/^/[$A] /"
   log "$A final: $(grep -E '^  probe ' $OUT/$A-final.log | tail -1)"
 }
 
