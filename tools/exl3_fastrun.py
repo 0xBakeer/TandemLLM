@@ -69,7 +69,11 @@ def server_cmd(a) -> list[str]:
             "--nvfp4", a.nvfp4, "--fp8-head", a.head,
             *(["--no-session-cache", "--no-prefix-cache", "--cache-budget-gb", "0"] if not a.caches else []),
             "--verbose", "--suffix-store=", "--len-latch", "--drop-idle",
-            "--reasoning-format", "tags", "--default-max-tokens", "32768"] + a.server_arg
+            "--reasoning-format", "tags", "--default-max-tokens", "32768",
+            # the release's sampled verify (ops/start.sh SAMPLED_TREE=det): a sampled request walks
+            # the greedy request's tree; "chain" = the q-aware chain every row before 2026-10-09
+            # 11:40 ran
+            *(["--sampled-tree=det"] if a.sampled_tree == "det" else [])] + a.server_arg
 
 
 def health(port: int) -> bool:
@@ -154,6 +158,8 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.0,
                    help="decode workloads sampled at this temperature (prefill stays greedy)")
     p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--sampled-tree", default="det", choices=("det", "chain"),
+                   help="a sampled request's verify: det (the release's) or the q-aware chain")
     p.add_argument("--prefill-salt", action="store_true",
                    help="start every prefill prompt with its own line, so no prefill reuses another's "
                         "rows from the caches (a list may repeat a length)")
