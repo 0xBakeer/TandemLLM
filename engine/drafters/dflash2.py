@@ -1135,7 +1135,7 @@ class DFlash2Drafter(Drafter):
         if missing:
             raise RuntimeError(f"draft checkpoint is missing {len(missing)} tensors, "
                                f"first: {missing[:3]}")
-        if DRAFT_EXL3:
+        if DRAFT_EXL3 and os.path.isfile(self._exl3_file()):
             self._w = exl3_projections(self._w, os.path.expanduser(self._exl3_file()),
                                        key=f"{self.snapshot}|{self._exl3_file()}")
         elif DRAFT_NVFP4:
@@ -1149,7 +1149,8 @@ class DFlash2Drafter(Drafter):
 
     def _exl3_file(self) -> str:
         """QWEN38_DRAFT_EXL3: one file, or a directory holding `<checkpoint dir name>.safetensors`
-        for each arm (the length router builds both)."""
+        for each arm (the length router builds both); an arm whose file is not there keeps its
+        NVFP4 projections."""
         p = os.path.expanduser(DRAFT_EXL3)
         if os.path.isdir(p):
             return os.path.join(p, os.path.basename(os.path.normpath(self.snapshot)) + ".safetensors")
