@@ -213,7 +213,7 @@ KNOBS: dict[str, tuple] = {
     'EXL3_STAGES': ('3', 'tools/exl3_linear.py'),
     'SAMPLE_TOPP_K': ('1024', 'engine/sample.py'),
     'SAMPLE_BATCH': ('1', 'engine/sample.py'),
-    'SAMPLE_NUCLEUS': ('0', 'engine/sample.py'),
+    'SAMPLE_NUCLEUS': ('1', 'engine/sample.py'),
     'SAMPLED_CUT': ('0', 'engine/router.py'),
     # the layer-major prefill (engine/model.py `prefill_window`): rows a window takes when its chunk
     # lines hand out anchors/snapshots (each line holds a recurrent-state copy), and when none do;

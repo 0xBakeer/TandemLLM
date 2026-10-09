@@ -72,7 +72,9 @@ BATCH = _S.get("SAMPLE_BATCH") == "1"
 # materialises (four full-vocabulary passes fewer a row). The same distribution: p(i) proportional
 # to exp(logit_i / T) over the nucleus either way. A row whose nucleus is wider than TOPP_K takes the
 # sort as `_top_p_fast` does. Unseeded det walks only (no q, no min_p / top_k); everything else is
-# `probs_rows` + `tree_walk` as before. 0 = off.
+# `probs_rows` + `tree_walk` as before. Default on since 2026-10-09 19:10 (sampled 50-prompt row
+# base vs nucleus 2 x 2 runs a side: no class worse beyond the run-to-run spread; board gate
+# tools/sampled_dist.py nospec/det/cool PASS, greedy identical). 0 = the probs_rows path.
 NUCLEUS = _S.get("SAMPLE_NUCLEUS") == "1"
 
 
