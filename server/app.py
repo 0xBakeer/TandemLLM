@@ -4172,7 +4172,7 @@ def _system() -> dict:
                    "started_at": dashboard_api.iso_utc_s(STATE.get("started", time.time())),
                    "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                    "pid": os.getpid(), "model": served_name(), "base_model": STATE.get("model"),
-                   "max_len": STATE.get("max_len"),
+                   "weights": weights_profile(), "max_len": STATE.get("max_len"),
                    "drafter": type(STATE.get("drafter")).__name__
                    if STATE.get("drafter") is not None else None,
                    "tree": bool(STATE.get("tree")),
@@ -4954,6 +4954,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "model": served_name(), "base_model": STATE.get("model"),
+                "version": STATE.get("version", ""), "weights": weights_profile(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                 "engine_busy": LOCK.locked(),
                 "inflight": dict(INFLIGHT),
@@ -8958,7 +8959,27 @@ def identity() -> dict:
             out["git_sha"] = open(os.path.join(root, ".git-sha")).read().strip()[:12]
         except OSError:
             pass
+    # the weight profile ops/use-profile.sh started (ops/profiles/<name>.env): it joins the version,
+    # so the dashboard's header, /metrics' info and every ledger row (engine_version) carry it
+    prof = weights_profile()["name"]
+    if prof and out["version"]:
+        out["version"] = f"{out['version']}+{prof}"
     return out
+
+
+def weights_profile() -> dict:
+    """The weight profile this process serves (QSE_WEIGHTS, exported from ops/profiles/<name>.env):
+    its name, the target's weights, the drafters, the draft head and the sampler's nucleus."""
+    e = os.environ
+    exl3 = _S.get("EXL3") or None
+    nv = e.get("NV") or _S.get("NVFP4") or None
+    return {"name": e.get("QSE_WEIGHTS") or None,
+            "format": "exl3" if exl3 else ("nvfp4" if nv else None),
+            "weights": exl3 or nv,
+            "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
+            "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
+            "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
+            "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
 
 
 def serve_until_drained(httpd) -> None:
