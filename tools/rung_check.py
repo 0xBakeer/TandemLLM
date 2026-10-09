@@ -47,6 +47,8 @@ def main() -> None:
     ap.add_argument("dirs", nargs="+")
     ap.add_argument("--stair", required=True)
     ap.add_argument("--ctx", default="1024")
+    ap.add_argument("--cost-stair", default="", help="the staircase the tok/s column is costed on "
+                    "(default --stair); --stair is then only what the cut prices with")
     ap.add_argument("--draft-ms", type=float, default=14.7)
     ap.add_argument("--host-ms", type=float, default=3.5)
     ap.add_argument("--v64-over", type=float, default=8.0, help="V(64) = V(16) + this")
@@ -58,19 +60,23 @@ def main() -> None:
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
     tab = {int(k): float(v) for k, v in json.load(open(a.stair))[a.ctx]["tree"].items()}
-    v16 = verify_ms(16, tab)
+    ctab = ({int(k): float(v) for k, v in json.load(open(a.cost_stair))[a.ctx]["tree"].items()}
+            if a.cost_stair else tab)
+    v16 = verify_ms(16, ctab)
     extra = {int(k): float(v) for k, v in (x.split(":") for x in a.extra.split(",") if x)}
     wide = {**tab, **extra}
+    cwide = {**ctab, **extra}
     if extra:
-        price = lambda T: verify_ms(T, wide)  # noqa: E731
+        price = lambda T: verify_ms(T, cwide)  # noqa: E731
     else:
-        price = lambda T: verify_ms(T, tab) if T <= 32 else v16 + a.v64_over  # noqa: E731
+        price = lambda T: verify_ms(T, ctab) if T <= 32 else v16 + a.v64_over  # noqa: E731
     out = {}
     for d in a.dirs:
         traces = load(os.path.expanduser(d))
         ident = collections.Counter()
         npos = 0
         pol = ["host16", "rung16", "rung32", "rung64", "pick16-32", "pick16-64"]
+        rows_used = collections.Counter()
         if extra:
             pol.append("hostwide")
         by = collections.defaultdict(lambda: {p: [0, 0, 0.0] for p in pol})   # blocks, committed, ms
@@ -125,6 +131,8 @@ def main() -> None:
                         rows = T
                     acc = accepted(t, target, at)
                     res[p][0] += 1
+                    if p == "host16":
+                        rows_used[rows] += 1
                     res[p][1] += min(acc + 1, len(target) - 1 - at)
                     res[p][2] += price(rows) + a.draft_ms + a.host_ms
                     at += acc + 1
@@ -134,6 +142,11 @@ def main() -> None:
         print(f"\n== {d}: {npos} positions; identical to lattice_tree: " +
               ", ".join(f"T{T} {ident[(T, True)]}/{ident[(T, True)] + ident[(T, False)]}"
                         for T in rung.SIZES))
+        nb = sum(rows_used.values()) or 1
+        print("host cut rows: mean %.1f, <=16: %.2f, 17-24: %.2f, 25-32: %.2f" % (
+            sum(r * c for r, c in rows_used.items()) / nb, sum(c for r, c in rows_used.items() if r <= 16) / nb,
+            sum(c for r, c in rows_used.items() if 17 <= r <= 24) / nb,
+            sum(c for r, c in rows_used.items() if 25 <= r <= 32) / nb))
         print("class     " + " ".join(f"{p:>18s}" for p in pol) + "   (committed/block, tok/s at the prices)")
         rows_out = {}
         for k, v in sorted(by.items()):
