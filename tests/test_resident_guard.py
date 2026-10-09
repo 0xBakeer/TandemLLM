@@ -262,7 +262,8 @@ def test_the_routers_question_on_a_side_slot_is_no_conversation_to_carry():
         S.bind(None)
         A.SIDE_CARRY = was
     src = open(A.__file__).read()
-    assert src.count('side.no_carry = bool(me["own"]) or lane_kind is not None') == 3
+    # 0.4.8's park and side-slot work (798b413, b375177) added three more side paths with the rule
+    assert src.count('side.no_carry = bool(me["own"]) or lane_kind is not None') == 6
 
 
 # ------------------------------------------------------------------ 4. the working directory

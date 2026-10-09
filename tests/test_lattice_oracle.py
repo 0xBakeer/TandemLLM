@@ -1,4 +1,8 @@
 """RND-32: the lattice oracle's replay on a synthetic lattice with a known answer (CPU)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from tools import lattice_oracle as O

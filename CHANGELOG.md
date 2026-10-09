@@ -2,6 +2,39 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.5.0, 2026-10-09
+
+Weight profiles. The engine serves either our NVFP4 set or an EXL3 quant of Qwen3.8-27B, from 2.5 to 6.0 bits a weight, one at a time. `ops/use-profile.sh <name>` switches between them, and the model is still `TandemLLM`. The `nvfp4` profile gives the same greedy text as 0.4.8 on the three prompts checked. An `exl3-*` profile serves other weights, so its text differs from NVFP4's. Either way, speculative decoding stays exact against whichever weights run.
+
+Against BF16 on 8 held-out rows (16,376 positions), in this engine: NVFP4 has a KL of 0.0582 and agrees on the top token 93.35 % of the time. EXL3 4.5 has 0.0217 and 95.78 %, and reads 14.70 GB a decode step against NVFP4's 15.01.
+
+Speed on EXL3 4.5, fast-run prompts, store off, same hour on 2026-10-09: greedy prose 41.3, chat 52.5, code 84.5 tok/s. The 50-prompt row runs 51.3 tok/s greedy and 50.9 sampled. TTFT with caches off is 8.8 s at 8k and 36.4 s at 32k.
+
+### Weights
+
+- EXL3 linear layers behind `QWEN38_EXL3`: one GEMM kernel per bit width from 2 to 8, for 1 to 32 verify rows. The trellis decode matches exllamav3 bit for bit. With the flag off, the engine is the 0.4.8 engine.
+- Both drafters run in EXL3 at 3 bits (`QWEN38_DRAFT_EXL3`), with a 4-bit EXL3 draft head (`QWEN38_DRAFT_HEAD_EXL3`). On the 50-prompt row they move EXL3 4.5 from 49.2 to 51.3 tok/s greedy.
+- Profiles live in `ops/profiles/*.env`. `ops/use-profile.sh` fetches missing weights from the private Hugging Face repo after a disk check. A smoke request follows the start; if it fails, the old profile comes back. The crons start the active profile, and `/health` and the dashboard name it.
+
+### Prompt processing (prefill)
+
+- Layer-major prefill windows decode each EXL3 weight slab once a window instead of once a 1,024-row chunk. With caches on, 32k goes from 52.2 to 42.2 s.
+- A prefill MLP bridge feeds the prefill MLP's products straight into the down projection: 8k from 9.7 to 8.8 s, 32k from 39.1 to 36.3 s, caches off. Both are bit-identical.
+
+### Sampling
+
+- A sampled round costs what a greedy one does: top-p reads each row's top 1,024 logits and the draws stay on the device, 97.4 to 89.1 ms a round.
+- `QWEN38_SAMPLE_NUCLEUS` (on by default) draws inside each row's nucleus. The kept set is bit-identical, and the sampled-distribution gate passes.
+
+### Attention
+
+- Verify attention runs three pipeline stages: 24 rows at 64k drop from 118.9 to 107.9 ms, bit-identical.
+
+### Tools
+
+- `tools/exl3`: the Hugging Face Jobs pipeline that built the six EXL3 sizes.
+- Also new: the lattice oracle, the sampled-tree replay and the drafter ranking-loss options. The ranking fine-tune (RND-37) gave no gain, and its tools stay for reuse.
+
 ## 0.4.8, 2026-10-08
 
 Two Open WebUI chats beside each other, after the owner's run of 2026-10-08 (two chats that took turns on slot 0 with the side slot idle, and a chat read again cold, 60,814 tokens in 91 s, after its retrieval block moved). The text does not change: every resume here is held to the end anchor's gate.

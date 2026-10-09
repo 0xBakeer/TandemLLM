@@ -1,4 +1,8 @@
 """ENG-209 step 1 / ENG-210: the Rung's CPU fill equals the host builder node for node."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import random
 
