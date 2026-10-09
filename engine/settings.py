@@ -95,7 +95,7 @@ KNOBS: dict[str, tuple] = {
     'GDN_AB': ('0', 'engine/model.py'),
     'GDN_CHUNK': ('64', 'engine/model.py'),
     'GDN_PREFILL_NOREP': ('0', 'engine/model.py'),
-    'ATTN_STAGES3': ('0', 'tools/attn_kernels.py'),
+    'ATTN_STAGES3': ('1', 'tools/attn_kernels.py'),
     'GDN_MM': ('fp32', 'engine/gdn.py'),
     'GDN_MM_FROM': ('64', 'engine/gdn.py'),
     'GDN_PREFILL_BV': ('32', 'tools/gdn_prefill_kernels.py'),
