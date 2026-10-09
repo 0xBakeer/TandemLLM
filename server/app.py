@@ -4981,6 +4981,7 @@ class Handler(BaseHTTPRequestHandler):
         says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
         (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
         `Retry-After` and the code `memory_wait_timeout`."""
+        self._mem_wait = False
         adm = pool.admission
         if adm is None:
             return True
@@ -6905,6 +6906,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 for k, v in (plan.headers() if plan is not None else ()):
                     self.send_header(k, v)             # X-Tandem and X-Tandem-Profile
+                if getattr(self, "_mem_wait", False):
+                    self.send_header("X-Tandem-Wait", "memory")      # SRV-305
                 self.end_headers()
             self._early_body = True                    # S1: a stream opened early goes on here
             w = self.wfile

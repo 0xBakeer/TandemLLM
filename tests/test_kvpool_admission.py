@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -121,6 +122,80 @@ def test_contract_knows_the_state_and_the_total():
     assert '"waiting_memory"' in txt
     assert "waiting_memory" in s["properties"]["totals"]["properties"] if "totals" in s.get(
         "properties", {}) else "waiting_memory" in txt
+
+
+def _app():
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import test_forward_tree  # noqa: F401  (the CPU environment before the engine imports)
+    from server import app
+    return app
+
+
+class _H:
+    """The handler's surface `_par_admit` uses."""
+
+    def __init__(self):
+        self.sent = None
+
+    def _client_gone(self):
+        return False
+
+    def _send_bytes(self, code, raw, extra_headers=()):
+        self.sent = (code, json.loads(raw), dict(extra_headers))
+
+
+def test_a_non_streamed_wait_ends_in_a_readable_503():
+    import types
+    import torch
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    app.STATE["queue_timeout"] = 1.5
+    app.STATE["request_timeout"] = 3600.0
+    adm = _adm(16)
+    adm.reserve("big", 2 * GiB)
+    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+    rec = usage.RequestRecord("chatcmpl-y", "chat", False)
+    said = []
+    h = _H()
+    t0 = time.monotonic()
+    assert app.Handler._par_admit(h, pool, "small", torch.zeros(576), rec=rec,
+                                  say=lambda short, place=1: said.append((short, place)),
+                                  stream=False) is False
+    assert 1.4 < time.monotonic() - t0 < 4.0
+    code, body, hdr = h.sent
+    assert code == 503 and body["error"]["code"] == "memory_wait_timeout", body
+    assert "memory is almost full" in body["error"]["message"] and hdr.get("Retry-After") == "30"
+    assert rec.wait_reason == "memory" and rec.waiting_memory is False
+    assert said and said[0][1] == 1, said              # the line, with its place in line
+    assert adm.stats["timeouts"] == 1 and adm.report()["waiting_memory"] == 0
+    assert h._mem_wait is True
+
+
+def test_a_streamed_wait_outlasts_the_queue_timeout():
+    import threading
+    import types
+    import torch
+    app = _app()
+    from server import usage
+    app.STATE.clear()
+    app.STATE["queue_timeout"] = 0.5
+    app.STATE["request_timeout"] = 30.0
+    box = {"avail": 16 * GiB}
+    adm = slots.Admission(15 * GiB, meminfo=lambda: {"MemAvailable": box["avail"]},
+                          growth=lambda: 0)
+    adm.reserve("big", 2 * GiB)
+    pool = types.SimpleNamespace(admission=adm, turn=None, running=lambda: 1)
+    rec = usage.RequestRecord("chatcmpl-z", "chat", True)
+    rec.lock_acquired()
+
+    def free_later():
+        time.sleep(2.5)
+        adm.release("big")
+    threading.Thread(target=free_later, daemon=True).start()
+    h = _H()
+    assert app.Handler._par_admit(h, pool, "small", torch.zeros(576), rec=rec, stream=True) is True
+    assert rec.wait_mem_ms >= 2000 and h.sent is None and rec.waiting_memory is False
 
 
 if __name__ == "__main__":

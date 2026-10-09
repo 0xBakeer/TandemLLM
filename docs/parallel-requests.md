@@ -62,6 +62,41 @@ While two requests run, Laya answers only when slot 0 is idle: a decision forwar
 
 The side slots' buffers are the engine's for good, so the engine's memory policy (engine/cache.py `Budget`) raises its ceiling and peak by what they took when they are built (7.65 GiB for one 65,536-token slot without graphs). From 0.3.44-test to 0.3.46-test the first request's residency document set the two limits again to their configured figures (70 and 77 GiB) and the raise was gone: the caches had no room left (live on 0.3.46-test: 131 anchors, 2 guest stashes, a park and a pin refused in one evening), and a guest whose stash was refused cut the resident rows at its start, so the next turn of a 41,474-token Open WebUI conversation read 41,749 tokens again (56 s). Since 0.3.47-test the slots' bytes are kept apart (`Budget.fixed`, in `/health` `cache.memory.fixed`) and added to every value the limits get. Replayed on the live engine with one build (n = 1 each): a 32,875-token conversation and two new user messages read 0 % from the cache at a 70 GiB ceiling (67.5 s and 70.7 s) and 99.9 % and 99.3 % at 78 GiB (6.4 s and 9.4 s).
 
+## The shared KV pool
+
+`QSE_KV_POOL=on` (`--kv-pool on`, SRV-307, 2026-10-10). Without it every slot allocates its whole
+window at load: 106.5 KiB a token (64 KiB of engine attention KV for the 16 full-attention layers,
+2 x 20 KiB of the two drafter arms' context KV, 256 B of rotary table). Four slots of 262,144 tokens
+would be ~106 GiB before the first request; the box could afford one long window and three short ones.
+
+With the pool, `engine/kvpool.py` reserves each KV tensor's full size as virtual addresses
+(`cuMemAddressReserve`) and maps 2 MiB physical pages (`cuMemCreate`/`cuMemMap`, the allocation
+granularity on GB10) only for the rows a conversation writes. The tensor has the static buffer's shape,
+dtype and strides, so every kernel, every view and every captured CUDA graph is unchanged, and the
+results are bit-identical by construction (tests/gpu/test_kvpool_identity_gpu.py: logits, KV rows, the
+recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
+
+- **Commit.** Every engine forward commits `start + rows` plus a margin (`QSE_KV_MARGIN_ROWS`, 256)
+  before it runs; a generation commits its prompt first; every copy into the KV (a store restore, the
+  pin, the park, the guest stash, the disk tier, the NVMe spill, a side slot's carry) commits its rows
+  before it writes them. A fresh page is zeroed, as `torch.zeros` was.
+- **Give back.** When a request ends, its slot keeps the rows its conversation still holds (the KV
+  length, the resident prefix's valid rows, a side slot's carried end) and the pages past them go back.
+- **Under pressure** a commit that would take MemAvailable under `QSE_KV_HARD_FLOOR_GB` (10) first asks
+  the memory policy's levels (store, anchors, end, stash, park, pin, roles) and the allocator's free
+  blocks, then the conversations idle side slots keep (oldest first), then slot 0's idle conversation
+  (to the NVMe first when the spill is on); only if none of that is enough is the commit refused.
+- **Admission** reserves, beside a request's prefill workspace, the KV pages its prompt and `max_tokens`
+  may still commit on its slot, credited as its slot commits them. A request that does not fit waits
+  (SRV-305): its stream carries "waiting: memory is almost full, ..." every 15 s (Open WebUI's status
+  line, opencode's reasoning; the states lines are stripped from a turn sent back), the header
+  `X-Tandem-Wait: memory`, the Parallel view shows the lane as `waiting_memory` and counts
+  `totals.waiting_memory`; a streamed request waits up to `--request-timeout`, a non-streamed one gets a
+  503 `memory_wait_timeout` with `Retry-After` after `--queue-timeout`.
+- **The memory policy** no longer holds slot 0's window: its ceiling and peak drop by it (26 GiB at
+  262,144), so the residency planner sees the uncommitted window as free and loads the narrator and the
+  Laya decider beside four slots. `/health` `kv_pool` shows the committed pages by slot.
+
 ## Which request goes where
 
 Slot 0 is the engine as it always was: the full window, the resident conversation, the disk tier and the side lane. A request takes a side slot only when slot 0 is busy, its prompt plus `max_tokens` fits the side window, it has no images, and it does not continue slot 0's resident conversation (that turn waits and resumes in place). One kind of request takes an idle side slot even when slot 0 is free (0.3.47-test, SRV-207): a guest of slot 0's conversation, that is, a short request (at most `--resident-guest-max` tokens and under a quarter of the conversation) that shares less than one prefill chunk with it, while slot 0 holds at least two chunks. The router's own questions before a new user message (the class, the package: 150 to 450 tokens) and a client's title, tags and follow-up tasks are such requests. On slot 0 a guest writes over the rows the conversation's next turn resumes from and only the guest stash puts them back; on a side slot it costs the same prefill and touches nothing of slot 0. A guest short enough for the side lane takes the idle side slot too; a side-lane request that is no guest is still served at slot 0's safe points. With every side slot busy it runs on slot 0 with the stash, as before (`QWEN38_SIDE_GUESTS=off` restores that for every guest). Everything else about the request is served by the same code: the conductor, the monitor, tool calls, structured outputs, streaming.
