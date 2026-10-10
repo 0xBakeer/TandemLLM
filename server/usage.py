@@ -198,6 +198,10 @@ class RequestRecord:
         # SRV-250: ms the parallel memory admission held this request after it took its slot
         # (inside `queue_ms`, never `prompt_ms`)
         self.wait_mem_ms: float | None = None
+        # SRV-305: why the request waited ("memory" while the admission held it for memory) and
+        # whether it is waiting for memory right now (the live and parallel views' lane state)
+        self.wait_reason: str | None = None
+        self.waiting_memory = False
         # SRV-241: how the request sampled -- None greedy, `client` the client's own sampling,
         # `regenerate` the regenerate's (server/regenerate.py); `regen` the detection's decision
         self.sampling: str | None = None

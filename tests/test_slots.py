@@ -135,6 +135,57 @@ def test_two_decoding_slots_meet_in_one_round_run_by_the_last():
     assert meet.stats["timeouts"] == 0
 
 
+def test_a_prefill_holding_the_turn_does_not_starve_a_split_round():
+    """SRV-311: slots 1 and 2 decode, slot 1 waits in this round, slot 2 is in another meeting
+    (the packed draft) and never submits here, and slot 3 holds the turn for a long prefill
+    (not decoding). The waiter times out and runs its round once it gets the turn, instead of
+    waiting for the prefill to end."""
+    pool, turn, meet = _pool(4)
+    pool.slots[1].phase = pool.slots[2].phase = "decode"
+    runs = []
+
+    def run(m):
+        with m.cv:
+            pend = list(m.pending.values())
+            m.pending.clear()
+            runs.append(sorted(r.slot for r in pend))
+            for r in pend:
+                r.out, r.ms = f"logits-{r.slot}", False
+            m.cv.notify_all()
+
+    stop = threading.Event()
+
+    def prefill():
+        turn.acquire(3)
+        while not stop.is_set():
+            time.sleep(0.02)              # a prefill chunk
+            turn.pause(3)                 # offered between chunks
+        turn.release(3)
+
+    pf = threading.Thread(target=prefill)
+    pf.start()
+    time.sleep(0.05)
+    res = {}
+
+    def slot1():
+        turn.acquire(1)
+        req = slots.VerifyReq(1, None, None, [-1, 0, 1], 0)
+        t0 = time.monotonic()
+        slots.barrier(meet, pool, turn, 1, req, run)
+        res["s"] = time.monotonic() - t0
+        res["out"] = req.out
+        turn.release(1)
+
+    th = threading.Thread(target=slot1)
+    th.start()
+    th.join(3)
+    stop.set()
+    pf.join(3)
+    assert res.get("out") == "logits-1", res
+    assert res["s"] < 1.0, f"waited {res['s']:.2f} s behind the prefill"
+    assert runs == [[1]] and meet.stats["timeouts"] == 1
+
+
 def test_a_slot_that_left_decode_does_not_keep_the_other_waiting():
     pool, turn, meet = _pool(2, timeout=0.002)
     pool.slots[0].phase = "decode"

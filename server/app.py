@@ -39,6 +39,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
+from engine import kvpool  # noqa: E402  (SRV-307 the shared KV pool)
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
 from engine.spec import Relax, ThinkBudget  # noqa: E402
@@ -529,6 +530,8 @@ def _par_health() -> dict:
     out = dict.get(STATE, "pool").report()
     r = dict.get(STATE, "disk_side")
     out["side_disk"] = r.report() if r is not None else None
+    if kvpool.POOL is not None:
+        out["kv_pool"] = kv_pool_report()
     return out
 
 
@@ -560,6 +563,8 @@ def _lane_run(job) -> None:
 #: request the conductor shapes), so the request gets the max_tokens slot 0 would give it.
 SIDE_MARGIN = 64
 PLAN_MARGIN = 8192
+#: SRV-305: a request waiting for memory gets its line again this often (s)
+MEM_LINE_EVERY_S = 15.0
 
 #: The least output a side slot's window must leave a request (its prompt and the margins
 #: taken): below it the request waits for slot 0, at or above it the request runs there with its
@@ -1277,6 +1282,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
     drafter = STATE["drafter"]
     k = STATE["k"]
     ctx = prompt.tolist()
+    # SRV-307: the prompt's rows exist before any restore or prefill writes them
+    _kv_ens = getattr(getattr(eng, "kv", None), "ensure", None)
+    if _kv_ens is not None:
+        _kv_ens(len(ctx))
     if pen is not None:
         pen.seed(ctx)
     # The list the engine's own positions index into, published for `_remember`. It is the SAME
@@ -2647,6 +2656,7 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
                 res.clear()
                 return None
             for (t, ax), (u, _) in zip(v0, v1):
+                kvpool.ensure_for(t, e)                         # SRV-307
                 t.narrow(ax, 0, e).copy_(u.narrow(ax, 0, e))
             res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")
             pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"]})
@@ -3114,6 +3124,7 @@ def prepare_once() -> str:
                 STATE["mem"].done()
             except Exception:                                      # noqa: BLE001
                 pass
+        kv_trim_current()                  # SRV-307: the job's scratch rows go back to the pool
         with QUEUE:
             HOLDER["who"] = None
         LOCK.release()
@@ -3245,6 +3256,7 @@ def memory_once() -> str:
                 STATE["mem"].done()
             except Exception:                                      # noqa: BLE001
                 pass
+        kv_trim_current()                  # SRV-307: the job's scratch rows go back to the pool
         with QUEUE:
             HOLDER["who"] = None
         LOCK.release()
@@ -3665,6 +3677,193 @@ def _memory_event(ev: dict) -> None:
     elif kind == "empty" and STATE.get("verbose"):
         print(f"[memory] reserve back to the driver: {ev.get('freed', 0) / 2**30:.2f} GiB in "
               f"{ev.get('ms')} ms ({ev.get('why')})", flush=True)
+
+
+# ------------------------------------------------------------------ SRV-307: the shared KV pool
+def _kv_pool_event(kind: str, kw: dict) -> None:
+    """A pool event (engine/kvpool.py): the log, and the residency journal for a refusal."""
+    if kind in ("reclaim", "refused", "reclaim_error"):
+        print(f"[kv-pool] {kind} " + " ".join(f"{k}={v}" for k, v in kw.items()), flush=True)
+
+
+def _kv_keep_rows(eng, res, slot=None) -> int:
+    """The rows a slot still needs after a generation: its KV length, the rows its resident
+    prefix holds valid (a guest's stash puts rows back below it, the end anchor and the anchors
+    sit inside it) and, on a side slot, the end its next turn may carry into slot 0."""
+    keep = int(getattr(eng.kv, "length", 0) or 0)
+    if res is not None:
+        keep = max(keep, int(getattr(res, "valid", 0) or 0))
+    if slot is not None and slot.carry is not None and slot.carry.get("gen") == slot.gen:
+        keep = max(keep, int(slot.carry.get("at") or 0))
+    return keep
+
+
+def kv_trim_current() -> int:
+    """At a generation's end, in its own thread: the pages past what the slot keeps go back."""
+    if kvpool.POOL is None:
+        return 0
+    eng = STATE.get("engine")
+    pages = getattr(getattr(eng, "kv", None), "pages", None)
+    if pages is None:
+        return 0
+    try:
+        return pages.trim(_kv_keep_rows(eng, STATE.get("resident"), slots_mod.current()))
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        return 0
+
+
+def _kv_reclaim_caches(want: int, owner) -> int:
+    """Pool reclaim, level 1: the memory policy's levels, cheapest first (engine/cache.py `Budget`
+    `LEVELS`), only what nothing is using, and the allocator's free blocks back to the driver."""
+    mem = dict.get(STATE, "mem")
+    if mem is None:
+        return 0
+    got = 0
+    for lv in mem.LEVELS:
+        got += int(mem.shed(lv, "kv_pool", safe=True) or 0)
+        got += int(mem.empty("kv_pool") or 0)
+        if got >= want:
+            break
+    return got
+
+
+def _kv_reclaim_side(want: int, owner) -> int:
+    """Pool reclaim, level 2: the conversations idle side slots keep, oldest first. The slot's
+    next turn re-reads its prompt (or comes back from the disk tier); nothing is lost but time."""
+    pool = dict.get(STATE, "pool")
+    if pool is None:
+        return 0
+    got = 0
+    idle = [s for s in pool.side() if f"slot{s.index}" != owner and not s.busy]
+    idle.sort(key=lambda s: float((s.carry or {}).get("t") or 0.0))
+    for s in idle:
+        if got >= want:
+            break
+        eng = (s.values or {}).get("engine")
+        pages = getattr(getattr(eng, "kv", None), "pages", None)
+        if pages is None or pages.committed_bytes() == 0 or not s.lock.acquire(blocking=False):
+            continue
+        try:
+            res = (s.values or {}).get("resident")
+            if res is not None:
+                res.clear()
+            s.carry = None
+            eng.kv.length = 0
+            got += pages.trim(0)
+        finally:
+            s.lock.release()
+    return got
+
+
+def _kv_reclaim_slot0(want: int, owner) -> int:
+    """Pool reclaim, level 3: slot 0's idle conversation, to the NVMe first when the spill is on
+    (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
+    if owner == "slot0":
+        return 0
+    eng = dict.get(STATE, "engine")
+    pages = getattr(getattr(eng, "kv", None), "pages", None)
+    if pages is None or pages.committed_bytes() == 0 or not LOCK._lk.acquire(False):
+        return 0
+    try:
+        res = dict.get(STATE, "resident")
+        if res is not None:
+            if res._stash is not None:
+                res.settle_guest(eng)
+            if res.spiller is not None and res.valid >= getattr(res.spiller, "min_tokens", 1 << 30):
+                res._spill(eng, dict.get(STATE, "drafter"), "kv_pool")
+            res.clear()
+        eng.kv.length = 0
+        return pages.trim(0)
+    finally:
+        LOCK._lk.release()
+
+
+def _kv_reclaim_idle(d: dict, owner) -> int:
+    """SRV-307, before a request waits for memory: the pages idle conversations keep (idle side
+    slots, then slot 0's idle one, to the NVMe first), as much as the admission is short. Not the
+    caches: the admission already counts their growth, and shedding them leaves it unchanged."""
+    pool = kvpool.POOL
+    if pool is None or d.get("after") is None:
+        return 0
+    want = int(d.get("floor", 0)) - int(d["after"])
+    got = 0
+    for name, fn in list(pool.reclaimers):
+        if name == "caches" or got >= want:
+            continue
+        try:
+            n = int(fn(want - got, owner) or 0)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+            n = 0
+        if n:
+            got += n
+            pool.stats["reclaims"] += 1
+            pool.stats["reclaimed_bytes"] += n
+            print(f"[kv-pool] reclaim for admission level={name} bytes={n} owner={owner}",
+                  flush=True)
+    return got
+
+
+#: SRV-309: while another slot decodes, a prefill's layer-major window takes at most this many
+#: rows, so the GPU turn is offered to the decoders at least that often (0: no cap, the default).
+#: Bit-identical (tests/gpu/test_kvpool_identity_gpu.py --window-cap), but it did not help: on
+#: 2026-10-10 three decoding chats still wrote 0.6-1 tok/s while an 87k prompt prefilled with the
+#: cap at 2,048 (0.9-1.3 without it). The stall was the rounds' barrier (SRV-311, slots.py
+#: `barrier`); with that fixed the cap still added nothing measurable (11.2-12.4 vs 10.3-11.4 tok/s)
+PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
+
+
+def _par_window_cap() -> int | None:
+    pool = dict.get(STATE, "pool")
+    if pool is None:
+        return None
+    me = _par_index()
+    return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
+
+
+def _kv_after_load(a) -> None:
+    """After slot 0's engine and drafters exist: the memory policy no longer holds slot 0's
+    window (its pages are the pool's now, outside the allocator), and the reclaimers in order."""
+    pool = kvpool.POOL
+    eng = dict.get(STATE, "engine")
+    pages = getattr(getattr(eng, "kv", None), "pages", None)
+    if pool is None or pages is None:
+        return
+    static = sum(b.nbytes for b in pages.bufs)
+    mem = dict.get(STATE, "mem")
+    if mem is not None and mem.on:
+        mem.fixed -= static
+        mem.ceiling -= static
+        mem.peak -= static
+        print(f"[kv-pool] memory policy: ceiling and peak -{_gib(static)} GiB (slot 0's window is "
+              f"the pool's now): {_gib(mem.ceiling)} / {_gib(mem.peak)} GiB", flush=True)
+    pool.add_reclaimer("caches", _kv_reclaim_caches)
+    pool.add_reclaimer("idle_side", _kv_reclaim_side)
+    pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    print(f"[kv-pool] on: slot 0 window {eng.kv.max_len:,} rows reserved as "
+          f"{_gib(static)} GiB of addresses, page {pages.bufs[0].page >> 20} MiB, hard floor "
+          f"{_gib(pool.hard_floor)} GiB, margin {pool.margin_rows} rows", flush=True)
+
+
+def kv_pool_report() -> dict | None:
+    pool = kvpool.POOL
+    if pool is None:
+        return None
+    out = pool.report()
+    slots = []
+    par = dict.get(STATE, "pool")
+    engs = [(0, dict.get(STATE, "engine"))]
+    if par is not None:
+        engs += [(s.index, (s.values or {}).get("engine")) for s in par.side()]
+    for i, e in engs:
+        ps = getattr(getattr(e, "kv", None), "pages", None)
+        if ps is not None:
+            slots.append({"slot": i, "window": int(e.kv.max_len), "kv_length": int(e.kv.length),
+                          "committed_rows": ps.rows,
+                          "committed_gib": round(ps.committed_bytes() / (1 << 30), 3)})
+    out["slots"] = slots
+    return out
 
 
 def _probe_done(rec) -> None:
@@ -4484,6 +4683,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         for k, v in (plan.headers() if plan is not None else ()):
             self.send_header(k, v)
+        if getattr(self, "_mem_wait", False):
+            self.send_header("X-Tandem-Wait", "memory")      # SRV-305
         self.end_headers()
         self._early = {"cid": cid, "model": model, "created": created, "role": False,
                        "done": False}
@@ -4799,13 +5000,15 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return self._reader_gone()
 
-    def _par_admit(self, pool, cid: str, prompt, rec=None, say=None) -> bool:
+    def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
+                   stream: bool = False) -> bool:
         """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
-        worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) -- is reserved
-        while it runs; with other requests in flight it waits, in one-second slices with the GPU
-        turn given up, while MemAvailable less the engine's growth (`_par_growth`), the other
-        requests' reservations and its own would fall under the floor, and gets a 503 when the
-        queue's timeout runs out. False: refused, the response is sent.
+        worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
+        shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
+        slot -- is reserved while it runs; with other requests in flight it waits, in one-second
+        slices with the GPU turn given up, while MemAvailable less the engine's growth
+        (`_par_growth`), the other requests' reservations and its own would fall under the floor.
+        False: refused, the response is sent.
 
         SRV-250 (FX7, 2026-10-07): every request was counted as 2.1 GiB (the workspace's 1.15 GiB
         floor plus a whole state-store entry, 1 GiB, whatever its length) against 6.4 to 8.4 GiB of
@@ -4813,55 +5016,105 @@ class Handler(BaseHTTPRequestHandler):
         63 and 83 s beside a 9,000-token one, and two requests rarely ran at once. The store's
         snapshot asks the engine's memory policy first (`Budget.admit`), inside its ceiling, so it
         is in the growth the policy allows, not in this request's need. The wait is the queue's
-        (`rec.t_lock` moves to the admission, `wait_mem_ms` books it) and `say(short_gib)` gives
-        the client its waiting line."""
+        (`rec.t_lock` moves to the admission, `wait_mem_ms` books it) and `say(short_gib, place)`
+        gives the client its waiting line.
+
+        SRV-305 (2026-10-10): a wait for memory is never a silent refusal. The request waits in
+        state `waiting_memory` (the dashboard counts it, `rec.wait_reason` is "memory"), its line
+        says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
+        (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
+        `Retry-After` and the code `memory_wait_timeout`."""
+        self._mem_wait = False
         adm = pool.admission
         if adm is None:
             return True
         n = int(prompt.numel())
         mem = dict.get(STATE, "mem")
-        need = mem.workspace(n) if mem is not None else max(
+        ws = mem.workspace(n) if mem is not None else max(
             cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
-        ok, d = adm.reserve(cid, need)
+        kv, owner = 0, None
+        if kvpool.POOL is not None:
+            eng = STATE.get("engine")
+            pages = getattr(getattr(eng, "kv", None), "pages", None)
+            if pages is not None:
+                # the served prompt carries the router's notes and the anchors' replay beyond the
+                # client's tokens: PLAN_MARGIN rows of room for them
+                rows = min(int(eng.kv.max_len), n + int(max_new) + PLAN_MARGIN + SIDE_MARGIN)
+                kv = pages.need_bytes(rows)
+                owner = pages.owner
+        need = ws + kv
+        ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+        if not ok and _kv_reclaim_idle(d, owner):
+            # SRV-307: the pages idle conversations keep come back before anyone waits
+            ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
         if ok:
             return True
         print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
         adm.stats["waits"] += 1
+        self._mem_wait = True
+        if rec is not None:
+            rec.wait_reason = "memory"
+            rec.waiting_memory = True
         t0 = time.perf_counter()
         i = _par_index()
-        until = time.monotonic() + float(STATE.get("queue_timeout", 120.0))
+        limit = (float(STATE.get("request_timeout") or 3600.0) if stream
+                 else float(STATE.get("queue_timeout", 120.0)))
+        until = time.monotonic() + limit
         said = -1e9
-        while time.monotonic() < until:
-            if self._client_gone():
-                raise ClientGone("client left while waiting for memory")
-            if say is not None and time.monotonic() - said >= qwait.LINE_EVERY_S:
-                said = time.monotonic()
-                try:
-                    say(max(0.0, (d.get("floor", 0) - (d.get("after") or 0)) / slots_mod.GiB))
-                except Exception:                                  # noqa: BLE001
-                    logbuf.print_exc()
-            held = pool.turn is not None and pool.turn.held_by(i)
-            if held:
-                pool.turn.release(i)
-            try:
-                time.sleep(1.0)
-            finally:
+        try:
+            while time.monotonic() < until:
+                if self._client_gone():
+                    raise ClientGone("client left while waiting for memory")
+                place = adm.wait(cid)
+                if say is not None and time.monotonic() - said >= MEM_LINE_EVERY_S:
+                    said = time.monotonic()
+                    short = max(0.0, (d.get("floor", 0) - (d.get("after") or 0)) / slots_mod.GiB)
+                    try:
+                        try:
+                            say(short, place)
+                        except TypeError:
+                            say(short)                     # a one-argument line (the tests')
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()
+                held = pool.turn is not None and pool.turn.held_by(i)
                 if held:
-                    pool.turn.acquire(i)
-            ok, d = adm.reserve(cid, need)
-            if ok:
-                waited = time.perf_counter() - t0
-                if rec is not None:
-                    rec.wait_mem_ms = round(waited * 1e3, 1)
-                    if rec.t_lock is not None:
-                        rec.t_lock += waited            # the wait is the queue's, not prefill
-                print(f"[parallel] {cid} admitted after {waited:.1f} s: "
-                      f"{slots_mod.Admission.describe(d)}", flush=True)
-                return True
+                    pool.turn.release(i)
+                try:
+                    time.sleep(1.0)
+                finally:
+                    if held:
+                        pool.turn.acquire(i)
+                # the first in line only: arrival order among the requests that wait for memory
+                if place > 1:
+                    continue
+                ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                if not ok and _kv_reclaim_idle(d, owner):
+                    ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                if ok:
+                    waited = time.perf_counter() - t0
+                    if rec is not None:
+                        rec.wait_mem_ms = round(waited * 1e3, 1)
+                        if rec.t_lock is not None:
+                            rec.t_lock += waited            # the wait is the queue's, not prefill
+                    print(f"[parallel] {cid} admitted after {waited:.1f} s: "
+                          f"{slots_mod.Admission.describe(d)}", flush=True)
+                    return True
+        finally:
+            adm.unwait(cid)
+            if rec is not None:
+                rec.waiting_memory = False
         adm.stats["refused"] += 1
-        print(f"[parallel] {cid} REFUSED: {slots_mod.Admission.describe(d)}", flush=True)
-        self._busy(503, "not enough free memory on the engine's box for another request now "
-                        f"({slots_mod.Admission.describe(d)})", retry=30)
+        adm.stats["timeouts"] += 1
+        running = pool.running()
+        print(f"[parallel] {cid} REFUSED after {limit:.0f} s waiting for memory: "
+              f"{slots_mod.Admission.describe(d)}", flush=True)
+        if rec is not None:
+            rec.stop_detail = "memory_wait_timeout"
+        self._send_bytes(503, json.dumps({"error": {
+            "message": (f"memory is almost full; {running} request(s) are running; "
+                        f"try again in about 30 s"),
+            "type": "server_busy", "code": "memory_wait_timeout"}}).encode(),
+            extra_headers=(("Retry-After", "30"),))
         return False
 
     def _prefill_watch(self, stream: bool, rec=None):
@@ -4975,6 +5228,8 @@ class Handler(BaseHTTPRequestHandler):
                 "default_max_tokens": STATE.get("default_max_tokens"),
                 "cache": cache_stats(),
                 "memory": _memory(),
+                # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
+                **({"kv_pool": kv_pool_report()} if kvpool.POOL is not None else {}),
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
                 # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
                 **({"parallel": _par_health()}
@@ -5787,12 +6042,14 @@ class Handler(BaseHTTPRequestHandler):
                     line = states_mod.inline(line)
                 self._early_write(_chunk(cid, model, created, {key: line}))
 
-        def mem_wait(short: float) -> None:
-            """SRV-250: the waiting line while the parallel admission holds this request for
-            memory (the other request runs first)."""
-            if ui is None or not live_lines:
+        def mem_wait(short: float, place: int = 1) -> None:
+            """SRV-250/SRV-305: the waiting line while the parallel admission holds this request
+            for memory. Shown on every stream with lines (not only with the progress lines on):
+            a wait for memory must never look like a hang."""
+            if ui is None or not stream:
                 return
-            ui.add("queue", reason=f"memory for a second request, {short:.1f} GiB short", n=1)
+            ui.add("queue", reason=(f"memory is almost full, your request starts when a running "
+                                    f"one frees memory ({short:.1f} GiB short)"), n=place)
             if not ui.pending:
                 return
             if plain_lines and fmt != "reasoning_content":
@@ -6049,7 +6306,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, compat.Refusal(
                     "messages" if chat else "prompt", "the prompt is empty").body())
             if par is not None and not micro and not self._par_admit(par, cid, prompt, rec=rec,
-                                                                       say=mem_wait):
+                                                                       say=mem_wait,
+                                                                       max_new=max_new,
+                                                                       stream=stream):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
@@ -6695,6 +6954,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Connection", "close")
                 for k, v in (plan.headers() if plan is not None else ()):
                     self.send_header(k, v)             # X-Tandem and X-Tandem-Profile
+                if getattr(self, "_mem_wait", False):
+                    self.send_header("X-Tandem-Wait", "memory")      # SRV-305
                 self.end_headers()
             self._early_body = True                    # S1: a stream opened early goes on here
             w = self.wfile
@@ -7179,6 +7440,9 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["mem"].done()
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()
+                # SRV-307: the pages past what this slot keeps go back to the pool, before the
+                # slot is given to the next request
+                kv_trim_current()
                 if (plan is not None and getattr(plan, "compaction", False)
                         and STATE.get("conductor") is not None):
                     # P-M2: a compaction marks its session for the memory writer, and with
@@ -7937,6 +8201,23 @@ def parser() -> argparse.ArgumentParser:
                          "default) follows --side-graphs: 7.5 GiB with it on (6.9 to 7.5 GiB allocated "
                          "measured for 8,192-token slots, most of it the verify graphs' pools: 121 "
                          "graphs, as slot 0's 5.5 GiB), 1.5 with it off")
+    # SRV-307: the shared KV pool (engine/kvpool.py)
+    ap.add_argument("--kv-pool", default=os.environ.get("QSE_KV_POOL", "off") or "off",
+                    choices=("on", "off"),
+                    help="on: every slot's KV window (engine attention KV and the drafters' "
+                         "context KV) is reserved as virtual addresses and its pages are committed "
+                         "as a conversation's rows are written and given back when it ends, from "
+                         "one pool for every slot (CUDA virtual memory management; bit-identical "
+                         "to the static buffers). off: each slot allocates its window at load")
+    ap.add_argument("--kv-hard-floor-gb", type=float,
+                    default=float(os.environ.get("QSE_KV_HARD_FLOOR_GB", "10") or 10),
+                    help="with --kv-pool on: a commit never takes MemAvailable under this (GiB); "
+                         "the pool gives back caches and idle conversations first, else the "
+                         "request is not run (admission keeps requests out at --parallel-floor-gb)")
+    ap.add_argument("--kv-margin-rows", type=int,
+                    default=int(os.environ.get("QSE_KV_MARGIN_ROWS", "256") or 256),
+                    help="with --kv-pool on: rows committed past every write (a masked tile's "
+                         "over-read stays on mapped pages)")
     # image input
     ap.add_argument("--vision", default="on", choices=("on", "off"),
                     help="load the checkpoint's vision tower (0.92 GB bf16) and accept image_url "
@@ -8260,6 +8541,14 @@ def _load(a) -> None:
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
     led.mark("weights")
+    if getattr(a, "kv_pool", "off") == "on":
+        kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
+                                    margin_rows=int(a.kv_margin_rows),
+                                    on_event=_kv_pool_event)
+        kvpool.OWNER = "slot0"
+        if kvpool.Driver.get() is None:
+            print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
+                  "only its accounts, every buffer is allocated in full", flush=True)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     led.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
@@ -8453,6 +8742,10 @@ def _load(a) -> None:
                                          if getattr(drafter, "calc", False) else range(2, 17))
         print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
     led.mark("graphs")
+    _kv_after_load(a)
+    if eng.kv.pages is not None:
+        # the warm-up's and the captures' rows are nobody's conversation
+        eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
     if int(getattr(a, "parallel", 1) or 1) > 1:
         _build_side_slots(a, cfg, w, tok)
         led.mark("side_slots")
@@ -8627,14 +8920,20 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                          f"not {a.drafter}")
     L = int(min(a.side_max_len, a.max_len))
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
-    adm = slots_mod.Admission(floor, growth=_par_growth, room=_par_room)
+    adm = slots_mod.Admission(floor, growth=_par_growth, room=_par_room,
+                              committed=lambda o: (kvpool.POOL.owner_bytes(o)
+                                                   if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
     ng0 = getattr(drafter0, "ngram", None)
     slots = [slots_mod.Slot(0, int(a.max_len), values=None, lock=None)]
     a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
     depth0 = a.depth
+    paged = kvpool.POOL is not None and kvpool.Driver.get() is not None
     for i in range(1, n):
-        need = slots_mod.slot_bytes(L, constant=int(_side_const_gb(a) * slots_mod.GiB))
+        # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a
+        # token) and its constant are memory at load
+        need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
+                                    constant=int(_side_const_gb(a) * slots_mod.GiB))
         ok, d = adm.check(need, count=False)
         if not ok:
             print(f"[parallel] slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
@@ -8643,6 +8942,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         mi0 = slots_mod.read_meminfo() or {}
         a1 = torch.cuda.memory_allocated()
         t0 = time.time()
+        kvpool.OWNER = f"slot{i}"
         e2 = Qwen38Engine(cfg, w, max_len=L)
         e2.graphs_off = a.side_graphs == "off"
         d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
@@ -8671,8 +8971,12 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                                              "blocks", "last_prefill")})
             if res_i is not None:
                 res_i.clear()                 # the warm-up's rows are nobody's conversation
+            if e2.kv.pages is not None:
+                e2.kv.length = 0
+                e2.kv.pages.trim(0)           # SRV-307: and their pages go back to the pool
         finally:
             slots_mod.bind(None)
+            kvpool.OWNER = "slot0"
         torch.cuda.synchronize()
         mi1 = slots_mod.read_meminfo() or {}
         print(f"[parallel] slot {i}: window {L:,}, built in {time.time() - t0:.1f}s, "
@@ -8716,6 +9020,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         sys.setswitchinterval(a.parallel_switch_ms / 1e3)
     STATE["pool"] = pool
     LOCK.turn = turn
+    if PAR_WINDOW_ROWS > 0:
+        cache.WINDOW_CAP = _par_window_cap      # SRV-309
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "

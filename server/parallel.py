@@ -370,6 +370,8 @@ class ParallelBoard:
     def _state(self, rec, ended: float | None) -> str:
         if ended is not None:
             return "done"
+        if getattr(rec, "waiting_memory", False):
+            return "waiting_memory"            # SRV-305: the admission holds it for memory
         if not is_relayed(rec):
             s = act.state_of(rec)
             return "replaying" if s == "replaying" else s
@@ -484,9 +486,10 @@ class ParallelBoard:
             ttft = (rec.t_first - rec.t_arrival) * 1e3
         label = None
         if not relayed and ended is None:
-            label = act.label({"state": state, "prefill": prefill and {
-                "done": prefill["done"], "total": prefill["total"], "pct": prefill["pct"]},
-                "tool": {"name": tool}})
+            label = ("waiting for memory" if state == "waiting_memory" else
+                     act.label({"state": state, "prefill": prefill and {
+                         "done": prefill["done"], "total": prefill["total"],
+                         "pct": prefill["pct"]}, "tool": {"name": tool}}))
         peer = self._peer_lane(rec) if ended is None else None
         if peer is not None:
             # our engine's own view of this request (server/parallel.py on the engine)
@@ -596,7 +599,7 @@ class ParallelBoard:
             if l["model"] and l["model"] not in b["models"]:
                 b["models"].append(l["model"])
             b["in_flight"] += 1
-            if l["state"] in ("queued", "waiting", "prefilling"):
+            if l["state"] in ("queued", "waiting", "waiting_memory", "prefilling"):
                 b["waiting"] += 1
             elif l["state"] not in ("done", "replaying"):
                 b["decoding"] += 1
@@ -633,7 +636,8 @@ class ParallelBoard:
                                    "models": len(fcs),
                                    "checked": sum(len(fc.results) for fc in fcs),
                                    "passed": sum(int(sum(fc.results)) for fc in fcs)}
-        dec = [l for l in lanes if l["state"] not in ("queued", "waiting", "prefilling", "done",
+        dec = [l for l in lanes if l["state"] not in ("queued", "waiting", "waiting_memory",
+                                                      "prefilling", "done",
                                                       "replaying")]
         tt = sorted(s["ttft_ms"] for s in stats if s["ttft_ms"] is not None)
         rep = [s for s in stats if s["prompt"] and s["cached"] is not None]
@@ -645,7 +649,10 @@ class ParallelBoard:
         partial = [l["cost_micros"] for l in lanes if l["cost_micros"] is not None]
         totals = {
             "in_flight": len(lanes), "decoding": len(dec),
-            "waiting": sum(1 for l in lanes if l["state"] in ("queued", "waiting", "prefilling")),
+            "waiting": sum(1 for l in lanes if l["state"] in ("queued", "waiting", "waiting_memory",
+                                                              "prefilling")),
+            # SRV-305: lanes the memory admission holds
+            "waiting_memory": sum(1 for l in lanes if l["state"] == "waiting_memory"),
             "decode_tps": _r(sum(now_rates), 1) if now_rates else None,
             "decode_reported": len(now_rates),
             "decode_unreported": len(dec) - len(now_rates),

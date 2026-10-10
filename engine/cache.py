@@ -75,6 +75,8 @@ from collections import OrderedDict, deque
 
 import torch
 
+from engine import kvpool as _kvp
+
 from engine.settings import SETTINGS as _S
 
 #: FX10: a parked conversation a new park gives up goes to the NVMe spill first (`on`); `off`
@@ -82,6 +84,12 @@ from engine.settings import SETTINGS as _S
 SPILL_PARK = (_S.get("SPILL_PARK") or "on").strip().lower()
 PREFILL_WINDOW = int(_S.get("PREFILL_WINDOW") or 0)
 PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
+#: SRV-309: () -> a cap on a layer-major window's rows right now, or None. The server sets it so a
+#: prefill on one slot hands the GPU turn to the slots that decode at least every this many rows
+#: (a window is one unit of GPU work: an 8,192-row window at 90k context held the turn ~20 s and
+#: three decoding chats wrote ~1 token a second). The windows' chunks are the same chunks in the
+#: same order, so the cap changes when the turn is offered, never a bit.
+WINDOW_CAP = None
 
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
@@ -232,6 +240,7 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
 def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     """Put `snap` back. After this the engine is exactly where `capture` was called."""
     n = snap.length
+    _kvp.ensure_for(eng.kv.k, n)      # SRV-307: the rows must exist before they are written
     eng.kv.k[:, :, :, :n, :].copy_(snap.k)
     eng.kv.v[:, :, :, :n, :].copy_(snap.v)
     if snap.ks is not None:
@@ -865,6 +874,7 @@ class Borrow:
     def give_back(self) -> None:
         eng = self.eng
         for (t, ax), buf in zip(self.views, self.saved):
+            _kvp.ensure_for(t, self.rows)     # SRV-307
             t.narrow(ax, 0, self.rows).copy_(buf)
         eng.state.S.copy_(self.S)
         eng.state.conv.copy_(self.conv)
@@ -1124,6 +1134,7 @@ class ResidentPrefix:
         self._stash = None
         s, r = st["start"], st["rows"]
         for (t, ax), buf in zip(st["views"], self._stash_bufs):
+            _kvp.ensure_for(t, s + r)         # SRV-307
             t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
         self.stats["stash_restored"] += 1
         reach = int(eng.kv.length) + GUEST_SLACK_ROWS
@@ -1666,6 +1677,7 @@ class ResidentPrefix:
             self._free.append(self.anchors.pop(b))
         r = self.pin_rows
         for (t, ax), buf in zip(views, self._pin_bufs):
+            _kvp.ensure_for(t, r)             # SRV-307
             t.narrow(ax, 0, r).copy_(buf.narrow(ax, 0, r))
         for b, (S0, c0) in sorted(self.pin_anchors.items()):
             S, conv = self._buffers(eng)
@@ -1927,6 +1939,7 @@ class ResidentPrefix:
                 rb = 0
         step = 4 * self.chunk
         for (t, ax), buf in zip(views, self._park_bufs):
+            _kvp.ensure_for(t, base + max(ra, rb))     # SRV-307
             both = min(ra, rb)
             for j in range(0, both, step):
                 w = min(step, both - j)
@@ -2418,7 +2431,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     win = PREFILL_WINDOW if lines else PREFILL_WINDOW_FREE
     try:
         while i < n:
-            plan = _window_plan(eng, i, n, chunk, win)
+            cap = WINDOW_CAP() if WINDOW_CAP is not None else None
+            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)))
             if plan is not None:
                 # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
                 # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The

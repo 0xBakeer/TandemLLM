@@ -28,11 +28,16 @@ Everything here is plain Python and CPU-testable (tests/test_slots.py).
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 GiB = 1 << 30
 MiB = 1 << 20
+
+#: SRV-311: a round's waiters time out while the turn is held by a slot that is not decoding
+#: (`barrier`); "off" waits for a free turn as before (kept for the A/B)
+IDLE_OWNER = (os.environ.get("QSE_BARRIER_IDLE_OWNER") or "on").strip().lower() != "off"
 
 #: the per-request keys a side slot keeps for itself (server/app.py `SlotState`): what the
 #: generation publishes for the handler (`last_ctx`, `blocks`, ...) and the slot-0-only machinery,
@@ -80,7 +85,8 @@ class Admission:
     what the long-lived caches may still take (their budgets minus what they hold). Without
     /proc/meminfo (a Mac, a test without `meminfo`) every request is admitted and says so."""
 
-    def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None):
+    def __init__(self, floor_bytes: int, *, meminfo=read_meminfo, growth=None, room=None,
+                 committed=None):
         self.floor = int(floor_bytes)
         self.meminfo = meminfo
         self.growth = growth or (lambda: 0)
@@ -90,26 +96,55 @@ class Admission:
         # peak, so what the caches, the requests in flight and this one may take together is at
         # most this room
         self.room = room
+        # SRV-307: (owner) -> bytes the KV pool has committed for that slot. A request's KV part
+        # is the pages it may still commit; what its slot committed since it was admitted has
+        # already left MemAvailable and is credited, so it is never counted twice
+        self.committed = committed
         self.lock = threading.Lock()
         self._admit = threading.Lock()
         self.held: dict = {}
-        self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None}
+        self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
+        self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
+        self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
+                      "timeouts": 0}
+
+    def _kv_left(self, key) -> int:
+        kv = self.kv.get(key)
+        if kv is None:
+            return 0
+        need, owner, base = kv
+        if self.committed is None or owner is None:
+            return need
+        try:
+            done = max(0, int(self.committed(owner)) - int(base))
+        except Exception:                                          # noqa: BLE001
+            done = 0
+        return max(0, need - done)
 
     def reserved(self) -> int:
         with self.lock:
             return sum(self.held.values())
 
-    def check(self, need: int, count: bool = True) -> tuple[bool, dict]:
+    def _held(self) -> tuple[int, int]:
+        """(the workspace part, the KV part still to commit) of the requests in flight."""
+        with self.lock:
+            keys = list(self.held)
+            ws = sum(self.held[k] - self.kv.get(k, (0,))[0] for k in keys)
+            kv = sum(self._kv_left(k) for k in keys)
+        return ws, kv
+
+    def check(self, need: int, count: bool = True, kv: int = 0) -> tuple[bool, dict]:
         mi = self.meminfo() if self.meminfo is not None else None
         grow = int(self.growth())
-        with self.lock:
-            held = sum(self.held.values())
-        d = {"floor": self.floor, "grow_left": grow, "reserved": held, "need": int(need)}
+        held_ws, held_kv = self._held()
+        need_ws = max(0, int(need) - int(kv))
+        d = {"floor": self.floor, "grow_left": grow, "reserved": held_ws + held_kv,
+             "need": int(need), "kv": int(kv), "kv_reserved": held_kv}
         if not mi or "MemAvailable" not in mi or self.floor <= 0:
             d.update(avail=None, after=None, ok=True)
             return True, d
         avail = int(mi["MemAvailable"])
-        take = grow + held + int(need)
+        take = grow + held_ws + need_ws
         room = None
         if self.room is not None:
             try:
@@ -118,6 +153,9 @@ class Admission:
                 room = None
         if room is not None and room < take:
             take = room
+        # the KV pages are outside the engine's memory policy (engine/kvpool.py): never capped by
+        # its room, always counted
+        take += held_kv + int(kv)
         after = avail - take
         d.update(avail=avail, after=after, ok=after >= self.floor, room=room)
         if count:
@@ -126,30 +164,56 @@ class Admission:
             self.stats["min_after"] = after if m is None else min(m, after)
         return d["ok"], d
 
-    def reserve(self, key, need: int) -> tuple[bool, dict]:
+    def reserve(self, key, need: int, kv: int = 0, owner=None) -> tuple[bool, dict]:
         """Check and record in one step, so two requests cannot both take the last bytes. A
         request with nothing else in flight is admitted without the check: alone, it is the
         single-sequence server's request, which the engine's own memory policy (engine/cache.py
-        `Budget`) admits as it always did."""
+        `Budget`) and the KV pool's gate (engine/kvpool.py) admit as they always did.
+
+        `kv`: the part of `need` that is KV pages the request's slot (`owner`) may commit."""
         with self._admit:
             with self.lock:
                 alone = not self.held
+            base = 0
+            if self.committed is not None and owner is not None:
+                try:
+                    base = int(self.committed(owner))
+                except Exception:                                  # noqa: BLE001
+                    base = 0
             if alone:
                 with self.lock:
                     self.held[key] = int(need)
+                    self.kv[key] = (int(kv), owner, base)
+                    self.waiting.pop(key, None)
                 self.stats["admitted"] += 1
                 self.stats["alone"] = self.stats.get("alone", 0) + 1
-                return True, {"alone": True, "need": int(need), "ok": True, "avail": None}
-            ok, d = self.check(need)
+                return True, {"alone": True, "need": int(need), "kv": int(kv), "ok": True,
+                              "avail": None}
+            ok, d = self.check(need, kv=kv)
             if ok:
                 with self.lock:
                     self.held[key] = int(need)
+                    self.kv[key] = (int(kv), owner, base)
+                    self.waiting.pop(key, None)
                 self.stats["admitted"] += 1
         return ok, d
+
+    def wait(self, key) -> int:
+        """SRV-305: `key` waits for memory; returns its place in line (1 = next)."""
+        with self.lock:
+            self.waiting.setdefault(key, time.monotonic())
+            t = self.waiting[key]
+            return 1 + sum(1 for v in self.waiting.values() if v < t)
+
+    def unwait(self, key) -> None:
+        with self.lock:
+            self.waiting.pop(key, None)
 
     def release(self, key) -> None:
         with self.lock:
             self.held.pop(key, None)
+            self.kv.pop(key, None)
+            self.waiting.pop(key, None)
 
     @staticmethod
     def describe(d: dict) -> str:
@@ -165,13 +229,18 @@ class Admission:
                    f"in flight {g(d['reserved'])}, this request {g(d['need'])})" if capped else
                    f"cache growth {g(d['grow_left'])} - in flight {g(d['reserved'])} - "
                    f"this request {g(d['need'])}")
-                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})")
+                + f" = {g(d['after'])} GiB ({'>=' if d['ok'] else '<'} floor {g(d['floor'])})"
+                + (f"; KV pages: this request {g(d['kv'])}, in flight {g(d['kv_reserved'])}"
+                   if d.get("kv") or d.get("kv_reserved") else ""))
 
     def report(self) -> dict:
         with self.lock:
             held = dict(self.held)
+            waiting = len(self.waiting)
+        ws, kv = self._held()
         return {"floor_gib": round(self.floor / GiB, 2), "in_flight": len(held),
-                "reserved_gib": round(sum(held.values()) / GiB, 3), **self.stats}
+                "reserved_gib": round(sum(held.values()) / GiB, 3),
+                "kv_to_commit_gib": round(kv / GiB, 3), "waiting_memory": waiting, **self.stats}
 
 
 # ------------------------------------------------------------------ the turn
@@ -606,8 +675,17 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
                     if all(i in meet.pending for i in pool.decoding()):
                         break                           # a slot left decode: the set is complete
                     now = time.monotonic()
-                    missing = set(pool.decoding()) - set(meet.pending)
-                    if turn.owner is None and not turn.waiting() and not (missing & meet.transit):
+                    dec = pool.decoding()
+                    missing = set(dec) - set(meet.pending)
+                    # SRV-311: a slot that holds the turn without decoding (a prefill, slot 0's own
+                    # job) never submits to this round, so for the round the turn is as idle as
+                    # free. Waiting for it to be free starved the decoders: two meetings (the
+                    # packed draft and the joint verify) each held some decoding slots, neither set
+                    # completed, and the timeout below never ran while an 87k prompt prefilled
+                    # (3 chats at 0-4 tok/s for ~90 s, 2026-10-10).
+                    owner = turn.owner
+                    idle_turn = owner is None or (IDLE_OWNER and owner not in dec)
+                    if idle_turn and not turn.waiting() and not (missing & meet.transit):
                         idle_since = idle_since or now
                         if now - idle_since >= meet.timeout:
                             meet.stats["timeouts"] += 1

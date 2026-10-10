@@ -1158,8 +1158,18 @@ class DFlash2Drafter(Drafter):
 
     def _alloc_cache(self) -> None:
         cfg = self.cfg
-        self._ck = torch.zeros(cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len,
-                               cfg.head_dim, dtype=torch.bfloat16, device=self.eng.device)
+        shape = (cfg.num_hidden_layers, cfg.num_key_value_heads, self.max_len, cfg.head_dim)
+        pages = getattr(getattr(self.eng, "kv", None), "pages", None)
+        if pages is not None and self.max_len <= self.eng.kv.max_len:
+            # SRV-307: the target's paged set grows and trims this arm's context KV with its own
+            # rows (a context row is a position the target has forwarded)
+            from engine import kvpool as _kvp
+            self._ck = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
+                                                  owner=pages.owner, name="draft.k")).tensor
+            self._cv = pages.add(_kvp.PagedBuffer(shape, 2, torch.bfloat16, self.eng.device,
+                                                  owner=pages.owner, name="draft.v")).tensor
+            return
+        self._ck = torch.zeros(*shape, dtype=torch.bfloat16, device=self.eng.device)
         self._cv = torch.zeros_like(self._ck)
 
     def release(self, free_cache: bool = False) -> None:
@@ -1263,6 +1273,8 @@ class DFlash2Drafter(Drafter):
             raise ValueError(f"not a dflash2 snapshot: {kind!r}")
         if n:
             self._build()
+            from engine import kvpool as _kvp
+            _kvp.ensure_for(self._ck, n)      # SRV-307
             self._ck[:, :, :n] = ck
             self._cv[:, :, :n] = cv
         self.ctx_len = int(n)

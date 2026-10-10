@@ -336,19 +336,48 @@ class KVCache:
     """
 
     def __init__(self, cfg: TextConfig, max_len: int, device: str, dtype=torch.bfloat16,
-                 fp8: bool = False):
+                 fp8: bool = False, paged: bool | None = None):
         n = len(cfg.attention_layers)
         self.slot = {l: i for i, l in enumerate(cfg.attention_layers)}
         self.fp8 = fp8
-        self.k = torch.zeros(n, 1, cfg.num_key_value_heads, max_len, cfg.head_dim,
-                             dtype=torch.float8_e4m3fn if fp8 else dtype, device=device)
-        self.v = torch.zeros_like(self.k)
+        # SRV-307 (the shared KV pool, engine/kvpool.py): with a pool, the window is reserved as
+        # addresses and its pages are committed as rows are written (`ensure`); the tensors have
+        # the static buffer's exact shape, dtype and strides, so every kernel and graph is the
+        # same. `paged` None: the pool decides (on for a window of PAGED_MIN_ROWS and more).
+        from engine import kvpool as _kvp
+        self.pages = None
+        if paged is None:
+            paged = (_kvp.POOL is not None and not fp8 and int(max_len) >= _kvp.PAGED_MIN_ROWS
+                     and str(device).startswith("cuda"))
+        shape = (n, 1, cfg.num_key_value_heads, max_len, cfg.head_dim)
+        if paged:
+            self.pages = _kvp.PagedSet(_kvp.OWNER)
+            self.k = self.pages.add(_kvp.PagedBuffer(shape, 3, dtype, device, owner=_kvp.OWNER,
+                                                     name="kv.k")).tensor
+            self.v = self.pages.add(_kvp.PagedBuffer(shape, 3, dtype, device, owner=_kvp.OWNER,
+                                                     name="kv.v")).tensor
+        else:
+            self.k = torch.zeros(*shape, dtype=torch.float8_e4m3fn if fp8 else dtype,
+                                 device=device)
+            self.v = torch.zeros_like(self.k)
         # one fp32 scale per (head, token) when the codes are e4m3; see tools/attn_kernels.py
         self.ks = (torch.zeros(n, 1, cfg.num_key_value_heads, max_len, dtype=torch.float32,
                                device=device) if fp8 else None)
         self.vs = torch.zeros_like(self.ks) if fp8 else None
         self.length = 0
         self.max_len = max_len
+
+    def ensure(self, rows: int) -> None:
+        """SRV-307: commit the pages that hold rows [0, rows) (plus the pool's margin) before a
+        write reaches them. One int compare when they are; nothing without a pool. Never inside
+        a CUDA graph capture: the zeroing of fresh pages would be captured, and the caller
+        committed the rows before it captured."""
+        ps = self.pages
+        if ps is None or rows + ps.margin() <= ps.rows:
+            return
+        if ps.on_device() and torch.cuda.is_current_stream_capturing():
+            return
+        ps.ensure(rows)
 
     def append(self, layer: int, k: torch.Tensor, v: torch.Tensor, start: int) -> tuple:
         i = self.slot[layer]
@@ -506,12 +535,13 @@ class TreeCtx:
 
 
 class Qwen38Engine:
-    def __init__(self, cfg: TextConfig, w: Weights, max_len: int = 8192, device: str = "cuda"):
+    def __init__(self, cfg: TextConfig, w: Weights, max_len: int = 8192, device: str = "cuda",
+                 paged: bool | None = None):
         self.cfg = cfg
         self.w = w
         self.device = device
         self.max_len = max_len
-        self.kv = KVCache(cfg, max_len, device, fp8=KV_FP8)
+        self.kv = KVCache(cfg, max_len, device, fp8=KV_FP8, paged=paged)
         self.state = GDNState(cfg, device)
         self._tril: dict[int, torch.Tensor] = {}
         self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -1057,6 +1087,7 @@ class Qwen38Engine:
     def forward(self, tokens: torch.Tensor, start: int = 0, *,
                 last_only: bool = False) -> torch.Tensor:
         T = tokens.numel()
+        self.kv.ensure(start + T)                # SRV-307: the rows this forward writes
         if self.trace is None and self._gv is None:
             self._settle()
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
@@ -1193,6 +1224,8 @@ class Qwen38Engine:
         keep = self.tap_indices() if self.tap is not None else set()
         keep = set(keep or ())
         C = len(toks)
+        if C:
+            self.kv.ensure(int(starts[-1]) + int(toks[-1].numel()))   # SRV-307: its rows
         primed0 = self.state.primed
         emb = self.w.norm("embed_tokens.weight")
         w0 = self.w.norm("layers.0.input_layernorm.weight")
@@ -1254,6 +1287,7 @@ class Qwen38Engine:
         follows `tokens[i]`.
         """
         T = tokens.numel()
+        self.kv.ensure(start + T)                # SRV-307
         if self._graphs_on():
             self._scratch()
         fold = self._folds(T, tree=False)
@@ -1423,6 +1457,7 @@ class Qwen38Engine:
             raise ValueError(f"{tokens.numel()} tokens for {n} parents")
         if n < 2:
             raise ValueError("a tree verify needs an anchor and at least one draft")
+        self.kv.ensure(start + n)                # SRV-307: graph or eager, the rows it writes
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
         self.picks = None
         delegate = ctx.is_chain and TREE_CHAIN_DELEGATE
@@ -1510,6 +1545,7 @@ class Qwen38Engine:
             raise ValueError(f"{tokens.numel()} tokens for {n} parents")
         if n < 2:
             raise ValueError("a tree verify needs an anchor and at least one draft")
+        self.kv.ensure(start + n)                # SRV-307: a joint pass's rows
         ctx = TreeCtx.get(parents, self.device, self.cfg.linear_conv_kernel_dim)
         self.picks = None
         fold = self._folds(n, tree=True)
@@ -1662,6 +1698,7 @@ class Qwen38Engine:
         returns the logits."""
         cfg = self.cfg
         T = tokens.numel()
+        self.kv.ensure(start + T)                # SRV-307
         h = F.embedding(tokens.view(1, T), self.w.norm("embed_tokens.weight"))
         if self.tap is not None:
             self.tap(h[0].detach())

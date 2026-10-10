@@ -95,6 +95,7 @@ import zlib
 from collections import OrderedDict
 
 from engine import capture_lock
+from engine import kvpool as _kvp
 
 ALIGN = 4096
 MAGIC = b"QSEDISK1"
@@ -1335,6 +1336,7 @@ class DiskTier:
                         return False
                     b = ck[0]
                     for (t, ax), (off, nb) in zip(views, secs):
+                        _kvp.ensure_for(t, b)                  # SRV-307
                         t.narrow(ax, b - C, C).copy_(buf.typed(off, t.dtype, _row_shape(t, ax, C)),
                                                      non_blocking=cuda and buf.pinned)
                     if cuda:

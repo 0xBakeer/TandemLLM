@@ -195,6 +195,9 @@
         "waiting": {
           "type": "integer"
         },
+        "waiting_memory": {
+          "type": "integer"
+        },
         "decode_reported": {
           "type": "integer"
         },
@@ -500,6 +503,7 @@
             "queued",
             "prefilling",
             "waiting",
+            "waiting_memory",
             "replaying",
             "thinking",
             "closing_reasoning",
