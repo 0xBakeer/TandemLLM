@@ -3806,8 +3806,11 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
 
 
 #: SRV-309: while another slot decodes, a prefill's layer-major window takes at most this many
-#: rows, so the GPU turn is offered to the decoders at least that often (0: no cap)
-PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "2048") or 0)
+#: rows, so the GPU turn is offered to the decoders at least that often (0: no cap, the default).
+#: Bit-identical (tests/gpu/test_kvpool_identity_gpu.py --window-cap), but it did not help: on
+#: 2026-10-10 three decoding chats still wrote 0.6-1 tok/s while an 87k prompt prefilled with the
+#: cap at 2,048 (0.9-1.3 without it); the stall's cause is not the window (open: SRV-311)
+PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
 
 
 def _par_window_cap() -> int | None:
