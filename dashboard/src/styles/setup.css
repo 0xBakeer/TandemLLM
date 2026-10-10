@@ -2541,6 +2541,10 @@ qse-wren-figure {
   font-size: var(--fs-xs);
   overflow-wrap: anywhere;
 }
+.reset-item-note {
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+}
 .reset-total {
   display: flex;
   justify-content: space-between;
@@ -2686,6 +2690,13 @@ qse-wren-figure {
   }
   .wren-close {
     display: inline-flex;
+  }
+  /* the floating wren sits bottom right: the page's last controls go left and clear it */
+  .setup-main {
+    padding-bottom: 72px;
+  }
+  .setup-foot {
+    justify-content: flex-start;
   }
   :root.wren-sheet-open,
   :root.wren-sheet-open body {

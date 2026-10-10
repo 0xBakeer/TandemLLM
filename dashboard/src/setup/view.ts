@@ -91,8 +91,8 @@ export class QseSetup extends LightElement {
   }
 
   private onReset = (): void => {
+    // the reset panel stays open: its dialog shows the result
     this.wiz = emptyState();
-    this.resetOpen = false;
     this.plan = null;
     this.jobInitial = null;
     if (location.hash !== '#/setup') location.hash = '#/setup';

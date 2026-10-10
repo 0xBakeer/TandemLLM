@@ -41,13 +41,13 @@ describe('planToolCall', () => {
     expect(planToolCall({ name: 'set_field', args: { step: 'methods', field: 'reasoning_effort', value: 'max' } }, ctx())).toMatchObject({ ok: false, error: expect.stringMatching(/expected one of low, medium, xhigh/) });
   });
   it('an unknown component is rejected', () => {
-    expect(planToolCall({ name: 'toggle', args: { component: 'flux', on: true } }, ctx())).toEqual({ ok: false, error: 'There is no tool called flux in this setup.' });
+    expect(planToolCall({ name: 'toggle', args: { component: 'flux', on: true } }, ctx())).toEqual({ ok: false, error: 'This setup has no tool called flux.' });
   });
   it('finish, apply, reset and the like are unknown tools: no handler exists', () => {
     for (const name of ['finish', 'apply', 'reset', 'install', 'unload', 'confirm_reset']) {
       const p = planToolCall({ name, args: {} }, ctx());
       expect(p.ok, name).toBe(false);
-      if (!p.ok) expect(p.error).toMatch(/There is no tool called/);
+      if (!p.ok) expect(p.error).toMatch(/Wren has no tool called/);
     }
     expect(TOOL_NAMES).not.toContain('finish' as never);
   });

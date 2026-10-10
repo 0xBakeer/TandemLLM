@@ -51,7 +51,7 @@ export const STEP_SHORT: Record<SetupStepId, string> = {
   parallelism: 'Decide how many chats run at once and how long they can be',
   methods: 'Keep the recommended settings, or change one',
   review: 'See every change before anything happens',
-  install: 'The box downloads, writes the settings and restarts',
+  install: 'The box fetches what it needs, then restarts with your settings',
 };
 
 export const S = {
@@ -66,15 +66,15 @@ export const S = {
   resetToRecommended: 'Use the recommended values',
   loading: 'Loading the setup guide',
   retry: 'Try again',
-  storageOff: 'This browser does not let the page save, so your progress will not be saved.',
-  storageCorrupt: 'The saved progress could not be read, so the guide starts from the recommended setup.',
+  storageOff: 'This browser does not let the page save, so your progress will not be kept.',
+  storageCorrupt: 'The guide could not read the saved progress, so it starts from the recommended setup.',
   storageOld: 'The saved progress is from an older version of the guide, so it starts from the recommended setup.',
-  savedProfileGone: (id: string) => `The saved weights ${id} are not offered any more, so the recommended weights are selected.`,
-  savedComponentGone: (id: string) => `The saved tool ${id} is not offered any more and was dropped.`,
-  savedValueBad: (label: string) => `The saved value of ${label} is not valid any more and was set back to the recommended one.`,
-  modelsEmpty: 'No models are listed. The registry folder models/ on the box is empty.',
+  savedProfileGone: (id: string) => `The guide no longer offers the saved weights ${id}, so it picked the recommended ones.`,
+  savedComponentGone: (id: string) => `The guide no longer offers the saved tool ${id} and left it out.`,
+  savedValueBad: (label: string) => `The saved value of ${label} is no longer valid, so the guide went back to the recommended one.`,
+  modelsEmpty: 'The box lists no models: its registry folder models/ is empty.',
   modelsError: 'The box did not answer with its list of models.',
-  modelLoadErrors: (n: number) => (n === 1 ? 'One model file could not be read:' : `${n} model files could not be read:`),
+  modelLoadErrors: (n: number) => (n === 1 ? 'The box could not read one model file:' : `The box could not read ${n} model files:`),
   unauthorized: 'This box has an admin password, and the dashboard has no sign-in yet. Unset QSE_ADMIN_TOKEN to use the setup guide (docs/server.md).',
   setupModeTab: 'Not available while the box is in setup mode',
   setupModeBanner: 'The box is in setup mode: only the dashboard and Wren are running. Finish the setup to start the model.',
@@ -160,7 +160,7 @@ export const S = {
 
   // methods
   advanced: 'Advanced',
-  advancedNote: 'Ports, names and the admin password.',
+  advancedNote: 'Where the engine listens, and the admin password.',
   invalidValue: (why: string) => `Not valid: ${why}.`,
 
   // review
@@ -199,7 +199,7 @@ export const S = {
   securityGenerate: 'Generate a password on the box',
   securityGenerateNote: 'The box writes it to secrets.env. Read it there with cat.',
   securityChoice: 'Admin password',
-  securitySet: 'An admin password is set on this box.',
+  securitySet: 'This box has an admin password.',
   confirmTitle: 'Install this setup?',
   confirmBody: (restart: boolean) => (restart ? 'Wren goes to sleep, the box writes the new settings and restarts the engine. Chats in progress stop.' : 'Wren goes to sleep and the box writes the new settings.'),
   confirmGo: 'Install',
@@ -303,15 +303,15 @@ export const S = {
 
   // tool errors (these go back to the model as the tool result)
   tool: {
-    unknown: (name: string) => `There is no tool called ${name}. The tools are set_field, toggle, select_profile, go_to_step, next, previous, explain and read_device.`,
+    unknown: (name: string) => `Wren has no tool called ${name}. The tools are set_field, toggle, select_profile, go_to_step, next, previous, explain and read_device.`,
     userOnly: (name: string) => `${name} is for the user only. Ask the user to press it.`,
     badArgs: (why: string) => `The arguments are wrong: ${why}.`,
     noModel: 'No model is open yet. Ask the user to pick one on the Models step.',
-    noStep: (step: string) => `There is no step ${step}. The steps are 0 models, 1 overview, 2 weights, 3 components, 4 parallelism, 5 methods, 6 review.`,
+    noStep: (step: string) => `The guide has no step ${step}. The steps are 0 models, 1 overview, 2 weights, 3 components, 4 parallelism, 5 methods, 6 review.`,
     noField: (step: string, field: string) => `The ${step} step has no field ${field}.`,
-    noComponent: (id: string) => `There is no tool called ${id} in this setup.`,
-    noProfile: (id: string) => `There are no weights called ${id}.`,
-    required: (label: string) => `${label} is always on and cannot be turned off.`,
+    noComponent: (id: string) => `This setup has no tool called ${id}.`,
+    noProfile: (id: string) => `This model has no weights called ${id}.`,
+    required: (label: string) => `${label} is always on; nobody can turn it off.`,
     secret: (label: string) => `${label} is a security setting. Only the user can change it.`,
     installStep: 'The install starts only when the user presses Finish.',
     atEnd: 'This is the last step before the install. Only the user can press Finish.',
@@ -325,7 +325,7 @@ export const S = {
 /** The reset section (VIS-82). */
 export const R = {
   title: 'Reset',
-  intro: 'Undo things in steps, from forgetting your setup progress to deleting the usage history. Each step shows what goes before anything is deleted.',
+  intro: 'Undo things in steps, from forgetting your setup progress to deleting the usage history. Each step shows what goes before the box deletes anything.',
   levelTitle: {
     1: 'Setup progress and Wren chat',
     2: 'Applied configuration',
@@ -347,7 +347,7 @@ export const R = {
   danger: 'Cannot be undone',
   dialogItems: 'What goes',
   dialogTotal: (b: string) => `Total ${b}`,
-  dialogNothing: 'There is nothing to delete at this level.',
+  dialogNothing: 'This level has nothing to delete.',
   typeWord: (w: string) => `Type ${w} to confirm`,
   confirm: (n: number) => `Reset level ${n}`,
   confirmLocal: 'Forget my progress',
@@ -356,14 +356,16 @@ export const R = {
   working: 'Resetting',
   busy: (n: number | null) => (n == null ? 'Requests are running. Reset is available when they finish.' : `${n} ${n === 1 ? 'request is' : 'requests are'} running. Reset is available when they finish.`),
   done: (freed: string) => `Done. Freed ${freed}.`,
-  doneLocal: 'Done. Your progress and the chat are forgotten.',
-  partial: (n: number) => `Not everything was deleted: ${n} ${n === 1 ? 'item' : 'items'} could not be removed.`,
+  doneLocal: 'Done. This browser forgot your progress and the chat.',
+  partial: (n: number) => `The box could not delete ${n} ${n === 1 ? 'item' : 'items'}; the rest is gone.`,
   error: 'The box did not reset.',
   unauthorized: 'This box has an admin password, and the dashboard has no sign-in yet. Reset needs it (docs/server.md).',
   offline: 'The box did not answer. Check the connection and try again.',
   loadError: 'The box did not list its reset levels.',
   atLeast: (b: string) => `at least ${b}`,
   missing: 'not on the box',
+  kept: (why: string) => `Stays: ${why}`,
+  keptShort: 'stays',
   restartNeeded: 'Restart the engine to finish.',
   retry: 'Try again',
   openSetup: 'Open the setup guide',

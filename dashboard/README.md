@@ -78,6 +78,19 @@ The mock's login is on unless the page is opened as `?mock=nologin` or the `POST
 
 `at: <ms>` starts a scenario that far in. `contract: "1.0"` answers like an older server without the activity fields, `liveRates: false` like a 1.1 server from before the live rates, `activity: false` sends them as `null`, and `draining: true` plays a server that is shutting down. While a request is in flight the mock sends four events a second, as the engine does. The mock also serves on its own (a request about every 15 s, log lines between them, memory drifting), so every live surface moves. Nothing from `mock/` ends up in `dist/`, and `tests/build.test.ts` checks that.
 
+`POST /__mock/setup` drives the setup guide's routes (`/v1/setup/*`, `mock/setup.ts`). Every POST starts from `{reset: true}` when it says so, then applies its keys:
+
+| key | what the mock does |
+|-|-|
+| `scenario` | the next apply job: `ok`, `rollback` (the smoke fails, the box goes back), `fail`, `slow` (3 times as long), `restart` (the origin does not answer for `gap_s` seconds, default 6, then the job resumes) |
+| `assistant` | Wren `loaded` or `not_loaded`; `loadMs` is how long a load takes, `refuse` a load refused for memory, `noModel` no Qwen3.5 on disk, `fallback` the 0.8B |
+| `hfToken`, `password`, `busy`, `setupMode` | the box: a Hugging Face token, an admin password, requests running (apply and reset answer 409), `/health` saying `mode: "setup"` |
+| `resetPartial`, `resetEmpty`, `estimateDown`, `planDown`, `unauthorized` | two reset items fail, nothing to delete at level 3, the estimate or plan route answers 500, every setup route answers 401 |
+| `models` | `ok`, `empty`, `error`, `broken` (a second model.yaml that does not load) |
+| `active` | the profile the box runs (default `exl3-6.0`) |
+
+The model is `mock/setup/qwen3.8-27b.json`, `models/qwen3.8-27b/model.yaml` as `GET /v1/setup/models/{id}` serves it (regenerate it with `server/setup/registry.py` and `wizard_fields` after a registry change). The scripted Wren answers by keyword: "turn off vision" (a tool call), "use 2 slots", "flux" (an unknown tool), "finish" (a tool that does not exist), "loop" (a call every round), "error" (an error mid-stream), "long" (a slow answer for Stop), "other tab" (busy).
+
 ## Against a real engine
 
     PW_BASE=http://<engine>:8000/dashboard/ PW_TOKEN=<admin token> npx playwright test
