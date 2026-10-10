@@ -61,6 +61,21 @@ def _value_error(f: dict, value) -> str | None:
     return registry.field_error(spec, value)
 
 
+def _coerce(f: dict, value):
+    """A value the model wrote as text, as the field's type: "4" for an int field, "true" for a
+    bool one (the XML tool-call form carries every parameter as text)."""
+    if not isinstance(value, str):
+        return value
+    v = value.strip()
+    if f["type"] == "bool" and v.lower() in ("true", "false"):
+        return v.lower() == "true"
+    if f["type"] == "int" and re.fullmatch(r"-?\d+", v):
+        return int(v)
+    if f["type"] == "number" and re.fullmatch(r"-?\d+(\.\d+)?", v):
+        return float(v)
+    return value
+
+
 def check(m: dict, name: str, args) -> tuple[dict | None, str | None]:
     """(the call's arguments, None) when `name(args)` is a valid call on model `m`; else
     (None, why) in a sentence the model can act on. `args` may be the JSON text of a tool call."""
@@ -87,10 +102,11 @@ def check(m: dict, name: str, args) -> tuple[dict | None, str | None]:
         f = registry.step_field(m, step, args["field"]) if isinstance(args["field"], str) else None
         if f is None:
             return None, f"step {args['step']!r} has no field {args['field']!r}"
-        why = _value_error(f, args["value"])
+        value = _coerce(f, args["value"])
+        why = _value_error(f, value)
         if why:
             return None, f"{args['field']}: {why}"
-        return args, None
+        return dict(args, value=value), None
     if name == "toggle":
         c = registry.component(m, args["component"]) if isinstance(args["component"], str) else None
         if c is None:

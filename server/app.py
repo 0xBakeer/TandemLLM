@@ -3740,11 +3740,16 @@ def _kv_reclaim_caches(want: int, owner) -> int:
 def _kv_reclaim_roles(want: int, owner) -> int:
     """Pool reclaim, level 2 (server/rolemem.py): the small models, shadow reader first, then the
     narrator (then Laya, only with QSE_ROLE_UNLOAD_LAYA=on), before any conversation is parked or
-    a request waits. They load again once memory has stayed back for a while."""
+    a request waits. They load again once memory has stayed back for a while. The setup guide's
+    assistant goes before all of them (server/setup/wren.py), and nothing loads it again."""
+    got = 0
+    wren = dict.get(STATE, "wren")
+    if wren is not None:
+        got = int(wren.reclaim(want) or 0)
     rm = dict.get(STATE, "role_mem")
-    if rm is None:
-        return 0
-    return int(rm.reclaim(want, owner, "kv_pool") or 0)
+    if rm is None or got >= want:
+        return got
+    return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
 def _kv_reclaim_side(want: int, owner) -> int:

@@ -6,6 +6,11 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
     POST /v1/setup/estimate {selection}   the memory estimate (server/setup/estimate.py)
+    GET  /v1/setup/assistant/status       Wren (server/setup/wren.py); a poll keeps it loaded
+    POST /v1/setup/assistant/load         idempotent; a memory refusal is state `refused`
+    POST /v1/setup/assistant/unload       the memory back
+    POST /v1/setup/assistant/chat         {messages, page} -> SSE of SetupChatEvent (`data: {...}`);
+                                          /v1/setup/chat is the same route
 
 Every route is an admin route (server/auth.py, kind `setup`): open while no admin password is set,
 the admin token, a dashboard session or a tool on the box itself once one is. Nothing here runs on a
@@ -35,13 +40,24 @@ def busy(app) -> bool:
     return bool(inf.get("running") or inf.get("waiting") or inf.get("lane"))
 
 
+def wren_of(app):
+    from server.setup import wren
+    return wren.get(app, device_facts=lambda: device_facts(app),
+                    setup_mode=bool(app.STATE.get("setup_mode")))
+
+
 def assistant_status(app) -> dict:
-    w = app.STATE.get("wren")
-    if w is not None:
-        return w.status()
-    return {"name": "Wren", "model": None, "fallback": False, "state": "off",
-            "reason": "this server has no assistant", "load_s": None, "device_gib": None,
-            "claim_gib": None, "can_load": False}
+    return wren_of(app).status()
+
+
+def device_facts(app) -> dict:
+    """What Wren reads of the box each turn: the device answer without Wren's own block."""
+    d = device_mod.read(app.STATE, inflight=app.INFLIGHT, busy=busy(app), assistant={},
+                        gpu=(app.STATE.get("gpu_sampler").sample()
+                             if app.STATE.get("gpu_sampler") is not None else None))
+    return {k: d.get(k) for k in ("mode", "preset", "mem_total_gb", "mem_available_gb", "gpu",
+                                  "disk", "active_profile", "profiles_on_disk", "hf_token_present",
+                                  "password_set")}
 
 
 def device(app) -> dict:
@@ -94,6 +110,10 @@ def _get(h, app, parts: list[str]) -> None:
                        extra_headers=NO_STORE)
     if parts == ["device"]:
         return h._json(200, device(app), extra_headers=NO_STORE)
+    if parts == ["assistant", "status"]:
+        w = wren_of(app)
+        w.touch()
+        return h._json(200, w.status(), extra_headers=NO_STORE)
     return _err(h, 404, "not_found", f"no route /v1/setup/{'/'.join(parts)}")
 
 
@@ -115,4 +135,33 @@ def _post(h, app, parts: list[str], body) -> None:
                                     available_gb=round(mem["MemAvailable"], 2)
                                     if "MemAvailable" in mem else None)
         return h._json(200, out, extra_headers=NO_STORE)
+    if parts == ["assistant", "load"]:
+        return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
+    if parts == ["assistant", "unload"]:
+        return h._json(200, wren_of(app).unload("asked"), extra_headers=NO_STORE)
+    if parts in (["assistant", "chat"], ["chat"]):
+        return sse(h, wren_of(app).chat(body))
     return _err(h, 404, "not_found", f"no route POST /v1/setup/{'/'.join(parts)}")
+
+
+def sse(h, events) -> None:
+    """An event stream of `data: {json}` frames; a reader that goes away closes the generator,
+    which stops what it was producing."""
+    import json
+    try:
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        h.send_header("Cache-Control", "no-cache")
+        h.send_header("X-Accel-Buffering", "no")
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.close_connection = True
+        for ev in events:
+            h.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+            h.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        h.close_connection = True
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
