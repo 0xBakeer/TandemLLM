@@ -1,17 +1,15 @@
 // VIS-78 (QA VIS-79): the page's copy of the memory formula against the server's fixture.
 // models/estimate-cases.json is the source (server/setup/estimate.py writes it with
-// `python tests/test_setup_estimate.py --write`); tests/fixtures/setup-estimate-cases.json is a copy
-// for a dashboard checkout without the registry. Every `expect` is matched (numbers within 0.01,
-// the rest equal, labels and notes included) and every `error` case refused with its status and code.
-import { existsSync, readFileSync } from 'node:fs';
+// `python tests/test_setup_estimate.py --write`), read here from the repository itself, so the two
+// can never drift. Every `expect` is matched (numbers within 0.01, the rest equal, labels and notes
+// included) and every `error` case refused with its status and code.
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SetupModel } from '../src/api/types';
 import { estimate, SelectionError } from '../src/setup/estimate';
 
-const repo = fileURLToPath(new URL('../../models/estimate-cases.json', import.meta.url));
-const copy = fileURLToPath(new URL('./fixtures/setup-estimate-cases.json', import.meta.url));
-const path = existsSync(repo) ? repo : copy;
+const path = fileURLToPath(new URL('../../models/estimate-cases.json', import.meta.url));
 const fixture = JSON.parse(readFileSync(path, 'utf8')) as {
   model: SetupModel;
   cases: { name: string; selection: Record<string, unknown>; expect?: Record<string, unknown>; error?: { status: number; code: string } }[];
@@ -36,7 +34,7 @@ function close(actual: unknown, want: unknown, at: string): void {
   expect(actual, at).toEqual(want);
 }
 
-describe(`the estimate fixture (${path.endsWith('models/estimate-cases.json') ? 'models/' : 'the dashboard copy'})`, () => {
+describe('the estimate fixture (models/estimate-cases.json)', () => {
   it('has cases of both kinds', () => {
     expect(fixture.cases.filter((c) => c.expect).length).toBeGreaterThan(10);
     expect(fixture.cases.filter((c) => c.error).length).toBeGreaterThan(0);
