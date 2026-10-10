@@ -84,6 +84,12 @@ from engine.settings import SETTINGS as _S
 SPILL_PARK = (_S.get("SPILL_PARK") or "on").strip().lower()
 PREFILL_WINDOW = int(_S.get("PREFILL_WINDOW") or 0)
 PREFILL_WINDOW_FREE = int(_S.get("PREFILL_WINDOW_FREE") or 0)
+#: SRV-309: () -> a cap on a layer-major window's rows right now, or None. The server sets it so a
+#: prefill on one slot hands the GPU turn to the slots that decode at least every this many rows
+#: (a window is one unit of GPU work: an 8,192-row window at 90k context held the turn ~20 s and
+#: three decoding chats wrote ~1 token a second). The windows' chunks are the same chunks in the
+#: same order, so the cap changes when the turn is offered, never a bit.
+WINDOW_CAP = None
 
 # 64-bit polynomial rolling hash. The multiplier is the FNV-1a prime; what matters is only that
 # `h(tokens[:i])` is available for every i after one pass, so probing a candidate boundary costs
@@ -2425,7 +2431,8 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     win = PREFILL_WINDOW if lines else PREFILL_WINDOW_FREE
     try:
         while i < n:
-            plan = _window_plan(eng, i, n, chunk, win)
+            cap = WINDOW_CAP() if WINDOW_CAP is not None else None
+            plan = _window_plan(eng, i, n, chunk, win if cap is None else min(win, int(cap)))
             if plan is not None:
                 # LAYER-major over several chunks (`Qwen38Engine.prefill_window`): the same forwards
                 # bit for bit, every EXL3 slab decoded once a window instead of once a chunk. The

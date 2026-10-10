@@ -3779,6 +3779,45 @@ def _kv_reclaim_slot0(want: int, owner) -> int:
         LOCK._lk.release()
 
 
+def _kv_reclaim_idle(d: dict, owner) -> int:
+    """SRV-307, before a request waits for memory: the pages idle conversations keep (idle side
+    slots, then slot 0's idle one, to the NVMe first), as much as the admission is short. Not the
+    caches: the admission already counts their growth, and shedding them leaves it unchanged."""
+    pool = kvpool.POOL
+    if pool is None or d.get("after") is None:
+        return 0
+    want = int(d.get("floor", 0)) - int(d["after"])
+    got = 0
+    for name, fn in list(pool.reclaimers):
+        if name == "caches" or got >= want:
+            continue
+        try:
+            n = int(fn(want - got, owner) or 0)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+            n = 0
+        if n:
+            got += n
+            pool.stats["reclaims"] += 1
+            pool.stats["reclaimed_bytes"] += n
+            print(f"[kv-pool] reclaim for admission level={name} bytes={n} owner={owner}",
+                  flush=True)
+    return got
+
+
+#: SRV-309: while another slot decodes, a prefill's layer-major window takes at most this many
+#: rows, so the GPU turn is offered to the decoders at least that often (0: no cap)
+PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "2048") or 0)
+
+
+def _par_window_cap() -> int | None:
+    pool = dict.get(STATE, "pool")
+    if pool is None:
+        return None
+    me = _par_index()
+    return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
+
+
 def _kv_after_load(a) -> None:
     """After slot 0's engine and drafters exist: the memory policy no longer holds slot 0's
     window (its pages are the pool's now, outside the allocator), and the reclaimers in order."""
@@ -5001,6 +5040,9 @@ class Handler(BaseHTTPRequestHandler):
                 owner = pages.owner
         need = ws + kv
         ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+        if not ok and _kv_reclaim_idle(d, owner):
+            # SRV-307: the pages idle conversations keep come back before anyone waits
+            ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
         if ok:
             return True
         print(f"[parallel] {cid} waits for memory: {slots_mod.Admission.describe(d)}", flush=True)
@@ -5042,6 +5084,8 @@ class Handler(BaseHTTPRequestHandler):
                 if place > 1:
                     continue
                 ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
+                if not ok and _kv_reclaim_idle(d, owner):
+                    ok, d = adm.reserve(cid, need, kv=kv, owner=owner)
                 if ok:
                     waited = time.perf_counter() - t0
                     if rec is not None:
@@ -8972,6 +9016,8 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         sys.setswitchinterval(a.parallel_switch_ms / 1e3)
     STATE["pool"] = pool
     LOCK.turn = turn
+    if PAR_WINDOW_ROWS > 0:
+        cache.WINDOW_CAP = _par_window_cap      # SRV-309
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "

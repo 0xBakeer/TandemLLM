@@ -162,10 +162,36 @@ def spec_identity(A, B, cfg, bad: list, new: int = 256) -> None:
         bad.append(f"spec tree blocks {ba} vs {bb} (the drafts differ)")
 
 
+def window_cap_identity(A, n: int, bad: list) -> None:
+    """SRV-309: a prefill with the layer-major window capped at 2,048 rows (what a slot gets while
+    another decodes) equals the uncapped one bit for bit."""
+    g = torch.Generator().manual_seed(n + 1)
+    ids = torch.randint(1000, 100000, (n,), generator=g).tolist()
+    outs = []
+    with torch.no_grad():
+        for cap in (None, 2048, 1024):
+            cache.WINDOW_CAP = (lambda c=cap: c) if cap is not None else None
+            A.reset()
+            t0 = time.time()
+            lg = cache.prefill(A, None, ids, "cuda", chunk=1024)[0].float().clone()
+            torch.cuda.synchronize()
+            L = A.kv.length
+            outs.append((cap, lg, A.kv.k[:, :, :, :L].clone(), A.kv.v[:, :, :, :L].clone(),
+                         _S(A).clone(), A.state.conv.clone(), time.time() - t0))
+    cache.WINDOW_CAP = None
+    ref = outs[0]
+    for o in outs[1:]:
+        for j, nm in ((1, "logits"), (2, "k"), (3, "v"), (4, "S"), (5, "conv")):
+            _eq(f"window cap {o[0]} {n} {nm}", ref[j], o[j], bad)
+    print("  window cap prefill s: " + ", ".join(f"{o[0]}: {o[6]:.1f}" for o in outs), flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lens", default="8192,32768,131072")
     ap.add_argument("--no-spec", action="store_true")
+    ap.add_argument("--window-cap", type=int, default=0,
+                    help="also check the SRV-309 window cap at this prompt length (0: skip)")
     a = ap.parse_args()
     lens = [int(x) for x in a.lens.split(",") if x]
     M = max(lens) + 4096
@@ -182,6 +208,8 @@ def main() -> None:
     print(f"[identity] window {M:,}; verify graphs {'on' if M_.VERIFY_GRAPH else 'off'}; "
           f"page {B.kv.pages.bufs[0].page >> 20} MiB", flush=True)
     bad: list = []
+    if a.window_cap:
+        window_cap_identity(A, a.window_cap, bad)
     for n in lens:
         identity_at(A, B, n, seed=n, bad=bad)
     if not a.no_spec:

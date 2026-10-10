@@ -198,6 +198,28 @@ def test_a_streamed_wait_outlasts_the_queue_timeout():
     assert rec.wait_mem_ms >= 2000 and h.sent is None and rec.waiting_memory is False
 
 
+def test_admission_takes_back_idle_conversations_before_it_waits():
+    app = _app()
+    from engine import kvpool
+    calls = []
+    pool = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+    pool.add_reclaimer("caches", lambda want, o: calls.append(("caches", want)) or GiB)
+    pool.add_reclaimer("idle_side", lambda want, o: calls.append(("idle_side", want, o)) or 3 * GiB)
+    pool.add_reclaimer("idle_slot0", lambda want, o: calls.append(("idle_slot0", want, o)) or 4 * GiB)
+    old = kvpool.POOL
+    kvpool.POOL = pool
+    try:
+        got = app._kv_reclaim_idle({"floor": 15 * GiB, "after": 10 * GiB}, "slot2")
+        assert got == 7 * GiB, got
+        assert calls == [("idle_side", 5 * GiB, "slot2"), ("idle_slot0", 2 * GiB, "slot2")], calls
+        calls.clear()
+        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": 13 * GiB}, "slot1") == 3 * GiB
+        assert [c[0] for c in calls] == ["idle_side"], "stops once enough came back"
+        assert app._kv_reclaim_idle({"floor": 15 * GiB, "after": None}, "slot1") == 0
+    finally:
+        kvpool.POOL = old
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):
