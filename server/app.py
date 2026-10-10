@@ -3836,6 +3836,21 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
 PAR_WINDOW_ROWS = int(os.environ.get("QSE_PARALLEL_WINDOW_ROWS", "0") or 0)
 
 
+#: SRV-321: between two layers of a layer-major window the GPU turn is offered to a waiting slot,
+#: as between two chunks ("off" offers it after the window only, kept for the A/B)
+PAR_LAYER_YIELD = (os.environ.get("QSE_PARALLEL_LAYER_YIELD") or "on").strip().lower() != "off"
+
+
+def _par_window_yield() -> None:
+    """SRV-321: a prefill's window between two layers: the GPU offered to a waiting slot (the
+    decoders run their rounds; a no-op when nobody waits). Without it the turn was offered only
+    after the window, and an 8,192-row EXL3 window held it ~10 s: three decoding chats wrote 0
+    tokens for 42 of the 147 seconds a 37k-token prompt prefilled beside them (2026-10-10)."""
+    pool = dict.get(STATE, "pool")
+    if pool is not None and pool.turn is not None and pool.turn.waiting():
+        pool.turn.pause(_par_index())
+
+
 def _par_window_cap() -> int | None:
     pool = dict.get(STATE, "pool")
     if pool is None:
@@ -9130,6 +9145,9 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     LOCK.turn = turn
     if PAR_WINDOW_ROWS > 0:
         cache.WINDOW_CAP = _par_window_cap      # SRV-309
+    if PAR_LAYER_YIELD and turn is not None:
+        from engine import model as model_mod           # the real engine's (the fake has none)
+        model_mod.WINDOW_YIELD = _par_window_yield      # SRV-321
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "
