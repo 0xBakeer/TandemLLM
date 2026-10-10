@@ -2,7 +2,7 @@
 // residency planner's words. Pure functions; GiB throughout, as the planner and the box's
 // operators count (the floor is 15 GiB of MemAvailable).
 
-import type { MemoryBudget, MemoryEvent, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyReason, ResidencyRow, SessionSwitch } from '../api/types';
+import type { RolesReport, RoleRow, MemoryBudget, MemoryEvent, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyReason, ResidencyRow, SessionSwitch } from '../api/types';
 
 const GIB = 1024 ** 3;
 
@@ -35,26 +35,47 @@ const PARTS: [string, string, string][] = [
   ['resident_prefix', 'resident prefix', 'red'],
   ['state_store', 'state store', 'aqua'],
   ['deciders', 'decision models', 'yellow'],
+  ['narrator', 'narrator', 'violet'],
+  ['shadow', 'shadow reader', 'aqua'],
 ];
 
+/** With the shared KV pool, the KV pages the driver maps outside the allocator: committed pages, never the reserved range. */
+const VMM_LABELS: Record<string, string> = { kv_pool: 'KV pages, committed', drafter_kv: 'drafter KV pages, committed' };
+
 /**
- * One bar for the engine: each named part, then `other` (the allocator's scratch, graph pools and
- * small buffers beyond the named parts) and `reserve` (taken from the driver, no tensor in it),
- * as shares of the reserved total. Parts of zero bytes are left out.
+ * One bar for the engine: each named part the allocator holds, then `other` (the allocator's
+ * scratch, graph pools and small buffers beyond the named parts) and `reserve` (taken from the
+ * driver, no tensor in it); then, with the shared KV pool, the KV pages committed outside the
+ * allocator (`vmm_parts`) and `outside` (the CUDA context, host memory, other programs), so the bar
+ * adds up to MemTotal - MemAvailable. Parts of zero bytes are left out.
  */
 export function splitSegments(s: MemorySplit | null | undefined): SplitSegment[] {
   if (!s) return [];
+  const vmm = new Set(s.vmm_parts ?? []);
   const segs: SplitSegment[] = [];
   for (const [key, label, color] of PARTS) {
     const b = s.parts[key];
-    if (b) segs.push({ key, label, bytes: b, share: 0, color });
+    if (b && !vmm.has(key)) segs.push({ key, label, bytes: b, share: 0, color });
   }
-  for (const [key, b] of Object.entries(s.parts)) if (b && !PARTS.some(([k]) => k === key)) segs.push({ key, label: key.replace(/_/g, ' '), bytes: b, share: 0, color: 'muted' });
+  for (const [key, b] of Object.entries(s.parts)) if (b && !vmm.has(key) && !PARTS.some(([k]) => k === key)) segs.push({ key, label: key.replace(/_/g, ' '), bytes: b, share: 0, color: 'muted' });
   if (s.other != null && s.other > 0) segs.push({ key: 'other', label: 'other allocations', bytes: s.other, share: 0, color: 'muted' });
   if (s.reserve != null && s.reserve > 0) segs.push({ key: 'reserve', label: 'allocator reserve', bytes: s.reserve, share: 0, color: 'rule' });
+  for (const key of vmm) {
+    const b = s.parts[key];
+    const color = PARTS.find(([k]) => k === key)?.[2] ?? 'muted';
+    if (b) segs.push({ key, label: VMM_LABELS[key] ?? key.replace(/_/g, ' '), bytes: b, share: 0, color });
+  }
+  if (vmm.size && s.outside != null && s.outside > 0) segs.push({ key: 'outside', label: 'outside the allocator (CUDA context, host, other programs)', bytes: s.outside, share: 0, color: 'rule' });
   const total = segs.reduce((a, x) => a + x.bytes, 0) || 1;
   for (const x of segs) x.share = x.bytes / total;
   return segs;
+}
+
+/** "in use 76.1 GiB = allocator 55.2 + KV pages 12.8 + outside 8.1 · KV addresses reserved 104.0 GiB (not memory)"; '' without the pool. */
+export function inUseWords(s: MemorySplit | null | undefined): string {
+  if (!s || s.kv_committed == null || s.in_use == null) return '';
+  const f = (b: number | null | undefined) => (b == null ? '—' : (b / GIB).toFixed(1));
+  return `in use ${f(s.in_use)} GiB (MemTotal ${f(s.mem_total)} − MemAvailable ${f(s.mem_available)}) = allocator ${f(s.reserved)} + KV pages committed ${f(s.kv_committed)} + outside ${f(s.outside)} · KV addresses reserved ${f(s.kv_reserved_va)} GiB (not memory)`;
 }
 
 export const REASON_WORDS: Record<ResidencyReason, string> = {
@@ -156,4 +177,30 @@ export function withEngineLimit(doc: ResidencyDoc, key: string, value: number | 
   const out: ResidencyDoc = { ...doc, engine };
   if (!Object.keys(engine).length) delete out.engine;
   return out;
+}
+
+// ---- 0.6.1: the small models under memory pressure ----------------------------------------------
+
+export const ROLE_LABELS: Record<string, string> = { shadow: 'shadow reader', narrator: 'narrator', laya: 'Laya deciders' };
+
+/** A role's state in words: "loaded", "unloaded for memory (3 min, 3.6 GiB back)", "loading again". */
+export function roleStateWords(r: RoleRow): string {
+  if (r.state === 'unloaded_for_memory') {
+    const m = r.out_s != null ? (r.out_s < 90 ? `${Math.round(r.out_s)} s` : `${Math.round(r.out_s / 60)} min`) : null;
+    const parts = [m, r.freed_gib != null ? `${r.freed_gib.toFixed(1)} GiB back` : null].filter(Boolean);
+    return `unloaded for memory${parts.length ? ` (${parts.join(', ')})` : ''}`;
+  }
+  if (r.state === 'reloading') return 'loading again';
+  return r.state.replace(/_/g, ' ');
+}
+
+/** The rows in unload order, with the reload line in words. */
+export function roleRows(rep: RolesReport | null | undefined): { name: string; label: string; row: RoleRow; words: string; line: string }[] {
+  if (!rep || !rep.roles) return [];
+  const order = rep.order ?? Object.keys(rep.roles);
+  return order.filter((n) => rep.roles[n]).map((n) => {
+    const row = rep.roles[n];
+    const line = row.reload_at_gib != null && rep.policy ? `reloads at ${row.reload_at_gib.toFixed(1)} GiB headroom held ${Math.round(row.hold_s ?? rep.policy.hold_s)} s` : '';
+    return { name: n, label: ROLE_LABELS[n] ?? n, row, words: roleStateWords(row), line };
+  });
 }

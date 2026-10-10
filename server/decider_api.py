@@ -331,8 +331,12 @@ def card(reg, name: str, created: int) -> dict | None:
 
 def readyz(reg, state: dict) -> tuple[int, dict]:
     ready = reg.ready()
-    st = "ready" if ready else ("warming" if reg.loading() else "not_loaded")
-    return (200 if ready else 503), {
+    held = bool(getattr(reg, "memory_hold", None))
+    st = "ready" if ready else ("warming" if reg.loading() else
+                                "unloaded_for_memory" if held else "not_loaded")
+    # out for memory (server/rolemem.py) is a planned state, not a broken one: the router falls
+    # back to its next stage and the governor loads the model again once memory came back
+    return (200 if ready or held else 503), {
         "status": st, "engine": "tandemllm", "models": reg.loaded(),
         "device": str(reg.device.device) if reg.device is not None else None,
         "version": state.get("version", ""),

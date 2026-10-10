@@ -179,7 +179,7 @@
           "minimum": 0
         },
         "split": {
-          "description": "OPS-41: where the engine's resident set goes, in bytes: the allocator's totals, the named parts read off the objects that hold them (weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix), what the allocator holds beyond them (other) and keeps without a tensor (reserve), and the load stages' deltas; null when it could not be read",
+          "description": "OPS-41: where the engine's resident set goes, in bytes: the allocator's totals, the named parts read off the objects that hold them (weights, kv_pool, gdn_state, drafter_kv, vision, state_store, resident_prefix), what the allocator holds beyond them (other) and keeps without a tensor (reserve), and the load stages' deltas; with the shared KV pool (0.6.1) kv_pool and drafter_kv are the pages COMMITTED for every slot (named in vmm_parts, outside the allocator), kv_reserved_va their reserved address range (not memory), and allocator reserved + kv_committed + outside = in_use = MemTotal - MemAvailable; null when it could not be read",
           "type": [
             "object",
             "null"
@@ -271,6 +271,42 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "vmm_parts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kv_committed": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kv_reserved_va": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mem_total": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "in_use": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "outside": {
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -563,6 +599,22 @@
             "owner"
           ],
           "additionalProperties": false
+        },
+        "roles": {
+          "description": "0.6.1 (server/rolemem.py): the small models beside the engine under memory pressure: each role's state (loaded, unloaded_for_memory, reloading, or its slot's own), the reload policy and the last events; null when it could not be read",
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "dynamic": {
+              "type": "boolean"
+            },
+            "roles": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": true
         }
       },
       "required": [
@@ -915,7 +967,10 @@
                 "minimum": 0
               },
               "max_inflight": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 1,
                 "description": "the cap the user set; null: no limit from the proxy (the default)"
               },

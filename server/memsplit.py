@@ -105,38 +105,123 @@ def drafter_caches(drafter, depth: int = 4) -> list:
     return out
 
 
-def split(state: dict, probe=None, avail=mem_available) -> dict:
+def mem_total() -> int | None:
+    """MemTotal in bytes, None where /proc does not exist."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _pool_bytes(where) -> tuple[int, int]:
+    try:
+        return tuple(int(x) for x in where.pool_bytes()) if where is not None else (0, 0)
+    except Exception:                                              # noqa: BLE001
+        return 0, 0
+
+
+def _roles(state: dict) -> dict[str, int]:
+    """The in-process small models' ALLOCATED bytes in the shared allocator (their own pools;
+    what a pool keeps free shows in `reserve`): the narrator, the shadow reader (one row when they
+    share a slot) and the decision models."""
+    out: dict[str, int] = {}
+    seen = set()
+    for name, owner in (("narrator", state.get("narrator")), ("shadow", state.get("shadow"))):
+        slot = getattr(owner, "slot", None) if owner is not None else None
+        if slot is None or id(slot) in seen or getattr(slot, "state", None) != "loaded":
+            continue
+        seen.add(id(slot))
+        res, alloc = _pool_bytes(slot) if hasattr(slot, "pool_bytes") else (0, 0)
+        if not alloc:
+            try:
+                alloc = int(slot.device_bytes())
+            except Exception:                                      # noqa: BLE001
+                alloc = 0
+        out[name] = alloc
+    reg = state.get("deciders")
+    if reg is not None:
+        n = 0
+        try:
+            for st in reg.status():
+                if st.get("state") != "loaded":
+                    continue
+                a = _pool_bytes(getattr(reg, "_placements", {}).get(st["name"]))[1]
+                n += a or int(st.get("device_bytes") or 0)
+        except Exception:                                          # noqa: BLE001
+            pass
+        out["deciders"] = n
+    return out
+
+
+def split(state: dict, probe=None, avail=mem_available, total=mem_total, pool=None) -> dict:
     """The resident set, in bytes, from the objects that hold it. `state` is server/app.py's
     STATE; a part the server does not have (no vision, no store, the fake engine) is left out,
-    and every part is a reading, never an estimate."""
+    and every part is a reading, never an estimate.
+
+    Two kinds of memory. The allocator's (`allocated`, `reserved`): weights, recurrent state,
+    vision, caches, the small models' pools. And, with the shared KV pool (engine/kvpool.py), the
+    KV pages the driver maps outside the allocator: `kv_pool` (the engine's attention KV) and
+    `drafter_kv` (the drafters' context KV) are then the pages COMMITTED for every slot, never a
+    paged tensor's `nbytes` (that is its reserved address range, 26.6 GiB a 262,144-row slot,
+    which is no memory at all: `kv_reserved_va`). `vmm_parts` names the parts outside the
+    allocator. `outside` is what the box uses that neither holds -- the CUDA context, the
+    process's host memory, other programs -- so that
+
+        allocator reserved + KV pages committed + outside = MemTotal - MemAvailable (`in_use`)
+
+    and the dashboard's bar adds up to what MemAvailable says is gone."""
+    from engine import kvpool
     alloc, reserved = (probe or _torch_probe)()
+    pool = pool if pool is not None else kvpool.POOL
     parts: dict[str, int] = {}
 
     def put(name, n):
         if n:
-            parts[name] = int(n)
+            parts[name] = parts.get(name, 0) + int(n)
+
+    def static(*ts) -> int:
+        return _nbytes(*(t for t in ts if t is not None and not kvpool.paged(t)))
+
     eng = state.get("engine")
     w = getattr(eng, "w", None)
     put("weights", getattr(w, "bytes_fp8", 0) + getattr(w, "bytes_other", 0))
     kv = getattr(eng, "kv", None)
-    put("kv_pool", _nbytes(*(getattr(kv, k, None) for k in ("k", "v", "ks", "vs"))))
+    put("kv_pool", static(*(getattr(kv, k, None) for k in ("k", "v", "ks", "vs"))))
     st = getattr(eng, "state", None)
     put("gdn_state", _nbytes(*(getattr(st, k, None) for k in ("S", "conv", "_spare"))))
     caches = drafter_caches(state.get("drafter"))
-    put("drafter_kv", sum(_nbytes(d._ck, getattr(d, "_cv", None)) for d in caches))
+    put("drafter_kv", sum(static(d._ck, getattr(d, "_cv", None)) for d in caches))
     put("vision", getattr(state.get("vision"), "nbytes", 0))
     put("state_store", getattr(state.get("state_store"), "bytes", 0))
     res = state.get("resident")
     put("resident_prefix", (res.report().get("bytes") or 0) if hasattr(res, "report") else 0)
-    # the decision models' weights and buffers (engine/decision): their own pool, same allocator
-    reg = state.get("deciders")
-    put("deciders", sum(s["device_bytes"] for s in reg.status()) if reg is not None else 0)
-    named = sum(parts.values())
-    out = {"allocated": alloc, "reserved": reserved, "parts": parts,
-           "other": (alloc - named) if alloc is not None else None,
+    for name, n in _roles(state).items():
+        put(name, n)
+    in_alloc = sum(parts.values())
+    vmm_parts: list[str] = []
+    kinds = pool.by_kind() if pool is not None and hasattr(pool, "by_kind") else None
+    vmm = 0
+    if kinds is not None and kinds.get("paged"):
+        for name, key in (("kv_pool", "engine_kv"), ("drafter_kv", "drafter_kv")):
+            if kinds.get(key):
+                put(name, kinds[key])
+                vmm_parts.append(name)
+        vmm = int(kinds.get("engine_kv", 0) + kinds.get("drafter_kv", 0) + kinds.get("other", 0))
+    ma, mt = avail(), (total() if total is not None else None)
+    in_use = (mt - ma) if ma is not None and mt is not None else None
+    out = {"allocated": alloc, "reserved": reserved, "parts": parts, "vmm_parts": vmm_parts,
+           "other": (alloc - in_alloc) if alloc is not None else None,
            "reserve": (reserved - alloc) if alloc is not None and reserved is not None else None,
-           "mem_available": avail(), "max_len": state.get("max_len"),
-           "drafter_caches": len(caches)}
+           "kv_committed": vmm if kinds is not None else None,
+           "kv_reserved_va": int(kinds["reserved_va"]) if kinds is not None else None,
+           "mem_available": ma, "mem_total": mt, "in_use": in_use,
+           "outside": (in_use - (reserved or 0) - vmm) if in_use is not None
+           and reserved is not None else None,
+           "max_len": state.get("max_len"), "drafter_caches": len(caches)}
     led = state.get("load_ledger")
     if led is not None:
         out["load"] = led.stages()
