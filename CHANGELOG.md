@@ -2,6 +2,27 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.6.0, 2026-10-10
+
+One shared KV pool. Before this release, every slot reserved its whole window at load, so 4 slots fit only with 32,768-token side windows, and the narrator and Laya were refused. Now each slot reserves only addresses, up to 262,144 tokens, and memory pages are mapped as a conversation grows (`QSE_KV_POOL=on`). The text does not change: on 8k, 32k and 128k prompts the logits, every KV row and the GDN state match the static buffers bit for bit, and a greedy decode with the served drafters gives the same 258 tokens in the same 56 blocks.
+
+Measured on :8000 (EXL3 4.5, 2026-10-10 night): 4 slots × 262,144, with Laya and the narrator loaded again. MemAvailable after warm-up is 58-63 GiB, against 26 GiB with the old 32k side windows. On the same 4-request load test, the aggregate went from 28.4-31.5 tok/s on 2 slots to 34.2-35.6 tok/s on 4, and the lowest MemAvailable from 23.7 to 48.5 GB. Three chats of 22k and one of 87k ran on four slots at once.
+
+### KV memory
+
+- `engine/kvpool.py` reserves each slot's engine KV and both drafters' context KV as CUDA virtual memory, with the old buffers' exact shape. It maps 2 MiB pages just before rows are written: every forward pass, restore, pin, park, stash, disk tier, NVMe spill and side-slot carry. No attention kernel changed, and CUDA graphs keep their pointers.
+- Pages past what a slot keeps go back when its request ends.
+- Under pressure, caches give memory back first, then idle side conversations, then slot 0's idle conversation (to the NVMe). A 53.7k conversation came back from the NVMe in 1.2 s.
+- Admission counts the pages a request could still commit, minus what it already holds.
+
+### Waiting instead of refusing
+
+- A request that does not fit waits. Its stream says "waiting while memory is almost full… 1st in line" every 15 s and carries `X-Tandem-Wait: memory`, and the dashboard has a `waiting_memory` lane. A 95k-token request waited 111 s and then ran, with nothing refused. After the queue timeout, a non-streamed request gets a 503 `memory_wait_timeout`.
+
+### Parallel decoding
+
+- Chats decoding on side slots no longer stall while another slot prefills a long prompt (`QSE_BARRIER_IDLE_OWNER`, on by default). In a same-hour A/B they went from 4.5 to 10.7-14.3 tok/s. The long prompt's first token came 18 % later (154.8 to 182 s), because the chats now get their share of the GPU.
+
 ## 0.5.1, 2026-10-10
 
 Two dashboard numbers were wrong, and :8000 now runs four requests at once. The text does not change.
