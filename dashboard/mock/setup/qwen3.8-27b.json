@@ -1,13 +1,13 @@
 {
- "contract_version": "1.0",
  "schema": 1,
  "id": "qwen3.8-27b",
  "name": "Qwen3.8-27B",
  "family": "Qwen3.8",
  "params": "27B",
- "pitch": "A 27-billion-parameter model with vision, fast on one DGX Spark through speculative decoding.",
- "architecture": "A hybrid of 48 Gated DeltaNet (recurrent) layers and 16 full-attention layers, with a vision tower. TandemLLM serves it with two small draft models and a tree verify, so one pass of the big model can accept several tokens; with greedy decoding the text is the model's own up to near ties.",
- "license": "The base model's license is on its Hugging Face card; TandemLLM is AGPL-3.0 or commercial",
+ "recommended": true,
+ "pitch": "A 27-billion-parameter model that reads images too, fast on one DGX Spark.",
+ "architecture": "64 layers: 48 recurrent (Gated DeltaNet) and 16 full-attention, with a vision tower. TandemLLM runs it with two small draft models: they guess the next tokens and one pass of the big model checks them all, so a pass can keep several tokens. With greedy decoding the text is the model's own, up to near ties.",
+ "license": "The model's license is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.",
  "icon": null,
  "links": [
   {
@@ -29,7 +29,83 @@
    "label": "NVIDIA DGX Spark (128 GB unified memory)",
    "total_gib": 121.63,
    "reserved_gib": 10.0,
-   "note": "MemTotal reads 121.6 GiB; the GPU and the CPU share it."
+   "note": "The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB."
+  }
+ ],
+ "assets": [
+  {
+   "id": "exl3-drafters-k3",
+   "label": "Draft models (EXL3 K3)",
+   "path": "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
+   "also": [
+    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors"
+   ],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": null,
+   "source": "Converted on the reference box (ENG-215); a private backup is 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters. No download yet (OPS-95)."
+  },
+  {
+   "id": "exl3-draft-head-k4",
+   "label": "Draft head (EXL3 K4)",
+   "path": "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors",
+   "also": [],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": null,
+   "source": "Converted on the reference box (ENG-215). No download yet (OPS-95)."
+  },
+  {
+   "id": "base-fp8",
+   "label": "Base checkpoint (Qwen3.8-27B-FP8)",
+   "path": "${HF_HUB}/models--Qwen--Qwen3.8-27B-FP8/snapshots/*/config.json",
+   "also": [],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+   "source": "Every profile reads its embeddings, norms and tokenizer. install.sh downloads it; use-profile.sh does not."
+  },
+  {
+   "id": "nvfp4-drafters",
+   "label": "Draft models (NVFP4)",
+   "path": "${REPO}/train/ft-b8-v2",
+   "also": [
+    "${REPO}/train/ft-b16"
+   ],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8",
+   "source": "The 0.4.8 release's drafters (DFlash2-b8 and -b16 on Hugging Face); the profile reads them from the repository's train/ folder."
+  },
+  {
+   "id": "qwen3.5-2b",
+   "label": "Qwen3.5-2B (the narrator, and Wren)",
+   "path": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "Qwen/Qwen3.5-2B",
+   "source": "Public on Hugging Face; install.sh --setup downloads it for Wren."
+  },
+  {
+   "id": "qwen3.5-0.8b",
+   "label": "Qwen3.5-0.8B (the shadow reader)",
+   "path": "${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b/config.json",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "Qwen/Qwen3.5-0.8B",
+   "source": "Public on Hugging Face."
+  },
+  {
+   "id": "laya",
+   "label": "Laya decision models",
+   "path": "${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "convaiinnovations/laya",
+   "source": "On Hugging Face, read with the token."
   }
  ],
  "profiles": [
@@ -42,6 +118,7 @@
    "weights_gib": 10.15,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5",
+   "hf_private": true,
    "recommended": false,
    "badges": [
     "fastest"
@@ -53,13 +130,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": "The fastest and the furthest from the original model.",
-   "private": true
+   "note": "The fastest, and the furthest from the original model."
   },
   {
    "id": "exl3-3.0",
@@ -70,6 +146,7 @@
    "weights_gib": 11.58,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0",
+   "hf_private": true,
    "recommended": false,
    "badges": [],
    "quality": {
@@ -79,13 +156,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": "As fast as 2.5 on greedy prose at a little over half its distance from the original.",
-   "private": true
+   "note": "As fast as 2.5 on greedy prose, and a little over half as far from the original."
   },
   {
    "id": "exl3-3.5",
@@ -96,6 +172,7 @@
    "weights_gib": 13.17,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5",
+   "hf_private": true,
    "recommended": false,
    "badges": [],
    "quality": {
@@ -105,13 +182,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": null,
-   "private": true
+   "note": "Code 35 % faster than 4.5, a little further from the original than NVFP4."
   },
   {
    "id": "exl3-4.0",
@@ -122,6 +198,7 @@
    "weights_gib": 14.76,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0",
+   "hf_private": true,
    "recommended": false,
    "badges": [
     "best speed for quality"
@@ -133,13 +210,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": "Closer to the original than NVFP4 on every measure, and faster than 4.5.",
-   "private": true
+   "note": "Closer to the original than NVFP4 on every measure, and prose 11 % faster than 4.5."
   },
   {
    "id": "exl3-4.5",
@@ -150,6 +226,7 @@
    "weights_gib": 16.14,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5",
+   "hf_private": true,
    "recommended": true,
    "badges": [
     "recommended"
@@ -161,13 +238,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": "The default of a new box.",
-   "private": true
+   "note": "The default of a new box."
   },
   {
    "id": "exl3-6.0",
@@ -178,6 +254,7 @@
    "weights_gib": 20.65,
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0",
+   "hf_private": true,
    "recommended": false,
    "badges": [
     "closest to BF16"
@@ -189,13 +266,12 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors",
-    "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors"
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
    ],
-   "note": "The closest to the original model and the slowest.",
-   "private": true
+   "note": "The closest to the original model, and the slowest."
   },
   {
    "id": "nvfp4",
@@ -203,9 +279,10 @@
    "format": "nvfp4",
    "bpw": null,
    "disk_gb": 15.0,
-   "weights_gib": 16.35,
-   "drafters_gib": 5.9,
+   "weights_gib": 16.46,
+   "drafters_gib": 5.87,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4",
+   "hf_private": false,
    "recommended": false,
    "badges": [
     "public weights"
@@ -217,12 +294,11 @@
     "date": "2026-10-09",
     "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
    },
-   "requires": [
-    "${REPO}/train/ft-b8-v2",
-    "${REPO}/train/ft-b16"
+   "assets_required": [
+    "nvfp4-drafters",
+    "base-fp8"
    ],
-   "note": "The release's public weights (the StairCut paper's set). Its speed was measured on the older build 0.4.8 only.",
-   "private": false
+   "note": "The public weights of the 0.4.8 release. Its speed was only measured on the older build 0.4.8, so it is not in the same table."
   }
  ],
  "measurements": {
@@ -1118,7 +1194,7 @@
     "build": "0.4.8",
     "date": "2026-10-08",
     "comparable": false,
-    "note": "Older build 0.4.8 with the NVFP4 drafters and other rows (one run, greedy 512 prose and chat only), not comparable with the rows above.",
+    "note": "Older build 0.4.8, not comparable with the rows above. One run with the NVFP4 drafters, greedy 512 prose and chat only (kernel note \"2026-10-08 23:35 CEST\").",
     "cells": {
      "greedy_512": {
       "prose": {
@@ -1149,10 +1225,10 @@
   "parts": [
    {
     "id": "graphs",
-    "label": "CUDA graphs (the verify)",
+    "label": "CUDA graphs (the verify step)",
     "gib": 6.63,
     "kind": "fixed",
-    "source": "load stage graphs, 0.6.2"
+    "source": "load stage graphs, 0.6.2 (6.61 to 6.65 over the six sizes)"
    },
    {
     "id": "engine",
@@ -1166,7 +1242,7 @@
     "label": "Allocator reserve",
     "gib": 2.6,
     "kind": "reserve",
-    "source": "memory.split reserve, 2026-10-10 (RESERVE_SLACK_GIB 2 is its cap between requests)"
+    "source": "memory.split reserve 2.62 GiB, 2026-10-10 22:30 (RESERVE_SLACK_GIB 2 is its target between requests)"
    }
   ],
   "sources": [
@@ -1181,7 +1257,7 @@
    "id": "drafters",
    "label": "Draft models",
    "group": "speed",
-   "what": "Two small models guess the next tokens and the big model checks them in one pass; most of the speed comes from here.",
+   "what": "Two small models guess the next tokens, and the big model checks the guesses in one pass. Most of the speed comes from here.",
    "default": true,
    "required": true,
    "memory_gib": 5.41,
@@ -1191,15 +1267,15 @@
    "depends_on": [],
    "conflicts": [],
    "knobs": {},
-   "files": [],
+   "assets": [],
    "docs": "docs/speculative-decoding.md",
-   "note": "The weight profile picks which draft models load (memory per profile in its drafters_gib)."
+   "note": "The weight profile picks which draft models load. Their memory is the profile's drafters_gib, and their context KV is part of the 104.25 KiB a token below."
   },
   {
    "id": "lookup",
    "label": "Lookup store",
    "group": "speed",
-   "what": "Remembers text the model wrote before and proposes it again when it repeats, such as code you edit over and over.",
+   "what": "Remembers what the model read and wrote before and suggests it again when text repeats, like code you edit many times.",
    "default": true,
    "required": false,
    "memory_gib": 0.19,
@@ -1210,13 +1286,13 @@
    "conflicts": [],
    "knobs": {
     "QWEN38_SUFFIX_STORE": {
-     "true": null,
-     "false": ""
+     "on": "${HOME}/.qwen38-spark-engine/suffix",
+     "off": ""
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/speculative-decoding.md",
-   "note": "Host memory, not the GPU pool."
+   "note": "192 MiB of token ids at most (--suffix-store-mb), in host memory."
   },
   {
    "id": "conductor",
@@ -1233,15 +1309,15 @@
    "conflicts": [],
    "knobs": {
     "CONDUCTOR": {
-     "true": "on",
-     "false": "raw"
+     "on": "on",
+     "off": "raw"
     },
     "QSE_CONDUCTOR_CONFIG": {
-     "true": "${HOME}/.qwen38-spark-engine/conductor",
-     "false": "off"
+     "on": "${HOME}/.qwen38-spark-engine/conductor",
+     "off": "off"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/server.md",
    "note": "Off, clients talk to the raw engine and the small models below have nothing to do."
   },
@@ -1262,25 +1338,25 @@
    "conflicts": [],
    "knobs": {
     "QWEN38_NARRATOR_MODEL": {
-     "true": "qwen3.5-2b",
-     "false": ""
+     "on": "qwen3.5-2b",
+     "off": ""
     },
     "QWEN38_NARRATOR_DIR": {
-     "true": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b",
-     "false": ""
+     "on": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b",
+     "off": ""
     }
    },
-   "files": [
-    "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json"
+   "assets": [
+    "qwen3.5-2b"
    ],
    "docs": "docs/server.md",
-   "note": "Qwen3.5-2B, 3.6 GiB measured. Unloaded first when memory runs short, loaded again later."
+   "note": "Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and loads again later."
   },
   {
    "id": "laya",
    "label": "Laya decision models",
    "group": "roles",
-   "what": "Three tiny classifiers that answer the conductor's quick questions (what kind of request is this, which package fits) in milliseconds.",
+   "what": "Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.",
    "default": true,
    "required": false,
    "memory_gib": 1.6,
@@ -1293,12 +1369,12 @@
    "conflicts": [],
    "knobs": {
     "QWEN38_DECIDER_MODELS": {
-     "true": "laya-english,laya-multilingual,laya-typed-decisions",
-     "false": ""
+     "on": "laya-english,laya-multilingual,laya-typed-decisions",
+     "off": ""
     }
    },
-   "files": [
-    "${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors"
+   "assets": [
+    "laya"
    ],
    "docs": "docs/server.md",
    "note": "Without them the big model answers those questions itself, which costs a turn each time."
@@ -1307,7 +1383,7 @@
    "id": "shadow",
    "label": "Shadow reader",
    "group": "roles",
-   "what": "A small model that reads along with each session in idle moments, so later questions about it are answered fast.",
+   "what": "A small model that reads along with each session when the box is idle, so later questions about it are answered fast.",
    "default": true,
    "required": false,
    "memory_gib": 1.52,
@@ -1320,19 +1396,15 @@
    "conflicts": [],
    "knobs": {
     "QWEN38_SHADOW_MODEL": {
-     "true": "qwen3.5-0.8b",
-     "false": ""
-    },
-    "QWEN38_SHADOW_DISK": {
-     "true": "auto",
-     "false": "auto"
+     "on": "qwen3.5-0.8b",
+     "off": ""
     }
    },
-   "files": [
-    "${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b/config.json"
+   "assets": [
+    "qwen3.5-0.8b"
    ],
    "docs": "docs/shadow-reader.md",
-   "note": "Qwen3.5-0.8B plus up to 4 GiB of session states (QWEN38_SHADOW_GB). The first to unload when memory runs short."
+   "note": "Qwen3.5-0.8B (1.52 GiB in the live memory split) and up to 4 GiB of session states (QWEN38_SHADOW_GB). The first to unload when memory runs short."
   },
   {
    "id": "vision",
@@ -1348,14 +1420,14 @@
    "depends_on": [],
    "conflicts": [],
    "knobs": {
-    "QSE_VISION": {
-     "true": "on",
-     "false": "off"
+    "VISION": {
+     "on": "on",
+     "off": "off"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/server.md",
-   "note": "The tower ships inside the base checkpoint; the 0.5 GiB more is the cache of encoded images."
+   "note": "The tower ships inside the base checkpoint. The extra 0.5 GiB is the cache of encoded images (--image-cache-mb 512)."
   },
   {
    "id": "prompt_cache",
@@ -1372,19 +1444,19 @@
    "conflicts": [],
    "knobs": {
     "RESIDENT_GB": {
-     "true": null,
-     "false": "0"
+     "on": "2.5",
+     "off": "0"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/caches.md",
-   "note": "The resident prefix (anchors 2.5, stash 1, pin 4, park 4 GiB at their caps). Off, every agent turn reads its whole prompt again."
+   "note": "The resident prefix, 0.43 GiB in the live memory split. At their caps the anchors take 2.5 GiB, the stash 1, the pin 4 and the park 4. Off, every agent turn reads its whole prompt again."
   },
   {
    "id": "state_store",
    "label": "State store",
    "group": "caches",
-   "what": "Saves the model's state for short chats so a repeated start is free.",
+   "what": "Saves the model's state after short chats, so the same start a second time costs nothing.",
    "default": true,
    "required": false,
    "memory_gib": 0.49,
@@ -1395,11 +1467,11 @@
    "conflicts": [],
    "knobs": {
     "CACHE_GB": {
-     "true": null,
-     "false": "0"
+     "on": "2",
+     "off": "0"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/caches.md",
    "note": null
   },
@@ -1407,7 +1479,7 @@
    "id": "response_cache",
    "label": "Response cache",
    "group": "caches",
-   "what": "Answers an identical greedy request again from memory without running the model.",
+   "what": "Answers an identical greedy request again from memory, without running the model.",
    "default": false,
    "required": false,
    "memory_gib": 0.25,
@@ -1417,37 +1489,37 @@
    "depends_on": [],
    "conflicts": [],
    "knobs": {
-    "QSE_RESPONSE_CACHE": {
-     "true": "on",
-     "false": "off"
+    "RESPONSE_CACHE": {
+     "on": "on",
+     "off": "off"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/caches.md",
-   "note": "Off on the reference box; useful for scripts that send the same request many times."
+   "note": "Off on the reference box. Useful for scripts that send the same request many times; never for a benchmark."
   },
   {
    "id": "disk_tier",
    "label": "Disk cache",
    "group": "disk",
-   "what": "Keeps prompt beginnings on the SSD, so a long agent session or a returning chat starts in seconds.",
+   "what": "Keeps the start of long prompts on the SSD, so a long agent session or a returning chat starts in seconds.",
    "default": true,
    "required": false,
    "memory_gib": 0.0,
    "memory_max_gib": null,
    "elastic": false,
-   "disk_gb": 50.0,
+   "disk_gb": 16.0,
    "depends_on": [],
    "conflicts": [],
    "knobs": {
     "QSE_DISK_CACHE": {
-     "true": null,
-     "false": "off"
+     "on": null,
+     "off": "off"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/caches.md",
-   "note": "Up to 50 GB (the Memory screen sets the budget); it never takes the disk under 50 GB free."
+   "note": "16 GB by default (the Memory screen sets it), in a folder per weight profile. It never takes the disk under 50 GB free."
   },
   {
    "id": "nvme_spill",
@@ -1466,19 +1538,19 @@
    "conflicts": [],
    "knobs": {
     "SESSION_SPILL": {
-     "true": "on",
-     "false": "off"
+     "on": "on",
+     "off": "off"
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/caches.md",
-   "note": "Compressed, up to SESSION_SPILL_GB (64 GB)."
+   "note": "Compressed, up to SESSION_SPILL_GB (64 GB), inside the disk cache's folder."
   },
   {
    "id": "proxy",
    "label": "Other backends",
    "group": "features",
-   "what": "Lets the dashboard route some model names to other servers or cloud APIs beside this engine.",
+   "what": "Lets the dashboard send some model names to other servers or cloud APIs, beside this engine.",
    "default": false,
    "required": false,
    "memory_gib": 0.0,
@@ -1489,13 +1561,13 @@
    "conflicts": [],
    "knobs": {
     "QSE_BACKENDS": {
-     "true": "${HOME}/.qwen38-spark-engine/backends/config.sqlite3",
-     "false": ""
+     "on": "${HOME}/.qwen38-spark-engine/backends/config.sqlite3",
+     "off": ""
     }
    },
-   "files": [],
+   "assets": [],
    "docs": "docs/proxy.md",
-   "note": "The backends themselves are set up later on the Backends screen."
+   "note": "You add the backends later, on the Backends screen."
   }
  ],
  "parallelism": {
@@ -1526,6 +1598,7 @@
   },
   "kv_hard_floor_gb": 10,
   "kv_bytes_per_token": 106752,
+  "typical_fill_tokens": 32768,
   "side_slot_const_gib": 1.19,
   "knobs": {
    "slots": "QSE_PARALLEL",
@@ -1545,21 +1618,20 @@
   {
    "id": "sampled_tree",
    "label": "Sampled decoding",
-   "what": "How a request with a temperature is checked against the draft. det walks the same tree a greedy request uses and is the fastest; the answers match the model sampled alone.",
+   "what": "How a request with a temperature is checked against the draft. det uses the same tree as a greedy request and is the fastest; the answers still follow the model's own sampling.",
    "type": "enum",
    "options": [
     {
      "value": "det",
-     "label": "det (tree",
-     "recommended)": null
+     "label": "det: the tree (recommended)"
     },
     {
      "value": "mixed",
-     "label": "mixed (sampled spine)"
+     "label": "mixed: the sampled chain in the tree"
     },
     {
      "value": "chain",
-     "label": "chain (q-aware chain)"
+     "label": "chain: one sampled chain"
     }
    ],
    "default": "det",
@@ -1594,7 +1666,7 @@
   {
    "id": "default_max_tokens",
    "label": "Default answer length",
-   "what": "The longest answer in tokens when a client does not set max_tokens.",
+   "what": "The longest answer, in tokens, when a client does not set max_tokens.",
    "type": "int",
    "min": 1024,
    "max": 262144,
@@ -1606,7 +1678,7 @@
   {
    "id": "draft_temperature",
    "label": "Draft temperature",
-   "what": "How sharply the draft models guess on a sampled request; lower guesses fewer wrong tokens.",
+   "what": "How sharp the draft models' guesses are on a sampled request. Lower means fewer wrong guesses.",
    "type": "number",
    "min": 0.05,
    "max": 1.0,
@@ -1618,7 +1690,7 @@
   {
    "id": "request_timeout",
    "label": "Request time limit",
-   "what": "Seconds one request may run before it is stopped.",
+   "what": "Seconds one request may run before the engine stops it.",
    "type": "int",
    "min": 60,
    "max": 14400,
@@ -1630,7 +1702,7 @@
   {
    "id": "max_queue",
    "label": "Queue length",
-   "what": "How many requests may wait for a free slot before new ones are refused.",
+   "what": "How many requests may wait for a free slot before new ones are turned away.",
    "type": "int",
    "min": 1,
    "max": 64,
@@ -1642,7 +1714,7 @@
   {
    "id": "queue_timeout",
    "label": "Queue wait",
-   "what": "Seconds a request without streaming may wait in the queue.",
+   "what": "Seconds a request may wait in the queue before it gets an error.",
    "type": "int",
    "min": 10,
    "max": 3600,
@@ -1668,7 +1740,7 @@
   {
    "id": "host",
    "label": "Listen on",
-   "what": "0.0.0.0 answers the whole network; 127.0.0.1 only this machine.",
+   "what": "The whole network, or only this machine.",
    "type": "enum",
    "options": [
     {
@@ -1688,7 +1760,7 @@
   {
    "id": "served_model",
    "label": "Raw engine name",
-   "what": "The model name of the raw engine; with the conductor on, clients see TandemLLM and this name is a hidden alias.",
+   "what": "The model name of the raw engine. With the conductor on, clients see TandemLLM and this name is a hidden alias.",
    "type": "string",
    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
    "default": "qwen38-spark-engine",
@@ -1719,7 +1791,7 @@
   {
    "id": "admin_password",
    "label": "Admin password",
-   "what": "Without one, anyone who reaches the port can change the setup. generate writes a random one into secrets.env on the box (read it there with cat).",
+   "what": "Without one, anyone who reaches the port can change the setup. Generate writes a random one into secrets.env on the box; read it there with cat.",
    "type": "enum",
    "options": [
     {
@@ -1735,6 +1807,268 @@
    "recommended": "keep",
    "knob": null,
    "docs": "docs/operations.md"
+  }
+ ],
+ "contract_version": "1.0",
+ "wizard_fields": [
+  {
+   "index": 0,
+   "id": "models",
+   "label": "Models",
+   "fields": []
+  },
+  {
+   "index": 1,
+   "id": "overview",
+   "label": "Model",
+   "fields": []
+  },
+  {
+   "index": 2,
+   "id": "weights",
+   "label": "Weights",
+   "fields": [
+    {
+     "field": "profile",
+     "label": "Weight profile",
+     "type": "enum",
+     "options": [
+      "exl3-2.5",
+      "exl3-3.0",
+      "exl3-3.5",
+      "exl3-4.0",
+      "exl3-4.5",
+      "exl3-6.0",
+      "nvfp4"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 3,
+   "id": "components",
+   "label": "Tools",
+   "fields": [
+    {
+     "field": "drafters",
+     "label": "Draft models",
+     "type": "bool"
+    },
+    {
+     "field": "lookup",
+     "label": "Lookup store",
+     "type": "bool"
+    },
+    {
+     "field": "conductor",
+     "label": "Conductor",
+     "type": "bool"
+    },
+    {
+     "field": "narrator",
+     "label": "Narrator",
+     "type": "bool"
+    },
+    {
+     "field": "laya",
+     "label": "Laya decision models",
+     "type": "bool"
+    },
+    {
+     "field": "shadow",
+     "label": "Shadow reader",
+     "type": "bool"
+    },
+    {
+     "field": "vision",
+     "label": "Vision",
+     "type": "bool"
+    },
+    {
+     "field": "prompt_cache",
+     "label": "Conversation cache",
+     "type": "bool"
+    },
+    {
+     "field": "state_store",
+     "label": "State store",
+     "type": "bool"
+    },
+    {
+     "field": "response_cache",
+     "label": "Response cache",
+     "type": "bool"
+    },
+    {
+     "field": "disk_tier",
+     "label": "Disk cache",
+     "type": "bool"
+    },
+    {
+     "field": "nvme_spill",
+     "label": "Session spill",
+     "type": "bool"
+    },
+    {
+     "field": "proxy",
+     "label": "Other backends",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "id": "parallelism",
+   "label": "Parallelism and memory",
+   "fields": [
+    {
+     "field": "slots",
+     "label": "Parallel requests",
+     "type": "int",
+     "min": 1,
+     "max": 4
+    },
+    {
+     "field": "window",
+     "label": "Context window, first slot",
+     "type": "int",
+     "min": 8192,
+     "max": 262144
+    },
+    {
+     "field": "side_window",
+     "label": "Context window, other slots",
+     "type": "int",
+     "min": 8192,
+     "max": 262144
+    },
+    {
+     "field": "kv_pool",
+     "label": "Shared KV pool",
+     "type": "bool"
+    },
+    {
+     "field": "floor_gb",
+     "label": "Memory kept free (GiB)",
+     "type": "number",
+     "min": 10,
+     "max": 40
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "id": "methods",
+   "label": "Methods and advanced",
+   "fields": [
+    {
+     "field": "sampled_tree",
+     "label": "Sampled decoding",
+     "type": "enum",
+     "options": [
+      "det",
+      "mixed",
+      "chain"
+     ]
+    },
+    {
+     "field": "reasoning_effort",
+     "label": "Thinking effort",
+     "type": "enum",
+     "options": [
+      "low",
+      "medium",
+      "xhigh"
+     ]
+    },
+    {
+     "field": "default_max_tokens",
+     "label": "Default answer length",
+     "type": "int",
+     "min": 1024,
+     "max": 262144
+    },
+    {
+     "field": "draft_temperature",
+     "label": "Draft temperature",
+     "type": "number",
+     "min": 0.05,
+     "max": 1.0
+    },
+    {
+     "field": "request_timeout",
+     "label": "Request time limit",
+     "type": "int",
+     "min": 60,
+     "max": 14400
+    },
+    {
+     "field": "max_queue",
+     "label": "Queue length",
+     "type": "int",
+     "min": 1,
+     "max": 64
+    },
+    {
+     "field": "queue_timeout",
+     "label": "Queue wait",
+     "type": "int",
+     "min": 10,
+     "max": 3600
+    },
+    {
+     "field": "port",
+     "label": "Port",
+     "type": "int",
+     "min": 1024,
+     "max": 65535
+    },
+    {
+     "field": "host",
+     "label": "Listen on",
+     "type": "enum",
+     "options": [
+      "0.0.0.0",
+      "127.0.0.1"
+     ]
+    },
+    {
+     "field": "served_model",
+     "label": "Raw engine name",
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    {
+     "field": "dashboard_login",
+     "label": "Dashboard login",
+     "type": "enum",
+     "options": [
+      "off",
+      "on"
+     ]
+    },
+    {
+     "field": "admin_password",
+     "label": "Admin password",
+     "type": "enum",
+     "options": [
+      "keep",
+      "generate"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "id": "review",
+   "label": "Review",
+   "fields": []
+  },
+  {
+   "index": 7,
+   "id": "install",
+   "label": "Install",
+   "fields": []
   }
  ]
 }

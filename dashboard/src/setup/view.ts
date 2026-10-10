@@ -18,7 +18,7 @@ import { emptyState as emptyPanel, errorState, icon, skeleton } from '../ui/bits
 import { setupApi } from './api';
 import { buildPageState, howToFix, overSentence, stepIssues, tokenBlocked, type StepIssues } from './checks';
 import { availability, isOn } from './deps';
-import { estimate as localEstimate, overBy, profileOf } from './estimate';
+import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
 import { PERCH_WREN, reducedMotion } from './figure';
 import './install';
@@ -35,7 +35,7 @@ import type { QseWren, ToolOutcome, WrenHost } from './wren';
 const WINDOW_PRESETS = [8_192, 32_768, 65_536, 131_072, 262_144];
 const kTok = (n: number) => (n >= 1024 ? `${Math.round(n / 1024)}k` : String(n));
 
-type SecChoice = 'keep' | 'generate' | 'own';
+type SecChoice = 'keep' | 'generate';
 
 @customElement('qse-setup')
 export class QseSetup extends LightElement {
@@ -54,8 +54,6 @@ export class QseSetup extends LightElement {
   @state() private confirmOpen = false;
   @state() private applying = false;
   @state() private applyError: string | null = null;
-  @state() private sec: SecChoice = 'keep';
-  @state() private ownPassword = '';
   @state() private jobInitial: SetupJob | null = null;
   @state() private previousProfile: string | null = null;
   @state() private resetOpen = false;
@@ -247,7 +245,7 @@ export class QseSetup extends LightElement {
     if (!m || !sel) return null;
     const local = localEstimate(m, sel, this.device?.mem_available_gb ?? null);
     const srv = this.serverEst;
-    if (srv && srv.key === this.selKey(sel) && Math.abs(srv.est.total_gb - local.total_gb) > 0.05) return { ...srv.est, available_gb: local.available_gb };
+    if (srv && srv.key === this.selKey(sel) && (!local || Math.abs(srv.est.total_gb - local.total_gb) > 0.05)) return { ...srv.est, available_gb: this.device?.mem_available_gb ?? srv.est.available_gb };
     return local;
   }
 
@@ -275,7 +273,7 @@ export class QseSetup extends LightElement {
   // ---- Wren's side --------------------------------------------------------------------------
 
   private host: WrenHost = {
-    pageState: () => buildPageState(this.m, this.wiz.step, this.wiz.selection, this.currentEstimate(), { errors: this.issues()[this.wiz.step] ?? [], ownPassword: this.sec === 'own' && !!this.ownPassword }),
+    pageState: () => buildPageState(this.m, this.wiz.step, this.wiz.selection, this.currentEstimate(), { errors: this.issues()[this.wiz.step] ?? [] }),
     execute: (call, t) => this.executeTool(call, t),
     saveChat: (chat) => this.dispatch({ type: 'chat', chat }),
     memAvailable: () => this.device?.mem_available_gb ?? null,
@@ -355,7 +353,6 @@ export class QseSetup extends LightElement {
     if (bad.length) out.push(S.blockedInvalid(bad.map((s) => STEP_TITLE[s].toLowerCase())));
     // the plan's own errors show in its card; here only what is not said above already
     if (this.plan?.state === 'ready' && !this.plan.data.ok && !out.length) out.push(...this.plan.data.errors);
-    if (this.sec === 'own' && this.ownPassword.length < 12) out.push(S.securityOwnShort);
     return out;
   }
 
@@ -366,10 +363,9 @@ export class QseSetup extends LightElement {
     this.applyError = null;
     this.previousProfile = this.device?.active_profile ?? null;
     this.querySelector<QseWren>('qse-wren')?.sleepForInstall();
-    const selection: SetupSelection = { ...sel, advanced: { ...sel.advanced, admin_password: this.sec === 'generate' ? 'generate' : 'keep' } };
+    const selection: SetupSelection = sel;
     try {
-      const res = await setupApi.apply({ selection, ...(this.sec === 'own' && this.ownPassword ? { secrets: { admin_password: this.ownPassword } } : {}) });
-      this.ownPassword = '';
+      const res = await setupApi.apply({ selection });
       this.jobInitial = res.job;
       this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
@@ -576,7 +572,7 @@ export class QseSetup extends LightElement {
     const fastest = Math.max(...rows.filter((r) => r.comparable).map((r) => r.cells.greedy_512?.code?.tok_s ?? 0));
     return html`
       ${blocked ? html`<div class="banner banner-offline" role="alert" data-token-blocked>${icon('warn')} ${S.privateNoToken}</div>` : nothing}
-      ${!blocked && dev?.hf_token_present && m.profiles.some((p) => p.private && !dev.profiles_on_disk?.[p.id]) ? html`<p class="wnote muted small">${icon('info')} ${S.privateRepo}</p>` : nothing}
+      ${!blocked && dev?.hf_token_present && m.profiles.some((p) => p.hf_private && !dev.profiles_on_disk?.[p.id]) ? html`<p class="wnote muted small">${icon('info')} ${S.privateRepo}</p>` : nothing}
       <div class="wcards" role="radiogroup" aria-label=${STEP_TITLE.weights}>
         ${m.profiles.map((p) => {
           const on = sel.profile === p.id;
@@ -611,7 +607,7 @@ export class QseSetup extends LightElement {
               <span><span class="wcard-k">${S.weightsDisk}</span> ${here ? S.onDisk : S.toDownload(p.disk_gb)}</span>
             </span>
             ${p.note ? html`<span class="wcard-note">${p.note}</span>` : nothing}
-            ${p.private && !here && dev?.hf_token_present === false ? html`<span class="wcard-private is-blocked" data-private>${icon('warn')} ${S.privateNoTokenShort}</span>` : nothing}
+            ${p.hf_private && !here && dev?.hf_token_present === false ? html`<span class="wcard-private is-blocked" data-private>${icon('warn')} ${S.privateNoTokenShort}</span>` : nothing}
           </label>`;
         })}
       </div>`;
@@ -828,20 +824,21 @@ export class QseSetup extends LightElement {
     </div>`;
   }
 
+  private get sec(): SecChoice {
+    return this.wiz.selection?.advanced.admin_password === 'generate' ? 'generate' : 'keep';
+  }
+
   private securityCard(): TemplateResult {
     const opt = (v: SecChoice, label: string, note?: string) => html`<label class="sec-opt ${this.sec === v ? 'is-on' : ''}">
-      <input type="radio" name="sec" .checked=${this.sec === v} @change=${() => (this.sec = v)} />
+      <input type="radio" name="sec" .checked=${this.sec === v} @change=${() => this.user('methods', 'admin_password', { type: 'field', group: 'advanced', id: 'admin_password', value: v })} />
       <span><span class="sec-opt-label">${label}</span>${note ? html`<span class="muted small">${note}</span>` : nothing}</span>
     </label>`;
     return html`<section class="rv-card rv-security" data-security-warning role="note">
       <h2 class="rv-h">${icon('warn')} ${S.securityTitle}</h2>
       <p>${S.securityBody}</p>
-      <div class="sec-opts" role="radiogroup" aria-label=${S.securityOwnLabel}>
-        ${opt('keep', S.securityKeep)} ${opt('generate', S.securityGenerate, S.securityGenerateNote)} ${opt('own', S.securityOwn, S.securityOwnNote)}
+      <div class="sec-opts" role="radiogroup" aria-label=${S.securityChoice}>
+        ${opt('keep', S.securityKeep)} ${opt('generate', S.securityGenerate, S.securityGenerateNote)}
       </div>
-      ${this.sec === 'own'
-        ? html`<label class="sec-own"><span>${S.securityOwnLabel}</span><input type="password" autocomplete="new-password" .value=${this.ownPassword} @input=${(e: Event) => (this.ownPassword = (e.target as HTMLInputElement).value)} />${this.ownPassword && this.ownPassword.length < 12 ? html`<span class="mfield-err">${S.securityOwnShort}</span>` : nothing}</label>`
-        : nothing}
     </section>`;
   }
 

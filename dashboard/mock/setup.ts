@@ -30,7 +30,7 @@ import type {
   SetupResetLevel,
   SetupSelection,
 } from '../src/api/types.ts';
-import { estimate } from '../src/setup/estimate.ts';
+import { checkSelection, estimate, SelectionError } from '../src/setup/estimate.ts';
 import { defaults } from '../src/setup/state.ts';
 import qwen from './setup/qwen3.8-27b.json';
 
@@ -161,6 +161,7 @@ export class MockSetup {
       claim_gib: 4.4,
       can_load: !o.refuse,
       progress,
+      loading_s: state === 'loading' ? Math.round((Date.now() - this.loadStartedAt) / 100) / 10 : null,
     };
   }
 
@@ -232,8 +233,15 @@ export class MockSetup {
     const prof = MODEL.profiles.find((p) => p.id === sel.profile)!;
     const onDisk = !!this.onDisk[prof.id];
     const errors: string[] = [];
-    if (!est.fits) errors.push('The setup does not fit in memory.');
-    if (!onDisk && prof.private && !this.o.hfToken) errors.push('The weights need a Hugging Face token this box does not have.');
+    const codes: string[] = [];
+    if (!est.fits) {
+      errors.push(`The selection needs ${est.total_gb.toFixed(2)} GiB, ${(est.total_gb - (est.budget_gb ?? 0)).toFixed(2)} GiB more than the ${(est.budget_gb ?? 0).toFixed(2)} GiB there is.`);
+      codes.push('over_budget');
+    }
+    if (!onDisk && prof.hf_private && !this.o.hfToken) {
+      errors.push(`${prof.hf_repo} is private and no Hugging Face token is set. Add one with \`hf auth login\` on the box, or set HF_TOKEN, then try again.`);
+      codes.push('missing_token');
+    }
     const switching = prof.id !== this.o.active;
     const commands = [
       ...(onDisk ? [] : [`ops/use-profile.sh --fetch-only ${prof.id}`]),
@@ -245,7 +253,8 @@ export class MockSetup {
       contract_version: '1.0',
       ok: errors.length === 0,
       errors,
-      warnings: this.o.password ? [] : ['No admin password is set on this box.'],
+      error_codes: codes,
+      warnings: [...(this.o.password ? [] : ['No admin password is set: anyone who can reach this port can run the setup, apply it and reset the box. Generate one in the advanced step.']), ...(est.fits && !est.fits_worst ? [est.notes[0]] : [])],
       profile: { current: this.o.active, next: prof.id, on_disk: onDisk, download_gb: onDisk ? 0 : prof.disk_gb },
       changes,
       restart: changes.length > 0 || switching,
@@ -400,8 +409,9 @@ export class MockSetup {
   chat(req: IncomingMessage, res: ServerResponse, body: SetupChatRequest): void {
     const st = this.status();
     if (st.state !== 'loaded') {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { type: 'not_loaded', message: 'Wren is asleep' } }));
+      // the server answers 200 with an error event (wren.py _turn)
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
+      res.end(`data: ${JSON.stringify({ type: 'error', message: 'Wren is not loaded. Load it first, or use the page without chat.' })}\n\n`);
       return;
     }
     const msgs = body.messages ?? [];
@@ -415,6 +425,11 @@ export class MockSetup {
     const send = (o: unknown) => !closed && res.write(`data: ${JSON.stringify(o)}\n\n`);
     void (async () => {
       const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      if (script.errorAfter === -1) {
+        send({ type: 'error', message: 'Wren is answering in another tab; try again when that answer is done.' });
+        res.end();
+        return;
+      }
       send({ type: 'state', state: 'thinking' });
       await wait(script.think ?? 650);
       send({ type: 'state', state: 'talking' });
@@ -446,18 +461,9 @@ export class MockSetup {
         /* plain text */
       }
       if (res.ok === false) return { text: `That did not work: ${res.error ?? 'the page said no'} I will leave it as it is.` };
-      const prevCall = [...msgs].reverse().find((m) => m.role === 'assistant' && m.tool_calls?.length)?.tool_calls?.[0];
-      if (prevCall?.name === 'read_device') {
-        let free = '';
-        try {
-          free = `${JSON.parse(res.result ?? '{}').mem_available_gb} GiB`;
-        } catch {
-          /* */
-        }
-        return { text: `Your box has ${free} free right now. **EXL3 4.5** is the recommended size: it fits with room for 4 chats. If you want more speed, **EXL3 4.0** is a little faster and still very close to the original.`, sources: [{ path: 'models/qwen3.8-27b/model.yaml', title: 'Qwen3.8-27B registry' }] };
-      }
       return { text: 'Done. The memory bar at the top shows the new total. Press Undo on the note if you want it back.' };
     }
+    if (/other tab/.test(user)) return { text: '', errorAfter: -1 };
     if (/error/.test(user)) return { text: 'Let me look at that for you, it takes a moment to', errorAfter: 6 };
     if (/loop/.test(user)) return { text: 'Opening the steps. ', calls: [{ name: 'go_to_step', args: { n: 2 } }] };
     if (/flux/.test(user)) return { text: 'Turning on flux. ', calls: [{ name: 'toggle', args: { component: 'flux', on: true } }] };
@@ -465,7 +471,8 @@ export class MockSetup {
     if (/vision/.test(user) && /off|disable|turn|no /.test(user) && !/ on\b/.test(user)) return { text: 'Vision lets the model read images and costs about 0.9 GiB. I will turn it off. ', calls: [{ name: 'toggle', args: { component: 'vision', on: false } }] };
     if (/vision/.test(user) && /\bon\b/.test(user)) return { text: 'Turning vision back on. ', calls: [{ name: 'toggle', args: { component: 'vision', on: true } }] };
     if (/2 slots|two slots|use 2|2 chats/.test(user)) return { text: 'Two parallel chats leave more room for each one. Setting it now. ', calls: [{ name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 2 } }] };
-    if (/size|memory|best|which/.test(user) && /weight|size|memory/.test(user)) return { text: 'Let me read the box first. ', calls: [{ name: 'read_device', args: {} }] };
+    if (/size|memory|best|which/.test(user) && /weight|size|memory/.test(user))
+      return { text: `Your box has ${this.memAvailable().toFixed(1)} GiB free right now. **EXL3 4.5** is the recommended size: it fits with room for 4 chats. If you want more speed, **EXL3 4.0** is a little faster and still very close to the original.`, sources: [{ path: 'models/qwen3.8-27b/model.yaml', title: 'Qwen3.8-27B registry' }] };
     if (/narrator/.test(user))
       return {
         text: 'The **narrator** is a small model (Qwen3.5-2B, about 3.6 GiB) that writes short status lines while the big model thinks, so you can see what it is doing.\n\nIt needs the conductor. When memory runs short it unloads first and loads again later.',
@@ -519,20 +526,38 @@ export class MockSetup {
     const mm = path.match(/^\/v1\/setup\/models\/([^/]+)$/);
     if (mm) return decodeURIComponent(mm[1]) === MODEL.id ? json(200, MODEL) : err(404, 'not_found', `no model ${mm[1]}`);
     if (path === '/v1/setup/device') return json(200, this.device());
+    const refuse = (e: unknown) => (e instanceof SelectionError ? err(e.status, e.code, e.message) : err(500, 'internal_error', String(e)));
     if (path === '/v1/setup/estimate' && method === 'POST') {
       if (o.estimateDown) return err(500, 'internal_error', 'estimate failed');
-      return json(200, estimate(MODEL, body as SetupSelection, this.memAvailable()));
+      try {
+        return json(200, estimate(MODEL, (body.selection ?? body) as SetupSelection, this.memAvailable()));
+      } catch (e) {
+        return refuse(e);
+      }
     }
     if (path === '/v1/setup/plan' && method === 'POST') {
       if (o.planDown) return err(500, 'internal_error', 'plan failed');
-      return json(200, this.plan(body.selection as SetupSelection));
+      try {
+        return json(200, this.plan(checkSelection(MODEL, body.selection ?? body)));
+      } catch (e) {
+        return refuse(e);
+      }
     }
     if (path === '/v1/setup/apply' && method === 'POST') {
-      if (o.busy) return err(409, 'busy', `${o.busy} requests are running`);
-      if ([...this.jobs.values()].some((j) => !['done', 'failed', 'rolled_back'].includes(this.jobNow(j.job.id)!.state))) return err(409, 'busy', 'a setup job is running');
-      const sel = body.selection as SetupSelection;
+      const extra = Object.keys(body).filter((k) => k !== 'selection' && k !== 'dry_run');
+      if (extra.length) return err(422, 'unknown_field', `unknown field '${extra[0]}'; apply takes selection and dry_run`);
+      let sel: SetupSelection;
+      try {
+        sel = checkSelection(MODEL, body.selection);
+      } catch (e) {
+        return refuse(e);
+      }
       const p = this.plan(sel);
-      if (!p.ok) return err(400, 'invalid', p.errors.join(' '));
+      if (body.dry_run) return json(200, { ...p, dry_run: true });
+      const running = [...this.jobs.values()].find((j) => !['done', 'failed', 'rolled_back'].includes(this.jobNow(j.job.id)!.state));
+      if (running) return err(409, 'job_running', `job ${running.job.id} runs; one setup job at a time`);
+      if (o.busy) return err(409, 'busy', `${o.busy} request(s) run and 0 wait; apply when the engine is idle`);
+      if (!p.ok) return err(p.error_codes![0] === 'over_budget' ? 409 : 412, p.error_codes![0], p.errors.join(' '), { plan: p });
       this.o.assistant = 'not_loaded';
       return json(202, { contract_version: '1.0', job: this.startJob(sel) });
     }
@@ -568,8 +593,8 @@ export class MockSetup {
     }
     if (path === '/v1/setup/assistant/status') return json(200, this.status());
     if (path === '/v1/setup/assistant/load' && method === 'POST') {
-      if (o.noModel) return err(409, 'no_model', 'no assistant model on this box', { assistant: this.status() });
-      if (o.refuse) return err(409, 'memory', 'not enough memory for Wren', { assistant: { ...this.status(), state: 'refused', reason: 'Wren needs about 4.4 GiB above the 15 GiB floor, and 2.1 GiB is left.' } });
+      if (o.noModel) return json(200, this.status());
+      if (o.refuse) return json(200, { ...this.status(), state: 'refused', can_load: true, reason: 'not enough memory beside the engine: 12.9 GiB would be left, 15 GiB must stay free' });
       if (this.o.assistant !== 'loaded') {
         this.o.assistant = 'loading';
         this.loadStartedAt = Date.now();

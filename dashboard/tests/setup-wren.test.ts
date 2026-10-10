@@ -85,14 +85,15 @@ function S_install() {
 describe('buildPageState', () => {
   it('is compact, carries the step fields and never a secret', () => {
     const sel = defaults(M);
-    sel.advanced = { ...sel.advanced, admin_password: 'generate' };
-    const page = buildPageState(M, 'methods', sel, estimate(M, sel), { ownPassword: true });
+    sel.advanced = { ...sel.advanced, admin_password: 'generate', api_key: 'sk-secret-1' };
+    const page = buildPageState(M, 'methods', sel, estimate(M, defaults(M)));
     const s = JSON.stringify(page);
     expect(s.length).toBeLessThan(6 * 1024);
+    expect(s).not.toContain('sk-secret-1');
     expect(page.step_index).toBe(5);
     const pw = (page.visible!.fields as { field: string; value: unknown }[]).find((f) => f.field === 'admin_password');
-    expect(pw!.value).toBe('<set>');
-    expect((page.selection.advanced as Record<string, unknown>).admin_password).toBe('<set>');
+    expect(pw!.value).toBe('generate');
+    expect((page.selection.advanced as Record<string, unknown>).api_key).toBe('<set>');
   });
   it('lists the components with their values on the components step', () => {
     const page = buildPageState(M, 'components', defaults(M), null);

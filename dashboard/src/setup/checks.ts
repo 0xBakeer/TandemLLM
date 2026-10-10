@@ -3,8 +3,8 @@
 
 import type { SetupDevice, SetupEstimate, SetupModel, SetupPageState, SetupSelection, SetupStepId } from '../api/types';
 import { isOn, lowerLabel } from './deps';
-import { estimate, overBy, profileOf } from './estimate';
-import { fieldError, SECURITY_FIELDS, stepIndex, stepsOf } from './fields';
+import { estimateLoose, overBy, profileOf } from './estimate';
+import { fieldError, stepIndex, stepsOf } from './fields';
 import { S, STEP_TITLE } from './strings';
 
 export type StepIssues = Partial<Record<SetupStepId, string[]>>;
@@ -29,7 +29,7 @@ export function stepIssues(m: SetupModel, sel: SetupSelection, device: SetupDevi
 /** The weights must be downloaded from a private repo and the box has no token. */
 export function tokenBlocked(m: SetupModel, sel: SetupSelection, device: SetupDevice | null): boolean {
   const p = m.profiles.find((x) => x.id === sel.profile);
-  if (!p || !p.private || !device) return false;
+  if (!p || !p.hf_private || !device) return false;
   if (device.profiles_on_disk?.[p.id]) return false;
   return device.hf_token_present === false;
 }
@@ -45,10 +45,11 @@ const WINDOWS = [262_144, 196_608, 131_072, 65_536, 32_768, 16_384, 8_192];
 
 /** Ways to make an over-budget selection fit, the ones that fit on their own first. */
 export function howToFix(m: SetupModel, sel: SetupSelection): Fix[] {
-  const base = estimate(m, sel);
-  if (base.fits) return [];
+  const base = estimateLoose(m, sel);
+  if (!base || base.fits) return [];
   const fixes: Fix[] = [];
-  const try_ = (s: SetupSelection) => estimate(m, s);
+  const NO = { fits: false, total_gb: base.total_gb } as SetupEstimate;
+  const try_ = (s: SetupSelection) => estimateLoose(m, s) ?? NO;
   if (!sel.kv_pool) {
     const e = try_({ ...sel, kv_pool: true });
     fixes.push({ text: S.fixPool, step: 'parallelism', saves: base.total_gb - e.total_gb });
@@ -91,23 +92,26 @@ export function overSentence(m: SetupModel, sel: SetupSelection, est: SetupEstim
 }
 
 const PAGE_STATE_MAX = 6 * 1024;
+const SECRET = /password|secret|token|api_?key/i;
 
 /** What Wren is told about the page each turn: compact, and never a secret. */
-export function buildPageState(m: SetupModel | null, step: SetupStepId, sel: SetupSelection | null, est: SetupEstimate | null, extra: { errors?: string[]; ownPassword?: boolean } = {}): SetupPageState {
+export function buildPageState(m: SetupModel | null, step: SetupStepId, sel: SetupSelection | null, est: SetupEstimate | null, extra: { errors?: string[] } = {}): SetupPageState {
   const page: SetupPageState = { model: m?.id ?? null, step, step_index: stepIndex(step), selection: {} };
   if (!m || !sel) {
     page.visible = { title: STEP_TITLE[step] };
     return page;
   }
-  const safeAdvanced = Object.fromEntries(Object.entries(sel.advanced).map(([k, v]) => [k, SECURITY_FIELDS.has(k) && k === 'admin_password' ? (v === 'keep' ? 'keep' : '<set>') : v]));
-  page.selection = { model: sel.model, profile: sel.profile, components: sel.components, slots: sel.slots, window: sel.window, side_window: sel.side_window, kv_pool: sel.kv_pool, floor_gb: sel.floor_gb, methods: sel.methods, advanced: safeAdvanced };
+  // nothing the page holds is a secret (the admin password is keep or generate); a value under a
+  // secret-looking name that is anything else is still never sent
+  const redact = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, SECRET.test(k) && v !== 'keep' && v !== 'generate' ? '<set>' : v])) as SetupSelection['advanced'];
+  page.selection = { model: sel.model, profile: sel.profile, components: sel.components, slots: sel.slots, window: sel.window, side_window: sel.side_window, kv_pool: sel.kv_pool, floor_gb: sel.floor_gb, methods: redact(sel.methods), advanced: redact(sel.advanced) };
   const schema = stepsOf(m).find((s) => s.id === step);
   const valueOf = (field: string): unknown => {
     if (step === 'weights') return sel.profile;
     if (step === 'components') return sel.components[field];
     if (step === 'parallelism') return (sel as unknown as Record<string, unknown>)[field];
     if (step === 'methods') {
-      if (field === 'admin_password') return extra.ownPassword ? '<set>' : sel.advanced[field] === 'generate' ? 'generate' : '<empty>';
+      if (field === 'admin_password') return sel.advanced[field] === 'generate' ? 'generate' : 'keep';
       return sel.methods[field] ?? sel.advanced[field];
     }
     return undefined;

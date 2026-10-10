@@ -60,6 +60,11 @@ interface Chip {
 
 let callSeq = 0;
 
+/** the server's reasons start in lower case ("not enough memory beside the engine: ...") */
+function sentence(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 @customElement('qse-wren')
 export class QseWren extends LightElement {
   @property({ attribute: false }) host: WrenHost | null = null;
@@ -150,7 +155,7 @@ export class QseWren extends LightElement {
         break;
       case 'loading':
         this.phase = 'loading';
-        this.progress = s.progress ?? this.timeProgress();
+        this.progress = s.progress ?? this.timeProgress(s.loading_s ?? null);
         this.emit('load-progress');
         this.scheduleLoadPoll();
         break;
@@ -169,9 +174,10 @@ export class QseWren extends LightElement {
     }
   }
 
-  /** without a server figure: a curve that approaches 95 % over about 20 s */
-  private timeProgress(): number {
-    const t = (Date.now() - this.loadStartedAt) / 1000;
+  /** without a server figure: a curve over the seconds since the load started (the server's
+   *  loading_s, else this page's clock) that approaches 95 % over about 20 s */
+  private timeProgress(loadingS: number | null): number {
+    const t = loadingS ?? (Date.now() - this.loadStartedAt) / 1000;
     return Math.min(0.95, 1 - Math.exp(-t / 8));
   }
 
@@ -298,6 +304,11 @@ export class QseWren extends LightElement {
           },
           signal,
         );
+        if (failure && /another tab/i.test(failure)) {
+          // one chat at a time on the box: say so, no error pose
+          this.notice = S.wrenBusy;
+          break;
+        }
         if (failure) throw new ApiError('/v1/setup/assistant/chat', 500, failure, 'stream');
         // the tool calls run in order, each with its hop and highlight
         for (const call of calls) {
@@ -483,7 +494,7 @@ export class QseWren extends LightElement {
         return html`<div class="wren-body wren-center" data-wren-refused>
             ${this.hero()}
             <p class="wren-lead">${S.wrenCannotLoad}</p>
-            <p class="muted small">${s?.reason ?? why}</p>
+            <p class="muted small">${s?.reason ? sentence(s.reason) : why}</p>
             ${s?.reason ? html`<p class="muted small">${why}</p>` : nothing}
             ${s?.model != null ? html`<button class="btn wren-wake" @click=${() => void this.wake()}>${icon('refresh')} ${S.wrenRetry}</button>` : nothing}
           </div>`;

@@ -93,9 +93,8 @@ describe('AU1: no password prompt in the source', () => {
       const text = readFileSync(f, 'utf8');
       const rel = f.slice(root.length + 1);
       // the Backends form's upstream API key (a provider's sk-..., not the dashboard's password) is
-      // the one password-type input, plus the setup guide's Review step where the user may CHOOSE a
-      // new admin password for an open box (D10, VIS-78): it sets one, it never asks for one
-      if (/type="password"/.test(text) && rel !== join('views', 'backends.ts') && rel !== join('setup', 'view.ts')) bad.push(`${rel}: a password input`);
+      // the one password-type input
+      if (/type="password"/.test(text) && rel !== join('views', 'backends.ts')) bad.push(`${rel}: a password input`);
       for (const [re, what] of [
         [/Unlock editing|>Unlock<|'Unlock'/, 'an unlock step'],
         [/Admin token needed|Enter admin token|Enter the admin token/, 'a token prompt'],

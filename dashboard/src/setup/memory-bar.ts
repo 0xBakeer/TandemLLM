@@ -36,8 +36,12 @@ export class QseMemoryBar extends LightElement {
     const kv = e.parts.find((p) => p.kind === 'kv');
     const scale = Math.max(e.device_gb, e.total_gb);
     const pct = (x: number) => `${((x / scale) * 100).toFixed(3)}%`;
+    // drawn by category (the model first, the chats last, next to the free room); the estimate's
+    // own order is the server's
+    const order = (id: string) => CATS.indexOf(categoryOf(m, id));
+    const sorted = [...e.parts].sort((a, b) => order(a.id) - order(b.id));
     let x = 0;
-    const segs = e.parts.map((p) => {
+    const segs = sorted.map((p) => {
       const s = { p, left: x, cat: categoryOf(m, p.id) };
       x += p.gb;
       return s;

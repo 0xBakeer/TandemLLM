@@ -990,10 +990,10 @@ export interface SetupProfile {
   note: string | null;
   /** the draft models, the draft head and their buffers with this profile (model.yaml) */
   drafters_gib?: number;
-  /** files the profile needs that ops/use-profile.sh cannot download */
-  requires?: string[];
   /** the weights' Hugging Face repo needs a token (the EXL3 sets, OPS-95) */
-  private?: boolean;
+  hf_private?: boolean;
+  /** ids of `SetupModel.assets` the profile needs beside its weights */
+  assets_required?: string[];
 }
 
 /** One cell of the measured table: mean tok/s (and min), ms a round, tokens a round. */
@@ -1051,8 +1051,8 @@ export interface SetupComponent {
   /** serve.env key -> its value with the component on / off */
   /** null: writes nothing in that state (the template's or the profile's value stands) */
   knobs: Record<string, { on: string | null; off: string | null }>;
-  /** what must be on disk for it to load */
-  files?: string[];
+  /** ids of `SetupModel.assets` it needs on disk to load */
+  assets?: string[];
   docs: string;
   note: string | null;
 }
@@ -1089,6 +1089,8 @@ export interface SetupParallelism {
   knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
   /** serve.env keys written with the slots whatever is chosen */
   fixed?: Record<string, string>;
+  /** what a slot typically holds in the estimate (32,768) */
+  typical_fill_tokens?: number;
 }
 
 export interface SetupDevicePreset {
@@ -1120,10 +1122,25 @@ export interface SetupModel {
   methods: SetupField[];
   advanced: SetupField[];
   devices: SetupDevicePreset[];
-  /** the step schema (design note addition); absent: the dashboard derives it from the fields above */
-  wizard_fields?: SetupStep[];
   /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
   memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
+  /** the step schema (design note addition); absent: the dashboard derives it from the fields above */
+  wizard_fields?: SetupStep[];
+  /** files beside the weights (drafters, the draft head, the base checkpoint) and where they come from */
+  assets?: SetupAsset[];
+  recommended?: boolean;
+}
+export interface SetupAsset {
+  id: string;
+  label: string;
+  path: string;
+  also: string[];
+  /** ops/use-profile.sh can download it */
+  fetchable: boolean;
+  /** reset level 4 keeps it */
+  protected: boolean;
+  hf_repo: string | null;
+  source: string;
 }
 
 /** The wizard's choices: what the estimate, the plan and the apply job take. */
@@ -1176,6 +1193,7 @@ export interface SetupEstimate {
   fits_worst?: boolean;
   /** device - floor */
   budget_gb?: number;
+  typical_fill_tokens?: number;
 }
 
 /** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
@@ -1241,6 +1259,11 @@ export interface SetupAssistantStatus {
   can_load: boolean;
   /** 0..1 while loading, when the server knows it */
   progress?: number | null;
+  /** seconds since the load started, while loading */
+  loading_s?: number | null;
+  /** Wren uses the narrator's loaded copy (no memory of its own) */
+  borrowed?: boolean;
+  window?: number;
 }
 
 export interface SetupToolCall {
@@ -1294,8 +1317,12 @@ export interface SetupPlan {
   ok: boolean;
   /** what is wrong with the selection (Finish stays off) */
   errors: string[];
+  /** one code per error: over_budget, missing_assets, missing_token, disk_full, port_in_use, ... */
+  error_codes?: string[];
   warnings: string[];
   profile: { current: string | null; next: string; on_disk: boolean; download_gb: number };
+  ports?: { current: number; next: number };
+  dry_run?: boolean;
   changes: SetupEnvChange[];
   restart: boolean;
   /** what the job will run, for reading: the server runs its own fixed steps, never these strings */
@@ -1327,8 +1354,8 @@ export interface SetupJob {
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
   selection: SetupSelection;
-  /** a password the user typed on the Review step: sent once, never stored by the page */
-  secrets?: { admin_password?: string };
+  /** the Review step's plan without starting anything (the answer is a SetupPlan) */
+  dry_run?: boolean;
 }
 export interface SetupApplyResponse {
   contract_version: SetupContract;
