@@ -201,34 +201,32 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         codes.append(code)
 
     if not est["fits"]:
-        error("over_budget", f"The selection needs {est['total_gb']:.2f} GiB, {est['total_gb'] - est['budget_gb']:.2f}"
-                      f" GiB more than the {est['budget_gb']:.2f} GiB there is. "
-                      + (est["notes"][-1] if est["notes"] else ""))
+        error("over_budget", " ".join(n for n in est["notes"] if not n.startswith("About")))
     missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
     if missing:
-        error("missing_assets", "This profile needs files that are not on this box and that nothing here "
-                      "can download yet: " + "; ".join(
-                          f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})" for a in missing)
-                      + ". See OPS-95 and docs/setup.md.")
+        error("missing_assets", "This profile needs files that are not on this box and that "
+              "nothing here can download yet: " + "; ".join(
+                  f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})"
+                  for a in missing) + ". See OPS-95 and docs/setup.md.")
     on_disk = bool(disk.get("weights"))
     if not on_disk and prof["hf_private"] and not device_mod.hf_token_present():
-        error("missing_token", f"{prof['hf_repo']} is private and no Hugging Face token is set. Add one "
-                      f"with `hf auth login` on the box, or set HF_TOKEN, then try again.")
+        error("missing_token", f"{prof['hf_repo']} is private and no Hugging Face token is set. "
+              f"Add one with `hf auth login` on the box, or set HF_TOKEN, then try again.")
     if not on_disk:
         try:
             free = shutil.disk_usage(os.path.expanduser("~")).free / 1e9
         except OSError:
             free = None
         if free is not None and free < prof["disk_gb"] + DISK_MARGIN_GB:
-            error("disk_full", f"The download needs {prof['disk_gb']:g} GB and {DISK_MARGIN_GB} GB "
-                          f"left after it; the disk has {free:.0f} GB free.")
+            error("disk_full", f"The download needs {prof['disk_gb']:g} GB and {DISK_MARGIN_GB} "
+                  f"GB left after it; the disk has {free:.0f} GB free.")
     if not hook_present():
-        error("no_overlay_hook", "ops/serve.env on this box does not read run/setup.env. Add the setup "
-                      "overlay lines from the repository's ops/serve.env (the end of the file) "
-                      "first.")
+        error("no_overlay_hook", "ops/serve.env on this box does not read run/setup.env. Add the "
+              "setup overlay lines from the repository's ops/serve.env (the end of the file) "
+              "first.")
     if sel["advanced"].get("admin_password") == "generate" and os.path.exists(secrets_file()):
-        error("secrets_exist", "secrets.env already exists. ops/make-secrets.sh --rotate --admin would "
-                      "replace the metrics token too, so run it on the box yourself.")
+        error("secrets_exist", "secrets.env already exists. ops/make-secrets.sh --rotate --admin "
+              "would replace the metrics token too, so run it on the box yourself.")
     keys = list(overlay_values(m, sel))
     current = resolve_env(keys + ["REPO"])
     repo = current.pop("REPO", None)
@@ -254,9 +252,9 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         if sel["components"][c["id"]]:
             for a in c["assets"]:
                 if not registry.asset_present(registry.asset(m, a), disk.get("repo")):
+                    where = registry.expand(registry.asset(m, a)["path"], disk.get("repo"))
                     warnings.append(f"{c['label']} is on, but its model is not on this box "
-                                    f"({registry.expand(registry.asset(m, a)['path'], disk.get('repo'))});"
-                                    f" the engine starts without it.")
+                                    f"({where}); the engine starts without it.")
     if mem_total_gb is not None and device_mod.preset(m, mem_total_gb, None) is None:
         warnings.append("These numbers were measured on a DGX Spark, not on this machine.")
     active = device_mod.active_profile()

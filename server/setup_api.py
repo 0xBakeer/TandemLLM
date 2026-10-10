@@ -28,6 +28,7 @@ chat request's path: server/app.py imports this module the first time a /v1/setu
 
 from __future__ import annotations
 
+import threading
 from urllib.parse import unquote
 
 from server.setup import device as device_mod
@@ -36,6 +37,8 @@ from server.setup import registry, tools
 
 CONTRACT = "1.0"
 NO_STORE = (("Cache-Control", "no-store"),)
+# one setup job at a time: the check for a running job and the new job's folder under one lock
+_JOB_LOCK = threading.Lock()
 
 
 def _err(h, status: int, code: str, message: str, **extra) -> None:
@@ -214,10 +217,6 @@ def apply_route(h, app, which: str, body) -> None:
                    mem_total_gb=mem.get("MemTotal"))
     if which == "plan" or body.get("dry_run"):
         return h._json(200, dict(p, dry_run=which == "apply"), extra_headers=NO_STORE)
-    run = apply.running_job()
-    if run is not None:
-        return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
-                    job=run["id"])
     if busy(app) and not setup_mode:
         inf = app.INFLIGHT
         return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
@@ -228,9 +227,14 @@ def apply_route(h, app, which: str, body) -> None:
         return h._json(PLAN_STATUS.get(code, 409),
                        {"error": {"type": code, "code": code, "message": " ".join(p["errors"])},
                         "plan": p}, extra_headers=NO_STORE)
-    wren_of(app).unload("apply")
-    job = apply.new_job(m, sel, p, setup_mode=setup_mode)
-    apply.spawn(job["id"])
+    with _JOB_LOCK:
+        run = apply.running_job()
+        if run is not None:
+            return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
+                        job=run["id"])
+        wren_of(app).unload("apply")
+        job = apply.new_job(m, sel, p, setup_mode=setup_mode)
+        apply.spawn(job["id"])
     print(f"[setup] apply job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
           f"started", flush=True)
     return h._json(202, {"contract_version": CONTRACT, "job": job}, extra_headers=NO_STORE)
@@ -277,7 +281,8 @@ def job_route(h, jid: str) -> None:
             if j is None or j["state"] not in ("queued", "running"):
                 # a runner that died says so once
                 if j is not None:
-                    h.wfile.write(f"data: {json.dumps({'type': 'done', 'state': j['state'], 'message': j['message']})}\n\n".encode())
+                    done = {"type": "done", "state": j["state"], "message": j["message"]}
+                    h.wfile.write(f"data: {json.dumps(done)}\n\n".encode())
                 h.wfile.flush()
                 return None
             if time.monotonic() - quiet > 15:
@@ -363,9 +368,12 @@ def reset_route(h, app, body) -> None:
                            {"error": {"type": code, "code": code,
                                       "message": " ".join(p["errors"])}, "plan": p},
                            extra_headers=NO_STORE)
-        wren_of(app).unload("reset")
-        job = apply.new_job(m, p["selection"], p, setup_mode=setup_mode, kind="reset")
-        apply.spawn(job["id"])
+        with _JOB_LOCK:
+            if apply.running_job() is not None:
+                return _err(h, 409, "job_running", "a setup job runs; one at a time")
+            wren_of(app).unload("reset")
+            job = apply.new_job(m, p["selection"], p, setup_mode=setup_mode, kind="reset")
+            apply.spawn(job["id"])
         reset.audit({"level": 2, "dry_run": False, "freed_gb": 0, "result": "job",
                      "job": job["id"]})
         return h._json(202, {"contract_version": CONTRACT, "level": 2, "removed": [],

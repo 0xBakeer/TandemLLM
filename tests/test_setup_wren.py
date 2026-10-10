@@ -28,7 +28,10 @@ The test matrix:
  11  never beside a request: while one runs or waits Wren does not run a slice, and it goes on
      once the engine is idle                             test_never_beside_a_request
  12  idle for 5 minutes on a serving engine: unloaded (not in setup mode); the KV pool's reclaim
-     takes Wren's own copy first and leaves a borrow     test_idle_unload_and_reclaim
+     takes Wren's own copy first and leaves a borrow; the memory limits and the split count its
+     own copy as a role, not as the engine (a borrow once, as the narrator)
+                                       test_idle_unload_and_reclaim,
+                                       test_wren_is_a_role_in_the_memory_figures
  13  the HTTP routes: status, load, chat as SSE frames, unload; a chat while unloaded is one error
      event                                               test_the_routes
  14  no chat text in the log                              test_no_content_in_the_log
@@ -296,6 +299,21 @@ def test_a_lone_highlight_is_followed_by_words():
     _loaded(w)
     _events(w)
     assert len(model.prompts) == 1                          # words came with it: no second turn
+
+
+def test_wren_is_a_role_in_the_memory_figures():
+    from server import memlimits, memsplit
+    _on_disk()
+    w, model = _wren()
+    assert memlimits.role_exclude(app.STATE) == (0, 0)
+    _loaded(w)
+    assert memlimits.role_exclude(app.STATE) == (4 << 30, 4 << 30)
+    assert memsplit._roles(app.STATE) == {"wren": 4 << 30}
+    narr = NarratorSlot(Scripted(max_ctx=4096))
+    w.unload()
+    app.STATE["narrator"] = type("N", (), {"slot": narr})()
+    w.load()                                        # a borrow: the narrator's row, counted once
+    assert w.borrowed and memsplit._roles(app.STATE) == {"narrator": 4 << 30}
 
 
 def test_the_tool_checks():
