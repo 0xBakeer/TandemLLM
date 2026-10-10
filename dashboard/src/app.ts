@@ -21,6 +21,7 @@ import { currentTheme, toggleTheme, watchSystemTheme, type Theme } from './lib/t
 import { browserTz } from './lib/time';
 import { LightElement, type Loadable } from './ui/base';
 import { icon } from './ui/bits';
+import { S } from './setup/strings';
 
 
 /** `short`: the label in the phone's bottom bar, where seven tabs share 390 px */
@@ -32,6 +33,7 @@ const TABS: { view: View; label: string; short?: string }[] = [
   { view: 'conductor', label: 'Conductor', short: 'Cond' },
   { view: 'backends', label: 'Backends', short: 'Backend' },
   { view: 'system', label: 'System' },
+  { view: 'setup', label: 'Setup' },
 ];
 
 /** The Playground view is its own chunk; the element upgrades in place once the chunk has loaded. */
@@ -43,6 +45,9 @@ const loadConductor = () => (conductorChunk ??= import('./views/conductor'));
 /** The Backends view (the proxy's registry), its own chunk: set up once, opened rarely. */
 let backendsChunk: Promise<unknown> | null = null;
 const loadBackends = () => (backendsChunk ??= import('./views/backends'));
+/** The setup guide (VIS-78): the wizard, Wren and the reset levels, its own chunk. */
+let setupChunk: Promise<unknown> | null = null;
+const loadSetup = () => (setupChunk ??= import('./setup/view'));
 /** Performance → Parallel (every request on every backend at once), its own chunk. */
 let parallelChunk: Promise<unknown> | null = null;
 const loadParallel = () => (parallelChunk ??= import('./views/parallel'));
@@ -72,6 +77,8 @@ export class QseApp extends LightElement {
   @state() private codeHash: string | null = null;
   /** the engine's parallel sequences (/v1/config engine.parallel.n), read once for the subtitle */
   @state() private engineParallel: number | null = null;
+  /** OPS-93: the box runs in setup mode (only the dashboard and Wren); every other view is off */
+  @state() private setupMode = false;
   private parallelAsked = false;
   private summaryPoll: Poller | null = null;
   private unsub: (() => void)[] = [];
@@ -80,7 +87,12 @@ export class QseApp extends LightElement {
   connectedCallback(): void {
     super.connectedCallback();
     watchSystemTheme();
-    this.unsub.push(onRoute((r) => (this.route = r)));
+    this.unsub.push(
+      onRoute((r) => {
+        this.route = r;
+        if (this.setupMode && r.view !== 'setup') navigate('setup');
+      }),
+    );
     this.unsub.push(
       onApi((ev) => {
         if (ev === 'unauthorized') this.refused = true;
@@ -127,6 +139,18 @@ export class QseApp extends LightElement {
     this.summaryPoll = poll(() => this.loadSummary(), 60_000);
     this.summaryPoll.start();
     void this.loadVersion();
+    void this.checkSetupMode();
+  }
+
+  /** /health says `mode: "setup"` on a box started by `ops/start.sh --setup`: open the guide */
+  private async checkSetupMode(): Promise<void> {
+    try {
+      const h = await fetch('/health', { cache: 'no-store', credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null));
+      this.setupMode = h?.mode === 'setup';
+      if (this.setupMode && this.route.view !== 'setup') navigate('setup');
+    } catch {
+      /* an engine without /health: not in setup mode */
+    }
   }
 
   private async loadSummary(): Promise<void> {
@@ -177,11 +201,16 @@ export class QseApp extends LightElement {
           </div>
         </header>
         <nav class="rail" aria-label="views">
-          ${TABS.map((t) => html`<a class="rail-tab ${this.route.view === t.view ? 'is-on' : ''}" href="#/${t.view}" aria-current=${this.route.view === t.view ? 'page' : nothing}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.short ? html`<span class="rail-short" aria-hidden="true">${t.short}</span>` : nothing}</a>`)}
+          ${TABS.map((t) =>
+            this.setupMode && t.view !== 'setup'
+              ? html`<span class="rail-tab is-off" aria-disabled="true" title=${S.setupModeTab}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.short ? html`<span class="rail-short" aria-hidden="true">${t.short}</span>` : nothing}</span>`
+              : html`<a class="rail-tab ${this.route.view === t.view ? 'is-on' : ''}" href="#/${t.view}" aria-current=${this.route.view === t.view ? 'page' : nothing}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.short ? html`<span class="rail-short" aria-hidden="true">${t.short}</span>` : nothing}</a>`,
+          )}
         </nav>
         <main class="content" id="main">
           ${this.offline ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
           ${this.refused ? html`<div class="banner banner-offline" role="status" data-refused>${icon('warn')} The server answered 401: an admin password is set on it, and the dashboard has no sign-in yet. Unset QSE_ADMIN_TOKEN to open it again (docs/server.md).</div>` : nothing}
+          ${this.setupMode ? html`<div class="banner setup-mode-banner" role="status" data-setup-mode>${icon('info')} ${S.setupModeBanner}</div>` : nothing}
           ${this.renderView()}
         </main>
       </div>
@@ -212,6 +241,9 @@ export class QseApp extends LightElement {
         return html`<qse-backends .params=${this.route.params}></qse-backends>`;
       case 'system':
         return html`<qse-system></qse-system>`;
+      case 'setup':
+        void loadSetup();
+        return html`<qse-setup .path=${this.route.path}></qse-setup>`;
     }
   }
 }

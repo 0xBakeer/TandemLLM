@@ -1064,7 +1064,8 @@ export interface SetupComponent {
   depends_on: string[];
   conflicts: string[];
   /** serve.env key -> its value with the component on / off */
-  knobs: Record<string, { on: string; off: string }>;
+  /** null: that state writes nothing (the template's or the profile's value stands; model.yaml) */
+  knobs: Record<string, { on: string | null; off: string | null }>;
   docs: string;
   note: string | null;
   /** 1.0+: SetupAsset ids that must be on disk for it to load */
@@ -1216,7 +1217,8 @@ export interface SetupStep {
   label: string;
   fields: SetupStepField[];
 }
-export type SetupToolName = 'set_field' | 'toggle' | 'select_profile' | 'go_to_step' | 'next' | 'previous' | 'explain';
+/** read_device: the page's own read-only tool (the server puts the device in Wren's prompt instead) */
+export type SetupToolName = 'set_field' | 'toggle' | 'select_profile' | 'go_to_step' | 'next' | 'previous' | 'explain' | 'read_device';
 export interface SetupSteps {
   contract_version: SetupContract;
   model: string;
