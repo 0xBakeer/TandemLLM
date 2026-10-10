@@ -7263,6 +7263,12 @@ class Handler(BaseHTTPRequestHandler):
             def prefill_line(done: int, total: int, now: float) -> None:
                 if pf_next[0] is not None and now < pf_next[0]:
                     return
+                w = watch.info.get("window")
+                if w is not None and done < w[1]:
+                    # VIS-76: inside a layer-major window the newest mark is a chunk of it at the
+                    # window's time, ~10 s after the last window's: the rate read 1,024 rows in
+                    # 10 s ("about 4 min left" for a 47 s prefill); its last chunk reads it whole
+                    return
                 tps = activity_mod.prefill_live(rec, 1)["tps_live_avg"]
                 if not tps:
                     return
