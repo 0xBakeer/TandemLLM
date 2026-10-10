@@ -442,7 +442,7 @@ export class MockSetup {
           item(`${E}/cache/disk-${this.o.active}`, "Disk cache and parked chats (the running profile's)", 11.2 * GIB, true, { action: 'engine', note: 'the engine clears it itself' }),
           item(`${E}/cache/disk-exl3-4.5`, 'Disk cache and parked chats', 3.1 * GIB),
           ...(this.o.shadowOn ? [item(`${E}/cache/shadow`, "The shadow reader's saved sessions", 0.6 * GIB, true, { action: 'skip', note: 'kept while the shadow reader runs' })] : []),
-          item(`${E}/suffix`, 'The lookup store', 412 * 2 ** 20, true, { restart: true, note: 'the running engine keeps its copy until a restart' }),
+          item(`${E}/suffix`, 'The lookup store', 412 * 2 ** 20, true, { action: 'engine', note: 'the engine empties it itself' }),
           memory('state_store', 'The state store (memory)'),
           memory('response_cache', 'The response cache (memory)'),
         ];
@@ -453,7 +453,7 @@ export class MockSetup {
       lv(2, 'Applied configuration', `The setup guide's configuration goes, and the engine restarts on the recommended weight profile. The recommended profile is ${rec}.`, config, true, null),
       lv(3, 'Caches and stored chats', 'Every cache on the SSD and in memory, and the conversations parked there. Answers stay right; the next long prompts are slower once.', caches, false, 'delete caches'),
       lv(4, 'Downloaded weights', 'The weights of every profile but the active one. They download again when you pick that profile.', weights, false, 'delete weights'),
-      lv(5, 'Usage history and conductor data', "The usage history, the conductor's settings and journal, and the memory notes. This cannot be undone.", [item(`${E}/usage`, 'The usage history', 1.4 * GIB, true, { files: 3 }), item(`${E}/conductor`, "The conductor's settings and journal", 220 * 2 ** 20), item(`${E}/memory`, 'Memory notes and transcripts', 5.1 * GIB, true, { files: 50_000, at_least: true })], true, 'delete history'),
+      lv(5, 'Usage history and conductor data', "The usage history, the conductor's settings and journal, and the memory notes. This cannot be undone.", [item(`${E}/usage/ledger.sqlite3`, 'The usage history', 1.4 * GIB, true, { files: 1 }), item(`${E}/conductor`, "The conductor's settings and journal", 220 * 2 ** 20), item(`${E}/memory`, 'Memory notes and transcripts', 5.1 * GIB, true, { files: 50_000, at_least: true })], true, 'delete history'),
     ];
   }
 

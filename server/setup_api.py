@@ -297,7 +297,8 @@ def job_route(h, jid: str) -> None:
 
 def clear_live(app, what: str) -> int:
     """Reset level 3's caches the running engine holds, through its own functions (what
-    POST /v1/cache/clear?tier=all does): the disk tier and the spill, or one RAM cache."""
+    POST /v1/cache/clear?tier=all does): the disk tier and the spill, the lookup store's log
+    (truncated under its lock), or one RAM cache."""
     st = app.STATE
     if what == "disk":
         from server import diskcache as diskcache_mod
@@ -309,6 +310,9 @@ def clear_live(app, what: str) -> int:
     obj = st.get(what)
     if obj is None or not hasattr(obj, "clear"):
         raise ValueError(f"no {what} on this server")
+    if what == "suffix_store":
+        # its own lock: appends take it, and a rebuild that read the old log is dropped
+        return int(obj.clear() or 0)
     with app.LOCK:
         obj.clear()
         if what == "resident":
@@ -346,6 +350,10 @@ def reset_route(h, app, body) -> None:
         return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
                     f"{inf.get('waiting', 0)} wait; reset when the engine is idle",
                     running=inf.get("running", 0), waiting=inf.get("waiting", 0))
+    if n == 4 and device_mod.active_profile() is None:
+        reset.audit({"level": 4, "dry_run": False, "freed_gb": 0, "result": "active_unknown"})
+        return _err(h, 409, "active_unknown", reset.ACTIVE_UNKNOWN[0].upper() +
+                    reset.ACTIVE_UNKNOWN[1:] + ".")
     word, confirm = reset.WORDS[n], body.get("confirm")
     ok = confirm is True if word is None else (
         isinstance(confirm, str) and confirm.strip().lower() == word)

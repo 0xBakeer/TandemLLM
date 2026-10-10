@@ -140,8 +140,9 @@ describe('the mock answers as the server does', () => {
     expect(two.items.map((i) => i.path)).toEqual(['~/tandem-live/run/setup.env', '~/tandem-live/run/setup.env.bak-20261010T081200Z']);
     expect(two.what).toContain('The recommended profile is exl3-4.5.');
     const three = lv.find((l) => l.level === 3)!;
-    expect(three.items.map((i) => [i.kind, i.action])).toEqual([['path', 'engine'], ['path', 'remove'], ['path', 'remove'], ['memory', 'engine'], ['memory', 'engine']]);
-    expect(three.restart).toBe(true); // the lookup store: the running engine keeps its copy
+    // the running disk tier and the lookup store are emptied by the engine itself (SRV-329)
+    expect(three.items.map((i) => [i.kind, i.action])).toEqual([['path', 'engine'], ['path', 'remove'], ['path', 'engine'], ['memory', 'engine'], ['memory', 'engine']]);
+    expect(three.restart).toBe(false);
     for (const l of lv) for (const i of l.items) expect(Object.keys(i).sort()).toEqual(['action', 'at_least', 'bytes', 'exists', 'files', 'kind', 'label', 'note', 'path', 'refused', 'restart']);
   });
 

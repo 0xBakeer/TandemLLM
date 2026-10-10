@@ -10,7 +10,8 @@
                                                      the lookup store, the shadow reader's disk
     4  downloaded weights but the active profile's   each other profile's weight folder and its
                                                      Hugging Face cache copy
-    5  usage history and conductor data              the usage ledger, the conductor's config and
+    5  usage history and conductor data              the usage ledger file (and its -wal, -shm and
+                                                     -journal sidecars), the conductor's config and
                                                      journal, the memory notes and transcripts
 
 GET /v1/setup/reset lists every level with its items and sizes; POST /v1/setup/reset {level,
@@ -26,6 +27,12 @@ never followed. A cache the engine runs is cleared through its own clear functio
 lock (wiping a disk tier behind a running engine's back broke it, SRV-289); the shadow reader's disk,
 which has none, is left alone while the shadow reader runs. Every call writes one line to
 run/setup-audit.log: the level, dry run or not, the GiB freed and the result, no paths of content.
+
+LEVEL 4 never removes what an engine reads: besides the active profile's folder, the weight paths
+in the argument vector and the environment of every engine process on any port (ops/engines.sh
+engine_pids: --nvfp4, --fp8-head, QWEN38_EXL3, QWEN38_DRAFT_*, QWEN38_NVFP4, QSE_WEIGHTS_DIR) and
+this server's own, and ~/nvfp4-bf16 while the ~/tandem-staircut rollback tree is on the box. With
+no active profile known (no QSE_WEIGHTS, no ops/active-profile) it removes nothing.
 """
 
 from __future__ import annotations
@@ -34,6 +41,8 @@ import glob
 import json
 import os
 import shutil
+import subprocess
+import sys
 import time
 
 from server.setup import apply, device as device_mod, registry
@@ -83,6 +92,77 @@ def size(path: str, limit_s: float = SIZE_S) -> tuple[int, int, bool]:
     return total, n, False
 
 
+# the arguments and environment variables that name weights an engine reads
+WEIGHT_ARGS = ("--nvfp4", "--fp8-head", "--exl3", "--draft-exl3", "--draft-head")
+WEIGHT_ENV = ("QWEN38_EXL3", "QWEN38_NVFP4", "QWEN38_FP8_HEAD", "QSE_WEIGHTS_DIR")
+WEIGHT_ENV_PREFIX = ("QWEN38_DRAFT_",)
+ACTIVE_UNKNOWN = "the active weight profile is not known on this box, so no weights are removed"
+
+
+def _weight_paths(argv: list[str], env: dict) -> list[str]:
+    """The paths in one engine's argument vector and environment that name weights it reads."""
+    vals = []
+    for i, a in enumerate(argv):
+        for flag in WEIGHT_ARGS:
+            if a == flag and i + 1 < len(argv):
+                vals.append(argv[i + 1])
+            elif a.startswith(flag + "="):
+                vals.append(a[len(flag) + 1:])
+    for k, v in env.items():
+        if k in WEIGHT_ENV or k.startswith(WEIGHT_ENV_PREFIX):
+            vals.append(v)
+    out = []
+    for v in vals:
+        for part in str(v).split(","):
+            part = os.path.expanduser(part.strip())
+            if part.startswith("/"):
+                out.append(part)
+    return out
+
+
+def engine_pids(ops: str | None = None) -> list[int]:
+    """Every engine process on any port, as ops/engines.sh decides (ENGINE_PROC for tests)."""
+    lib = os.path.join(ops or device_mod.ops_dir(), "engines.sh")
+    if not os.path.isfile(lib):
+        lib = os.path.join(registry.ROOT, "ops", "engines.sh")
+    try:
+        r = subprocess.run(["bash", "-c", '. "$1"; engine_pids', "-", lib], capture_output=True,
+                           text=True, timeout=10,
+                           env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                **({"ENGINE_PROC": os.environ["ENGINE_PROC"]}
+                                   if os.environ.get("ENGINE_PROC") else {})})
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(x) for x in r.stdout.split() if x.isdigit()]
+
+
+def in_use() -> list[str]:
+    """The weight paths the engines on this box read now: every engine process's (its
+    /proc/<pid>/cmdline and environ) and this server's own."""
+    out = _weight_paths(sys.argv, dict(os.environ))
+    root = os.environ.get("ENGINE_PROC") or "/proc"
+    for pid in engine_pids():
+        try:
+            with open(os.path.join(root, str(pid), "cmdline"), "rb") as fh:
+                argv = [a.decode(errors="replace") for a in fh.read().split(b"\0") if a]
+        except OSError:
+            argv = []
+        env = {}
+        try:
+            with open(os.path.join(root, str(pid), "environ"), "rb") as fh:
+                for kv in fh.read().split(b"\0"):
+                    k, _, v = kv.decode(errors="replace").partition("=")
+                    if k:
+                        env[k] = v
+        except OSError:
+            pass
+        out += _weight_paths(argv, env)
+    if os.path.isdir(os.path.expanduser("~/tandem-staircut")):
+        # the rollback tree (0.4.8) serves NVFP4 from there: it must still start
+        out.append(os.path.expanduser("~/nvfp4-bf16"))
+    return out
+
+
 def protected(m: dict | None, repo: str | None = None, level: int = 2) -> list[str]:
     """Real paths a level never removes (a path under one of them, or one of them under it): the
     checkout, the home and state folders, secrets.env, the roles' models, the HF token and the
@@ -93,6 +173,8 @@ def protected(m: dict | None, repo: str | None = None, level: int = 2) -> list[s
             os.path.expanduser(os.environ.get("HF_TOKEN_PATH") or "~/.cache/huggingface/token")]
     if level != 5:
         keep += [os.path.join(state_dir(), x) for x in ("usage", "conductor", "memory")]
+    if level == 4:
+        keep += in_use()
     out = [os.path.realpath(p) for p in keep]
     for a in (m or {}).get("assets") or []:
         for p in [a["path"], *a.get("also", [])]:
@@ -117,14 +199,15 @@ def _allowed(path: str, guard: list[str], level: int) -> str | None:
 
 
 def _item(path: str, label: str, *, kind: str = "path", action: str = "remove",
-          note: str | None = None, restart: bool = False) -> dict:
+          note: str | None = None, restart: bool = False, clear: str | None = None) -> dict:
     """`action`: remove (the files go), engine (the running engine clears it with its own
-    function), skip (in use and nothing can clear it now)."""
+    function, `clear` names it for clear_live; a memory item's path is that name), skip (in use
+    and nothing can clear it now)."""
     b, n, at_least = size(path) if kind == "path" else (0, 0, False)
     return {"path": _label(path) if kind == "path" else path, "label": label, "bytes": b,
             "files": n, "at_least": at_least, "exists": kind != "path" or os.path.lexists(path),
             "real": path if kind == "path" else None, "kind": kind, "action": action,
-            "note": note, "restart": restart}
+            "note": note, "restart": restart, "clear": clear or (path if kind == "memory" else None)}
 
 
 def _env(keys: list[str]) -> dict:
@@ -152,7 +235,8 @@ def items(level: int, app=None) -> list[dict]:
             out.append(_item(p, "Disk cache and parked chats" + (" (the running profile's)"
                                                                  if running else ""),
                              action="engine" if running else "remove",
-                             note="the engine clears it itself" if running else None))
+                             note="the engine clears it itself" if running else None,
+                             clear="disk" if running else None))
         shadow = os.path.join(state_dir(), "cache", "shadow")
         if os.path.lexists(shadow):
             on = st.get("shadow") is not None
@@ -162,10 +246,13 @@ def items(level: int, app=None) -> list[dict]:
         suffix = _env(["QWEN38_SUFFIX_STORE"]).get("QWEN38_SUFFIX_STORE") or \
             os.path.join(state_dir(), "suffix")
         if suffix and suffix != "off" and os.path.lexists(os.path.expanduser(suffix)):
+            # a running store appends to its log after every request: removing the folder under
+            # it made every later request fail, so the engine empties it under its own lock
             on = st.get("suffix_store") is not None
-            out.append(_item(os.path.expanduser(suffix), "The lookup store", restart=on,
-                             note="the running engine keeps its copy until a restart"
-                             if on else None))
+            out.append(_item(os.path.expanduser(suffix), "The lookup store",
+                             action="engine" if on else "remove",
+                             note="the engine empties it itself" if on else None,
+                             clear="suffix_store" if on else None))
         for name, label in (("state_store", "The state store (memory)"),
                             ("response_cache", "The response cache (memory)"),
                             ("resident", "The conversation cache (memory)")):
@@ -190,9 +277,12 @@ def items(level: int, app=None) -> list[dict]:
         got = _env(["QSE_USAGE_LEDGER", "QSE_CONDUCTOR_CONFIG"])
         ledger = got.get("QSE_USAGE_LEDGER") or os.path.join(state_dir(), "usage", "ledger.sqlite3")
         cond = got.get("QSE_CONDUCTOR_CONFIG") or os.path.join(state_dir(), "conductor")
-        for p, label in ((os.path.dirname(os.path.expanduser(ledger)), "The usage history"),
-                         (os.path.expanduser(cond), "The conductor's settings and journal"),
-                         (os.path.join(state_dir(), "memory"), "Memory notes and transcripts")):
+        # the ledger and its SQLite sidecars only: its folder may hold other things
+        led = [] if ledger in ("", "off") else [os.path.expanduser(ledger) + x for x in
+                                                ("", "-wal", "-shm", "-journal")]
+        for p, label in ([(x, "The usage history") for x in led] +
+                         [(os.path.expanduser(cond), "The conductor's settings and journal"),
+                          (os.path.join(state_dir(), "memory"), "Memory notes and transcripts")]):
             if p and p != "off" and os.path.lexists(p):
                 out.append(_item(p, label))
         return out
@@ -206,9 +296,11 @@ def level(n: int, app=None) -> dict:
     m = next(iter(models.values()), None)
     guard = protected(m, None, n)
     shown = []
+    unknown = n == 4 and device_mod.active_profile() is None
     for it in its:
-        why = _allowed(it["real"], guard, n) if it["kind"] == "path" else None
-        shown.append({k: v for k, v in dict(it, refused=why).items() if k not in ("real",)})
+        why = ACTIVE_UNKNOWN if unknown else (
+            _allowed(it["real"], guard, n) if it["kind"] == "path" else None)
+        shown.append({k: v for k, v in dict(it, refused=why).items() if k not in ("real", "clear")})
     label, what = LABELS[n]
     if n == 2 and m is not None:
         rec = registry.recommended_profile(m)["id"]
@@ -242,7 +334,7 @@ def execute(n: int, app=None, clear_live=None) -> dict:
     running engine holds (the disk tier, a RAM cache) through the engine's own function."""
     lv = level(n, app)
     removed, failed = [], []
-    real = {(_label(i["real"]) if i["kind"] == "path" else i["real"]): i
+    real = {(_label(i["real"]) if i["kind"] == "path" else i["path"]): i
             for i in items(n, app)}
     for it in lv["items"]:
         src = real.get(it["path"])
@@ -254,7 +346,7 @@ def execute(n: int, app=None, clear_live=None) -> dict:
                 failed.append({"path": it["path"], "reason": "no running engine to clear it"})
                 continue
             try:
-                freed = int(clear_live(it["path"] if it["kind"] == "memory" else "disk") or 0)
+                freed = int(clear_live(src["clear"]) or 0)
                 removed.append({"path": it["path"], "bytes": freed or it["bytes"]})
             except Exception as exc:                              # noqa: BLE001
                 failed.append({"path": it["path"], "reason": f"{type(exc).__name__}: {exc}"[:200]})

@@ -91,9 +91,9 @@ On a fresh box today every profile fails the check: the K3 drafters, the K4 draf
 |-|-|-|-|
 | 1 | the page's progress and Wren's chat (the browser's own storage) | the page's | no |
 | 2 | `run/setup.env` and its backups; the recommended profile starts | `true` | yes (a job, as apply) |
-| 3 | the disk caches of every profile, the parked chats, the RAM caches, the lookup store, the shadow reader's disk | `delete caches` | no |
-| 4 | the weights of every profile but the active one, and their HF cache copies | `delete weights` | no |
-| 5 | the usage history, the conductor's settings and journal, the memory notes | `delete history` | yes |
+| 3 | the disk caches of every profile, the parked chats, the RAM caches, the lookup store (a running one is emptied by the engine, its folder stays), the shadow reader's disk | `delete caches` | no |
+| 4 | the weights of every profile but the active one, and their HF cache copies; never what an engine on any port reads (its `--nvfp4`, `--fp8-head`, `QWEN38_EXL3`, `QWEN38_DRAFT_*`), nor `~/nvfp4-bf16` while `~/tandem-staircut` is there; nothing at all while the active profile is unknown (409 `active_unknown`) | `delete weights` | no |
+| 5 | the usage ledger file and its `-wal`, `-shm` and `-journal` files (not its folder), the conductor's settings and journal, the memory notes | `delete history` | yes |
 
 Levels 2 to 4 never touch the active profile's weights, the K3 drafters, the K4 draft head, the base checkpoint, the small models, the HF token, `secrets.env`, the history or the conductor's data. A cache the running engine holds is cleared by the engine's own function; the shadow reader's disk is kept while it runs. A symbolic link goes as a link and its target stays. Every reset is refused while requests run or a job runs, and every call writes one line to `run/setup-audit.log`.
 
