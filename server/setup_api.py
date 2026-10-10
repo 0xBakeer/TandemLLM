@@ -6,6 +6,12 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
     POST /v1/setup/estimate {selection}   the memory estimate (server/setup/estimate.py)
+    POST /v1/setup/plan {selection}       the review step's facts (server/setup/apply.py)
+    POST /v1/setup/apply {selection, dry_run?}   202 and a job (dry_run: the plan); 409 while
+                                          requests are in flight or a job runs, 409/412 when the
+                                          plan has errors (over_budget, missing_token, ...)
+    GET  /v1/setup/jobs/{id}              the job's events as SSE (`id:` its sequence, Last-Event-ID
+                                          resumes), ?format=json the job
     GET  /v1/setup/assistant/status       Wren (server/setup/wren.py); a poll keeps it loaded
     POST /v1/setup/assistant/load         idempotent; a memory refusal is state `refused`
     POST /v1/setup/assistant/unload       the memory back
@@ -110,6 +116,8 @@ def _get(h, app, parts: list[str]) -> None:
                        extra_headers=NO_STORE)
     if parts == ["device"]:
         return h._json(200, device(app), extra_headers=NO_STORE)
+    if len(parts) == 2 and parts[0] == "jobs":
+        return job_route(h, parts[1])
     if parts == ["assistant", "status"]:
         w = wren_of(app)
         w.touch()
@@ -135,6 +143,8 @@ def _post(h, app, parts: list[str], body) -> None:
                                     available_gb=round(mem["MemAvailable"], 2)
                                     if "MemAvailable" in mem else None)
         return h._json(200, out, extra_headers=NO_STORE)
+    if parts in (["plan"], ["apply"]):
+        return apply_route(h, app, parts[0], body)
     if parts == ["assistant", "load"]:
         return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
     if parts == ["assistant", "unload"]:
@@ -165,3 +175,108 @@ def sse(h, events) -> None:
         close = getattr(events, "close", None)
         if close is not None:
             close()
+
+
+# 412 for what the box lacks, 409 for the rest
+PLAN_STATUS = {"missing_token": 412, "missing_assets": 412, "disk_full": 412,
+               "no_overlay_hook": 412}
+
+
+def apply_route(h, app, which: str, body) -> None:
+    from server.setup import apply
+    if not isinstance(body, dict):
+        return _err(h, 422, "invalid_selection", "the body must be a JSON object")
+    if which == "apply":
+        extra = sorted(k for k in body if k not in ("selection", "dry_run"))
+        if extra:
+            return _err(h, 422, "unknown_field", f"unknown field {extra[0]!r}; apply takes "
+                        f"selection and dry_run", errors=[{"field": k, "reason": "unknown"}
+                                                         for k in extra])
+        if not isinstance(body.get("dry_run", False), bool):
+            return _err(h, 422, "invalid_selection", "dry_run: true or false")
+    sel_body = body.get("selection", body if which == "plan" else None)
+    m = selection_model(sel_body)
+    sel = estimate_mod.check(m, sel_body)
+    mem = device_mod.meminfo()
+    auth = app.STATE.get("auth")
+    setup_mode = bool(app.STATE.get("setup_mode"))
+    p = apply.plan(m, sel, setup_mode=setup_mode,
+                   password_set=bool(getattr(auth, "password_set", False)),
+                   available_gb=round(mem["MemAvailable"], 2) if "MemAvailable" in mem else None,
+                   mem_total_gb=mem.get("MemTotal"))
+    if which == "plan" or body.get("dry_run"):
+        return h._json(200, dict(p, dry_run=which == "apply"), extra_headers=NO_STORE)
+    run = apply.running_job()
+    if run is not None:
+        return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
+                    job=run["id"])
+    if busy(app) and not setup_mode:
+        inf = app.INFLIGHT
+        return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
+                    f"{inf.get('waiting', 0)} wait; apply when the engine is idle",
+                    running=inf.get("running", 0), waiting=inf.get("waiting", 0))
+    if not p["ok"]:
+        code = p["error_codes"][0]
+        return h._json(PLAN_STATUS.get(code, 409),
+                       {"error": {"type": code, "code": code, "message": " ".join(p["errors"])},
+                        "plan": p}, extra_headers=NO_STORE)
+    wren_of(app).unload("apply")
+    job = apply.new_job(m, sel, p, setup_mode=setup_mode)
+    apply.spawn(job["id"])
+    print(f"[setup] apply job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
+          f"started", flush=True)
+    return h._json(202, {"contract_version": CONTRACT, "job": job}, extra_headers=NO_STORE)
+
+
+def job_route(h, jid: str) -> None:
+    from urllib.parse import parse_qs, urlsplit
+    import json
+    import time
+    from server.setup import apply
+    if not apply.JOB_ID.match(jid):
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    job = apply.read_job(jid)
+    if job is None:
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    q = {k: v[-1] for k, v in parse_qs(urlsplit(h.path).query).items()}
+    if q.get("format") == "json" or "text/event-stream" not in (h.headers.get("Accept") or
+                                                                 "text/event-stream"):
+        return h._json(200, job, extra_headers=NO_STORE)
+    try:
+        after = int(h.headers.get("Last-Event-ID") or q.get("after") or 0)
+    except ValueError:
+        after = 0
+    try:
+        h.send_response(200)
+        h.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        h.send_header("Cache-Control", "no-cache")
+        h.send_header("X-Accel-Buffering", "no")
+        h.send_header("Connection", "close")
+        h.end_headers()
+        h.close_connection = True
+        if after == 0:
+            h.wfile.write(f"data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
+        quiet = time.monotonic()
+        while True:
+            for rec in apply.events(jid, after):
+                after = rec["seq"]
+                h.wfile.write(f"id: {after}\ndata: {json.dumps(rec['event'])}\n\n".encode())
+                quiet = time.monotonic()
+                if rec["event"].get("type") == "done":
+                    h.wfile.flush()
+                    return None
+            j = apply.read_job(jid)
+            if j is None or j["state"] not in ("queued", "running"):
+                # a runner that died says so once
+                if j is not None:
+                    h.wfile.write(f"data: {json.dumps({'type': 'done', 'state': j['state'], 'message': j['message']})}\n\n".encode())
+                h.wfile.flush()
+                return None
+            if time.monotonic() - quiet > 15:
+                h.wfile.write(b": ping\n\n")
+                quiet = time.monotonic()
+            h.wfile.flush()
+            time.sleep(0.5)
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        h.close_connection = True
+    return None

@@ -42,6 +42,7 @@ import html
 import http.server
 import json
 import os
+import re
 import socket
 import statistics
 import subprocess
@@ -268,9 +269,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._send(200, json.dumps(dict(card, tandem_engine=engine)).encode(),
                           "application/json", f["retry_after_s"])
 
+    def _setup_job(self, path: str) -> None:
+        """The setup guide's job while the engine restarts (server/setup/apply.py writes it):
+        read only, the job's state file, no other file."""
+        jid = path.rstrip("/").rsplit("/", 1)[-1]
+        try:
+            if not re.fullmatch(r"[a-f0-9]{16}", jid):
+                raise OSError
+            with open(os.path.join(REPO, "run", "setup-jobs", jid, "state.json"), "rb") as f:
+                body = f.read()
+            json.loads(body)
+        except (OSError, ValueError):
+            return self._send(404, json.dumps({"error": {"type": "not_found",
+                                                         "message": f"no job {jid!r}"}}).encode(),
+                              "application/json", 5)
+        self._send(200, body, "application/json", 5)
+
     def _answer(self) -> None:
-        f = self._facts()
         path = self.path.split("?")[0]
+        if self.command in ("GET", "HEAD") and path.startswith("/v1/setup/jobs/"):
+            return self._setup_job(path)
+        f = self._facts()
         if self.command in ("GET", "HEAD") and (path.rstrip("/") in ("/v1/models", "/models")
                                                 or path.startswith("/v1/models/")):
             return self._models(f, path)

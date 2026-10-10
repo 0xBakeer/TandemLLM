@@ -58,14 +58,16 @@ def hf_token_present() -> bool:
 
 
 def profile_dirs(names: list[str], ops: str | None = None, timeout: float = 10.0) -> dict:
-    """profile -> {dir, files}: QSE_WEIGHTS_DIR and QSE_WEIGHTS_FILES as serve.env resolves them for
-    that profile (QSE_PROFILE_OVERRIDE, as ops/use-profile.sh --list reads them), one bash for all."""
+    """profile -> {dir, files, repo}: QSE_WEIGHTS_DIR, QSE_WEIGHTS_FILES and REPO as serve.env
+    resolves them for that profile (QSE_PROFILE_OVERRIDE, as ops/use-profile.sh --list reads
+    them), one bash for all."""
     ops = ops or ops_dir()
     env_file = os.path.join(ops, "serve.env")
     if not names or not os.path.isfile(env_file):
         return {}
     script = ('for n in "$@"; do ( export QSE_PROFILE_OVERRIDE="$n"; set -a; . "$ENVF" >/dev/null '
-              '2>&1; printf "%s\\t%s\\t%s\\n" "$n" "${QSE_WEIGHTS_DIR:-}" "${QSE_WEIGHTS_FILES:-}" ); '
+              '2>&1; printf "%s\\t%s\\t%s\\t%s\\n" "$n" "${QSE_WEIGHTS_DIR:-}" "${QSE_WEIGHTS_FILES:-}" '
+              '"${REPO:-}" ); '
               'done')
     try:
         r = subprocess.run(["bash", "-c", script, "-", *names], capture_output=True, text=True,
@@ -76,8 +78,8 @@ def profile_dirs(names: list[str], ops: str | None = None, timeout: float = 10.0
     out = {}
     for line in r.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) == 3 and parts[0] in names:
-            out[parts[0]] = {"dir": parts[1], "files": parts[2].split()}
+        if len(parts) == 4 and parts[0] in names:
+            out[parts[0]] = {"dir": parts[1], "files": parts[2].split(), "repo": parts[3]}
     return out
 
 
@@ -111,10 +113,11 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
     out = {}
     for p in m["profiles"]:
         d = dirs.get(p["id"])
+        repo = (d or {}).get("repo") or None          # ${REPO} of an asset: serve.env's
         missing = [a for a in p["assets_required"]
-                   if not registry.asset_present(registry.asset(m, a))]
+                   if not registry.asset_present(registry.asset(m, a), repo)]
         out[p["id"]] = {"weights": weights_present(d), "dir": (d or {}).get("dir") or None,
-                        "assets_missing": missing}
+                        "assets_missing": missing, "repo": repo}
     with _lock:
         _cache["disk_at"] = now
         _cache["disk"][m["id"]] = out
@@ -126,7 +129,7 @@ def active_profile() -> str | None:
     if os.environ.get("QSE_WEIGHTS"):
         return os.environ["QSE_WEIGHTS"]
     try:
-        with open(os.path.join(registry.ROOT, "ops", "active-profile")) as fh:
+        with open(os.path.join(ops_dir(), "active-profile")) as fh:
             return fh.read().strip() or None
     except OSError:
         return None

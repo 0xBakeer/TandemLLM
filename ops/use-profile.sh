@@ -15,6 +15,7 @@ REPO_DIR="$(dirname "$HERE")"
 ACTIVE="$HERE/active-profile"
 NAME="${1:-}"; MODE="${2:-switch}"
 SMOKE_URL="${SMOKE_URL:-https://ai-api.khaled.de/v1}"
+SMOKE_MODEL="${SMOKE_MODEL:-TandemLLM}"   # the served raw name when the conductor is off (the setup guide)
 MEM_NEED_GB="${MEM_NEED_GB:-80}"        # MemAvailable before a start (serve8011's guard; the stack takes ~70)
 DISK_MARGIN_GB="${DISK_MARGIN_GB:-60}"  # free disk left after a download (disk tier + spill grow into it)
 BOX_LOCK="${BOX_LOCK:-$HOME/.qwen38-box.flock}"
@@ -89,7 +90,7 @@ smoke() {   # a /health that names the profile, then one conductor turn through 
     echo "$h" | "$PY" -c "import json,sys; w=json.load(sys.stdin).get('weights') or {}; sys.exit(0 if w.get('name')=='$1' else 1)" \
         || { say "smoke: /health does not name $1"; return 1; }
     local r; r="$(curl -s -m 300 -H 'Content-Type: application/json' -H 'X-Tandem-Memory: off' "$SMOKE_URL/chat/completions" \
-        -d '{"model":"TandemLLM","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
+        -d '{"model":"'"$SMOKE_MODEL"'","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
     echo "$r" | "$PY" -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]['message'].get('content') or ''; print('[smoke] ' + c.strip()[:80]); sys.exit(0 if c.strip() else 1)" \
         || { say "smoke: the turn through $SMOKE_URL failed: ${r:0:300}"; return 1; }
 }
