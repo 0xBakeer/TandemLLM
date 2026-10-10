@@ -61,6 +61,12 @@ SECRET = re.compile(r"pass|token|secret|api_?key|hf_", re.I)
 TOOL_OPEN = "<tool_call>"
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "wren_system.md")) as _fh:
     SYSTEM = _fh.read().strip()
+# who Wren is goes first; its rules go last, next to the question. Measured on the box with
+# Qwen3.5-2B (2026-10-11, ten plain requests, one tool call each): with the rules first 5 of 10 calls
+# were the right one; rules last, the field names in set_field's description and the step names
+# in go_to_step's: 7 of 10, and 8 of 10 with the page's visible fields in the page state
+INTRO, _, RULES = SYSTEM.partition("\n\nHow you answer:")
+RULES = "How you answer:" + RULES
 
 
 def model_dir(name: str) -> str:
@@ -68,8 +74,13 @@ def model_dir(name: str) -> str:
 
 
 def choose() -> tuple[str | None, str | None, bool]:
-    """(model name, its folder, a fallback) for the first of CHOICES on disk; (None, None, False)."""
-    for i, name in enumerate(CHOICES):
+    """(model name, its folder, a fallback) for the first of CHOICES on disk; (None, None, False).
+    QSE_WREN_MODEL puts another Qwen3.5 size first (qwen3.5-4b: 12 of 13 right on the box's tool
+    and question set against the 2B's 10, at about 2.5 times the time a turn and its own copy)."""
+    first = (os.environ.get("QSE_WREN_MODEL") or "").strip()
+    choices = ((first,) if first in ("qwen3.5-0.8b", "qwen3.5-2b", "qwen3.5-4b") else ()) + \
+        tuple(c for c in CHOICES if c != first)
+    for i, name in enumerate(choices):
         d = model_dir(name)
         if os.path.isfile(os.path.join(d, "config.json")) and os.path.isfile(
                 os.path.join(d, "tokenizer.json")):
@@ -365,10 +376,11 @@ class Wren:
         facts = self.device_facts() if self.device_facts is not None else {}
         ref = "\n\n".join(f"[{i + 1}] {s['title']} ({s['path']})\n{s['text']}"
                           for i, s in enumerate(sources))
-        head = (f"{SYSTEM}\n\nThe model on this page: {m['name']} ({m['id']}).\n\n"
-                f"The page state (data):\n{page_text(page, 1800 if small else 3500)}\n\n"
+        head = (f"{INTRO}\n\nThe model on this page: {m['name']} ({m['id']}).\n\n"
+                f"Reference text:\n{ref or '(nothing matched)'}\n\n"
                 f"The box now (read only):\n{json.dumps(facts, separators=(',', ':'))[:800]}\n\n"
-                f"Reference text:\n{ref or '(nothing matched)'}")
+                f"The page state (data):\n{page_text(page, 1800 if small else 3500)}\n\n"
+                f"{RULES}")
         defs = tools.definitions(m)
         hist = list(messages)
         while True:
@@ -382,7 +394,7 @@ class Wren:
                 hist = [messages[-1]]
         if len(ids) + max_new > window:
             # one message alone is too long for the window: the reference text goes, then the page
-            head = (f"{SYSTEM}\n\nThe page state (data):\n{page_text(page, 600)}")
+            head = (f"{INTRO}\n\nThe page state (data):\n{page_text(page, 600)}\n\n{RULES}")
             sources = []
             ids = self._encode(model, [{"role": "system", "content": head}, hist[-1]], defs)
         return ids, sources
@@ -488,7 +500,7 @@ class Wren:
         yield {"type": "state", "state": "thinking"}
         model = self.slot.model
         deadline = self.clock() + TURN_S
-        sources_out, finish, talked, emitted = [], "stop", False, 0
+        sources_out, finish, talked, emitted, said_more = [], "stop", False, 0, False
         names = list(tools.NAMES)
         from server.toolcall import parse_tool_calls, schema_types
         types = schema_types(tools.definitions(m))
@@ -524,17 +536,31 @@ class Wren:
             visible = content.split(TOOL_OPEN)[0].rstrip()
             if len(visible) > sent:
                 yield {"type": "text", "delta": visible[sent:]}
-            bad = []
+            bad, shown = [], []
             for c in calls:
                 fn = c["function"]
                 args, why = tools.check(m, fn["name"], fn["arguments"])
                 if why is None:
                     self.stats["tool_valid"] += 1
                     emitted += 1
+                    shown.append((fn["name"], args))
                     yield {"type": "tool_call", "id": c["id"], "name": fn["name"], "args": args}
                 else:
                     self.stats["tool_invalid"] += 1
                     bad.append((c, why))
+            if not bad and shown and not visible.strip() and not said_more and \
+                    all(n == "explain" for n, _ in shown) and attempt < REPAIRS:
+                # only a highlight and no words: the question still wants its answer (a 2B
+                # model often points before it speaks); the highlight changed nothing
+                said_more = True
+                self.stats["explain_then_answer"] += 1
+                messages = messages + [
+                    {"role": "assistant", "content": "", "tool_calls": [
+                        {"type": "function", "function": {"name": n, "arguments": a}}
+                        for n, a in shown]}] + [
+                    {"role": "tool", "content": "ok: it is highlighted on the page. Now answer "
+                                                "the user in words."} for _ in shown]
+                continue
             if not bad:
                 break
             if attempt == REPAIRS:

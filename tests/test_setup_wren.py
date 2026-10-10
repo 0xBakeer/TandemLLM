@@ -14,7 +14,9 @@ The test matrix:
   5  a turn: thinking, talking, the text without the tool-call markup, a checked tool call (the
      value as the field's type), done with the sources   test_a_turn_with_a_tool_call
   6  an invalid call is never sent: the model sees why and tries again (at most twice), then the
-     turn ends with a sentence and no call               test_invalid_calls_are_repaired_twice
+     turn ends with a sentence and no call; a turn that only highlights something and says nothing
+     goes on once for the words           test_invalid_calls_are_repaired_twice,
+                                          test_a_lone_highlight_is_followed_by_words
   7  the tools: only the seven, each checked against the step schema; no finish, apply or reset
                                                          test_the_tool_checks
   8  retrieval: a question about a tool brings the tool's registry sentence into the prompt, among
@@ -276,6 +278,24 @@ def test_invalid_calls_are_repaired_twice():
     assert len(model.prompts) == 3, len(model.prompts)               # the first and two repairs
     assert "could not make that change" in "".join(e.get("delta", "") for e in ev)
     assert ev[-1]["type"] == "done"
+
+
+def test_a_lone_highlight_is_followed_by_words():
+    _on_disk()
+    w, model = _wren(Scripted(replies=[call_xml("explain", field="shadow"),
+                                       "It reads along with each session."]))
+    _loaded(w)
+    ev = _events(w, "What does the shadow reader do?")
+    kinds = [e["type"] for e in ev]
+    assert kinds.count("tool_call") == 1 and ev[-1]["type"] == "done", ev
+    assert "".join(e.get("delta", "") for e in ev) == "It reads along with each session."
+    assert len(model.prompts) == 2 and "Now answer the user in words" in model.prompts[1]
+    assert w.stats["explain_then_answer"] == 1
+    w, model = _wren(Scripted(replies=["The shadow reader is here. " + call_xml(
+        "explain", field="shadow")]))
+    _loaded(w)
+    _events(w)
+    assert len(model.prompts) == 1                          # words came with it: no second turn
 
 
 def test_the_tool_checks():

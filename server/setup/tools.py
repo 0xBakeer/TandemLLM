@@ -5,7 +5,9 @@ model's step schema (`registry.wizard_fields`) before it streams it, and the bro
 before it acts. There is no tool to finish, apply, reset, delete, load or unload anything: those are
 the user's buttons.
 
-    set_field(step, field, value)   a field of a step (the step's id, or its index 0..7)
+    set_field(step, field, value)   a field of a step (the step's id, or its index 0..7); the model
+                                    may leave the step out (the field names are unique), and the
+                                    call that reaches the browser always names it
     toggle(component, on)           a tool beside the model on or off
     select_profile(id)              the weight profile
     go_to_step(n)                   step n, 0..7
@@ -37,21 +39,27 @@ def definitions(m: dict) -> list[dict]:
             "parameters": {"type": "object", "properties": props or {},
                            "required": list(required), "additionalProperties": False}}}
 
+    fields = "; ".join(f"{s['id']}: {', '.join(f['field'] for f in s['fields'])}"
+                       for s in steps if s["fields"] and s["id"] != "components")
     return [
-        fn("set_field", "Set a field of a step to a value, like the number of slots or the port.",
-           {"step": {"type": "string", "enum": step_ids},
-            "field": {"type": "string"},
-            "value": {"type": ["string", "number", "boolean"]}}, ("step", "field", "value")),
-        fn("toggle", "Switch a tool beside the model on or off.",
+        fn("set_field", "Set a field to a value. The fields, by step: "
+           f"{fields}. For a tool use toggle, for the weights select_profile.",
+           {"field": {"type": "string"},
+            "value": {"type": ["string", "number", "boolean"]},
+            "step": {"type": "string", "enum": step_ids}}, ("field", "value")),
+        fn("toggle", "Switch a tool beside the model on or off. The tools: "
+           f"{', '.join(comps)}. Slots, windows and the KV pool are fields: set_field.",
            {"component": {"type": "string", "enum": comps}, "on": {"type": "boolean"}},
            ("component", "on")),
         fn("select_profile", "Pick the weight profile.",
            {"id": {"type": "string", "enum": [p["id"] for p in m["profiles"]]}}, ("id",)),
-        fn("go_to_step", "Open a step by its number, 0 to 7.",
+        fn("go_to_step", "Open a step by its number: "
+           + ", ".join(f"{s['index']} {s['label'].lower()}" for s in steps) + ".",
            {"n": {"type": "integer", "minimum": 0, "maximum": len(steps) - 1}}, ("n",)),
         fn("next", "Go to the next step."),
         fn("previous", "Go back one step."),
-        fn("explain", "Point at a field, a tool or a weight profile on the page while you explain it.",
+        fn("explain", "Highlight a field, a tool or a weight profile for the user. It changes "
+           "nothing and looks nothing up: the field names are in set_field's description.",
            {"field": {"type": "string", "enum": names}}, ("field",)),
     ]
 
@@ -91,6 +99,13 @@ def check(m: dict, name: str, args) -> tuple[dict | None, str | None]:
     want = {"set_field": {"step", "field", "value"}, "toggle": {"component", "on"},
             "select_profile": {"id"}, "go_to_step": {"n"}, "next": set(), "previous": set(),
             "explain": {"field"}}[name]
+    if name == "set_field" and "step" not in args and isinstance(args.get("field"), str):
+        owner = [s["id"] for s in registry.wizard_fields(m)
+                 if any(f["field"] == args["field"] for f in s["fields"])]
+        if len(owner) != 1:
+            return None, (f"there is no field {args['field']!r} on the page; a tool is toggle, the "
+                          f"weights are select_profile")
+        args = dict(args, step=owner[0])
     if set(args) != want:
         return None, (f"{name} takes {', '.join(sorted(want)) or 'no arguments'}, "
                       f"not {', '.join(sorted(args)) or 'none'}")

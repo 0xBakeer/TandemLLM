@@ -59,6 +59,8 @@ Wren is Qwen3.5-2B (Qwen3.5-0.8B when the 2B is not on disk) on the engine's own
 - It generates in slices of 150 ms while no request runs or waits, so a request that arrives waits at most one slice.
 - The chat's text is never logged.
 
+On the reference box (2026-10-11, `tests/gpu/setup_wren_gpu.py`) Wren's own copy loads in 22 s and holds 3.62 GiB on the device; MemAvailable drops 5.0 to 5.2 GiB at the first load, of which 1.1 to 1.5 GiB is the process's CUDA context, which stays. Later loads and unloads return within the box's own noise (0.2 to 0.4 GiB), with the process's RSS and the allocator flat. Borrowing the narrator costs 0.03 to 0.06 GiB, and the narrator's next line is the same to the token. A turn takes 1 to 3 s, the first words after 0.4 to 0.7 s. On ten plain requests and three questions, the 2B made the right call or answered 10 times of 13; Qwen3.5-4B (`QSE_WREN_MODEL=qwen3.5-4b`) 12 of 13, at about 2.5 times the time a turn. The 2B sometimes mixes the numbers of two profiles in an answer, so the page's own numbers stay the reference.
+
 ## The install job
 
 `POST /v1/setup/plan` returns the review step's facts: what is wrong, what changes against `ops/serve.env`, the commands that will run and the estimate. `POST /v1/setup/apply` checks the selection again and starts a job; `GET /v1/setup/jobs/{id}` streams its steps and log lines (SSE; `Last-Event-ID` resumes, `?format=json` gives the job).
