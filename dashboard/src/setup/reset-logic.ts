@@ -1,8 +1,9 @@
 // The reset levels' rules (D9, VIS-82), without the DOM: the typed word must match exactly (no
 // trimming, no case folding), an empty plan cannot be confirmed, a busy engine refuses every server
-// level, and level 1 is the browser's own.
+// level, and level 1 is the browser's own. Level 2 is a job that restarts the engine on the
+// recommended weights, so it runs even when the guide has written no configuration yet.
 
-import type { SetupResetLevel } from '../api/types';
+import type { SetupResetItem, SetupResetLevel } from '../api/types';
 
 export type ResetLevelNo = 1 | 2 | 3 | 4 | 5;
 
@@ -17,11 +18,17 @@ export interface ConfirmState {
   reason: 'busy' | 'empty' | 'word' | 'sending' | null;
 }
 
-export function confirmState(level: Pick<SetupResetLevel, 'confirm_word' | 'items' | 'bytes'> | null, typed: string, opts: { busy: boolean; sending: boolean }): ConfirmState {
+/** The server removes or clears it: on the box, not refused, and not `skip` (in use, nothing can
+ *  clear it now; server/setup/reset.py answers it in `failed`). */
+export function goes(i: SetupResetItem): boolean {
+  return i.exists && !i.refused && i.action !== 'skip';
+}
+
+export function confirmState(level: (Pick<SetupResetLevel, 'confirm_word' | 'items' | 'bytes'> & { level?: number }) | null, typed: string, opts: { busy: boolean; sending: boolean }): ConfirmState {
   if (opts.sending) return { enabled: false, reason: 'sending' };
   if (level == null) return { enabled: true, reason: null }; // level 1, local
   if (opts.busy) return { enabled: false, reason: 'busy' };
-  if (!level.items.some((i) => i.exists && !i.refused)) return { enabled: false, reason: 'empty' };
+  if (level.level !== 2 && !level.items.some(goes)) return { enabled: false, reason: 'empty' };
   if (!confirmMatches(level.confirm_word, typed)) return { enabled: false, reason: 'word' };
   return { enabled: true, reason: null };
 }

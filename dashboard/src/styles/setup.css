@@ -270,7 +270,8 @@ qse-wren-figure {
   z-index: 8;
   margin: -8px 0 0;
   padding: 8px 0 10px;
-  background: linear-gradient(var(--bg) 82%, transparent);
+  /* solid down to the bar's lower edge, a 10 px fade below it: nothing shows through the bar */
+  background: linear-gradient(var(--bg) calc(100% - 10px), transparent);
 }
 .setup-local {
   margin-top: 6px;
@@ -1366,6 +1367,11 @@ qse-wren-figure {
 .rv-notes .is-err {
   color: var(--err);
 }
+.rv-notes .is-err .btn {
+  margin-left: auto;
+  flex: none;
+  color: var(--ink);
+}
 .rv-cmds {
   margin: 8px 0 0;
   padding: 10px 12px;
@@ -1411,6 +1417,58 @@ qse-wren-figure {
 }
 .sec-opt-label {
   font-weight: 500;
+}
+.sec-login {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+
+/* ---- the sign-in (a 401 from a setup route) ---------------------------------------------- */
+.signin-card {
+  max-width: 460px;
+  margin: 24px auto;
+  padding: 22px;
+  display: grid;
+  gap: 12px;
+  border-left: 3px solid var(--warn);
+}
+.signin-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.signin-title .icon {
+  color: var(--warn-ink);
+}
+.signin-body {
+  color: var(--ink-2);
+}
+.signin-field {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.signin-input {
+  width: 100%;
+  min-height: 40px;
+  font-size: 16px; /* no zoom on a phone */
+}
+.signin-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.signin-foot .btn {
+  min-height: 40px;
 }
 .sec-own {
   display: grid;

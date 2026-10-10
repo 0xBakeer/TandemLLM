@@ -130,6 +130,13 @@ textarea {
   -webkit-backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--rule);
 }
+/* The setup guide scrolls long forms under a sticky memory bar: there the top bar is solid, so
+   no button or row shows faintly through the glass above the bar. */
+.shell[data-view='setup'] .topbar {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 .topbar-left,
 .topbar-right {
   display: flex;
@@ -203,6 +210,10 @@ textarea {
 .pill-offline {
   color: var(--err);
   border-color: var(--err);
+}
+.pill-setup {
+  color: var(--cobalt);
+  border-color: var(--cobalt);
 }
 .rail {
   grid-area: rail;

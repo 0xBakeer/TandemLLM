@@ -2,7 +2,9 @@
 // VIS-82). GET /v1/setup/jobs/{id} as SSE: the step list (waiting, running, done, failed, skipped),
 // a log tail, and the end: installed with the way out, or failed / rolled back with the way back.
 // The engine restarts in the middle of a job; the stream then drops and the page says so, retries
-// with back-off and resumes the same job (Last-Event-ID), which the server keeps on disk.
+// with back-off and resumes the same job (Last-Event-ID), which the server keeps on disk. A job that
+// generated an admin password comes back behind it: the stream's 401 asks the page for the sign-in
+// and the same stream resumes after it.
 
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -10,7 +12,7 @@ import type { SetupJob, SetupJobEvent, SetupJobStep } from '../api/types';
 import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
-import { setupApi } from './api';
+import { setupApi, setupUnauthorized } from './api';
 import { S } from './strings';
 
 const LOG_KEEP = 300;
@@ -47,6 +49,7 @@ export class QseInstallProgress extends LightElement {
   @state() private conn: StreamState = 'closed';
   @state() private awaySince: number | null = null;
   @state() private lost = false;
+  @state() private signIn = false;
   @state() private tick = 0;
   private stream: ResumableStream | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -57,8 +60,10 @@ export class QseInstallProgress extends LightElement {
     this.timer = setInterval(() => {
       if (this.awaySince != null) this.tick++;
     }, 1000);
+    window.addEventListener('qse-signed-in', this.onSignedIn);
   }
   disconnectedCallback(): void {
+    window.removeEventListener('qse-signed-in', this.onSignedIn);
     this.stream?.close();
     if (this.timer) clearInterval(this.timer);
     super.disconnectedCallback();
@@ -68,6 +73,12 @@ export class QseInstallProgress extends LightElement {
     if (changed.has('initial') && this.initial && !this.job) this.job = this.initial;
     if (changed.has('jobId')) this.connect();
   }
+
+  private onSignedIn = (): void => {
+    if (!this.signIn) return;
+    this.signIn = false;
+    this.stream?.start(); // from its Last-Event-ID
+  };
 
   private connect(): void {
     this.stream?.close();
@@ -108,7 +119,11 @@ export class QseInstallProgress extends LightElement {
       },
       onState: (s, detail) => {
         this.conn = s;
-        if (s === 'open') this.awaySince = null;
+        if (s === 'unauthorized') {
+          this.signIn = true;
+          this.awaySince = null;
+          setupUnauthorized();
+        } else if (s === 'open') this.awaySince = null;
         else if ((s === 'reconnecting' || s === 'error') && !isFinal(this.job)) {
           this.awaySince ??= Date.now();
           if (detail && /HTTP 404/.test(detail)) {
@@ -133,15 +148,15 @@ export class QseInstallProgress extends LightElement {
     const j = this.job;
     const final = isFinal(j);
     const away = this.awaySince != null && !final;
-    const stateWord = j ? S.jobState[j.state] : S.installStarting;
+    const stateWord = j ? (j.kind === 'reset' ? S.resetJobState : S.jobState)[j.state] : S.installStarting;
     const failedStep = j?.steps.find((s) => s.state === 'failed');
     return html`<div class="inst ${j ? `is-${j.state}` : ''}" data-job-state=${j?.state ?? 'starting'}>
       <div class="inst-head" role="status" aria-live="polite">
         <span class="inst-badge" aria-hidden="true">${j?.state === 'done' ? icon('check') : j && (j.state === 'failed' || j.state === 'rolled_back') ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
         <div>
           <p class="inst-title">${stateWord}</p>
-          ${j?.state === 'rolled_back' ? html`<p class="inst-sub" data-rolled-back>${S.rolledBackTo(this.previousProfile ?? j.message ?? '')}</p>` : nothing}
-          ${j?.state === 'failed' && j.message ? html`<p class="inst-sub">${j.message}</p>` : nothing}
+          ${j?.state === 'rolled_back' ? html`<p class="inst-sub" data-rolled-back>${S.rolledBackTo(this.previousProfile ?? S.previousSetup)}</p>` : nothing}
+          ${(j?.state === 'failed' || j?.state === 'rolled_back') && j.message ? html`<p class="inst-sub" data-job-reason>${S.jobReason(j.message)}</p>` : nothing}
           ${j?.state === 'done' && j.message ? html`<p class="inst-sub">${j.message}</p>` : nothing}
         </div>
       </div>
@@ -152,6 +167,7 @@ export class QseInstallProgress extends LightElement {
           </div>`
         : nothing}
       ${this.lost ? html`<div class="inst-away is-lost" role="alert">${icon('warn')} ${S.jobLost}</div>` : nothing}
+      ${this.signIn ? html`<div class="inst-away" role="status" data-job-signin>${icon('warn')} <span>${S.jobSignIn}</span> <a class="btn btn-sm" href="#/setup">${S.signIn.go}</a></div>` : nothing}
       <ol class="inst-steps">
         ${(j?.steps ?? []).map(
           (s) => html`<li class="inst-step is-${s.state}" data-step=${s.id}>

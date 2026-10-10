@@ -1,5 +1,6 @@
 // What is wrong with a step (the rail's valid/invalid marks, Next stays usable, Finish does not),
-// the How-to-fix list for a setup that does not fit, and the compact page state Wren gets each turn.
+// the How-to-fix list for a setup that does not fit, the step that fixes a plan error, what a failed
+// sign-in says, and the compact page state Wren gets each turn.
 
 import type { SetupDevice, SetupEstimate, SetupModel, SetupPageState, SetupSelection, SetupStepId } from '../api/types';
 import { isOn, lowerLabel } from './deps';
@@ -8,6 +9,30 @@ import { fieldError, stepIndex, stepsOf } from './fields';
 import { S, STEP_TITLE } from './strings';
 
 export type StepIssues = Partial<Record<SetupStepId, string[]>>;
+
+/** The step that fixes a plan error, by its code (SetupPlan.error_codes, one per error, in order);
+ *  null: the fix is on the box itself (ops/serve.env's overlay lines, its REPO). */
+const PLAN_FIX: Record<string, SetupStepId> = {
+  over_budget: 'parallelism',
+  missing_token: 'weights',
+  disk_full: 'weights',
+  missing_assets: 'components',
+  secrets_exist: 'methods',
+  port_in_use: 'methods',
+};
+export function planFixStep(code: string | undefined): SetupStepId | null {
+  return (code && PLAN_FIX[code]) || null;
+}
+
+/** What a failed sign-in says, by the status of POST /v1/dashboard/session (404: the server's
+ *  dashboard login is off, so there is no session to make). */
+export function signInError(status: number, message: string): string {
+  if (status === 401) return S.signIn.refused;
+  if (status === 429) return S.signIn.tooMany;
+  if (status === 404) return S.signIn.loginOff;
+  if (status === 0) return S.signIn.offline;
+  return `${S.signIn.failed} ${message}`;
+}
 
 export function stepIssues(m: SetupModel, sel: SetupSelection, device: SetupDevice | null, est: SetupEstimate | null): StepIssues {
   const out: StepIssues = {};
@@ -125,7 +150,18 @@ export function buildPageState(m: SetupModel | null, step: SetupStepId, sel: Set
   page.visible = { title: STEP_TITLE[step], fields, ...(extra.errors?.length ? { errors: extra.errors } : {}) };
   if (est) {
     const top = [...est.parts].sort((a, b) => b.gb - a.gb).slice(0, 3).map((p) => ({ id: p.id, gb: p.gb }));
-    page.estimate = { total_gb: est.total_gb, device_gb: est.device_gb, floor_gb: est.floor_gb, fits: est.fits, context_tokens_fit: est.context_tokens_fit, parts: top as never };
+    page.estimate = {
+      total_gb: est.total_gb,
+      budget_gb: est.budget_gb,
+      device_gb: est.device_gb,
+      available_gb: est.available_gb,
+      floor_gb: est.floor_gb,
+      fits: est.fits,
+      fits_worst: est.fits_worst,
+      kv_worst_gb: est.kv_worst_gb,
+      context_tokens_fit: est.context_tokens_fit,
+      parts: top as never,
+    };
   }
   // keep it under the cap: the field list goes first (options are the long part)
   let s = JSON.stringify(page);

@@ -3,23 +3,32 @@
 // phone) with exactly what goes and its size, from GET /v1/setup/reset, before anything happens.
 // Levels 2 to 5 need their word typed exactly; level 1 is this browser's own (tandem.setup.v1) and
 // needs a plain confirm. Every server level is off while requests run. Level 2 hands over to the
-// install progress view (the job restarts the engine).
+// install progress view (the job restarts the engine). An item says what happens to it: removed,
+// cleared by the running engine itself, or kept for now (in use, the server's `skip`).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
-import { describeError } from '../api/client';
-import type { SetupDevice, SetupResetLevel, SetupResetLevels, SetupResetResult } from '../api/types';
+import { ApiError, describeError } from '../api/client';
+import type { SetupDevice, SetupResetItem, SetupResetLevel, SetupResetLevels, SetupResetResult } from '../api/types';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi } from './api';
 import './install';
 import '../styles/setup.css';
-import { bytesText, confirmState, confirmValue, type ResetLevelNo } from './reset-logic';
+import { bytesText, confirmState, confirmValue, goes, type ResetLevelNo } from './reset-logic';
 import { clearSaved, safeStorage } from './state';
 import { R } from './strings';
 
 /** Sizes above this are trees the server may have stopped counting in: "at least". */
 const HUGE = 500 * 2 ** 30;
+
+/** The size column: what goes, or why nothing does. */
+function itemSize(i: SetupResetItem): string {
+  if (!i.exists) return R.missing;
+  if (i.refused || i.action === 'skip') return R.keptShort;
+  if (i.kind === 'memory') return R.inMemory;
+  return i.at_least ? R.atLeast(bytesText(i.bytes)) : bytesText(i.bytes);
+}
 
 @customElement('qse-reset')
 export class QseReset extends LightElement {
@@ -43,11 +52,15 @@ export class QseReset extends LightElement {
     this.poll = setInterval(() => {
       if (document.visibilityState === 'visible' && this.levels?.busy) void this.load();
     }, 4000);
+    window.addEventListener('qse-signed-in', this.onSignedIn);
   }
   disconnectedCallback(): void {
+    window.removeEventListener('qse-signed-in', this.onSignedIn);
     if (this.poll) clearInterval(this.poll);
     super.disconnectedCallback();
   }
+
+  private onSignedIn = (): void => void this.load();
 
   private async load(): Promise<void> {
     try {
@@ -113,7 +126,7 @@ export class QseReset extends LightElement {
     } catch (e) {
       const d = describeError(e);
       if (d.status === 409) {
-        this.errorText = R.busy(this.running);
+        this.errorText = e instanceof ApiError && e.type === 'job_running' ? R.jobRunning : R.busy(this.running);
         void this.load();
       } else if (d.status === 401 || d.status === 403) this.errorText = R.unauthorized;
       else if (d.status === 0) this.errorText = R.offline;
@@ -127,7 +140,7 @@ export class QseReset extends LightElement {
     const busy = !!this.levels?.busy;
     return html`<div class="reset" data-busy=${busy}>
       <p class="reset-intro muted">${R.intro}</p>
-      ${this.loadError ? html`<div class="reset-load-error" role="alert">${icon('warn')} <span>${this.loadError}</span> <button class="btn btn-sm" @click=${() => void this.load()}>${icon('refresh')} ${R.retry}</button></div>` : nothing}
+      ${this.loadError ? html`<div class="reset-load-error" role="alert">${icon('warn')} <span>${this.loadError}</span> ${this.loadError === R.unauthorized && !this.inSetup ? html`<a class="btn btn-sm" href="#/setup">${R.openSetup}</a>` : html`<button class="btn btn-sm" @click=${() => void this.load()}>${icon('refresh')} ${R.retry}</button>`}</div>` : nothing}
       ${busy ? html`<p class="reset-busy" id="reset-busy" role="status" data-reset-busy>${icon('info')} ${R.busy(this.running)}</p>` : nothing}
       <ol class="reset-levels">${([1, 2, 3, 4, 5] as ResetLevelNo[]).map((n) => this.card(n, busy))}</ol>
       ${this.renderDialog()}
@@ -158,7 +171,7 @@ export class QseReset extends LightElement {
     const busy = !!this.levels?.busy;
     const cs = n === 1 ? { enabled: !this.result, reason: null } : confirmState(lv, this.typed, { busy, sending: this.sending });
     const items = lv?.items ?? [];
-    const present = items.filter((i) => i.exists && !i.refused);
+    const present = items.filter(goes);
     const word = lv?.confirm_word ?? null;
     const done = this.result != null;
     return html`<dialog class="reset-dialog ${n === 5 ? 'is-danger' : ''}" aria-labelledby="reset-dialog-title" @close=${() => (this.openLevel = null)} @cancel=${() => (this.openLevel = null)}>
@@ -176,17 +189,17 @@ export class QseReset extends LightElement {
             <p class="muted">${lv?.what ?? R.levelWhat[n]}</p>
             ${n > 1
               ? html`<h3 class="reset-dialog-sub">${R.dialogItems}</h3>
-                  ${present.length
+                  ${present.length || (n === 2 && items.length)
                     ? html`<ul class="reset-items">
                           ${items.map(
-                            (i) => html`<li class=${!i.exists || i.refused ? 'is-missing' : ''} data-item=${i.path}>
-                              <span class="reset-item-label">${i.label}<code>${i.path}</code>${i.refused ? html`<span class="reset-item-note">${R.kept(i.refused)}</span>` : i.note ? html`<span class="reset-item-note">${i.note}</span>` : nothing}</span>
-                              <span class="num">${!i.exists ? R.missing : i.refused ? R.keptShort : i.at_least ? R.atLeast(bytesText(i.bytes)) : bytesText(i.bytes)}</span>
+                            (i) => html`<li class=${goes(i) ? '' : 'is-missing'} data-item=${i.path} data-action=${i.action}>
+                              <span class="reset-item-label">${i.label}${i.kind === 'path' ? html`<code>${i.path}</code>` : nothing}${i.refused ? html`<span class="reset-item-note">${R.kept(i.refused)}</span>` : i.note ? html`<span class="reset-item-note">${i.note}</span>` : i.action === 'engine' ? html`<span class="reset-item-note">${R.byEngine}</span>` : nothing}</span>
+                              <span class="num">${itemSize(i)}</span>
                             </li>`,
                           )}
                         </ul>
                         <p class="reset-total"><span>${R.dialogTotal(lv!.bytes >= HUGE ? R.atLeast(bytesText(lv!.bytes)) : bytesText(lv!.bytes))}</span><span class="muted">${lv!.restart ? R.restart : R.noRestart}</span></p>`
-                    : html`<p class="reset-nothing" data-reset-empty>${R.dialogNothing}</p>`}`
+                    : html`<p class="reset-nothing" data-reset-empty>${n === 2 ? R.level2Nothing : R.dialogNothing}</p>`}`
               : nothing}
             ${busy && n > 1 && !done ? html`<p class="reset-busy" role="status">${icon('info')} ${R.busy(this.running)}</p>` : nothing}
             ${word && present.length && !done

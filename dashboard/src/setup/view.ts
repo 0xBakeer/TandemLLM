@@ -7,16 +7,19 @@
 // POST /v1/setup/estimate (150 ms debounce, the stale request aborted); the server's numbers win
 // when they differ by more than 0.05 GiB. Review asks POST /v1/setup/plan for the serve.env diff and
 // the commands. Finish puts Wren to sleep, posts /v1/setup/apply and follows the job.
+//
+// A 401 from any setup route (a box with an admin password) puts the sign-in card in place of the
+// steps (signin.ts); the progress stays, and after the sign-in every reading is asked again.
 
 import { html, nothing, render as litRender, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { describeError } from '../api/client';
+import { ApiError, describeError } from '../api/client';
 import type { SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
 import { poll, type Poller } from '../lib/poll';
 import { LightElement, type Loadable } from '../ui/base';
 import { emptyState as emptyPanel, errorState, icon, skeleton } from '../ui/bits';
 import { setupApi } from './api';
-import { buildPageState, howToFix, overSentence, stepIssues, tokenBlocked, type StepIssues } from './checks';
+import { buildPageState, howToFix, overSentence, planFixStep, stepIssues, tokenBlocked, type StepIssues } from './checks';
 import { availability, isOn } from './deps';
 import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
@@ -25,6 +28,7 @@ import './install';
 import './measure-table';
 import './memory-bar';
 import './reset';
+import './signin';
 import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
 import { S, STEP_INTRO, STEP_LABEL, STEP_SHORT, STEP_TITLE } from './strings';
 import { fieldKey, planToolCall } from './tools';
@@ -81,14 +85,33 @@ export class QseSetup extends LightElement {
     this.devPoll = poll(() => this.loadDevice(), 5000);
     this.devPoll.start();
     window.addEventListener('qse-setup-reset', this.onReset);
+    window.addEventListener('qse-setup-unauthorized', this.onUnauthorized);
+    window.addEventListener('qse-signed-in', this.onSignedIn);
   }
   disconnectedCallback(): void {
     this.devPoll?.stop();
     this.estCtrl?.abort();
     this.planCtrl?.abort();
     window.removeEventListener('qse-setup-reset', this.onReset);
+    window.removeEventListener('qse-setup-unauthorized', this.onUnauthorized);
+    window.removeEventListener('qse-signed-in', this.onSignedIn);
     super.disconnectedCallback();
   }
+
+  private onUnauthorized = (): void => {
+    this.unauthorized = true;
+  };
+
+  /** signed in: everything the 401 stopped is asked again */
+  private onSignedIn = (): void => {
+    this.unauthorized = false;
+    if (this.list.state !== 'ready') void this.loadList();
+    const id = this.path[0];
+    if (id && this.model?.state !== 'ready') void this.loadModel(id);
+    void this.loadDevice();
+    if (this.wiz.selection) this.queueEstimate();
+    if (this.wiz.step === 'review') this.queuePlan();
+  };
 
   private onReset = (): void => {
     // the reset panel stays open: its dialog shows the result
@@ -107,7 +130,6 @@ export class QseSetup extends LightElement {
       this.list = l.models.length || l.errors.length ? { state: 'ready', data: l } : { state: 'empty', note: S.modelsEmpty };
     } catch (e) {
       const d = describeError(e);
-      if (d.status === 401) this.unauthorized = true;
       this.list = { state: 'error', endpoint: d.endpoint, message: d.status === 401 ? S.unauthorized : d.message };
     }
   }
@@ -273,11 +295,18 @@ export class QseSetup extends LightElement {
   // ---- Wren's side --------------------------------------------------------------------------
 
   private host: WrenHost = {
-    pageState: () => buildPageState(this.m, this.wiz.step, this.wiz.selection, this.currentEstimate(), { errors: this.issues()[this.wiz.step] ?? [] }),
+    pageState: () => buildPageState(this.m, this.wiz.step, this.wiz.selection, this.currentEstimate(), { errors: this.visibleErrors() }),
     execute: (call, t) => this.executeTool(call, t),
     saveChat: (chat) => this.dispatch({ type: 'chat', chat }),
     memAvailable: () => this.device?.mem_available_gb ?? null,
   };
+
+  /** what the step shows as wrong: its own checks, and on Review the plan's errors */
+  private visibleErrors(): string[] {
+    const own = this.issues()[this.wiz.step] ?? [];
+    if (this.wiz.step !== 'review' || this.plan?.state !== 'ready') return own;
+    return [...own, ...this.plan.data.errors.filter((e) => !own.includes(e))];
+  }
 
   private async executeTool(call: SetupToolCall, turnStartedAt: number): Promise<ToolOutcome> {
     const plan = planToolCall(call, { model: this.m, selection: this.wiz.selection, step: this.wiz.step, touchedAt: this.touchedAt, turnStartedAt });
@@ -370,11 +399,27 @@ export class QseSetup extends LightElement {
       this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
     } catch (e) {
-      const d = describeError(e);
-      this.applyError = d.status === 409 ? S.blockedBusy : `${S.installError} ${d.message}`;
+      this.applyError = this.applyErrorText(e);
     } finally {
       this.applying = false;
     }
+  }
+
+  /** apply's refusals (server/setup_api.py apply_route): another job, requests in flight, or the
+   *  plan's own errors (409 over_budget, 412 missing_token, ...), whose plan comes along and
+   *  replaces the review's */
+  private applyErrorText(e: unknown): string | null {
+    const d = describeError(e);
+    if (d.status === 401) return null; // the sign-in card takes over
+    const body = e instanceof ApiError ? (e.body as { error?: { running?: number }; plan?: SetupPlan } | undefined) : undefined;
+    if (body?.plan) {
+      this.plan = { state: 'ready', data: body.plan };
+      this.confirmOpen = false;
+      return body.plan.errors.join(' ') || d.message;
+    }
+    if (e instanceof ApiError && e.type === 'job_running') return S.blockedBusy;
+    if (e instanceof ApiError && e.type === 'busy') return S.blockedRequests(body?.error?.running ?? 1);
+    return `${S.installError} ${d.message}`;
   }
 
   // ---- render -------------------------------------------------------------------------------
@@ -387,7 +432,7 @@ export class QseSetup extends LightElement {
       <div class="setup">
         <div class="setup-main">
           ${this.renderBanners()}
-          ${inModel ? this.renderModelArea() : this.renderTiles()}
+          ${this.unauthorized ? html`<qse-setup-signin></qse-setup-signin>` : inModel ? this.renderModelArea() : this.renderTiles()}
           <footer class="setup-foot">
             <button class="btn btn-ghost btn-sm" aria-expanded=${this.resetOpen} aria-controls="setup-reset" @click=${() => (this.resetOpen = !this.resetOpen)}>${icon('trash')} ${S.resetLink}</button>
           </footer>
@@ -420,7 +465,7 @@ export class QseSetup extends LightElement {
         ${dev?.mem_total_gb != null ? html`<p class="setup-device muted num" data-device-line>${S.deviceLine(dev.mem_total_gb, dev.mem_available_gb)}</p>` : nothing}
       </header>
       ${l.state === 'loading' ? skeleton(4) : nothing}
-      ${l.state === 'error' ? errorState(l.endpoint, this.unauthorized ? S.unauthorized : `${S.modelsError} ${l.message}`, this.unauthorized ? undefined : () => void this.loadList()) : nothing}
+      ${l.state === 'error' ? errorState(l.endpoint, `${S.modelsError} ${l.message}`, () => void this.loadList()) : nothing}
       ${l.state === 'empty' ? emptyPanel(S.modelsEmpty) : nothing}
       ${l.state === 'ready'
         ? html`<div class="mtiles">
@@ -772,6 +817,7 @@ export class QseSetup extends LightElement {
 
   private stepReview(m: SetupModel, sel: SetupSelection, est: SetupEstimate | null): TemplateResult {
     const plan = this.plan;
+    const step = this.wiz.step;
     const fixes = est && !est.fits ? howToFix(m, sel) : [];
     const blockers = this.finishBlockers();
     const dev = this.device;
@@ -806,7 +852,16 @@ export class QseSetup extends LightElement {
               </table></div>`
             : html`<p class="muted">${S.reviewNoChanges}</p>`
           : nothing}
-        ${ready && (ready.errors.length || ready.warnings.length) ? html`<ul class="rv-notes">${ready.errors.map((e) => html`<li class="is-err">${icon('warn')} ${e}</li>`)}${ready.warnings.map((w) => html`<li>${icon('info')} ${w}</li>`)}</ul>` : nothing}
+        ${ready && (ready.errors.length || ready.warnings.length)
+          ? html`<ul class="rv-notes">
+              ${ready.errors.map((e, i) => {
+                const code = ready.error_codes?.[i];
+                const fix = planFixStep(code);
+                return html`<li class="is-err" data-error-code=${code ?? nothing}>${icon('warn')} <span>${e}</span>${fix && fix !== step ? html` <a class="btn btn-sm" href=${`#/setup/${m.id}/${fix}`}>${S.planFix}: ${STEP_LABEL[fix]}</a>` : nothing}</li>`;
+              })}
+              ${ready.warnings.map((w) => html`<li>${icon('info')} ${w}</li>`)}
+            </ul>`
+          : nothing}
       </section>
 
       ${ready?.commands.length
@@ -828,6 +883,13 @@ export class QseSetup extends LightElement {
     return this.wiz.selection?.advanced.admin_password === 'generate' ? 'generate' : 'keep';
   }
 
+  /** the model has the Dashboard login field and it is off: after a generated password the setup
+   *  routes want a session, and POST /v1/dashboard/session exists only with the login on */
+  private loginOff(): boolean {
+    const f = this.m?.advanced.find((x) => x.id === 'dashboard_login');
+    return !!f && (this.wiz.selection?.advanced.dashboard_login ?? f.recommended) !== 'on';
+  }
+
   private securityCard(): TemplateResult {
     const opt = (v: SecChoice, label: string, note?: string) => html`<label class="sec-opt ${this.sec === v ? 'is-on' : ''}">
       <input type="radio" name="sec" .checked=${this.sec === v} @change=${() => this.user('methods', 'admin_password', { type: 'field', group: 'advanced', id: 'admin_password', value: v })} />
@@ -839,6 +901,10 @@ export class QseSetup extends LightElement {
       <div class="sec-opts" role="radiogroup" aria-label=${S.securityChoice}>
         ${opt('keep', S.securityKeep)} ${opt('generate', S.securityGenerate, S.securityGenerateNote)}
       </div>
+      ${this.sec === 'generate' && this.loginOff()
+        ? html`<p class="sec-login" data-login-off>${icon('info')} <span>${S.securityLoginOff}</span>
+            <button class="btn btn-sm" @click=${() => this.user('methods', 'dashboard_login', { type: 'field', group: 'advanced', id: 'dashboard_login', value: 'on' })}>${S.securityLoginOn}</button></p>`
+        : nothing}
     </section>`;
   }
 

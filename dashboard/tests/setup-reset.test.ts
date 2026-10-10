@@ -28,6 +28,14 @@ describe('confirmState', () => {
     expect(confirmState({ ...level3, items: [item({ exists: false, bytes: 0 })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
     // an item the server will not remove does not count
     expect(confirmState({ ...level3, items: [item({ refused: 'the active profile' })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
+    // nor one in use that nothing can clear now (action skip: the shadow reader's sessions)
+    expect(confirmState({ ...level3, items: [item({ action: 'skip', note: 'kept while the shadow reader runs' })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
+    // a cache the running engine clears itself does (action engine)
+    expect(confirmState({ ...level3, items: [item({ kind: 'memory', action: 'engine', bytes: 0 })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: true, reason: null });
+  });
+  it('level 2 is a job: it runs with no configuration written yet (the engine restarts on the recommended weights)', () => {
+    expect(confirmState({ level: 2, confirm_word: null, bytes: 0, items: [] }, '', { busy: false, sending: false })).toEqual({ enabled: true, reason: null });
+    expect(confirmState({ level: 2, confirm_word: null, bytes: 0, items: [] }, '', { busy: true, sending: false })).toEqual({ enabled: false, reason: 'busy' });
   });
   it('sending disables it (no second request)', () => {
     expect(confirmState(level3, 'delete caches', { busy: false, sending: true }).enabled).toBe(false);
