@@ -2,6 +2,22 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.6.2, 2026-10-10
+
+Decoding no longer stops while another slot prefills, and the dashboard's Perf tab reads the 0.6.x live feed correctly again. The text does not change: with another engine's 8- and 512-row forwards run at all 63 layer boundaries of a 24,576-row window, the prefill's logits, KV rows, recurrent state and convolution tails, and every logit of the other engine, matched running each alone bit for bit.
+
+- An EXL3 prefill works through its prompt in 8,192-row windows, and each window was one GPU pass of about 10 s. Other slots got the GPU only between windows, so every decoding slot stopped for the whole pass (SRV-321). A window now offers the GPU turn between its layers, only when another slot is waiting. `QSE_PARALLEL_LAYER_YIELD=off` restores the old behaviour.
+- Measured on :8000 (EXL3 4.5, one run each): three streamed chats with a 37k-token uncached prompt arriving 25 s later. Seconds with no decoded token during the prefill went from 42 of 147 (the longest 10 s) to 0 of 145. The prefill beside the decoders ran at 252 → 254 tok/s, a single request decoded at 42.5 → 42.1 tok/s, and the prompt alone prefilled at 809 → 792 tok/s (within single-run noise).
+- Dashboard (VIS-76):
+  - The Now card's prefill bar fills again. A global tone rule in `parallel.css` had cleared the Live panel's colours.
+  - Between two window marks, the bar shows a hatched estimate at the measured rate and the ETA counts down. "measuring" replaces "warming up" until the second mark.
+  - The card and the prefill tile count the same total, including the harness's hidden tokens, on the same clock.
+  - The 5-minute charts lose the holes the 1.007 s sampler tick left, and say "none in 5 min" when nothing ran.
+  - A decode that stands still reads as "stalled behind a prefill" instead of a bare 0.
+  - The Parallel view counts lanes held for memory as waiting and uses the legend's words in the In flight tile.
+  - The Now line reads "4.9 of 17.2 tok/s" when several requests decode.
+- The prefill's progress line is said only at a window's last chunk. Inside a window, a 47 s prefill read "about 4 min left".
+
 ## 0.6.1, 2026-10-10
 
 The small models now give memory back when the KV pool runs short, and the dashboard's memory numbers count what is really in use. The text does not change: with the small models loaded, unloaded and loaded again, Qwen's 128 tokens, 26 blocks and prefill logits matched bit for bit.
