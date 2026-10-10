@@ -22,7 +22,9 @@ dashboard/src/api/types.ts `Setup*`).
                                           /v1/setup/chat is the same route
 
 Every route is an admin route (server/auth.py, kind `setup`): open while no admin password is set,
-the admin token, a dashboard session or a tool on the box itself once one is. Nothing here runs on a
+the admin token, a dashboard session or a tool on the box itself once one is. Every POST also must
+be a same-origin JSON request (`same_origin_json`): a page on another site can send a text/plain
+POST without a preflight, and an open box or a tunnel's loopback needs no cookie to be abused. Nothing here runs on a
 chat request's path: server/app.py imports this module the first time a /v1/setup route is called.
 """
 
@@ -88,9 +90,35 @@ def _model(h, mid: str) -> dict | None:
     return m
 
 
+def same_origin_json(headers) -> tuple[int, str, str] | None:
+    """None for a POST the page itself sent, else (status, code, message): the body must be
+    declared JSON (a form or text/plain POST needs no CORS preflight), a browser's
+    `Sec-Fetch-Site: cross-site` is refused, and an `Origin` must name this server's host (the
+    `Host` the browser sent, which nginx passes on as $host, or `X-Forwarded-Host`). A tool
+    without a browser sends no Origin and no Sec-Fetch-Site and passes on its JSON alone."""
+    from urllib.parse import urlsplit
+    ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        return 415, "json_only", "the setup routes take a JSON body (Content-Type: application/json)"
+    if (headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+        return 403, "cross_site", "a request from another site cannot change the setup"
+    origin = headers.get("Origin")
+    if origin is not None:
+        o = urlsplit(origin.strip()) if origin.strip() != "null" else None
+        hosts = {x.strip().lower() for x in (headers.get("Host"), headers.get("X-Forwarded-Host"))
+                 if x}
+        if o is None or not o.netloc or o.netloc.lower() not in hosts:
+            return 403, "cross_origin", "a request from another origin cannot change the setup"
+    return None
+
+
 def handle(h, app, method: str, path: str, body) -> None:
     if not h._allowed("setup"):
         return
+    if method == "POST":
+        bad = same_origin_json(h.headers)
+        if bad is not None:
+            return _err(h, *bad)
     sub = path[len("/v1/setup"):].strip("/")
     parts = [unquote(x) for x in sub.split("/")] if sub else []
     try:

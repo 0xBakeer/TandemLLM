@@ -20,6 +20,10 @@ The test matrix:
                                                          test_no_secret_in_any_answer
   7  the device route stays cheap: 50 polls, each under 200 ms, the sources read once a second
                                                          test_device_is_cheap
+  8  CSRF: a POST that is not declared JSON is 415, `Sec-Fetch-Site: cross-site` and an Origin of
+     another host are 403 (open box and loopback alike), and nothing ran; the page's own POST
+     passes directly (Origin = Host) and through nginx (Origin = $host, or X-Forwarded-Host); a
+     tool with neither header passes on its JSON         test_cross_site_posts_are_refused
 
 Run: python tests/test_setup_api.py
 """
@@ -61,7 +65,7 @@ class Req(app.Handler):
     def __init__(self, path, body):
         raw = json.dumps(body).encode()
         self.rfile, self.wfile = io.BytesIO(raw), io.BytesIO()
-        self.headers = {"Content-Length": str(len(raw))}
+        self.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
         self.path, self.command, self.request_version = path, "POST", "HTTP/1.1"
         self.requestline, self.client_address = "POST " + path, ("127.0.0.1", 0)
         self.close_connection = True
@@ -216,6 +220,37 @@ def test_device_is_cheap():
     assert max(ts) < 0.2, max(ts)
     assert len(reads) <= 2 + int(took / device_mod.TTL_S), (len(reads), took)
     print(f"    50 polls, slowest {max(ts) * 1e3:.1f} ms, {len(reads)} memory reads in {took:.2f} s")
+
+
+
+def test_cross_site_posts_are_refused():
+    _setup(admin=None, mem={})
+    body = {"level": 3, "dry_run": True}
+    for headers, want in (({"Content-Type": "text/plain"}, (415, "json_only")),
+                          ({"Content-Type": "application/x-www-form-urlencoded"}, (415, "json_only")),
+                          ({"Content-Type": ""}, (415, "json_only")),
+                          ({"Sec-Fetch-Site": "cross-site"}, (403, "cross_site")),
+                          ({"Origin": "https://evil.example", "Host": "192.168.178.143:8000"},
+                           (403, "cross_origin")),
+                          ({"Origin": "null", "Host": "127.0.0.1:8000"}, (403, "cross_origin")),
+                          ({"Origin": "http://127.0.0.1:8000.evil.example", "Host": "127.0.0.1:8000"},
+                           (403, "cross_origin"))):
+        for route in ("/v1/setup/reset", "/v1/setup/apply", "/v1/setup/assistant/load"):
+            code, b = call("POST", route, body, headers)
+            assert (code, b["error"]["code"]) == want, (route, headers, code, b)
+    ok = ({"Origin": "http://192.168.178.143:8000", "Host": "192.168.178.143:8000",
+           "Sec-Fetch-Site": "same-origin"},
+          {"Origin": "https://ai-api.khaled.de", "Host": "ai-api.khaled.de", **PROXY},
+          {"Origin": "https://ai-api.khaled.de", "Host": "127.0.0.1:8000",
+           "X-Forwarded-Host": "ai-api.khaled.de"},
+          {"Content-Type": "application/json; charset=utf-8"},
+          {})
+    for headers in ok:
+        code, b = call("POST", "/v1/setup/reset", body, headers)
+        assert code == 200 and b["dry_run"] is True, (headers, code, b)
+    # GETs are reads and need none of it
+    code, _ = call("GET", "/v1/setup/reset", None, {"Sec-Fetch-Site": "cross-site"})
+    assert code == 200
 
 
 if __name__ == "__main__":

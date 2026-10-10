@@ -99,7 +99,7 @@ Levels 2 to 4 never touch the active profile's weights, the K3 drafters, the K4 
 
 ## The routes
 
-All of them are admin routes: open while no admin password is set, and the admin token, a dashboard session or a tool on the box itself once one is. The shapes are `dashboard/src/api/types.ts`, contract 1.0.
+All of them are admin routes: open while no admin password is set, and the admin token, a dashboard session or a tool on the box itself once one is. Every POST must also be same-origin JSON: `Content-Type: application/json` (else 415 `json_only`), no `Sec-Fetch-Site: cross-site`, and an `Origin`, when sent, that names the server's `Host` or `X-Forwarded-Host` (else 403 `cross_site` / `cross_origin`). A page on another site cannot run apply or reset through a visitor's browser, even on an open box or through a tunnel's loopback. The shapes are `dashboard/src/api/types.ts`, contract 1.0.
 
 ```text
 GET  /v1/setup/models                  a tile per model

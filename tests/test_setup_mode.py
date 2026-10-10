@@ -37,7 +37,7 @@ class Req(app.SetupHandler):
     def __init__(self, method, path, body=None):
         raw = json.dumps(body if body is not None else {}).encode()
         self.rfile, self.wfile = io.BytesIO(raw), io.BytesIO()
-        self.headers = {"Content-Length": str(len(raw))}
+        self.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json"}
         self.path, self.command, self.request_version = path, method, "HTTP/1.1"
         self.requestline, self.client_address = f"{method} {path}", ("127.0.0.1", 0)
         self.close_connection = True
