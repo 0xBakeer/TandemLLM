@@ -2796,10 +2796,12 @@ qse-wren-figure {
     padding: 10px 74px 10px 0; /* the floating Wren on the right */
     margin: 20px calc(var(--gutter) * -1) 0;
     padding-left: var(--gutter);
-    background: var(--bg-glass);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: var(--bg);
     border-top: 1px solid var(--rule);
+  }
+  .pfield > .seg,
+  .mfield-ctl > .seg {
+    justify-self: start;
   }
   .step-kicker {
     display: none;
