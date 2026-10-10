@@ -5304,6 +5304,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._dashboard_get(path)
         if path.startswith("/v1/conductor/"):
             return self._conductor("GET")
+        if path.startswith("/v1/setup/"):
+            # the setup guide (server/setup_api.py, docs/setup.md): imported on its first call
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "GET", path, None)
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("GET", path, None)
         if (path == "/v1/library" or path.startswith("/v1/library/")) and \
@@ -5517,6 +5521,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("POST", body)
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
+        if path.startswith("/v1/setup/"):
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "POST", path, body)
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("POST", path, body)
         if path.startswith("/v1/collect/"):          # P6: a vLLM or SGLang plugin's batch
