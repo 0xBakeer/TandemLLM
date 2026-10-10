@@ -988,6 +988,12 @@ export interface SetupProfile {
   badges: string[];
   quality: SetupQuality;
   note: string | null;
+  /** the draft models, the draft head and their buffers with this profile (model.yaml) */
+  drafters_gib?: number;
+  /** files the profile needs that ops/use-profile.sh cannot download */
+  requires?: string[];
+  /** the weights' Hugging Face repo needs a token (the EXL3 sets, OPS-95) */
+  private?: boolean;
 }
 
 /** One cell of the measured table: mean tok/s (and min), ms a round, tokens a round. */
@@ -1043,7 +1049,10 @@ export interface SetupComponent {
   depends_on: string[];
   conflicts: string[];
   /** serve.env key -> its value with the component on / off */
-  knobs: Record<string, { on: string; off: string }>;
+  /** null: writes nothing in that state (the template's or the profile's value stands) */
+  knobs: Record<string, { on: string | null; off: string | null }>;
+  /** what must be on disk for it to load */
+  files?: string[];
   docs: string;
   note: string | null;
 }
@@ -1078,6 +1087,8 @@ export interface SetupParallelism {
   /** a side slot's bytes beyond its window (verify graphs off) */
   side_slot_const_gib: number;
   knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
+  /** serve.env keys written with the slots whatever is chosen */
+  fixed?: Record<string, string>;
 }
 
 export interface SetupDevicePreset {
@@ -1109,6 +1120,8 @@ export interface SetupModel {
   methods: SetupField[];
   advanced: SetupField[];
   devices: SetupDevicePreset[];
+  /** the step schema (design note addition); absent: the dashboard derives it from the fields above */
+  wizard_fields?: SetupStep[];
   /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
   memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
 }
@@ -1159,6 +1172,10 @@ export interface SetupEstimate {
   /** device - fixed parts - floor: what conversations (and the caches, which give it back) may use */
   room_gb: number;
   notes: string[];
+  /** every slot at its full window fits too */
+  fits_worst?: boolean;
+  /** device - floor */
+  budget_gb?: number;
 }
 
 /** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
@@ -1202,6 +1219,8 @@ export interface SetupDevice {
   profiles_on_disk: Record<string, boolean>;
   /** false: anyone who reaches the port can run setup, apply and reset */
   password_set: boolean;
+  /** a Hugging Face token is on the box (the private EXL3 repos need one) */
+  hf_token_present?: boolean;
   assistant: SetupAssistantStatus;
 }
 
@@ -1220,6 +1239,8 @@ export interface SetupAssistantStatus {
   claim_gib: number | null;
   /** the planner's answer for a load now */
   can_load: boolean;
+  /** 0..1 while loading, when the server knows it */
+  progress?: number | null;
 }
 
 export interface SetupToolCall {
@@ -1306,6 +1327,8 @@ export interface SetupJob {
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
   selection: SetupSelection;
+  /** a password the user typed on the Review step: sent once, never stored by the page */
+  secrets?: { admin_password?: string };
 }
 export interface SetupApplyResponse {
   contract_version: SetupContract;
@@ -1352,4 +1375,9 @@ export interface SetupResetResult {
   removed: { path: string; bytes: number }[];
   restart_needed: boolean;
   message: string;
+  /** false: some items could not be deleted (listed in `failed`) */
+  ok?: boolean;
+  failed?: { path: string; message: string }[];
+  /** level 2: the job that writes the shipped configuration and restarts */
+  job?: SetupJob;
 }
