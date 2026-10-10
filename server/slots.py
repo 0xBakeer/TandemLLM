@@ -28,11 +28,16 @@ Everything here is plain Python and CPU-testable (tests/test_slots.py).
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 GiB = 1 << 30
 MiB = 1 << 20
+
+#: SRV-311: a round's waiters time out while the turn is held by a slot that is not decoding
+#: (`barrier`); "off" waits for a free turn as before (kept for the A/B)
+IDLE_OWNER = (os.environ.get("QSE_BARRIER_IDLE_OWNER") or "on").strip().lower() != "off"
 
 #: the per-request keys a side slot keeps for itself (server/app.py `SlotState`): what the
 #: generation publishes for the handler (`last_ctx`, `blocks`, ...) and the slot-0-only machinery,
@@ -679,7 +684,7 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
                     # completed, and the timeout below never ran while an 87k prompt prefilled
                     # (3 chats at 0-4 tok/s for ~90 s, 2026-10-10).
                     owner = turn.owner
-                    idle_turn = owner is None or owner not in dec
+                    idle_turn = owner is None or (IDLE_OWNER and owner not in dec)
                     if idle_turn and not turn.waiting() and not (missing & meet.transit):
                         idle_since = idle_since or now
                         if now - idle_since >= meet.timeout:
