@@ -2249,6 +2249,15 @@ mark {
   border-radius: 2px;
   transition: width 0.25s linear;
 }
+/* the estimate past the newest mark: the tone, hatched and lighter, so it never reads as measured */
+.now-bar-est {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(-45deg, var(--tone) 0 3px, transparent 3px 6px);
+  opacity: 0.55;
+  transition: width 0.25s linear;
+}
 .now-side {
   grid-area: side;
   display: flex;
@@ -2655,7 +2664,8 @@ mark {
   .dot-stale {
     animation: none;
   }
-  .now-bar-fill {
+  .now-bar-fill,
+  .now-bar-est {
     transition: none;
   }
 }

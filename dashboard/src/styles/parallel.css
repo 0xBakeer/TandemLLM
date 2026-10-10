@@ -30,6 +30,16 @@
   color: var(--ink-3);
 }
 
+/* the stall line under the hero's figures: one reserved line, so it never moves the chart */
+.par-stall {
+  min-height: 1.4em;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* tabs at the top of Performance */
 .perf-tabs {
   display: flex;
@@ -171,15 +181,18 @@
   min-width: 7ch;
 }
 
-/* tone colours: the dots, the mix bar, the lanes' accents */
-.tone-wait { --tone: var(--tone-wait); }
-.tone-prefill { --tone: var(--tone-prefill); }
-.tone-think { --tone: var(--tone-think); }
-.tone-tool { --tone: var(--tone-tool); }
-.tone-write { --tone: var(--tone-write); }
-.tone-done { --tone: var(--tone-done); }
-.tone-error { --tone: var(--tone-error); }
-.tone-idle { --tone: transparent; }
+/* tone colours: the dots, the mix bar, the lanes' accents. Scoped to `.par`: the `--tone-*`
+   values live there, and unscoped these rules reset the Live panel's own `.tone-prefill`,
+   `.tone-think`, ... (app.css) to an undefined variable -- the Now card lost its colour stripe,
+   its glyph colour and the prefill bar's fill (an empty grey bar at 41 %, VIS-76) */
+.par .tone-wait { --tone: var(--tone-wait); }
+.par .tone-prefill { --tone: var(--tone-prefill); }
+.par .tone-think { --tone: var(--tone-think); }
+.par .tone-tool { --tone: var(--tone-tool); }
+.par .tone-write { --tone: var(--tone-write); }
+.par .tone-done { --tone: var(--tone-done); }
+.par .tone-error { --tone: var(--tone-error); }
+.par .tone-idle { --tone: transparent; }
 .par-mix-seg { background: var(--tone); }
 .par-dot {
   width: 8px;

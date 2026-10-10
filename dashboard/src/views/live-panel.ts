@@ -25,7 +25,7 @@ import { api, describeError } from '../api/client';
 import type { Live, LiveRecent, LiveRequest, LiveSample } from '../api/types';
 import { activityCell, clientFlag, constrainedWord, continuesText, nowLine, pathSegments, roundWords, secs, stopTone, streamHealth, timelineList, timelineSegments, tokensSplit, type Segment } from '../lib/activity';
 import { compact, exact, fixed, ms, timeShort, tps } from '../lib/format';
-import { agoShort, cachedShare, decodeFigure, elapsed, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
+import { agoShort, cachedShare, clockSkew, decodeFigure, elapsed, emptyFoot, emptyRing, hasLiveRates, mostlyCachedWords, orderRows, peak, prefillFigure, prefillingWords, push, rateText, seedRing, slots, sumDecodeNow, voiceLine, warmingWords, type Ring } from '../lib/live';
 import { cacheTier, reuse, TIER_LABEL } from '../lib/cache-source';
 import { navigate } from '../lib/router';
 import { laneTitle, laneWord } from '../lib/lane';
@@ -46,6 +46,8 @@ export class QseLivePanel extends LightElement {
   @state() private error: { endpoint: string; message: string } | null = null;
   @state() private tickAt = 0; // bumps every event and once a second, so the ages and the slots move
   @state() private gaps: number[] = [];
+  /** seconds the server's clock is ahead of this device's, from the newest event (lib/live.ts clockSkew) */
+  private skew = 0;
   /** the request whose supervisor drawer is open (VIS-44) */
   @state() private drawer: string | null = null;
   private lastEventAt: number | null = null;
@@ -116,7 +118,8 @@ export class QseLivePanel extends LightElement {
   /** Merge one message. The sparklines keep one sample a second: `push` ignores a repeated `sample.t`. */
   private apply(l: Live, fromStream: boolean): void {
     const at = Date.now();
-    const now = at / 1000;
+    this.skew = clockSkew(l.generated_at, at);
+    const now = at / 1000 + this.skew;
     if (l.history) this.ring = seedRing(l.history, now);
     else this.ring = push(this.ring, l.sample, now);
     this.live = l;
@@ -149,8 +152,9 @@ export class QseLivePanel extends LightElement {
         ${this.error ? errorState(this.error.endpoint, this.error.message, () => void this.firstPaint()) : html`<div class="skeleton skeleton-live" aria-busy="true"><div class="skeleton-line" style="width:60%"></div><div class="skeleton-line" style="width:80%"></div></div>`}
       </section>`;
     }
-    const now = this.tickAt / 1000;
+    const now = this.tickAt / 1000 + this.skew;
     const s = slots(this.ring, now);
+    const foot = emptyFoot(this.ring, now);
     const rows = orderRows(l.requests);
     const lr = hasLiveRates(l);
     const df = lr ? decodeFigure(l, rows) : null;
@@ -176,6 +180,7 @@ export class QseLivePanel extends LightElement {
           values: lr ? s.decodeLive : s.decode,
           mode: 'ribbon',
           peak: peak(lr ? s.decodeLive : s.decode),
+          empty: foot,
           format: (v: number) => String(Math.round(v)),
         })}
         ${pf
@@ -192,6 +197,7 @@ export class QseLivePanel extends LightElement {
               values: s.prefillLive,
               mode: 'ribbon',
               peak: peak(s.prefillLive),
+              empty: foot,
               format: (v: number) => rateText(v),
               busy: l.now.prefilling,
             })
@@ -205,6 +211,7 @@ export class QseLivePanel extends LightElement {
               values: s.prefill,
               mode: 'dots',
               peak: peak(s.prefill),
+              empty: foot,
               format: (v: number) => compact(v),
               busy: l.now.prefilling,
             })}
@@ -244,7 +251,7 @@ export class QseLivePanel extends LightElement {
         ${voice !== undefined ? html`<div class="now-voice" data-voice-line data-kind=${voice?.kind ?? ''} title=${voice?.text ?? ''}>${voice ? html`<span class="now-voice-glyph" aria-hidden="true">›</span><span class="clip">${voice.text}</span>` : '\u00a0'}</div>` : nothing}
         <div class="now-sub">
           <div class="now-warning" title=${n.warning ?? ''}>${n.warning ? html`<span class="flag-glyph" aria-hidden="true">✗</span><span class="clip">${n.warning}</span>` : nothing}</div>
-          ${n.progress != null ? html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${Math.round(n.progress * 100)}><div class="now-bar-fill" style="width:${(n.progress * 100).toFixed(1)}%"></div></div>` : nothing}
+          ${n.progress != null ? this.bar(n.progress, n.estimate, n.sinceMarkMs) : nothing}
         </div>
       </div>
       <div class="now-side">
@@ -254,7 +261,18 @@ export class QseLivePanel extends LightElement {
     </div>`;
   }
 
-  private figure(f: { id: string; label: string; value: number | null; text?: (v: number) => string; unit: string; sub: string; caption?: string | null; captionTitle?: string | null; foot: string | null; values: (number | null)[]; mode: 'ribbon' | 'dots'; peak: number | null; format: (v: number) => string; busy?: boolean }): TemplateResult {
+  /** The prefill bar: solid to the newest mark (measured), a hatched part on to the estimate (the
+   *  measured rate since that mark), which the next mark replaces with the measured figure. */
+  private bar(progress: number, estimate: number | null, sinceMarkMs: number | null): TemplateResult {
+    const done = Math.round(progress * 100);
+    const est = estimate != null && estimate > progress ? estimate : null;
+    const title = est != null ? `${done} % measured at the last mark ${secs(sinceMarkMs)} ago; ≈ ${Math.round(est * 100)} % by now at the measured rate (an estimate until the next mark)` : `${done} % measured`;
+    return html`<div class="now-bar" role="progressbar" aria-label="prefill" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${done} aria-valuetext=${title} title=${title}>
+      <div class="now-bar-fill" style="width:${(progress * 100).toFixed(1)}%"></div>${est != null ? html`<div class="now-bar-est" data-estimate style="left:${(progress * 100).toFixed(1)}%;width:${((est - progress) * 100).toFixed(1)}%"></div>` : nothing}
+    </div>`;
+  }
+
+  private figure(f: { id: string; label: string; value: number | null; text?: (v: number) => string; unit: string; sub: string; caption?: string | null; captionTitle?: string | null; foot: string | null; values: (number | null)[]; mode: 'ribbon' | 'dots'; peak: number | null; empty?: string; format: (v: number) => string; busy?: boolean }): TemplateResult {
     const na = f.value == null;
     return html`<div class="live-fig ${na ? 'is-na' : ''} ${f.busy ? 'is-busy' : ''}" id="live-${f.id}">
       <div class="live-fig-label">${f.label}</div>
@@ -262,7 +280,7 @@ export class QseLivePanel extends LightElement {
       <div class="live-fig-sub" title=${f.sub}>${f.busy ? html`<span class="pulse"></span>` : nothing}<span class="clip">${f.sub}</span></div>
       <div class="live-fig-rounds num" title=${f.foot ?? ''}>${f.foot ?? nothing}</div>
       <qse-spark .values=${f.values} mode=${f.mode} .height=${44} .format=${f.format} unit=${f.unit} aria-label="${f.label}, last 5 minutes"></qse-spark>
-      <div class="live-fig-foot"><span>5 min</span><span class="num">${f.peak == null ? 'no samples yet' : `peak ${f.format(f.peak)} ${f.unit}`}</span></div>
+      <div class="live-fig-foot"><span>5 min</span><span class="num">${f.peak == null ? (f.empty ?? 'no samples yet') : `peak ${f.format(f.peak)} ${f.unit}`}</span></div>
     </div>`;
   }
 

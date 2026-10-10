@@ -171,9 +171,9 @@ describe('the Now line, one per engine state', () => {
     expect(n.tone).toBe('queued');
   });
   it('prefilling: cached tokens and the ETA; a single-call prefill gets no bar', () => {
-    const p = { done: 36864, total: 48210, cached: 12288, pct: 76.5, tps_now: 2310, tps_avg: 1822.6, eta_ms: 4900, progress: 'chunked' as const, at_ms: 100 };
+    const p = { done: 36864, total: 48210, cached: 12288, pct: 76.5, tps_now: 2310, tps_avg: 1822.6, eta_ms: 4900, progress: 'chunked' as const, at_ms: 4900 };
     const n = nowLine(engine('busy'), [req('prefilling', { label: 'Prefilling 36,864 of 48,210 (76 %)', prefill: p })])!;
-    expect(n.numbers).toEqual(['2310 tok/s', '12,288 cached', 'about 5 s left']);
+    expect(n.numbers).toEqual(['2310 tok/s', 'about 5 s left', '12,288 cached']);
     expect(n.progress).toBeCloseTo(0.765, 3);
     const s = nowLine(engine('busy'), [req('prefilling', { label: 'Prefilling 48,210 tokens', prefill: { ...p, done: null, pct: null, progress: 'single_call' } })])!;
     expect(s.progress).toBeNull();

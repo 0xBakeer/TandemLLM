@@ -16,7 +16,7 @@ import { api, describeError } from '../api/client';
 import { colorVar } from '../charts/chart-base';
 import '../charts/stack';
 import { compact, exact, money, ms, pct } from '../lib/format';
-import { barScale, backendOrder, Colors, jointWords, kindLabel, mergeSeries, Slots, slotWord, sourceWord, stateLine, stateTone, tokenBar, windowWord, type BackendRow, type EngineSlots, type Lane, type Parallel, type Sample, type Slot } from '../lib/parallel';
+import { barScale, backendOrder, Colors, inFlightWords, jointWords, kindLabel, mergeSeries, Slots, slotWord, sourceWord, stallLine, stateLine, stateTone, tokenBar, windowWord, type BackendRow, type EngineSlots, type Lane, type Parallel, type Sample, type Slot } from '../lib/parallel';
 import { poll, type Poller } from '../lib/poll';
 import { LightElement } from '../ui/base';
 import { errorState, skeleton } from '../ui/bits';
@@ -92,6 +92,7 @@ export class QseParallel extends LightElement {
     const live = d.lanes;
     const counts = Object.fromEntries(TONES.map((k) => [k, live.filter((l) => stateTone(l) === k).length])) as Record<(typeof TONES)[number], number>;
     const byId = new Map(d.backends.map((b) => [b.id, b]));
+    const stall = stallLine(t, live, d.windows.now_s);
     return html`<section class="panel par-hero" aria-label="aggregate decode">
       <div class="par-hero-num">
         <div class="par-kicker">Aggregate decode, now</div>
@@ -105,6 +106,7 @@ export class QseParallel extends LightElement {
           <span class="par-nr ${t.decode_unreported ? '' : 'is-hidden'}" title="no live count for these (server/parallel.py): the usage at the end has the exact one">${t.decode_unreported} not counted live</span>
           <span class=${t.prefill_tps != null ? '' : 'is-hidden'}>prefill <b class="num">${rate(t.prefill_tps)}</b> tok/s</span>
         </div>
+        <div class="par-stall warn-ink" data-stall role="status" title="no decoding lane wrote a token over the last ${d.windows.now_s} s: the rates count tokens, so this 0 is a real stall">${stall ?? '\u00a0'}</div>
         <div class="par-mix" role="img" aria-label="requests in flight by state">
           <div class="par-mix-bar">
             ${TONES.map((k) => html`<span class="par-mix-seg tone-${k}" style="flex-grow:${counts[k]};flex-basis:0;${counts[k] ? '' : 'padding:0;'}" title="${counts[k]} ${TONE_WORD[k]}"></span>`)}
@@ -133,7 +135,7 @@ export class QseParallel extends LightElement {
     const tile = (label: string, value: TemplateResult | string, sub: TemplateResult | string, key: string, na = false) =>
       html`<div class="stat ${na ? 'is-na' : ''}" data-kpi=${key}><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`;
     return html`<div class="stats par-kpis">
-      ${tile('In flight', html`<span class="num">${t.in_flight}</span>`, html`${t.waiting} waiting · ${t.decoding} decoding`, 'in-flight')}
+      ${tile('In flight', html`<span class="num">${t.in_flight}</span>`, inFlightWords(d.lanes, t.decoding), 'in-flight')}
       ${tile(
         'TTFT p50 · p90',
         t.ttft_p50 == null ? 'none yet' : html`<span class="num">${ms(t.ttft_p50)}</span><span class="stat-unit">· ${ms(t.ttft_p90)}</span>`,
@@ -275,7 +277,7 @@ export class QseParallel extends LightElement {
     const nowCell = l.decode_now != null ? rate(l.decode_now) : live && (tone === 'think' || tone === 'write' || tone === 'tool') ? NR : '—';
     const avgCell = l.decode_avg != null ? rate(l.decode_avg) : l.tokens == null && (live || l.tokens_source == null) && l.frames ? NR : '—';
     let ttft: TemplateResult | string = l.ttft_ms != null ? ms(l.ttft_ms) : '—';
-    if (l.ttft_ms == null && (l.state === 'waiting' || l.state === 'queued' || l.state === 'prefilling') && l.waiting_ms != null) ttft = html`<span class="par-wait">${ms(l.waiting_ms)}…</span>`;
+    if (l.ttft_ms == null && (l.state === 'waiting' || l.state === 'waiting_memory' || l.state === 'queued' || l.state === 'prefilling') && l.waiting_ms != null) ttft = html`<span class="par-wait">${ms(l.waiting_ms)}…</span>`;
     let prefill: TemplateResult | string = '—';
     const ptps = l.prefill?.tps ?? l.prefill?.tps_avg;
     if (ptps != null) prefill = html`<span title=${l.prefill?.tps != null ? 'tokens a second, now' : 'tokens a second over the whole prefill'}>${rate(ptps)}</span>`;
