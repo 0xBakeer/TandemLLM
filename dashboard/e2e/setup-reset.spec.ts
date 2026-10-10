@@ -28,11 +28,13 @@ test('Review lists each cache with its size, the total, the restart note and the
   });
   await open(page, '#/system');
   const d = await review(page, 3);
-  await expect(d.locator('.reset-items li')).toHaveCount(4);
+  // two disk tiers (the running one the engine clears), the lookup store, two caches in memory
+  await expect(d.locator('.reset-items li')).toHaveCount(5);
   await expect(d.locator('.reset-items')).toContainText('Disk cache');
   await expect(d.locator('.reset-items')).toContainText('11.2 GiB');
   await expect(d.locator('.reset-total')).toContainText('Total 14.7 GiB');
-  await expect(d.locator('.reset-total')).toContainText('No restart');
+  // the lookup store: the running engine keeps its copy until a restart (server/setup/reset.py)
+  await expect(d.locator('.reset-total')).toContainText('Restarts the engine');
   await expect(d.locator('.reset-word-show')).toHaveText('delete caches');
   expect(posted).toBe(0);
 });

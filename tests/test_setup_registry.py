@@ -28,6 +28,8 @@ The test matrix:
      refused, and numbers keep their range                  test_field_values
  11  the KV bytes a token are the server's (server/slots.py) and the units add up: 104.25 KiB,
      26.06 GiB = 27.98 GB at 262,144 tokens                 test_kv_units
+ 12  the dashboard mock's copy (dashboard/mock/setup/qwen3.8-27b.json) is what
+     GET /v1/setup/models/qwen3.8-27b answers, key for key   test_the_mock_copy
 
 Run: python tests/test_setup_registry.py
 """
@@ -337,7 +339,33 @@ def test_kv_units():
     assert round(per * w / 2**30, 2) == 26.06 and round(per * w / 1e9, 2) == 27.98
 
 
+
+def test_the_mock_copy():
+    """The page's e2e and unit tests run on the mock's copy of the registry entry; a model.yaml
+    change that does not reach it would test the page against a model the server does not serve.
+    Write it again with: python tests/test_setup_registry.py --write-mock"""
+    m = registry.get("qwen3.8-27b")
+    with open(MOCK_COPY) as fh:
+        assert json.load(fh) == _served(m), (f"{MOCK_COPY} is not the registry's payload; run "
+                                             f"python tests/test_setup_registry.py --write-mock")
+
+
+MOCK_COPY = os.path.join(ROOT, "dashboard", "mock", "setup", "qwen3.8-27b.json")
+
+
+def _served(m: dict) -> dict:
+    """GET /v1/setup/models/{id} (server/setup_api.py), as JSON."""
+    return json.loads(json.dumps(dict(m, contract_version="1.0",
+                                      wizard_fields=registry.wizard_fields(m))))
+
+
 if __name__ == "__main__":
+    if "--write-mock" in sys.argv:
+        with open(MOCK_COPY, "w") as fh:
+            json.dump(_served(registry.get("qwen3.8-27b")), fh, indent=1, ensure_ascii=False)
+            fh.write("\n")
+        print(f"wrote {MOCK_COPY}")
+        sys.exit(0)
     passed = 0
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

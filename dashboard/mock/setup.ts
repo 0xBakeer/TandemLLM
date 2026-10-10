@@ -10,10 +10,17 @@
 //   refuse: bool (a load is refused for memory), noModel: bool (no Qwen3.5 on disk),
 //   loadMs: n (how long a load takes), fallback: bool (the 0.8B)
 //   hfToken: bool, password: bool, busy: n (requests running), setupMode: bool (/health mode)
-//   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3)
+//   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3),
+//   shadowOn: bool (the shadow reader runs: its sessions are kept, `skip`, and reported in `failed`)
 //   estimateDown: bool, planDown: bool, models: ok | empty | error | broken
-//   active: <profile id> (what the box runs), unauthorized: bool (every route 401),
+//   active: <profile id> (what the box runs), secretsExist: bool (generate is refused, secrets_exist)
+//   unauthorized: bool (an admin password is set: every /v1/setup route answers 401 until
+//   POST /v1/dashboard/session {token: QSE_MOCK_TOKEN or "mock"} signs in), loginOff: bool (with
+//   unauthorized: the dashboard login is off, so that POST is a 404 as on the server)
 //   reset: true (all of the above back to the start)
+//
+// In setup mode every other /v1 route answers 503 setup_mode (mock/server.ts), as server/app.py's
+// SetupHandler does.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
@@ -61,12 +68,15 @@ interface Options {
   setupMode: boolean;
   resetPartial: boolean;
   resetEmpty: boolean;
+  shadowOn: boolean;
+  secretsExist: boolean;
   estimateDown: boolean;
   planDown: boolean;
   models: 'ok' | 'empty' | 'error' | 'broken';
   active: string;
   /** a box with an admin password and no session: every /v1/setup route answers 401 */
   unauthorized: boolean;
+  loginOff: boolean;
 }
 
 const START: Options = {
@@ -83,21 +93,31 @@ const START: Options = {
   setupMode: false,
   resetPartial: false,
   resetEmpty: false,
+  shadowOn: false,
+  secretsExist: false,
   estimateDown: false,
   planDown: false,
   models: 'ok',
   active: 'exl3-6.0',
   unauthorized: false,
+  loginOff: false,
 };
 
+const TOKEN = process.env.QSE_MOCK_TOKEN ?? 'mock';
+/** server/setup_api.py PLAN_STATUS: 412 for what the box lacks, 409 for the rest */
+const PLAN_STATUS: Record<string, number> = { missing_token: 412, missing_assets: 412, disk_full: 412, no_overlay_hook: 412 };
+/** the checkout the mock box runs from (run/setup.env lives there) */
+const REPO = '~/tandem-live';
+
+/** server/setup/apply.py STEPS */
 const STEP_LABELS: Record<SetupJobStepId, string> = {
-  check: 'Check the setup',
-  unload_assistant: 'Put Wren to sleep',
+  check: 'Check the selection, the disk and the box',
+  unload_assistant: 'Unload Wren',
   fetch: 'Download the weights',
-  write_config: 'Write serve.env',
-  switch: 'Switch the weights and restart the engine',
-  smoke: 'Check that the engine answers',
-  rollback: 'Go back to the previous setup',
+  write_config: 'Write the configuration (run/setup.env)',
+  switch: 'Restart the engine with the new setup',
+  smoke: 'Check that the new engine answers',
+  rollback: 'Roll back',
 };
 
 export class MockSetup {
@@ -110,6 +130,8 @@ export class MockSetup {
   awayUntil = 0;
   awayFrom = 0;
   private seq = 0;
+  /** dashboard sessions made by POST /v1/dashboard/session while `unauthorized` is on */
+  sessions = new Set<string>();
   /** serve.env as it is now on the mock box */
   env: Record<string, string> = {};
 
@@ -120,6 +142,7 @@ export class MockSetup {
   reset(): void {
     this.o = { ...START };
     this.jobs.clear();
+    this.sessions.clear();
     this.awayUntil = 0;
     this.awayFrom = 0;
     this.env = this.envFor({ ...defaults(MODEL), profile: 'exl3-6.0' });
@@ -243,12 +266,20 @@ export class MockSetup {
       errors.push(`${prof.hf_repo} is private and no Hugging Face token is set. Add one with \`hf auth login\` on the box, or set HF_TOKEN, then try again.`);
       codes.push('missing_token');
     }
-    const switching = prof.id !== this.o.active;
+    const generate = sel.advanced.admin_password === 'generate';
+    if (generate && this.o.secretsExist) {
+      errors.push('secrets.env already exists. ops/make-secrets.sh --rotate --admin would replace the metrics token too, so run it on the box yourself.');
+      codes.push('secrets_exist');
+    }
+    const port = Number(sel.advanced.port ?? 8000);
+    // server/setup/apply.py plan(): the commands for reading, in the runner's order
     const commands = [
-      ...(onDisk ? [] : [`ops/use-profile.sh --fetch-only ${prof.id}`]),
-      `write ops/serve.env (${changes.length} ${changes.length === 1 ? 'change' : 'changes'})`,
-      switching ? `ops/use-profile.sh ${prof.id}` : 'ops/restart.sh',
-      'smoke: GET /health, then one short chat request',
+      ...(onDisk ? [] : [`bash ops/use-profile.sh ${prof.id} --fetch-only   (about ${prof.disk_gb} GB from ${prof.hf_repo})`]),
+      ...(port !== 8000 ? ['bash ops/stop.sh 120   (the engine on port 8000)'] : []),
+      `write run/setup.env (${Object.keys(next).length} keys; the old one kept as a .bak)`,
+      ...(generate ? ['bash ops/make-secrets.sh --admin'] : []),
+      `bash ops/use-profile.sh ${prof.id}   (stop, start, smoke, roll back on failure)`,
+      `smoke: GET http://127.0.0.1:${port}/health and one short chat`,
     ];
     return {
       contract_version: '1.0',
@@ -256,26 +287,27 @@ export class MockSetup {
       errors,
       error_codes: codes,
       warnings: [...(this.o.password ? [] : ['No admin password is set: anyone who can reach this port can run the setup, apply it and reset the box. Generate one in the advanced step.']), ...(est.fits && !est.fits_worst ? [est.notes[0]] : [])],
-      profile: { current: this.o.active, next: prof.id, on_disk: onDisk, download_gb: onDisk ? 0 : prof.disk_gb },
+      profile: { current: this.o.setupMode ? null : this.o.active, next: prof.id, on_disk: onDisk, download_gb: onDisk ? 0 : prof.disk_gb },
       changes,
-      restart: changes.length > 0 || switching,
+      restart: true,
       commands,
       estimate: est,
-      ports: { current: 8000, next: Number(sel.advanced.port ?? 8000) },
+      ports: { current: 8000, next: port },
     };
   }
 
   // ---- the apply job ------------------------------------------------------------------------
 
-  startJob(sel: SetupSelection, scenario: Scenario = this.o.scenario): SetupJob {
-    const id = `job_${Date.now().toString(36)}_${++this.seq}`;
+  startJob(sel: SetupSelection, scenario: Scenario = this.o.scenario, kind: SetupJob['kind'] = 'apply'): SetupJob {
+    // a token_hex(8) as the server makes (apply.JOB_ID)
+    const id = (Date.now().toString(16) + (++this.seq).toString(16).padStart(4, '0')).slice(-16).padStart(16, '0');
     const now = Date.now();
     const prof = sel.profile;
     const fetch = !this.onDisk[prof];
     const slow = scenario === 'slow' ? 3 : 1;
     const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
     const steps: SetupJobStep[] = ids.map((s) => ({ id: s, label: STEP_LABELS[s], state: 'pending', started_at: null, ended_at: null, detail: null }));
-    const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes, kind: 'apply', rolled_back: false, failed_step: null, url: '<this box>/dashboard/' };
+    const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes, kind, rolled_back: false, failed_step: null, url: `http://<this box>:${sel.advanced.port ?? 8000}/dashboard/` };
     const tl: { at: number; ev: SetupJobEvent }[] = [];
     const sec = (ms: number) => (now + ms) / 1000;
     let t = 0;
@@ -295,7 +327,7 @@ export class MockSetup {
     step('unload_assistant', 600 * slow, ['[wren] unloading qwen3.5-2b (4.4 GiB back)']);
     if (fetch) step('fetch', 2600 * slow, [`[profile] fetching ${prof} from ${MODEL.profiles.find((p) => p.id === prof)?.hf_repo}`, '[hf] 25 % of 18.4 GB', '[hf] 50 %', '[hf] 75 %', '[hf] 100 %, sha256 ok']);
     else step('fetch', 0, [], 'skipped', 'already on the box');
-    step('write_config', 600 * slow, ['[setup] ops/serve.env.bak written', `[setup] ops/serve.env: ${job.changes.length} keys changed`]);
+    step('write_config', 600 * slow, kind === 'reset' ? ['[setup] run/setup.env and 1 backup(s) removed'] : ['[setup] run/setup.env.bak-20261010T081200Z kept', `[setup] run/setup.env: ${Object.keys(this.envFor(sel)).length} keys`]);
     const switchStart = t;
     step('switch', 2800 * slow, [`[profile] switching ${this.o.active} -> ${prof}`, '[engine] stopping (draining 0 requests)', '[engine] starting', '[memory] load stages: weights, drafters, graphs', '[engine] ready on :8000']);
     let gap: MockJob['gap'] = null;
@@ -310,7 +342,8 @@ export class MockSetup {
       step('smoke', 1400 * slow, ['[smoke] GET /health 200', '[smoke] chat request: 500 internal error (CUDA graph capture failed)'], 'failed', 'the test request failed');
       if (scenario === 'rollback') {
         step('rollback', 1600 * slow, [`[profile] rolling back to ${this.o.active}`, '[engine] ready on :8000', '[smoke] ok']);
-        tl.push({ at: t + 100, ev: { type: 'done', state: 'rolled_back', message: this.o.active } });
+        // the job's message is why it failed (apply.py _fail); the previous profile is the page's to say
+        tl.push({ at: t + 100, ev: { type: 'done', state: 'rolled_back', message: 'the chat request failed (HTTP 500)' } });
       } else {
         step('rollback', 0, [], 'skipped', null);
         tl.push({ at: t + 100, ev: { type: 'done', state: 'failed', message: 'The engine did not pass its check.' } });
@@ -318,7 +351,7 @@ export class MockSetup {
     } else {
       step('smoke', 1400 * slow, ['[smoke] GET /health 200', '[smoke] chat request 200, 41.2 tok/s']);
       step('rollback', 0, [], 'skipped', null);
-      tl.push({ at: t + 100, ev: { type: 'done', state: 'done', message: `${MODEL.profiles.find((p) => p.id === prof)?.label} is running.` } });
+      tl.push({ at: t + 100, ev: { type: 'done', state: 'done', message: kind === 'reset' ? `The shipped configuration runs, on ${prof}.` : `${prof} is live on port ${sel.advanced.port ?? 8000}.` } });
       const finish = t + 100;
       setTimeout(() => {
         this.o.active = prof;
@@ -337,6 +370,12 @@ export class MockSetup {
       }, gap.from - now).unref?.();
     }
     return { ...job };
+  }
+
+  /** the id of a job that has not ended, or null */
+  runningJob(): string | null {
+    for (const j of this.jobs.values()) if (!['done', 'failed', 'rolled_back'].includes(this.jobNow(j.job.id)!.state)) return j.job.id;
+    return null;
   }
 
   /** the job as it is now (?format=json) */
@@ -390,19 +429,31 @@ export class MockSetup {
 
   // ---- reset --------------------------------------------------------------------------------
 
+  /** server/setup/reset.py's levels on the mock box: the same labels, items, actions and words */
   levels(): SetupResetLevel[] {
     const E = '~/.qwen38-spark-engine';
     const item = (path: string, label: string, bytes: number, exists = true, more: Partial<SetupResetLevel['items'][number]> = {}): SetupResetLevel['items'][number] => ({ path, label, bytes: exists ? bytes : 0, exists, files: exists ? 12 : 0, at_least: false, kind: 'path', action: 'remove', note: null, restart: false, refused: null, ...more });
-    const caches = this.o.resetEmpty
-      ? [item(`${E}/disk-cache`, 'Disk cache', 0, false), item(`${E}/spill`, 'Parked sessions', 0, false), item(`${E}/suffix.bin`, 'Lookup store', 0, false), item(`${E}/response-cache`, 'Response cache', 0, false)]
-      : [item(`${E}/disk-cache`, 'Disk cache', 11.2 * GIB, true, { action: 'engine', note: 'the running engine clears it' }), item(`${E}/spill`, 'Parked sessions', 3.1 * GIB), item(`${E}/suffix.bin`, 'Lookup store', 412 * 2 ** 20), item(`${E}/response-cache`, 'Response cache', 0, false)];
-    const weights = MODEL.profiles.filter((p) => this.onDisk[p.id] && p.id !== this.o.active).map((p) => item(`${E}/weights/${p.id}`, `${p.label} weights`, p.disk_gb * 1e9));
-    const lv = (level: 2 | 3 | 4 | 5, label: string, what: string, items: SetupResetLevel['items'], restart: boolean, word: string | null): SetupResetLevel => ({ level, label, what, items, bytes: items.reduce((a, i) => a + (i.refused ? 0 : i.bytes), 0), restart, confirm_word: word });
+    const memory = (name: string, label: string) => item(name, label, 0, true, { kind: 'memory', action: 'engine', files: 0 });
+    const empty = this.o.resetEmpty;
+    const config = empty ? [] : [item(`${REPO}/run/setup.env`, "The setup guide's configuration", 2150, true, { files: 1 }), item(`${REPO}/run/setup.env.bak-20261010T081200Z`, 'An earlier one, kept as a backup', 2080, true, { files: 1 })];
+    const caches = empty
+      ? []
+      : [
+          item(`${E}/cache/disk-${this.o.active}`, "Disk cache and parked chats (the running profile's)", 11.2 * GIB, true, { action: 'engine', note: 'the engine clears it itself' }),
+          item(`${E}/cache/disk-exl3-4.5`, 'Disk cache and parked chats', 3.1 * GIB),
+          ...(this.o.shadowOn ? [item(`${E}/cache/shadow`, "The shadow reader's saved sessions", 0.6 * GIB, true, { action: 'skip', note: 'kept while the shadow reader runs' })] : []),
+          item(`${E}/suffix`, 'The lookup store', 412 * 2 ** 20, true, { restart: true, note: 'the running engine keeps its copy until a restart' }),
+          memory('state_store', 'The state store (memory)'),
+          memory('response_cache', 'The response cache (memory)'),
+        ];
+    const weights = MODEL.profiles.filter((p) => this.onDisk[p.id] && p.id !== this.o.active).map((p) => item(`${E}/weights/${p.id}`, `Weights of ${p.id}`, p.disk_gb * 1e9));
+    const lv = (level: 2 | 3 | 4 | 5, label: string, what: string, items: SetupResetLevel['items'], restart: boolean, word: string | null): SetupResetLevel => ({ level, label, what, items, bytes: items.reduce((a, i) => a + (i.refused ? 0 : i.bytes), 0), restart: restart || items.some((i) => i.restart), confirm_word: word });
+    const rec = MODEL.profiles.find((p) => p.recommended)!.id;
     return [
-      lv(2, 'Applied configuration', 'Writes the shipped serve.env back and switches to the recommended weights (EXL3 4.5).', [item('ops/serve.env', 'Your serve.env, written back from the template', 4812), item('ops/active-profile', `The active weights, ${this.o.active} to exl3-4.5`, 9)], true, null),
-      lv(3, 'Caches and stored chats', 'Deletes the disk cache, parked sessions, the lookup store and the response cache.', caches, false, 'delete caches'),
-      lv(4, 'Downloaded weights', `Deletes every downloaded weight set except ${this.o.active}, which is running.`, weights, false, 'delete weights'),
-      lv(5, 'Usage history and conductor data', 'Deletes the usage ledger and the conductor’s notes, memory and journal. The usage charts start empty.', [item(`${E}/usage`, 'The usage history', 1.4 * GIB, true, { files: 3 }), item(`${E}/conductor`, "The conductor's settings and journal", 220 * 2 ** 20), item(`${E}/memory`, 'Memory notes and transcripts', 5.1 * GIB, true, { files: 50_000, at_least: true })], true, 'delete history'),
+      lv(2, 'Applied configuration', `The setup guide's configuration goes, and the engine restarts on the recommended weight profile. The recommended profile is ${rec}.`, config, true, null),
+      lv(3, 'Caches and stored chats', 'Every cache on the SSD and in memory, and the conversations parked there. Answers stay right; the next long prompts are slower once.', caches, false, 'delete caches'),
+      lv(4, 'Downloaded weights', 'The weights of every profile but the active one. They download again when you pick that profile.', weights, false, 'delete weights'),
+      lv(5, 'Usage history and conductor data', "The usage history, the conductor's settings and journal, and the memory notes. This cannot be undone.", [item(`${E}/usage`, 'The usage history', 1.4 * GIB, true, { files: 3 }), item(`${E}/conductor`, "The conductor's settings and journal", 220 * 2 ** 20), item(`${E}/memory`, 'Memory notes and transcripts', 5.1 * GIB, true, { files: 50_000, at_least: true })], true, 'delete history'),
     ];
   }
 
@@ -493,6 +544,44 @@ export class MockSetup {
     };
   }
 
+  // ---- the admin password (unauthorized: on) ------------------------------------------------
+
+  signedIn(req: IncomingMessage): boolean {
+    const m = /(?:^|;\s*)qse_dash=([^;]+)/.exec(req.headers.cookie ?? '');
+    return !!m && this.sessions.has(decodeURIComponent(m[1]));
+  }
+
+  /** /v1/dashboard/session while the mock box has a password for the setup routes (server/app.py
+   *  _session): POST signs in (204 and the cookie), 401 on a wrong token; 404 with the login off */
+  async session(req: IncomingMessage, res: ServerResponse, readBody: () => Promise<string>): Promise<void> {
+    const json = (code: number, body: unknown) => {
+      res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(body));
+    };
+    const method = req.method ?? 'GET';
+    if (this.o.loginOff) {
+      if (method === 'GET') return json(200, { contract_version: '1.1', authenticated: true, login: false, password_set: true, expires_at: null });
+      return json(404, { error: { type: 'not_found', message: 'the dashboard login is off' } });
+    }
+    if (method === 'POST') {
+      const b = JSON.parse((await readBody()) || '{}');
+      if (b.token !== TOKEN) return json(401, { error: { type: 'unauthorized', message: 'wrong token' } });
+      const sid = `s${Date.now().toString(36)}${++this.seq}`;
+      this.sessions.add(sid);
+      res.writeHead(204, { 'Set-Cookie': `qse_dash=${sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` });
+      res.end();
+      return;
+    }
+    if (method === 'DELETE') {
+      this.sessions.clear();
+      res.writeHead(204, { 'Set-Cookie': 'qse_dash=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+      res.end();
+      return;
+    }
+    if (!this.signedIn(req)) return json(401, { error: { type: 'unauthorized', message: 'no session' } });
+    return json(200, { contract_version: '1.1', authenticated: true, login: true, password_set: true, expires_at: new Date(Date.now() + 43_200_000).toISOString().replace(/\.\d{3}Z$/, 'Z') });
+  }
+
   // ---- the router ---------------------------------------------------------------------------
 
   /** true when it answered */
@@ -502,14 +591,15 @@ export class MockSetup {
       res.end(JSON.stringify(body));
       return true;
     };
-    const err = (code: number, type: string, message: string, extra: Record<string, unknown> = {}) => json(code, { error: { type, message }, ...extra });
+    // server/setup_api.py _err: the extras go inside the error
+    const err = (code: number, type: string, message: string, extra: Record<string, unknown> = {}) => json(code, { error: { type, code: type, message, ...extra } });
     if (path === '/__mock/setup' && req.method === 'POST') return json(200, this.control(JSON.parse((await readBody()) || '{}')));
     if (!path.startsWith('/v1/setup/')) return false;
     if (this.away()) {
       req.socket.destroy();
       return true;
     }
-    if (this.o.unauthorized) return err(401, 'unauthorized', 'a bearer token or the dashboard session is needed');
+    if (this.o.unauthorized && !this.signedIn(req)) return err(401, 'unauthorized', 'a bearer token or the dashboard session is needed');
     const method = req.method ?? 'GET';
     const body = method === 'POST' ? JSON.parse((await readBody()) || '{}') : null;
     const o = this.o;
@@ -557,10 +647,10 @@ export class MockSetup {
       }
       const p = this.plan(sel);
       if (body.dry_run) return json(200, { ...p, dry_run: true });
-      const running = [...this.jobs.values()].find((j) => !['done', 'failed', 'rolled_back'].includes(this.jobNow(j.job.id)!.state));
-      if (running) return err(409, 'job_running', `job ${running.job.id} runs; one setup job at a time`);
-      if (o.busy) return err(409, 'busy', `${o.busy} request(s) run and 0 wait; apply when the engine is idle`);
-      if (!p.ok) return err(p.error_codes![0] === 'over_budget' ? 409 : 412, p.error_codes![0], p.errors.join(' '), { plan: p });
+      if (o.busy && !o.setupMode) return err(409, 'busy', `${o.busy} request(s) run and 0 wait; apply when the engine is idle`, { running: o.busy, waiting: 0 });
+      if (!p.ok) return json(PLAN_STATUS[p.error_codes[0]] ?? 409, { error: { type: p.error_codes[0], code: p.error_codes[0], message: p.errors.join(' ') }, plan: p });
+      const running = this.runningJob();
+      if (running) return err(409, 'job_running', `job ${running} runs; one setup job at a time`, { job: running });
       this.o.assistant = 'not_loaded';
       return json(202, { contract_version: '1.0', job: this.startJob(sel) });
     }
@@ -576,25 +666,41 @@ export class MockSetup {
     }
     if (path === '/v1/setup/reset') {
       if (method === 'GET') return json(200, { contract_version: '1.0', levels: this.levels(), busy: o.busy > 0 });
-      const level = Number(body.level) as 2 | 3 | 4 | 5;
+      // server/setup_api.py reset_route, in its order
+      const extra = Object.keys(body).filter((k) => !['level', 'confirm', 'dry_run'].includes(k));
+      if (extra.length) return err(422, 'unknown_field', `unknown field '${extra[0]}'; reset takes level, confirm and dry_run`);
+      if (body.level === 1) return err(400, 'browser_only', "level 1 (the setup progress and Wren's chat) is the browser's own: the page clears it");
+      const level = body.level as 2 | 3 | 4 | 5;
       const lv = this.levels().find((l) => l.level === level);
-      if (!lv) return err(400, 'invalid', `no reset level ${body.level}`);
-      if (o.busy) return err(409, 'busy', `${o.busy} requests are running`);
+      if (!lv || typeof level !== 'number') return err(422, 'invalid_level', 'level is 2, 3, 4 or 5');
       if (body.dry_run) return json(200, { ...lv, contract_version: '1.0', dry_run: true });
-      if (lv.confirm_word ? String(body.confirm ?? '').trim().toLowerCase() !== lv.confirm_word : body.confirm !== true) return err(400, 'confirm_required', lv.confirm_word ? `type '${lv.confirm_word}' to confirm` : 'confirm: true');
-      const present = lv.items.filter((i) => i.exists);
-      if (o.resetPartial) {
-        const failed = present.slice(0, 2).map((i) => ({ path: i.path, reason: 'OSError: [Errno 16] Device or resource busy' }));
-        const removed = present.slice(2).map((i) => ({ path: i.path, bytes: i.bytes }));
-        return json(200, { contract_version: '1.0', level, removed, restart_needed: lv.restart, message: 'Some items could not be removed.', ok: false, failed, freed_gb: Math.round((removed.reduce((a, r) => a + r.bytes, 0) / GIB) * 100) / 100 });
-      }
-      if (level === 4) for (const p of MODEL.profiles) if (p.id !== o.active) this.onDisk[p.id] = false;
+      const running = this.runningJob();
+      if (running) return err(409, 'job_running', `job ${running} runs; one setup job at a time`);
+      if (o.busy) return err(409, 'busy', `${o.busy} request(s) run and 0 wait; reset when the engine is idle`, { running: o.busy, waiting: 0 });
+      if (lv.confirm_word ? typeof body.confirm !== 'string' || body.confirm.trim().toLowerCase() !== lv.confirm_word : body.confirm !== true)
+        return json(400, { error: { type: 'confirm_required', code: 'confirm_required', message: lv.confirm_word ? `type '${lv.confirm_word}' to confirm` : 'confirm: true' }, level: { ...lv, contract_version: '1.0' } });
       if (level === 2) {
-        const job = { ...this.startJob({ ...defaults(MODEL) }, 'ok'), kind: 'reset' as const };
+        const rec = MODEL.profiles.find((p) => p.recommended)!.id;
+        const job = this.startJob({ ...defaults(MODEL), profile: rec }, 'ok', 'reset');
         return json(202, { contract_version: '1.0', level, removed: [], failed: [], freed_gb: 0, restart_needed: true, message: 'The engine restarts with the shipped configuration.', ok: true, job_id: job.id, job });
       }
-      const bytes = present.reduce((a, i) => a + i.bytes, 0);
-      return json(200, { contract_version: '1.0', level, removed: present.map((i) => ({ path: i.path, bytes: i.bytes })), failed: [], freed_gb: Math.round((bytes / GIB) * 100) / 100, restart_needed: lv.restart, message: 'Done.', ok: true });
+      // reset.execute: refused and `skip` items stay (in `failed`), `engine` ones the engine clears
+      const removed: { path: string; bytes: number }[] = [];
+      const failed: { path: string; reason: string }[] = [];
+      let busyLeft = o.resetPartial ? 2 : 0;
+      for (const it of lv.items) {
+        if (!it.exists) continue;
+        if (it.refused) failed.push({ path: it.path, reason: it.refused });
+        else if (it.action === 'skip') failed.push({ path: it.path, reason: 'the shadow reader runs; reset again in setup mode or after a restart' });
+        else if (busyLeft > 0) {
+          busyLeft--;
+          failed.push({ path: it.path, reason: 'OSError: [Errno 16] Device or resource busy' });
+        } else removed.push({ path: it.path, bytes: it.bytes });
+      }
+      if (level === 4) for (const p of MODEL.profiles) if (p.id !== o.active && removed.some((r) => r.path.endsWith(`/${p.id}`))) this.onDisk[p.id] = false;
+      const freed = removed.reduce((a, r) => a + r.bytes, 0);
+      const message = `Removed ${removed.length} of ${lv.items.length} items, ${(freed / GIB).toFixed(2)} GiB.` + (failed.length ? ` ${failed.length} could not be removed: see \`failed\`.` : '') + (lv.restart ? ' Restart the engine to finish.' : '');
+      return json(200, { contract_version: '1.0', level, removed, failed, freed_gb: Math.round((freed / GIB) * 100) / 100, restart_needed: lv.restart, message, ok: !failed.length });
     }
     if (path === '/v1/setup/assistant/status') return json(200, this.status());
     if (path === '/v1/setup/assistant/load' && method === 'POST') {

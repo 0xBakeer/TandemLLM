@@ -483,6 +483,16 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         req.socket.destroy();
         return;
       }
+      // the setup guide's admin password (mock/setup.ts `unauthorized`): its own session
+      if (path === '/v1/dashboard/session' && setup.o.unauthorized) return setup.session(req, res, () => readBody(req));
+      // setup mode (OPS-93): server/app.py SetupHandler serves /health, the session, /v1/setup/*
+      // and an empty /v1/models; every other /v1 route is a 503 setup_mode with Retry-After
+      if (setup.o.setupMode && path === '/v1/models') return json(res, 200, { object: 'list', data: [] });
+      if (setup.o.setupMode && path.startsWith('/v1/') && path !== '/v1/dashboard/session') {
+        res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '60' });
+        res.end(JSON.stringify({ error: { type: 'setup_mode', code: 'setup_mode', message: `this box is in setup mode and serves no model yet (${path}); open /dashboard/#/setup to set it up` } }));
+        return;
+      }
       if (path === '/__mock/mode') {
         if (req.method === 'POST') {
           const b = JSON.parse((await readBody(req)) || '{}');
