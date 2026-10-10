@@ -309,12 +309,34 @@ class KVPool:
         m = self.stats["min_avail_after"]
         self.stats["min_avail_after"] = after if m is None else min(m, after)
 
+    def by_kind(self) -> dict:
+        """Committed bytes by what the pages hold: `engine_kv` (the attention KV, buffers
+        `kv.*`) and `drafter_kv` (the drafters' context KV, `draft.*`), and the addresses
+        reserved for them (`reserved_va`: a window's whole range, NOT memory). Only buffers
+        mapped through the driver count as pages; a bookkeeping-only buffer (no driver, a CPU
+        test) is an ordinary allocation and is left to the allocator's figures."""
+        out = {"engine_kv": 0, "drafter_kv": 0, "other": 0, "reserved_va": 0, "paged": 0}
+        with self.lock:
+            bufs = list(self.buffers)
+        for b in bufs:
+            if getattr(b, "drv", None) is None:
+                continue
+            out["paged"] += 1
+            kind = ("drafter_kv" if str(b.name).startswith("draft") else
+                    "engine_kv" if str(b.name).startswith("kv") else "other")
+            out[kind] += b.committed_bytes()
+            out["reserved_va"] += int(getattr(b, "va_size", b.nbytes))
+        return out
+
     def report(self) -> dict:
         with self.lock:
             owners = {str(k): round(v / GiB, 3) for k, v in self.by_owner.items()}
             c = sum(self.by_owner.values())
         avail = self.meminfo() if self.meminfo is not None else None
+        kinds = self.by_kind()
         return {"committed_gib": round(c / GiB, 3), "by_owner_gib": owners,
+                "committed_by_kind_gib": {k: round(kinds[k] / GiB, 3)
+                                          for k in ("engine_kv", "drafter_kv", "other")},
                 "reserved_va_gib": round(sum(b.nbytes for b in self.buffers) / GiB, 2),
                 "buffers": len(self.buffers), "hard_floor_gib": round(self.hard_floor / GiB, 2),
                 "margin_rows": self.margin_rows,
@@ -590,6 +612,19 @@ class PagedSet:
 
 #: a paged tensor's base address -> its set, for the copy-ins that only hold the tensor
 _BY_PTR: dict = {}
+
+
+def paged(t) -> bool:
+    """Is `t` (a whole KV or draft-KV tensor) backed by driver-mapped pages of the pool? Such a
+    tensor's `nbytes` is its reserved ADDRESS range, not memory: what it holds is its buffer's
+    committed pages (server/memsplit.py reads those)."""
+    if t is None:
+        return False
+    try:
+        ps = _BY_PTR.get(t.data_ptr())
+    except Exception:                                              # noqa: BLE001
+        return False
+    return ps is not None and ps.on_device()
 
 
 def ensure_for(t, rows: int) -> None:

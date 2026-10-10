@@ -329,6 +329,7 @@ export interface SystemInfo {
     process_rss_bytes: number | null;
     split?: MemorySplit | null; // OPS-41
     limits?: MemoryLimits | null; // OPS-47
+    roles?: RolesReport | null; // 0.6.1: the small models under memory pressure (server/rolemem.py)
   };
   gpu: {
     name: string | null;
@@ -746,6 +747,38 @@ export interface Live {
   history?: LiveSample[]; // the first event and follow=0 only
 }
 
+// ---- 0.6.1: the small models under memory pressure (server/rolemem.py) ------------------------
+
+export type RoleState = 'loaded' | 'unloaded_for_memory' | 'reloading' | 'not_loaded' | 'loading' | 'unloading' | 'failed';
+export interface RoleRow {
+  models: string[];
+  kind?: string;
+  state: RoleState | string;
+  claim_gib?: number;
+  reload_at_gib?: number;
+  out_since?: number | null; // unix seconds
+  out_s?: number | null;
+  why?: string | null;
+  freed_gib?: number | null;
+  unloads?: number;
+  reloads?: number;
+  hold_s?: number;
+  refusal?: string | null;
+}
+export interface RolesReport {
+  dynamic: boolean;
+  order?: string[];
+  reload_order?: string[];
+  policy?: { floor_gib: number; margin_gib: number; hold_s: number; thrash_s: number; max_hold_s: number };
+  mem_available_gib?: number | null;
+  headroom_gib?: number | null;
+  quiet_s?: number | null;
+  roles: Record<string, RoleRow>;
+  stats?: Record<string, number>;
+  events?: { kind: string; ts: number; role?: string; freed_gib?: number; why?: string; reason?: string; out_s?: number }[];
+  error?: string;
+}
+
 // ---- OPS-41: the engine's memory split and the residency planner -------------------------------
 
 /** server/memsplit.py: the resident set in bytes, each part read off the object that holds it. */
@@ -758,6 +791,13 @@ export interface MemorySplit {
   mem_available: number | null;
   max_len: number | null;
   drafter_caches: number;
+  /** 0.6.1: the parts held as KV pages the driver maps outside the allocator (the shared KV pool), committed bytes */
+  vmm_parts?: string[];
+  kv_committed?: number | null; // every slot's committed KV pages
+  kv_reserved_va?: number | null; // the address range reserved for them: not memory
+  mem_total?: number | null;
+  in_use?: number | null; // MemTotal - MemAvailable
+  outside?: number | null; // in_use - allocator reserved - KV pages: the CUDA context, host memory, other programs
   load?: { stage: string; allocated: number | null; reserved: number | null; mem_available_drop: number | null; s: number }[];
 }
 

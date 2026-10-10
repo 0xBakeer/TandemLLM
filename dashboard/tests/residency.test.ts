@@ -3,7 +3,7 @@
 // refusal (2, 3, 4, 5 of OPS-41's Gherkin as the dashboard shows them).
 import { describe, expect, it } from 'vitest';
 import type { MemoryBudget, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyRow } from '../src/api/types';
-import { appliesWords, eventWords, gib, limitValue, pendingWords, rowWords, scaledBar, splitSegments, switchWords, usageShare, usageWords, withEngineLimit } from '../src/lib/residency';
+import { appliesWords, eventWords, gib, inUseWords, limitValue, roleRows, roleStateWords, pendingWords, rowWords, scaledBar, splitSegments, switchWords, usageShare, usageWords, withEngineLimit } from '../src/lib/residency';
 
 const G = 1024 ** 3;
 const split: MemorySplit = { allocated: 70 * G, reserved: 72 * G, parts: { kv_pool: 16 * G, weights: 16 * G, drafter_kv: 10 * G, vision: 0 }, other: 28 * G, reserve: 2 * G, mem_available: 31 * G, max_len: 262144, drafter_caches: 2 };
@@ -78,5 +78,38 @@ describe('the limits', () => {
     expect(a.engine).toEqual({ RESIDENT_PARK_GB: 2 });
     expect(doc.engine).toBeUndefined();
     expect(withEngineLimit(a, 'RESIDENT_PARK_GB', null).engine).toBeUndefined();
+  });
+});
+
+// 0.6.1: the shared KV pool's pages are committed bytes outside the allocator, and the bar adds up
+// to MemTotal - MemAvailable (the 2026-10-10 04:35 reading: 16 GiB "KV pool" and 10 GiB "drafter
+// caches" were the reserved address ranges of slot 0 while 12.75 GiB were committed in all).
+describe('the split with the shared KV pool', () => {
+  const pooled: MemorySplit = { allocated: 46 * G, reserved: 51 * G, parts: { weights: 16 * G, kv_pool: 9 * G, drafter_kv: 3.75 * G, narrator: 3.6 * G }, vmm_parts: ['kv_pool', 'drafter_kv'], other: 26.4 * G, reserve: 5 * G, kv_committed: 12.75 * G, kv_reserved_va: 104 * G, mem_total: 121.6 * G, mem_available: 45.5 * G, in_use: 76.1 * G, outside: 12.35 * G, max_len: 262144, drafter_caches: 2 };
+  it('puts the allocator first, then the committed KV pages and what is outside, summing to in use', () => {
+    const s = splitSegments(pooled);
+    expect(s.map((x) => x.key)).toEqual(['weights', 'narrator', 'other', 'reserve', 'kv_pool', 'drafter_kv', 'outside']);
+    const sum = s.reduce((a, x) => a + x.bytes, 0);
+    expect(sum).toBeCloseTo(16 * G + 3.6 * G + 26.4 * G + 5 * G + 12.75 * G + 12.35 * G, 0);
+    expect(s.find((x) => x.key === 'kv_pool')!.label).toBe('KV pages, committed');
+  });
+  it('says in use as allocator + KV pages + outside, and the reserved range as not memory', () => {
+    expect(inUseWords(pooled)).toContain('KV pages committed 12.8');
+    expect(inUseWords(pooled)).toContain('KV addresses reserved 104.0 GiB (not memory)');
+    expect(inUseWords(split)).toBe('');
+  });
+});
+
+describe('the small models under memory pressure', () => {
+  const rep = { dynamic: true, order: ['shadow', 'narrator'], policy: { floor_gib: 15, margin_gib: 4, hold_s: 60, thrash_s: 600, max_hold_s: 3600 }, headroom_gib: 30,
+    roles: { shadow: { models: ['qwen3.5-0.8b'], state: 'unloaded_for_memory', out_s: 200, freed_gib: 1.9, reload_at_gib: 21.5, hold_s: 60, unloads: 1, reloads: 0 }, narrator: { models: ['qwen3.5-2b'], state: 'reloading', reload_at_gib: 24.5 } } };
+  it('names each state in words, in unload order, with the reload line', () => {
+    const rows = roleRows(rep);
+    expect(rows.map((r) => r.name)).toEqual(['shadow', 'narrator']);
+    expect(rows[0].words).toBe('unloaded for memory (3 min, 1.9 GiB back)');
+    expect(rows[0].line).toBe('reloads at 21.5 GiB headroom held 60 s');
+    expect(rows[1].words).toBe('loading again');
+    expect(roleStateWords({ models: [], state: 'loaded' })).toBe('loaded');
+    expect(roleRows(null)).toEqual([]);
   });
 });

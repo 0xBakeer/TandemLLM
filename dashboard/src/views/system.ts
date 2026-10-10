@@ -20,7 +20,7 @@ import { api, describeError } from '../api/client';
 import type { MemoryLimitRow, MemoryLimits, ResidencyDoc, ResidencyPlan, SystemInfo } from '../api/types';
 import { bytes, duration, exact, pct, timeShort, dateTimeShort, ago } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
-import { appliesWords, eventWords, gib, gibOf, limitValue, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
+import { appliesWords, eventWords, gib, gibOf, inUseWords, limitValue, roleRows, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
 import { pushHostSamples, renderHosts, type HostSample } from './hosts';
 import { renderEngines } from './engines';
@@ -260,6 +260,7 @@ export class QseSystem extends LightElement {
               ${segs.map((x) => html`<div data-part-row=${x.key}><dt><span class="split-dot" style="--seg:var(--series-${x.color}, var(--${x.color}))"></span>${x.label}</dt><dd class="num">${gib(x.bytes)}</dd></div>`)}
             </dl>
             <p class="small muted num">allocated ${gib(split.allocated)} · reserved ${gib(split.reserved)} · max_len ${exact(split.max_len)} · ${split.drafter_caches} drafter caches</p>
+            ${inUseWords(split) ? html`<p class="small muted num" data-in-use>${inUseWords(split)}</p>` : nothing}
             ${split.load?.length
               ? html`<details class="sec"><summary>Load stages <span class="sec-sub">allocated / taken from MemAvailable, each stage of the start</span></summary>
                   <div class="table-scroll"><table class="table" data-load-stages><thead><tr><th>stage</th><th class="num-col">allocated</th><th class="num-col">reserved</th><th class="num-col">MemAvailable taken</th><th class="num-col">took</th></tr></thead>
@@ -267,6 +268,7 @@ export class QseSystem extends LightElement {
                 </details>`
               : nothing}`
         : nothing}
+      ${this.renderRoles(d)}
       ${lim ? this.renderLimits(lim, p != null) : nothing}
       ${pl
         ? html`<div class="stats residency-stats" data-residency>
@@ -289,6 +291,24 @@ export class QseSystem extends LightElement {
           : nothing}`,
       { id: 'card-residency', cls: pl && pl.spendable_gib != null && pl.spendable_gib < 0 ? 'is-warn' : '' },
     );
+  }
+
+  /** 0.6.1: the small models under memory pressure: loaded, unloaded for memory, loading again. */
+  private renderRoles(d: SystemInfo): TemplateResult | typeof nothing {
+    const rep = d.memory.roles;
+    const rows = roleRows(rep);
+    if (!rep || !rows.length) return nothing;
+    const ev = (rep.events ?? []).slice(0, 4);
+    return html`<div class="sec" data-roles>
+      <div class="table-scroll"><table class="table" data-roles-table>
+        <thead><tr><th>small model, in unload order</th><th>model</th><th>now</th><th class="num-col">claim</th><th>comes back</th><th class="num-col">out / back</th></tr></thead>
+        <tbody>${rows.map((r) => html`<tr data-role=${r.name} data-role-state=${r.row.state} class=${r.row.state === 'unloaded_for_memory' ? 'is-warn' : ''}><td>${r.label}</td><td>${r.row.models.join(', ') || '—'}</td><td class=${r.row.state === 'unloaded_for_memory' ? 'warn-ink' : ''}>${r.words}</td><td class="num num-col">${gibOf(r.row.claim_gib ?? null)}</td><td class="small muted">${r.line || '—'}</td><td class="num num-col">${r.row.unloads ?? 0} / ${r.row.reloads ?? 0}</td></tr>`)}</tbody>
+      </table></div>
+      <p class="muted small">${rep.dynamic
+        ? html`When the KV pool needs pages, the caches go first, then these models in this order, and only then an idle conversation is parked or a request waits. They load again through the residency planner once the headroom${rep.headroom_gib != null ? html` (now <span class="num">${gibOf(rep.headroom_gib)}</span>)` : nothing} has stayed above their line with nothing waiting.`
+        : 'The small models stay loaded (QSE_ROLES_DYNAMIC off).'}</p>
+      ${ev.length ? html`<ul class="small muted num" data-role-events>${ev.map((e) => html`<li>${dateTimeShort(new Date(e.ts * 1000).toISOString())} ${e.kind.replace(/_/g, ' ')} ${e.role ?? ''}${e.freed_gib != null ? `, ${e.freed_gib} GiB back` : ''}${e.out_s != null ? `, out ${Math.round(e.out_s)} s` : ''}${e.reason ? `, ${e.reason}` : ''}</li>`)}</ul>` : nothing}
+    </div>`;
   }
 
   /** OPS-47: every limit with what it holds now; editable when the conductor is on this server. */
