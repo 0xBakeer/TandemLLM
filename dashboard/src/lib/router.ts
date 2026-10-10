@@ -1,18 +1,24 @@
-// Hash routing: #/usage?client=k:…&range=90d. Reload keeps the tab and its filters.
+// Hash routing: #/usage?client=k:…&range=90d. Reload keeps the tab and its filters. The setup guide
+// has a path below its view: #/setup/<model>/<step> (VIS-78).
 
-export type View = 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'backends' | 'system';
-export const VIEWS: View[] = ['usage', 'performance', 'dev', 'playground', 'conductor', 'backends', 'system'];
+export type View = 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'backends' | 'system' | 'setup';
+export const VIEWS: View[] = ['usage', 'performance', 'dev', 'playground', 'conductor', 'backends', 'system', 'setup'];
 
 export interface Route {
   view: View;
   params: URLSearchParams;
+  /** the segments after the view (#/setup/qwen3.8-27b/weights -> ['qwen3.8-27b', 'weights']) */
+  path: string[];
 }
 
 export function parseHash(hash = location.hash): Route {
   const h = hash.replace(/^#\/?/, '');
-  const [path, query = ''] = h.split('?');
-  const view = (VIEWS as string[]).includes(path) ? (path as View) : 'usage';
-  return { view, params: new URLSearchParams(query) };
+  const [full, query = ''] = h.split('?');
+  const [first, ...rest] = full.split('/');
+  const known = (VIEWS as string[]).includes(first);
+  const view = known ? (first as View) : 'usage';
+  const path = known && view === 'setup' ? rest.filter(Boolean).map((x) => decodeURIComponent(x)) : [];
+  return { view, params: new URLSearchParams(query), path };
 }
 
 export function hashFor(view: View, params?: URLSearchParams | Record<string, string | null | undefined>): string {
@@ -38,7 +44,7 @@ export function setParams(patch: Record<string, string | null | undefined>): voi
     if (v == null || v === '') r.params.delete(k);
     else r.params.set(k, v);
   }
-  const next = hashFor(r.view, r.params);
+  const next = hashFor(r.view, r.params).replace(`#/${r.view}`, `#/${[r.view, ...r.path].join('/')}`);
   if (location.hash !== next) history.replaceState(null, '', next);
   window.dispatchEvent(new HashChangeEvent('hashchange'));
 }

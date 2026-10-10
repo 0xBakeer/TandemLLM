@@ -26,8 +26,12 @@ import { pushHostSamples, renderHosts, type HostSample } from './hosts';
 import { renderEngines } from './engines';
 import { copyButton, icon, panel, skeleton, errorState, emptyState } from '../ui/bits';
 import '../ui/speed-check';
+import { R } from '../setup/strings';
 
 const KEEP = 360; // 30 min at 5 s
+
+let resetChunk: Promise<unknown> | null = null;
+const loadReset = () => (resetChunk ??= import('../setup/reset'));
 
 interface Sample {
   t: number;
@@ -56,8 +60,11 @@ export class QseSystem extends LightElement {
     super.connectedCallback();
     this.poller = poll(() => this.load(), 5000);
     this.poller.start();
+    window.addEventListener('qse-system-refresh', this.onRefresh);
   }
+  private onRefresh = () => void this.poller?.refresh();
   disconnectedCallback(): void {
+    window.removeEventListener('qse-system-refresh', this.onRefresh);
     this.poller?.stop();
     super.disconnectedCallback();
   }
@@ -220,7 +227,14 @@ export class QseSystem extends LightElement {
       ${renderEngines((d.proxy?.backends ?? []).map((b) => ({ id: b.id, label: b.label, kind: b.kind, engine: b.engine ?? null, figures: b.engine?.figures ?? null })), 'from each engine’s own /metrics page, read by the proxy every 15 s; figures over the last 5 minutes')}
       ${this.renderPlan(d)}
       ${this.renderRolling()}
+      ${this.renderReset()}
     </div>`;
+  }
+
+  /** VIS-82: the reset levels, at the bottom (their own chunk, loaded when the view opens) */
+  private renderReset() {
+    void loadReset();
+    return panel(R.title, html`<qse-reset></qse-reset>`, { id: 'reset', cls: 'panel-reset' });
   }
 
   private async editLimits(): Promise<void> {
