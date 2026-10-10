@@ -112,6 +112,10 @@ done
 [ -n "${SESSION_SPILL_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-gb $SESSION_SPILL_GB"
 [ -n "${SESSION_SPILL_CODEC:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-codec $SESSION_SPILL_CODEC"
 [ -n "${DISK_WRITE_BUDGET_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --disk-write-budget-gb $DISK_WRITE_BUDGET_GB"
+# The vision tower, on unless serve.env says off, and the response cache, off unless it says on
+# (the setup guide's two switches for them, docs/setup.md)
+[ "${VISION:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --vision off"
+[ "${RESPONSE_CACHE:-off}" = "on" ] && MEM_FLAGS="$MEM_FLAGS --response-cache"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"

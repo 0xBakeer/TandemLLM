@@ -18,7 +18,7 @@ Keep at least 15~GiB of \code{MemAvailable} at the worst case of anything you ru
 \hd{item} & \hd{size} \\
 \midrule
 NVFP4 weights and the FP8 head, on the device & about 16.4 GiB \\
-KV buffer, allocated for the whole context at load & 106.5 KiB a token: 64 KiB for the target, 20 KiB for each of the two block drafters; 27.9 GB at 262,144 tokens \\
+KV buffer, allocated for the whole context at load & 104.25 KiB a token (106,752 bytes): 64 KiB for the target, 20 KiB for each of the two block drafters, 256 B of rotary table; 28.0 GB (26.1 GiB) at 262,144 tokens \\
 the engine at load (allocated) & 57.0 GiB: weights 16.35, KV pool 16.00, drafters' context caches 10.00, recurrent state 0.14, vision 0.86, the rest 13.7 \\
 the same at a 131,072-token context & 44.0 GiB: halving the window frees 13.0 GiB \\
 the caches at their caps & state store 2 GiB, resident anchors 2.5, stash 1, pinned head 4, parked session 4 \\

@@ -95,3 +95,15 @@ In this order, each on the new model:
 - Tile tables and router prices are measured for this model's shapes on the GB10. A new model or a new board needs its own sweep (`tools/fp8_probe.py --sweep`, `tools/nvfp4_skinny.py`) and its own price curve.
 - Some modules read their switches into globals at import. Two engines with different settings cannot share one process yet.
 - Runtime names still carry the old project name, from the `QWEN38_` and `QSE_` variable prefixes to the `Qwen38Engine` class. A later release renames them.
+
+## Register the model for the setup guide
+
+The dashboard's setup guide (`#/setup`, [setup.md](setup.md)) lists one tile per `models/<id>/model.yaml`. The folder is named after the model's id, and the file follows schema 1: the weight profiles (one per `ops/profiles/<name>.env`), the measured table, the tools that run beside the model with their memory and serve.env keys, the parallelism limits, the methods and the device presets. [models/README.md](../models/README.md) lists the fields; `models/qwen3.8-27b/model.yaml` is the worked example, with the source of every number next to it.
+
+```text
+models/<id>/model.yaml                  the registry entry
+models/<id>/measurements/<build>-*.json the raw data the measured table came from (optional)
+models/schema/model.schema.json         the schema, for an editor (python -m server.setup.registry --schema)
+```
+
+Check a new file with `python -m server.setup.registry --check`. It refuses a file whose numbers do not add up (two recommended profiles, a tool that needs one that is off, a docs link that is not there), and `tests/test_setup_registry.py` fails when the file names a serve.env key nothing reads or when a profile in `ops/profiles/` has no entry. Memory is in GiB and comes from the engine's own `[memory] load stages` line and the dashboard's memory split, never from a guess.
