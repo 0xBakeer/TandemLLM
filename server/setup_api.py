@@ -12,6 +12,9 @@ dashboard/src/api/types.ts `Setup*`).
                                           plan has errors (over_budget, missing_token, ...)
     GET  /v1/setup/jobs/{id}              the job's events as SSE (`id:` its sequence, Last-Event-ID
                                           resumes), ?format=json the job
+    GET  /v1/setup/reset                  the levels 2 to 5, what each removes and how big it is
+    POST /v1/setup/reset {level, confirm, dry_run?}   one level (server/setup/reset.py); level 2
+                                          starts a job; 409 while requests are in flight or a job runs
     GET  /v1/setup/assistant/status       Wren (server/setup/wren.py); a poll keeps it loaded
     POST /v1/setup/assistant/load         idempotent; a memory refusal is state `refused`
     POST /v1/setup/assistant/unload       the memory back
@@ -118,6 +121,9 @@ def _get(h, app, parts: list[str]) -> None:
         return h._json(200, device(app), extra_headers=NO_STORE)
     if len(parts) == 2 and parts[0] == "jobs":
         return job_route(h, parts[1])
+    if parts == ["reset"]:
+        from server.setup import reset
+        return h._json(200, reset.levels(app, busy(app)), extra_headers=NO_STORE)
     if parts == ["assistant", "status"]:
         w = wren_of(app)
         w.touch()
@@ -145,6 +151,8 @@ def _post(h, app, parts: list[str], body) -> None:
         return h._json(200, out, extra_headers=NO_STORE)
     if parts in (["plan"], ["apply"]):
         return apply_route(h, app, parts[0], body)
+    if parts == ["reset"]:
+        return reset_route(h, app, body)
     if parts == ["assistant", "load"]:
         return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
     if parts == ["assistant", "unload"]:
@@ -280,3 +288,94 @@ def job_route(h, jid: str) -> None:
     except (BrokenPipeError, ConnectionResetError, OSError):
         h.close_connection = True
     return None
+
+
+def clear_live(app, what: str) -> int:
+    """Reset level 3's caches the running engine holds, through its own functions (what
+    POST /v1/cache/clear?tier=all does): the disk tier and the spill, or one RAM cache."""
+    st = app.STATE
+    if what == "disk":
+        from server import diskcache as diskcache_mod
+        diskcache_mod.clear(st)
+        if st.get("spill") is not None:
+            with app.LOCK:
+                st["spill"].clear()
+        return 0
+    obj = st.get(what)
+    if obj is None or not hasattr(obj, "clear"):
+        raise ValueError(f"no {what} on this server")
+    with app.LOCK:
+        obj.clear()
+        if what == "resident":
+            obj.shed_park()
+    return 0
+
+
+def reset_route(h, app, body) -> None:
+    from server.setup import apply, reset
+    if not isinstance(body, dict):
+        return _err(h, 422, "invalid_request", "the body must be a JSON object")
+    extra = sorted(k for k in body if k not in ("level", "confirm", "dry_run"))
+    if extra:
+        return _err(h, 422, "unknown_field", f"unknown field {extra[0]!r}; reset takes level, "
+                    f"confirm and dry_run")
+    n = body.get("level")
+    if n == 1:
+        return _err(h, 400, "browser_only", "level 1 (the setup progress and Wren's chat) is the "
+                    "browser's own: the page clears it")
+    if isinstance(n, bool) or n not in (2, 3, 4, 5):
+        return _err(h, 422, "invalid_level", "level is 2, 3, 4 or 5")
+    lv = reset.level(n, app)
+    if body.get("dry_run"):
+        reset.audit({"level": n, "dry_run": True, "freed_gb": 0, "result": "plan"})
+        return h._json(200, dict(lv, contract_version=CONTRACT, dry_run=True),
+                       extra_headers=NO_STORE)
+    run = apply.running_job()
+    if run is not None:
+        reset.audit({"level": n, "dry_run": False, "freed_gb": 0, "result": "job_running"})
+        return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
+                    job=run["id"])
+    if busy(app):
+        inf = app.INFLIGHT
+        reset.audit({"level": n, "dry_run": False, "freed_gb": 0, "result": "busy"})
+        return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
+                    f"{inf.get('waiting', 0)} wait; reset when the engine is idle",
+                    running=inf.get("running", 0), waiting=inf.get("waiting", 0))
+    word, confirm = reset.WORDS[n], body.get("confirm")
+    ok = confirm is True if word is None else (
+        isinstance(confirm, str) and confirm.strip().lower() == word)
+    if not ok:
+        reset.audit({"level": n, "dry_run": False, "freed_gb": 0, "result": "confirm_required"})
+        return h._json(400, {"error": {"type": "confirm_required", "code": "confirm_required",
+                                       "message": "confirm: true" if word is None else
+                                       f"type {word!r} to confirm"},
+                             "level": dict(lv, contract_version=CONTRACT)},
+                       extra_headers=NO_STORE)
+    if n == 2:
+        models, _ = registry.load_all()
+        m = next(iter(models.values()))
+        setup_mode = bool(app.STATE.get("setup_mode"))
+        p = apply.reset_plan(m, setup_mode=setup_mode)
+        if not p["ok"]:
+            code = p["error_codes"][0]
+            reset.audit({"level": 2, "dry_run": False, "freed_gb": 0, "result": code})
+            return h._json(PLAN_STATUS.get(code, 409),
+                           {"error": {"type": code, "code": code,
+                                      "message": " ".join(p["errors"])}, "plan": p},
+                           extra_headers=NO_STORE)
+        wren_of(app).unload("reset")
+        job = apply.new_job(m, p["selection"], p, setup_mode=setup_mode, kind="reset")
+        apply.spawn(job["id"])
+        reset.audit({"level": 2, "dry_run": False, "freed_gb": 0, "result": "job",
+                     "job": job["id"]})
+        return h._json(202, {"contract_version": CONTRACT, "level": 2, "removed": [],
+                             "failed": [], "freed_gb": 0.0, "restart_needed": True,
+                             "message": "The engine restarts with the shipped configuration.",
+                             "ok": True, "job_id": job["id"], "job": job},
+                       extra_headers=NO_STORE)
+    out = reset.execute(n, app, clear_live=lambda what: clear_live(app, what))
+    reset.audit({"level": n, "dry_run": False, "freed_gb": out["freed_gb"],
+                 "result": "ok" if out["ok"] else f"{len(out['failed'])} failed"})
+    print(f"[setup] reset level {n}: {out['freed_gb']:.2f} GiB freed, {len(out['failed'])} "
+          f"item(s) not removed", flush=True)
+    return h._json(200, out, extra_headers=NO_STORE)

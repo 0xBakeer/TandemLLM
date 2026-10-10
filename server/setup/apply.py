@@ -34,6 +34,7 @@ the conductor's secret filter, and the HF and admin tokens are cut out of them b
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -302,6 +303,48 @@ def _port_taken(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def reset_plan(m: dict, *, setup_mode: bool) -> dict:
+    """Reset level 2's plan (the shape of `plan`): run/setup.env and its backups go, the engine
+    starts on the recommended profile with what ops/serve.env alone says."""
+    sel = estimate_mod.defaults(m)
+    prof = registry.recommended_profile(m)
+    disk = device_mod.on_disk(m, fresh=True).get(prof["id"], {})
+    errors, codes = [], []
+    missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
+    if missing:
+        errors.append("The recommended profile needs files that are not on this box: " + "; ".join(
+            f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})" for a in missing) + ".")
+        codes.append("missing_assets")
+    on_disk = bool(disk.get("weights"))
+    if not on_disk and prof["hf_private"] and not device_mod.hf_token_present():
+        errors.append(f"{prof['hf_repo']} is private and no Hugging Face token is set.")
+        codes.append("missing_token")
+    keys = list(overlay_values(m, sel))
+    extra = ["PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG"]
+    now = resolve_env(keys + extra)
+    base = resolve_env(keys + extra, profile=prof["id"], overlay=os.path.join(run_dir(), ".none"))
+    changes = [{"key": k, "current": now.get(k), "next": base.get(k), "from": "reset level 2"}
+               for k in keys if now.get(k) != base.get(k)]
+    port = lambda d: int(d["PORT"]) if (d.get("PORT") or "").isdigit() else 8000  # noqa: E731
+    cond = base.get("QSE_CONDUCTOR_CONFIG") or "off"
+    smoke = "TandemLLM" if cond not in ("", "off") else (base.get("SERVED_MODEL") or
+                                                         "qwen38-spark-engine")
+    active = device_mod.active_profile()
+    commands = ([f"bash ops/use-profile.sh {prof['id']} --fetch-only"] if not on_disk else []) + \
+        ([f"bash ops/stop.sh 120   (the engine on port {port(now)})"]
+         if port(now) != port(base) else []) + \
+        ["remove run/setup.env and its backups", f"bash ops/use-profile.sh {prof['id']}",
+         f"smoke: GET http://127.0.0.1:{port(base)}/health and one short chat"]
+    return {"contract_version": "1.0", "ok": not errors, "errors": errors, "error_codes": codes,
+            "warnings": [], "profile": {"current": None if setup_mode and not active else active,
+                                        "next": prof["id"], "on_disk": on_disk,
+                                        "download_gb": 0.0 if on_disk else prof["disk_gb"]},
+            "changes": changes, "restart": True, "commands": commands,
+            "estimate": estimate_mod.estimate(m, sel), "ports": {"current": port(now),
+                                                                 "next": port(base)},
+            "smoke_model": smoke, "selection": sel}
+
+
 # ---------------------------------------------------------------------- jobs
 def job_dir(jid: str) -> str:
     if not JOB_ID.match(jid or ""):
@@ -376,22 +419,23 @@ def events(jid: str, after: int = 0) -> list[dict]:
     return out
 
 
-def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool) -> dict:
-    """The job's folder and its job.json (what the runner reads), state queued."""
+def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply") -> dict:
+    """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
+    reset (reset level 2: the overlay goes and the recommended profile starts)."""
     jid = secrets.token_hex(8)
     d = job_dir(jid)
     os.makedirs(d, mode=0o700)
     now = time.time()
     steps = [{"id": sid, "label": label, "state": "pending", "started_at": None, "ended_at": None,
               "detail": None} for sid, label in STEPS]
-    job = {"id": jid, "state": "queued", "created_at": now, "ended_at": None,
+    job = {"id": jid, "kind": kind, "state": "queued", "created_at": now, "ended_at": None,
            "profile": sel["profile"], "steps": steps, "message": None, "changes": p["changes"],
            "rolled_back": False, "failed_step": None, "pid": None,
            "url": f"http://<this box>:{p['ports']['next']}/dashboard/"}
     _write_json(os.path.join(d, "job.json"),
-                {"model": m["id"], "selection": sel, "setup_mode": setup_mode,
+                {"kind": kind, "model": m["id"], "selection": sel, "setup_mode": setup_mode,
                  "previous": p["profile"]["current"], "ports": p["ports"],
-                 "on_disk": p["profile"]["on_disk"]})
+                 "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model")})
     _write_json(os.path.join(d, "state.json"), job)
     return job
 
@@ -539,6 +583,8 @@ class Runner:
         m = registry.get(spec["model"])
         if m is None:
             return self._fail("check", f"no model {spec['model']!r} in models/")
+        if spec.get("kind") == "reset":
+            return self._reset_steps(m)
         try:
             sel = estimate_mod.check(m, spec["selection"])
         except estimate_mod.SelectionError as exc:
@@ -604,6 +650,64 @@ class Runner:
             return self._rollback(m, spec, backup, prev, old_port)
         self.step("smoke", "done", f"{sel['profile']} answers on port {new_port}")
         self.job["message"] = f"{sel['profile']} is live on port {new_port}."
+        return True
+
+    def _reset_steps(self, m: dict) -> bool:
+        """Reset level 2: the overlay and its backups go (the overlay kept in the job's folder
+        for the rollback), then the recommended profile starts as serve.env alone says."""
+        spec = self.spec
+        p = reset_plan(m, setup_mode=spec["setup_mode"])
+        prof = p["profile"]["next"]
+        if p["errors"]:
+            return self._fail("check", " ".join(p["errors"]))
+        if _box_lock_held():
+            return self._fail("check", "the box lock (~/.qwen38-box.flock) is held; try again "
+                                       "later")
+        prev = spec.get("previous")
+        if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
+                os.path.join(self.ops, "profiles", prev + ".env"))):
+            prev = None
+        self.step("check", "done", f"{len(p['changes'])} settings go back")
+        if p["profile"]["on_disk"]:
+            self.step("fetch", "skipped", "the weights are on this box")
+        else:
+            self.step("fetch", "running", f"about {p['profile']['download_gb']:g} GB")
+            rc = self.run(self.argv("use-profile.sh", prof, "--fetch-only"), TIMEOUTS["fetch"])
+            if rc != 0:
+                return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
+                                           f"else changed")
+            self.step("fetch", "done")
+        self.step("write_config", "running")
+        old_port, new_port = p["ports"]["current"], p["ports"]["next"]
+        if new_port != old_port:
+            self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
+        keep = os.path.join(self.dir, "setup.env.before")
+        overlay = overlay_path()
+        if os.path.exists(overlay):
+            shutil.copy2(overlay, keep)
+        gone = 0
+        for f in glob.glob(overlay + "*"):
+            if f == overlay or ".bak-" in f:
+                os.unlink(f)
+                gone += 1
+        self.step("write_config", "done", f"run/setup.env and {max(0, gone - 1)} backup(s) removed")
+        backup = keep if os.path.exists(keep) else None
+        self.step("switch", "running", "about 4 minutes; the dashboard is away meanwhile")
+        if spec["setup_mode"] and os.path.exists(pending_path()):
+            os.unlink(pending_path())
+        rc = self.run(self.argv("use-profile.sh", prof), TIMEOUTS["switch"],
+                      SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=p["smoke_model"])
+        if rc != 0:
+            self._fail("switch", f"the engine did not start (ops/use-profile.sh exit {rc})")
+            return self._rollback(m, spec, backup, prev, old_port)
+        self.step("switch", "done")
+        self.step("smoke", "running")
+        why = self._smoke(prof, new_port, p["smoke_model"])
+        if why:
+            self._fail("smoke", why)
+            return self._rollback(m, spec, backup, prev, old_port)
+        self.step("smoke", "done", f"{prof} answers on port {new_port}")
+        self.job["message"] = f"The shipped configuration runs, on {prof}."
         return True
 
     def _smoke(self, profile: str, port: int, model: str) -> str | None:
