@@ -224,7 +224,45 @@ export class MockParallel {
     }
   }
 
+  /** VIS-76: `POST /__mock/parallel {fixture: "stall"}` answers the 0.6.x shape of 2026-10-10 09:52
+   *  instead of the simulator: four engine slots, slot 0 prefilling 18,432 of 44,558 (one 8,192-row
+   *  window a mark), slots 1-3 decoding with no token over the last 2 s (decode_now 0.0), a fifth
+   *  request held for memory (SRV-305), and a series whose decode drops to 0 between bursts. */
+  fixture: 'stall' | null = null;
+
+  private stallDoc(nowMs: number, since: number | null): J {
+    const now = nowMs / 1000;
+    const lane = (i: number, state: string, extra: J): J => ({
+      id: `chatcmpl-sta11${i}000000000000000000`, backend: 'engine', kind: 'tandemllm', model: 'TandemLLM',
+      client: { kind: 'open-webui', user: null, session: `c:s${i}` }, state, label: null, tool: null,
+      elapsed_ms: 60_000 - i * 9000, ttft_ms: 900, waiting_ms: null, tokens: 400 + i * 150, tokens_source: 'engine', frames: null,
+      thinking_tokens: 300, decode_now: 0, decode_avg: 18.5, prefill: null, prompt_tokens: 20_000, cached_tokens: 18_000, cache_hit: 0.9,
+      cost_micros: null, cost_partial: false, max_tokens: 32_768, relay_id: null, via: null, slot: i, ...extra,
+    });
+    const lanes = [
+      lane(0, 'prefilling', { label: 'Prefilling 18,432 of 44,558 (41 %)', elapsed_ms: 19_000, ttft_ms: null, waiting_ms: 19_000, tokens: 0, thinking_tokens: 0, decode_now: null, decode_avg: null, prefill: { done: 18_432, total: 44_558, pct: 41.4, cached: 10_240, tps: 774.8, tps_avg: 774.8, eta_ms: 33_700 }, prompt_tokens: 34_487, cached_tokens: 10_240 }),
+      lane(1, 'thinking', { label: 'Thinking' }),
+      lane(2, 'tool_call', { label: 'Calling tool write_file', tool: 'write_file' }),
+      lane(3, 'writing', { label: 'Writing' }),
+      { ...lane(4, 'waiting_memory', { label: 'waiting for memory', ttft_ms: null, waiting_ms: 6000, tokens: 0, thinking_tokens: 0, decode_now: null, decode_avg: null, elapsed_ms: 6000 }), slot: undefined },
+    ];
+    const t0 = Math.floor(now) - 120;
+    const series = Array.from({ length: 121 }, (_, k) => {
+      const ph = k % 24; // a burst of decode between two prefill windows, then nothing for ~11 s
+      return { t: t0 + k, by: ph < 12 ? { engine: 40 + ((k * 37) % 40) } : {}, in_flight: 5 };
+    });
+    return {
+      contract_version: '1.0', at: now, windows: { now_s: 2, done_keep_s: 4, stats_s: 300, cost_min_s: 60 }, lanes, recent: [],
+      backends: [{ id: 'engine', kind: 'tandemllm', models: ['TandemLLM'], in_flight: 5, decoding: 3, waiting: 2, decode_tps: 0, decode_unreported: 0, ttft_p50: 1580, ttft_p90: 9920, cache_hit: 0.565, cache_reported: 10, finished: 9, errors: 0, cost_per_min: null, cost_window: null, tokens_window: 18_000, frames: null, engine_view: false }],
+      totals: { in_flight: 5, decoding: 3, waiting: 2, waiting_memory: 1, decode_tps: 0, decode_reported: 3, decode_unreported: 0, prefill_tps: 774.8, ttft_p50: 1580, ttft_p90: 9920, ttft_n: 9, cache_hit: 0.565, cache_reported: 10, prompt_tokens_window: 18_100, cached_tokens_window: 10_200, cost_per_min: null, cost_window: null, cost_in_flight: null, finished: 9, errors: 0, refused: 0, tokens_window: 18_000, backends: 1 },
+      series: series.filter((x) => since == null || x.t > since),
+      build_us: { last: 260, max: 900 },
+      engine_slots: { n: 4, running: 4, decoding: 3, slots: [0, 1, 2, 3].map((i) => ({ index: i, window: 262_144, busy: true, phase: i ? 'decode' : '', request: null })), rounds: 10_078, joint_rounds: 4231, joint_hist: { 2: 2312, 3: 1338, 4: 581 }, timeouts: 456, admission: { floor_gib: 15, in_flight: 4, reserved_gib: 7.2, waits: 1, refused: 0 } },
+    };
+  }
+
   snapshot(nowMs: number, since: number | null): J {
+    if (this.fixture === 'stall') return this.stallDoc(nowMs, since);
     this.tick(nowMs);
     const now = nowMs / 1000;
     const lanes = this.live.map((s) => this.lane(s, now, false)).sort((a, b) => (b.elapsed_ms as number) - (a.elapsed_ms as number));

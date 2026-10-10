@@ -38,6 +38,11 @@ export function push(ring: Ring, s: LiveSample | null, now = Date.now() / 1000):
  * not a zero and not a line across). Four series come out: decode and prefill tok/s as contract
  * 1.0 has them (all tokens; one prefill dot when a request finishes), and the live ones of VIS-40
  * (decode from each request's warm-up anchor on; the running prefills' now-rate every second).
+ *
+ * The sampler's second is a little longer than one (1.007 s on the box), so rounding each `t` to
+ * its slot skipped a slot every ~140 s and the ribbon broke there without a missing sample
+ * (VIS-76). Samples are placed newest first: one that follows the next within 1.5 s takes the slot
+ * just before it, any other its own wall-clock slot, so only a real pause leaves a hole.
  */
 export function slots(ring: Ring, now = Date.now() / 1000, seconds = WINDOW_S): { t: number[]; decode: (number | null)[]; prefill: (number | null)[]; decodeLive: (number | null)[]; prefillLive: (number | null)[] } {
   const end = Math.floor(now);
@@ -48,15 +53,32 @@ export function slots(ring: Ring, now = Date.now() / 1000, seconds = WINDOW_S): 
   const decodeLive: (number | null)[] = new Array(seconds).fill(null);
   const prefillLive: (number | null)[] = new Array(seconds).fill(null);
   for (let i = 0; i < seconds; i++) t.push(start + i);
-  for (const s of ring.samples) {
-    const i = Math.round(s.t) - start;
-    if (i < 0 || i >= seconds) continue;
+  let next: { t: number; i: number } | null = null;
+  for (let k = ring.samples.length - 1; k >= 0; k--) {
+    const s = ring.samples[k];
+    const own = Math.min(seconds - 1, Math.round(s.t) - start);
+    const i: number = next == null ? own : next.t - s.t < 1.5 ? next.i - 1 : Math.min(own, next.i - 1);
+    if (i < 0) break;
+    next = { t: s.t, i };
     decode[i] = s.decode_tps;
     if (s.prefill_tps != null) prefill[i] = s.prefill_tps;
     decodeLive[i] = s.decode_live_tps ?? null;
     prefillLive[i] = s.prefill_live_tps ?? null;
   }
   return { t, decode, prefill, decodeLive, prefillLive };
+}
+
+/** Seconds the server's clock is ahead of this device's (the samples' `t` are the server's): read
+ *  off each event's `generated_at`, so a phone whose clock is off still puts "now" at the right edge. */
+export function clockSkew(generatedAt: string | undefined, at = Date.now()): number {
+  const g = generatedAt ? Date.parse(generatedAt) : NaN;
+  return Number.isFinite(g) ? (g - at) / 1000 : 0;
+}
+
+/** The chart's foot when it has no value: "no samples yet" only when the sampler sent none in the
+ *  window; with samples and no value the figure was simply never running ("none in 5 min"). */
+export function emptyFoot(ring: Ring, now = Date.now() / 1000, seconds = WINDOW_S): string {
+  return ring.samples.some((s) => s.t > now - seconds) ? 'none in 5 min' : 'no samples yet';
 }
 
 /** Peak of the last `seconds` of a series, for a "peak 5 min" caption. */
@@ -137,13 +159,74 @@ export function rateText(v: number | null | undefined): string {
   return v >= 100 ? exact(Math.round(v)) : v.toFixed(1);
 }
 
-/** "prefilling 14,336 of 107,604 · 13 %", or "prefilling 4,000 tokens · 12.0 s" without progress. */
+/** "prefilling 14,336 of 107,604 · 13 %", or "prefilling 4,000 tokens · 12.0 s" without progress.
+ *  The total is the prefill's own (the client's prompt and TandemLLM's hidden tokens, as the Now
+ *  card counts it) and the time is the time in the state, the card's clock: the tile read 34,487
+ *  tokens · 9.5 s beside the card's 44,558 tokens · 7.7 s (VIS-76). */
 export function prefillingWords(rows: LiveRequest[]): string {
   const p = rows.find((r) => r.phase === 'prefill');
   if (!p) return 'prefilling';
   const pf = p.activity?.prefill;
-  if (pf && pf.done != null && pf.pct != null && pf.progress !== 'single_call') return `prefilling ${exact(pf.done)} of ${exact(pf.total)} · ${Math.round(pf.pct)} %`;
-  return p.prompt_tokens != null ? `prefilling ${exact(p.prompt_tokens)} tokens · ${elapsed(p.elapsed_ms)}` : 'prefilling';
+  if (pf && pf.done != null && pf.pct != null && pf.progress !== 'single_call') {
+    const est = prefillEstimate(p);
+    return `prefilling ${exact(pf.done)} of ${exact(pf.total)} · ${Math.round(pf.pct)} %${est.estPct != null ? ` (≈ ${Math.round(est.estPct * 100)} % est.)` : ''}`;
+  }
+  const total = pf?.total ?? p.prompt_tokens;
+  const since = p.activity?.since_ms ?? p.elapsed_ms;
+  return total != null ? `prefilling ${exact(total)} tokens · ${elapsed(since)}` : 'prefilling';
+}
+
+export interface PrefillEstimate {
+  /** rows done at the newest mark (restored rows count), over the prefill's total, 0..1 */
+  pct: number | null;
+  /** where the prefill is by now at the measured rate, 0..1: past `pct` only between two marks */
+  estPct: number | null;
+  /** ms since the newest mark */
+  sinceMarkMs: number | null;
+  /** the server's ETA counted down by the time since its mark */
+  etaMs: number | null;
+  /** 'warming': before the first mark past the warm-up; 'measuring': one mark, the live rate needs
+   *  a second; 'live': the live rate is there; 'single': one call, no progress at all */
+  stage: 'warming' | 'measuring' | 'live' | 'single';
+}
+
+/** A mark younger than this gets no estimate: marks a second or so apart (a chunk-major prefill)
+ *  need none, it would only flicker. */
+export const ESTIMATE_AFTER_MS = 1500;
+
+/**
+ * The prefill between two progress marks. A layer-major prefill (EXL3) reports one mark a window
+ * of up to 8,192 rows, ~10 s apart at ~800 tok/s (VIS-74), so the server's `done` and its ETA
+ * stand still that long. What is measured stays measured: the bar's solid part is `done` (before
+ * the first mark: the rows restored from a cache). The estimate goes past it at the prefill's own
+ * rate since the newest mark (`at_ms`, against the row's `elapsed_ms` from the same event) once
+ * that mark is `ESTIMATE_AFTER_MS` old, never further than one more window of the size the marks
+ * so far had, never past the total; the ETA is the server's, counted down by the same time.
+ */
+export function prefillEstimate(r: LiveRequest): PrefillEstimate {
+  const p = r.activity?.prefill;
+  const out: PrefillEstimate = { pct: null, estPct: null, sinceMarkMs: null, etaMs: null, stage: 'warming' };
+  if (!p || !p.total) return out;
+  if (p.progress === 'single_call') return { ...out, stage: 'single' };
+  const marks = p.warmup?.chunks ?? (p.pct != null ? 1 : 0);
+  const done = p.done ?? p.cached ?? 0;
+  out.pct = Math.max(0, Math.min(1, done / p.total));
+  out.stage = p.tps_live != null ? 'live' : p.warmup?.reached && marks > 0 ? 'measuring' : 'warming';
+  if (!marks || p.at_ms == null || r.elapsed_ms == null) return out;
+  const since = Math.max(0, r.elapsed_ms - p.at_ms);
+  out.sinceMarkMs = since;
+  if (p.eta_ms != null) out.etaMs = Math.max(0, p.eta_ms - since);
+  const rate = p.tps_live ?? p.tps_live_avg ?? p.tps_avg;
+  if (rate == null || rate <= 0 || since < ESTIMATE_AFTER_MS) return out;
+  const window = (done - (p.cached ?? 0)) / marks;
+  const est = Math.min(p.total, done + (rate * since) / 1000, window > 0 ? done + window : p.total);
+  if (est > done) out.estPct = est / p.total;
+  return out;
+}
+
+/** The rate slot of a running prefill in words: the rate itself, or why there is none yet. */
+export function prefillStageWord(stage: PrefillEstimate['stage']): string | null {
+  return stage === 'warming' ? 'warming up' : stage === 'measuring' ? 'measuring' : null;
 }
 
 export interface LiveFigure {
@@ -179,12 +262,12 @@ export function prefillFigure(l: Live & { windows: LiveWindows }, rows: LiveRequ
     sub = replay && replay.prompt_tokens != null ? `fully cached, no prefill (${exact(replay.prompt_tokens)} tokens)` : 'nothing prefilling';
   } else if (pre.length > 1) {
     const rates = pre.map((r) => r.activity?.prefill?.tps_live).filter((v): v is number => v != null);
-    sub = `${pre.length} prefilling · ${rates.length ? rates.map(rateText).join(' + ') : 'warming up'}`;
+    sub = `${pre.length} prefilling · ${rates.length ? rates.map(rateText).join(' + ') : (prefillStageWord(prefillEstimate(pre[0]).stage) ?? 'warming up')}`;
   } else {
     const p = pre[0];
     const words = prefillingWords(pre);
-    const warming = value == null && p.activity?.prefill?.progress !== 'single_call';
-    sub = mostlyCachedWords(p) ?? (warming ? `warming up · ${words}` : words);
+    const stage = value == null ? prefillStageWord(prefillEstimate(p).stage) : null;
+    sub = mostlyCachedWords(p) ?? (stage ? `${stage} · ${words}` : words);
   }
   const caption = warmChunks(w.prefill_warmup_chunks);
   return {
@@ -205,13 +288,20 @@ export function decodeFigure(l: Live & { windows: LiveWindows }, rows: LiveReque
   else if (value == null && (l.now.decode_warming ?? 0) > 0) {
     const warm = rows.filter((r) => r.phase === 'decode' && r.decode_warmup && !r.decode_warmup.reached);
     sub = warm.length === 1 ? warmingWords(warm[0], w) : `${warm.length || l.now.decode_warming} warming up`;
-  } else sub = `${c.decoding} decoding · last ${w.now_window_s} s`;
+  } else sub = value === 0 ? `${c.decoding} decoding · ${stallWords(c.prefilling, w.now_window_s)}` : `${c.decoding} decoding · last ${w.now_window_s} s`;
   return {
     value,
     sub,
     caption: `from token ${w.decode_warmup_tokens}`,
     captionTitle: `The speed now: tokens over the last ${w.now_window_s} s, each request counted from its ${w.decode_warmup_tokens}th decoded token on (its warm-up left out). A finished request keeps its end-to-end rate (timings) in its row.`,
   };
+}
+
+/** Decoding requests whose tokens did not move over the now-window: a real stall, said as one (the
+ *  rates are token counts, so 0 is no token, never a sampling gap). With a prefill running beside
+ *  them it holds the GPU turn (SRV-311): the parallel chart's drops to 0 between bursts. */
+export function stallWords(prefilling: number, windowS = 2): string {
+  return prefilling > 0 ? 'stalled behind a prefill' : `stalled, no token in the last ${windowS} s`;
 }
 
 /** "warming up (23 of 50 tokens)" for a decoding row before its anchor. */

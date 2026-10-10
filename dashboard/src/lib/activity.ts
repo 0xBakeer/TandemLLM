@@ -6,7 +6,7 @@
 
 import type { ActivityState, LiveActivity, LiveEngine, LiveRequest, LiveStop, LiveTimelineEntry, LiveWindows, StopReason } from '../api/types';
 import { bytes, exact, fixed, tps } from './format';
-import { phaseWords, rateText, warmingWords } from './live';
+import { phaseWords, prefillEstimate, prefillStageWord, rateText, stallWords, warmingWords } from './live';
 import type { StreamState } from './sse';
 
 /** The colour family of a state; the CSS maps a tone to the palette (cobalt for prefill, orange for now). */
@@ -101,7 +101,9 @@ export interface NowLine {
   sinceMs: number | null; // time in this state
   client: string | null; // the client kind, e.g. "opencode"
   requestId: string | null;
-  progress: number | null; // 0..1 while a chunked prefill runs
+  progress: number | null; // 0..1 while a chunked prefill runs: rows done at the newest mark
+  estimate: number | null; // 0..1, past `progress` between two marks: where the measured rate puts it now
+  sinceMarkMs: number | null; // time since the newest prefill mark
   moving: boolean; // tokens move: the glyph may pulse
   warning: string | null; // "client disconnected 12 s ago"
 }
@@ -113,7 +115,7 @@ export interface NowLine {
  */
 export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest[], windows?: LiveWindows | null): NowLine | null {
   if (!engine) return null; // a 1.0 server: the panel, no Now line
-  const line = (glyph: string, tone: Tone, headline: string, numbers: string[] = [], more: Partial<NowLine> = {}): NowLine => ({ glyph, tone, headline, numbers, sinceMs: engine.since_ms, client: null, requestId: null, progress: null, moving: false, warning: null, ...more });
+  const line = (glyph: string, tone: Tone, headline: string, numbers: string[] = [], more: Partial<NowLine> = {}): NowLine => ({ glyph, tone, headline, numbers, sinceMs: engine.since_ms, client: null, requestId: null, progress: null, estimate: null, sinceMarkMs: null, moving: false, warning: null, ...more });
   const w = engine.waiting_for_client;
   if (engine.state === 'idle') return line('○', 'idle', 'Idle', ['nothing in flight']);
   if (engine.state === 'starting') return line('◌', 'warn', 'Starting', ['the model is loading']);
@@ -132,21 +134,37 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   const q = a.queue;
   const live = !!windows && r.decode_warmup !== undefined;
   const rate = live ? (r.decode_live_now_tps ?? null) : (d?.tps_now ?? d?.tps_avg ?? r.decode_tps_now ?? r.decode_tps);
-  const rateWord = rate != null ? tps(rate) : live && r.decode_warmup && !r.decode_warmup.reached ? warmingWords(r, windows!) : null;
+  // several requests decode: this one's rate is its share of the tile's sum, said so ("4.9 of 17.2
+  // tok/s"), and a request whose tokens stand still beside a prefill is stalled behind it
+  const others = rows.filter((x) => x.phase === 'decode' && x.request_id !== r.request_id);
+  const sum = live && others.length && rate != null ? rate + others.reduce((s, x) => s + (x.decode_live_now_tps ?? 0), 0) : null;
+  const prefilling = rows.filter((x) => x.phase === 'prefill').length;
+  const rateWord = rate === 0 && r.phase === 'decode' ? stallWords(prefilling, windows?.now_window_s) : sum != null ? `${rateText(rate)} of ${rateText(sum)} tok/s` : rate != null ? tps(rate) : live && r.decode_warmup && !r.decode_warmup.reached ? warmingWords(r, windows!) : null;
   const st = a.state;
   const n: (string | null | false)[] = [];
   let progress: number | null = null;
+  let estimate: number | null = null;
+  let sinceMarkMs: number | null = null;
   if (st === 'queued') n.push(q?.wait_ms != null && `waiting ${secs(q.wait_ms)}`, q?.timeout_s != null && `gives up after ${q.timeout_s} s`);
   else if (st === 'prefilling') {
+    const e = prefillEstimate(r);
     if (windows && p && p.tps_live !== undefined) {
-      // the tile's number, in the tile's words: "743 tok/s" in both places
-      n.push(p.tps_live != null ? `${rateText(p.tps_live)} tok/s` : p.progress === 'single_call' ? null : 'warming up');
+      // the tile's number, in the tile's words: "743 tok/s" in both places; while the estimate
+      // shows, the tile alone says why there is no rate yet (the line is clipped on a phone)
+      n.push(p.tps_live != null ? `${rateText(p.tps_live)} tok/s` : e.estPct == null && prefillStageWord(e.stage));
     } else {
       const ptps = p?.tps_now ?? p?.tps_avg;
       n.push(ptps != null && tps(ptps));
     }
-    n.push(!!p?.cached && `${exact(p!.cached)} cached`, etaWord(p?.eta_ms) ?? null);
-    if (p && p.pct != null && p.progress !== 'single_call') progress = Math.max(0, Math.min(1, p.pct / 100));
+    // between two marks (one a window of up to 8,192 rows on EXL3, ~10 s): the estimate, said to
+    // be one, and the ETA counting down, so the card never stands still while the GPU works; the
+    // ETA before the cached count, which a 390 px line cuts first
+    n.push(e.estPct != null && `≈ ${Math.round(e.estPct * 100)} % est.`, etaWord(e.etaMs ?? p?.eta_ms) ?? null, !!p?.cached && `${exact(p!.cached)} cached`);
+    if (p && p.progress !== 'single_call' && e.pct != null && (p.pct != null || (p.cached ?? 0) > 0)) {
+      progress = e.pct;
+      estimate = e.estPct;
+      sinceMarkMs = e.sinceMarkMs;
+    }
   } else if (st === 'replaying') n.push(`${exact(r.tokens)} tokens replayed, no model run`);
   else if (st === 'thinking') n.push(rateWord, d && `${exact(d.thinking_tokens)} thinking tokens`);
   else if (st === 'closing_reasoning') n.push(!!a.reasoning?.closed_by && `closed by the ${a.reasoning!.closed_by}`, d && `${exact(d.thinking_tokens)} thinking tokens`);
@@ -154,7 +172,7 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   else if (st === 'tool_call') n.push(t?.arg_bytes != null && `${bytes(t.arg_bytes, 1)} of arguments`, !!t?.calls_done && `${t!.calls_done} call${t!.calls_done === 1 ? '' : 's'} done`, rateWord);
   else if (st === 'finishing') n.push(d && `${exact(d.tokens)} tokens`);
   n.push(!!a.constrained && constrainedWord(a.constrained));
-  return line(GLYPH[st], TONE[st], a.label, n.filter((x): x is string => !!x), { sinceMs: a.since_ms, client: r.client.kind, requestId: r.request_id, progress, moving: isMoving(st), warning: clientFlag(a) });
+  return line(GLYPH[st], TONE[st], a.label, n.filter((x): x is string => !!x), { sinceMs: a.since_ms, client: r.client.kind, requestId: r.request_id, progress, estimate, sinceMarkMs, moving: isMoving(st), warning: clientFlag(a) });
 }
 
 export function constrainedWord(c: LiveActivity['constrained']): string {

@@ -555,9 +555,10 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
         return json(res, 200, { ok: true, decisions: cond.rows.length });
       }
       if (path === '/__mock/parallel' && req.method === 'POST') {
-        // the parallel view's load: {streams: n} (0: idle), {reset: true} starts it afresh
+        // the parallel view's load: {streams: n} (0: idle), {reset: true} starts it afresh, {fixture: 'stall'|null}
         const b = JSON.parse((await readBody(req)) || '{}');
         if (typeof b.engine_slots === 'number') parallel.engineSlots = Math.max(1, Math.floor(b.engine_slots));
+        if ('fixture' in b) parallel.fixture = b.fixture === 'stall' ? 'stall' : null; // VIS-76: the 0.6.x stall shape
         if (b.reset) parallel.reset(typeof b.streams === 'number' ? b.streams : undefined);
         else if (typeof b.streams === 'number') parallel.streams = b.streams;
         return json(res, 200, { streams: parallel.streams, engine_slots: parallel.engineSlots });

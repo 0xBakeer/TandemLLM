@@ -92,7 +92,8 @@ describe('scenario 3 + 4 + 5 + 15: the prefill now-rate', () => {
   it('15: a single call shows "—" with the tokens and the elapsed time', () => {
     const s = shown(mock('single-call', 12_100).snapshot(NOW));
     expect(s.tile).toBe('—');
-    expect(s.prefill!.sub).toBe('prefilling 4,000 tokens · 12.1 s');
+    // VIS-76: the time in the state, the Now card's clock (12.1 s since arrival, 0.1 s of it queued)
+    expect(s.prefill!.sub).toBe('prefilling 4,000 tokens · 12.0 s');
   });
 });
 

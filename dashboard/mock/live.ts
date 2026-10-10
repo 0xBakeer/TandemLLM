@@ -38,6 +38,8 @@ export interface ActScript {
   prefillTps: number;
   chunk?: number; // the prefill's chunk (2,048 unless set)
   chunkMs?: number[]; // the first chunks' own durations (a slow warm-up chunk); later ones at prefillTps
+  window?: number; // VIS-76: one mark a layer-major window of this many rows from the restore point (EXL3, VIS-74), not a chunk grid
+  hidden?: number; // VIS-76: TandemLLM's hidden prompt tokens, in the prefill's total beside the client's prompt
   progress?: 'chunked' | 'single_call';
   tool?: { name: string; argBytes: number };
   finish: StopReason;
@@ -527,11 +529,11 @@ export class MockLive {
     const marks: { done: number; t: number }[] = [];
     if (!a || a.progress === 'single_call' || r.lockAt == null || !a.prefillTps) return marks;
     const chunk = a.chunk ?? 2048;
-    const total = r.row.prompt_tokens ?? a.total;
+    const total = (r.row.prompt_tokens ?? a.total) + (a.hidden ?? 0);
     let done = r.row.cached_tokens ?? a.cached;
     let t = r.lockAt;
     for (let k = 0; ; k++) {
-      const size = Math.min(chunk - (done % chunk), total - done);
+      const size = Math.min(a.window ?? chunk - (done % chunk), total - done);
       if (done + size >= total) break; // the last chunk is not reported
       t += a.chunkMs?.[k] ?? (size / a.prefillTps) * 1000;
       if (t > until) break;
@@ -546,7 +548,7 @@ export class MockLive {
     const until = r.firstAt ?? r.endedAt ?? now;
     const marks = this.prefillMarks(r, until);
     const start = r.lockAt != null ? { done: r.row.cached_tokens ?? 0, t: r.lockAt } : null;
-    const end = r.firstAt != null ? { total: r.row.prompt_tokens ?? 0, t: r.firstAt } : undefined;
+    const end = r.firstAt != null ? { total: (r.row.prompt_tokens ?? 0) + (r.act?.hidden ?? 0), t: r.firstAt } : undefined;
     return { ...prefillLive(marks, this.windows.prefill_warmup_chunks, this.windows.now_window_s, start, end), chunks: marks.length };
   }
 
@@ -623,6 +625,7 @@ export class MockLive {
       max_tokens: row.max_tokens,
       ended_ms_ago: done ? Math.round((now - r.endedAt!) * 10) / 10 : null,
     };
+    if (r.act?.hidden && ran) out.hidden_tokens = r.act.hidden;
     if (this.contract === '1.1' && this.liveRates) {
       const d = phase === 'decode' || phase === 'done' ? this.decodeLive(r, now) : { now: null, avg: null, warmup: null };
       Object.assign(out, { decode_live_now_tps: d.now, decode_live_avg_tps: d.avg, decode_warmup: d.warmup, mostly_cached: r.lockAt != null && row.prompt_tokens != null ? (row.cache_source === 'response' ? false : mostlyCached(row.prompt_tokens, row.cached_tokens ?? 0, this.windows)) : null });
@@ -650,7 +653,7 @@ export class MockLive {
     const done = r.endedAt != null;
     const end = done ? r.endedAt! : now;
     const state = r.state;
-    const total = row.prompt_tokens ?? a?.total ?? 0;
+    const total = (row.prompt_tokens ?? a?.total ?? 0) + (a?.hidden ?? 0);
     const cached = row.cached_tokens ?? a?.cached ?? 0;
     // prefill progress: scripted requests have chunk marks at the script's rates (the hook's view:
     // every chunk but the last); derived ones show the total only
@@ -1169,6 +1172,9 @@ export class MockLive {
    *   short-reply    E: 30 decoded tokens, then done
    *   fully-cached   H: a response-cache replay of a 195,083-token prompt
    *   mostly-cached  I: 195,083 tokens of which 192,512 cached, prefilling its 2,571
+   *   exl3-window    W (VIS-76, the 0.6.x shape of 2026-10-10 10:30): 34,487 client tokens + 10,071
+   *                  hidden = 44,558, 10,240 restored, one mark a window of 8,192 rows: the first
+   *                  10.6 s (restore and warm-up), then 8,192 / 774.8 tok/s = 10.57 s a window
    */
   rates(makeRow: (forced: Partial<LedgerRow>) => LedgerRow, kind: string, now = Date.now(), at = 0): void {
     this.samples = []; // the case owns the charts and their peaks
@@ -1205,6 +1211,8 @@ export class MockLive {
       add('chatcmpl-e0000000000000000030', { prompt_tokens: 200, cached_tokens: 0, cache_source: 'none', completion_tokens: 31 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 300 }, ...writing(1500)], total: 200, cached: 0, tps: 20, prefillTps: 666, chunk: 1024, progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
     } else if (kind === 'fully-cached') {
       add('chatcmpl-h0000000000000000000', { prompt_tokens: 195_083, cached_tokens: 195_083, cache_source: 'response', completion_tokens: 9000 }, { segs: [{ state: 'queued', ms: 50 }, { state: 'replaying', ms: 60_000 }], total: 195_083, cached: 195_083, tps: 150, prefillTps: 0, finish: 'stop', finishDetail: 'eos' }, t0);
+    } else if (kind === 'exl3-window') {
+      add('chatcmpl-ex13w1nd0w0000000000', { client_kind: 'open-webui', prompt_tokens: 34_487, cached_tokens: 10_240, cache_source: 'end', completion_tokens: 2000, thinking: true }, { segs: [{ state: 'queued', ms: 1800 }, { state: 'prefilling', ms: 44_300 }, { state: 'thinking', ms: 60_000 }], total: 34_487, hidden: 10_071, cached: 10_240, tps: 20, prefillTps: 774.8, window: 8192, chunkMs: [10_600], progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
     } else if (kind === 'mostly-cached') {
       add('chatcmpl-10000000000000000000', { prompt_tokens: 195_083, cached_tokens: 192_512, cache_source: 'session', completion_tokens: 400 }, { segs: [{ state: 'queued', ms: 100 }, { state: 'prefilling', ms: 60_000 }, ...writing(10_000)], total: 195_083, cached: 192_512, tps: 40, prefillTps: 1024 / 1.2, chunk: 1024, chunkMs: [4000], progress: 'chunked', finish: 'stop', finishDetail: 'eos' }, t0);
     }

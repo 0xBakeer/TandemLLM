@@ -5,7 +5,7 @@
 
 import type { SeriesColor } from '../charts/chart-base';
 
-export type LaneState = 'queued' | 'prefilling' | 'waiting' | 'replaying' | 'thinking' | 'closing_reasoning' | 'tool_call' | 'writing' | 'finishing' | 'done';
+export type LaneState = 'queued' | 'waiting_memory' | 'prefilling' | 'waiting' | 'replaying' | 'thinking' | 'closing_reasoning' | 'tool_call' | 'writing' | 'finishing' | 'done';
 
 export interface Lane {
   id: string;
@@ -83,6 +83,8 @@ export interface Totals {
   in_flight: number;
   decoding: number;
   waiting: number;
+  /** SRV-305 (absent on older servers): lanes the memory admission holds, counted in `waiting` too */
+  waiting_memory?: number;
   decode_tps: number | null;
   decode_reported: number;
   decode_unreported: number;
@@ -247,6 +249,7 @@ export function backendOrder(series: Sample[], rows: BackendRow[]): string[] {
 // ---- words --------------------------------------------------------------------------------------
 export const STATE_WORD: Record<LaneState, string> = {
   queued: 'Queued',
+  waiting_memory: 'Waiting for memory',
   prefilling: 'Prefilling',
   waiting: 'Waiting for the first token',
   replaying: 'Replaying',
@@ -264,6 +267,7 @@ export function stateTone(l: Lane): 'wait' | 'prefill' | 'think' | 'tool' | 'wri
   switch (l.state) {
     case 'queued':
     case 'waiting':
+    case 'waiting_memory': // SRV-305: held for memory; it read as "writing" (the default) before
       return 'wait';
     case 'prefilling':
     case 'replaying':
@@ -287,6 +291,27 @@ export function stateLine(l: Lane): string {
   if (l.state === 'prefilling' && l.prefill?.pct != null) return `Prefilling ${Math.round(l.prefill.pct)} %`;
   if (l.state === 'done') return l.finish && l.finish !== 'stop' ? `Done: ${l.finish.replace('_', ' ')}` : 'Done';
   return STATE_WORD[l.state] ?? l.state;
+}
+
+/** The In flight tile's line in the legend's words: the server's `waiting` counts the prefilling
+ *  lanes too, so "1 waiting · 3 decoding" sat under a legend of "waiting 0 · prefilling 1" (VIS-76). */
+export function inFlightWords(lanes: Lane[], decoding: number): string {
+  const live = lanes.filter((l) => l.state !== 'done');
+  const wait = live.filter((l) => stateTone(l) === 'wait').length;
+  const pre = live.filter((l) => stateTone(l) === 'prefill').length;
+  return `${wait} waiting · ${pre} prefilling · ${decoding} decoding`;
+}
+
+/** The hero's line when lanes decode and no token moved over the now-window: a stall, said as one
+ *  (the series counts tokens, so its 0 is real, never a sampling gap); null otherwise. With an
+ *  engine lane prefilling, the prefill holds the GPU turn the decoders wait for (SRV-311). */
+export function stallLine(t: Pick<Totals, 'decode_tps' | 'decoding'>, lanes: Lane[], windowS = 2): string | null {
+  if (t.decode_tps !== 0 || !t.decoding) return null;
+  const pre = lanes.find((l) => l.state === 'prefilling' && l.backend === 'engine');
+  if (!pre) return `${t.decoding} decoding, no token in the last ${windowS} s`;
+  const p = pre.prefill;
+  const where = p?.done != null && p.total ? ` (${Math.round((100 * p.done) / p.total)} % of ${p.total.toLocaleString('en-US')})` : '';
+  return `${t.decoding} decoding, stalled behind a prefill${where}`;
 }
 
 /** The kind's label: "TandemLLM", "vLLM", "SGLang", "DeepSeek", "OpenAI", "OpenAI-compatible". */
