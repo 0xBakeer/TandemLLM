@@ -670,8 +670,17 @@ def barrier(meet: Meeting, pool: Pool, turn: Turn, slot_index: int, req: VerifyR
                     if all(i in meet.pending for i in pool.decoding()):
                         break                           # a slot left decode: the set is complete
                     now = time.monotonic()
-                    missing = set(pool.decoding()) - set(meet.pending)
-                    if turn.owner is None and not turn.waiting() and not (missing & meet.transit):
+                    dec = pool.decoding()
+                    missing = set(dec) - set(meet.pending)
+                    # SRV-311: a slot that holds the turn without decoding (a prefill, slot 0's own
+                    # job) never submits to this round, so for the round the turn is as idle as
+                    # free. Waiting for it to be free starved the decoders: two meetings (the
+                    # packed draft and the joint verify) each held some decoding slots, neither set
+                    # completed, and the timeout below never ran while an 87k prompt prefilled
+                    # (3 chats at 0-4 tok/s for ~90 s, 2026-10-10).
+                    owner = turn.owner
+                    idle_turn = owner is None or owner not in dec
+                    if idle_turn and not turn.waiting() and not (missing & meet.transit):
                         idle_since = idle_since or now
                         if now - idle_since >= meet.timeout:
                             meet.stats["timeouts"] += 1
