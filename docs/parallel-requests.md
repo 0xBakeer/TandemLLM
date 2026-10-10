@@ -83,9 +83,27 @@ recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
 - **Give back.** When a request ends, its slot keeps the rows its conversation still holds (the KV
   length, the resident prefix's valid rows, a side slot's carried end) and the pages past them go back.
 - **Under pressure** a commit that would take MemAvailable under `QSE_KV_HARD_FLOOR_GB` (10) first asks
-  the memory policy's levels (store, anchors, end, stash, park, pin, roles) and the allocator's free
-  blocks, then the conversations idle side slots keep (oldest first), then slot 0's idle conversation
-  (to the NVMe first when the spill is on); only if none of that is enough is the commit refused.
+  the memory policy's levels (store, anchors, end, stash, park, pin) and the allocator's free blocks,
+  then the small models (0.6.1, `server/rolemem.py`: the shadow reader, then the narrator; see below),
+  then the conversations idle side slots keep (oldest first), then slot 0's idle conversation (to the
+  NVMe first when the spill is on); only if none of that is enough is the commit refused. A request
+  that does not fit the admission takes the same levels back, the caches left out, before it waits.
+- **The small models under pressure** (0.6.1). An unloaded role gets a memory hold: its callers get
+  `unloaded_for_memory` at once (no narrator lines, the template line instead; the shadow reader's
+  journal-only answers stop) and nothing loads it on demand. It loads again through the residency
+  planner, one role at a time and the narrator before the shadow reader, once the headroom
+  (MemAvailable less the caches' growth and the requests' reservations) has stayed at
+  `QSE_PARALLEL_FLOOR_GB` + its claim + `QSE_ROLE_RELOAD_MARGIN_GB` (4) for `QSE_ROLE_RELOAD_S` (60 s)
+  with no request waiting and no reclaim in that time. A role unloaded again within `QSE_ROLE_THRASH_S`
+  (600 s) of its reload waits twice as long next time (up to `QSE_ROLE_MAX_HOLD_S`). The Laya deciders
+  stay loaded unless `QSE_ROLE_UNLOAD_LAYA=on`: they answer the router's questions, and their fallback,
+  Qwen's own answer, can choose another class, package or effort, which changes what the model is
+  given, and costs an engine turn and guest KV rows exactly while memory is short. `/health` `roles`
+  and the System view's memory panel show each role as `loaded`, `unloaded_for_memory` or
+  `reloading`; every unload and reload is a `[roles]` log line and a row of the residency journal.
+  Qwen's output does not depend on the roles (their own memory pools and stream):
+  `tests/gpu/test_roles_dynamic_gpu.py` checks tokens, blocks and prefill logits loaded, out and
+  reloaded.
 - **Admission** reserves, beside a request's prefill workspace, the KV pages its prompt and `max_tokens`
   may still commit on its slot, credited as its slot commits them. A request that does not fit waits
   (SRV-305): its stream carries "waiting: memory is almost full, ..." every 15 s (Open WebUI's status
@@ -95,7 +113,11 @@ recurrent state and a greedy spec-tree decode equal at 8k, 32k and 128k).
   503 `memory_wait_timeout` with `Retry-After` after `--queue-timeout`.
 - **The memory policy** no longer holds slot 0's window: its ceiling and peak drop by it (26 GiB at
   262,144), so the residency planner sees the uncommitted window as free and loads the narrator and the
-  Laya decider beside four slots. `/health` `kv_pool` shows the committed pages by slot.
+  Laya decider beside four slots. `/health` `kv_pool` shows the committed pages by slot and by kind
+  (`committed_by_kind_gib`: engine KV, drafter KV). The System view's memory split counts the KV as
+  these committed pages, outside the allocator, never as a paged tensor's size (that is its reserved
+  address range, `kv_reserved_va`, 26.6 GiB a 262,144-row slot and no memory), and adds `outside`
+  (the CUDA context, the host side, other programs) so that the bar sums to MemTotal - MemAvailable.
 
 ## Which request goes where
 

@@ -343,6 +343,10 @@
         },
         "stats": {
           "$ref": "#/$defs/stats"
+        },
+        "memory_hold": {
+          "description": "0.6.1 (server/rolemem.py): unloaded while memory was short; nothing loads it on demand until the role governor lifts the hold",
+          "type": "boolean"
         }
       },
       "required": [

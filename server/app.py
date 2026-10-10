@@ -73,6 +73,7 @@ from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
 from server import memsplit  # noqa: E402
+from server import rolemem  # noqa: E402
 from server import refwatch as refwatch_mod  # noqa: E402
 from server import decider_api  # noqa: E402
 from server import laya_api  # noqa: E402
@@ -2178,6 +2179,10 @@ def _release_roles(safe: bool = False) -> int:
     svc = STATE.get("shadow")
     if svc is None or safe:
         return 0
+    rm = dict.get(STATE, "role_mem")
+    if rm is not None and "shadow" in rm.by_name:
+        # the governor's unload: the shadow stays out until memory came back (server/rolemem.py)
+        return int(rm.release("shadow", "memory_gate"))
     try:
         return int(svc.release("memory_gate"))
     except Exception as exc:                                       # noqa: BLE001
@@ -3576,6 +3581,8 @@ def shadow_preload_once() -> str | None:
         return None                             # the narrator's slot: its keeper loads it
     if getattr(slot, "loads", 0) or slot.state != "not_loaded":
         return None                             # loaded once already, or a load in its course
+    if getattr(slot, "memory_hold", False):
+        return None                             # out for memory: the role governor reloads it
     with QUEUE:
         busy = bool(INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS) or LOCK.locked()
     if busy or decider_api._other_loading(STATE, "shadow") or \
@@ -3619,6 +3626,8 @@ def narrator_once() -> str | None:
     slot = n.slot
     if slot.state == "loaded" or slot.state in ("loading", "unloading"):
         return None
+    if getattr(slot, "memory_hold", False):
+        return None                             # out for memory: the role governor reloads it
     if n.settings()["mode"] == "off":
         return None
     with QUEUE:
@@ -3728,8 +3737,18 @@ def _kv_reclaim_caches(want: int, owner) -> int:
     return got
 
 
+def _kv_reclaim_roles(want: int, owner) -> int:
+    """Pool reclaim, level 2 (server/rolemem.py): the small models, shadow reader first, then the
+    narrator (then Laya, only with QSE_ROLE_UNLOAD_LAYA=on), before any conversation is parked or
+    a request waits. They load again once memory has stayed back for a while."""
+    rm = dict.get(STATE, "role_mem")
+    if rm is None:
+        return 0
+    return int(rm.reclaim(want, owner, "kv_pool") or 0)
+
+
 def _kv_reclaim_side(want: int, owner) -> int:
-    """Pool reclaim, level 2: the conversations idle side slots keep, oldest first. The slot's
+    """Pool reclaim, level 3: the conversations idle side slots keep, oldest first. The slot's
     next turn re-reads its prompt (or comes back from the disk tier); nothing is lost but time."""
     pool = dict.get(STATE, "pool")
     if pool is None:
@@ -3757,7 +3776,7 @@ def _kv_reclaim_side(want: int, owner) -> int:
 
 
 def _kv_reclaim_slot0(want: int, owner) -> int:
-    """Pool reclaim, level 3: slot 0's idle conversation, to the NVMe first when the spill is on
+    """Pool reclaim, level 4: slot 0's idle conversation, to the NVMe first when the spill is on
     (engine/spill.py, the tier a replaced conversation goes to), then its pages."""
     if owner == "slot0":
         return 0
@@ -3787,6 +3806,9 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
     if pool is None or d.get("after") is None:
         return 0
     want = int(d.get("floor", 0)) - int(d["after"])
+    rm = dict.get(STATE, "role_mem")
+    if rm is not None and want > 0:
+        rm.note_pressure("admission")
     got = 0
     for name, fn in list(pool.reclaimers):
         if name == "caches" or got >= want:
@@ -3822,6 +3844,85 @@ def _par_window_cap() -> int | None:
     return PAR_WINDOW_ROWS if any(i != me for i in pool.decoding()) else None
 
 
+def _roles_idle() -> bool:
+    """No request waits: none in the queue, none waiting for memory."""
+    if INFLIGHT.get("waiting"):
+        return False
+    pool = dict.get(STATE, "pool")
+    adm = getattr(pool, "admission", None) if pool is not None else None
+    return not (adm is not None and adm.waiting)
+
+
+def _roles_headroom() -> int | None:
+    """What a new request could still take: MemAvailable less the caches' growth left and what
+    the requests in flight reserved (the admission's own sum); MemAvailable without it."""
+    pool = dict.get(STATE, "pool")
+    adm = getattr(pool, "admission", None) if pool is not None else None
+    if adm is not None:
+        try:
+            _, d = adm.check(0, count=False)
+            if d.get("after") is not None:
+                return int(d["after"])
+        except Exception:                                          # noqa: BLE001
+            pass
+    return kvpool._meminfo_avail()
+
+
+def _roles_start(a) -> None:
+    def journal(rec):
+        cond = STATE.get("conductor")
+        if cond is not None:
+            from server.conductor import residency
+            residency.Journal(cond.root).write(rec)
+
+    def empty():
+        mem = dict.get(STATE, "mem")
+        if mem is not None:
+            mem.empty("role_unload")
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    floor = float(getattr(a, "parallel_floor_gb", 15.0) or 15.0)
+    rm = rolemem.build(STATE, floor_gib=floor, meminfo=kvpool._meminfo_avail,
+                       headroom=_roles_headroom, idle=_roles_idle, empty=empty, journal=journal,
+                       log=lambda m: print(m, flush=True))
+    STATE["role_mem"] = rm
+    if rm is None:
+        return
+    print(f"[roles] dynamic {'on' if rm.enabled else 'off'}: unload order "
+          f"{' -> '.join(r.name for r in rm.roles)} (after the caches, before idle conversations);"
+          f" reload at floor {floor:g} + claim + margin {rm.margin / (1 << 30):g} GiB held "
+          f"{rm.hold_s:g} s with nothing waiting", flush=True)
+    if not a.fake_engine or os.environ.get("QSE_ROLE_TICK_FAKE") == "1":
+        rm.start()
+
+
+def _safe(fn):
+    """`fn()`, or `{"error": ...}` when it raises: a report never breaks `/health`."""
+    try:
+        return fn()
+    except Exception as exc:                                       # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+def roles_report() -> dict:
+    """`/health` `roles`: each small model's state (loaded, unloaded_for_memory, reloading, or its
+    slot's own), the governor's policy and its last events."""
+    rm = dict.get(STATE, "role_mem")
+    if rm is not None:
+        return rm.report()
+    out = {"dynamic": False, "roles": {}}
+    nar, svc, reg = (dict.get(STATE, k) for k in ("narrator", "shadow", "deciders"))
+    if svc is not None and getattr(svc, "slot", None) is not getattr(nar, "slot", None):
+        out["roles"]["shadow"] = {"models": [svc.slot.model.name], "state": svc.slot.state}
+    if nar is not None:
+        out["roles"]["narrator"] = {"models": [nar.slot.model.name], "state": nar.slot.state}
+    if reg is not None:
+        out["roles"]["laya"] = {"models": reg.loaded(), "state": "loaded" if reg.ready()
+                                else "not_loaded"}
+    return out
+
+
 def _kv_after_load(a) -> None:
     """After slot 0's engine and drafters exist: the memory policy no longer holds slot 0's
     window (its pages are the pool's now, outside the allocator), and the reclaimers in order."""
@@ -3839,6 +3940,7 @@ def _kv_after_load(a) -> None:
         print(f"[kv-pool] memory policy: ceiling and peak -{_gib(static)} GiB (slot 0's window is "
               f"the pool's now): {_gib(mem.ceiling)} / {_gib(mem.peak)} GiB", flush=True)
     pool.add_reclaimer("caches", _kv_reclaim_caches)
+    pool.add_reclaimer("roles", _kv_reclaim_roles)
     pool.add_reclaimer("idle_side", _kv_reclaim_side)
     pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
     print(f"[kv-pool] on: slot 0 window {eng.kv.max_len:,} rows reserved as "
@@ -4352,6 +4454,7 @@ def _system() -> dict:
         mem["limits"] = memlimits.view(STATE)    # OPS-47: every limit and what it holds now
     except Exception:                                              # noqa: BLE001
         mem["limits"] = None
+    mem["roles"] = _safe(roles_report)            # the small models under memory pressure
     led = STATE.get("ledger")
     li = led.info() if led is not None else None
     hosts = _hosts()
@@ -4597,7 +4700,10 @@ def _engine_own_settings() -> dict:
         nar = dict.get(STATE, "narrator")
         slot = getattr(nar, "slot", None) if nar is not None else None
         if slot is not None:
-            roles["narrator"] = {"model": getattr(slot.model, "name", None), "state": slot.state}
+            rm = dict.get(STATE, "role_mem")
+            state = (rm.state_of("narrator") if rm is not None and "narrator" in rm.by_name
+                     else slot.state)
+            roles["narrator"] = {"model": getattr(slot.model, "name", None), "state": state}
     except Exception:                                              # noqa: BLE001
         pass
     return {"parallel": par, "roles": roles}
@@ -5230,6 +5336,8 @@ class Handler(BaseHTTPRequestHandler):
                 "memory": _memory(),
                 # SRV-307: the shared KV pool's committed pages by slot (absent without the pool)
                 **({"kv_pool": kv_pool_report()} if kvpool.POOL is not None else {}),
+                # the small models and the memory governor (server/rolemem.py)
+                "roles": _safe(roles_report),
                 **({"price_table": STATE["price_table"]} if STATE.get("price_table") else {}),
                 # `--parallel N`: the slots, the GPU turn, the joint rounds and the admission
                 **({"parallel": _par_health()}
@@ -9194,6 +9302,9 @@ def _serve(a, led) -> None:
         raise SystemExit(f"[shadow] {exc}")
     if STATE.get("shadow") is not None:
         threading.Thread(target=_shadow_loop, name="shadow-reader", daemon=True).start()
+    # the small models under memory pressure (server/rolemem.py): unloaded before a conversation
+    # is parked or a request waits, loaded again once memory has stayed back
+    _roles_start(a)
     # ENG-181: the probe snapshots (None, nothing allocated, with QWEN38_PROBE_SNAPSHOTS off;
     # TandemLLM requests only, so the conductor's server alone) and the router's probe stage
     try:

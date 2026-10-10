@@ -84,6 +84,9 @@ class Registry:
         self._batchers: dict[str, Batcher] = {}
         self._placements: dict = {}
         self._loading: str | None = None
+        # models the role governor (server/rolemem.py) unloaded for memory: no on-demand load
+        # brings them back; the governor lifts the hold and loads them when memory came back
+        self.memory_hold: set[str] = set()
         self._lock = threading.RLock()
         self._alias = {}
         for m in models:
@@ -210,6 +213,12 @@ class Registry:
         if st == "failed":
             return NotReadyError("failed", f"{name} failed and was unloaded: "
                                            f"{self.error.get(name, '')}; load it again to retry")
+        if name in self.memory_hold:
+            err = NotReadyError("unloaded_for_memory",
+                                f"{name} was unloaded while memory was short; it loads again "
+                                f"once memory has come back")
+            err.retry = 30
+            return err
         pol = self.policy().get(name, "on_demand")
         if pol == "off":
             err = NotReadyError("not_loaded", f"{name} is not loaded and its load policy is off")
@@ -234,6 +243,9 @@ class Registry:
             st = self.state[name]
             if st in ("loaded", "loading", "warming"):
                 return dict(_allowed("decider"), state=st)
+            if name in self.memory_hold:
+                return {"allowed": False, "reason": "unloaded_for_memory", "role": "decider",
+                        "state": st}
             d = (self.planner(name, loading=self._loading is not None,
                               service_start=service_start, hold_restart=hold_restart)
                  if self.planner is not None else _allowed("decider"))
@@ -303,6 +315,25 @@ class Registry:
             self.loaded_at.pop(name, None)
             self.warm.pop(name, None)
         self.log(f"[deciders] {name}: unloaded")
+        return True
+
+    def unload_if_idle(self, name: str) -> bool:
+        """Unload `name` only when no question of it is queued or running (its batcher is
+        idle, so stopping it never waits): the role governor's call, which may run on a thread
+        that holds the engine lock a queued batch would wait for. False otherwise."""
+        with self._lock:
+            if self.state.get(name) != "loaded":
+                return False
+            b = self._batchers.get(name)
+            if b is not None and b.depth > 0:
+                return False
+            self.state[name] = "unloading"
+        self._drop(name)
+        with self._lock:
+            self.state[name] = "not_loaded"
+            self.loaded_at.pop(name, None)
+            self.warm.pop(name, None)
+        self.log(f"[deciders] {name}: unloaded (idle)")
         return True
 
     def _drop(self, name: str) -> None:
@@ -377,7 +408,7 @@ class Registry:
                         "device_bytes": m.device_bytes(), "weight_hash": m.weight_hash(),
                         "warm": self.warm.get(n), "loaded_at": self.loaded_at.get(n),
                         "questions": self.questions[n], "error": self.error.get(n),
-                        "refusal": self.refusal.get(n),
+                        "refusal": self.refusal.get(n), "memory_hold": n in self.memory_hold,
                         "stats": b.stats() if b is not None else None})
         return out
 

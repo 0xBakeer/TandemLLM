@@ -73,6 +73,10 @@ class Slot:
         self._where = None
         self.claim_gib = None
         self.loads = 0                          # completed loads since the start
+        # the role governor (server/rolemem.py) unloaded this model for memory: nothing loads it
+        # again on its own (a caller's `ensure`, the narrator's keeper, the shadow's preload)
+        # until the governor lifts the hold after memory came back
+        self.memory_hold = False
 
     # ------------------------------------------------------------------ loading
     def load(self, *, service_start: bool = False, hold_restart: bool = False,
@@ -81,6 +85,9 @@ class Slot:
         with self._lock:
             if self.state in ("loaded", "loading"):
                 return {"allowed": True, "reason": None, "role": self.role, "state": self.state}
+            if self.memory_hold:
+                return {"allowed": False, "reason": "unloaded_for_memory", "role": self.role,
+                        "state": self.state}
             d = (self.planner(self.model.name, loading=False, service_start=service_start,
                               hold_restart=hold_restart)
                  if self.planner is not None else {"allowed": True, "reason": None,
@@ -178,6 +185,8 @@ class Slot:
         st = self.state
         if st == "loaded":
             return None
+        if st == "not_loaded" and self.memory_hold:
+            return "unloaded_for_memory"         # the governor reloads it, not a caller
         if st == "not_loaded":
             last = self.refusal
             if last is not None and time.time() - last.get("at", 0) < REFUSAL_REUSE_S:
@@ -308,7 +317,8 @@ class Slot:
         ms = sorted(self.ms)
         return {"name": m.name, "role": self.role, "family": m.family, "owned_by": m.owned_by,
                 "contract": m.role(), "state": self.state, "error": self.error,
-                "refusal": self.refusal, "loaded_at": self.loaded_at, "load_s": self.load_s,
+                "refusal": self.refusal, "memory_hold": self.memory_hold,
+                "loaded_at": self.loaded_at, "load_s": self.load_s,
                 "took_gib": self.took_gib, "precision": m.precision(),
                 "device": str(self.device) if self.device is not None else None,
                 "device_bytes": self.device_bytes(), "weight_hash": m.weight_hash(),
