@@ -11,9 +11,14 @@
 # it. The switch holds the box lock (~/.qwen38-box.flock), so the watchdog leaves the restart alone.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$HERE")"
-ACTIVE="$HERE/active-profile"
 NAME="${1:-}"; MODE="${2:-switch}"
+# the profile's view of serve.env, without switching
+pv() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; echo \"\${$1:-}\""; }
+# the active-profile file and the profiles are the ones serve.env reads, under its REPO: this folder's
+# parent on a checkout, the source tree on an install.sh box (whose serve.env sits in DIR/run/ops)
+REPO_DIR="$(pv REPO)"; REPO_DIR="${REPO_DIR:-$(dirname "$HERE")}"
+ACTIVE="$REPO_DIR/ops/active-profile"
+PROFILES="$REPO_DIR/ops/profiles"
 SMOKE_URL="${SMOKE_URL:-https://ai-api.khaled.de/v1}"
 SMOKE_MODEL="${SMOKE_MODEL:-TandemLLM}"   # the served raw name when the conductor is off (the setup guide)
 MEM_NEED_GB="${MEM_NEED_GB:-80}"        # MemAvailable before a start (serve8011's guard; the stack takes ~70)
@@ -23,17 +28,15 @@ say() { echo "[use-profile $(date +%H:%M:%S)] $*"; }
 
 if [ "$NAME" = "--list" ]; then
     CUR="$(cat "$ACTIVE" 2>/dev/null || echo '(none: serve.env values)')"
-    for f in "$HERE"/profiles/[!_]*.env; do
+    for f in "$PROFILES"/[!_]*.env; do
         n="$(basename "$f" .env)"
         d="$(QSE_PROFILE_OVERRIDE=$n bash -c "set -a; . '$HERE/serve.env'; echo \"\$QSE_WEIGHTS_DIR\"")"
         printf '%-10s %-3s %s %s\n' "$n" "$([ "$n" = "$CUR" ] && echo '*')" "$d" "$([ -e "$d" ] && echo '(on disk)' || echo '(not on disk: fetched on switch)')"
     done
     exit 0
 fi
-[ -n "$NAME" ] && [ -f "$HERE/profiles/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$HERE"/profiles | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
+[ -n "$NAME" ] && [ -f "$PROFILES/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$PROFILES" | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
 
-# the profile's view of serve.env, without switching
-pv() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; echo \"\${$1:-}\""; }
 WDIR="$(pv QSE_WEIGHTS_DIR)"; HF="$(pv QSE_WEIGHTS_HF)"; GB="$(pv QSE_WEIGHTS_GB)"; FILES="$(pv QSE_WEIGHTS_FILES)"
 PY="$(pv PY)"; PORT="$(pv PORT)"
 DRAFT="$(pv QWEN38_DRAFT_EXL3)"; DHEAD="$(pv QWEN38_DRAFT_HEAD_EXL3)"; C8="$(pv CKPT8)"; C16="$(pv CKPT16)"

@@ -14,6 +14,12 @@
 #      control script DIR/bin/tandem (start | stop | status | smoke | logs)
 #   7. start, wait for /health, a smoke test; --no-start stops after step 6
 #
+# With --setup (docs/setup.md) it installs the code and the venv, downloads only Wren's model
+# (Qwen3.5-2B, the setup guide's assistant), writes the config with no weights and the marker
+# src/run/setup-pending, and starts SETUP MODE: the dashboard's #/setup page and Wren, no model of
+# Qwen's. The page picks the weights, the tools and the parallelism and installs them; until then a
+# start (and a reboot) comes back in setup mode. It binds 127.0.0.1 unless --host says otherwise.
+#
 # The primary target is one NVIDIA DGX Spark (GB10, aarch64, sm_121). Other CUDA GPUs are best
 # effort: the served profile's skinny NVFP4 kernel is built for sm_121a only and is switched off
 # there, and StairCut's cost tables were measured on the Spark.
@@ -128,6 +134,9 @@ PORT="${TANDEM_PORT:-8000}"
 HOST="${TANDEM_HOST:-127.0.0.1}"
 SERVED_MODEL="${TANDEM_MODEL_NAME:-qwen3.8-27b-tandem}"
 START=1
+SETUP=0
+FORCE_SETUP=0
+HOST_SET=0
 CORPUS_MODE=build
 YES=0
 DRY=0
@@ -151,6 +160,10 @@ Usage: bash install.sh [options]
   --hf-token TOKEN  a Hugging Face token (or set HF_TOKEN; a stored 'hf auth login' works too)
   --no-corpus       skip the lookup corpus (the lookup drafter then copies from the conversation only)
   --no-start        install and configure, but do not start the engine
+  --setup           set up in the browser instead: install the code and Wren's model only, then
+                    start setup mode (the dashboard's #/setup page; docs/setup.md); 127.0.0.1
+                    unless --host says otherwise
+  --force-setup     with --setup, on a directory that already has a configured engine
   --systemd         also install a systemd user unit, tandemllm.service (off by default)
   --yes, -y         non-interactive: answer yes to every question
   --dry-run         print every step and command, change nothing
@@ -170,8 +183,8 @@ while [ $# -gt 0 ]; do
         --dir=*) DIR="${1#*=}"; shift ;;
         --port) need_arg "$@"; PORT="$2"; shift 2 ;;
         --port=*) PORT="${1#*=}"; shift ;;
-        --host) need_arg "$@"; HOST="$2"; shift 2 ;;
-        --host=*) HOST="${1#*=}"; shift ;;
+        --host) need_arg "$@"; HOST="$2"; HOST_SET=1; shift 2 ;;
+        --host=*) HOST="${1#*=}"; HOST_SET=1; shift ;;
         --ref) need_arg "$@"; TANDEM_REF="$2"; shift 2 ;;
         --ref=*) TANDEM_REF="${1#*=}"; shift ;;
         --repo) need_arg "$@"; TANDEM_REPO="$2"; REPO_SET=1; shift 2 ;;
@@ -180,6 +193,8 @@ while [ $# -gt 0 ]; do
         --hf-token=*) export HF_TOKEN="${1#*=}"; shift ;;
         --no-corpus) CORPUS_MODE=none; shift ;;
         --no-start) START=0; shift ;;
+        --setup) SETUP=1; shift ;;
+        --force-setup) FORCE_SETUP=1; shift ;;
         --systemd) SYSTEMD=1; shift ;;
         --yes|-y) YES=1; shift ;;
         --dry-run) DRY=1; shift ;;
@@ -206,6 +221,19 @@ CORPUS_DIR="$DIR/corpus"
 MARK="$DIR/.tandemllm-install"
 UNIT="$HOME/.config/systemd/user/tandemllm.service"
 HF_HUB_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+WREN_REPO="Qwen/Qwen3.5-2B"
+WREN_DIR="$HOME/.qwen38-spark-engine/models/qwen3.5-2b"
+if [ "$SETUP" = 1 ]; then
+    CORPUS_MODE=none        # the corpus needs the base checkpoint, which the setup guide fetches later
+    if [ -f "$RUN/ops/serve.env" ] && [ ! -f "$SRC/run/setup-pending" ] && [ "$FORCE_SETUP" != 1 ]; then
+        die "$DIR already has a configured engine; --setup would stop it. Add --force-setup to set it up again in the browser"
+    fi
+    if [ "$HOST_SET" = 0 ] && [ "$DRY" != 1 ] && [ "$YES" != 1 ] && { : </dev/tty; } 2>/dev/null; then
+        printf '    Open the setup page to your network (anyone who reaches port %s can run the setup)? [y/N] ' "$PORT"
+        read -r ans </dev/tty || ans=""
+        case "$ans" in y|Y|yes|YES) HOST=0.0.0.0 ;; *) HOST=127.0.0.1 ;; esac
+    fi
+fi
 # fast parallel Xet downloads (the defaults leave most of a fast line unused)
 export HF_XET_HIGH_PERFORMANCE="${HF_XET_HIGH_PERFORMANCE:-1}"
 export HF_XET_NUM_CONCURRENT_RANGE_GETS="${HF_XET_NUM_CONCURRENT_RANGE_GETS:-64}"
@@ -365,6 +393,7 @@ still_to_get() {
 }
 TO_GET=$(( $(still_to_get "$(hf_repo_dir "$BASE_REPO")" "$BASE_GIB") + $(still_to_get "$(hf_repo_dir "$NVFP4_REPO")" "$NVFP4_GIB")
          + $(still_to_get "$(hf_repo_dir "$B8_REPO")" "$DRAFTER_GIB") + $(still_to_get "$(hf_repo_dir "$B16_REPO")" "$DRAFTER_GIB") ))
+[ "$SETUP" = 1 ] && TO_GET=5           # Wren's model alone; the setup guide checks the weights' room
 [ "$CORPUS_MODE" = build ] && [ ! -f "$CORPUS_DIR/meta.json" ] \
     && TO_GET=$((TO_GET + $(still_to_get "$HF_HUB_DIR/datasets--wikimedia--wikipedia" "$WIKI_GIB")))
 NEED_HF=$((TO_GET + 1))
@@ -390,6 +419,7 @@ fi
 # Memory: the served stack takes about 64 GiB of the board at load (docs/operations.md).
 MEM_AVAIL="$(meminfo_gib MemAvailable)"
 MIN_FREE=64; [ "$SPARK" = 1 ] || MIN_FREE=16      # host RAM on a discrete-GPU box
+[ "$SETUP" = 1 ] && MIN_FREE=8                     # setup mode holds Wren alone
 if [ "$MEM_AVAIL" -ge "$MIN_FREE" ]; then
     ok "memory: ${MEM_AVAIL} GiB available"
 elif [ "$START" = 1 ]; then
@@ -429,7 +459,13 @@ if [ -n "${HF_TOKEN:-}" ]; then HF_AUTH="$HF_TOKEN"; ok "HF token from HF_TOKEN/
 elif [ -r "$HF_TOKEN_FILE" ]; then HF_AUTH="$(cat "$HF_TOKEN_FILE")"; ok "HF token from $HF_TOKEN_FILE"
 else info "no Hugging Face token: fine once the weights are public"
 fi
+if [ "$SETUP" = 1 ]; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' -m 20 "https://huggingface.co/api/models/$WREN_REPO" || true)"
+    [ "$code" = 200 ] && ok "Hugging Face: $WREN_REPO is readable" \
+        || warn "cannot read $WREN_REPO (HTTP ${code:-none}): setup mode starts without Wren's chat"
+fi
 for r in "$BASE_REPO" "$NVFP4_REPO" "$B8_REPO" "$B16_REPO"; do
+    [ "$SETUP" = 1 ] && break             # the setup guide checks the weights it is asked for
     # the token goes to curl on stdin, never on its command line
     code="$( { [ -n "$HF_AUTH" ] && printf 'header = "Authorization: Bearer %s"\n' "$HF_AUTH"; true; } \
         | curl -s -K - -o /dev/null -w '%{http_code}' -m 20 "https://huggingface.co/api/models/$r" || true)"
@@ -439,7 +475,7 @@ for r in "$BASE_REPO" "$NVFP4_REPO" "$B8_REPO" "$B16_REPO"; do
         *) fail "cannot reach huggingface.co for $r (HTTP ${code:-none}); check the network" ;;
     esac
 done
-ok "Hugging Face: the four model repositories are readable"
+[ "$SETUP" = 1 ] || ok "Hugging Face: the four model repositories are readable"
 unset HF_AUTH
 
 cat <<EOF
@@ -544,6 +580,22 @@ fi
 # 4. Weights
 # ---------------------------------------------------------------------------------------------
 
+if [ "$SETUP" = 1 ]; then
+step "Wren's model (the setup guide's assistant): $WREN_REPO"
+SNAP_BASE=""; SNAP_NV=""; SNAP_B8=""; SNAP_B16=""
+if [ -f "$WREN_DIR/config.json" ] && [ -f "$WREN_DIR/tokenizer.json" ]; then
+    ok "already here: $WREN_DIR"
+elif [ "$DRY" = 1 ]; then
+    note "snapshot_download $WREN_REPO into $WREN_DIR (about 4.3 GB)"
+else
+    "$PY" - "$WREN_REPO" "$WREN_DIR" <<'EOF' && ok "$WREN_DIR" \
+        || warn "Wren's model did not download: setup mode starts without its chat (the page works without it)"
+import sys
+from huggingface_hub import snapshot_download
+snapshot_download(sys.argv[1], local_dir=sys.argv[2], max_workers=8)
+EOF
+fi
+else
 step "Weights (Hugging Face cache: $HF_HUB_DIR)"
 # hf_get REPO PATTERN...: download (or verify) the files matching the patterns; prints the
 # snapshot directory on stdout, progress on stderr. Resumes an interrupted download.
@@ -600,6 +652,8 @@ else
     ok "NVFP4     $SNAP_NV"
     ok "drafters  $SNAP_B8"
     ok "          $SNAP_B16"
+fi
+
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -670,10 +724,15 @@ setv PYTHONPATH ""
 setv HOST "$(q "$HOST")"
 setv PORT "$PORT"
 setv SERVED_MODEL "$(q "$SERVED_MODEL")"
-setv NV "$(q "$SNAP_NV/mlp.safetensors,$SNAP_NV/gdn.safetensors,$SNAP_NV/attn.safetensors")"
-setv HEAD "$(q "$SNAP_NV/head-fp8.safetensors")"
-setv CKPT8 "$(q "$SNAP_B8")"
-setv CKPT16 "$(q "$SNAP_B16")"
+if [ "$SETUP" = 1 ]; then
+    # no weights yet: the weight profile the setup guide installs sets them
+    setv NV "''"; setv HEAD "''"; setv CKPT8 "''"; setv CKPT16 "''"
+else
+    setv NV "$(q "$SNAP_NV/mlp.safetensors,$SNAP_NV/gdn.safetensors,$SNAP_NV/attn.safetensors")"
+    setv HEAD "$(q "$SNAP_NV/head-fp8.safetensors")"
+    setv CKPT8 "$(q "$SNAP_B8")"
+    setv CKPT16 "$(q "$SNAP_B16")"
+fi
 setv CORPUS "$(q "$CORPUS_VALUE")"
 setv QSE_USAGE_LEDGER "$(q "$DIR/state/usage/ledger.sqlite3")"
 setv DROP_PAGE_CACHE 0              # bin/tandem drops the weights' page cache with this install's paths
@@ -717,7 +776,14 @@ else
         bash -n "$RUN/ops/serve.env.tmp" || die "the generated serve.env does not parse"
         mv "$RUN/ops/serve.env.tmp" "$RUN/ops/serve.env"
         # the release's own service scripts, next to this env file (they source ./serve.env)
-        for s in start.sh stop.sh engines.sh; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
+        # and what the setup guide's apply job runs beside them (server/setup/apply.py)
+        for s in start.sh stop.sh engines.sh use-profile.sh make-secrets.sh engine_status.py \
+                 fetch_weights.py; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
+        if [ "$SETUP" = 1 ]; then
+            # setup mode until the setup guide's apply job removes it (a reboot comes back to it)
+            mkdir -p "$SRC/run"
+            printf 'HOST=%s\n' "$HOST" > "$SRC/run/setup-pending"
+        fi
         mkdir -p "$DIR/state/usage"
         ok "wrote $RUN/ops/serve.env (StairCut on: QWEN38_LEN_SWITCH=$(sed -n 's/^QWEN38_LEN_SWITCH=//p' "$RUN/ops/serve.env"), QWEN38_LEN_MODE=$(sed -n 's/^QWEN38_LEN_MODE=//p' "$RUN/ops/serve.env"))"
     fi
@@ -880,6 +946,25 @@ fi
 # ---------------------------------------------------------------------------------------------
 
 step "Start"
+if [ "$SETUP" = 1 ]; then
+    if [ "$START" != 1 ]; then
+        info "skipped (--no-start). Start setup mode with: bash $RUN/ops/start.sh --setup"
+    elif [ "$DRY" = 1 ]; then
+        note "bash $RUN/ops/start.sh --setup --host $HOST   (the dashboard and Wren; waits for /health)"
+    else
+        bash "$RUN/ops/start.sh" --setup --host "$HOST" || die "setup mode did not come up; log: $SRC/logs/engine.log"
+    fi
+    if [ "$HOST" = 127.0.0.1 ]; then
+        printf '\n%sSetup mode%s on this machine only. From your computer:\n\n    ssh -L %s:localhost:%s %s\n\n  then open http://localhost:%s/dashboard/#/setup\n' \
+            "$B" "$N" "$PORT" "$PORT" "$(hostname 2>/dev/null || echo '<this box>')" "$PORT"
+    else
+        printf '\n%sSetup mode%s: open http://%s:%s/dashboard/#/setup\n' "$B" "$N" \
+            "$(hostname -I 2>/dev/null | awk '{print $1}')" "$PORT"
+        printf '%sWARNING:%s no admin password is set, so anyone who reaches port %s can run the setup.\n' "$Y" "$N" "$PORT"
+        printf '  Set one with: bash %s/ops/make-secrets.sh --admin   (then restart setup mode)\n' "$RUN"
+    fi
+    exit 0
+fi
 if [ "$START" != 1 ]; then
     info "skipped (--no-start). Start it with: $DIR/bin/tandem start"
 elif [ "$DRY" = 1 ]; then
