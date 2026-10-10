@@ -1194,7 +1194,7 @@ export interface SetupStep {
   label: string;
   fields: SetupStepField[];
 }
-export type SetupToolName = 'set_field' | 'toggle' | 'select_profile' | 'go_to_step' | 'next' | 'previous' | 'explain';
+export type SetupToolName = 'set_field' | 'toggle' | 'select_profile' | 'go_to_step' | 'next' | 'previous' | 'explain' | 'read_device';
 export interface SetupSteps {
   contract_version: SetupContract;
   model: string;

@@ -20,12 +20,14 @@ export interface WizardState {
   visited: SetupStepId[];
   chat: SetupChatMessage[];
   updatedAt: number;
+  /** the install job this browser started (a reload during the install resumes it) */
+  job: string | null;
   /** a one-line note for the user (a cascade, a clamp); not saved */
   notice: string | null;
 }
 
 export function emptyState(): WizardState {
-  return { model: null, step: 'models', selection: null, visited: ['models'], chat: [], updatedAt: 0, notice: null };
+  return { model: null, step: 'models', selection: null, visited: ['models'], chat: [], updatedAt: 0, job: null, notice: null };
 }
 
 /** The recommended setup of a model: what the wizard shows on a first visit. */
@@ -111,6 +113,7 @@ export type SetupAction =
   | { type: 'field'; group: 'methods' | 'advanced'; id: string; value: SetupValue }
   | { type: 'recommended'; scope: 'components' | 'parallelism' | 'methods' }
   | { type: 'chat'; chat: SetupChatMessage[] }
+  | { type: 'job'; id: string | null }
   | { type: 'dismiss' }
   | { type: 'clear' };
 
@@ -161,6 +164,8 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
       return { ...st, notice: null };
     case 'chat':
       return { ...st, chat: capChat(a.chat), updatedAt: now };
+    case 'job':
+      return a.id ? done({ job: a.id, step: 'install', visited: visit(st.visited, 'install') }) : done({ job: null, step: st.step === 'install' ? 'review' : st.step });
   }
   if (!m || !st.selection) return st;
   const sel = st.selection;
@@ -215,6 +220,7 @@ export interface Saved {
   visited: SetupStepId[];
   updatedAt: number;
   chat: SetupChatMessage[];
+  job?: string | null;
 }
 
 /** localStorage, or null where the browser refuses it (private mode, blocked storage). */
@@ -256,6 +262,8 @@ export function readSaved(store: Storage | null): { state: WizardState; problem:
   st.visited = Array.isArray(data.visited) ? data.visited.filter(isStepId) : ['models'];
   st.chat = Array.isArray(data.chat) ? capChat(data.chat.filter(isChatMessage)) : [];
   st.updatedAt = typeof data.updatedAt === 'number' ? data.updatedAt : 0;
+  st.job = typeof data.job === 'string' ? data.job : null;
+  if (st.step === 'install' && !st.job) st.step = 'review';
   if (!st.model || !st.selection) {
     st.model = null;
     st.selection = null;
@@ -273,7 +281,7 @@ export function toSaved(st: WizardState): Saved {
     const clean = (o: Record<string, SetupValue>) => Object.fromEntries(Object.entries(o).filter(([k, v]) => !SECRET.test(k) || v === 'keep' || v === 'generate'));
     selection = { ...selection, methods: clean(selection.methods), advanced: clean(selection.advanced) };
   }
-  return { v: 1, model: st.model, step: st.step === 'install' ? 'review' : st.step, selection, visited: st.visited, updatedAt: st.updatedAt, chat: capChat(st.chat) };
+  return { v: 1, model: st.model, step: st.step === 'install' && !st.job ? 'review' : st.step, selection, visited: st.visited, updatedAt: st.updatedAt, chat: capChat(st.chat), job: st.job };
 }
 
 export function writeSaved(store: Storage | null, st: WizardState): boolean {

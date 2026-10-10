@@ -28,6 +28,7 @@ import { MockParallel } from './parallel.ts';
 import { MockConductor } from './conductor.ts';
 import { MockBackends } from './backends.ts';
 import { longSession } from './memory.ts';
+import { MockSetup } from './setup.ts';
 
 type Next = (err?: unknown) => void;
 type Middleware = (req: IncomingMessage, res: ServerResponse, next: Next) => void;
@@ -437,6 +438,8 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
 
   // 1.3: every seventh row was relayed to DeepSeek: what the proxy sees, nulls for the rest
   const backends = new MockBackends();
+  // the setup guide (/v1/setup/*, POST /__mock/setup): mock/setup.ts
+  const setup = new MockSetup();
   function proxied(r: Record<string, unknown>): void {
     if (Number(r.id) % 7 !== 0) return;
     Object.assign(r, {
@@ -471,6 +474,14 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       if (url.pathname.startsWith('/dashboard/')) {
         req.url = url.pathname.slice('/dashboard'.length) + url.search;
         return next();
+      }
+      if (path === '/__mock/setup' || path.startsWith('/v1/setup/')) {
+        if (await setup.handle(req, res, path, q, () => readBody(req))) return;
+      }
+      // an engine restart during a setup job: the origin does not answer
+      if (setup.away() && (path === '/health' || path.startsWith('/v1/'))) {
+        req.socket.destroy();
+        return;
       }
       if (path === '/__mock/mode') {
         if (req.method === 'POST') {
@@ -760,7 +771,7 @@ export function createMockMiddleware(opts: MockOptions = {}): Middleware {
       if (path === '/v1/models') {
         return json(res, 200, { object: 'list', data: [{ id: 'TandemLLM', object: 'model', created: Math.floor(startedAt / 1000), owned_by: 'tandemllm', profile: 'chat' }] });
       }
-      if (path === '/health') return json(res, 200, { status: liveStatus() });
+      if (path === '/health') return json(res, 200, { status: liveStatus(), ...(setup.o.setupMode ? { mode: 'setup' } : {}) });
       next();
     })().catch((e) => {
       if (!res.headersSent) json(res, 500, { error: { type: 'internal_error', message: String(e) } });

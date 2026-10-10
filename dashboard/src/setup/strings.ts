@@ -33,7 +33,7 @@ export const STEP_TITLE: Record<SetupStepId, string> = {
 
 export const STEP_INTRO: Record<SetupStepId, string> = {
   models: 'Each tile is a model this box can serve. Pick one to see how fast it runs here and to set it up.',
-  overview: 'These speeds were measured on a DGX Spark, one request at a time, with the caches off. Sort the table or switch the mode to compare the sizes.',
+  overview: 'What the model is, and how fast each size of it runs on a DGX Spark. Sort the table or switch the mode to compare the sizes.',
   weights: 'Smaller weights run faster and use less memory, but their answers drift further from the original model. KL measures that drift: lower is closer.',
   components: 'We checked what we run on our own box. Each tool says what it does and what it costs in memory.',
   parallelism: 'Each slot is one chat the model can serve at the same time. The window is the longest conversation a slot can hold.',
@@ -42,7 +42,20 @@ export const STEP_INTRO: Record<SetupStepId, string> = {
   install: 'The box runs the steps below. You can leave this page; it picks up where it was when you come back.',
 };
 
+/** One line per step for the tiles page's "what the guide walks you through" list. */
+export const STEP_SHORT: Record<SetupStepId, string> = {
+  models: 'Pick a model',
+  overview: 'See how fast each size runs on this box',
+  weights: 'Pick a size that fits your memory and the quality you want',
+  components: 'Turn the helper tools on or off',
+  parallelism: 'Decide how many chats run at once and how long they can be',
+  methods: 'Keep the recommended settings, or change one',
+  review: 'See every change before anything happens',
+  install: 'The box downloads, writes the settings and restarts',
+};
+
 export const S = {
+  guideSteps: 'What the guide walks you through',
   pageTitle: 'Setup guide',
   stepOf: (n: number, total: number) => `Step ${n} of ${total}`,
   next: 'Next',
@@ -77,7 +90,7 @@ export const S = {
 
   // overview
   license: 'License',
-  measuredOn: (build: string, date: string) => `Measured with build ${build} on ${date}.`,
+  measuredOn: (build: string, date: string) => `Measured with build ${build} on ${date}, one request at a time, with the caches off.`,
   howMeasured: 'How we measured',
   modeGreedy: 'Greedy',
   modeSampled: 'Sampled',
@@ -110,10 +123,11 @@ export const S = {
   weightsMemory: 'Memory',
   weightsDisk: 'Download',
   onDisk: 'On this box',
-  toDownload: (gb: number) => `${gb.toFixed(1)} GB to download`,
-  privateRepo: 'Needs a Hugging Face token: these weights are in a private repository.',
+  toDownload: (gb: number) => `${gb.toFixed(1)} GB`,
+  privateRepo: 'The EXL3 weights are in private repositories. This box has a Hugging Face token, so it can download them.',
   privateNoToken: 'This box has no Hugging Face token, so it cannot download these weights. Add one with huggingface-cli login on the box, or pick weights that are already here.',
   activeNow: 'Running now',
+  privateNoTokenShort: 'Needs a Hugging Face token, and this box has none.',
   notMeasured: 'not measured on this build',
 
   // components
@@ -139,7 +153,7 @@ export const S = {
   floor: 'Memory kept free',
   floorWhat: 'The engine stops taking new memory when less than this is free, so the box stays responsive.',
   windowClamped: (n: number) => `Set to ${tokens(n)} tokens, the nearest length this model supports.`,
-  fitsTokens: (n: number) => `About ${tokens(n)} tokens of conversation fit, over all chats.`,
+  fitsUnit: 'tokens of conversation fit, over all chats.',
   fitsPerSlot: (n: number, slots: number) => (slots > 1 ? `That is about ${tokens(n)} tokens for each of ${slots} chats if all are long at once.` : `One chat can grow to about ${tokens(n)} tokens.`),
   worstCase: (gb: number, fits: boolean) => (fits ? `Even with every chat at its full window (${gib(gb)}), it fits.` : `Every chat at its full window would need ${gib(gb)}. The engine pauses or parks a chat before that happens.`),
   tokensUnit: 'tokens',
@@ -210,7 +224,7 @@ export const S = {
   restarting: 'The engine is restarting. This takes about 4 minutes; the page keeps checking.',
   restartingSince: (s: number) => `Waiting for the engine for ${Math.round(s)} s.`,
   logTail: 'Log',
-  openDashboard: 'Open the dashboard',
+  openDashboard: 'See it run',
   openPlayground: 'Open the Playground',
   backToReview: 'Back to Review',
   installStarting: 'Starting the install',
@@ -354,6 +368,8 @@ export const R = {
   atLeast: (b: string) => `at least ${b}`,
   missing: 'not on the box',
   restartNeeded: 'Restart the engine to finish.',
+  retry: 'Try again',
+  openSetup: 'Open the setup guide',
 };
 
 export function stepRefLabel(id: SetupStepId): string {

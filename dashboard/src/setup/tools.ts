@@ -79,7 +79,13 @@ function display(v: SetupValue): string {
 }
 
 /** Check one call and say what it would do. Nothing changes until the caller dispatches. */
-export function planToolCall(call: Pick<SetupToolCall, 'name' | 'args'>, ctx: ToolContext): ToolPlan {
+/** A call as the model sent it: any name (unknown ones are rejected), arguments as an object or JSON text. */
+export interface RawToolCall {
+  name: string;
+  args: unknown;
+}
+
+export function planToolCall(call: RawToolCall | Pick<SetupToolCall, 'name' | 'args'>, ctx: ToolContext): ToolPlan {
   const name = String(call.name ?? '');
   if (!(TOOL_NAMES as readonly string[]).includes(name)) {
     if (/finish|apply|install|reset|delete|unload|load|confirm|submit/i.test(name)) return fail(S.tool.unknown(name) + ' ' + S.tool.userOnly(name));
