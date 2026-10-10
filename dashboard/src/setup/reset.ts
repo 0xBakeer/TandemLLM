@@ -105,8 +105,8 @@ export class QseReset extends LightElement {
     this.errorText = null;
     try {
       const res = await setupApi.reset({ level: lv.level, confirm: confirmValue(lv, this.typed) });
-      const freed = res.removed.reduce((a, r) => a + r.bytes, 0);
-      if (res.ok === false || (res.failed && res.failed.length)) this.result = { kind: 'partial', text: R.partial(res.failed?.length ?? 0), res };
+      const freed = res.freed_gb != null ? res.freed_gb * 2 ** 30 : res.removed.reduce((a, r) => a + r.bytes, 0);
+      if (res.ok === false || res.failed?.length) this.result = { kind: 'partial', text: R.partial(res.failed.length), res };
       else this.result = { kind: 'ok', text: res.job ? res.message : R.done(bytesText(freed)), res };
       window.dispatchEvent(new CustomEvent('qse-system-refresh'));
       void this.load();
@@ -158,7 +158,7 @@ export class QseReset extends LightElement {
     const busy = !!this.levels?.busy;
     const cs = n === 1 ? { enabled: !this.result, reason: null } : confirmState(lv, this.typed, { busy, sending: this.sending });
     const items = lv?.items ?? [];
-    const present = items.filter((i) => i.exists);
+    const present = items.filter((i) => i.exists && !i.refused);
     const word = lv?.confirm_word ?? null;
     const done = this.result != null;
     return html`<dialog class="reset-dialog ${n === 5 ? 'is-danger' : ''}" aria-labelledby="reset-dialog-title" @close=${() => (this.openLevel = null)} @cancel=${() => (this.openLevel = null)}>
@@ -178,7 +178,12 @@ export class QseReset extends LightElement {
               ? html`<h3 class="reset-dialog-sub">${R.dialogItems}</h3>
                   ${present.length
                     ? html`<ul class="reset-items">
-                          ${items.map((i) => html`<li class=${i.exists ? '' : 'is-missing'}><span class="reset-item-label">${i.label}<code>${i.path}</code></span><span class="num">${i.exists ? bytesText(i.bytes) : R.missing}</span></li>`)}
+                          ${items.map(
+                            (i) => html`<li class=${!i.exists || i.refused ? 'is-missing' : ''} data-item=${i.path}>
+                              <span class="reset-item-label">${i.label}<code>${i.path}</code>${i.refused ? html`<span class="reset-item-note">${R.kept(i.refused)}</span>` : i.note ? html`<span class="reset-item-note">${i.note}</span>` : nothing}</span>
+                              <span class="num">${!i.exists ? R.missing : i.refused ? R.keptShort : i.at_least ? R.atLeast(bytesText(i.bytes)) : bytesText(i.bytes)}</span>
+                            </li>`,
+                          )}
                         </ul>
                         <p class="reset-total"><span>${R.dialogTotal(lv!.bytes >= HUGE ? R.atLeast(bytesText(lv!.bytes)) : bytesText(lv!.bytes))}</span><span class="muted">${lv!.restart ? R.restart : R.noRestart}</span></p>`
                     : html`<p class="reset-nothing" data-reset-empty>${R.dialogNothing}</p>`}`
@@ -207,7 +212,7 @@ export class QseReset extends LightElement {
     const res = r.res;
     return html`<div class="reset-result is-${r.kind}" role="status" data-reset-result=${r.kind}>
       <p>${r.kind === 'ok' || r.kind === 'local' ? icon('check') : icon('warn')} ${r.text}</p>
-      ${res?.failed?.length ? html`<ul class="reset-failed">${res.failed.map((f) => html`<li><code>${f.path}</code> <span class="muted">${f.message}</span></li>`)}</ul>` : nothing}
+      ${res?.failed?.length ? html`<ul class="reset-failed">${res.failed.map((f) => html`<li><code>${f.path}</code> <span class="muted">${f.reason}</span></li>`)}</ul>` : nothing}
       ${res?.restart_needed && !res.job ? html`<p class="muted small">${R.restartNeeded}</p>` : nothing}
       ${res?.job ? html`<qse-install-progress .jobId=${res.job.id} .initial=${res.job} compact></qse-install-progress>` : nothing}
       ${r.kind === 'local' && !this.inSetup ? html`<p class="small"><a href="#/setup">${R.openSetup}</a></p>` : nothing}

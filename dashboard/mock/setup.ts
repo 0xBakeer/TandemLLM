@@ -12,7 +12,8 @@
 //   hfToken: bool, password: bool, busy: n (requests running), setupMode: bool (/health mode)
 //   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3)
 //   estimateDown: bool, planDown: bool, models: ok | empty | error | broken
-//   active: <profile id> (what the box runs), reset: true (all of the above back to the start)
+//   active: <profile id> (what the box runs), unauthorized: bool (every route 401),
+//   reset: true (all of the above back to the start)
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
@@ -64,6 +65,8 @@ interface Options {
   planDown: boolean;
   models: 'ok' | 'empty' | 'error' | 'broken';
   active: string;
+  /** a box with an admin password and no session: every /v1/setup route answers 401 */
+  unauthorized: boolean;
 }
 
 const START: Options = {
@@ -84,6 +87,7 @@ const START: Options = {
   planDown: false,
   models: 'ok',
   active: 'exl3-6.0',
+  unauthorized: false,
 };
 
 const STEP_LABELS: Record<SetupJobStepId, string> = {
@@ -139,16 +143,12 @@ export class MockSetup {
 
   status(): SetupAssistantStatus {
     const o = this.o;
-    if (o.noModel) return { name: 'Wren', model: null, fallback: false, state: 'off', reason: 'Neither Qwen3.5-2B nor Qwen3.5-0.8B is on this box.', load_s: null, device_gib: null, claim_gib: null, can_load: false };
+    const extra = { borrowed: false, window: 8192, loading_s: null as number | null, stats: {} as Record<string, number> };
+    if (o.noModel) return { name: 'Wren', model: null, fallback: false, state: 'off', reason: 'neither Qwen3.5-2B nor Qwen3.5-0.8B is in ~/.qwen38-spark-engine/models. Download it with: hf download Qwen/Qwen3.5-2B --local-dir ~/.qwen38-spark-engine/models/qwen3.5-2b', load_s: null, device_gib: null, claim_gib: null, can_load: false, ...extra };
     let state = o.assistant as SetupAssistantStatus['state'];
-    let progress: number | null = null;
-    if (state === 'loading') {
-      progress = Math.min(1, (Date.now() - this.loadStartedAt) / o.loadMs);
-      if (progress >= 1) {
-        this.o.assistant = 'loaded';
-        state = 'loaded';
-        progress = null;
-      }
+    if (state === 'loading' && Date.now() - this.loadStartedAt >= o.loadMs) {
+      this.o.assistant = 'loaded';
+      state = 'loaded';
     }
     return {
       name: 'Wren',
@@ -159,8 +159,8 @@ export class MockSetup {
       load_s: state === 'loaded' ? o.loadMs / 1000 : null,
       device_gib: state === 'loaded' ? 4.4 : null,
       claim_gib: 4.4,
-      can_load: !o.refuse,
-      progress,
+      can_load: state !== 'loaded' && state !== 'loading',
+      ...extra,
       loading_s: state === 'loading' ? Math.round((Date.now() - this.loadStartedAt) / 100) / 10 : null,
     };
   }
@@ -181,11 +181,12 @@ export class MockSetup {
       mem_available_gb: this.memAvailable(),
       gpu: { name: 'NVIDIA GB10', util_pct: o.busy ? 92 : 3, temp_c: o.busy ? 71 : 44, power_w: o.busy ? 88 : 14 },
       disk: { path: '/home/bakeer/.qwen38-spark-engine', free_gb: 1412.6, total_gb: 3726.0 },
-      engine: { version: '0.6.2', profile: o.setupMode ? null : o.active, uptime_s: 22_841, running: o.busy, waiting: 0, busy: o.busy > 0 },
+      engine: { version: '0.6.2', profile: o.setupMode ? null : o.active, uptime_s: 22_841, running: o.busy, waiting: 0, busy: o.busy > 0, mode: o.setupMode ? 'setup' : 'serving' },
       active_profile: o.setupMode ? null : o.active,
       profiles_on_disk: { ...this.onDisk },
       password_set: o.password,
       hf_token_present: o.hfToken,
+      admin_password_set: o.password,
       assistant: this.status(),
     };
   }
@@ -260,6 +261,7 @@ export class MockSetup {
       restart: changes.length > 0 || switching,
       commands,
       estimate: est,
+      ports: { current: 8000, next: Number(sel.advanced.port ?? 8000) },
     };
   }
 
@@ -273,7 +275,7 @@ export class MockSetup {
     const slow = scenario === 'slow' ? 3 : 1;
     const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
     const steps: SetupJobStep[] = ids.map((s) => ({ id: s, label: STEP_LABELS[s], state: 'pending', started_at: null, ended_at: null, detail: null }));
-    const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes };
+    const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes, kind: 'apply', rolled_back: false, failed_step: null, url: '<this box>/dashboard/' };
     const tl: { at: number; ev: SetupJobEvent }[] = [];
     const sec = (ms: number) => (now + ms) / 1000;
     let t = 0;
@@ -390,17 +392,17 @@ export class MockSetup {
 
   levels(): SetupResetLevel[] {
     const E = '~/.qwen38-spark-engine';
-    const item = (path: string, label: string, bytes: number, exists = true) => ({ path, label, bytes: exists ? bytes : 0, exists });
+    const item = (path: string, label: string, bytes: number, exists = true, more: Partial<SetupResetLevel['items'][number]> = {}): SetupResetLevel['items'][number] => ({ path, label, bytes: exists ? bytes : 0, exists, files: exists ? 12 : 0, at_least: false, kind: 'path', action: 'remove', note: null, restart: false, refused: null, ...more });
     const caches = this.o.resetEmpty
       ? [item(`${E}/disk-cache`, 'Disk cache', 0, false), item(`${E}/spill`, 'Parked sessions', 0, false), item(`${E}/suffix.bin`, 'Lookup store', 0, false), item(`${E}/response-cache`, 'Response cache', 0, false)]
-      : [item(`${E}/disk-cache`, 'Disk cache', 11.2 * GIB), item(`${E}/spill`, 'Parked sessions', 3.1 * GIB), item(`${E}/suffix.bin`, 'Lookup store', 412 * 2 ** 20), item(`${E}/response-cache`, 'Response cache', 0, false)];
+      : [item(`${E}/disk-cache`, 'Disk cache', 11.2 * GIB, true, { action: 'engine', note: 'the running engine clears it' }), item(`${E}/spill`, 'Parked sessions', 3.1 * GIB), item(`${E}/suffix.bin`, 'Lookup store', 412 * 2 ** 20), item(`${E}/response-cache`, 'Response cache', 0, false)];
     const weights = MODEL.profiles.filter((p) => this.onDisk[p.id] && p.id !== this.o.active).map((p) => item(`${E}/weights/${p.id}`, `${p.label} weights`, p.disk_gb * 1e9));
-    const lv = (level: 2 | 3 | 4 | 5, label: string, what: string, items: SetupResetLevel['items'], restart: boolean, word: string | null): SetupResetLevel => ({ level, label, what, items, bytes: items.reduce((a, i) => a + i.bytes, 0), restart, confirm_word: word });
+    const lv = (level: 2 | 3 | 4 | 5, label: string, what: string, items: SetupResetLevel['items'], restart: boolean, word: string | null): SetupResetLevel => ({ level, label, what, items, bytes: items.reduce((a, i) => a + (i.refused ? 0 : i.bytes), 0), restart, confirm_word: word });
     return [
-      lv(2, 'Applied configuration', 'Writes the shipped serve.env back and switches to the recommended weights (EXL3 4.5).', [item('ops/serve.env', 'Your serve.env, written back from the template', 4812), item('ops/active-profile', `The active weights, ${this.o.active} to exl3-4.5`, 9)], true, 'reset'),
+      lv(2, 'Applied configuration', 'Writes the shipped serve.env back and switches to the recommended weights (EXL3 4.5).', [item('ops/serve.env', 'Your serve.env, written back from the template', 4812), item('ops/active-profile', `The active weights, ${this.o.active} to exl3-4.5`, 9)], true, null),
       lv(3, 'Caches and stored chats', 'Deletes the disk cache, parked sessions, the lookup store and the response cache.', caches, false, 'delete caches'),
       lv(4, 'Downloaded weights', `Deletes every downloaded weight set except ${this.o.active}, which is running.`, weights, false, 'delete weights'),
-      lv(5, 'Usage history and conductor data', 'Deletes the usage ledger and the conductor’s notes, memory and journal. The usage charts start empty.', [item(`${E}/ledger.sqlite3`, 'Usage ledger', 1.4 * GIB), item(`${E}/conductor`, 'Conductor data', 220 * 2 ** 20)], true, 'delete history'),
+      lv(5, 'Usage history and conductor data', 'Deletes the usage ledger and the conductor’s notes, memory and journal. The usage charts start empty.', [item(`${E}/usage`, 'The usage history', 1.4 * GIB, true, { files: 3 }), item(`${E}/conductor`, "The conductor's settings and journal", 220 * 2 ** 20), item(`${E}/memory`, 'Memory notes and transcripts', 5.1 * GIB, true, { files: 50_000, at_least: true })], true, 'delete history'),
     ];
   }
 
@@ -507,6 +509,7 @@ export class MockSetup {
       req.socket.destroy();
       return true;
     }
+    if (this.o.unauthorized) return err(401, 'unauthorized', 'a bearer token or the dashboard session is needed');
     const method = req.method ?? 'GET';
     const body = method === 'POST' ? JSON.parse((await readBody()) || '{}') : null;
     const o = this.o;
@@ -577,19 +580,21 @@ export class MockSetup {
       const lv = this.levels().find((l) => l.level === level);
       if (!lv) return err(400, 'invalid', `no reset level ${body.level}`);
       if (o.busy) return err(409, 'busy', `${o.busy} requests are running`);
-      if (lv.confirm_word ? body.confirm !== lv.confirm_word : body.confirm !== true) return err(400, 'confirm', `type ${lv.confirm_word ?? 'true'} to confirm`);
+      if (body.dry_run) return json(200, { ...lv, contract_version: '1.0', dry_run: true });
+      if (lv.confirm_word ? String(body.confirm ?? '').trim().toLowerCase() !== lv.confirm_word : body.confirm !== true) return err(400, 'confirm_required', lv.confirm_word ? `type '${lv.confirm_word}' to confirm` : 'confirm: true');
       const present = lv.items.filter((i) => i.exists);
       if (o.resetPartial) {
-        const failed = present.slice(0, 2).map((i) => ({ path: i.path, message: 'Device or resource busy' }));
+        const failed = present.slice(0, 2).map((i) => ({ path: i.path, reason: 'OSError: [Errno 16] Device or resource busy' }));
         const removed = present.slice(2).map((i) => ({ path: i.path, bytes: i.bytes }));
-        return json(200, { contract_version: '1.0', level, removed, restart_needed: lv.restart, message: 'Some items could not be deleted.', ok: false, failed });
+        return json(200, { contract_version: '1.0', level, removed, restart_needed: lv.restart, message: 'Some items could not be removed.', ok: false, failed, freed_gb: Math.round((removed.reduce((a, r) => a + r.bytes, 0) / GIB) * 100) / 100 });
       }
       if (level === 4) for (const p of MODEL.profiles) if (p.id !== o.active) this.onDisk[p.id] = false;
       if (level === 2) {
-        const job = this.startJob({ ...defaults(MODEL) }, 'ok');
-        return json(200, { contract_version: '1.0', level, removed: [], restart_needed: true, message: 'The shipped configuration is being written back.', ok: true, job });
+        const job = { ...this.startJob({ ...defaults(MODEL) }, 'ok'), kind: 'reset' as const };
+        return json(202, { contract_version: '1.0', level, removed: [], failed: [], freed_gb: 0, restart_needed: true, message: 'The engine restarts with the shipped configuration.', ok: true, job_id: job.id, job });
       }
-      return json(200, { contract_version: '1.0', level, removed: present.map((i) => ({ path: i.path, bytes: i.bytes })), restart_needed: lv.restart, message: 'Done.', ok: true });
+      const bytes = present.reduce((a, i) => a + i.bytes, 0);
+      return json(200, { contract_version: '1.0', level, removed: present.map((i) => ({ path: i.path, bytes: i.bytes })), failed: [], freed_gb: Math.round((bytes / GIB) * 100) / 100, restart_needed: lv.restart, message: 'Done.', ok: true });
     }
     if (path === '/v1/setup/assistant/status') return json(200, this.status());
     if (path === '/v1/setup/assistant/load' && method === 'POST') {

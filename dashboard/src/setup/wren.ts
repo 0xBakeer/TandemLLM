@@ -155,7 +155,7 @@ export class QseWren extends LightElement {
         break;
       case 'loading':
         this.phase = 'loading';
-        this.progress = s.progress ?? this.timeProgress(s.loading_s ?? null);
+        this.progress = this.timeProgress(s.loading_s ?? null);
         this.emit('load-progress');
         this.scheduleLoadPoll();
         break;

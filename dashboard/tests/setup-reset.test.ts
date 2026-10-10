@@ -1,8 +1,10 @@
 // VIS-82 (QA VIS-83): the reset confirmation rules.
 import { describe, expect, it } from 'vitest';
+import type { SetupResetItem } from '../src/api/types';
 import { bytesText, confirmMatches, confirmState, confirmValue, once } from '../src/setup/reset-logic';
 
-const level3 = { confirm_word: 'delete caches', bytes: 12e9, items: [{ path: '~/.qwen38-spark-engine/disk', label: 'Disk cache', bytes: 12e9, exists: true }] };
+const item = (more: Partial<SetupResetItem> = {}): SetupResetItem => ({ path: '~/.qwen38-spark-engine/disk', label: 'Disk cache', bytes: 12e9, exists: true, files: 40, at_least: false, kind: 'path', action: 'remove', note: null, restart: false, refused: null, ...more });
+const level3 = { confirm_word: 'delete caches', bytes: 12e9, items: [item()] };
 
 describe('confirmMatches', () => {
   it('needs the exact word', () => {
@@ -23,7 +25,9 @@ describe('confirmState', () => {
     expect(confirmState(level3, 'delete caches', { busy: true, sending: false })).toEqual({ enabled: false, reason: 'busy' });
   });
   it('an empty plan cannot be confirmed', () => {
-    expect(confirmState({ ...level3, items: [{ ...level3.items[0], exists: false, bytes: 0 }] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
+    expect(confirmState({ ...level3, items: [item({ exists: false, bytes: 0 })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
+    // an item the server will not remove does not count
+    expect(confirmState({ ...level3, items: [item({ refused: 'the active profile' })] }, 'delete caches', { busy: false, sending: false })).toEqual({ enabled: false, reason: 'empty' });
   });
   it('sending disables it (no second request)', () => {
     expect(confirmState(level3, 'delete caches', { busy: false, sending: true }).enabled).toBe(false);

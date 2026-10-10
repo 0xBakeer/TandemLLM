@@ -21,7 +21,7 @@ export function confirmState(level: Pick<SetupResetLevel, 'confirm_word' | 'item
   if (opts.sending) return { enabled: false, reason: 'sending' };
   if (level == null) return { enabled: true, reason: null }; // level 1, local
   if (opts.busy) return { enabled: false, reason: 'busy' };
-  if (!level.items.some((i) => i.exists)) return { enabled: false, reason: 'empty' };
+  if (!level.items.some((i) => i.exists && !i.refused)) return { enabled: false, reason: 'empty' };
   if (!confirmMatches(level.confirm_word, typed)) return { enabled: false, reason: 'word' };
   return { enabled: true, reason: null };
 }
