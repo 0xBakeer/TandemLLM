@@ -109,6 +109,12 @@ FUSED_ADDNORM = _S.get("FUSED_ADDNORM") == "1"
 # has no per-launch gaps. Needs the fused commit and GDN verify mixer, the decode-attention kernel
 # and a bf16 KV cache; without them the eager verify runs.
 VERIFY_GRAPH = _S.get("VERIFY_GRAPH") == "1"
+#: SRV-321: () -> None, called by a layer-major window (`prefill_window`) between two layers, with
+#: the EXL3 slab cache empty and off; the server sets it so a prefill on one slot offers the GPU
+#: turn to the slots that decode every layer, not only after the window (an 8,192-row window is
+#: one ~10 s pass, and three decoding chats wrote nothing for those 10 s). Whatever runs in it runs
+#: on other engines: this window's ops, their order and their inputs stay the same, bit for bit.
+WINDOW_YIELD = None
 
 # Fold the block's commit into the next block's verify. Without it a commit is a
 # second pass over the 151 MB recurrent state after every verify (read the entry, add the accepted
@@ -1263,6 +1269,14 @@ class Qwen38Engine:
                         taps[c][layer + 1] = hs[c][0].detach()
                 if _x3 is not None:
                     _x3.slab_cache_clear()
+                if WINDOW_YIELD is not None and layer + 1 < n:
+                    # the slab cache is empty here; off while another slot's forwards run, so they
+                    # take their own kernels (a decode's few rows never read a prefill's slab)
+                    if _x3 is not None:
+                        _x3.slab_cache_off()
+                    WINDOW_YIELD()
+                    if _x3 is not None:
+                        _x3.slab_cache_on()
         finally:
             if _x3 is not None:
                 _x3.slab_cache_off()

@@ -209,6 +209,31 @@ def test_a_short_resident_conversation_does_not_hold_every_request_on_slot_0():
     assert not c(0, 0, 1024)
 
 
+def test_a_window_offers_the_turn_between_layers_only_to_a_waiting_slot():
+    """SRV-321: the window's layer yield pauses the turn when a slot waits for it, and does nothing
+    alone (no hand-over, no device sync); QSE_PARALLEL_LAYER_YIELD defaults to on."""
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import types
+    from server import app as A
+    calls = []
+    turn = types.SimpleNamespace(n=0, waiting=lambda: turn.n, pause=lambda who: calls.append(who))
+    pool = types.SimpleNamespace(turn=turn)
+    old = dict.get(A.STATE, "pool")
+    dict.__setitem__(A.STATE, "pool", pool)
+    try:
+        A._par_window_yield()
+        assert calls == [], "alone: no pause"
+        turn.n = 2
+        A._par_window_yield()
+        assert calls == [0], "a slot waits: the turn is offered by this thread's slot"
+        pool.turn = None
+        A._par_window_yield()
+        assert calls == [0]
+    finally:
+        dict.__setitem__(A.STATE, "pool", old)
+    assert A.PAR_LAYER_YIELD is True
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):
