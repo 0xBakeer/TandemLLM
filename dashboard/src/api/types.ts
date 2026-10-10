@@ -988,6 +988,27 @@ export interface SetupProfile {
   badges: string[];
   quality: SetupQuality;
   note: string | null;
+  /** 1.0+: the draft models, the draft head and their buffers on the device (the profile picks them) */
+  drafters_gib: number;
+  /** 1.0+: the weights' repo needs a Hugging Face token */
+  hf_private: boolean;
+  /** 1.0+: SetupAsset ids the profile needs besides its own weights */
+  assets_required: string[];
+}
+
+/** 1.0+: a file a profile or a tool needs besides the profile's weights. */
+export interface SetupAsset {
+  id: string;
+  label: string;
+  /** with ${HOME}, ${REPO} or ${HF_HUB}; may end in a glob */
+  path: string;
+  also: string[];
+  /** something in the repository downloads it */
+  fetchable: boolean;
+  /** reset level 4 never removes it */
+  protected: boolean;
+  hf_repo: string | null;
+  source: string;
 }
 
 /** One cell of the measured table: mean tok/s (and min), ms a round, tokens a round. */
@@ -1046,6 +1067,8 @@ export interface SetupComponent {
   knobs: Record<string, { on: string; off: string }>;
   docs: string;
   note: string | null;
+  /** 1.0+: SetupAsset ids that must be on disk for it to load */
+  assets: string[];
 }
 
 /** A field of the methods and advanced steps. */
@@ -1078,6 +1101,10 @@ export interface SetupParallelism {
   /** a side slot's bytes beyond its window (verify graphs off) */
   side_slot_const_gib: number;
   knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
+  /** 1.0+: a slot's conversation in the estimate's typical case (32,768) */
+  typical_fill_tokens: number;
+  /** 1.0+: serve.env keys written with every selection (QSE_SIDE_GRAPHS off, ...) */
+  fixed: Record<string, string>;
 }
 
 export interface SetupDevicePreset {
@@ -1111,6 +1138,12 @@ export interface SetupModel {
   devices: SetupDevicePreset[];
   /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
   memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
+  /** 1.0+: the tile's recommended badge */
+  recommended: boolean;
+  /** 1.0+ */
+  assets: SetupAsset[];
+  /** 1.0+: the step schema (the same list GET .../steps returns as `steps`) */
+  wizard_fields: SetupStep[];
 }
 
 /** The wizard's choices: what the estimate, the plan and the apply job take. */
@@ -1143,7 +1176,7 @@ export interface SetupEstimatePart {
 }
 export interface SetupEstimate {
   contract_version: SetupContract;
-  /** the parts' sum (KV at what the room holds with the pool, at its allocation without) */
+  /** the parts' sum: the KV part at typical_fill_tokens a slot with the pool, every window without */
   total_gb: number;
   /** live MemAvailable of the box; null in the fixture and off the box */
   available_gb: number | null;
@@ -1159,6 +1192,12 @@ export interface SetupEstimate {
   /** device - fixed parts - floor: what conversations (and the caches, which give it back) may use */
   room_gb: number;
   notes: string[];
+  /** 1.0+: device - floor; fits is total_gb <= budget_gb, both rounded to 0.01 */
+  budget_gb: number;
+  /** 1.0+: room_gb >= kv_worst_gb (every slot at its full window fits too) */
+  fits_worst: boolean;
+  /** 1.0+ */
+  typical_fill_tokens: number;
 }
 
 /** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
@@ -1196,13 +1235,17 @@ export interface SetupDevice {
   mem_available_gb: number | null;
   gpu: { name: string | null; util_pct: number | null; temp_c: number | null; power_w: number | null } | null;
   disk: { path: string; free_gb: number; total_gb: number } | null;
-  engine: { version: string; profile: string | null; uptime_s: number; running: number; waiting: number; busy: boolean };
+  engine: { version: string; profile: string | null; uptime_s: number; running: number; waiting: number; busy: boolean; mode: 'setup' | 'serving' };
   active_profile: string | null;
   /** profile id -> its weights are on this box */
   profiles_on_disk: Record<string, boolean>;
   /** false: anyone who reaches the port can run setup, apply and reset */
   password_set: boolean;
   assistant: SetupAssistantStatus;
+  /** 1.0+: a Hugging Face token is configured (never the token) */
+  hf_token_present: boolean;
+  /** 1.0+: the same as password_set */
+  admin_password_set: boolean;
 }
 
 export type SetupAssistantState = 'off' | 'not_loaded' | 'loading' | 'loaded' | 'unloading' | 'failed' | 'refused';
@@ -1218,8 +1261,16 @@ export interface SetupAssistantStatus {
   load_s: number | null;
   device_gib: number | null;
   claim_gib: number | null;
-  /** the planner's answer for a load now */
+  /** a load is possible now (a model on disk, not loaded or loading) */
   can_load: boolean;
+  /** 1.0+: Wren uses the narrator's loaded copy (no memory of its own) */
+  borrowed: boolean;
+  /** 1.0+: the rows of its cache (8,192 own, the narrator's 4,096 borrowed) */
+  window: number;
+  /** 1.0+: seconds into a load, while loading */
+  loading_s: number | null;
+  /** 1.0+: counts (turns, tool_valid, tool_invalid, errors, unload_<why>) */
+  stats: Record<string, number>;
 }
 
 export interface SetupToolCall {
@@ -1280,6 +1331,13 @@ export interface SetupPlan {
   /** what the job will run, for reading: the server runs its own fixed steps, never these strings */
   commands: string[];
   estimate: SetupEstimate;
+  /** 1.0+: a code per error, in order (over_budget, missing_assets, missing_token, disk_full,
+   *  no_overlay_hook, secrets_exist, port_in_use, repo_mismatch) */
+  error_codes: string[];
+  /** 1.0+: the API port before and after */
+  ports: { current: number; next: number };
+  /** 1.0+: POST /v1/setup/apply {dry_run: true} answered this (false from POST /v1/setup/plan) */
+  dry_run?: boolean;
 }
 
 export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'write_config' | 'switch' | 'smoke' | 'rollback';
@@ -1302,10 +1360,19 @@ export interface SetupJob {
   steps: SetupJobStep[];
   message: string | null;
   changes: SetupEnvChange[];
+  /** 1.0+: apply, or reset (reset level 2) */
+  kind: 'apply' | 'reset';
+  /** 1.0+ */
+  rolled_back: boolean;
+  failed_step: SetupJobStepId | null;
+  /** 1.0+: the dashboard after the job, `<this box>` for the host the browser knows */
+  url: string;
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
   selection: SetupSelection;
+  /** 1.0+: answer the plan (SetupPlan, dry_run true) and change nothing */
+  dry_run?: boolean;
 }
 export interface SetupApplyResponse {
   contract_version: SetupContract;
@@ -1324,6 +1391,18 @@ export interface SetupResetItem {
   label: string;
   bytes: number;
   exists: boolean;
+  /** 1.0+: files counted; at_least: the count stopped after 2 s (a huge tree) */
+  files: number;
+  at_least: boolean;
+  /** 1.0+: path, or memory (a cache in RAM) */
+  kind: 'path' | 'memory';
+  /** 1.0+: remove; engine (the running engine clears it); skip (in use, nothing can clear it now) */
+  action: 'remove' | 'engine' | 'skip';
+  note: string | null;
+  /** 1.0+: the running engine keeps its copy until a restart */
+  restart: boolean;
+  /** 1.0+: why the server will not remove it (null: it will) */
+  refused: string | null;
 }
 export interface SetupResetLevel {
   level: 2 | 3 | 4 | 5;
@@ -1345,6 +1424,8 @@ export interface SetupResetLevels {
 export interface SetupResetRequest {
   level: 2 | 3 | 4 | 5;
   confirm: string | boolean;
+  /** 1.0+: the level (SetupResetLevel, dry_run true) and nothing removed; no confirm needed */
+  dry_run?: boolean;
 }
 export interface SetupResetResult {
   contract_version: SetupContract;
@@ -1352,4 +1433,11 @@ export interface SetupResetResult {
   removed: { path: string; bytes: number }[];
   restart_needed: boolean;
   message: string;
+  /** 1.0+: what could not be removed, and why (the rest still went) */
+  failed: { path: string; reason: string }[];
+  freed_gb: number;
+  ok: boolean;
+  /** 1.0+: level 2 is a job (202): follow it at GET /v1/setup/jobs/{job_id} */
+  job_id?: string;
+  job?: SetupJob;
 }
