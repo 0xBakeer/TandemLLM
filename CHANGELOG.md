@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.6.1, 2026-10-10
+
+The small models now give memory back when the KV pool runs short, and the dashboard's memory numbers count what is really in use. The text does not change: with the small models loaded, unloaded and loaded again, Qwen's 128 tokens, 26 blocks and prefill logits matched bit for bit.
+
+- When the pool runs short, the order is: caches, then the shadow reader, then the narrator, then idle side conversations, then slot 0's idle conversation. Only after that does a request wait. An unloaded model is held out, so nothing loads it back on demand. It comes back through the residency planner once free memory has stayed above the floor plus its size plus 4 GiB for 60 s with nothing waiting. Laya stays loaded by default, because it decides routing and its fallback could change the text; `QSE_ROLE_UNLOAD_LAYA=on` puts it last. `QSE_ROLES_DYNAMIC=off` turns the whole feature off.
+- In a live test, free memory went down to 24.9 GiB and a 31,687-token request arrived. The shadow reader went (1.82 GiB), then the narrator (3.81 GiB), then one idle side conversation. The request waited 11.5 s and finished, and both models came back 162 s and 238 s after the memory was released. Free memory never went below 21.7 GiB.
+- The memory split counts the KV pool's committed pages, not the reserved address range of each slot. Before, it showed 16 GiB of KV and 10 GiB of drafter KV with 12.75 GiB in use. The bar now adds up to MemTotal minus MemAvailable.
+
 ## 0.6.0, 2026-10-10
 
 One shared KV pool. Before this release, every slot reserved its whole window at load, so 4 slots fit only with 32,768-token side windows, and the narrator and Laya were refused. Now each slot reserves only addresses, up to 262,144 tokens, and memory pages are mapped as a conversation grows (`QSE_KV_POOL=on`). The text does not change: on 8k, 32k and 128k prompts the logits, every KV row and the GDN state match the static buffers bit for bit, and a greedy decode with the served drafters gives the same 258 tokens in the same 56 blocks.
