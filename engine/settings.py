@@ -286,6 +286,10 @@ KNOBS: dict[str, tuple] = {
     # SRV-171: the session's scratch directory the notes name (`{token}` = the session token;
     # '' = `.tandem` in the project)
     'TANDEM_SCRATCH': ('', 'server/conductor/packages.py'),
+    # ENG-E7: Qwen3.8-Flash-Next on turboderp's EXL3 packs (engine/models/flashnext/). The 27B's
+    # disk-tier fingerprint leaves knobs owned under engine/models/ out (engine/disk_cache.py).
+    # The hyper-connection mixers' served width: int8 rows with an fp32 scale, or the pack's fp16
+    'FN_MIX': ('int8', 'engine/models/flashnext/pack.py'),
 }
 
 
