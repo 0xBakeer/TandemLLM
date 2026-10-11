@@ -9,7 +9,10 @@ The test matrix:
      nothing of the engine's flags; --host names another address        test_start_setup
   3  while run/setup-pending exists a plain start is setup mode, on the host the marker names;
      without it the configured engine starts as before (no --setup)     test_the_marker
-  4  start.sh refuses an unknown argument and a host that is not an address    test_bad_arguments
+  2b setup mode reads secrets.env like the engine does: QSE_ADMIN_TOKEN reaches the server
+                                                                  test_start_setup
+  4  start.sh refuses an unknown argument, a host that is not an address, and --host with no
+     address after it (it looped forever)                         test_bad_arguments
 
 Run: python tests/test_setup_mode.py
 """
@@ -95,8 +98,9 @@ class Box:
         self.py = os.path.join(bin_, "fakepy")
         self.args = os.path.join(self.root, "py.args")
         with open(self.py, "w") as fh:
-            fh.write('#!/bin/bash\nprintf "%s|SETUP=%s|OPS=%s\\n" "$*" "${QSE_SETUP_MODE:-}" '
-                     '"${QSE_OPS_DIR:-}" >> "' + self.args + '"\n'
+            fh.write('#!/bin/bash\nprintf "%s|SETUP=%s|OPS=%s|ADMIN=%s\\n" "$*" '
+                     '"${QSE_SETUP_MODE:-}" "${QSE_OPS_DIR:-}" "${QSE_ADMIN_TOKEN:+set}" >> "'
+                     + self.args + '"\n'
                      'touch "' + os.path.join(self.root, "healthy") + '"\nsleep 1\n')
         with open(os.path.join(bin_, "setsid"), "w") as fh:
             fh.write('#!/bin/bash\nexec "$@"\n')
@@ -133,10 +137,19 @@ def test_start_setup():
     with Box() as box:
         r, launched = box.start("--setup")
         assert r.returncode == 0, r.stdout + r.stderr
-        argv, setup, ops = launched[0].split("|")
+        argv, setup, ops, admin = launched[0].split("|")
         assert argv == "-u server/app.py --setup --host 127.0.0.1 --port 8000", argv
         assert setup == "SETUP=1" and ops == f"OPS={os.path.join(box.root, 'ops')}"
+        assert admin == "ADMIN=", admin
         assert "setup mode answers" in r.stdout and len(launched) == 1, r.stdout
+    with Box() as box:
+        # an admin password set: setup mode reads secrets.env too, so its routes are guarded
+        sec = os.path.join(box.tmp, ".qwen38-spark-engine", "secrets.env")
+        os.makedirs(os.path.dirname(sec))
+        with open(sec, "w") as fh:
+            fh.write("QSE_ADMIN_TOKEN=" + "a" * 40 + "\n")
+        r, launched = box.start("--setup")
+        assert r.returncode == 0 and launched[0].split("|")[3] == "ADMIN=set", launched
     with Box() as box:
         r, launched = box.start("--setup", "--host", "0.0.0.0")
         assert r.returncode == 0 and launched[0].startswith(
@@ -166,6 +179,8 @@ def test_bad_arguments():
         assert r.returncode == 2 and "unknown argument" in r.stdout and not launched
         r, launched = box.start("--setup", "--host", "a;reboot")
         assert r.returncode == 2 and not launched, r.stdout
+        r, launched = box.start("--setup", "--host")
+        assert r.returncode == 2 and "needs an address" in r.stdout and not launched, r.stdout
 
 
 if __name__ == "__main__":

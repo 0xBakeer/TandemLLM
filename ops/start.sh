@@ -18,7 +18,8 @@ SETUP=0; SETUP_HOST=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --setup) SETUP=1; shift ;;
-        --host) SETUP_HOST="${2:-}"; shift 2 ;;
+        --host) [ $# -ge 2 ] || { echo "[start] --host needs an address"; exit 2; }
+                SETUP_HOST="$2"; shift 2 ;;
         -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
         *) echo "[start] unknown argument $1 (--setup, --host ADDR)"; exit 2 ;;
     esac
@@ -82,6 +83,13 @@ STATUS_PY="${STATUS_PY:-python3}"
 status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || true; }
 [ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
     --engine-port "$PORT" 2>&1 | tail -1
+# The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
+# when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
+# token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
+# rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above). Setup mode
+# reads them too: its /v1/setup routes run apply and reset, and a password set must guard them.
+SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
+if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 T_START=$(date +%s)
 if [ "$SETUP" = "1" ]; then
     # Setup mode: the server with no model of Qwen's, the dashboard and Wren alone (no caches, no
@@ -110,12 +118,6 @@ if [ "$SETUP" = "1" ]; then
     echo "[start] setup mode did not answer /health in 120 s; tail of $LOG:"; tail -20 "$LOG"; exit 1
 fi
 status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
-# The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
-# when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
-# token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
-# rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above).
-SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
-if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And
