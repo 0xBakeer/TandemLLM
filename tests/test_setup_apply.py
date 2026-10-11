@@ -26,7 +26,8 @@ The test matrix:
      409, a missing asset 412; a good apply is 202, unloads Wren and starts the runner
                                                          test_the_routes
   7  the job route: ?format=json the job; SSE replays the events with their ids, and Last-Event-ID
-     resumes after one; an unknown or malformed id is 404   test_the_job_route
+     resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
+     offset, each line once, a half-written line on the next read   test_the_job_route
   8  no secret in the log: the HF token, an hf_ token and a bearer token are cut out of every
      line the runner writes                              test_secrets_are_redacted
   9  the real runner, detached (its own session) with stub scripts and a local engine for the
@@ -703,6 +704,18 @@ def test_the_job_route():
         for bad in ("0123456789abcdef", "../../etc", "nope"):
             code, _ = _api("GET", f"/v1/setup/jobs/{bad}?format=json")
             assert code == 404, bad
+        # a follower reads each line once from its offset; a half-written line waits
+        recs, off = apply.events_from(jid)
+        assert [r["seq"] for r in recs] == ids and off == os.path.getsize(
+            os.path.join(apply.job_dir(jid), "events.jsonl"))
+        with open(os.path.join(apply.job_dir(jid), "events.jsonl"), "a") as fh:
+            fh.write('{"seq": 999, "event": {"type": "lo')
+        more, off2 = apply.events_from(jid, off)
+        assert more == [] and off2 == off
+        with open(os.path.join(apply.job_dir(jid), "events.jsonl"), "a") as fh:
+            fh.write('g", "line": "x", "ts": 1}}\n')
+        more, off3 = apply.events_from(jid, off2)
+        assert [r["seq"] for r in more] == [999] and off3 > off2
 
 
 def test_secrets_are_redacted():

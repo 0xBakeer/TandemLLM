@@ -313,8 +313,10 @@ def job_route(h, jid: str) -> None:
         if after == 0:
             h.wfile.write(f"data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
         quiet = time.monotonic()
+        offset = 0
         while True:
-            for rec in apply.events(jid, after):
+            recs, offset = apply.events_from(jid, offset, after)
+            for rec in recs:
                 after = rec["seq"]
                 h.wfile.write(f"id: {after}\ndata: {json.dumps(rec['event'])}\n\n".encode())
                 quiet = time.monotonic()

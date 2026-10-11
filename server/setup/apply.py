@@ -556,6 +556,28 @@ def events(jid: str, after: int = 0) -> list[dict]:
     return out
 
 
+def events_from(jid: str, offset: int = 0, after: int = 0) -> tuple[list[dict], int]:
+    """The job's events from byte `offset` of events.jsonl on, those after sequence `after`, and
+    the offset after the last whole line: a follower reads each line once (a line the runner is
+    still writing waits for the next call)."""
+    out = []
+    try:
+        with open(os.path.join(job_dir(jid), "events.jsonl"), "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+    except OSError:
+        return out, offset
+    end = data.rfind(b"\n") + 1
+    for line in data[:end].splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("seq", 0) > after:
+            out.append(rec)
+    return out, offset + end
+
+
 def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply") -> dict:
     """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
     reset (reset level 2: the overlay goes and the recommended profile starts)."""
