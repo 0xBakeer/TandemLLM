@@ -39,6 +39,9 @@ The test matrix:
      use-profile.sh never rolls back itself (QSE_NO_ROLLBACK) and the rollback's smoke names the
      old served model; the setup-mode marker comes back unchanged (its HOST) on a rollback and after
      a crash; the smoke asks for 512 tokens          test_the_runners_hard_cases
+ 11  a timed-out command's whole process group goes; a pid that is not the runner's any more (another
+     start time, another boot) is not alive; every overlay value is quoted, so a value with a ; in
+     it stays one word                                   test_timeouts_liveness_and_quoting
  12  the wizard's seed is the box as it runs (GET .../current): the active profile, the overlay's
      slots, window, tools, port and served name; a HOST neither option names is listed as unmatched;
      the plan warns when HOST, PORT, SERVED_MODEL or QSE_BACKENDS change
@@ -46,9 +49,8 @@ The test matrix:
  13  an install.sh box (serve.env and the scripts in run/ops, the profiles and active-profile under
      serve.env's REPO): the active profile and the profile files are found there, and a job runs
                                                          test_an_install_sh_box
- 11  a timed-out command's whole process group goes; a pid that is not the runner's any more (another
-     start time, another boot) is not alive; every overlay value is quoted, so a value with a ; in
-     it stays one word                                   test_timeouts_liveness_and_quoting
+ 14  a benchmark's --env-file (tools/exl3_fastrun.py) reads serve.env without the overlay
+                                                         test_benchmarks_ignore_the_overlay
 
 Run: python tests/test_setup_apply.py
 """
@@ -599,6 +601,19 @@ def test_an_install_sh_box():
         finally:
             os.environ["QSE_OPS_DIR"] = box.ops
             device_mod.clear()
+
+
+def test_benchmarks_ignore_the_overlay():
+    """tools/exl3_fastrun.py --env-file reads serve.env's QWEN38_* knobs without run/setup.env."""
+    sys.path.insert(0, os.path.join(REPO, "tools"))
+    import exl3_fastrun
+    with Box() as box:
+        env_file = os.path.join(box.ops, "serve.env")
+        before = exl3_fastrun.env_from_file(env_file)
+        apply.write_overlay(M, _sel(methods={"draft_temperature": 0.9}))
+        assert apply.resolve_env(["QWEN38_DRAFT_TEMP"])["QWEN38_DRAFT_TEMP"] == "0.9"
+        after = exl3_fastrun.env_from_file(env_file)
+        assert after == before and after.get("QWEN38_DRAFT_TEMP") != "0.9", after
 
 
 class Req(app.Handler):

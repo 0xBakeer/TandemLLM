@@ -83,6 +83,10 @@ The job runs as a process of its own, because the switch replaces the server tha
 
 On a fresh box today every profile fails the check: the K3 drafters, the K4 draft head and the FP8 base checkpoint have no download yet (OPS-95), and the job says which files are missing before it changes anything.
 
+## Benchmarks and the overlay
+
+`tools/exl3_fastrun.py --env-file ops/serve.env` reads serve.env without `run/setup.env` (it sources it with `QSE_SETUP_ENV` pointing nowhere): a benchmark row is the file's knobs, not what the box was last set up with. Its report says `setup_overlay: <path> (ignored)` when an overlay was there. Pass a knob with `--env KEY=VALUE` to measure an overlay's value.
+
 ## Where the wizard starts
 
 A model the browser has no progress for starts from what the box runs now (`GET /v1/setup/models/{id}/current`): the active profile and every registry knob as `ops/serve.env` resolves it, `run/setup.env` included, so host, port, served name, the backends and every hand-tuned value are the box's own, and Review lists only what the user changed. A value the registry has no option for (a HOST that is neither address) stays at the recommended one and is listed in `unmatched`. Review warns when HOST, PORT, SERVED_MODEL or QSE_BACKENDS change, since every client notices. On an install.sh box the profiles and `active-profile` are read under serve.env's REPO, as `ops/use-profile.sh` reads them.
