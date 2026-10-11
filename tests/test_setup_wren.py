@@ -301,6 +301,87 @@ def test_a_lone_highlight_is_followed_by_words():
     assert len(model.prompts) == 1                          # words came with it: no second turn
 
 
+def test_explain_takes_only_what_the_page_can_point_at():
+    """VIS-91: the live 2B called explain("overview") after every answer. The server took a step's
+    id as valid, the page could not point at a step and refused it, and the browser asked again
+    four times. explain now takes what the page can highlight, the same set as tools.ts."""
+    steps = registry.wizard_fields(M)
+    for s in steps:
+        assert tools.check(M, "explain", {"field": s["id"]})[1], s["id"]
+    enum = set(next(d for d in tools.definitions(M) if d["function"]["name"] == "explain")
+               ["function"]["parameters"]["properties"]["field"]["enum"])
+    want = ({c["id"] for c in M["components"]} | {f["id"] for f in M["methods"] + M["advanced"]}
+            | {p["id"] for p in M["profiles"]}
+            | {"slots", "window", "side_window", "kv_pool", "floor_gb"})
+    assert enum == want, (enum ^ want)
+    for name in sorted(want):
+        assert tools.check(M, "explain", {"field": name})[1] is None, name
+
+
+def test_one_repair_then_words_with_the_tools_off():
+    """VIS-91: an invalid call gets one repair; when that is invalid too the model answers in
+    words with no tools in the prompt, and the turn says nothing changed."""
+    _on_disk()
+    bad = call_xml("set_field", step="parallelism", field="slots", value=9)
+    w, model = _wren(Scripted(replies=[bad, bad, "Four is the most this model allows."]))
+    _loaded(w)
+    ev = _events(w)
+    assert not [e for e in ev if e["type"] == "tool_call"], ev
+    assert len(model.prompts) == 3, len(model.prompts)               # the first, one repair, words
+    assert model.prompts[1].endswith(json.dumps(tools.definitions(M))), "the repair has the tools"
+    assert model.prompts[2].endswith("[]"), model.prompts[2][-200:]   # the words: no tools at all
+    text = "".join(e.get("delta", "") for e in ev)
+    assert text == "Four is the most this model allows.", repr(text)
+    assert ev[-1] == {"type": "done", "finish": "stop", "sources": ev[-1]["sources"],
+                      "unchanged": True}, ev[-1]
+    assert w.stats["tool_invalid"] == 2 and w.stats["forced_words"] == 1
+
+
+def test_a_forced_answer_is_always_words():
+    """VIS-91: with the tools off a call the model still writes is dropped, never sent, and a turn
+    that ends with no words at all gets a plain sentence."""
+    _on_disk()
+    lone = call_xml("explain", field="shadow")
+    w, model = _wren(Scripted(replies=[lone, lone]))
+    _loaded(w)
+    ev = _events(w, "What does the shadow reader do?")
+    assert [e["name"] for e in ev if e["type"] == "tool_call"] == ["explain"], ev
+    assert model.prompts[1].endswith("[]")
+    text = "".join(e.get("delta", "") for e in ev)
+    assert text and "<tool_call>" not in text, repr(text)
+    assert ev[-1]["type"] == "done" and "unchanged" not in ev[-1], ev[-1]
+    # the page asks for words only (its last round): one pass, no tools, no call sent
+    w, model = _wren(Scripted(replies=["Done. " + call_xml("next")]))
+    _loaded(w)
+    ev = list(w.chat({"messages": [{"role": "user", "content": "next please"}],
+                      "page": {"model": "qwen3.8-27b", "step": "weights"}, "tools": False}))
+    assert len(model.prompts) == 1 and model.prompts[0].endswith("[]")
+    assert not [e for e in ev if e["type"] == "tool_call"] and ev[-1]["finish"] == "stop", ev
+    assert "".join(e.get("delta", "") for e in ev) == "Done."
+    ev = list(w.chat({"messages": [{"role": "user", "content": "hi"}], "page": {}, "tools": "no"}))
+    assert ev[-1]["type"] == "error" and "tools" in ev[-1]["message"], ev
+
+
+def test_the_step_and_its_ids_are_in_the_prompt():
+    """VIS-91: "Which one is for coding tasks?" on the Model step had no table to answer from. The
+    prompt now has the step's measured table with the code column, and the ids a tool may name."""
+    _on_disk()
+    w, model = _wren(Scripted(replies=["ok", "ok", "ok"]))
+    _loaded(w)
+    _events(w, "Which one is for coding tasks?",
+            page={"model": "qwen3.8-27b", "step": "overview", "step_index": 1, "selection": {}})
+    p = model.prompts[0]
+    assert "exl3-2.5 | 56.22 | 89.05 | 124.17" in p, p[:3000]
+    assert "fastest for code: exl3-2.5 (124.17 tok/s)" in p, p[:3000]
+    assert "This step has no fields" in p
+    _events(w, "Use two slots", page={"model": "qwen3.8-27b", "step": "parallelism",
+                                      "step_index": 4, "selection": {}})
+    assert "slots, window, side_window, kv_pool, floor_gb" in model.prompts[1]
+    _events(w, "What is on this step?", page={"model": "qwen3.8-27b", "step": "components",
+                                              "step_index": 3, "selection": {}})
+    assert "narrator" in model.prompts[2].split("The ids on this step")[1][:600]
+
+
 def test_wren_is_a_role_in_the_memory_figures():
     from server import memlimits, memsplit
     _on_disk()

@@ -1,4 +1,6 @@
 // QA VIS-81 (VIS-80): Wren, the setup guide's chat, against the mock's scripted model. @mock
+// QA VIS-92 (VIS-91): the live loop of 0.7.1 (refused calls asked again four times, a notice per
+// call, no answer, the phone's sheet dropping per call), with the mock playing the 2B's calls.
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK } from './helpers';
 import { open, setupMock } from './setup-helpers';
@@ -77,12 +79,14 @@ test('Wren fills a form field: slots 2', async ({ page }) => {
   await expect(page.locator('[data-field="parallelism.slots"] .seg-btn.is-on')).toHaveText(/^2/, { timeout: 10_000 });
 });
 
-test('an unknown component is refused: nothing changes, the corrected-note shows', async ({ page }) => {
+test('an unknown component is refused: nothing changes, one notice says so', async ({ page }) => {
   await open(page, `#/setup/${MODEL}/components`);
   const before = await page.locator('.membar').getAttribute('data-total');
   await ask(page, 'turn on flux');
   const p = await panel(page);
-  await expect(p.locator('[data-tool-rejected]')).toHaveText('Wren tried something that does not exist and was corrected.', { timeout: 10_000 });
+  await expect(p.locator('[data-tool-rejected]')).toHaveText('Wren could not make that change, so nothing on the page changed.', { timeout: 10_000 });
+  await expect(figure(page)).toHaveAttribute('state', 'idle', { timeout: 10_000 });
+  await expect(p.locator('[data-tool-rejected]')).toHaveCount(1);
   await expect(page.locator('.membar')).toHaveAttribute('data-total', before!);
   // the error went back to the model as the tool message
   const chat = await page.evaluate(() => JSON.parse(localStorage.getItem('tandem.setup.v1')!).chat);
@@ -103,13 +107,83 @@ test('Wren cannot finish: the call is refused and no install starts', async ({ p
   expect(applied).toBe(false);
 });
 
-test('a model that keeps calling tools stops after 4 rounds', async ({ page }) => {
+test('a model that keeps calling tools: the fourth round has the tools off and ends in words', async ({ page }) => {
   await open(page, `#/setup/${MODEL}/overview`);
+  const bodies: { tools?: boolean }[] = [];
+  page.on('request', (r) => {
+    if (r.url().endsWith('/v1/setup/assistant/chat')) bodies.push(JSON.parse(r.postData() ?? '{}'));
+  });
   await ask(page, 'loop');
   const p = await panel(page);
-  await expect(p.locator('.wren-note', { hasText: 'stopped after 4 rounds' })).toBeVisible({ timeout: 20_000 });
+  await expect(p.locator('.wren-msg.is-assistant').last()).toContainText('You are on the Tools step now.', { timeout: 20_000 });
+  await expect(p.locator('.wren-note')).toHaveCount(0);
   const chat = await page.evaluate(() => JSON.parse(localStorage.getItem('tandem.setup.v1')!).chat);
-  expect(chat.filter((m: { role: string }) => m.role === 'tool')).toHaveLength(4);
+  expect(chat.filter((m: { role: string }) => m.role === 'tool')).toHaveLength(3);
+  expect(bodies.map((b) => b.tools !== false)).toEqual([true, true, true, false]);
+});
+
+/** counts every time the sheet dropped to a peek or closed, however short */
+async function watchSheet(page: Page) {
+  await page.evaluate(() => {
+    const el = document.querySelector('.wren-panel')!;
+    const w = window as unknown as { __sheet: { peek: number; closed: number } };
+    w.__sheet = { peek: 0, closed: 0 };
+    new MutationObserver(() => {
+      if (el.classList.contains('is-peek')) w.__sheet.peek++;
+      if (!el.classList.contains('is-open')) w.__sheet.closed++;
+    }).observe(el, { attributes: true, attributeFilter: ['class'] });
+  });
+}
+const sheetMoves = (page: Page) => page.evaluate(() => (window as unknown as { __sheet: { peek: number; closed: number } }).__sheet);
+
+test('VIS-91: a question the 2B answers with calls the page refuses gets its answer, no notice and no round limit', async ({ page }) => {
+  await open(page, `#/setup/${MODEL}/overview`);
+  const bodies: { tools?: boolean }[] = [];
+  page.on('request', (r) => {
+    if (r.url().endsWith('/v1/setup/assistant/chat')) bodies.push(JSON.parse(r.postData() ?? '{}'));
+  });
+  const p = await panel(page);
+  if (isPhone(page)) await watchSheet(page);
+  await ask(page, 'Which one is for coding tasks?');
+  await expect(p.locator('.wren-msg.is-assistant').last()).toContainText('124.17 tokens a second', { timeout: 20_000 });
+  await expect(figure(page)).toHaveAttribute('state', 'idle', { timeout: 10_000 });
+  await expect(p.locator('[data-tool-rejected]')).toHaveCount(0);
+  await expect(p.locator('.wren-note')).toHaveCount(0);
+  expect(bodies.length).toBeLessThanOrEqual(3);
+  expect(bodies[bodies.length - 1].tools).toBe(false);
+  if (isPhone(page)) {
+    expect(await sheetMoves(page)).toEqual({ peek: 0, closed: 0 });
+    await expect(page.locator('.wren-panel.is-open')).toHaveCount(1);
+  }
+});
+
+test('VIS-91: 390 px, a change keeps the sheet open with a toast; Show me closes it at the field', async ({ page }) => {
+  test.skip(!isPhone(page), 'phone only');
+  await open(page, `#/setup/${MODEL}/components`);
+  const p = await panel(page);
+  await watchSheet(page);
+  await ask(page, 'turn off vision');
+  const toast = p.locator('[data-wren-toast]');
+  await expect(toast).toContainText('Wren turned off Vision', { timeout: 10_000 });
+  await expect(figure(page)).toHaveAttribute('state', 'idle', { timeout: 10_000 });
+  expect(await sheetMoves(page)).toEqual({ peek: 0, closed: 0 });
+  await expect(page.locator('.wren-panel.is-open')).toHaveCount(1);
+  await toast.locator('button', { hasText: 'Show me' }).click();
+  await expect(page.locator('.wren-panel.is-open')).toHaveCount(0);
+  const field = page.locator('[data-field="components.vision"]');
+  await expect(field).toHaveAttribute('data-wren-acting', '');
+  await expect(field).toBeInViewport();
+  await expect(page.locator('[data-component="vision"] input')).not.toBeChecked();
+});
+
+test('VIS-91: desktop, a change has no toast and the field pulses beside the docked panel', async ({ page }) => {
+  test.skip(isPhone(page), 'desktop only');
+  await open(page, `#/setup/${MODEL}/components`);
+  await ask(page, 'turn off vision');
+  await expect(page.locator('[data-field="components.vision"][data-wren-acting]')).toBeVisible({ timeout: 10_000 });
+  const p = await panel(page);
+  await expect(p.locator('[data-tool-chip]').first()).toContainText('Wren turned off Vision');
+  await expect(p.locator('[data-wren-toast]')).toHaveCount(0);
 });
 
 test('a load refused for memory: the reason, and the wizard still works', async ({ page, request }) => {
@@ -186,7 +260,8 @@ test('390 px: the sheet opens from the figure, keeps focus, Esc closes, the page
   await page.keyboard.press('Escape');
   await expect(page.locator('.wren-panel.is-open')).toHaveCount(0);
   expect(await page.evaluate(() => getComputedStyle(document.documentElement).overflow)).not.toBe('hidden');
-  // the sheet peeks while Wren changes a field
+  // the sheet stays up while Wren changes a field (VIS-91: it dropped to a peek per call)
   await ask(page, 'turn off vision');
-  await expect(page.locator('.wren-panel.is-peek')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('[data-wren-toast]')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.wren-panel.is-peek')).toHaveCount(0);
 });

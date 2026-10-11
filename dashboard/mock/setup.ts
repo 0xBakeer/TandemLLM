@@ -506,7 +506,9 @@ export class MockSetup {
     const last = msgs[msgs.length - 1];
     const lastUser = [...msgs].reverse().find((m) => m.role === 'user')?.content.toLowerCase() ?? '';
     const page = body.page;
-    const script = this.script(lastUser, last, msgs, page?.visible as Record<string, unknown> | undefined, page?.step ?? 'models');
+    let script = this.script(lastUser, last, msgs, page?.visible as Record<string, unknown> | undefined, page?.step ?? 'models');
+    // the page's last round asks for words only (VIS-91): the server renders no tools and drops a call
+    if ((body as { tools?: boolean }).tools === false) script = { ...script, calls: [], text: script.calls?.length ? this.words(lastUser) : script.text };
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' });
     let closed = false;
     req.on('close', () => (closed = true));
@@ -521,7 +523,7 @@ export class MockSetup {
       send({ type: 'state', state: 'thinking' });
       await wait(script.think ?? 650);
       send({ type: 'state', state: 'talking' });
-      const words = script.text.split(/(?<= )/);
+      const words = script.text ? script.text.split(/(?<= )/) : [];
       for (let i = 0; i < words.length; i++) {
         if (closed) return;
         send({ type: 'text', delta: words[i] });
@@ -538,10 +540,20 @@ export class MockSetup {
     })();
   }
 
+  /** a round with the tools off: the answer in words */
+  private words(user: string): string {
+    if (/coding/.test(user)) return 'For code, **EXL3 2.5** is the fastest in the table: 124.17 tokens a second. It drifts the most from the original (KL 0.21). **EXL3 4.5**, the recommended size, does 84.44 tokens a second on code.';
+    if (/loop/.test(user)) return 'You are on the Tools step now.';
+    return 'I could not do that on the page. Nothing changed.';
+  }
+
   private script(user: string, last: SetupChatMessage | undefined, msgs: SetupChatMessage[], visible: Record<string, unknown> | undefined, step: string): { text: string; calls?: { name: string; args: Record<string, unknown> }[]; sources?: { path: string; title: string }[]; errorAfter?: number; wordMs?: number; think?: number } {
     const title = String(visible?.title ?? step);
+    // the live 2B on 0.7.1 (VIS-91): it points at the step it is on, every round, and says nothing
+    const pointAtStep = { text: '', calls: [{ name: 'explain', args: { field: step } }, { name: 'explain', args: { field: step } }] };
     if (last?.role === 'tool') {
       if (/loop/.test(user)) return { text: 'One more step. ', calls: [{ name: 'go_to_step', args: { n: 3 } }] };
+      if (/coding/.test(user)) return pointAtStep;
       let res: { ok?: boolean; error?: string; result?: string } = {};
       try {
         res = JSON.parse(last.content);
@@ -552,6 +564,7 @@ export class MockSetup {
       return { text: 'Done. The memory bar at the top shows the new total. Press Undo on the note if you want it back.' };
     }
     if (/other tab/.test(user)) return { text: '', errorAfter: -1 };
+    if (/coding/.test(user)) return pointAtStep;
     if (/error/.test(user)) return { text: 'Let me look at that for you, it takes a moment to', errorAfter: 6 };
     if (/loop/.test(user)) return { text: 'Opening the steps. ', calls: [{ name: 'go_to_step', args: { n: 2 } }] };
     if (/flux/.test(user)) return { text: 'Turning on flux. ', calls: [{ name: 'toggle', args: { component: 'flux', on: true } }] };
