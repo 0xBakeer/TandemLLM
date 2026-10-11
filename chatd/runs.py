@@ -71,6 +71,7 @@ class Run:
         self.think_started: float | None = None
         self.in_tag = False
         self.carry = ""
+        self.trim = False             # the newlines right after a tag are the template's, not text
         # counts for the figures when the live row is not there
         self.tokens = 0
         self.thinking_tokens = 0
@@ -265,11 +266,14 @@ class Run:
             tag = THINK_CLOSE if self.in_tag else THINK_OPEN
             i = s.find(tag)
             if i >= 0:
-                if i:
-                    self._add("thinking" if self.in_tag else "text", s[:i])
+                head = s[:i].lstrip("\n") if self.trim else s[:i]
+                if head:
+                    self.trim = False
+                    self._add("thinking" if self.in_tag else "text", head)
                 self.in_tag = not self.in_tag
                 if not self.in_tag:
                     self.svc.close_thinking(self)
+                self.trim = True
                 s = s[i + len(tag):]
                 continue
             keep = 0
@@ -278,6 +282,9 @@ class Run:
                     keep = k
                     break
             body = s[:len(s) - keep] if keep else s
+            if self.trim and body:
+                body = body.lstrip("\n")
+                self.trim = not body
             if body:
                 self._add("thinking" if self.in_tag else "text", body)
             self.carry = s[len(s) - keep:] if keep else ""

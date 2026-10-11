@@ -633,7 +633,8 @@ def test_a_tag_cut_across_chunks_is_still_split():
     r.svc, r.carry, r.in_tag, r.phase, r.tokens = Svc(), "", False, "writing", 0
     r.thinking_tokens, r.marks, r.t_first = 0, [], None
     r.set_phase = lambda *a, **k: None
-    for piece in ["<th", "ink>abc</thi", "nk>", "tail <", "b>"]:
+    r.trim = False
+    for piece in ["<th", "ink>\nabc</thi", "nk>", "\n\n", "tail <", "b>"]:
         r._content(piece)
     kinds = [k for k, _ in got]
     assert "".join(t for k, t in got if k == "thinking") == "abc"
@@ -757,6 +758,31 @@ def test_two_runs_at_most_the_third_waits():
         for cid in ids:
             c.wait_idle(cid, 20)
         assert c.fake.max_streams == 2
+    finally:
+        c.close()
+
+
+def test_the_title_call_names_the_chat_and_a_rambling_answer_is_not_a_title():
+    c = Chat(titles=True)
+    try:
+        cid = c.new()
+        c.send(cid, "FAKE_LONG 3 a short one")         # the fake's title answer: three words
+        c.wait_idle(cid)
+        c.wait(lambda: c.snap(cid)["title"] == "w0 w1 w2", 10)
+        body = [b for b in c.fake.bodies if b.get("stream") is False][-1]
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        assert body["max_tokens"] == 48
+        cid2 = c.new()
+        c.send(cid2, "tell me something long")         # 24 words back: not a title
+        c.wait_idle(cid2)
+        time.sleep(1.0)
+        assert c.snap(cid2)["title"] == "tell me something long"
+        renamed = c.new()
+        c.ok("PATCH", f"/conversations/{renamed}", {"title": "Mine"})
+        c.send(renamed, "FAKE_LONG 3 x")
+        c.wait_idle(renamed)
+        time.sleep(1.0)
+        assert c.snap(renamed)["title"] == "Mine"       # a person's title stays
     finally:
         c.close()
 

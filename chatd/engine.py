@@ -180,12 +180,16 @@ class Engine:
 
     def facts(self) -> dict:
         """Our engine's own facts (weights, max_len, drafter, memory); {} from another server."""
-        st, obj = self.get_json("/v1/dashboard/system")
-        if st == 200 and isinstance(obj, dict):
-            return obj
-        st, obj = self.get_json("/health")
-        if st == 200 and isinstance(obj, dict) and "max_len" in obj:
-            return {"engine": obj, "memory": obj.get("memory") or {}}
+        st, sysd = self.get_json("/v1/dashboard/system")
+        st2, health = self.get_json("/health")
+        health = health if st2 == 200 and isinstance(health, dict) and "max_len" in health else None
+        if st == 200 and isinstance(sysd, dict):
+            eng = sysd.setdefault("engine", {})
+            if health is not None and eng.get("default_max_tokens") is None:
+                eng["default_max_tokens"] = health.get("default_max_tokens")   # the answer's room
+            return sysd
+        if health is not None:
+            return {"engine": health, "memory": health.get("memory") or {}}
         return {}
 
     def profiles(self) -> list[dict]:

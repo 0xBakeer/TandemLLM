@@ -913,7 +913,9 @@ class Service:
             run.metrics["decode_tps"] = tps
             run.metrics["tokens_per_round"] = dec.get("tokens_per_round_now") or \
                 row.get("tokens_per_block")
-            run.metrics["acceptance"] = dec.get("accept_mean")
+            # the live row has no acceptance rate (`accept_mean` is a mean length, not a share);
+            # the answer's own figure comes with its usage frame
+            run.metrics["acceptance"] = None
             if row.get("thinking_budget") is not None:
                 run.metrics["thinking_budget"] = row["thinking_budget"]
             if dec.get("tokens") is not None:
@@ -1243,9 +1245,12 @@ class Service:
         settings = json.loads(row["settings"])
         body = {"model": settings.get("model") or "default", "stream": False, "max_tokens": 48,
                 "chat_template_kwargs": {"enable_thinking": False},
-                "messages": [{"role": "system", "content": "Name this chat in at most six words. "
-                              "Reply with the title only, no quotes, no punctuation at the end."},
-                             {"role": "user", "content": f"{user}\n\n---\n\n{answer}"}]}
+                "messages": [{"role": "system", "content": "You name chats. You never continue "
+                              "or answer them."},
+                             {"role": "user", "content": "Here is the start of a chat between a "
+                              "user and an assistant, between the lines.\n-----\nUser: "
+                              f"{user[:600]}\nAssistant: {answer[:400]}\n-----\nReply with a "
+                              "title for this chat of at most six words, and nothing else."}]}
         st, obj = self.engine.post_json("/v1/chat/completions", body,
                                         {"x-session-id": f"chat-title-{cid}",
                                          "X-QSE-Client": "dashboard"}, timeout=60.0)
@@ -1258,8 +1263,8 @@ class Service:
         if "</think>" in text:
             text = text.split("</think>", 1)[1]
         title = next((ln for ln in text.strip().split("\n") if ln.strip()), "").strip(" \"'.#*`")
-        if not title:
-            return
+        if not title or len(title.split()) > 8 or len(title) > 60 or "<think>" in title:
+            return                       # not a title: the first line of the message stays
         conv = self.conv(cid)
         with conv.lock:
             cur = self.store.one("SELECT title_auto FROM conversations WHERE id = ?", (cid,))
