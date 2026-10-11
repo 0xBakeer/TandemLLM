@@ -178,7 +178,7 @@ export class QseChatThread extends LightElement {
       case 'thinking': {
         const only = live && !p.done;
         return html`<details class="ch-think" ?open=${only} data-part="thinking">
-          <summary>${only ? html`<span class="pulse"></span> Thinking` : 'Thinking'}${p.tokens != null ? html`<span class="num muted">, ${exact(p.tokens)} tokens</span>` : only ? html`<span class="num muted">, ${exact(Math.round(p.text.length / 4))} so far</span>` : nothing}</summary>
+          <summary>${only ? html`<span class="pulse"></span>` : nothing}<span>Thinking${p.tokens != null ? html`<span class="num muted">, ${exact(p.tokens)} tokens</span>` : only ? html`<span class="num muted">, ${exact(Math.round(p.text.length / 4))} so far</span>` : nothing}</span></summary>
           <div class="ch-think-body">${p.text}</div>
         </details>`;
       }

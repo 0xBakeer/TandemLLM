@@ -7,7 +7,6 @@
 
 qse-chat,
 qse-chat-rail,
-qse-chat-thread,
 qse-chat-composer,
 qse-chat-context,
 qse-chat-panes,
@@ -15,6 +14,14 @@ qse-chat-settings {
   display: block;
   min-width: 0;
   min-height: 0;
+}
+/* the thread takes the column's height and scrolls inside; the composer stays under it */
+qse-chat-thread {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* the shell gives the chat the whole content area */
@@ -150,9 +157,7 @@ qse-chat-settings {
   text-decoration: none;
 }
 .ch-row-title {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  display: block;
   font-size: var(--fs-base);
   font-weight: 500;
   white-space: nowrap;
@@ -161,11 +166,18 @@ qse-chat-settings {
 }
 .ch-row.is-unread .ch-row-title::before {
   content: '';
+  display: inline-block;
   width: 6px;
   height: 6px;
+  margin-right: 5px;
   border-radius: 50%;
   background: var(--cobalt-hi);
-  flex: none;
+  vertical-align: 2px;
+}
+.ch-pin {
+  display: inline-block;
+  margin-right: 2px;
+  vertical-align: -2px;
 }
 .ch-pin .icon {
   width: 12px;
@@ -434,6 +446,7 @@ qse-chat-settings {
   display: flex;
   flex-direction: column;
   position: relative;
+  overflow: hidden;
 }
 .is-panes qse-chat-panes {
   flex: 0 0 var(--ch-pane-size);
@@ -512,14 +525,16 @@ qse-chat-settings {
   padding: 8px 12px 8px 8px;
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
-  background: var(--bg-glass);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: inset 3px 0 0 var(--orange);
+  /* opaque: it rides over the thread while sticky, and nothing shows through it */
+  background: var(--bg-2);
+  box-shadow: inset 3px 0 0 var(--orange), 0 6px 18px rgba(0, 0, 0, 0.28);
   font-size: var(--fs-sm);
 }
+:root[data-theme='light'] .ch-now {
+  box-shadow: inset 3px 0 0 var(--orange), 0 6px 18px rgba(15, 22, 32, 0.12);
+}
 .ch-now.is-permission {
-  box-shadow: inset 3px 0 0 var(--warn-ink);
+  box-shadow: inset 3px 0 0 var(--warn-ink), 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 .ch-now-fig {
   flex: none;
@@ -2590,7 +2605,7 @@ qse-chat-panes {
     left: 0;
     bottom: 0;
     z-index: 30;
-    width: min(320px, 88vw);
+    width: min(320px, 84vw);
     box-shadow: var(--shadow-pop);
     transform: translateX(-102%);
     transition: transform 0.22s ease-out;

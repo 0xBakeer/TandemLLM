@@ -145,9 +145,17 @@ export class QseChat extends LightElement {
     if (this.more && !(e.target as HTMLElement).closest('.ch-more')) this.more = false;
   };
 
+  /** the route's query (#/chat?chat=mock) and the page's (?chat=mock#/chat) both count */
+  private get query(): URLSearchParams {
+    const q = new URLSearchParams(location.search);
+    for (const [k, v] of this.params) q.set(k, v);
+    return q;
+  }
+
   private async boot(): Promise<void> {
-    const scenario = this.params.get('scenario');
-    const choice = await pickBackend(this.params, {
+    const q = this.query;
+    const scenario = q.get('scenario');
+    const choice = await pickBackend(q, {
       mock: async () => new (await import('./mock')).MockChatBackend({ scenario }),
       remote: async () => new (await import('./remote')).RemoteChatBackend(),
     });

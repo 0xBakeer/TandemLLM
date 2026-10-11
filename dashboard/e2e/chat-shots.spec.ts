@@ -162,14 +162,14 @@ test('chat phone: empty, drawer, context sheet, panes sheet, permission, setting
   await page.locator('.ch-head-rail').click();
   await page.waitForTimeout(400);
   await shot(page, 'drawer-phone-dark');
-  await page.locator('.ch-scrim').click();
+  await page.locator('.ch-scrim').click({ position: { x: 370, y: 400 } });
   await page.goto('./?chat=mock#/chat/c_sync');
   await page.locator('.ch-now').waitFor();
-  await page.getByRole('button', { name: 'Context panel' }).click();
+  await page.getByRole('button', { name: 'Context panel', exact: true }).click();
   await page.waitForTimeout(400);
   await shot(page, 'context-phone-dark');
-  await page.locator('.ch-scrim').click();
-  await page.getByRole('button', { name: 'Panes' }).click();
+  await page.locator('.ch-scrim').click({ position: { x: 20, y: 400 } });
+  await page.getByRole('button', { name: 'Panes', exact: true }).click();
   await page.locator('qse-chat-panes .ch-term-line').first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(800);
   await shot(page, 'panes-phone-dark');
