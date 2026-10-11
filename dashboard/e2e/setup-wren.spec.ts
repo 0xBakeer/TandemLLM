@@ -149,8 +149,7 @@ test('VIS-91: a question the 2B answers with calls the page refuses gets its ans
   await expect(figure(page)).toHaveAttribute('state', 'idle', { timeout: 10_000 });
   await expect(p.locator('[data-tool-rejected]')).toHaveCount(0);
   await expect(p.locator('.wren-note')).toHaveCount(0);
-  expect(bodies.length).toBeLessThanOrEqual(3);
-  expect(bodies[bodies.length - 1].tools).toBe(false);
+  expect(bodies.map((b) => b.tools !== false)).toEqual([true, false]);
   if (isPhone(page)) {
     expect(await sheetMoves(page)).toEqual({ peek: 0, closed: 0 });
     await expect(page.locator('.wren-panel.is-open')).toHaveCount(1);

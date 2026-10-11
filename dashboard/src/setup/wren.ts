@@ -1,13 +1,17 @@
 // <qse-wren>: the Setup Guide's assistant panel (D1, D6, D7, VIS-80). Docked right on a desktop; at
 // 1100 px and below a floating figure opens it as a bottom sheet (focus kept inside, Esc closes,
-// the page behind does not scroll, the sheet drops to a peek while Wren changes a field).
+// the page behind does not scroll). The sheet stays open while Wren works: a change shows inside
+// it as a toast with Show me, which closes the sheet at the field (VIS-91; it dropped to a peek
+// and rose again once per call, refused ones too).
 //
 // Asleep: a Wake button loads the model (POST /v1/setup/assistant/load, status polled every 500 ms
 // for the progress ring); a refusal for memory says so with the numbers, the wizard works without
 // it. Ready: the chat streams from POST /v1/setup/assistant/chat; every tool call is executed by
 // the page through `host.execute` (validated there, the same actions as a click), the result goes
-// back as a tool message and the turn continues, at most 4 rounds. Stop aborts and keeps the text.
-// Finished: after Finish Wren is asleep while the setup runs.
+// back as a tool message and the turn continues as wren-turn.ts nextRound says: a refused change
+// gets one repair, and the last round asks for words with the tools off, so a turn ends in words.
+// A turn shows at most one notice. Stop aborts and keeps the text. Finished: after Finish Wren is
+// asleep while the setup runs.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
@@ -23,8 +27,7 @@ import './figure';
 import type { QseWrenFigure } from './figure';
 import { nextFigureState, type FigureEvent, type FigureState } from './figure-state';
 import { S } from './strings';
-
-export const MAX_ROUNDS = 4;
+import { nextRound, toastFor, turnNotices, type RoundCall } from './wren-turn';
 
 export interface ToolOutcome {
   ok: boolean;
@@ -34,6 +37,8 @@ export interface ToolOutcome {
   summary: string | null;
   /** the change can be undone (this session only) */
   undo: (() => void) | null;
+  /** scroll to the changed field and highlight it (the phone's Show me) */
+  reveal?: (() => void) | null;
   stale?: boolean;
 }
 
@@ -84,7 +89,8 @@ export class QseWren extends LightElement {
   @state() private notice: string | null = null;
   @state() private sources: SetupSource[] = [];
   @state() private open = false;
-  @state() private peek = false;
+  /** the phone's last change: a toast inside the sheet, and its chip in the log pulses */
+  @state() private toast: { id: string; summary: string; reveal: (() => void) | null } | null = null;
   @state() private chips = new Map<string, Chip>();
   @query('qse-wren-figure.wren-main') private fig!: QseWrenFigure | null;
   @query('qse-wren-figure.wren-fab-fig') private fabFig!: QseWrenFigure | null;
@@ -97,6 +103,7 @@ export class QseWren extends LightElement {
   private loadStartedAt = 0;
   private lastUserText = '';
   private opener: HTMLElement | null = null;
+  private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -110,6 +117,7 @@ export class QseWren extends LightElement {
     this.ctrl?.abort();
     if (this.loadPoll) clearTimeout(this.loadPoll);
     if (this.ping) clearInterval(this.ping);
+    if (this.toastTimer) clearTimeout(this.toastTimer);
     document.removeEventListener('keydown', this.onKey);
     this.lockScroll(false);
     super.disconnectedCallback();
@@ -247,6 +255,7 @@ export class QseWren extends LightElement {
     this.composer = '';
     this.error = null;
     this.notice = null;
+    this.toast = null;
     const history: SetupChatMessage[] = [...this.chat, { role: 'user', content: t }];
     this.setChat(history);
     await this.turn(history);
@@ -275,16 +284,20 @@ export class QseWren extends LightElement {
     this.emit('send');
     this.ctrl = new AbortController();
     const signal = this.ctrl.signal;
+    let tools = true;
+    let retried = false;
+    let unchanged = false;
     try {
       for (let round = 1; ; round++) {
         let text = '';
         const calls: SetupToolCall[] = [];
         const toolMsgs: SetupChatMessage[] = [];
+        const outcomes: RoundCall[] = [];
         let first = true;
         let failure: string | null = null;
         this.partial = '';
         await streamChat(
-          { messages: history, page: host.pageState() },
+          { messages: history, page: host.pageState(), ...(tools ? {} : { tools: false }) },
           (ev: SetupChatEvent) => {
             if (ev.type === 'state') this.emit(ev.state === 'thinking' ? 'state-thinking' : ev.state === 'loading' ? 'load-progress' : 'first-token');
             else if (ev.type === 'text') {
@@ -299,8 +312,10 @@ export class QseWren extends LightElement {
               this.scrollLog();
             } else if (ev.type === 'tool_call') {
               calls.push({ id: ev.id || `call_${++callSeq}`, name: ev.name, args: ev.args });
-            } else if (ev.type === 'done') this.sources = ev.sources ?? [];
-            else if (ev.type === 'error') failure = ev.message;
+            } else if (ev.type === 'done') {
+              this.sources = ev.sources ?? [];
+              if (ev.unchanged) unchanged = true;
+            } else if (ev.type === 'error') failure = ev.message;
           },
           signal,
         );
@@ -310,26 +325,32 @@ export class QseWren extends LightElement {
           break;
         }
         if (failure) throw new ApiError('/v1/setup/assistant/chat', 500, failure, 'stream');
-        // the tool calls run in order, each with its hop and highlight
+        // the tool calls run in order; a valid one hops and highlights, a refused one only goes
+        // back to the model, and none of them moves the phone's sheet
         for (const call of calls) {
-          this.emit('tool-call');
-          this.sheetPeek();
           const out = await host.execute(call, turnStartedAt);
-          void this.fig?.hop();
+          if (out.ok) {
+            this.emit('tool-call');
+            void this.fig?.hop();
+            this.emit('acted');
+          }
           toolMsgs.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(out.ok ? { ok: true, result: out.result, ...(out.summary ? { summary: out.summary } : {}) } : { ok: false, error: out.result, ...(out.stale ? { stale: true } : {}) }) });
           this.chips = new Map(this.chips).set(call.id, { summary: out.summary, ok: out.ok, stale: out.stale, undo: out.undo, undone: false });
-          this.emit('acted');
+          outcomes.push({ name: call.name, ok: out.ok, changed: !!out.summary });
+          const toast = toastFor(out, this.open && this.sheetMode());
+          if (toast) this.showToast(call.id, toast, out.reveal ?? null);
         }
         const assistant: SetupChatMessage = { role: 'assistant', content: text, ...(calls.length ? { tool_calls: calls } : {}) };
         history = [...history, assistant, ...toolMsgs];
         this.partial = '';
         this.setChat(history);
-        if (!calls.length) break;
-        if (round >= MAX_ROUNDS) {
-          this.notice = S.wrenRoundLimit;
-          break;
-        }
+        const next = nextRound({ round, tools, text, calls: outcomes, retried });
+        if (!next) break;
+        ({ tools, retried } = next);
       }
+      // the server refused a change twice and nothing changed: one notice, unless the page's own
+      // refusals already gave this turn its notice
+      if (unchanged && !turnNotices(history).has(history.length - 1)) this.notice = S.wrenNotChanged;
       this.emit('done');
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
@@ -386,7 +407,6 @@ export class QseWren extends LightElement {
   private close(): void {
     if (!this.open) return;
     this.open = false;
-    this.peek = false;
     this.lockScroll(false);
     this.opener?.focus?.();
   }
@@ -395,11 +415,20 @@ export class QseWren extends LightElement {
     document.documentElement.classList.toggle('wren-sheet-open', on && this.sheetMode());
   }
 
-  /** while Wren edits a field on a phone, the sheet drops to a peek so the field shows */
-  private sheetPeek(): void {
-    if (!this.open || !this.sheetMode()) return;
-    this.peek = true;
-    setTimeout(() => (this.peek = false), 1800);
+  /** a change on a phone: the toast stays 12 s, or until Show me or the next question */
+  private showToast(id: string, summary: string, reveal: (() => void) | null): void {
+    this.toast = { id, summary, reveal };
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => (this.toast = null), 12_000);
+  }
+
+  /** Show me: the sheet closes and the page scrolls to the field, which pulses */
+  private async showMe(): Promise<void> {
+    const reveal = this.toast?.reveal;
+    this.toast = null;
+    this.close();
+    await this.updateComplete;
+    requestAnimationFrame(() => reveal?.());
   }
 
   private onKey = (e: KeyboardEvent): void => {
@@ -446,7 +475,7 @@ export class QseWren extends LightElement {
         <qse-wren-figure class="wren-fab-fig" .state=${st} .size=${50} .progress=${this.progress}></qse-wren-figure>
       </button>
       <div class="wren-scrim ${this.open ? 'is-open' : ''}" @click=${() => this.close()}></div>
-      <aside id="wren-panel" class="wren-panel ${this.open ? 'is-open' : ''} ${this.peek ? 'is-peek' : ''}" aria-label=${S.wrenName} data-phase=${this.phase} data-figure=${st} role="complementary">
+      <aside id="wren-panel" class="wren-panel ${this.open ? 'is-open' : ''}" aria-label=${S.wrenName} data-phase=${this.phase} data-figure=${st} role="complementary">
         <div class="wren-handle" aria-hidden="true"></div>
         <header class="wren-head">
           <qse-wren-figure class="wren-main" .state=${st} .size=${76} .progress=${this.progress}></qse-wren-figure>
@@ -513,13 +542,14 @@ export class QseWren extends LightElement {
 
   private renderChat(): TemplateResult {
     const msgs = this.chat;
+    const notes = turnNotices(msgs);
     return html`
       <div class="wren-body wren-log" aria-live="off">
         ${msgs.length === 0 ? html`<p class="wren-msg is-assistant wren-hello">${S.wrenHello}</p>` : nothing}
         ${repeat(
           msgs.map((m, i) => ({ m, i })),
           ({ i }) => i,
-          ({ m, i }) => this.renderMessage(m, i === msgs.length - 1),
+          ({ m, i }) => html`${this.renderMessage(m, i === msgs.length - 1)}${notes.has(i) ? html`<p class="wren-note" data-tool-rejected>${notes.get(i) === 'stale' ? S.tool.stale : S.wrenNotChanged}</p>` : nothing}`,
         )}
         ${this.partial ? html`<div class="wren-msg is-assistant is-streaming">${unsafeHTML(renderMarkdown(this.partial))}</div>` : nothing}
         ${this.streaming && !this.partial ? html`<div class="wren-msg is-assistant wren-typing" aria-hidden="true"><span></span><span></span><span></span></div>` : nothing}
@@ -531,6 +561,13 @@ export class QseWren extends LightElement {
             </div>`
           : nothing}
       </div>
+      ${this.toast
+        ? html`<div class="wren-toast" role="status" data-wren-toast>
+            <span class="wren-chip-dot" aria-hidden="true"></span>
+            <span class="wren-toast-text">${this.toast.summary}</span>
+            ${this.toast.reveal ? html`<button class="btn btn-sm" @click=${() => void this.showMe()}>${S.wrenShowMe}</button>` : nothing}
+          </div>`
+        : nothing}
       ${this.renderChips()} ${this.renderComposer(false)}
     `;
   }
@@ -543,7 +580,8 @@ export class QseWren extends LightElement {
         ${last && this.sources.length ? html`<p class="wren-sources">${S.wrenSources} ${this.sources.map((s, i) => html`${i ? ', ' : ''}<span title=${s.path}>${s.title || s.path}</span>`)}</p>` : nothing}
       </div>`;
     }
-    // a tool result: a chip with Undo, or the corrected-note
+    // a tool result: a chip with Undo; a refused call shows nothing here (turnNotices gives the
+    // turn at most one notice)
     let parsed: { ok?: boolean; summary?: string; error?: string; stale?: boolean } = {};
     try {
       parsed = JSON.parse(m.content);
@@ -551,12 +589,10 @@ export class QseWren extends LightElement {
       /* an old or foreign message */
     }
     const chip = m.tool_call_id ? this.chips.get(m.tool_call_id) : undefined;
-    if (parsed.ok === false || chip?.ok === false) {
-      return html`<p class="wren-note" data-tool-rejected>${parsed.stale || chip?.stale ? S.tool.stale : S.wrenCorrected}</p>`;
-    }
+    if (parsed.ok === false || chip?.ok === false) return nothing;
     const summary = chip?.summary ?? parsed.summary;
     if (!summary) return nothing;
-    return html`<div class="wren-chip ${chip?.undone ? 'is-undone' : ''}" data-tool-chip>
+    return html`<div class="wren-chip ${chip?.undone ? 'is-undone' : ''} ${this.toast?.id === m.tool_call_id ? 'is-fresh' : ''}" data-tool-chip>
       <span class="wren-chip-dot" aria-hidden="true"></span>
       <span>${summary}</span>
       ${chip?.undo ? html`<button class="btn btn-ghost btn-sm" ?disabled=${chip.undone} @click=${() => this.undoChip(m.tool_call_id!)}>${chip.undone ? S.wrenUndone : S.wrenUndo}</button>` : nothing}

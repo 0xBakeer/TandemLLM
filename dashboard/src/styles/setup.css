@@ -2519,6 +2519,39 @@ qse-wren-figure::before {
   opacity: 0.6;
   border-style: dashed;
 }
+/* the change Wren just made: its chip pulses in the log, and on a phone a toast over the composer
+   says it with Show me (VIS-91: the sheet used to drop to a peek per call) */
+.wren-chip.is-fresh {
+  animation: wren-fresh 1.2s ease-out 2;
+}
+@keyframes wren-fresh {
+  0% {
+    box-shadow: 0 0 0 0 var(--orange);
+  }
+  100% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+.wren-toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 8px;
+  padding: 8px 8px 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--orange);
+  background: var(--orange-wash);
+  font-size: var(--fs-sm);
+  animation: wren-fresh 1.2s ease-out 2;
+}
+.wren-toast-text {
+  flex: 1;
+  min-width: 0;
+}
+.wren-toast .btn {
+  min-height: 36px;
+  flex: none;
+}
 .wren-chip-dot {
   width: 7px;
   height: 7px;
@@ -2882,12 +2915,6 @@ qse-wren-figure::before {
     visibility: visible;
     transition: transform 0.28s cubic-bezier(0.3, 0.7, 0.4, 1);
   }
-  .wren-panel.is-open.is-peek {
-    transform: translateY(calc(100% - 118px));
-  }
-  .wren-scrim.is-open:has(+ .wren-panel.is-peek) {
-    background: transparent;
-  }
   .wren-handle {
     display: block;
     width: 40px;
@@ -3119,6 +3146,8 @@ qse-wren-figure::before {
   qse-wren-figure::before,
   [data-wren-acting],
   .wren-typing span,
+  .wren-chip.is-fresh,
+  .wren-toast,
   .inst-spin {
     animation: none !important;
   }

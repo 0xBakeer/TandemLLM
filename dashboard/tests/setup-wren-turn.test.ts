@@ -4,7 +4,7 @@
 // the tools on or off, turnNotices gives a turn at most one notice, and toastFor says what the
 // phone's sheet shows for a call.
 import { describe, expect, it } from 'vitest';
-import type { SetupChatMessage } from '../src/api/types';
+import type { SetupChatMessage, SetupToolName } from '../src/api/types';
 import { MAX_ROUNDS, nextRound, toastFor, turnNotices } from '../src/setup/wren-turn';
 
 const explainBad = { name: 'explain', ok: false, changed: false };
@@ -19,13 +19,13 @@ describe('nextRound', () => {
   it('a round with the tools off is the last one', () => {
     expect(nextRound({ round: 2, tools: false, text: '', calls: [setOk], retried: true })).toBeNull();
   });
-  it('a refused call gets one repair with the tools on, then words with the tools off', () => {
-    const r1 = nextRound({ round: 1, tools: true, text: '', calls: [explainBad, explainBad], retried: false });
+  it('a refused change gets one repair with the tools on, then words with the tools off', () => {
+    const r1 = nextRound({ round: 1, tools: true, text: '', calls: [setBad, setBad], retried: false });
     expect(r1).toEqual({ tools: true, retried: true });
-    const r2 = nextRound({ round: 2, tools: true, text: '', calls: [explainBad, explainBad], retried: true });
+    const r2 = nextRound({ round: 2, tools: true, text: '', calls: [setBad], retried: true });
     expect(r2).toEqual({ tools: false, retried: true });
   });
-  it('the live sequence (two refused explains a round) asks at most three times and ends in words', () => {
+  it('the live sequence (two refused explains a round, no words) asks twice and ends in words', () => {
     let next: ReturnType<typeof nextRound> = { tools: true, retried: false };
     let rounds = 0;
     while (next) {
@@ -33,10 +33,11 @@ describe('nextRound', () => {
       const calls = next.tools ? [explainBad, explainBad] : [];
       next = nextRound({ round: rounds, tools: next.tools, text: next.tools ? '' : 'EXL3 2.5 is the fastest for code.', calls, retried: next.retried });
     }
-    expect(rounds).toBe(3);
+    expect(rounds).toBe(2);
   });
-  it('a highlight with words needs nothing more; a highlight alone asks for the words', () => {
+  it('a highlight with words needs nothing more, refused or not; a highlight alone asks for the words', () => {
     expect(nextRound({ round: 1, tools: true, text: 'It is here.', calls: [explainOk], retried: false })).toBeNull();
+    expect(nextRound({ round: 1, tools: true, text: 'Four slots.', calls: [explainBad, explainBad], retried: false })).toBeNull();
     expect(nextRound({ round: 1, tools: true, text: '', calls: [explainOk], retried: false })).toEqual({ tools: false, retried: false });
   });
   it('a change goes on, and the last of MAX_ROUNDS rounds has the tools off', () => {
@@ -52,7 +53,7 @@ describe('nextRound', () => {
   });
 });
 
-const call = (id: string, name: string) => ({ id, name, args: {} });
+const call = (id: string, name: string) => ({ id, name: name as SetupToolName, args: {} });
 const tool = (id: string, ok: boolean, extra: Record<string, unknown> = {}): SetupChatMessage => ({ role: 'tool', tool_call_id: id, content: JSON.stringify(ok ? { ok, result: 'ok', ...extra } : { ok, error: 'no', ...extra }) });
 
 describe('turnNotices', () => {
