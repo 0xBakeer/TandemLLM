@@ -161,6 +161,10 @@ def test_the_selection_check():
     _refused("not an object", 422, "invalid_selection")
     s = E.check(m, dict(base, window=65_536))
     assert s["side_window"] == 65_536 and s["profile"] == "exl3-4.5" and s["slots"] == 4
+    # the side window is clamped to the window, and both keep the 8,192 step
+    assert E.check(m, dict(base, window=32_768, side_window=262_144))["side_window"] == 32_768
+    _refused(dict(base, window=100_000), 422, "off_step", "window")
+    _refused(dict(base, side_window=20_000), 422, "off_step", "side_window")
     assert s["components"]["narrator"] is True and s["components"]["response_cache"] is False
     assert s["methods"]["sampled_tree"] == "det" and s["advanced"]["port"] == 8000
     s = E.check(m, dict(base, components={"conductor": False, "narrator": False, "laya": False,
@@ -209,6 +213,10 @@ def _cases() -> list[dict]:
          advanced={"port": 8080})
     case("refused: slots 5", slots=5)
     case("refused: window 512", window=512)
+    case("refused: a window off the 8,192 step", window=100_000)
+    case("refused: a side window off the step", side_window=20_000)
+    case("a side window longer than the window is the window", window=32_768,
+         side_window=262_144)
     case("refused: the narrator without the conductor", components={"conductor": False})
     case("refused: an unknown profile", profile="exl3-9.9")
     case("refused: an unknown key", cmd="reboot")

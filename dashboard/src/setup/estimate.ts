@@ -49,6 +49,12 @@ function intIn(name: string, v: unknown, lo: number, hi: number): number {
   return v;
 }
 
+/** A window is a whole number of the KV pool's pages (estimate.py `_on_step`). */
+function onStep(name: string, v: number, step: number): number {
+  if (step && v % step) throw new SelectionError(422, 'off_step', `${name}: a multiple of ${thousands(step)}, not ${thousands(v)}`);
+  return v;
+}
+
 /** The selection complete and checked (estimate.py `check`); SelectionError otherwise. */
 export function checkSelection(m: SetupModel, body: unknown): SetupSelection & { side_window: number; device: string } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new SelectionError(422, 'invalid_selection', 'the selection must be a JSON object');
@@ -78,8 +84,9 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
   if (bad.length) throw new SelectionError(422, 'invalid_combination', bad.join('; '));
   const p = m.parallelism;
   const slots = intIn('slots', b.slots ?? p.slots.default, p.slots.min, p.slots.max);
-  const window = intIn('window', b.window ?? p.window.default, p.window.min, p.window.max);
-  const side = intIn('side_window', b.side_window ?? window, p.side_window.min, p.side_window.max);
+  const window = onStep('window', intIn('window', b.window ?? p.window.default, p.window.min, p.window.max), p.window.step);
+  // a side slot never holds more than slot 0 (server/app.py: min(side_max_len, max_len))
+  const side = Math.min(window, onStep('side_window', intIn('side_window', b.side_window ?? window, p.side_window.min, p.side_window.max), p.side_window.step));
   const pool = b.kv_pool ?? p.kv_pool.default;
   if (typeof pool !== 'boolean') throw new SelectionError(422, 'invalid_selection', 'kv_pool: true or false');
   const floor = b.floor_gb ?? p.floor_gb.default;

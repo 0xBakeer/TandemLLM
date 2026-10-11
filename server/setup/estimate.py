@@ -69,6 +69,14 @@ def _int_in(name: str, v, lo, hi) -> int:
     return int(v)
 
 
+def _on_step(name: str, v: int, step: int) -> int:
+    """A window is a whole number of the KV pool's pages (8,192 tokens on Qwen3.8-27B)."""
+    if step and v % step:
+        raise SelectionError(422, "off_step", f"{name}: a multiple of {step:,}, not {v:,}",
+                             [{"field": name, "reason": f"a multiple of {step}"}])
+    return v
+
+
 def check(m: dict, body) -> dict:
     """The selection `body` for model `m`, complete and checked; SelectionError otherwise."""
     if not isinstance(body, dict):
@@ -111,11 +119,14 @@ def check(m: dict, body) -> dict:
     p = m["parallelism"]
     slots = _int_in("slots", body.get("slots", p["slots"]["default"]), p["slots"]["min"],
                     p["slots"]["max"])
-    window = _int_in("window", body.get("window", p["window"]["default"]), p["window"]["min"],
-                     p["window"]["max"])
+    window = _on_step("window", _int_in("window", body.get("window", p["window"]["default"]),
+                                        p["window"]["min"], p["window"]["max"]), p["window"]["step"])
     side = body.get("side_window")
     side = window if side is None else side
-    side = _int_in("side_window", side, p["side_window"]["min"], p["side_window"]["max"])
+    side = _on_step("side_window", _int_in("side_window", side, p["side_window"]["min"],
+                                           p["side_window"]["max"]), p["side_window"]["step"])
+    # a side slot never holds more than slot 0 (server/app.py: min(side_max_len, max_len))
+    side = min(side, window)
     pool = body.get("kv_pool", p["kv_pool"]["default"])
     if not isinstance(pool, bool):
         raise SelectionError(422, "invalid_selection", "kv_pool: true or false",

@@ -5038,6 +5038,151 @@
    }
   },
   {
+   "name": "refused: a window off the 8,192 step",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 100000
+   },
+   "error": {
+    "status": 422,
+    "code": "off_step"
+   }
+  },
+  {
+   "name": "refused: a side window off the step",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "side_window": 20000
+   },
+   "error": {
+    "status": 422,
+    "code": "off_step"
+   }
+  },
+  {
+   "name": "a side window longer than the window is the window",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 32768,
+    "side_window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 13.03
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 13.03,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 32,768 a slot when all 4 are full (the window is 32,768)."
+    ]
+   }
+  },
+  {
    "name": "refused: the narrator without the conductor",
    "selection": {
     "model": "qwen3.8-27b",
