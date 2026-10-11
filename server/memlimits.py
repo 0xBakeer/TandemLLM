@@ -231,9 +231,10 @@ def _decider_bytes(state: dict) -> int:
 
 def _role_pools(state: dict) -> list:
     """(slot, pool reserved, pool allocated, claim bytes or None) of each in-process generative
-    role -- the narrator and the shadow reader, one row for a slot they share."""
+    role -- the narrator, the shadow reader and the setup guide's Wren, one row for a slot they
+    share."""
     out, seen = [], set()
-    for owner in (state.get("narrator"), state.get("shadow")):
+    for owner in (state.get("narrator"), state.get("shadow"), state.get("wren")):
         slot = getattr(owner, "slot", None) if owner is not None else None
         if slot is None or id(slot) in seen:
             continue

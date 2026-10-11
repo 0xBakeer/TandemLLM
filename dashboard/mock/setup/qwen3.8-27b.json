@@ -1,0 +1,2074 @@
+{
+ "schema": 1,
+ "id": "qwen3.8-27b",
+ "name": "Qwen3.8-27B",
+ "family": "Qwen3.8",
+ "params": "27B",
+ "recommended": true,
+ "pitch": "A 27-billion-parameter model that reads images too, fast on one DGX Spark.",
+ "architecture": "64 layers: 48 recurrent (Gated DeltaNet) and 16 full-attention, with a vision tower. TandemLLM runs it with two small draft models: they guess the next tokens and one pass of the big model checks them all, so a pass can keep several tokens. With greedy decoding the text is the model's own, up to near ties.",
+ "license": "The model's license is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.",
+ "icon": null,
+ "links": [
+  {
+   "label": "Base model",
+   "url": "https://huggingface.co/Qwen/Qwen3.8-27B-FP8"
+  },
+  {
+   "label": "NVFP4 weights",
+   "url": "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4"
+  },
+  {
+   "label": "EXL3 weights (private)",
+   "url": "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5"
+  }
+ ],
+ "devices": [
+  {
+   "id": "dgx-spark",
+   "label": "NVIDIA DGX Spark (128 GB unified memory)",
+   "total_gib": 121.63,
+   "reserved_gib": 10.0,
+   "note": "The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB."
+  }
+ ],
+ "assets": [
+  {
+   "id": "exl3-drafters-k3",
+   "label": "Draft models (EXL3 K3)",
+   "path": "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors",
+   "also": [
+    "${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors"
+   ],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": null,
+   "source": "Converted on the reference box (ENG-215); a private backup is 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters. No download yet (OPS-95)."
+  },
+  {
+   "id": "exl3-draft-head-k4",
+   "label": "Draft head (EXL3 K4)",
+   "path": "${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors",
+   "also": [],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": null,
+   "source": "Converted on the reference box (ENG-215). No download yet (OPS-95)."
+  },
+  {
+   "id": "base-fp8",
+   "label": "Base checkpoint (Qwen3.8-27B-FP8)",
+   "path": "${HF_HUB}/models--Qwen--Qwen3.8-27B-FP8/snapshots/*/config.json",
+   "also": [],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+   "source": "Every profile reads its embeddings, norms and tokenizer. install.sh downloads it; use-profile.sh does not."
+  },
+  {
+   "id": "nvfp4-drafters",
+   "label": "Draft models (NVFP4)",
+   "path": "${REPO}/train/ft-b8-v2",
+   "also": [
+    "${REPO}/train/ft-b16"
+   ],
+   "fetchable": false,
+   "protected": true,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8",
+   "source": "The 0.4.8 release's drafters (DFlash2-b8 and -b16 on Hugging Face); the profile reads them from the repository's train/ folder."
+  },
+  {
+   "id": "qwen3.5-2b",
+   "label": "Qwen3.5-2B (the narrator, and Wren)",
+   "path": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "Qwen/Qwen3.5-2B",
+   "source": "Public on Hugging Face; install.sh --setup downloads it for Wren."
+  },
+  {
+   "id": "qwen3.5-0.8b",
+   "label": "Qwen3.5-0.8B (the shadow reader)",
+   "path": "${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b/config.json",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "Qwen/Qwen3.5-0.8B",
+   "source": "Public on Hugging Face."
+  },
+  {
+   "id": "laya",
+   "label": "Laya decision models",
+   "path": "${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "convaiinnovations/laya",
+   "source": "On Hugging Face, read with the token."
+  }
+ ],
+ "profiles": [
+  {
+   "id": "exl3-2.5",
+   "label": "EXL3 2.5 bpw",
+   "format": "exl3",
+   "bpw": 2.5,
+   "disk_gb": 12.0,
+   "weights_gib": 10.15,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [
+    "fastest"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.2121,
+    "top1_pct": 86.27,
+    "ppl": 3.1187,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "The fastest, and the furthest from the original model."
+  },
+  {
+   "id": "exl3-3.0",
+   "label": "EXL3 3.0 bpw",
+   "format": "exl3",
+   "bpw": 3.0,
+   "disk_gb": 13.5,
+   "weights_gib": 11.58,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": 0.1246,
+    "top1_pct": 89.8,
+    "ppl": 2.918,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "As fast as 2.5 on greedy prose, and a little over half as far from the original."
+  },
+  {
+   "id": "exl3-3.5",
+   "label": "EXL3 3.5 bpw",
+   "format": "exl3",
+   "bpw": 3.5,
+   "disk_gb": 15.2,
+   "weights_gib": 13.17,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": 0.0749,
+    "top1_pct": 92.31,
+    "ppl": 2.8001,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "Code 35 % faster than 4.5, a little further from the original than NVFP4."
+  },
+  {
+   "id": "exl3-4.0",
+   "label": "EXL3 4.0 bpw",
+   "format": "exl3",
+   "bpw": 4.0,
+   "disk_gb": 16.9,
+   "weights_gib": 14.76,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [
+    "best speed for quality"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.0392,
+    "top1_pct": 94.71,
+    "ppl": 2.7458,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "Closer to the original than NVFP4 on every measure, and prose 11 % faster than 4.5."
+  },
+  {
+   "id": "exl3-4.5",
+   "label": "EXL3 4.5 bpw",
+   "format": "exl3",
+   "bpw": 4.5,
+   "disk_gb": 18.4,
+   "weights_gib": 16.14,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5",
+   "hf_private": true,
+   "recommended": true,
+   "badges": [
+    "recommended"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.0217,
+    "top1_pct": 95.78,
+    "ppl": 2.7271,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "The default of a new box."
+  },
+  {
+   "id": "exl3-6.0",
+   "label": "EXL3 6.0 bpw",
+   "format": "exl3",
+   "bpw": 6.0,
+   "disk_gb": 23.3,
+   "weights_gib": 20.65,
+   "drafters_gib": 5.41,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [
+    "closest to BF16"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.0042,
+    "top1_pct": 98.06,
+    "ppl": 2.7064,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "exl3-drafters-k3",
+    "exl3-draft-head-k4",
+    "base-fp8"
+   ],
+   "note": "The closest to the original model, and the slowest."
+  },
+  {
+   "id": "nvfp4",
+   "label": "NVFP4 (published set)",
+   "format": "nvfp4",
+   "bpw": null,
+   "disk_gb": 15.0,
+   "weights_gib": 16.46,
+   "drafters_gib": 5.87,
+   "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4",
+   "hf_private": false,
+   "recommended": false,
+   "badges": [
+    "public weights"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.0582,
+    "top1_pct": 93.35,
+    "ppl": 2.7685,
+    "date": "2026-10-09",
+    "source": "kernel note 2026-10-09 00:50, tools/exl3_eval.py against BF16, 8 held-out rows"
+   },
+   "assets_required": [
+    "nvfp4-drafters",
+    "base-fp8"
+   ],
+   "note": "The public weights of the 0.4.8 release. Its speed was only measured on the older build 0.4.8, so it is not in the same table."
+  }
+ ],
+ "measurements": {
+  "build": "0.6.2",
+  "date": "2026-10-10",
+  "method": "tools/exl3_fastrun.py, one raw-engine server per run, prompts prose / chat / code, 3 reps, temperature 0 (greedy) or 0.7 with top-p 0.95 (sampled), thinking off, 128 or 512 new tokens, 2 runs a mode (6 decodes a cell); long rows: the code task after 32k / 64k tokens of held-out text, one text a cell; lossless: tools/exl3_lossless.py, 12 traces of 256 tokens against the size's own greedy decode. Caches, the conductor and the small models off; 4 slots of 262,144 tokens with the KV pool on. Chat and long rows are one prompt a cell: read them as \"smaller is faster\", not as an order between neighbours.",
+  "source": "kernel note \"2026-10-10, build 0.6.2\" (raw data spark ~/exl3-measure-20261010/summary.json)",
+  "rows": [
+   {
+    "profile": "exl3-2.5",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 56.22,
+       "min": 55.36,
+       "ms_round": 57.0,
+       "tok_round": 3.2,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 89.05,
+       "min": 76.55,
+       "ms_round": 60.1,
+       "tok_round": 5.35,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 124.17,
+       "min": 123.75,
+       "ms_round": 61.4,
+       "tok_round": 7.63,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 57.47,
+       "min": 54.63,
+       "ms_round": 58.2,
+       "tok_round": 3.34,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 82.73,
+       "min": 82.11,
+       "ms_round": 59.0,
+       "tok_round": 4.88,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 111.22,
+       "min": 110.71,
+       "ms_round": 60.1,
+       "tok_round": 6.68,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 56.42,
+       "min": 54.4,
+       "ms_round": 57.7,
+       "tok_round": 3.26,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 75.45,
+       "min": 67.52,
+       "ms_round": 60.2,
+       "tok_round": 4.54,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 115.34,
+       "min": 111.92,
+       "ms_round": 62.1,
+       "tok_round": 7.17,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 53.29,
+       "min": 47.47,
+       "ms_round": 58.5,
+       "tok_round": 3.12,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 70.05,
+       "min": 64.26,
+       "ms_round": 59.2,
+       "tok_round": 4.15,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 108.73,
+       "min": 89.58,
+       "ms_round": 62.0,
+       "tok_round": 6.79,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 99.51,
+       "min": 99.51,
+       "ms_round": 77.8,
+       "tok_round": 7.74,
+       "n": 1,
+       "ttft_s": 35.9
+      },
+      "long64k": {
+       "tok_s": 80.99,
+       "min": 80.99,
+       "ms_round": 85.3,
+       "tok_round": 6.91,
+       "n": 1,
+       "ttft_s": 77.64
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 96.87,
+       "min": 96.87,
+       "ms_round": 78.7,
+       "tok_round": 7.63,
+       "n": 1,
+       "ttft_s": 35.92
+      },
+      "long64k": {
+       "tok_s": 78.78,
+       "min": 78.78,
+       "ms_round": 86.5,
+       "tok_round": 6.81,
+       "n": 1,
+       "ttft_s": 77.67
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 8.8,
+     "32768": 36.32
+    },
+    "lossless": {
+     "identical": 6,
+     "near_tie": 6,
+     "other": 0,
+     "max_near_tie_ulp": 0.48
+    },
+    "note": null
+   },
+   {
+    "profile": "exl3-3.0",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 56.91,
+       "min": 56.48,
+       "ms_round": 63.2,
+       "tok_round": 3.6,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 69.6,
+       "min": 67.77,
+       "ms_round": 65.8,
+       "tok_round": 4.58,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 119.06,
+       "min": 110.59,
+       "ms_round": 68.7,
+       "tok_round": 8.18,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 60.24,
+       "min": 59.6,
+       "ms_round": 63.9,
+       "tok_round": 3.85,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 63.05,
+       "min": 62.81,
+       "ms_round": 65.0,
+       "tok_round": 4.1,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 112.34,
+       "min": 111.33,
+       "ms_round": 66.5,
+       "tok_round": 7.47,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 50.49,
+       "min": 48.79,
+       "ms_round": 63.8,
+       "tok_round": 3.22,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 67.02,
+       "min": 60.24,
+       "ms_round": 66.6,
+       "tok_round": 4.46,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 100.77,
+       "min": 90.39,
+       "ms_round": 68.4,
+       "tok_round": 6.89,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 48.87,
+       "min": 44.55,
+       "ms_round": 63.8,
+       "tok_round": 3.12,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 63.0,
+       "min": 55.87,
+       "ms_round": 65.5,
+       "tok_round": 4.13,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 98.61,
+       "min": 87.7,
+       "ms_round": 67.5,
+       "tok_round": 6.68,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 81.16,
+       "min": 81.16,
+       "ms_round": 83.9,
+       "tok_round": 6.81,
+       "n": 1,
+       "ttft_s": 36.24
+      },
+      "long64k": {
+       "tok_s": 82.74,
+       "min": 82.74,
+       "ms_round": 92.2,
+       "tok_round": 7.63,
+       "n": 1,
+       "ttft_s": 77.79
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 76.97,
+       "min": 76.97,
+       "ms_round": 86.2,
+       "tok_round": 6.64,
+       "n": 1,
+       "ttft_s": 35.73
+      },
+      "long64k": {
+       "tok_s": 67.98,
+       "min": 67.98,
+       "ms_round": 91.7,
+       "tok_round": 6.23,
+       "n": 1,
+       "ttft_s": 78.33
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 8.81,
+     "32768": 36.45
+    },
+    "lossless": {
+     "identical": 8,
+     "near_tie": 4,
+     "other": 0,
+     "max_near_tie_ulp": 0.5
+    },
+    "note": null
+   },
+   {
+    "profile": "exl3-3.5",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 47.23,
+       "min": 46.85,
+       "ms_round": 71.0,
+       "tok_round": 3.35,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 74.82,
+       "min": 73.36,
+       "ms_round": 74.2,
+       "tok_round": 5.55,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 113.63,
+       "min": 111.34,
+       "ms_round": 75.0,
+       "tok_round": 8.52,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 49.26,
+       "min": 48.78,
+       "ms_round": 71.6,
+       "tok_round": 3.53,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 57.16,
+       "min": 56.92,
+       "ms_round": 71.7,
+       "tok_round": 4.1,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 87.27,
+       "min": 86.39,
+       "ms_round": 72.8,
+       "tok_round": 6.35,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 44.44,
+       "min": 41.65,
+       "ms_round": 71.1,
+       "tok_round": 3.16,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 59.95,
+       "min": 56.92,
+       "ms_round": 73.4,
+       "tok_round": 4.4,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 101.59,
+       "min": 94.0,
+       "ms_round": 75.7,
+       "tok_round": 7.7,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 44.43,
+       "min": 40.31,
+       "ms_round": 71.4,
+       "tok_round": 3.17,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 59.44,
+       "min": 54.58,
+       "ms_round": 72.8,
+       "tok_round": 4.33,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 86.29,
+       "min": 56.4,
+       "ms_round": 73.8,
+       "tok_round": 6.4,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 82.65,
+       "min": 82.65,
+       "ms_round": 92.3,
+       "tok_round": 7.63,
+       "n": 1,
+       "ttft_s": 36.14
+      },
+      "long64k": {
+       "tok_s": 76.4,
+       "min": 76.4,
+       "ms_round": 98.4,
+       "tok_round": 7.51,
+       "n": 1,
+       "ttft_s": 78.37
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 75.52,
+       "min": 75.52,
+       "ms_round": 92.7,
+       "tok_round": 7.0,
+       "n": 1,
+       "ttft_s": 36.6
+      },
+      "long64k": {
+       "tok_s": 66.59,
+       "min": 66.59,
+       "ms_round": 99.7,
+       "tok_round": 6.64,
+       "n": 1,
+       "ttft_s": 78.54
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 8.93,
+     "32768": 36.88
+    },
+    "lossless": {
+     "identical": 5,
+     "near_tie": 7,
+     "other": 0,
+     "max_near_tie_ulp": 0.54
+    },
+    "note": null
+   },
+   {
+    "profile": "exl3-4.0",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 45.59,
+       "min": 45.12,
+       "ms_round": 77.1,
+       "tok_round": 3.52,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 53.44,
+       "min": 53.21,
+       "ms_round": 79.0,
+       "tok_round": 4.22,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 89.14,
+       "min": 88.4,
+       "ms_round": 80.4,
+       "tok_round": 7.16,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 45.8,
+       "min": 45.27,
+       "ms_round": 77.7,
+       "tok_round": 3.56,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 52.2,
+       "min": 52.13,
+       "ms_round": 78.5,
+       "tok_round": 4.1,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 73.84,
+       "min": 73.41,
+       "ms_round": 78.2,
+       "tok_round": 5.77,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 41.29,
+       "min": 39.52,
+       "ms_round": 78.0,
+       "tok_round": 3.22,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 56.86,
+       "min": 54.61,
+       "ms_round": 79.6,
+       "tok_round": 4.53,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 85.44,
+       "min": 74.99,
+       "ms_round": 81.6,
+       "tok_round": 6.97,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 41.5,
+       "min": 38.36,
+       "ms_round": 78.0,
+       "tok_round": 3.24,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 51.8,
+       "min": 48.22,
+       "ms_round": 79.0,
+       "tok_round": 4.09,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 76.62,
+       "min": 67.07,
+       "ms_round": 80.4,
+       "tok_round": 6.17,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 83.18,
+       "min": 83.18,
+       "ms_round": 97.5,
+       "tok_round": 8.11,
+       "n": 1,
+       "ttft_s": 36.77
+      },
+      "long64k": {
+       "tok_s": 74.59,
+       "min": 74.59,
+       "ms_round": 105.4,
+       "tok_round": 7.86,
+       "n": 1,
+       "ttft_s": 82.11
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 58.32,
+       "min": 58.32,
+       "ms_round": 96.3,
+       "tok_round": 5.62,
+       "n": 1,
+       "ttft_s": 36.48
+      },
+      "long64k": {
+       "tok_s": 56.91,
+       "min": 56.91,
+       "ms_round": 105.6,
+       "tok_round": 6.01,
+       "n": 1,
+       "ttft_s": 83.94
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 8.99,
+     "32768": 36.41
+    },
+    "lossless": {
+     "identical": 4,
+     "near_tie": 8,
+     "other": 0,
+     "max_near_tie_ulp": 0.52
+    },
+    "note": null
+   },
+   {
+    "profile": "exl3-4.5",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 41.23,
+       "min": 40.7,
+       "ms_round": 83.9,
+       "tok_round": 3.46,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 52.54,
+       "min": 52.01,
+       "ms_round": 85.3,
+       "tok_round": 4.48,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 84.44,
+       "min": 83.44,
+       "ms_round": 86.5,
+       "tok_round": 7.3,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 43.04,
+       "min": 37.16,
+       "ms_round": 84.9,
+       "tok_round": 3.65,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 43.25,
+       "min": 42.76,
+       "ms_round": 83.9,
+       "tok_round": 3.63,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 74.81,
+       "min": 73.87,
+       "ms_round": 84.9,
+       "tok_round": 6.35,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 38.38,
+       "min": 35.03,
+       "ms_round": 84.7,
+       "tok_round": 3.25,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 53.82,
+       "min": 50.8,
+       "ms_round": 86.7,
+       "tok_round": 4.67,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 80.57,
+       "min": 76.82,
+       "ms_round": 88.9,
+       "tok_round": 7.16,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 36.55,
+       "min": 34.73,
+       "ms_round": 85.1,
+       "tok_round": 3.11,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 49.91,
+       "min": 44.17,
+       "ms_round": 85.9,
+       "tok_round": 4.29,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 71.39,
+       "min": 58.84,
+       "ms_round": 87.1,
+       "tok_round": 6.23,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 63.11,
+       "min": 63.11,
+       "ms_round": 105.2,
+       "tok_round": 6.64,
+       "n": 1,
+       "ttft_s": 36.72
+      },
+      "long64k": {
+       "tok_s": 58.21,
+       "min": 58.21,
+       "ms_round": 112.5,
+       "tok_round": 6.55,
+       "n": 1,
+       "ttft_s": 78.02
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 63.62,
+       "min": 63.62,
+       "ms_round": 104.3,
+       "tok_round": 6.64,
+       "n": 1,
+       "ttft_s": 36.54
+      },
+      "long64k": {
+       "tok_s": 48.51,
+       "min": 48.51,
+       "ms_round": 113.3,
+       "tok_round": 5.49,
+       "n": 1,
+       "ttft_s": 78.56
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 9.03,
+     "32768": 37.11
+    },
+    "lossless": {
+     "identical": 2,
+     "near_tie": 10,
+     "other": 0,
+     "max_near_tie_ulp": 0.39
+    },
+    "note": null
+   },
+   {
+    "profile": "exl3-6.0",
+    "build": "0.6.2",
+    "date": "2026-10-10",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 33.16,
+       "min": 32.14,
+       "ms_round": 105.6,
+       "tok_round": 3.5,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 39.78,
+       "min": 39.3,
+       "ms_round": 105.6,
+       "tok_round": 4.2,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 67.67,
+       "min": 66.28,
+       "ms_round": 107.4,
+       "tok_round": 7.27,
+       "n": 6
+      }
+     },
+     "greedy_128": {
+      "prose": {
+       "tok_s": 30.72,
+       "min": 29.0,
+       "ms_round": 106.5,
+       "tok_round": 3.27,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 38.83,
+       "min": 37.33,
+       "ms_round": 105.6,
+       "tok_round": 4.1,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 62.92,
+       "min": 61.18,
+       "ms_round": 106.3,
+       "tok_round": 6.68,
+       "n": 6
+      }
+     },
+     "sampled_512": {
+      "prose": {
+       "tok_s": 30.96,
+       "min": 30.3,
+       "ms_round": 104.8,
+       "tok_round": 3.25,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 42.4,
+       "min": 40.7,
+       "ms_round": 106.8,
+       "tok_round": 4.53,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 66.91,
+       "min": 61.11,
+       "ms_round": 109.1,
+       "tok_round": 7.3,
+       "n": 6
+      }
+     },
+     "sampled_128": {
+      "prose": {
+       "tok_s": 31.46,
+       "min": 28.8,
+       "ms_round": 105.2,
+       "tok_round": 3.31,
+       "n": 6
+      },
+      "chat": {
+       "tok_s": 39.9,
+       "min": 35.18,
+       "ms_round": 106.9,
+       "tok_round": 4.27,
+       "n": 6
+      },
+      "code": {
+       "tok_s": 59.46,
+       "min": 53.9,
+       "ms_round": 107.3,
+       "tok_round": 6.38,
+       "n": 6
+      }
+     },
+     "long_greedy": {
+      "long32k": {
+       "tok_s": 57.63,
+       "min": 57.63,
+       "ms_round": 126.7,
+       "tok_round": 7.3,
+       "n": 1,
+       "ttft_s": 47.22
+      },
+      "long64k": {
+       "tok_s": 53.78,
+       "min": 53.78,
+       "ms_round": 133.8,
+       "tok_round": 7.2,
+       "n": 1,
+       "ttft_s": 82.81
+      }
+     },
+     "long_sampled": {
+      "long32k": {
+       "tok_s": 52.96,
+       "min": 52.96,
+       "ms_round": 127.0,
+       "tok_round": 6.72,
+       "n": 1,
+       "ttft_s": 38.05
+      },
+      "long64k": {
+       "tok_s": 54.62,
+       "min": 54.62,
+       "ms_round": 135.6,
+       "tok_round": 7.41,
+       "n": 1,
+       "ttft_s": 79.35
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 9.06,
+     "32768": 36.83
+    },
+    "lossless": {
+     "identical": 5,
+     "near_tie": 7,
+     "other": 0,
+     "max_near_tie_ulp": 0.26
+    },
+    "note": null
+   },
+   {
+    "profile": "nvfp4",
+    "build": "0.4.8",
+    "date": "2026-10-08",
+    "comparable": false,
+    "note": "Older build 0.4.8, not comparable with the rows above. One run with the NVFP4 drafters, greedy 512 prose and chat only (kernel note \"2026-10-08 23:35 CEST\").",
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 38.8,
+       "min": 38.8,
+       "ms_round": 92.0,
+       "tok_round": 3.57,
+       "n": 1
+      },
+      "chat": {
+       "tok_s": 47.1,
+       "min": 47.1,
+       "ms_round": 93.6,
+       "tok_round": 4.41,
+       "n": 1
+      }
+     }
+    },
+    "ttft_s": {
+     "8192": 13.4,
+     "32768": 39.6
+    },
+    "lossless": null
+   }
+  ]
+ },
+ "memory": {
+  "parts": [
+   {
+    "id": "graphs",
+    "label": "CUDA graphs (the verify step)",
+    "gib": 6.63,
+    "kind": "fixed",
+    "source": "load stage graphs, 0.6.2 (6.61 to 6.65 over the six sizes)"
+   },
+   {
+    "id": "engine",
+    "label": "Engine state and warm-up workspace",
+    "gib": 1.28,
+    "kind": "fixed",
+    "source": "load stages engine 0.14 + warmup 1.14, 0.6.2"
+   },
+   {
+    "id": "allocator",
+    "label": "Allocator reserve",
+    "gib": 2.6,
+    "kind": "reserve",
+    "source": "memory.split reserve 2.62 GiB, 2026-10-10 22:30 (RESERVE_SLACK_GIB 2 is its target between requests)"
+   }
+  ],
+  "sources": [
+   "docs/operations.md \"Memory rules\"",
+   "docs/parallel-requests.md \"The shared KV pool\"",
+   "kernel note \"2026-10-10, build 0.6.2\", the load stages of every size",
+   "memory.split of /v1/dashboard/system, 2026-10-10 22:30 (exl3-6.0, 4 slots, the small models loaded)"
+  ]
+ },
+ "components": [
+  {
+   "id": "drafters",
+   "label": "Draft models",
+   "group": "speed",
+   "what": "Two small models guess the next tokens, and the big model checks the guesses in one pass. Most of the speed comes from here.",
+   "default": true,
+   "required": true,
+   "memory_gib": 5.41,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 4.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {},
+   "assets": [],
+   "docs": "docs/speculative-decoding.md",
+   "note": "The weight profile picks which draft models load. Their memory is the profile's drafters_gib, and their context KV is part of the 104.25 KiB a token below."
+  },
+  {
+   "id": "lookup",
+   "label": "Lookup store",
+   "group": "speed",
+   "what": "Remembers what the model read and wrote before and suggests it again when text repeats, like code you edit many times.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.19,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.2,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_SUFFIX_STORE": {
+     "on": "${HOME}/.qwen38-spark-engine/suffix",
+     "off": ""
+    }
+   },
+   "assets": [],
+   "docs": "docs/speculative-decoding.md",
+   "note": "192 MiB of token ids at most (--suffix-store-mb), in host memory."
+  },
+  {
+   "id": "conductor",
+   "label": "Conductor",
+   "group": "features",
+   "what": "Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.1,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "CONDUCTOR": {
+     "on": "on",
+     "off": "raw"
+    },
+    "QSE_CONDUCTOR_CONFIG": {
+     "on": "${HOME}/.qwen38-spark-engine/conductor",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/server.md",
+   "note": "Off, clients talk to the raw engine and the small models below have nothing to do."
+  },
+  {
+   "id": "narrator",
+   "label": "Narrator",
+   "group": "roles",
+   "what": "A small model that writes short status lines while the big model thinks, so you can see what it is doing.",
+   "default": true,
+   "required": false,
+   "memory_gib": 3.6,
+   "memory_max_gib": null,
+   "elastic": true,
+   "disk_gb": 4.3,
+   "depends_on": [
+    "conductor"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_NARRATOR_MODEL": {
+     "on": "qwen3.5-2b",
+     "off": ""
+    },
+    "QWEN38_NARRATOR_DIR": {
+     "on": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b",
+     "off": ""
+    }
+   },
+   "assets": [
+    "qwen3.5-2b"
+   ],
+   "docs": "docs/server.md",
+   "note": "Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and loads again later."
+  },
+  {
+   "id": "laya",
+   "label": "Laya decision models",
+   "group": "roles",
+   "what": "Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.",
+   "default": true,
+   "required": false,
+   "memory_gib": 1.6,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 2.3,
+   "depends_on": [
+    "conductor"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_DECIDER_MODELS": {
+     "on": "laya-english,laya-multilingual,laya-typed-decisions",
+     "off": ""
+    }
+   },
+   "assets": [
+    "laya"
+   ],
+   "docs": "docs/server.md",
+   "note": "Without them the big model answers those questions itself, which costs a turn each time."
+  },
+  {
+   "id": "shadow",
+   "label": "Shadow reader",
+   "group": "roles",
+   "what": "A small model that reads along with each session when the box is idle, so later questions about it are answered fast.",
+   "default": true,
+   "required": false,
+   "memory_gib": 1.52,
+   "memory_max_gib": 5.52,
+   "elastic": true,
+   "disk_gb": 1.7,
+   "depends_on": [
+    "conductor"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_SHADOW_MODEL": {
+     "on": "qwen3.5-0.8b",
+     "off": ""
+    }
+   },
+   "assets": [
+    "qwen3.5-0.8b"
+   ],
+   "docs": "docs/shadow-reader.md",
+   "note": "Qwen3.5-0.8B (1.52 GiB in the live memory split) and up to 4 GiB of session states (QWEN38_SHADOW_GB). The first to unload when memory runs short."
+  },
+  {
+   "id": "vision",
+   "label": "Vision",
+   "group": "features",
+   "what": "Lets the model read images you send with a message.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.86,
+   "memory_max_gib": 1.36,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "VISION": {
+     "on": "on",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/server.md",
+   "note": "The tower ships inside the base checkpoint. The extra 0.5 GiB is the cache of encoded images (--image-cache-mb 512)."
+  },
+  {
+   "id": "prompt_cache",
+   "label": "Conversation cache",
+   "group": "caches",
+   "what": "Keeps the conversation the model is in, so the next turn starts where the last one ended instead of reading everything again.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.43,
+   "memory_max_gib": 11.5,
+   "elastic": true,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "RESIDENT_GB": {
+     "on": "2.5",
+     "off": "0"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "The resident prefix, 0.43 GiB in the live memory split. At their caps the anchors take 2.5 GiB, the stash 1, the pin 4 and the park 4. Off, every agent turn reads its whole prompt again."
+  },
+  {
+   "id": "state_store",
+   "label": "State store",
+   "group": "caches",
+   "what": "Saves the model's state after short chats, so the same start a second time costs nothing.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.49,
+   "memory_max_gib": 2.0,
+   "elastic": true,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "CACHE_GB": {
+     "on": "2",
+     "off": "0"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": null
+  },
+  {
+   "id": "response_cache",
+   "label": "Response cache",
+   "group": "caches",
+   "what": "Answers an identical greedy request again from memory, without running the model.",
+   "default": false,
+   "required": false,
+   "memory_gib": 0.25,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "RESPONSE_CACHE": {
+     "on": "on",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "Off on the reference box. Useful for scripts that send the same request many times; never for a benchmark."
+  },
+  {
+   "id": "disk_tier",
+   "label": "Disk cache",
+   "group": "disk",
+   "what": "Keeps the start of long prompts on the SSD, so a long agent session or a returning chat starts in seconds.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 16.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "QSE_DISK_CACHE": {
+     "on": null,
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "16 GB by default (the Memory screen sets it), in a folder per weight profile. It never takes the disk under 50 GB free."
+  },
+  {
+   "id": "nvme_spill",
+   "label": "Session spill",
+   "group": "disk",
+   "what": "Moves a paused conversation to the SSD instead of dropping it, and brings it back on its next turn.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 64.0,
+   "depends_on": [
+    "disk_tier"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "SESSION_SPILL": {
+     "on": "on",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "Compressed, up to SESSION_SPILL_GB (64 GB), inside the disk cache's folder."
+  },
+  {
+   "id": "proxy",
+   "label": "Other backends",
+   "group": "features",
+   "what": "Lets the dashboard send some model names to other servers or cloud APIs, beside this engine.",
+   "default": false,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "QSE_BACKENDS": {
+     "on": "${HOME}/.qwen38-spark-engine/backends/config.sqlite3",
+     "off": ""
+    }
+   },
+   "assets": [],
+   "docs": "docs/proxy.md",
+   "note": "You add the backends later, on the Backends screen."
+  }
+ ],
+ "parallelism": {
+  "slots": {
+   "min": 1,
+   "max": 4,
+   "default": 4
+  },
+  "window": {
+   "min": 8192,
+   "max": 262144,
+   "default": 262144,
+   "step": 8192
+  },
+  "side_window": {
+   "min": 8192,
+   "max": 262144,
+   "default": 262144,
+   "step": 8192
+  },
+  "kv_pool": {
+   "default": true
+  },
+  "floor_gb": {
+   "min": 10,
+   "max": 40,
+   "default": 15
+  },
+  "kv_hard_floor_gb": 10,
+  "kv_bytes_per_token": 106752,
+  "typical_fill_tokens": 32768,
+  "side_slot_const_gib": 1.19,
+  "knobs": {
+   "slots": "QSE_PARALLEL",
+   "window": "MAX_LEN",
+   "side_window": "QSE_SIDE_MAX_LEN",
+   "kv_pool": "QSE_KV_POOL",
+   "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+  },
+  "fixed": {
+   "QSE_SIDE_GRAPHS": "off",
+   "QSE_SIDE_SLOT_CONST_GB": "1.5",
+   "QSE_KV_HARD_FLOOR_GB": "10",
+   "QSE_BARRIER_IDLE_OWNER": "on"
+  }
+ },
+ "methods": [
+  {
+   "id": "sampled_tree",
+   "label": "Sampled decoding",
+   "what": "How a request with a temperature is checked against the draft. det uses the same tree as a greedy request and is the fastest; the answers still follow the model's own sampling.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "det",
+     "label": "det: the tree (recommended)"
+    },
+    {
+     "value": "mixed",
+     "label": "mixed: the sampled chain in the tree"
+    },
+    {
+     "value": "chain",
+     "label": "chain: one sampled chain"
+    }
+   ],
+   "default": "det",
+   "recommended": "det",
+   "knob": "SAMPLED_TREE",
+   "docs": "docs/speculative-decoding.md"
+  },
+  {
+   "id": "reasoning_effort",
+   "label": "Thinking effort",
+   "what": "How long the model may think before it answers, when a client does not say.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "low",
+     "label": "low"
+    },
+    {
+     "value": "medium",
+     "label": "medium"
+    },
+    {
+     "value": "xhigh",
+     "label": "extra high"
+    }
+   ],
+   "default": "medium",
+   "recommended": "medium",
+   "knob": "REASONING_EFFORT",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "default_max_tokens",
+   "label": "Default answer length",
+   "what": "The longest answer, in tokens, when a client does not set max_tokens.",
+   "type": "int",
+   "min": 1024,
+   "max": 262144,
+   "default": 32768,
+   "recommended": 32768,
+   "knob": "DEFAULT_MAX_TOKENS",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "draft_temperature",
+   "label": "Draft temperature",
+   "what": "How sharp the draft models' guesses are on a sampled request. Lower means fewer wrong guesses.",
+   "type": "number",
+   "min": 0.05,
+   "max": 1.0,
+   "default": 0.3,
+   "recommended": 0.3,
+   "knob": "QWEN38_DRAFT_TEMP",
+   "docs": "docs/speculative-decoding.md"
+  },
+  {
+   "id": "request_timeout",
+   "label": "Request time limit",
+   "what": "Seconds one request may run before the engine stops it.",
+   "type": "int",
+   "min": 60,
+   "max": 14400,
+   "default": 3600,
+   "recommended": 3600,
+   "knob": "REQUEST_TIMEOUT",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "max_queue",
+   "label": "Queue length",
+   "what": "How many requests may wait for a free slot before new ones are turned away.",
+   "type": "int",
+   "min": 1,
+   "max": 64,
+   "default": 8,
+   "recommended": 8,
+   "knob": "MAX_QUEUE",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "queue_timeout",
+   "label": "Queue wait",
+   "what": "Seconds a request may wait in the queue before it gets an error.",
+   "type": "int",
+   "min": 10,
+   "max": 3600,
+   "default": 240,
+   "recommended": 240,
+   "knob": "QUEUE_TIMEOUT",
+   "docs": "docs/server.md"
+  }
+ ],
+ "advanced": [
+  {
+   "id": "port",
+   "label": "Port",
+   "what": "The port the API and the dashboard answer on.",
+   "type": "int",
+   "min": 1024,
+   "max": 65535,
+   "default": 8000,
+   "recommended": 8000,
+   "knob": "PORT",
+   "docs": "docs/operations.md"
+  },
+  {
+   "id": "host",
+   "label": "Listen on",
+   "what": "The whole network, or only this machine.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "0.0.0.0",
+     "label": "the whole network"
+    },
+    {
+     "value": "127.0.0.1",
+     "label": "this machine only"
+    }
+   ],
+   "default": "0.0.0.0",
+   "recommended": "0.0.0.0",
+   "knob": "HOST",
+   "docs": "docs/operations.md"
+  },
+  {
+   "id": "served_model",
+   "label": "Raw engine name",
+   "what": "The model name of the raw engine. With the conductor on, clients see TandemLLM and this name is a hidden alias.",
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+   "default": "qwen38-spark-engine",
+   "recommended": "qwen38-spark-engine",
+   "knob": "SERVED_MODEL",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "dashboard_login",
+   "label": "Dashboard login",
+   "what": "With an admin password set, on makes the dashboard ask for it too.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "off",
+     "label": "off"
+    },
+    {
+     "value": "on",
+     "label": "on"
+    }
+   ],
+   "default": "off",
+   "recommended": "off",
+   "knob": "QSE_DASHBOARD_LOGIN",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "admin_password",
+   "label": "Admin password",
+   "what": "Without one, anyone who reaches the port can change the setup. Generate writes a random one into secrets.env on the box; read it there with cat.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "keep",
+     "label": "keep as it is"
+    },
+    {
+     "value": "generate",
+     "label": "generate one"
+    }
+   ],
+   "default": "keep",
+   "recommended": "keep",
+   "knob": null,
+   "docs": "docs/operations.md"
+  }
+ ],
+ "contract_version": "1.0",
+ "wizard_fields": [
+  {
+   "index": 0,
+   "id": "models",
+   "label": "Models",
+   "fields": []
+  },
+  {
+   "index": 1,
+   "id": "overview",
+   "label": "Model",
+   "fields": []
+  },
+  {
+   "index": 2,
+   "id": "weights",
+   "label": "Weights",
+   "fields": [
+    {
+     "field": "profile",
+     "label": "Weight profile",
+     "type": "enum",
+     "options": [
+      "exl3-2.5",
+      "exl3-3.0",
+      "exl3-3.5",
+      "exl3-4.0",
+      "exl3-4.5",
+      "exl3-6.0",
+      "nvfp4"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 3,
+   "id": "components",
+   "label": "Tools",
+   "fields": [
+    {
+     "field": "drafters",
+     "label": "Draft models",
+     "type": "bool"
+    },
+    {
+     "field": "lookup",
+     "label": "Lookup store",
+     "type": "bool"
+    },
+    {
+     "field": "conductor",
+     "label": "Conductor",
+     "type": "bool"
+    },
+    {
+     "field": "narrator",
+     "label": "Narrator",
+     "type": "bool"
+    },
+    {
+     "field": "laya",
+     "label": "Laya decision models",
+     "type": "bool"
+    },
+    {
+     "field": "shadow",
+     "label": "Shadow reader",
+     "type": "bool"
+    },
+    {
+     "field": "vision",
+     "label": "Vision",
+     "type": "bool"
+    },
+    {
+     "field": "prompt_cache",
+     "label": "Conversation cache",
+     "type": "bool"
+    },
+    {
+     "field": "state_store",
+     "label": "State store",
+     "type": "bool"
+    },
+    {
+     "field": "response_cache",
+     "label": "Response cache",
+     "type": "bool"
+    },
+    {
+     "field": "disk_tier",
+     "label": "Disk cache",
+     "type": "bool"
+    },
+    {
+     "field": "nvme_spill",
+     "label": "Session spill",
+     "type": "bool"
+    },
+    {
+     "field": "proxy",
+     "label": "Other backends",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "id": "parallelism",
+   "label": "Parallelism and memory",
+   "fields": [
+    {
+     "field": "slots",
+     "label": "Parallel requests",
+     "type": "int",
+     "min": 1,
+     "max": 4
+    },
+    {
+     "field": "window",
+     "label": "Context window, first slot",
+     "type": "int",
+     "min": 8192,
+     "max": 262144
+    },
+    {
+     "field": "side_window",
+     "label": "Context window, other slots",
+     "type": "int",
+     "min": 8192,
+     "max": 262144
+    },
+    {
+     "field": "kv_pool",
+     "label": "Shared KV pool",
+     "type": "bool"
+    },
+    {
+     "field": "floor_gb",
+     "label": "Memory kept free (GiB)",
+     "type": "number",
+     "min": 10,
+     "max": 40
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "id": "methods",
+   "label": "Methods and advanced",
+   "fields": [
+    {
+     "field": "sampled_tree",
+     "label": "Sampled decoding",
+     "type": "enum",
+     "options": [
+      "det",
+      "mixed",
+      "chain"
+     ]
+    },
+    {
+     "field": "reasoning_effort",
+     "label": "Thinking effort",
+     "type": "enum",
+     "options": [
+      "low",
+      "medium",
+      "xhigh"
+     ]
+    },
+    {
+     "field": "default_max_tokens",
+     "label": "Default answer length",
+     "type": "int",
+     "min": 1024,
+     "max": 262144
+    },
+    {
+     "field": "draft_temperature",
+     "label": "Draft temperature",
+     "type": "number",
+     "min": 0.05,
+     "max": 1.0
+    },
+    {
+     "field": "request_timeout",
+     "label": "Request time limit",
+     "type": "int",
+     "min": 60,
+     "max": 14400
+    },
+    {
+     "field": "max_queue",
+     "label": "Queue length",
+     "type": "int",
+     "min": 1,
+     "max": 64
+    },
+    {
+     "field": "queue_timeout",
+     "label": "Queue wait",
+     "type": "int",
+     "min": 10,
+     "max": 3600
+    },
+    {
+     "field": "port",
+     "label": "Port",
+     "type": "int",
+     "min": 1024,
+     "max": 65535
+    },
+    {
+     "field": "host",
+     "label": "Listen on",
+     "type": "enum",
+     "options": [
+      "0.0.0.0",
+      "127.0.0.1"
+     ]
+    },
+    {
+     "field": "served_model",
+     "label": "Raw engine name",
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    {
+     "field": "dashboard_login",
+     "label": "Dashboard login",
+     "type": "enum",
+     "options": [
+      "off",
+      "on"
+     ]
+    },
+    {
+     "field": "admin_password",
+     "label": "Admin password",
+     "type": "enum",
+     "options": [
+      "keep",
+      "generate"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "id": "review",
+   "label": "Review",
+   "fields": []
+  },
+  {
+   "index": 7,
+   "id": "install",
+   "label": "Install",
+   "fields": []
+  }
+ ]
+}

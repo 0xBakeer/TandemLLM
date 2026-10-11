@@ -935,3 +935,521 @@ export interface MemoryLimits {
   park: { owner: string | null; rows: number; base: number; bytes: number } | null;
   owner: string | null;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The setup guide: /v1/setup/* (server/setup/, docs/setup.md). Contract 1.0, separate from the
+// dashboard's. Every memory figure is GiB (2^30 bytes) like the engine's knobs, whatever the field
+// is called (`gb`, `*_gb`, `*_gib`). The model payload is models/<id>/model.yaml parsed as JSON.
+// ---------------------------------------------------------------------------------------------
+
+export type SetupContract = '1.0';
+export type SetupStepId = 'models' | 'overview' | 'weights' | 'components' | 'parallelism' | 'methods' | 'review' | 'install';
+export type SetupValue = string | number | boolean;
+
+/** GET /v1/setup/models: one tile per models/<id>/model.yaml. */
+export interface SetupModelTile {
+  id: string;
+  name: string;
+  family: string;
+  params: string;
+  pitch: string;
+  recommended: boolean;
+  icon: string | null;
+  /** the fastest measured cell of the recommended profile (greedy, 512 tokens) */
+  best_speed: { tok_s: number; task: string; profile: string } | null;
+}
+export interface SetupModelsList {
+  contract_version: SetupContract;
+  models: SetupModelTile[];
+  /** a model.yaml that did not load: its path and why (the other models still list) */
+  errors: { path: string; message: string }[];
+}
+
+export interface SetupQuality {
+  kl_vs_bf16: number | null;
+  top1_pct: number | null;
+  ppl: number | null;
+  date: string;
+  source: string;
+}
+/** One weight profile: one ops/profiles/<id>.env. */
+export interface SetupProfile {
+  id: string;
+  label: string;
+  format: 'exl3' | 'nvfp4';
+  bpw: number | null;
+  /** download size */
+  disk_gb: number;
+  /** the target's weights on the device, measured at load */
+  weights_gib: number;
+  hf_repo: string;
+  recommended: boolean;
+  /** e.g. "best speed for quality", "closest to BF16" */
+  badges: string[];
+  quality: SetupQuality;
+  note: string | null;
+  /** 1.0+: the draft models, the draft head and their buffers on the device (the profile picks them) */
+  drafters_gib: number;
+  /** 1.0+: the weights' repo needs a Hugging Face token */
+  hf_private: boolean;
+  /** 1.0+: SetupAsset ids the profile needs besides its own weights */
+  assets_required: string[];
+}
+
+/** 1.0+: a file a profile or a tool needs besides the profile's weights. */
+export interface SetupAsset {
+  id: string;
+  label: string;
+  /** with ${HOME}, ${REPO} or ${HF_HUB}; may end in a glob */
+  path: string;
+  also: string[];
+  /** something in the repository downloads it */
+  fetchable: boolean;
+  /** reset level 4 never removes it */
+  protected: boolean;
+  hf_repo: string | null;
+  source: string;
+}
+
+/** One cell of the measured table: mean tok/s (and min), ms a round, tokens a round. */
+export interface SetupMeasureCell {
+  tok_s: number;
+  min: number;
+  ms_round: number;
+  tok_round: number;
+  n: number;
+  ttft_s?: number;
+}
+export type SetupMeasureMode = 'greedy_512' | 'greedy_128' | 'sampled_512' | 'sampled_128' | 'long_greedy' | 'long_sampled';
+export type SetupMeasureTask = 'prose' | 'chat' | 'code' | 'long32k' | 'long64k';
+export interface SetupMeasureRow {
+  profile: string;
+  build: string;
+  date: string;
+  /** false: another build or other rows (the NVFP4 row from 0.4.8); show it apart */
+  comparable: boolean;
+  note: string | null;
+  cells: Partial<Record<SetupMeasureMode, Partial<Record<SetupMeasureTask, SetupMeasureCell>>>>;
+  /** TTFT with the caches off, by prompt length in tokens ("8192", "32768") */
+  ttft_s: Record<string, number>;
+  lossless: { identical: number; near_tie: number; other: number; max_near_tie_ulp: number | null } | null;
+}
+export interface SetupMeasurements {
+  build: string;
+  date: string;
+  method: string;
+  source: string;
+  rows: SetupMeasureRow[];
+}
+
+export type SetupComponentGroup = 'speed' | 'roles' | 'caches' | 'disk' | 'features';
+/** A tool that runs beside the model (the narrator, Laya, the caches, ...). */
+export interface SetupComponent {
+  id: string;
+  label: string;
+  group: SetupComponentGroup;
+  /** one plain sentence for users */
+  what: string;
+  /** on in the recommended setup */
+  default: boolean;
+  /** cannot be switched off (the engine always loads it) */
+  required: boolean;
+  /** memory it holds while loaded */
+  memory_gib: number;
+  /** what it may grow to (a cache at its cap), when that differs */
+  memory_max_gib: number | null;
+  /** given back first when memory runs short (caches, the small models) */
+  elastic: boolean;
+  disk_gb: number;
+  depends_on: string[];
+  conflicts: string[];
+  /** serve.env key -> its value with the component on / off */
+  /** null: that state writes nothing (the template's or the profile's value stands; model.yaml) */
+  knobs: Record<string, { on: string | null; off: string | null }>;
+  docs: string;
+  note: string | null;
+  /** 1.0+: SetupAsset ids that must be on disk for it to load */
+  assets: string[];
+}
+
+/** A field of the methods and advanced steps. */
+export interface SetupField {
+  id: string;
+  label: string;
+  what: string;
+  type: 'enum' | 'int' | 'number' | 'bool' | 'string';
+  options?: { value: string; label: string }[];
+  min?: number;
+  max?: number;
+  /** string fields: the characters allowed (a server-side check too) */
+  pattern?: string;
+  default: SetupValue;
+  recommended: SetupValue;
+  /** the serve.env key it writes; null: not a serve.env key (handled by its own step) */
+  knob: string | null;
+  docs: string | null;
+}
+
+export interface SetupParallelism {
+  slots: { min: number; max: number; default: number };
+  window: { min: number; max: number; default: number; step: number };
+  side_window: { min: number; max: number; default: number; step: number };
+  kv_pool: { default: boolean };
+  floor_gb: { min: number; max: number; default: number };
+  kv_hard_floor_gb: number;
+  /** 106.5 KiB on Qwen3.8-27B: engine attention KV + the two drafter arms + the rotary row */
+  kv_bytes_per_token: number;
+  /** a side slot's bytes beyond its window (verify graphs off) */
+  side_slot_const_gib: number;
+  knobs: Record<'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb', string>;
+  /** 1.0+: a slot's conversation in the estimate's typical case (32,768) */
+  typical_fill_tokens: number;
+  /** 1.0+: serve.env keys written with every selection (QSE_SIDE_GRAPHS off, ...) */
+  fixed: Record<string, string>;
+}
+
+export interface SetupDevicePreset {
+  id: string;
+  label: string;
+  total_gib: number;
+  /** the OS, the CUDA context and other programs (outside the engine's allocator) */
+  reserved_gib: number;
+  note: string | null;
+}
+
+/** GET /v1/setup/models/{id}: model.yaml as JSON (schema 1). */
+export interface SetupModel {
+  contract_version: SetupContract;
+  schema: 1;
+  id: string;
+  name: string;
+  family: string;
+  params: string;
+  pitch: string;
+  architecture: string;
+  license: string;
+  links: { label: string; url: string }[];
+  icon: string | null;
+  profiles: SetupProfile[];
+  measurements: SetupMeasurements;
+  components: SetupComponent[];
+  parallelism: SetupParallelism;
+  methods: SetupField[];
+  advanced: SetupField[];
+  devices: SetupDevicePreset[];
+  /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
+  memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
+  /** 1.0+: the tile's recommended badge */
+  recommended: boolean;
+  /** 1.0+ */
+  assets: SetupAsset[];
+  /** 1.0+: the step schema (the same list GET .../steps returns as `steps`) */
+  wizard_fields: SetupStep[];
+}
+
+/** The wizard's choices: what the estimate, the plan and the apply job take. */
+export interface SetupSelection {
+  model: string;
+  profile: string;
+  components: Record<string, boolean>;
+  slots: number;
+  /** slot 0's window (MAX_LEN) */
+  window: number;
+  /** each side slot's window (QSE_SIDE_MAX_LEN); default = window */
+  side_window?: number;
+  kv_pool: boolean;
+  floor_gb: number;
+  methods: Record<string, SetupValue>;
+  advanced: Record<string, SetupValue>;
+  /** a SetupDevicePreset id; default the model's first */
+  device?: string;
+}
+
+/** 1.0+: GET /v1/setup/models/{id}/current: what the box runs now, as a selection (the wizard's
+ *  seed); a value the registry cannot express stays recommended and is listed in `unmatched`. */
+export interface SetupCurrent {
+  contract_version: SetupContract;
+  model: string;
+  selection: SetupSelection;
+  unmatched: { field: string; value: unknown }[];
+}
+
+/** POST /v1/setup/estimate {selection} (also the TS copy's input, models/estimate-cases.json). */
+export type SetupEstimateRequest = SetupSelection;
+export interface SetupEstimatePart {
+  id: string;
+  label: string;
+  gb: number;
+  kind: 'fixed' | 'kv' | 'reserve';
+  /** kv: every slot at its full window; reserve: a cache at its cap */
+  worst_gb?: number;
+}
+export interface SetupEstimate {
+  contract_version: SetupContract;
+  /** the parts' sum: the KV part at typical_fill_tokens a slot with the pool, every window without */
+  total_gb: number;
+  /** live MemAvailable of the box; null in the fixture and off the box */
+  available_gb: number | null;
+  device_gb: number;
+  floor_gb: number;
+  parts: SetupEstimatePart[];
+  fits: boolean;
+  /** tokens of conversation that fit in the room left, over all slots */
+  context_tokens_fit: number;
+  kv_bytes_per_token: number;
+  /** every slot at its full window */
+  kv_worst_gb: number;
+  /** device - fixed parts - floor: what conversations (and the caches, which give it back) may use */
+  room_gb: number;
+  notes: string[];
+  /** 1.0+: device - floor; fits is total_gb <= budget_gb, both rounded to 0.01 */
+  budget_gb: number;
+  /** 1.0+: room_gb >= kv_worst_gb (every slot at its full window fits too) */
+  fits_worst: boolean;
+  /** 1.0+ */
+  typical_fill_tokens: number;
+}
+
+/** GET /v1/setup/models/{id}/steps: the step schema Wren's tool calls are checked against. */
+export interface SetupStepField {
+  field: string;
+  label: string;
+  type: 'enum' | 'int' | 'number' | 'bool' | 'string';
+  options?: string[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+}
+export interface SetupStep {
+  index: number;
+  id: SetupStepId;
+  label: string;
+  fields: SetupStepField[];
+}
+/** read_device: the page's own read-only tool (the server puts the device in Wren's prompt instead) */
+export type SetupToolName = 'set_field' | 'toggle' | 'select_profile' | 'go_to_step' | 'next' | 'previous' | 'explain' | 'read_device';
+export interface SetupSteps {
+  contract_version: SetupContract;
+  model: string;
+  steps: SetupStep[];
+  /** the OpenAI tool definitions Wren is given */
+  tools: { type: 'function'; function: { name: SetupToolName; description: string; parameters: Record<string, unknown> } }[];
+}
+
+/** GET /v1/setup/device: the box, read only. */
+export interface SetupDevice {
+  contract_version: SetupContract;
+  /** setup: started by `ops/start.sh --setup` (no model loaded); serving: the engine is up */
+  mode: 'setup' | 'serving';
+  preset: string | null;
+  mem_total_gb: number | null;
+  mem_available_gb: number | null;
+  gpu: { name: string | null; util_pct: number | null; temp_c: number | null; power_w: number | null } | null;
+  disk: { path: string; free_gb: number; total_gb: number } | null;
+  engine: { version: string; profile: string | null; uptime_s: number; running: number; waiting: number; busy: boolean; mode: 'setup' | 'serving' };
+  active_profile: string | null;
+  /** profile id -> its weights are on this box */
+  profiles_on_disk: Record<string, boolean>;
+  /** false: anyone who reaches the port can run setup, apply and reset */
+  password_set: boolean;
+  assistant: SetupAssistantStatus;
+  /** 1.0+: a Hugging Face token is configured (never the token) */
+  hf_token_present: boolean;
+  /** 1.0+: the same as password_set */
+  admin_password_set: boolean;
+}
+
+export type SetupAssistantState = 'off' | 'not_loaded' | 'loading' | 'loaded' | 'unloading' | 'failed' | 'refused';
+/** GET /v1/setup/assistant/status (and POST load / unload answer the same). */
+export interface SetupAssistantStatus {
+  name: string;
+  /** qwen3.5-2b, or qwen3.5-0.8b when the 2B is not on disk; null when neither is */
+  model: string | null;
+  fallback: boolean;
+  state: SetupAssistantState;
+  /** why it is off, refused or failed, in a sentence */
+  reason: string | null;
+  load_s: number | null;
+  device_gib: number | null;
+  claim_gib: number | null;
+  /** a load is possible now (a model on disk, not loaded or loading) */
+  can_load: boolean;
+  /** 1.0+: Wren uses the narrator's loaded copy (no memory of its own) */
+  borrowed: boolean;
+  /** 1.0+: the rows of its cache (8,192 own, the narrator's 4,096 borrowed) */
+  window: number;
+  /** 1.0+: seconds into a load, while loading */
+  loading_s: number | null;
+  /** 1.0+: counts (turns, tool_valid, tool_invalid, errors, unload_<why>) */
+  stats: Record<string, number>;
+}
+
+export interface SetupToolCall {
+  id: string;
+  name: SetupToolName;
+  args: Record<string, unknown>;
+}
+export interface SetupChatMessage {
+  role: 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_calls?: SetupToolCall[];
+  /** role tool: the call it answers; content is the browser's result ("ok", or the error) */
+  tool_call_id?: string;
+}
+/** What the page shows now, in the system prompt each turn. */
+export interface SetupPageState {
+  model: string | null;
+  step: SetupStepId;
+  step_index: number;
+  selection: Partial<SetupSelection>;
+  /** the step's visible content in short (labels, values, errors) */
+  visible?: Record<string, unknown>;
+  estimate?: Partial<SetupEstimate>;
+}
+/** POST /v1/setup/assistant/chat: an SSE stream of SetupChatEvent (`data: {...}` frames). */
+export interface SetupChatRequest {
+  messages: SetupChatMessage[];
+  page: SetupPageState;
+}
+export interface SetupSource {
+  path: string;
+  title: string;
+}
+export type SetupChatEvent =
+  | { type: 'state'; state: 'thinking' | 'loading' | 'talking' }
+  | { type: 'text'; delta: string }
+  | { type: 'tool_call'; id: string; name: SetupToolName; args: Record<string, unknown> }
+  | { type: 'done'; finish: 'stop' | 'length' | 'time' | 'tool_calls'; sources: SetupSource[] }
+  | { type: 'error'; message: string };
+
+/** POST /v1/setup/plan {selection}: the review step's facts, nothing changes. */
+export interface SetupEnvChange {
+  key: string;
+  current: string | null;
+  next: string | null;
+  /** the component or field that sets it */
+  from: string;
+}
+export interface SetupPlan {
+  contract_version: SetupContract;
+  ok: boolean;
+  /** what is wrong with the selection (Finish stays off) */
+  errors: string[];
+  warnings: string[];
+  profile: { current: string | null; next: string; on_disk: boolean; download_gb: number };
+  changes: SetupEnvChange[];
+  restart: boolean;
+  /** what the job will run, for reading: the server runs its own fixed steps, never these strings */
+  commands: string[];
+  estimate: SetupEstimate;
+  /** 1.0+: a code per error, in order (over_budget, missing_assets, missing_token, disk_full,
+   *  no_overlay_hook, secrets_exist, port_in_use, repo_mismatch) */
+  error_codes: string[];
+  /** 1.0+: the API port before and after */
+  ports: { current: number; next: number };
+  /** 1.0+: POST /v1/setup/apply {dry_run: true} answered this (false from POST /v1/setup/plan) */
+  dry_run?: boolean;
+}
+
+export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'write_config' | 'switch' | 'smoke' | 'rollback';
+/** waiting: the step waits for the engine's requests to finish before anything stops (1.0+) */
+export type SetupJobStepState = 'pending' | 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
+export interface SetupJobStep {
+  id: SetupJobStepId;
+  label: string;
+  state: SetupJobStepState;
+  started_at: number | null;
+  ended_at: number | null;
+  detail: string | null;
+}
+export type SetupJobState = 'queued' | 'running' | 'done' | 'failed' | 'rolled_back';
+export interface SetupJob {
+  id: string;
+  state: SetupJobState;
+  created_at: number;
+  ended_at: number | null;
+  profile: string;
+  steps: SetupJobStep[];
+  message: string | null;
+  changes: SetupEnvChange[];
+  /** 1.0+: apply, or reset (reset level 2) */
+  kind: 'apply' | 'reset';
+  /** 1.0+ */
+  rolled_back: boolean;
+  failed_step: SetupJobStepId | null;
+  /** 1.0+: the dashboard after the job, `<this box>` for the host the browser knows */
+  url: string;
+}
+/** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
+export interface SetupApplyRequest {
+  selection: SetupSelection;
+  /** 1.0+: answer the plan (SetupPlan, dry_run true) and change nothing */
+  dry_run?: boolean;
+}
+export interface SetupApplyResponse {
+  contract_version: SetupContract;
+  job: SetupJob;
+}
+/** GET /v1/setup/jobs/{id}: SSE (`id:` = sequence, resumable with Last-Event-ID); ?format=json: the SetupJob. */
+export type SetupJobEvent =
+  | { type: 'job'; job: SetupJob }
+  | { type: 'step'; step: SetupJobStep }
+  | { type: 'log'; line: string; ts: number }
+  | { type: 'done'; state: SetupJobState; message: string | null };
+
+/** GET /v1/setup/reset: the server-side levels (level 1, the browser's progress and chat, is the page's own). */
+export interface SetupResetItem {
+  path: string;
+  label: string;
+  bytes: number;
+  exists: boolean;
+  /** 1.0+: files counted; at_least: the count stopped after 2 s (a huge tree) */
+  files: number;
+  at_least: boolean;
+  /** 1.0+: path, or memory (a cache in RAM) */
+  kind: 'path' | 'memory';
+  /** 1.0+: remove; engine (the running engine clears it); skip (in use, nothing can clear it now) */
+  action: 'remove' | 'engine' | 'skip';
+  note: string | null;
+  /** 1.0+: the running engine keeps its copy until a restart */
+  restart: boolean;
+  /** 1.0+: why the server will not remove it (null: it will) */
+  refused: string | null;
+}
+export interface SetupResetLevel {
+  level: 2 | 3 | 4 | 5;
+  label: string;
+  what: string;
+  items: SetupResetItem[];
+  bytes: number;
+  restart: boolean;
+  /** the word to type; null: a plain confirm (`confirm: true`) */
+  confirm_word: string | null;
+}
+export interface SetupResetLevels {
+  contract_version: SetupContract;
+  levels: SetupResetLevel[];
+  /** requests in flight: every reset is refused until they end */
+  busy: boolean;
+}
+/** POST /v1/setup/reset {level, confirm}: confirm is the typed word, or true for level 2. */
+export interface SetupResetRequest {
+  level: 2 | 3 | 4 | 5;
+  confirm: string | boolean;
+  /** 1.0+: the level (SetupResetLevel, dry_run true) and nothing removed; no confirm needed */
+  dry_run?: boolean;
+}
+export interface SetupResetResult {
+  contract_version: SetupContract;
+  level: number;
+  removed: { path: string; bytes: number }[];
+  restart_needed: boolean;
+  message: string;
+  /** 1.0+: what could not be removed, and why (the rest still went) */
+  failed: { path: string; reason: string }[];
+  freed_gb: number;
+  ok: boolean;
+  /** 1.0+: level 2 is a job (202): follow it at GET /v1/setup/jobs/{job_id} */
+  job_id?: string;
+  job?: SetupJob;
+}

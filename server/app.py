@@ -3740,11 +3740,16 @@ def _kv_reclaim_caches(want: int, owner) -> int:
 def _kv_reclaim_roles(want: int, owner) -> int:
     """Pool reclaim, level 2 (server/rolemem.py): the small models, shadow reader first, then the
     narrator (then Laya, only with QSE_ROLE_UNLOAD_LAYA=on), before any conversation is parked or
-    a request waits. They load again once memory has stayed back for a while."""
+    a request waits. They load again once memory has stayed back for a while. The setup guide's
+    assistant goes before all of them (server/setup/wren.py), and nothing loads it again."""
+    got = 0
+    wren = dict.get(STATE, "wren")
+    if wren is not None:
+        got = int(wren.reclaim(want) or 0)
     rm = dict.get(STATE, "role_mem")
-    if rm is None:
-        return 0
-    return int(rm.reclaim(want, owner, "kv_pool") or 0)
+    if rm is None or got >= want:
+        return got
+    return got + int(rm.reclaim(want - got, owner, "kv_pool") or 0)
 
 
 def _kv_reclaim_side(want: int, owner) -> int:
@@ -5304,6 +5309,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._dashboard_get(path)
         if path.startswith("/v1/conductor/"):
             return self._conductor("GET")
+        if path.startswith("/v1/setup/"):
+            # the setup guide (server/setup_api.py, docs/setup.md): imported on its first call
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "GET", path, None)
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("GET", path, None)
         if (path == "/v1/library" or path.startswith("/v1/library/")) and \
@@ -5517,6 +5526,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._session("POST", body)
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
+        if path.startswith("/v1/setup/"):
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "POST", path, body)
         if path == "/v1/config" or path.startswith("/v1/config/"):
             return self._config("POST", path, body)
         if path.startswith("/v1/collect/"):          # P6: a vLLM or SGLang plugin's batch
@@ -8439,6 +8451,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--dashboard-dir", default=None,
                     help="where the dashboard's built files are (default: dashboard/dist in this "
                          "repository); /dashboard/ serves them, or a placeholder when missing")
+    ap.add_argument("--setup", action="store_true",
+                    help="setup mode (docs/setup.md, `ops/start.sh --setup`): no model of Qwen's "
+                         "is loaded; the dashboard, /v1/setup/* and Wren, the setup guide's "
+                         "assistant, alone. Every other route answers 503 setup_mode")
     ap.add_argument("--fake-engine", action="store_true",
                     help="the e2e: no weights, no GPU -- a deterministic CPU token source "
                          "(server/fake_engine.py) behind the real handler, auth, ledger, metrics "
@@ -8504,6 +8520,8 @@ def main() -> None:
     # every line from here on also reaches /v1/dashboard/logs; the log file is unchanged
     logbuf.install()
     logbuf.CONFIG["log_content"] = bool(a.log_content)
+    if a.setup:
+        return _serve_setup(a)
     if a.log_content:
         print("[server] --log-content is ON: exception messages may quote requests in the log",
               flush=True)
@@ -8519,6 +8537,25 @@ def main() -> None:
     else:
         _load(a)
     _serve(a, led)
+
+
+def _serve_setup(a) -> None:
+    """Setup mode (OPS-93, docs/setup.md): a box with no configured engine yet. Nothing of Qwen's
+    loads, nothing of the engine's caches, ledger, conductor or proxy opens; the server answers
+    the dashboard, /v1/setup/* and /health (`mode: setup`) and loads Wren alone, which the setup
+    guide's apply job unloads before it starts the configured engine in this one's place."""
+    from server import setup_api
+    ident = identity()
+    ident["version"] = ident["version"].split("+")[0]   # no weight profile serves here
+    STATE.update(ident)
+    STATE.update(setup_mode=True, started=time.time(), args=vars(a), port=a.port,
+                 dashboard_dir=a.dashboard_dir, model="setup")
+    print(f"[server] {STATE['auth'].describe()}", flush=True)
+    print(f"[setup] setup mode {STATE['version']}: the dashboard's #/setup, /v1/setup/* and Wren "
+          f"on http://{a.host}:{a.port}; no model of Qwen's loaded", flush=True)
+    w = setup_api.wren_of(sys.modules[__name__])
+    threading.Thread(target=w.load, name="wren-autoload", daemon=True).start()
+    serve_until_drained(EngineServer((a.host, a.port), SetupHandler))
 
 
 def _limits_at_start(a) -> None:
@@ -9365,6 +9402,57 @@ def _serve(a, led) -> None:
     print(f"[server] queue max {a.max_queue} wait {a.queue_timeout:.0f}s "
           f"request timeout {a.request_timeout:.0f}s", flush=True)
     serve_until_drained(EngineServer((a.host, a.port), Handler))
+
+
+class SetupHandler(Handler):
+    """Setup mode's routes (`--setup`): the dashboard's files and session, /health, /v1/setup/*
+    and an empty /v1/models; every other route answers 503 `setup_mode` with Retry-After."""
+
+    def _setup_only(self, path: str) -> None:
+        self._json(503, {"error": {"type": "setup_mode", "code": "setup_mode",
+                                   "message": f"this box is in setup mode and serves no model yet "
+                                              f"({path}); open /dashboard/#/setup to set it up"}},
+                   extra_headers=(("Retry-After", "60"),))
+
+    def do_GET(self):
+        raw = self.path.split("?")[0]
+        if raw == "/dashboard" or raw.startswith("/dashboard/"):
+            return static.serve(self, self.path, STATE.get("dashboard_dir"))
+        path = raw.rstrip("/") or "/"
+        if path.startswith("/v1/setup/"):
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "GET", path, None)
+        if path == "/v1/dashboard/session":
+            return self._session("GET")
+        if path in ("/health", "/healthz", "/v1/health"):
+            w = STATE.get("wren")
+            return self._json(503 if STATE.get("draining") else 200, {
+                "status": "draining" if STATE.get("draining") else "ok", "mode": "setup",
+                "version": STATE.get("version", ""),
+                "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
+                "assistant": w.state if w is not None else "off"})
+        if path == "/v1/models":
+            return self._json(200, {"object": "list", "data": []})
+        return self._setup_only(path)
+
+    def do_POST(self):
+        path = self.path.split("?")[0].rstrip("/")
+        try:
+            body = self._read()
+        except Exception as exc:                                  # noqa: BLE001
+            return self._json(400, {"error": {"message": f"bad json: {exc}",
+                                              "type": "invalid_request_error"}})
+        if path.startswith("/v1/setup/"):
+            from server import setup_api
+            return setup_api.handle(self, sys.modules[__name__], "POST", path, body)
+        if path == "/v1/dashboard/session":
+            return self._session("POST", body)
+        return self._setup_only(path)
+
+    def do_PUT(self):
+        return self._setup_only(self.path.split("?")[0])
+
+    do_PATCH = do_DELETE = do_PUT
 
 
 class EngineServer(ThreadingHTTPServer):

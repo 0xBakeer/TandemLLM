@@ -45,11 +45,18 @@ CHAT = ("I have a machine with 121 GB of unified memory and about 273 GB/s of ba
         "Explain in plain language what that means for running a 27-billion-parameter model.")
 
 
+NO_OVERLAY = "/nonexistent/qse-setup-env"
+
+
 def env_from_file(path: str) -> dict[str, str]:
     """The QWEN38_* knobs (and PY/REPO-independent values) a serve.env sets, as start.sh exports
-    them: sourced by bash so its ${HOME}/${REPO} expansions are the file's own."""
+    them: sourced by bash so its ${HOME}/${REPO} expansions are the file's own. The setup guide's
+    overlay (run/setup.env, which serve.env reads last) is left out: a benchmark row is the file's
+    numbers, not whatever the box was last set up with (`setup_overlay` in the report says when
+    one was there)."""
     out = subprocess.run(["bash", "-c", f"set -a; . {shlex.quote(path)} >/dev/null 2>&1; env -0"],
-                         capture_output=True, check=True).stdout.decode()
+                         capture_output=True, check=True,
+                         env=dict(os.environ, QSE_SETUP_ENV=NO_OVERLAY)).stdout.decode()
     env = {}
     for kv in out.split("\0"):
         if "=" in kv:
@@ -185,7 +192,9 @@ def main() -> None:
     log = Path(os.path.expanduser(a.json)).with_suffix(".server.log")
     cmd = server_cmd(a)
     proc = None
+    overlay = repo / "run" / "setup.env"
     rep = {"label": a.label, "repo": str(repo), "server_cmd": cmd, "knobs": knobs,
+           "setup_overlay": (f"{overlay} (ignored)" if a.env_file and overlay.exists() else None),
            "started": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     try:
         if not a.no_server:

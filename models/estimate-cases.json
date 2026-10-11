@@ -1,0 +1,5221 @@
+{
+ "contract_version": "1.0",
+ "about": "server/setup/estimate.py pins its formula here; the dashboard's TypeScript copy must give every `expect` from `model` and `selection` (each number within 0.01, the rest equal; `fits` compares the figures rounded to 0.01) and refuse every `error` case with that status and code. `model` is the part of the model payload (GET /v1/setup/models/{id}) the formula reads. Regenerate with python tests/test_setup_estimate.py --write after a registry change.",
+ "model": {
+  "id": "qwen3.8-27b",
+  "profiles": [
+   {
+    "id": "exl3-2.5",
+    "label": "EXL3 2.5 bpw",
+    "weights_gib": 10.15,
+    "drafters_gib": 5.41,
+    "recommended": false
+   },
+   {
+    "id": "exl3-3.0",
+    "label": "EXL3 3.0 bpw",
+    "weights_gib": 11.58,
+    "drafters_gib": 5.41,
+    "recommended": false
+   },
+   {
+    "id": "exl3-3.5",
+    "label": "EXL3 3.5 bpw",
+    "weights_gib": 13.17,
+    "drafters_gib": 5.41,
+    "recommended": false
+   },
+   {
+    "id": "exl3-4.0",
+    "label": "EXL3 4.0 bpw",
+    "weights_gib": 14.76,
+    "drafters_gib": 5.41,
+    "recommended": false
+   },
+   {
+    "id": "exl3-4.5",
+    "label": "EXL3 4.5 bpw",
+    "weights_gib": 16.14,
+    "drafters_gib": 5.41,
+    "recommended": true
+   },
+   {
+    "id": "exl3-6.0",
+    "label": "EXL3 6.0 bpw",
+    "weights_gib": 20.65,
+    "drafters_gib": 5.41,
+    "recommended": false
+   },
+   {
+    "id": "nvfp4",
+    "label": "NVFP4 (published set)",
+    "weights_gib": 16.46,
+    "drafters_gib": 5.87,
+    "recommended": false
+   }
+  ],
+  "devices": [
+   {
+    "id": "dgx-spark",
+    "total_gib": 121.63,
+    "reserved_gib": 10.0
+   }
+  ],
+  "memory": {
+   "parts": [
+    {
+     "id": "graphs",
+     "label": "CUDA graphs (the verify step)",
+     "gib": 6.63,
+     "kind": "fixed",
+     "source": "load stage graphs, 0.6.2 (6.61 to 6.65 over the six sizes)"
+    },
+    {
+     "id": "engine",
+     "label": "Engine state and warm-up workspace",
+     "gib": 1.28,
+     "kind": "fixed",
+     "source": "load stages engine 0.14 + warmup 1.14, 0.6.2"
+    },
+    {
+     "id": "allocator",
+     "label": "Allocator reserve",
+     "gib": 2.6,
+     "kind": "reserve",
+     "source": "memory.split reserve 2.62 GiB, 2026-10-10 22:30 (RESERVE_SLACK_GIB 2 is its target between requests)"
+    }
+   ]
+  },
+  "components": [
+   {
+    "id": "drafters",
+    "label": "Draft models",
+    "default": true,
+    "required": true,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 5.41,
+    "memory_max_gib": null
+   },
+   {
+    "id": "lookup",
+    "label": "Lookup store",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.19,
+    "memory_max_gib": null
+   },
+   {
+    "id": "conductor",
+    "label": "Conductor",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null
+   },
+   {
+    "id": "narrator",
+    "label": "Narrator",
+    "default": true,
+    "required": false,
+    "depends_on": [
+     "conductor"
+    ],
+    "conflicts": [],
+    "memory_gib": 3.6,
+    "memory_max_gib": null
+   },
+   {
+    "id": "laya",
+    "label": "Laya decision models",
+    "default": true,
+    "required": false,
+    "depends_on": [
+     "conductor"
+    ],
+    "conflicts": [],
+    "memory_gib": 1.6,
+    "memory_max_gib": null
+   },
+   {
+    "id": "shadow",
+    "label": "Shadow reader",
+    "default": true,
+    "required": false,
+    "depends_on": [
+     "conductor"
+    ],
+    "conflicts": [],
+    "memory_gib": 1.52,
+    "memory_max_gib": 5.52
+   },
+   {
+    "id": "vision",
+    "label": "Vision",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.86,
+    "memory_max_gib": 1.36
+   },
+   {
+    "id": "prompt_cache",
+    "label": "Conversation cache",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.43,
+    "memory_max_gib": 11.5
+   },
+   {
+    "id": "state_store",
+    "label": "State store",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.49,
+    "memory_max_gib": 2.0
+   },
+   {
+    "id": "response_cache",
+    "label": "Response cache",
+    "default": false,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.25,
+    "memory_max_gib": null
+   },
+   {
+    "id": "disk_tier",
+    "label": "Disk cache",
+    "default": true,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null
+   },
+   {
+    "id": "nvme_spill",
+    "label": "Session spill",
+    "default": true,
+    "required": false,
+    "depends_on": [
+     "disk_tier"
+    ],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null
+   },
+   {
+    "id": "proxy",
+    "label": "Other backends",
+    "default": false,
+    "required": false,
+    "depends_on": [],
+    "conflicts": [],
+    "memory_gib": 0.0,
+    "memory_max_gib": null
+   }
+  ],
+  "parallelism": {
+   "slots": {
+    "min": 1,
+    "max": 4,
+    "default": 4
+   },
+   "window": {
+    "min": 8192,
+    "max": 262144,
+    "default": 262144,
+    "step": 8192
+   },
+   "side_window": {
+    "min": 8192,
+    "max": 262144,
+    "default": 262144,
+    "step": 8192
+   },
+   "kv_pool": {
+    "default": true
+   },
+   "floor_gb": {
+    "min": 10,
+    "max": 40,
+    "default": 15
+   },
+   "kv_hard_floor_gb": 10,
+   "kv_bytes_per_token": 106752,
+   "typical_fill_tokens": 32768,
+   "side_slot_const_gib": 1.19,
+   "knobs": {
+    "slots": "QSE_PARALLEL",
+    "window": "MAX_LEN",
+    "side_window": "QSE_SIDE_MAX_LEN",
+    "kv_pool": "QSE_KV_POOL",
+    "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+   },
+   "fixed": {
+    "QSE_SIDE_GRAPHS": "off",
+    "QSE_SIDE_SLOT_CONST_GB": "1.5",
+    "QSE_KV_HARD_FLOOR_GB": "10",
+    "QSE_BARRIER_IDLE_OWNER": "on"
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "profile exl3-2.5, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-2.5"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 61.36,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.5 bpw)",
+      "gb": 10.15,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 586397,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 58.3,
+    "notes": [
+     "With every slot at its full window the conversations would need 45.95 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 586,397 tokens of conversation fit in all, 146,599 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile exl3-3.0, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-3.0"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 62.79,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.0 bpw)",
+      "gb": 11.58,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 572014,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 56.87,
+    "notes": [
+     "With every slot at its full window the conversations would need 47.38 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 572,014 tokens of conversation fit in all, 143,003 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile exl3-3.5, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-3.5"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 64.38,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.5 bpw)",
+      "gb": 13.17,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 556021,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 55.28,
+    "notes": [
+     "With every slot at its full window the conversations would need 48.97 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 556,021 tokens of conversation fit in all, 139,005 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile exl3-4.0, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-4.0"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 65.97,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.0 bpw)",
+      "gb": 14.76,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 540029,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 53.69,
+    "notes": [
+     "With every slot at its full window the conversations would need 50.56 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 540,029 tokens of conversation fit in all, 135,007 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile exl3-4.5, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-4.5"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile exl3-6.0, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-6.0"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 71.86,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 6.0 bpw)",
+      "gb": 20.65,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 480785,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 47.8,
+    "notes": [
+     "With every slot at its full window the conversations would need 56.45 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 480,785 tokens of conversation fit in all, 120,196 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "profile nvfp4, the recommended rest",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "nvfp4"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 68.13,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (NVFP4 (published set))",
+      "gb": 16.46,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.87,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 518303,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 51.53,
+    "notes": [
+     "With every slot at its full window the conversations would need 52.72 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 518,303 tokens of conversation fit in all, 129,575 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "lookup off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "lookup": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.16,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 528059,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.5,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.75 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 528,059 tokens of conversation fit in all, 132,014 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "conductor off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "conductor": false,
+     "narrator": false,
+     "laya": false,
+     "shadow": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 60.63,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 593740,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 59.03,
+    "notes": [
+     "With every slot at its full window the conversations would need 45.22 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 593,740 tokens of conversation fit in all, 148,435 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "narrator off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "narrator": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 63.75,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 562358,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 55.91,
+    "notes": [
+     "With every slot at its full window the conversations would need 48.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 562,358 tokens of conversation fit in all, 140,589 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "laya off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "laya": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 65.75,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 542242,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 53.91,
+    "notes": [
+     "With every slot at its full window the conversations would need 50.34 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 542,242 tokens of conversation fit in all, 135,560 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "shadow off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "shadow": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 65.83,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 541437,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 53.83,
+    "notes": [
+     "With every slot at its full window the conversations would need 50.42 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 541,437 tokens of conversation fit in all, 135,359 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "vision off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "vision": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 66.49,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 534798,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 53.17,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.08 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 534,798 tokens of conversation fit in all, 133,699 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "prompt_cache off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "prompt_cache": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 66.92,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 530473,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.74,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.51 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 530,473 tokens of conversation fit in all, 132,618 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "state_store off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "state_store": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 66.86,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 531077,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.8,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.45 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 531,077 tokens of conversation fit in all, 132,769 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "response_cache on",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "response_cache": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.6,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "response_cache",
+      "label": "Response cache",
+      "gb": 0.25,
+      "kind": "fixed"
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 523634,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.06,
+    "notes": [
+     "With every slot at its full window the conversations would need 52.19 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 523,634 tokens of conversation fit in all, 130,908 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "disk_tier off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "disk_tier": false,
+     "nvme_spill": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "nvme_spill off",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "nvme_spill": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "proxy on",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "proxy": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "1 slot(s)",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 1
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 54.01,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 3.26,
+      "kind": "kv",
+      "worst_gb": 26.06
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 562056,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 26.06,
+    "room_gb": 55.88,
+    "notes": [
+     "About 562,056 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "2 slot(s)",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 2
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 58.46,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 1.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 6.52,
+      "kind": "kv",
+      "worst_gb": 52.12
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 550087,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 52.12,
+    "room_gb": 54.69,
+    "notes": [
+     "About 550,087 tokens of conversation fit in all, 262,144 a slot when all 2 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "3 slot(s)",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 3
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 62.9,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "2 more slot(s), beyond their KV",
+      "gb": 2.38,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 9.77,
+      "kind": "kv",
+      "worst_gb": 78.19
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 538118,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 78.19,
+    "room_gb": 53.5,
+    "notes": [
+     "With every slot at its full window the conversations would need 24.69 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 538,118 tokens of conversation fit in all, 179,372 a slot when all 3 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "4 slot(s)",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 4
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "window 8,192 on every slot",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 8192
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 57.58,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 3.26,
+      "kind": "kv",
+      "worst_gb": 3.26
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.26,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 8,192 a slot when all 4 are full (the window is 8,192)."
+    ]
+   }
+  },
+  {
+   "name": "window 32,768 on every slot",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 32768
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 13.03
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 13.03,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 32,768 a slot when all 4 are full (the window is 32,768)."
+    ]
+   }
+  },
+  {
+   "name": "window 65,536 on every slot",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 65536
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 26.06
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 26.06,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 65,536 a slot when all 4 are full (the window is 65,536)."
+    ]
+   }
+  },
+  {
+   "name": "window 131,072 on every slot",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 52.12
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 52.12,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 131,072 a slot when all 4 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "window 262,144 on every slot",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "one long window, three short ones",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 262144,
+    "side_window": 32768
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 35.84
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 35.84,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "pool off, 4 x 262,144: over the budget",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "kv_pool": false
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 158.57,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 104.25,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "Over the budget by 51.94 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "pool off, 2 x 65,536",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "kv_pool": false,
+    "slots": 2,
+    "window": 65536
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 64.97,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 1.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 13.03
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 550087,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 13.03,
+    "room_gb": 54.69,
+    "notes": [
+     "About 550,087 tokens of conversation fit in all, 65,536 a slot when all 2 are full (the window is 65,536)."
+    ]
+   }
+  },
+  {
+   "name": "pool off, 1 x 262,144, exl3-2.5",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "kv_pool": false,
+    "slots": 1,
+    "profile": "exl3-2.5"
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 70.82,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.5 bpw)",
+      "gb": 10.15,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 26.06,
+      "kind": "kv",
+      "worst_gb": 26.06
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 622305,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 26.06,
+    "room_gb": 61.87,
+    "notes": [
+     "About 622,305 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "floor 10",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "floor_gb": 10
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 10.0,
+    "budget_gb": 111.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 576440,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 57.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 46.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 576,440 tokens of conversation fit in all, 144,110 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "floor 40",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "floor_gb": 40
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 40.0,
+    "budget_gb": 81.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 274691,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 27.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 76.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 274,691 tokens of conversation fit in all, 68,672 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "everything on, exl3-6.0, pool off: the most it can take",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-6.0",
+    "kv_pool": false,
+    "components": {
+     "response_cache": true,
+     "proxy": true
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 163.33,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 6.0 bpw)",
+      "gb": 20.65,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "response_cache",
+      "label": "Response cache",
+      "gb": 0.25,
+      "kind": "fixed"
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 104.25,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 478271,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 47.55,
+    "notes": [
+     "Over the budget by 56.70 GiB. The largest parts: Conversations (KV), every window at load 104.25 GiB, Weights (EXL3 6.0 bpw) 20.65 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 478,271 tokens of conversation fit in all, 119,567 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "the smallest: exl3-2.5, one slot of 8,192, no tools",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-2.5",
+    "slots": 1,
+    "window": 8192,
+    "components": {
+     "drafters": true,
+     "lookup": false,
+     "conductor": false,
+     "narrator": false,
+     "laya": false,
+     "shadow": false,
+     "vision": false,
+     "prompt_cache": false,
+     "state_store": false,
+     "response_cache": false,
+     "disk_tier": false,
+     "nvme_spill": false,
+     "proxy": false
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 36.88,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.5 bpw)",
+      "gb": 10.15,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 0.81,
+      "kind": "kv",
+      "worst_gb": 0.81
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 709712,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 0.81,
+    "room_gb": 70.56,
+    "notes": [
+     "About 709,712 tokens of conversation fit in all, 8,192 a slot when all 1 are full (the window is 8,192)."
+    ]
+   }
+  },
+  {
+   "name": "exactly at the budget",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "floor_gb": 30.6,
+    "kv_pool": false,
+    "slots": 2,
+    "window": 262144,
+    "side_window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 91.03,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 30.6,
+    "budget_gb": 91.03,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 1.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 39.09,
+      "kind": "kv",
+      "worst_gb": 39.09
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 393178,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 39.09,
+    "room_gb": 39.09,
+    "notes": [
+     "About 393,178 tokens of conversation fit in all, 196,589 a slot when all 2 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "a cent over the budget",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "floor_gb": 30.61,
+    "kv_pool": false,
+    "slots": 2,
+    "window": 262144,
+    "side_window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 91.03,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 30.61,
+    "budget_gb": 91.02,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "1 more slot(s), beyond their KV",
+      "gb": 1.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 39.09,
+      "kind": "kv",
+      "worst_gb": 39.09
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 393077,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 39.09,
+    "room_gb": 39.08,
+    "notes": [
+     "Over the budget by 0.01 GiB. The largest parts: Conversations (KV), every window at load 39.09 GiB, Weights (EXL3 4.5 bpw) 16.14 GiB, The OS and other programs 10.00 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down.",
+     "About 393,077 tokens of conversation fit in all, 196,538 a slot when all 2 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "methods and advanced fields do not move the memory",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "methods": {
+     "reasoning_effort": "low"
+    },
+    "advanced": {
+     "port": 8080
+    }
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 104.25
+     }
+    ],
+    "fits": true,
+    "fits_worst": false,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 104.25,
+    "room_gb": 52.31,
+    "notes": [
+     "With every slot at its full window the conversations would need 51.94 GiB more than there is. When memory runs short, a new request waits for room instead of the engine running out of memory.",
+     "About 526,148 tokens of conversation fit in all, 131,537 a slot when all 4 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "refused: slots 5",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "slots": 5
+   },
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
+   }
+  },
+  {
+   "name": "refused: window 512",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 512
+   },
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
+   }
+  },
+  {
+   "name": "refused: a window off the 8,192 step",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 100000
+   },
+   "error": {
+    "status": 422,
+    "code": "off_step"
+   }
+  },
+  {
+   "name": "refused: a side window off the step",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "side_window": 20000
+   },
+   "error": {
+    "status": 422,
+    "code": "off_step"
+   }
+  },
+  {
+   "name": "a side window longer than the window is the window",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "window": 32768,
+    "side_window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 67.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.5 bpw)",
+      "gb": 16.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA graphs (the verify step)",
+      "gb": 6.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state and warm-up workspace",
+      "gb": 1.28,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.6,
+      "kind": "reserve"
+     },
+     {
+      "id": "side_slots",
+      "label": "3 more slot(s), beyond their KV",
+      "gb": 3.57,
+      "kind": "fixed"
+     },
+     {
+      "id": "drafters",
+      "label": "Draft models",
+      "gb": 5.41,
+      "kind": "fixed"
+     },
+     {
+      "id": "lookup",
+      "label": "Lookup store",
+      "gb": 0.19,
+      "kind": "fixed"
+     },
+     {
+      "id": "narrator",
+      "label": "Narrator",
+      "gb": 3.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "laya",
+      "label": "Laya decision models",
+      "gb": 1.6,
+      "kind": "fixed"
+     },
+     {
+      "id": "shadow",
+      "label": "Shadow reader",
+      "gb": 1.52,
+      "kind": "reserve",
+      "worst_gb": 5.52
+     },
+     {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.86,
+      "kind": "reserve",
+      "worst_gb": 1.36
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), committed as they grow",
+      "gb": 13.03,
+      "kind": "kv",
+      "worst_gb": 13.03
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 526148,
+    "kv_bytes_per_token": 106752,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 13.03,
+    "room_gb": 52.31,
+    "notes": [
+     "About 526,148 tokens of conversation fit in all, 32,768 a slot when all 4 are full (the window is 32,768)."
+    ]
+   }
+  },
+  {
+   "name": "refused: the narrator without the conductor",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "components": {
+     "conductor": false
+    }
+   },
+   "error": {
+    "status": 422,
+    "code": "invalid_combination"
+   }
+  },
+  {
+   "name": "refused: an unknown profile",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "profile": "exl3-9.9"
+   },
+   "error": {
+    "status": 400,
+    "code": "unknown_profile"
+   }
+  },
+  {
+   "name": "refused: an unknown key",
+   "selection": {
+    "model": "qwen3.8-27b",
+    "cmd": "reboot"
+   },
+   "error": {
+    "status": 422,
+    "code": "unknown_field"
+   }
+  }
+ ]
+}

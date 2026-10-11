@@ -92,9 +92,10 @@ describe('AU1: no password prompt in the source', () => {
     for (const f of files) {
       const text = readFileSync(f, 'utf8');
       const rel = f.slice(root.length + 1);
-      // the Backends form's upstream API key (a provider's sk-..., not the dashboard's password) is
-      // the one password-type input
-      if (/type="password"/.test(text) && rel !== join('views', 'backends.ts')) bad.push(`${rel}: a password input`);
+      // the Backends form's upstream API key (a provider's sk-..., not the dashboard's password) and
+      // the setup guide's sign-in (shown only on a 401 from a /v1/setup route, a box with a password
+      // set) are the password-type inputs
+      if (/type="password"/.test(text) && rel !== join('views', 'backends.ts') && rel !== join('setup', 'signin.ts')) bad.push(`${rel}: a password input`);
       for (const [re, what] of [
         [/Unlock editing|>Unlock<|'Unlock'/, 'an unlock step'],
         [/Admin token needed|Enter admin token|Enter the admin token/, 'a token prompt'],
@@ -106,5 +107,24 @@ describe('AU1: no password prompt in the source', () => {
       }
     }
     expect(bad).toEqual([]);
+  });
+
+  it("the setup guide's sign-in renders only behind a 401, nowhere else", async () => {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = fileURLToPath(new URL('../src', import.meta.url));
+    const users: string[] = [];
+    const walk = (d: string) => {
+      for (const f of readdirSync(d)) {
+        const p = join(d, f);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (p.endsWith('.ts') && !p.endsWith(join('setup', 'signin.ts')) && readFileSync(p, 'utf8').includes('<qse-setup-signin>')) users.push(p.slice(root.length + 1));
+      }
+    };
+    walk(root);
+    expect(users).toEqual([join('setup', 'view.ts')]);
+    const view = readFileSync(join(root, 'setup', 'view.ts'), 'utf8');
+    expect(view).toMatch(/this\.unauthorized \? html`<qse-setup-signin><\/qse-setup-signin>`/);
   });
 });

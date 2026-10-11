@@ -18,3 +18,5 @@ train/
 manual/tandemllm-manual*.pdf
 tandemllm-manual*.pdf
 ops/active-profile
+# the setup guide's files on a box: the generated overlay, its backups, the jobs, the audit log
+/run/

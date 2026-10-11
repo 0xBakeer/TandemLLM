@@ -9,12 +9,19 @@
 # Everything but the weights is shared: serve.env, the conductor, ledger, caches, crons. The active profile
 # is ops/active-profile, which serve.env reads, so start.sh, the watchdog and the @reboot line always start
 # it. The switch holds the box lock (~/.qwen38-box.flock), so the watchdog leaves the restart alone.
+# QSE_NO_ROLLBACK=1 leaves a failed switch to the caller (the setup guide's apply job).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$HERE")"
-ACTIVE="$HERE/active-profile"
 NAME="${1:-}"; MODE="${2:-switch}"
+# the profile's view of serve.env, without switching
+pv() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; echo \"\${$1:-}\""; }
+# the active-profile file and the profiles are the ones serve.env reads, under its REPO: this folder's
+# parent on a checkout, the source tree on an install.sh box (whose serve.env sits in DIR/run/ops)
+REPO_DIR="$(pv REPO)"; REPO_DIR="${REPO_DIR:-$(dirname "$HERE")}"
+ACTIVE="$REPO_DIR/ops/active-profile"
+PROFILES="$REPO_DIR/ops/profiles"
 SMOKE_URL="${SMOKE_URL:-https://ai-api.khaled.de/v1}"
+SMOKE_MODEL="${SMOKE_MODEL:-TandemLLM}"   # the served raw name when the conductor is off (the setup guide)
 MEM_NEED_GB="${MEM_NEED_GB:-80}"        # MemAvailable before a start (serve8011's guard; the stack takes ~70)
 DISK_MARGIN_GB="${DISK_MARGIN_GB:-60}"  # free disk left after a download (disk tier + spill grow into it)
 BOX_LOCK="${BOX_LOCK:-$HOME/.qwen38-box.flock}"
@@ -22,17 +29,15 @@ say() { echo "[use-profile $(date +%H:%M:%S)] $*"; }
 
 if [ "$NAME" = "--list" ]; then
     CUR="$(cat "$ACTIVE" 2>/dev/null || echo '(none: serve.env values)')"
-    for f in "$HERE"/profiles/[!_]*.env; do
+    for f in "$PROFILES"/[!_]*.env; do
         n="$(basename "$f" .env)"
         d="$(QSE_PROFILE_OVERRIDE=$n bash -c "set -a; . '$HERE/serve.env'; echo \"\$QSE_WEIGHTS_DIR\"")"
         printf '%-10s %-3s %s %s\n' "$n" "$([ "$n" = "$CUR" ] && echo '*')" "$d" "$([ -e "$d" ] && echo '(on disk)' || echo '(not on disk: fetched on switch)')"
     done
     exit 0
 fi
-[ -n "$NAME" ] && [ -f "$HERE/profiles/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$HERE"/profiles | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
+[ -n "$NAME" ] && [ -f "$PROFILES/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$PROFILES" | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
 
-# the profile's view of serve.env, without switching
-pv() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; echo \"\${$1:-}\""; }
 WDIR="$(pv QSE_WEIGHTS_DIR)"; HF="$(pv QSE_WEIGHTS_HF)"; GB="$(pv QSE_WEIGHTS_GB)"; FILES="$(pv QSE_WEIGHTS_FILES)"
 PY="$(pv PY)"; PORT="$(pv PORT)"
 DRAFT="$(pv QWEN38_DRAFT_EXL3)"; DHEAD="$(pv QWEN38_DRAFT_HEAD_EXL3)"; C8="$(pv CKPT8)"; C16="$(pv CKPT16)"
@@ -89,7 +94,7 @@ smoke() {   # a /health that names the profile, then one conductor turn through 
     echo "$h" | "$PY" -c "import json,sys; w=json.load(sys.stdin).get('weights') or {}; sys.exit(0 if w.get('name')=='$1' else 1)" \
         || { say "smoke: /health does not name $1"; return 1; }
     local r; r="$(curl -s -m 300 -H 'Content-Type: application/json' -H 'X-Tandem-Memory: off' "$SMOKE_URL/chat/completions" \
-        -d '{"model":"TandemLLM","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
+        -d '{"model":"'"$SMOKE_MODEL"'","messages":[{"role":"user","content":"Reply with the single word: ready"}],"max_tokens":512,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')"
     echo "$r" | "$PY" -c "import json,sys; d=json.load(sys.stdin); c=d['choices'][0]['message'].get('content') or ''; print('[smoke] ' + c.strip()[:80]); sys.exit(0 if c.strip() else 1)" \
         || { say "smoke: the turn through $SMOKE_URL failed: ${r:0:300}"; return 1; }
 }
@@ -99,7 +104,11 @@ say "switching $PREV -> $NAME (MemAvailable $(memavail) GB)"
 STATUS_REASON="switching the weights to $NAME" "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done
 T1=$(date +%s)
+# QSE_NO_ROLLBACK=1: the caller rolls back itself (the setup guide's apply job puts its old
+# run/setup.env back first; a rollback here would start the old profile under the new overlay)
+NO_ROLLBACK="${QSE_NO_ROLLBACK:-0}"
 if [ "$(memavail)" -lt "$MEM_NEED_GB" ]; then
+    [ "$NO_ROLLBACK" = "1" ] && { say "MemAvailable $(memavail) GB < ${MEM_NEED_GB} GB after the stop; the caller rolls back"; exit 7; }
     say "MemAvailable $(memavail) GB < ${MEM_NEED_GB} GB after the stop; starting $PREV again"
     start_profile "$PREV"; exit 7
 fi
@@ -108,6 +117,7 @@ if start_profile "$NAME" && smoke "$NAME"; then
     say "OK: $NAME live on :$PORT; stop $((T1-T0)) s, start+smoke $((T2-T1)) s, total $((T2-T0)) s; MemAvailable $(memavail) GB"
     exit 0
 fi
+[ "$NO_ROLLBACK" = "1" ] && { say "FAILED on $NAME; the caller rolls back"; exit 1; }
 say "FAILED on $NAME; rolling back to $PREV"
 STATUS_REASON="rolling back to $PREV" "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done

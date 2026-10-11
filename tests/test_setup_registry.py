@@ -1,0 +1,375 @@
+"""The setup guide's model registry (OPS-91): models/<id>/model.yaml, schema 1, its loader and its
+validator (server/setup/registry.py).
+
+The test matrix:
+
+  1  the seed loads: 7 profiles, one recommended (exl3-4.5), the 4.0 badge, the NVFP4 row marked
+     not comparable with its reason, cells as objects, a payload json.dumps takes and that holds no
+     path of this machine                                   test_the_seed
+  2  the measured table is the run's own numbers: every cell, TTFT, lossless count and the largest
+     near tie equal measurements/0.6.2-summary.json         test_the_table_is_the_raw_data
+  3  every serve.env key the file names is read by something; a planted QWEN38_/QSE_/plain key that
+     nothing reads is caught                                test_every_knob_is_registered
+  4  every ops/profiles/<name>.env has an entry and every entry a file, with the file's HF repo and
+     size; a planted extra profile is caught                test_profiles_match_ops
+  5  each validator rule refuses a bad file, naming the YAML path: a newer schema, two recommended
+     profiles, an unknown dependency, a cycle, a default whose dependency is off, a conflict on by
+     default, YAML's on/off booleans as knob keys, an unknown asset, a docs file that is not there,
+     a default out of range, a row of another build marked comparable, a non-comparable row without
+     its reason, a quality value without date, an unknown key   test_the_validator_rules
+  6  a second folder lists with no code change; a broken file is reported while the others still
+     list; a folder without model.yaml is skipped; a folder named after another id is refused
+                                                            test_more_models
+  7  models/schema/model.schema.json is the schema the code checks   test_the_schema_file
+  8  the CLI: exit 0 on the seed, 1 and the YAML path on a bad file  test_the_cli
+  9  the step schema: the eight steps in order, a field per tool, the profile and enum options
+                                                            test_wizard_fields
+ 10  a string a client sends is a plain value or nothing: newlines, $(...), quotes and spaces are
+     refused, and numbers keep their range                  test_field_values
+ 11  the KV bytes a token are the server's (server/slots.py) and the units add up: 104.25 KiB,
+     26.06 GiB = 27.98 GB at 262,144 tokens                 test_kv_units
+ 12  the dashboard mock's copy (dashboard/mock/setup/qwen3.8-27b.json) is what
+     GET /v1/setup/models/qwen3.8-27b answers, key for key   test_the_mock_copy
+
+Run: python tests/test_setup_registry.py
+"""
+
+from __future__ import annotations
+
+import ast
+import copy
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import redirect_stdout
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import yaml  # noqa: E402
+
+from server.setup import registry  # noqa: E402
+
+ROOT = registry.ROOT
+SEED = os.path.join(ROOT, "models", "qwen3.8-27b", "model.yaml")
+
+
+def _seed() -> dict:
+    with open(SEED) as fh:
+        return yaml.safe_load(fh)
+
+
+def test_the_seed():
+    m = registry.load(SEED)
+    assert m["schema"] == 1 and m["id"] == "qwen3.8-27b"
+    ids = [p["id"] for p in m["profiles"]]
+    assert sorted(ids) == ["exl3-2.5", "exl3-3.0", "exl3-3.5", "exl3-4.0", "exl3-4.5", "exl3-6.0",
+                           "nvfp4"], ids
+    assert registry.recommended_profile(m)["id"] == "exl3-4.5"
+    assert "best speed for quality" in registry.profile(m, "exl3-4.0")["badges"]
+    nv = next(r for r in m["measurements"]["rows"] if r["profile"] == "nvfp4")
+    assert nv["comparable"] is False and "0.4.8" in nv["note"] and "not comparable" in nv["note"]
+    cell = next(r for r in m["measurements"]["rows"]
+                if r["profile"] == "exl3-4.5")["cells"]["greedy_512"]["prose"]
+    assert cell == {"tok_s": 41.23, "min": 40.7, "ms_round": 83.9, "tok_round": 3.46, "n": 6}, cell
+    text = json.dumps(m)
+    assert "quality_source" not in m
+    # the registry names paths by ${HOME}, ${REPO} and ${HF_HUB}, never this machine's
+    for bad in ("/home/", "/Users/", os.path.expanduser("~")):
+        assert bad not in text, bad
+    t = registry.tile(m)
+    assert t["best_speed"] == {"tok_s": 84.44, "task": "code", "profile": "exl3-4.5"}, t
+    assert t["recommended"] is True
+    # every tool's memory and default is there, and the defaults are the reference box's
+    on = {c["id"] for c in m["components"] if c["default"]}
+    assert on == {"drafters", "lookup", "conductor", "narrator", "laya", "shadow", "vision",
+                  "prompt_cache", "state_store", "disk_tier", "nvme_spill"}, on
+
+
+def test_the_table_is_the_raw_data():
+    m = registry.load(SEED)
+    with open(os.path.join(ROOT, "models", "qwen3.8-27b", "measurements", "0.6.2-summary.json")) as fh:
+        raw = json.load(fh)
+    modes = {"g512": "greedy_512", "g128": "greedy_128", "s512": "sampled_512",
+             "s128": "sampled_128", "long-g": "long_greedy", "long-s": "long_sampled"}
+    n = 0
+    for size, d in raw.items():
+        row = next(r for r in m["measurements"]["rows"] if r["profile"] == f"exl3-{size}")
+        assert row["build"] == "0.6.2" and row["comparable"]
+        for k, mode in modes.items():
+            for task, c in d[k].items():
+                if task == "files":
+                    continue
+                got = row["cells"][mode][task]
+                want = {"tok_s": c["mean"], "min": c["min"], "ms_round": c["ms_round"],
+                        "tok_round": c["tok_round"], "n": c["n"]}
+                if k.startswith("long"):
+                    want["ttft_s"] = c["ttft"]
+                assert got == want, (size, mode, task, got, want)
+                n += 1
+        assert {k: float(v) for k, v in row["ttft_s"].items()} == \
+            {k: float(v) for k, v in d["ttft"].items()}
+        counts = ast.literal_eval(d["lossless"]["counts"])      # the summary keeps a dict's repr
+        ulps = [json.loads(r[2]).get("ulp") for r in d["lossless_rows"]]
+        assert row["lossless"] == {"identical": counts["identical"], "near_tie": counts["near-tie"],
+                                   "other": counts["other"],
+                                   "max_near_tie_ulp": max(u for u in ulps if u is not None)}
+        # the load stages behind weights_gib and drafters_gib
+        stages = dict(re.findall(r"(\w+) ([\d.]+)/", d["load_stages"]))
+        p = registry.profile(m, f"exl3-{size}")
+        assert p["weights_gib"] == float(stages["weights"]), (size, p["weights_gib"])
+        assert p["drafters_gib"] == float(stages["drafters"]), (size, p["drafters_gib"])
+    assert n == 6 * (4 * 3 + 2 * 2), n
+
+
+def test_every_knob_is_registered():
+    m = registry.load(SEED)
+    assert registry.unregistered_keys(m) == [], registry.unregistered_keys(m)
+    keys = registry.env_keys(m)
+    for k in ("QSE_PARALLEL", "MAX_LEN", "QSE_KV_POOL", "QWEN38_NARRATOR_MODEL", "VISION",
+              "RESPONSE_CACHE", "SAMPLED_TREE", "QSE_SIDE_GRAPHS"):
+        assert k in keys, k
+    bad = copy.deepcopy(m)
+    bad["components"][1]["knobs"] = {"QWEN38_NOT_A_KNOB": {"on": "1", "off": ""},
+                                     "QSE_NOT_READ": {"on": "1", "off": ""},
+                                     "NOT_IN_SERVE_ENV": {"on": "1", "off": ""}}
+    got = registry.unregistered_keys(bad)
+    assert len(got) == 3 and all(k in " ".join(got) for k in
+                                 ("QWEN38_NOT_A_KNOB", "QSE_NOT_READ", "NOT_IN_SERVE_ENV")), got
+
+
+def _profile_env(name: str) -> dict:
+    """What ops/profiles/<name>.env sets for the registry's fields, through bash (the _exl3 template
+    included)."""
+    out = subprocess.run(["bash", "-c", 'REPO="$1"; HOME=/h; set -a; . "$1/ops/profiles/$2.env"; '
+                          'echo "$QSE_WEIGHTS_HF|$QSE_WEIGHTS_GB"', "-", ROOT, name],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    hf, gb = out.split("|")
+    return {"hf": hf, "gb": float(gb)}
+
+
+def test_profiles_match_ops():
+    models, errors = registry.load_all()
+    assert errors == [], errors
+    assert registry.unlisted_profiles(models) == []
+    m = models["qwen3.8-27b"]
+    for p in m["profiles"]:
+        f = os.path.join(ROOT, "ops", "profiles", p["id"] + ".env")
+        assert os.path.isfile(f), f
+        env = _profile_env(p["id"])
+        assert env["hf"] == p["hf_repo"], (p["id"], env)
+        assert env["gb"] == p["disk_gb"], (p["id"], env)
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copytree(os.path.join(ROOT, "ops", "profiles"), os.path.join(d, "ops", "profiles"))
+        with open(os.path.join(d, "ops", "profiles", "exl3-9.9.env"), "w") as fh:
+            fh.write("QSE_EXL3_BPW=9.9\n")
+        assert registry.unlisted_profiles(models, d) == ["exl3-9.9"]
+
+
+def _refused(data: dict, want: str) -> None:
+    try:
+        registry.parse(data, "x.yaml")
+    except registry.RegistryError as exc:
+        text = "\n".join(exc.problems)
+        assert want in text, (want, text)
+        return
+    raise AssertionError(f"accepted a file that should fail with {want!r}")
+
+
+def test_the_validator_rules():
+    d = _seed()
+    registry.parse(copy.deepcopy(d), "seed")                       # the seed itself passes
+    x = copy.deepcopy(d)
+    x["schema"] = 2
+    _refused(x, "reads schema 1 only")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["recommended"] = True
+    _refused(x, "exactly one recommended profile, not 2")
+    x = copy.deepcopy(d)
+    x["components"][3]["depends_on"] = ["nope"]
+    _refused(x, "$.components[3]: no other component 'nope'")
+    x = copy.deepcopy(d)
+    x["components"][2]["depends_on"] = ["narrator"]                # conductor <-> narrator
+    _refused(x, "depends on itself")
+    x = copy.deepcopy(d)
+    x["components"][2]["default"] = False                          # conductor off, narrator on
+    _refused(x, "on by default, but 'conductor' it depends on is not")
+    x = copy.deepcopy(d)
+    x["components"][1]["conflicts"] = ["vision"]
+    _refused(x, "a conflict")
+    x = copy.deepcopy(d)
+    x["components"][6]["knobs"] = {"VISION": {True: "on", False: "off"}}
+    _refused(x, "quote on and off")
+    x = copy.deepcopy(d)
+    x["components"][3]["assets"] = ["nope"]
+    _refused(x, "no asset 'nope'")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["assets_required"] = ["nope"]
+    _refused(x, "$.profiles[0].assets_required: no asset 'nope'")
+    x = copy.deepcopy(d)
+    x["components"][0]["docs"] = "docs/not-there.md"
+    _refused(x, "no file 'docs/not-there.md'")
+    x = copy.deepcopy(d)
+    x["components"][0]["docs"] = "../../etc/passwd"
+    _refused(x, "no file '../../etc/passwd'")
+    x = copy.deepcopy(d)
+    x["methods"][2]["default"] = 10
+    _refused(x, "$.methods[2].default: at least 1024")
+    x = copy.deepcopy(d)
+    x["measurements"]["rows"][-1]["comparable"] = True               # the 0.4.8 NVFP4 row
+    _refused(x, "build 0.4.8 is not the table's 0.6.2")
+    x = copy.deepcopy(d)
+    del x["measurements"]["rows"][-1]["note"]
+    _refused(x, "a row that is not comparable says why")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["quality"]["date"] = ""
+    _refused(x, "needs its date and source")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["speed"] = 1
+    _refused(x, "unknown key 'speed'")
+    x = copy.deepcopy(d)
+    x["parallelism"]["slots"]["default"] = 9
+    _refused(x, "$.parallelism.slots: the default is outside min..max")
+    x = copy.deepcopy(d)
+    x["parallelism"]["fixed"]["QSE_X"] = "a b"
+    _refused(x, "$.parallelism.fixed.QSE_X")
+
+
+def test_more_models():
+    with tempfile.TemporaryDirectory() as root:
+        md = os.path.join(root, "models")
+        shutil.copytree(os.path.join(ROOT, "docs"), os.path.join(root, "docs"))
+        os.makedirs(os.path.join(md, "qwen3.8-27b"))
+        shutil.copy(SEED, os.path.join(md, "qwen3.8-27b", "model.yaml"))
+        d = _seed()
+        d["id"], d["name"] = "other-9b", "Other-9B"
+        os.makedirs(os.path.join(md, "other-9b"))
+        with open(os.path.join(md, "other-9b", "model.yaml"), "w") as fh:
+            yaml.safe_dump(d, fh)
+        os.makedirs(os.path.join(md, "only-readme"))
+        with open(os.path.join(md, "only-readme", "README.md"), "w") as fh:
+            fh.write("no model.yaml here\n")
+        models, errors = registry.load_all(md)
+        assert sorted(models) == ["other-9b", "qwen3.8-27b"] and errors == [], (models, errors)
+        d["profiles"][0]["recommended"] = True
+        os.makedirs(os.path.join(md, "broken"))
+        d["id"] = "broken"
+        with open(os.path.join(md, "broken", "model.yaml"), "w") as fh:
+            yaml.safe_dump(d, fh)
+        os.makedirs(os.path.join(md, "misnamed"))
+        d2 = _seed()
+        with open(os.path.join(md, "misnamed", "model.yaml"), "w") as fh:
+            yaml.safe_dump(d2, fh)
+        models, errors = registry.load_all(md)
+        assert sorted(models) == ["other-9b", "qwen3.8-27b"], sorted(models)
+        paths = sorted(e["path"] for e in errors)
+        assert paths == ["models/broken/model.yaml", "models/misnamed/model.yaml"], errors
+        assert "exactly one recommended" in errors[0]["message"] or \
+            "exactly one recommended" in errors[1]["message"]
+        assert any("not named after the id" in e["message"] for e in errors)
+
+
+def test_the_schema_file():
+    with open(os.path.join(ROOT, "models", "schema", "model.schema.json")) as fh:
+        assert json.load(fh) == json.loads(json.dumps(registry.json_schema())), \
+            "regenerate: python -m server.setup.registry --schema > models/schema/model.schema.json"
+
+
+def test_the_cli():
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert registry.main(["--check"]) == 0
+    assert "ok" in buf.getvalue() and "7 profiles" in buf.getvalue(), buf.getvalue()
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "qwen3.8-27b"))
+        bad = _seed()
+        bad["profiles"][1]["recommended"] = True
+        path = os.path.join(d, "qwen3.8-27b", "model.yaml")
+        with open(path, "w") as fh:
+            yaml.safe_dump(bad, fh)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            assert registry.main(["--check", path]) == 1
+        assert path in buf.getvalue() and "$.profiles" in buf.getvalue(), buf.getvalue()
+
+
+def test_wizard_fields():
+    m = registry.load(SEED)
+    steps = registry.wizard_fields(m)
+    assert [s["id"] for s in steps] == ["models", "overview", "weights", "components",
+                                        "parallelism", "methods", "review", "install"]
+    assert [s["index"] for s in steps] == list(range(8))
+    assert steps[2]["fields"][0]["options"] == [p["id"] for p in m["profiles"]]
+    assert {f["field"] for f in steps[3]["fields"]} == {c["id"] for c in m["components"]}
+    assert registry.step_field(m, "parallelism", "slots") == \
+        {"field": "slots", "label": "Parallel requests", "type": "int", "min": 1, "max": 4}
+    assert registry.step_field(m, 5, "reasoning_effort")["options"] == ["low", "medium", "xhigh"]
+    assert registry.step_field(m, "methods", "nope") is None
+    assert registry.step_field(m, "review", "slots") is None
+
+
+def test_field_values():
+    m = registry.load(SEED)
+    _, name = registry.fields(m)["served_model"]
+    for bad in ("a b", "x\ny", "$(reboot)", "a'b", 'a"b', "`id`", "", "a" * 65, "x;y", None, 3):
+        assert registry.field_error(name, bad), bad
+    assert registry.field_error(name, "my-model.v2:latest") is None
+    _, port = registry.fields(m)["port"]
+    assert registry.field_error(port, 8000) is None
+    assert registry.field_error(port, 80) and registry.field_error(port, 8000.5)
+    assert registry.field_error(port, True) and registry.field_error(port, "8000")
+    assert registry.field_error(port, float("nan"))
+    _, eff = registry.fields(m)["reasoning_effort"]
+    assert registry.field_error(eff, "medium") is None and registry.field_error(eff, "max")
+    plain = {"id": "x", "type": "string"}
+    assert registry.field_error(plain, "ok-1.2") is None and registry.field_error(plain, "/etc")
+
+
+def test_kv_units():
+    from server.slots import slot_bytes
+    m = registry.load(SEED)
+    per = m["parallelism"]["kv_bytes_per_token"]
+    assert per == slot_bytes(1, constant=0) == 64 * 1024 + 2 * 20 * 1024 + 256
+    assert per / 1024 == 104.25
+    w = 262_144
+    assert round(per * w / 2**30, 2) == 26.06 and round(per * w / 1e9, 2) == 27.98
+
+
+
+def test_the_mock_copy():
+    """The page's e2e and unit tests run on the mock's copy of the registry entry; a model.yaml
+    change that does not reach it would test the page against a model the server does not serve.
+    Write it again with: python tests/test_setup_registry.py --write-mock"""
+    m = registry.get("qwen3.8-27b")
+    with open(MOCK_COPY) as fh:
+        assert json.load(fh) == _served(m), (f"{MOCK_COPY} is not the registry's payload; run "
+                                             f"python tests/test_setup_registry.py --write-mock")
+
+
+MOCK_COPY = os.path.join(ROOT, "dashboard", "mock", "setup", "qwen3.8-27b.json")
+
+
+def _served(m: dict) -> dict:
+    """GET /v1/setup/models/{id} (server/setup_api.py), as JSON."""
+    return json.loads(json.dumps(dict(m, contract_version="1.0",
+                                      wizard_fields=registry.wizard_fields(m))))
+
+
+if __name__ == "__main__":
+    if "--write-mock" in sys.argv:
+        with open(MOCK_COPY, "w") as fh:
+            json.dump(_served(registry.get("qwen3.8-27b")), fh, indent=1, ensure_ascii=False)
+            fh.write("\n")
+        print(f"wrote {MOCK_COPY}")
+        sys.exit(0)
+    passed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"  {name:68s} ok")
+            passed += 1
+    print(f"{passed} passed")

@@ -31,6 +31,9 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
                                             the dashboard rule below
     POST /v1/systemone, /v1/predict         the admin token/session, or trusted-local (decision
                                             models, SRV-131: LAN only, behind the bearer token)
+    /v1/setup/* (GET and POST)              the admin token/session, or trusted-local (the setup
+                                            guide: its reads too, since apply and reset follow
+                                            them; server/setup_api.py)
     POST /v1/laya/ask, GET /v1/laya         anyone, as the chat API (L1: Laya for the model's own
                                             scripts, typed answers on a short text, rate-limited;
                                             server/laya_api.py); X1: POST /v1/laya/drive/end and
@@ -62,8 +65,12 @@ THE SESSION: `POST /v1/dashboard/session {"token"}` sets `qse_dash=<expiry>.<non
 key derived from the admin token, so rotating the token ends every session; the nonce makes each
 login its own session, so signing out ends that one only), HttpOnly, SameSite=Strict,
 Path=/, 12 hours, Secure behind https. Five failed logins a minute from one address (X-Real-IP, or
-the peer) and the sixth gets a 429. The dashboard API only reads, and the one route that writes
-(`/v1/cache/clear`) does not take the cookie, so SameSite=Strict is the whole CSRF story.
+the peer) and the sixth gets a 429. The dashboard API only reads, and `/v1/cache/clear` does not
+take the cookie. SameSite=Strict is NOT the whole CSRF story for `/v1/setup/*`, which writes
+(apply, reset) and takes the cookie: an open box, or loopback through a tunnel, needs no cookie at
+all, and a text/plain POST from any page needs no preflight. So every /v1/setup POST must also be
+declared JSON, carry no `Sec-Fetch-Site: cross-site`, and name this server's host in its `Origin`
+when it sends one (server/setup_api.py same_origin_json).
 """
 
 from __future__ import annotations
@@ -228,7 +235,7 @@ class Auth:
         """`ok` or `unauthorized` (401) for one guarded route kind (`absent`, the 404 of the old
         fail-closed rule, is no longer returned; the callers still handle it):
         `metrics`, `cache_read`, `cache_clear`, `conductor_write`, `decider`, `dashboard`,
-        `health_full`. With no admin password set (AU1) every kind is `ok`, but /metrics with a
+        `health_full`, `setup`. With no admin password set (AU1) every kind is `ok`, but /metrics with a
         metrics token set still wants that token (or trusted-local)."""
         local = self.trusted_local(peer, headers)
         if not self.password_set:
@@ -247,7 +254,7 @@ class Auth:
         if route == "health_full":
             return ("ok" if self.metrics_bearer(headers) or self.admin_any(headers)
                     else "unauthorized")
-        if route in ("cache_read", "conductor_write", "decider"):
+        if route in ("cache_read", "conductor_write", "decider", "setup"):
             return "ok" if self.admin_any(headers) else "unauthorized"
         if route == "cache_clear":
             return "ok" if self.admin_bearer(headers) else "unauthorized"

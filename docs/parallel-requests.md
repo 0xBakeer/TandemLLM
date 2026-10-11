@@ -65,9 +65,9 @@ The side slots' buffers are the engine's for good, so the engine's memory policy
 ## The shared KV pool
 
 `QSE_KV_POOL=on` (`--kv-pool on`, SRV-307, 2026-10-10). Without it every slot allocates its whole
-window at load: 106.5 KiB a token (64 KiB of engine attention KV for the 16 full-attention layers,
+window at load: 104.25 KiB a token, 106,752 bytes (64 KiB of engine attention KV for the 16 full-attention layers,
 2 x 20 KiB of the two drafter arms' context KV, 256 B of rotary table). Four slots of 262,144 tokens
-would be ~106 GiB before the first request; the box could afford one long window and three short ones.
+would be ~104 GiB before the first request; the box could afford one long window and three short ones.
 
 With the pool, `engine/kvpool.py` reserves each KV tensor's full size as virtual addresses
 (`cuMemAddressReserve`) and maps 2 MiB physical pages (`cuMemCreate`/`cuMemMap`, the allocation

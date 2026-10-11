@@ -127,10 +127,11 @@ def _pool_bytes(where) -> tuple[int, int]:
 def _roles(state: dict) -> dict[str, int]:
     """The in-process small models' ALLOCATED bytes in the shared allocator (their own pools;
     what a pool keeps free shows in `reserve`): the narrator, the shadow reader (one row when they
-    share a slot) and the decision models."""
+    share a slot), the setup guide's Wren when it has its own copy, and the decision models."""
     out: dict[str, int] = {}
     seen = set()
-    for name, owner in (("narrator", state.get("narrator")), ("shadow", state.get("shadow"))):
+    for name, owner in (("narrator", state.get("narrator")), ("shadow", state.get("shadow")),
+                        ("wren", state.get("wren"))):
         slot = getattr(owner, "slot", None) if owner is not None else None
         if slot is None or id(slot) in seen or getattr(slot, "state", None) != "loaded":
             continue

@@ -2681,6 +2681,9 @@ class PersistentSuffixStore:
         self.n_tokens = 0
         self.lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        # bumped by clear(): a rebuild that read the log before it does not swap its index in or
+        # write its trim back
+        self._gen = 0
         self.stats = {"appended": 0, "rebuilds": 0, "trims": 0, "rebuild_ms": 0.0,
                       "rebuild_ms_total": 0.0, "rebuild_last_ts": 0.0, "turns": 0,
                       "turn_tokens": 0, "turn_shared": 0}
@@ -2729,6 +2732,7 @@ class PersistentSuffixStore:
             return
         buf = struct.pack(f"<{len(tokens) + 1}i", *(int(t) for t in tokens), DOC_SEP)
         with self.lock:
+            os.makedirs(self.path, exist_ok=True)
             with open(self._bin, "ab") as f:
                 f.write(buf)
             self.pending += len(tokens) + 1
@@ -2765,7 +2769,25 @@ class PersistentSuffixStore:
         self.stats["turn_shared"] += shared
         return len(doc) if not self.readonly else 0
 
-    def _read_tokens(self):
+    def clear(self) -> int:
+        """Forget everything (reset level 3 beside a running engine, SRV-329): the log is truncated
+        under the store's lock, so an append never meets a missing file, and the index goes; the
+        folder and meta.json stay. Returns the bytes the log held."""
+        with self.lock:
+            try:
+                n = os.path.getsize(self._bin)
+            except OSError:
+                n = 0
+            os.makedirs(self.path, exist_ok=True)
+            with open(self._bin, "wb"):
+                pass
+            self._gen += 1
+            self.store = None
+            self.n_tokens = self.pending = 0
+            self._recent = []
+        return n
+
+    def _read_tokens(self, gen: int | None = None):
         import numpy as np
         if not os.path.exists(self._bin):
             return np.zeros(0, dtype=np.int64)
@@ -2778,7 +2800,10 @@ class PersistentSuffixStore:
             nxt = np.nonzero(a[cut:] >= DOC_SEP)[0]
             cut = cut + int(nxt[0]) + 1 if nxt.size else cut
             a = a[cut:]
-            a.astype("<i4").tofile(self._bin)
+            with self.lock:
+                if gen is not None and gen != self._gen:
+                    return np.zeros(0, dtype=np.int64)     # cleared meanwhile: write nothing back
+                a.astype("<i4").tofile(self._bin)
             self.stats["trims"] += 1
         return a
 
@@ -2799,7 +2824,8 @@ class PersistentSuffixStore:
         from engine.drafters.ngram import CorpusSuffixStore
         from tools.build_corpus import build_suffix_array
         t0 = time.perf_counter()
-        toks = self._read_tokens()
+        gen = self._gen
+        toks = self._read_tokens(gen)
         if toks.shape[0] < self.max_order:
             return
         sa = build_suffix_array(toks, max_order=self.max_order)
@@ -2807,6 +2833,8 @@ class PersistentSuffixStore:
                                   meta={"doc_sep": DOC_SEP, "max_order": self.max_order})
         ms = (time.perf_counter() - t0) * 1e3
         with self.lock:
+            if gen != self._gen:
+                return                             # cleared while this index was built
             self.store = store
             self.n_tokens = int(toks.shape[0])
             self.pending = 0

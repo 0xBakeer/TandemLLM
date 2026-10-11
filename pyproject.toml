@@ -59,6 +59,7 @@ packages = [
   "server.conductor",
   "server.conductor.monitor",
   "server.laya_kit",
+  "server.setup",
 ]
 
 [tool.setuptools.package-dir]
@@ -74,6 +75,7 @@ proxy = ["*.json"]
 server = ["METRICS.md"]
 "server.conductor.monitor" = ["policy.default.json"]
 "server.laya_kit" = ["*.js"]
+"server.setup" = ["*.md"]
 
 [tool.setuptools.dynamic]
 version = { attr = "proxy._version.PEP440" }

@@ -3,10 +3,36 @@
 #
 # The port is the contract. your-host.example reaches this box's nginx, which proxies :8000, so
 # whatever answers on :8000 is what Open WebUI calls the model -- and exactly one thing may.
+#
+#   ops/start.sh                      the configured engine
+#   ops/start.sh --setup [--host A]   setup mode (docs/setup.md): no model of Qwen's, only the dashboard,
+#                                     /v1/setup/* and Wren, the setup guide's assistant; on 127.0.0.1
+#                                     unless --host says otherwise. While run/setup-pending exists (the
+#                                     installer writes it, the setup guide's apply job removes it) a
+#                                     plain start is setup mode too, with the host the marker names.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set -a; . "$HERE/serve.env"; set +a
 . "$HERE/engines.sh"
+SETUP=0; SETUP_HOST=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --setup) SETUP=1; shift ;;
+        --host) [ $# -ge 2 ] || { echo "[start] --host needs an address"; exit 2; }
+                SETUP_HOST="$2"; shift 2 ;;
+        -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+        *) echo "[start] unknown argument $1 (--setup, --host ADDR)"; exit 2 ;;
+    esac
+done
+PENDING="$REPO/run/setup-pending"
+if [ -f "$PENDING" ]; then
+    SETUP=1
+    [ -n "$SETUP_HOST" ] || SETUP_HOST="$(sed -n 's/^HOST=//p' "$PENDING" | head -1)"
+fi
+SETUP_HOST="${SETUP_HOST:-127.0.0.1}"
+case "$SETUP_HOST" in
+    *[!0-9.:a-fA-F]*|"") echo "[start] --host takes an address, not '$SETUP_HOST'"; exit 2 ;;
+esac
 LOGS="$REPO/logs"; mkdir -p "$LOGS"
 PIDFILE="$LOGS/engine.pid"
 LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
@@ -57,20 +83,47 @@ STATUS_PY="${STATUS_PY:-python3}"
 status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || true; }
 [ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
     --engine-port "$PORT" 2>&1 | tail -1
-T_START=$(date +%s)
-status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
 # The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
 # when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
 # token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
-# rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above).
+# rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above). Setup mode
+# reads them too: its /v1/setup routes run apply and reset, and a password set must guard them.
 SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
+T_START=$(date +%s)
+if [ "$SETUP" = "1" ]; then
+    # Setup mode: the server with no model of Qwen's, the dashboard and Wren alone (no caches, no
+    # store, no drafters, no conductor, no ledger: nothing of serve.env's engine flags reaches it)
+    status starting --reason "starting the setup guide"
+    export PYTHONPATH TZ=Europe/Berlin QSE_OPS_DIR="$HERE" QSE_SETUP_MODE=1
+    for fd in /proc/$$/fd/*; do
+        fd=${fd##*/}
+        case "$fd" in 0|1|2|255|*[!0-9]*) ;; *) eval "exec $fd>&-" 2>/dev/null ;; esac
+    done
+    setsid nohup "$PY" -u server/app.py --setup --host "$SETUP_HOST" --port "$PORT" \
+        >"$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    ln -sfn "$LOG" "$LOGS/engine.log"
+    echo "[start] setup mode: pid $(cat "$PIDFILE"), log $LOG"
+    for i in $(seq 1 60); do
+        if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"
+            echo "[start] setup mode answers on $SETUP_HOST:$PORT after $(( $(date +%s) - T_START )) s:" \
+                 "open http://<this box>:$PORT/dashboard/#/setup"
+            exit 0
+        fi
+        sleep 2
+    done
+    status failed --reason "the setup guide did not answer /health within 120 s"
+    echo "[start] setup mode did not answer /health in 120 s; tail of $LOG:"; tail -20 "$LOG"; exit 1
+fi
+status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And
 # for the disk tier (QSE_DISK_CACHE, C1): a row, gate or soak server never reads or writes it, so a
 # benchmark row can never be a disk hit. And for the proxy's config database (QSE_BACKENDS).
-export PYTHONPATH TZ=Europe/Berlin QWEN38_FUSE_PROJ="$FUSE_PROJ" \
+export PYTHONPATH TZ=Europe/Berlin QSE_OPS_DIR="$HERE" QWEN38_FUSE_PROJ="$FUSE_PROJ" \
        QWEN38_DF2_TREE_MODE="$QWEN38_DF2_TREE_MODE" \
        QWEN38_TREE_ALIAS_STATE="$QWEN38_TREE_ALIAS_STATE"
 LATCH_FLAG=""; [ "${LEN_LATCH:-0}" = "1" ] && LATCH_FLAG="--len-latch"
@@ -112,6 +165,10 @@ done
 [ -n "${SESSION_SPILL_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-gb $SESSION_SPILL_GB"
 [ -n "${SESSION_SPILL_CODEC:-}" ] && MEM_FLAGS="$MEM_FLAGS --session-spill-codec $SESSION_SPILL_CODEC"
 [ -n "${DISK_WRITE_BUDGET_GB:-}" ] && MEM_FLAGS="$MEM_FLAGS --disk-write-budget-gb $DISK_WRITE_BUDGET_GB"
+# The vision tower, on unless serve.env says off, and the response cache, off unless it says on
+# (the setup guide's two switches for them, docs/setup.md)
+[ "${VISION:-on}" = "off" ] && MEM_FLAGS="$MEM_FLAGS --vision off"
+[ "${RESPONSE_CACHE:-off}" = "on" ] && MEM_FLAGS="$MEM_FLAGS --response-cache"
 SAMPLE_FLAGS=""
 [ -n "${TEMPERATURE:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --temperature $TEMPERATURE"
 [ -n "${TOP_P:-}" ] && SAMPLE_FLAGS="$SAMPLE_FLAGS --top-p $TOP_P"

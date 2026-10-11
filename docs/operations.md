@@ -15,7 +15,7 @@ What the served stack costs:
 | item | size |
 |-|-|
 | NVFP4 weights and the FP8 head, on the device | about 16.4 GiB |
-| KV buffer, allocated for the whole context at load | 106.5 KiB a token: 64 KiB for the target, 20 KiB for each of the two block drafters, which the served profile loads although StairCut drafts with one (27.9 GB at 262,144 tokens) |
+| KV buffer, allocated for the whole context at load | 104.25 KiB a token (106,752 bytes): 64 KiB for the target, 20 KiB for each of the two block drafters, which the served profile loads although StairCut drafts with one, and 256 B of rotary table (28.0 GB, 26.1 GiB, at 262,144 tokens) |
 | the whole stack at load, 262,144-token context | 53.45 GB (measured with `tools/mem_audit.py`) |
 | the served engine at load, 262,144-token context (2026-10-01, `memory.split`) | 57.0 GiB allocated (weights 16.35, KV pool 16.00, the drafters' context caches 10.00, GDN state 0.14, vision 0.86, the rest 13.7: drafter weights and buffers about 5.9, verify graphs 5.4, warm-up workspace 2.2), 58.2 GiB for the process, 62.7 GiB of `MemAvailable` |
 | the same at 131,072 tokens | 44.0 GiB allocated, 45.2 GiB for the process: halving the window frees 13.0 GiB (KV pool 8, drafter caches 5) |
@@ -36,7 +36,7 @@ The FP8 profile needs about 27.5 GiB of weights on the device instead of 16.4. T
 | script | what it does |
 |-|-|
 | `ops/make-secrets.sh` | creates `secrets.env` with the metrics token (mode 600), once; `--admin` adds the admin password (`QSE_ADMIN_TOKEN`), which turns the admin rule on; `--rotate` replaces what is there |
-| `ops/start.sh` | starts the engine on the port from `serve.env` and waits for `/health`; refuses if an engine is alive or the port is held |
+| `ops/start.sh [--setup [--host ADDR]]` | starts the engine on the port from `serve.env` and waits for `/health`; refuses if an engine is alive or the port is held. `--setup`, or the marker `run/setup-pending`, starts setup mode instead ([setup.md](setup.md)) |
 | `ops/stop.sh [seconds]` | sends SIGTERM, waits for the drain (60 s by default), and kills only after that |
 | `ops/watchdog.sh` | one health check, for cron every minute; restarts after 3 failures in a row |
 | `ops/hold.sh <minutes> <command>` | runs a command with the board to itself, then restores the service |
@@ -53,6 +53,12 @@ At boot, two cron lines bring the service up:
     * * * * * $HOME/<checkout>/ops/watchdog.sh
 
 `ops/qwen38-engine.service` is a systemd user unit for the same job. A user unit only survives logout with `loginctl enable-linger`, which needs root. Install one mechanism, never both: two supervisors for one port start the service twice.
+
+## Setup mode and the setup guide
+
+The dashboard's `#/setup` page installs a configuration from the browser ([setup.md](setup.md)). On a new box, `install.sh --setup` or `ops/start.sh --setup` starts setup mode: `server/app.py --setup` with the dashboard and Wren, the guide's small assistant, and no model of Qwen's. It binds 127.0.0.1 unless `--host` says otherwise, and `/health` answers `"mode": "setup"`, which the watchdog takes as healthy. While `run/setup-pending` exists, every start, the reboot's included, comes back in setup mode.
+
+The guide's install writes `run/setup.env`, which `ops/serve.env` reads last (after the weight profile), and switches through `ops/use-profile.sh`. It never edits `ops/serve.env`. A box whose `serve.env` was copied before the setup guide needs the overlay's last lines from the repository's `ops/serve.env`, or the guide refuses to install (`no_overlay_hook`). Reset level 2 removes the overlay; the other reset levels remove caches, weights or history ([setup.md](setup.md), "Reset").
 
 ## Profiles
 
