@@ -241,9 +241,14 @@ def test_bf16_argmax_matches_fp32():
     ref16 = FlashNextRef(ref.cfg, W, tables, dtype=torch.bfloat16)
     a = ref.forward(PROMPT, FNState())
     b = ref16.forward(PROMPT, FNState())
-    agree = (a.argmax(-1) == b.argmax(-1)).float().mean().item()
-    assert agree >= 0.85, agree
-    return f"bf16 vs fp32 argmax agreement {agree:.2f}"
+    same = a.argmax(-1) == b.argmax(-1)
+    agree = same.float().mean().item()
+    # a random tiny model has near ties everywhere; a position whose fp32 margin between its two
+    # best tokens is clear of bf16 noise (8 bf16 steps of the row's largest logit) must agree
+    top2 = torch.topk(a, 2, dim=-1).values
+    clear = (top2[:, 0] - top2[:, 1]) > 8 * 2 ** -7 * a.abs().max(-1).values
+    assert clear.any() and bool(same[clear].all()), (same.tolist(), clear.tolist())
+    return f"bf16 vs fp32 argmax agreement {agree:.2f} overall, 1.00 on the {int(clear.sum())} clear positions"
 
 
 if __name__ == "__main__":

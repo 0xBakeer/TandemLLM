@@ -50,13 +50,76 @@ def ring_us(blocks, cfg) -> float:
     return e0.elapsed_time(e1) * 1e3 / 10 / len(blocks)
 
 
+def ring_us_dense(blocks, split) -> float:
+    """`ring_us` for tools/fn_kernels.dense at a (S, warps) split (the input rotation inside)."""
+    from tools import fn_kernels as K
+    b0 = blocks[0]
+    K.DENSE_SPLIT[(b0.tile_n, b0.K, b0.kb)] = split
+    xs = torch.randn(1, b0.K, device="cuda").to(torch.bfloat16)
+    outs = [torch.empty(1, b.N, dtype=torch.float32 if b.out_fp32 else torch.bfloat16, device="cuda") for b in blocks]
+    for b, o in zip(blocks, outs):
+        K.dense(xs, b, out=o)
+    torch.cuda.synchronize()
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        for b, o in zip(blocks, outs):
+            K.dense(xs, b, out=o)
+    g.replay()
+    torch.cuda.synchronize()
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    e0.record()
+    for _ in range(10):
+        g.replay()
+    e1.record()
+    torch.cuda.synchronize()
+    return e0.elapsed_time(e1) * 1e3 / 10 / len(blocks)
+
+
+def sweep_dense(a) -> None:
+    """--dense: the split of tools/fn_kernels.dense per shape, against the library path (the
+    rotation launch included), cold ring, M = 1 -> {"NxKinxK": {"S", "warps", "us", "us_exl3"}}."""
+    from tools import fn_kernels as K
+    shapes = SHAPES if a.shapes == "all" else [tuple(int(v) for v in s.split("x")) for s in a.shapes.split(",")]
+    out = {"_about": "Flash-Next dense EXL3 splits for tools/fn_kernels.dense (tools/fn_tiles.py --dense, M = 1, "
+                     f"cold ring, CUDA graph), {time.strftime('%Y-%m-%d %H:%M')}; us_exl3 = exl3_matmul with its "
+                     "rot_in at its own best split; applied by engine/models/flashnext/load.py"}
+    for N, Kin, kb in shapes:
+        one = X.random_block(N, Kin, kb, seed=1).nbytes
+        n = max(2, int(a.ring_mb * 1e6 // one)) if N < 100000 else 2
+        blocks = [X.random_block(N, Kin, kb, seed=s) for s in range(n)]
+        if N > 100000:
+            for b in blocks:
+                b.out_fp32 = True
+        lib = ring_us(blocks, X.pick(N, Kin, kb))
+        best, best_us = None, 1e30
+        for S in (1, 2, 4, 8):
+            if (Kin // 16) % (8 * S) or (N // 128) * S > 4096:
+                continue
+            for w in (4, 8):
+                us = ring_us_dense(blocks, (S, w))
+                if us < best_us:
+                    best, best_us = (S, w), us
+        K.DENSE_SPLIT.pop((N, Kin, kb), None)
+        print(f"{N}x{Kin}x{kb}: dense {best} {best_us:.1f} us ({one / best_us / 1e3:.1f} GB/s) vs exl3_matmul "
+              f"{lib:.1f} us", flush=True)
+        out[f"{N}x{Kin}x{kb}"] = {"S": best[0], "warps": best[1], "us": round(best_us, 2), "us_exl3": round(lib, 2),
+                                  "gb_s": round(one / best_us / 1e3, 1)}
+        del blocks
+        torch.cuda.empty_cache()
+    if a.json:
+        json.dump(out, open(a.json, "w"), indent=1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json")
     ap.add_argument("--ring-mb", type=float, default=256)
     ap.add_argument("--min-gain", type=float, default=0.02)
     ap.add_argument("--shapes", default="all")
+    ap.add_argument("--dense", action="store_true", help="sweep tools/fn_kernels.dense instead")
     a = ap.parse_args()
+    if a.dense:
+        return sweep_dense(a)
     shapes = SHAPES if a.shapes == "all" else [tuple(int(v) for v in s.split("x")) for s in a.shapes.split(",")]
     out = {"_about": "Flash-Next EXL3 dense splits (tools/fn_tiles.py, M = 1, cold ring, CUDA graph), "
                      f"{time.strftime('%Y-%m-%d %H:%M')}; applied by engine/models/flashnext/load.py"}

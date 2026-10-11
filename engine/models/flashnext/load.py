@@ -93,20 +93,31 @@ TILES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dir
                      "ops", "fn-exl3-tiles.json")
 
 
-def apply_tiles(path: str = TILES) -> int:
-    """Flash-Next's own EXL3 splits (tools/fn_tiles.py) for its dense shapes; the 27B's shapes are
-    not in the file, so its table is untouched. Returns the entries applied."""
+DENSE_SPLITS = os.path.join(os.path.dirname(TILES), "fn-dense-splits.json")
+
+
+def apply_tiles(path: str = TILES, dense_path: str = DENSE_SPLITS) -> int:
+    """Flash-Next's own EXL3 splits for its dense shapes: the library kernel's (tools/fn_tiles.py,
+    prompt chunks) and tools/fn_kernels.dense's (tools/fn_tiles.py --dense, decode and verify). The
+    27B's shapes are in neither file, so its table is untouched. Returns the entries applied."""
     import json
+    from tools import fn_kernels as K
     from tools.exl3_linear import set_config
-    if not os.path.isfile(path):
-        return 0
     n = 0
-    for k, v in json.load(open(path)).items():
-        if k.startswith("_"):
-            continue
-        N, Kin, kb = (int(x) for x in k.split("x"))
-        set_config(N, Kin, kb, {"S": int(v["S"]), "wk": int(v["wk"]), "cfg": int(v["cfg"]), "cfg2": int(v["cfg2"])})
-        n += 1
+    if os.path.isfile(path):
+        for k, v in json.load(open(path)).items():
+            if k.startswith("_"):
+                continue
+            N, Kin, kb = (int(x) for x in k.split("x"))
+            set_config(N, Kin, kb, {"S": int(v["S"]), "wk": int(v["wk"]), "cfg": int(v["cfg"]), "cfg2": int(v["cfg2"])})
+            n += 1
+    if os.path.isfile(dense_path):
+        for k, v in json.load(open(dense_path)).items():
+            if k.startswith("_"):
+                continue
+            N, Kin, kb = (int(x) for x in k.split("x"))
+            K.DENSE_SPLIT[(N, Kin, kb)] = (int(v["S"]), int(v["warps"]))
+            n += 1
     return n
 
 

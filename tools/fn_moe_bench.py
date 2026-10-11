@@ -36,6 +36,33 @@ def bank(E: int, kb: int, skb: int, seed: int):
     return K.MoEBank(trip, "cuda"), sizes
 
 
+def parts_ms(banks, xs, idss, wss, orders, bufs, outs, reps) -> dict:
+    """ms a call of gate|up, down and combine, each alone in its own graph over the ring."""
+    mod = K._module()
+    out = {}
+    for part in ("gu", "down", "combine"):
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            for i, (b, _) in enumerate(banks):
+                flat = idss[i].reshape(-1)
+                if part == "gu":
+                    mod.fn_moe_gu(xs[i], flat, orders[i], b.tr, b.kb, b.su, b.sv, bufs[i]["ygu"], b.ks[-1])
+                elif part == "down":
+                    mod.fn_moe_down(bufs[i]["ygu"], flat, orders[i], b.tr, b.kb, b.su, b.sv, bufs[i]["yd"], b.ks[-1])
+                else:
+                    mod.fn_moe_combine(bufs[i]["yd"], flat, wss[i].reshape(-1), outs[i])
+        g.replay()
+        torch.cuda.synchronize()
+        e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        e0.record()
+        for _ in range(reps):
+            g.replay()
+        e1.record()
+        torch.cuda.synchronize()
+        out[part] = round(e0.elapsed_time(e1) / reps / len(banks), 4)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=int, default=3)
@@ -87,9 +114,10 @@ def run(a, banks, g, st, warps) -> None:
         torch.cuda.synchronize()
         ms = ev[0].elapsed_time(ev[1]) / a.reps / len(banks)
         gbs = byts / len(banks) / (ms / 1e3) / 1e9
+        parts = parts_ms(banks, xs, idss, wss, orders, bufs, outs, a.reps)
         print(json.dumps({"warps": warps, "st": st, "M": M, "k": a.k, "shared_k": a.shared_k, "experts": a.experts, "banks": a.banks,
                           "ms_per_call": round(ms, 4), "mb_per_call": round(byts / len(banks) / 1e6, 2),
-                          "gb_s": round(gbs, 1)}), flush=True)
+                          "gb_s": round(gbs, 1), "parts_ms": parts}), flush=True)
 
 
 if __name__ == "__main__":

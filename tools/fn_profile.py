@@ -60,7 +60,7 @@ def main() -> None:
     g.capture()
     t = int(logits[0].argmax())
     for _ in range(4):
-        t = int(g(t)[0].argmax())
+        t = g.greedy(t)
     torch.cuda.synchronize()
     # wall time of a replay alone (no staging) and of a whole step (staging + replay + argmax)
     ev = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
@@ -72,7 +72,7 @@ def main() -> None:
     replay_ms = ev[0].elapsed_time(ev[1]) / a.steps
     t0 = time.time()
     for _ in range(a.steps):
-        t = int(g(t)[0].argmax())
+        t = g.greedy(t)
     step_ms = (time.time() - t0) * 1e3 / a.steps
     from torch.profiler import ProfilerActivity, profile
     with profile(activities=[ProfilerActivity.CUDA]) as prof:

@@ -181,6 +181,34 @@ def test_attn_prep_and_gate_mul():
     return "q/k norm + rope within one bf16 step of torch's, caches written at the device position only, gate bit-equal"
 
 
+def test_dense_reference_rows_and_groups():
+    out = []
+    for N, Kin, kb in ((16384, 2560, 5), (2560, 6144, 5), (640, 2560, 3), (2560, 2560, 4)):
+        w = X.random_block(N, Kin, kb, seed=N + kb)
+        x = _x(32, Kin, 51, 0.5)
+        y = K.dense(x, w)
+        ref = X.reference_matmul(x, w)
+        rel = ((y.float() - ref.float()).abs().max() / ref.float().abs().max()).item()
+        assert rel < 1e-2, (N, Kin, kb, rel)
+        one = torch.cat([K.dense(x[m:m + 1], w) for m in range(32)])
+        for M in (2, 9, 32):
+            assert torch.equal(K.dense(x[:M], w), one[:M]), (N, Kin, kb, M)
+        out.append(f"{N}x{Kin}x{kb} S{K.dense_split(N, Kin, kb)[0]} rel {rel:.0e}")
+    # a group (members side by side, each with its own suh) equals its members called alone
+    blocks = [X.random_block(n, 2560, 5, seed=60 + i) for i, n in enumerate((10240, 6144))]
+    grp = X.EXL3Block.group(blocks, ["qkv", "z"])
+    x = _x(4, 2560, 52, 0.5)
+    parts = K.dense(x, grp).split(grp.sizes, dim=-1)
+    for j in range(2):
+        m = grp.member(j)
+        assert torch.equal(parts[j], K.dense(x, m)), j
+    hb = X.random_block(248320 // 4, 2560, 5, seed=70)
+    hb.out_fp32 = True
+    yh = K.dense(_x(1, 2560, 53, 0.5), hb)
+    assert yh.dtype == torch.float32
+    return "; ".join(out) + "; rows 1..32 bit-equal; group = members; fp32 head output"
+
+
 def _bank(n_exp: int, kbs, shared_k: int, seed: int = 0):
     blocks = []
     for e in range(n_exp + 1):
@@ -263,6 +291,21 @@ def test_moe_every_k():
         assert torch.equal(got, one), kb
         out.append(f"K{kb} {rel:.0e}")
     return ", ".join(out)
+
+
+def test_combine_inject_norm_equals_combine_then_inject():
+    bank, _ = _bank(24, (3,), 5)
+    x = _x(5, H, 61, 0.5)
+    ids, w = _ids(5, 24, 10, 62)
+    g = torch.Generator(device=DEV).manual_seed(63)
+    h0 = torch.randn(5, 4 * H, generator=g, device=DEV).to(torch.bfloat16)
+    d = torch.randn(5, 324, generator=g, device=DEV) * 3
+    wn = (torch.randn(4 * H, generator=g, device=DEV) * 0.1).half()
+    want_h, want_n = K.inject_norm(h0, K.moe(x, ids, w, bank), d, 320, wn, 4, 1e-6)
+    yd = K.moe_experts(x, ids, bank)
+    got_h, got_n = K.combine_inject_norm(h0, yd, ids, w, d, 320, wn, 4, 1e-6)
+    assert torch.equal(got_h, want_h) and torch.equal(got_n, want_n)
+    return "the fused combine + inject + norm is moe_combine then inject_norm, bit for bit"
 
 
 def test_moe_graph_capture():

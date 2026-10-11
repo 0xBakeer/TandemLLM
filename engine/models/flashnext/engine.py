@@ -27,8 +27,14 @@ import numpy as np
 import torch
 
 from engine import capture_lock
+from engine.settings import SETTINGS as _S
 from engine.models.flashnext.ref import FlashNextRef, FNState
 from engine.models.flashnext.ple import decode_rows
+
+
+# rows up to which an EXL3 projection runs on tools/fn_kernels.dense (the kernel's limit);
+# QWEN38_FN_DENSE=0: the library path of tools/exl3_linear for every row count (an A/B)
+DENSE_MAX = 32 if _S.get("FN_DENSE") == "1" else 0
 
 
 class FlashNextEngine(FlashNextRef):
@@ -77,7 +83,10 @@ class FlashNextEngine(FlashNextRef):
         from tools.exl3_linear import EXL3Block, exl3_matmul
         if isinstance(w, EXL3Block):
             lead = x.shape[:-1]
-            y = exl3_matmul(x.reshape(-1, x.shape[-1]).contiguous(), w)
+            x2 = x.reshape(-1, x.shape[-1]).contiguous()
+            # up to 32 rows (decode, verify): Flash-Next's dense kernel (rows invariant, PDL); a
+            # prompt chunk: the library path of tools/exl3_linear
+            y = K.dense(x2, w) if x2.shape[0] <= DENSE_MAX else exl3_matmul(x2, w)
             return y.view(*lead, w.N)
         if hasattr(w, "q") or (isinstance(w, torch.Tensor) and w.dtype == torch.float16 and w.dim() == 2):
             lead = x.shape[:-1]
@@ -127,22 +136,36 @@ class FlashNextEngine(FlashNextRef):
             # one row: any launch order is the same arithmetic, so skip the sort
             order = self._order1 if xs.shape[0] == 1 else None
             K.moe(xs, ids, wts, self.banks[li], order=order, out=out[r0:r0 + step])
-        if self._moe_record is not None:
-            self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), out.clone()))
         return out
+
+    def moe_parts(self, x, li):
+        """The router and the experts of every (row, slot) pair, without the combine (the trunk
+        folds it into the next inject): (yd [M S, H] fp32, ids, wts)."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        logits = K.gemv(x, self.W[self.pre(li) + "mlp.router"])
+        ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
+        if self.route_trace is not None:
+            self.route_trace.append((li, ids[:, :-1].long()))
+        yd = K.moe_experts(x, ids, self.banks[li], order=self._order1 if x.shape[0] == 1 else None)
+        if self._moe_record is not None:
+            self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), yd.clone()))
+        return yd, ids, wts
 
     _moe_record = None
     spec_ok = False            # the load-time self-check passed (speculation may run)
+    MOE_ROWS = 2048            # rows the MoE takes in one call (11 pairs a row on the grid's y axis)
     TREE_ROWS = (0, 1, 2, 3, 5, 6, 8, 11)
 
     @torch.no_grad()
     def self_check(self, prompt: list[int], steps: int = 12, log=print) -> dict:
         """ENG-223's load-time check of the expert kernel's verify twins on real routing: decode
         `steps` tokens one at a time (the decode step), recording every layer's MoE input, ids,
-        weights and output; then run each layer's rows again as one `steps`-row chain call and an
-        8-row tree-shaped call (rows TREE_ROWS, out of order), with the router recomputed from the
-        recorded inputs, and compare every row bit for bit. Any difference leaves `spec_ok` False
-        and the log names the layer and the row."""
+        weights and every pair's expert output; then run each layer's rows again as one
+        `steps`-row chain call and an 8-row tree-shaped call (rows TREE_ROWS, out of order), with
+        the router recomputed from the recorded inputs, and compare every row bit for bit (the
+        combine is per row and per column, so equal pairs give an equal sum). Any difference
+        leaves `spec_ok` False and the log names the layer and the row."""
         from tools import fn_kernels as K
         c = self.cfg
         st = self.new_state(self.max_len)
@@ -159,18 +182,19 @@ class FlashNextEngine(FlashNextRef):
             by_layer.setdefault(li, []).append((x, ids, wts, out))
         bad = None
         checked = 0
+        S = c.num_experts_per_tok + 1
         for li, rows in sorted(by_layer.items()):
             X = torch.cat([r[0] for r in rows])
             I = torch.cat([r[1] for r in rows])
             Wt = torch.cat([r[2] for r in rows])
-            O = torch.cat([r[3] for r in rows])
+            Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
             ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
             for name, sel in (("chain", list(range(len(rows)))), ("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)])):
                 sl = torch.tensor(sel, device=X.device)
-                got = K.moe(X[sl].contiguous(), I[sl].contiguous(), Wt[sl].contiguous(), self.banks[li])
+                got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
                 for j, t in enumerate(sel):
                     checked += 1
-                    if bad is None and not (torch.equal(got[j], O[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
+                    if bad is None and not (torch.equal(got[j], Y[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
                         bad = {"layer": li, "row": t, "call": name}
         self.spec_ok = bad is None
         res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": checked, "first_diff": bad}
@@ -215,7 +239,12 @@ class FlashNextEngine(FlashNextRef):
                                  self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
             x, di = self._mix(n, p + "mlp_hyper_connection")
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
-            h, n = K.inject_norm(h, self.moe(x, li), di, self.W[p + "mlp_hyper_connection.rank"], nxt, hc, eps)
+            R = self.W[p + "mlp_hyper_connection.rank"]
+            if x.shape[0] <= self.MOE_ROWS:
+                yd, ids, wts = self.moe_parts(x, li)
+                h, n = K.combine_inject_norm(h, yd, ids, wts, di, R, nxt, hc, eps)
+            else:
+                h, n = K.inject_norm(h, self.moe(x, li), di, R, nxt, hc, eps)
         self.stack = h
         if n is None:
             n = K.hc_norm(h, self._site_norm(c.num_hidden_layers), H, eps)
@@ -271,7 +300,9 @@ class FlashNextEngine(FlashNextRef):
             "tok": di64[0:1], "pos": di64[1:2], "heads": di64[2:], "lenp": di32, "packed": drows,
             "mask": torch.ones(1, 1, dtype=torch.bool, device=dev),
             "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=dev),
+            "next": torch.zeros(1, dtype=torch.long, device=dev),
         }
+        self._next_h = torch.zeros(1, dtype=torch.long, pin_memory=True)
         if tab is not None:
             self.g["bias"] = tab.bias.to(dev)
             self.g["codebook"] = tab.codebook(dev)
@@ -300,13 +331,19 @@ class FlashNextEngine(FlashNextRef):
         """One token from the device buffers (`stage` first); the state advances in place except
         `st.length`, which the caller moves. Returns logits [1, vocab] fp32 (a static buffer)."""
         from tools import fn_kernels as K
-        from tools.exl3_linear import exl3_matmul
         c, g = self.cfg, self.g
         h = self.W["embed_tokens.weight"].index_select(0, g["tok"]).repeat(1, c.hc_count)
         n = self.trunk(h, None, st, None, step=True)
         d = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
         x = K.mix_up(d, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
-        exl3_matmul(x, self.W["lm_head.weight"], out=g["logits"])
+        if DENSE_MAX:
+            K.dense(x, self.W["lm_head.weight"], out=g["logits"])
+        else:
+            from tools.exl3_linear import exl3_matmul
+            exl3_matmul(x, self.W["lm_head.weight"], out=g["logits"])
+        # the greedy token, and its copy into pinned host memory: the host reads it after a sync
+        torch.argmax(g["logits"][0], dim=-1, keepdim=True, out=g["next"])
+        self._next_h.copy_(g["next"], non_blocking=True)
         return g["logits"]
 
     def _ple_step(self, h, li, st):
@@ -410,6 +447,18 @@ class DecodeGraph:
         st.ple_ctx.clear()
         st.ple_ctx.update(pctx)
         st.length = length
+
+    @torch.no_grad()
+    def greedy(self, token: int) -> int:
+        """One greedy step: the next token, read from the graph's own argmax (no extra launch)."""
+        eng, st = self.eng, self.st
+        if st.length + 1 > min(self.max_lc, eng.dense_limit) or self.graph is None:
+            return int(self(token)[0].argmax())
+        eng.stage(token, st)
+        self.graph.replay()
+        st.length += 1
+        torch.cuda.current_stream().synchronize()
+        return int(eng._next_h[0])
 
     @torch.no_grad()
     def __call__(self, token: int) -> torch.Tensor:

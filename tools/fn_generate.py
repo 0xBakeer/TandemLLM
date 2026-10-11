@@ -76,15 +76,21 @@ def greedy(eng: FlashNextEngine, ids: list[int], new: int, eos: set, graph_lc: i
     g.capture()
     torch.cuda.synchronize()
     t1 = time.time()
+    per = []
     while len(out) < new and out[-1] not in eos:
-        out.append(int(g(out[-1])[0].argmax()))
+        ts = time.perf_counter()
+        out.append(g.greedy(out[-1]))
+        per.append(time.perf_counter() - ts)
     torch.cuda.synchronize()
     t_dec = time.time() - t1
     n = len(out) - 1
+    srt = sorted(per) or [0.0]
     return out, {"prompt_tokens": len(ids), "new_tokens": len(out), "prefill_s": round(t_prefill, 3),
                  "prefill_tok_s": round(len(ids) / t_prefill, 1), "decode_s": round(t_dec, 3),
                  "decode_tok_s": round(n / t_dec, 2) if n > 0 else None,
-                 "ms_per_token": round(1e3 * t_dec / n, 2) if n > 0 else None}
+                 "ms_per_token": round(1e3 * t_dec / n, 2) if n > 0 else None,
+                 "ms_p50": round(1e3 * srt[len(srt) // 2], 2), "ms_p90": round(1e3 * srt[int(len(srt) * 0.9)], 2),
+                 "ms_max": round(1e3 * srt[-1], 2)}
 
 
 @torch.no_grad()
@@ -117,22 +123,23 @@ def step_checks(eng: FlashNextEngine, ids: list[int], k: int = 8) -> dict:
 
 
 def injected_self_check(eng: FlashNextEngine, ids: list[int]) -> dict:
-    """The self-check on a build whose multi-row MoE call differs from the one-row call in one bit
-    (the lowest bit of one output of row 5): it must fail and name that row."""
+    """The self-check on a build whose multi-row expert call differs from the one-row call in one
+    bit (the lowest bit of one value of row 5's first pair): it must fail and name that row."""
     from tools import fn_kernels as K
-    orig = K.moe
+    orig = K.moe_experts
 
-    def flipped(x, ids_, wts, bank, **kw):
-        out = orig(x, ids_, wts, bank, **kw)
-        if x.shape[0] > 1 and out.shape[0] > 5:
-            out[5, 7] = (out[5, 7].view(torch.int16) ^ 1).view(torch.bfloat16)
-        return out
-    K.moe = flipped
+    def flipped(x, ids_, bank, **kw):
+        yd = orig(x, ids_, bank, **kw)
+        if x.shape[0] > 5:
+            r = 5 * ids_.shape[1]
+            yd[r, 7] = (yd[r, 7].view(torch.int32) ^ 1).view(torch.float32)
+        return yd
+    K.moe_experts = flipped
     before = eng.spec_ok
     try:
         r = eng.self_check(ids)
     finally:
-        K.moe = orig
+        K.moe_experts = orig
         eng.spec_ok = before
     assert not r["ok"] and r["first_diff"]["row"] == 5, r
     return r
