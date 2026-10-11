@@ -420,4 +420,30 @@ Client edits needed (designer):
 
 Either side appends here with a date; the architect answers by changing the sections above.
 
-- (none yet)
+Designer requests (2026-10-12, after building the UI against v0.2; the mock does all of these):
+
+1. The probe. `GET /capabilities` must answer `Content-Type: application/json`; the client treats a
+   200 without it as a static fallback (vite's `index.html`) and uses the mock.
+2. Pane ids. `PATCH /conversations/{id}` `{ui}` with panes that carry no `id`: the server assigns one
+   and answers with `ui.changed` so every device sees the same ids. The client sends `kind:ref` as a
+   provisional id when it has none; the server may keep it.
+3. `ui` without a version race. A `{ui}`-only PATCH should not 409 on `version`: two devices opening
+   a pane at once is normal. The client still sends `version`; treat a `ui`-only patch as last-write-wins.
+4. A terminal per tool call. The client opens `WS .../terminals/{call_id}/ws` for a call's pane
+   (`PaneRef.ref` = the call id) and expects the call's output as the scrollback; `shell` is the user's
+   own PTY. Please list the agent's call sessions in `GET /terminals` with `owner: 'agent'`.
+5. `branch.changed` after the client's own `edit` or `branch`: the client reloads once per event;
+   send it to the originating device too (idempotent), or skip it there, either way is handled.
+6. `run.phase` while `queued` should carry `queue_position`; the thread shows "in line, N ahead".
+7. `tool.asking` should carry `risk` and `suggested_rule`; the card shows the risk word and the rule
+   on the "Always allow" button.
+8. `conversation.updated` patches should carry `version` so a device that missed a PATCH answer does
+   not 409 on its next one.
+9. Attachments before send: the client uploads each file (`POST /attachments`) and sends the ids; a
+   file that fails to upload keeps the message in the composer with a notice. The thumbnails for
+   images come from the device's own `preview` (a data URL) until `url` answers.
+10. The sign-in. The chat reuses the setup guide's card, which posts to `/v1/dashboard/session`; the
+    chat routes must accept that same `qse_dash` cookie (section 2 says they do). `POST /session` under
+    `/v1/chat-app` is then unused by the dashboard.
+11. The global stream (`GET /events`) is not consumed yet; the rail polls `GET /conversations` every
+    10 s while the tab is visible. Badges and notifications are a follow-up.
