@@ -1,11 +1,12 @@
 // VIS-80 (QA VIS-81): Wren's tool calls are validated in the browser; the page state carries no
-// secret; the figure's state machine.
+// secret; the figure's state machine. VIS-89 (QA VIS-90): the gold box's poses, reduced motion, the
+// figure's size, and no animal in the current code and docs.
 import { describe, expect, it } from 'vitest';
 import model from '../mock/setup/qwen3.8-27b.json';
 import type { SetupModel } from '../src/api/types';
 import { buildPageState } from '../src/setup/checks';
 import { estimate } from '../src/setup/estimate';
-import { foldFigure, nextFigureState, FIGURE_STATES } from '../src/setup/figure-state';
+import { blipPeak, foldFigure, nextFigureState, poseFor, ringFill, FIGURE_STATES } from '../src/setup/figure-state';
 import { defaults, emptyState, setupReducer } from '../src/setup/state';
 import { fieldKey, planToolCall, TOOL_NAMES, type ToolContext } from '../src/setup/tools';
 
@@ -152,12 +153,99 @@ describe('nextFigureState', () => {
       expect(nextFigureState(s, 'unload')).toBe('sleeping');
     }
   });
-  it('a sleeping wren only wakes by loading', () => {
+  it('a sleeping figure only wakes by loading', () => {
     expect(nextFigureState('sleeping', 'focus')).toBe('sleeping');
     expect(foldFigure(['load-start', 'load-progress', 'loaded'], 'sleeping')).toEqual(['loading', 'idle']);
   });
   it('typing does not interrupt an answer', () => {
     expect(nextFigureState('talking', 'input')).toBe('talking');
     expect(nextFigureState('thinking', 'focus')).toBe('thinking');
+  });
+});
+
+describe('poseFor (VIS-89)', () => {
+  it('the ticket\'s table', () => {
+    expect(poseFor('idle')).toEqual({ eyes: 'dot', mouth: 'smile', extra: 'none', led: 'breathe', motion: 'breathe' });
+    expect(poseFor('listening')).toMatchObject({ eyes: 'wide', mouth: 'o', motion: 'lean' });
+    expect(poseFor('thinking')).toMatchObject({ eyes: 'up', mouth: 'flat', extra: 'question', led: 'amber' });
+    expect(poseFor('loading')).toMatchObject({ eyes: 'lid', mouth: 'flat', extra: 'none' });
+    expect(poseFor('talking')).toMatchObject({ mouth: 'open', motion: 'bounce' });
+    expect(poseFor('acting')).toMatchObject({ eyes: 'side', mouth: 'wide', extra: 'spark', motion: 'hop' });
+    expect(poseFor('error')).toMatchObject({ eyes: 'small', mouth: 'wavy', extra: 'alarm', led: 'blink', motion: 'shake' });
+    expect(poseFor('sleeping')).toEqual({ eyes: 'shut', mouth: 'tiny', extra: 'z', led: 'off', motion: 'sleep' });
+  });
+  it('every state has an eyes + mouth + extra triple no other state has', () => {
+    const triples = FIGURE_STATES.map((s) => { const p = poseFor(s); return `${p.eyes}/${p.mouth}/${p.extra}`; });
+    expect(new Set(triples).size).toBe(FIGURE_STATES.length);
+  });
+  it('an unknown state falls back to idle', () => {
+    expect(poseFor('nap' as never)).toEqual(poseFor('idle'));
+  });
+  it('the ring is clamped, and chases without a number', () => {
+    expect(ringFill(0.4)).toBe(0.4);
+    expect(ringFill(7)).toBe(1);
+    expect(ringFill(-1)).toBe(0.02);
+    expect(ringFill(null)).toBeNull();
+    expect(ringFill(Number.NaN)).toBeNull();
+  });
+  it('a blip never shuts the mouth and never repeats its height', () => {
+    let last = 0;
+    for (const r of [0, 0, 0.5, 0.5, 1, 1, Number.NaN, 2, -3]) {
+      const v = blipPeak(r, last);
+      expect(v).toBeGreaterThanOrEqual(0.5);
+      expect(v).toBeLessThanOrEqual(1);
+      expect(Math.abs(v - last)).toBeGreaterThanOrEqual(0.12);
+      last = v;
+    }
+  });
+});
+
+describe('the figure\'s CSS and source (VIS-89)', async () => {
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { gzipSync } = await import('node:zlib');
+  const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
+  const css = readFileSync(here('../src/styles/setup.css'), 'utf8');
+  const fig = css.slice(css.indexOf("/* ---- Wren's acting"), css.indexOf('/* ---- the Wren panel'));
+  const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+
+  it('every pose value the table uses has a rule (the defaults draw dot, none and steady)', () => {
+    const vals = new Set<string>();
+    for (const s of FIGURE_STATES) for (const [k, v] of Object.entries(poseFor(s))) vals.add(`${k}=${v}`);
+    const drawnByDefault = new Set(['eyes=dot', 'extra=none', 'led=steady', 'motion=hop']);
+    for (const kv of vals) {
+      const [k, v] = kv.split('=');
+      if (drawnByDefault.has(kv) && !fig.includes(`[data-${k}='${v}']`)) continue;
+      expect(fig, kv).toContain(`[data-${k}='${v}']`);
+    }
+  });
+  it('reduced motion stops every animation of the figure, the glow and the mini box', () => {
+    for (const sel of ['.goldbox *', '.wren-mini', '.wren-mini-box *', 'qse-wren-figure::before']) expect(reduced, sel).toContain(sel);
+    expect(reduced).toMatch(/animation: none !important/);
+    expect(reduced).toMatch(/\.goldbox \.gb-all,[\s\S]*transition: none !important/);
+  });
+  it('no url(#id) reference in the figure (three copies, one display:none)', () => {
+    const code = readFileSync(here('../src/setup/figure.ts'), 'utf8').replace(/^\s*\/\/.*$/gm, '');
+    expect(code).not.toMatch(/url\(#/);
+    expect(fig).not.toMatch(/url\(#/);
+  });
+  it('figure.ts and the figure and mini CSS stay under 6 KB gzip without comments (VIS-80\'s limit)', () => {
+    const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\s+/g, ' ');
+    const src = strip(readFileSync(here('../src/setup/figure.ts'), 'utf8')) + strip(fig);
+    expect(gzipSync(src).length).toBeLessThan(6 * 1024);
+  });
+  it('nothing in the current code, mock or docs calls the figure a bird', () => {
+    const bad = /\b(bird|beak|feathers?|wings?|perch\w*|chirp\w*|preen\w*|ruffle\w*)\b/i;
+    const roots = ['../src', '../mock', '../README.md', '../../docs'].map(here);
+    const hits: string[] = [];
+    const walk = (p: string) => {
+      if (statSync(p).isDirectory()) for (const f of readdirSync(p)) walk(join(p, f));
+      else if (/\.(ts|css|md|html|json)$/.test(p)) {
+        readFileSync(p, 'utf8').split('\n').forEach((line, i) => { if (bad.test(line)) hits.push(`${p}:${i + 1}: ${line.trim().slice(0, 80)}`); });
+      }
+    };
+    for (const r of roots) walk(r);
+    expect(hits).toEqual([]);
   });
 });
