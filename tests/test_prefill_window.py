@@ -95,7 +95,7 @@ def _run(window: int, ids, chunk=16, cached=True, cls=TapDrafter, start=None):
                "conv": eng.state.conv.clone(), "len": eng.kv.length, "syncs": dr.syncs,
                "anchors": ({b: (s.clone(), c.clone()) for b, (s, c) in res.anchors.items()}
                            if res is not None else {}),
-               "snaps": ({e.snap.length: (e.snap.S.clone(), e.snap.k.clone())
+               "snaps": ({e.snap.length: (e.snap.state[0].clone(), e.snap.views[0].clone())
                           for e in store._d.values()} if store is not None else {})}
         return out, calls
     finally:

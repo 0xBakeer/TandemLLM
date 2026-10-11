@@ -1886,10 +1886,8 @@ def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> 
     from engine.model import h2d
     if pos + len(ids) >= eng.max_len:
         raise incontext_mod.ContextError("no_room")
-    settle = getattr(eng, "_settle", None)
-    if settle is not None:
-        settle()                      # as `cache.capture`: a walked state that is not in yet
-    saved, length = eng.state.clone(), eng.kv.length
+    eng.settle()                      # as `cache.capture`: a walked state that is not in yet
+    saved, length = cache.state_clone(eng), eng.kv.length
     tap, eng.tap = getattr(eng, "tap", None), None      # the probe's prefill tap reads no question
     try:
         with torch.no_grad():
@@ -1898,9 +1896,8 @@ def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> 
             return [float(x) for x in row[torch.tensor(letters, device=row.device)].tolist()]
     finally:
         eng.tap = tap
-        eng.state.restore(saved)
-        eng.kv.length = length
-        eng.discard_pending()
+        cache.state_load(eng, saved)
+        eng.resume_at(length)
 
 
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
@@ -2326,8 +2323,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         # the puts succeeded none was ever served.
         n_c = len(committed)
         if STATE.get("session_trim") and eng.kv.length > n_c:
-            trim = getattr(eng, "trim_pending", None)
-            if trim is not None and trim(n_c):
+            if eng.trim_pending(n_c):
                 if drafter is not None and hasattr(drafter, "state_resume"):
                     drafter.state_resume(n_c)
                 store.stats["session_trimmed"] = store.stats.get("session_trimmed", 0) + 1
@@ -2507,13 +2503,10 @@ def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
         # and its end must not keep the next guest off the side slot (`Pool.take_side`)
         return "short"
     if e > n_c:
-        trim = getattr(eng, "trim_pending", None)
-        if trim is None or not trim(n_c):
+        if not eng.trim_pending(n_c):
             return "ahead"
         e = n_c
-    settle = getattr(eng, "_settle", None)
-    if settle is not None:
-        settle()
+    eng.settle()
     mark = getattr(drafter, "end_mark", None) if drafter is not None else None
     spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
     slot.carry = {"gen": slot.gen, "t": time.monotonic(), "at": e,
@@ -2641,12 +2634,13 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             return None
         e = int(rec["at"])
         v1 = cache._kv_views(seng, sdrafter)
-        if (e > min(t.shape[ax] for t, ax in v1) or seng.state.S.shape != eng.state.S.shape
-                or seng.state.conv.shape != eng.state.conv.shape
+        st0, st1 = cache.state_now(eng), cache.state_now(seng)
+        cuda = any(t.is_cuda for t in st0)
+        if (e > min(t.shape[ax] for t, ax in v1) or [t.shape for t in st1] != [t.shape for t in st0]
                 or len(v1) != len(cache._kv_views(eng, drafter))):
             return None
         with torch.no_grad():
-            if eng.state.S.is_cuda:
+            if cuda:
                 torch.cuda.synchronize()
             disk = STATE.get("disk_cache")
             if disk is not None:
@@ -2675,18 +2669,16 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
                 if (rec.get("resident") and bufs is not None
                         and getattr(side_res, "end", None) is not None
                         and int(side_res.end["at"]) == e):
-                    pair[0].copy_(bufs[0])
-                    pair[1].copy_(bufs[1])
+                    cache.state_copy(pair, bufs)
                 else:
-                    pair[0].copy_(seng.state.S)
-                    pair[1].copy_(seng.state.conv)
+                    cache.state_save(pair, seng)
                 res.end["served_hidden"] = list(rec.get("served_hidden") or ())
                 al = STATE.get("end_align")
                 if al is not None:
                     # FX16: the side slot's own regions when it kept them (every generation of
                     # the conversation served there), else the last one's
                     al.adopt(res, list(rec.get("regions") or ()) or [(int(rec["n_prompt"]), e)])
-            if eng.state.S.is_cuda:
+            if cuda:
                 torch.cuda.synchronize()
         slot.carry = None
         side_res = sv.get("resident")

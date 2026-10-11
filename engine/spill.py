@@ -519,11 +519,13 @@ class SessionSpill:
         return self._hbufs[i]
 
     def _anchor_buf(self, eng):
-        need = dc._sections([dc._nb(eng.state.S), dc._nb(eng.state.conv)])[1]
+        from engine.cache import state_now
+        state = state_now(eng)
+        need = dc._sections([dc._nb(t) for t in state])[1]
         if self._abuf is None or self._abuf.nbytes < need:
             if self._abuf is not None:
                 self._abuf.close()
-            self._abuf = dc._Buf(need, bool(eng.state.S.is_cuda))
+            self._abuf = dc._Buf(need, any(t.is_cuda for t in state))
         return self._abuf
 
     def _reader(self):
@@ -740,7 +742,7 @@ class SessionSpill:
     def _save(self, eng, drafter, *, tokens, n, rows_from, anchors, end, taint, owner, reason,
               extra, resident) -> dict | None:
         import torch
-        from engine.cache import _kv_views
+        from engine.cache import _kv_views, state_now
         t0 = time.perf_counter()
         C = self.chunk
         tokens = [int(x) for x in tokens[:n]]
@@ -748,9 +750,9 @@ class SessionSpill:
         layout = _layout(views)
         keep = sorted(anchors)[-int(self.cfg["anchors"]):]
         per_row = sum(dc._row_bytes(t, ax) for t, ax in views)
-        S, conv = eng.state.S, eng.state.conv
-        (oS, nS), (oc, nc) = dc._sections([dc._nb(S), dc._nb(conv)])[0]
-        anc_size = ALIGN + dc.align(oc + nc)
+        state = state_now(eng)
+        offs, anc_payload = dc._sections([dc._nb(t) for t in state])
+        anc_size = ALIGN + anc_payload
         if self.guard is not None and not self.guard.allow("spill", reason, n):
             self._count("refused", "write_budget")
             self._event("refused", why="write_budget", tokens=n, reason=reason)
@@ -919,22 +921,20 @@ class SessionSpill:
                 if carried is not None:
                     files.append(old_files["end.anc"])
                     nbytes += anc_size
-                for fname, b, (aS, ac) in pairs:
-                    sums = [state_sums(aS), state_sums(ac)]
+                for fname, b, anc in pairs:
+                    sums = [state_sums(x) for x in anc]
                     of = old_files.get(fname)
                     if (of is not None and of["b"] == b and of["sums"] == sums
                             and os.path.exists(os.path.join(path, fname))):
                         files.append(of)           # An anchor already on the disk
                         nbytes += anc_size
                         continue
-                    abuf.typed(oS, S.dtype, S.shape).copy_(aS, non_blocking=cuda and abuf.pinned)
-                    abuf.typed(oc, conv.dtype, conv.shape).copy_(ac,
-                                                                 non_blocking=cuda and abuf.pinned)
+                    for (o, _), t, x in zip(offs, state, anc):
+                        abuf.typed(o, t.dtype, t.shape).copy_(x, non_blocking=cuda and abuf.pinned)
                     if cuda:
                         torch.cuda.current_stream().synchronize()
                     hdr = self._put_header(self._hdr(), {"b": b, "sums": sums})
-                    dc.write_file(os.path.join(path, fname),
-                                  [hdr, abuf.view(0, dc.align(oc + nc))], fsync=False)
+                    dc.write_file(os.path.join(path, fname), [hdr, abuf.view(0, anc_payload)], fsync=False)
                     files.append({"file": fname, "b": b, "sums": sums})
                     nbytes += anc_size
                     wbytes += anc_size
@@ -954,7 +954,7 @@ class SessionSpill:
                    "tsha": _tsha(tokens), "owner": owner, "reason": reason, "resident": resident,
                    "created": round(now, 3), "used": round(now, 3), "taint": taint,
                    "layout": layout,
-                   "state": [[str(S.dtype), list(S.shape)], [str(conv.dtype), list(conv.shape)]],
+                   "state": [[str(t.dtype), list(t.shape)] for t in state],
                    "anchors": [int(b) for b in keep], "anchor_files": files,
                    "end": ({"at": int(end["at"]), "hidden": end["hidden"], "mark": end["mark"],
                             "served_hidden": list(end.get("served_hidden") or ()),
@@ -1128,12 +1128,12 @@ class SessionSpill:
         its end anchor, its line and its session). None, with the resident prefix cut below the
         first row written, when a file fails its check or a buffer is refused."""
         import torch
-        from engine.cache import _kv_views
+        from engine.cache import _kv_views, state_now
         t0 = time.perf_counter()
         man = e.man
         n, C = e.valid, self.chunk
-        S, conv = eng.state.S, eng.state.conv
-        if man["state"] != [[str(S.dtype), list(S.shape)], [str(conv.dtype), list(conv.shape)]]:
+        state = state_now(eng)
+        if man["state"] != [[str(t.dtype), list(t.shape)] for t in state]:
             return self._failed(e, "layout", res, None)
         if drafter is not None and hasattr(drafter, "state_resume"):
             drafter.state_resume(n)            # builds a draft cache that does not exist yet
@@ -1211,11 +1211,11 @@ class SessionSpill:
                 res.adopt(e.tokens, n, man.get("taint"), man.get("owner"))
                 low = 0 if low is None else low
                 abuf = self._anchor_buf(eng)
-                (oS, nS), (oc, nc) = dc._sections([dc._nb(S), dc._nb(conv)])[0]
+                offs, anc_payload = dc._sections([dc._nb(t) for t in state])
                 for f in man["anchor_files"]:
                     p = os.path.join(e.path, f["file"])
                     try:
-                        nread += dc.read_into(p, ALIGN, abuf.view(0, dc.align(oc + nc)))
+                        nread += dc.read_into(p, ALIGN, abuf.view(0, anc_payload))
                     except Exception:                              # noqa: BLE001
                         return self._failed(e, "read", res, low)
                     if f["file"] == "end.anc":
@@ -1225,11 +1225,11 @@ class SessionSpill:
                     if pair is None:
                         continue                   # the memory policy refused it: not kept
                     nb = cuda and abuf.pinned
-                    pair[0].copy_(abuf.typed(oS, S.dtype, S.shape), non_blocking=nb)
-                    pair[1].copy_(abuf.typed(oc, conv.dtype, conv.shape), non_blocking=nb)
+                    for (o, _), t, x in zip(offs, state, pair):
+                        x.copy_(abuf.typed(o, t.dtype, t.shape), non_blocking=nb)
                     if cuda:
                         torch.cuda.current_stream().synchronize()
-                    if [state_sums(pair[0]), state_sums(pair[1])] != f["sums"]:
+                    if [state_sums(x) for x in pair] != f["sums"]:
                         return self._failed(e, "sums", res, low)
         except Exception as exc:                                   # noqa: BLE001
             self._event("failed", what="restore", error=f"{type(exc).__name__}: {exc}"[:200])

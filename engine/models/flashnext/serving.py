@@ -148,6 +148,14 @@ class FlashNextServing:
         if self.fn._pend_owner is self.st:
             self.fn.flush()
 
+    def cache_state(self) -> FNModelState:
+        return self.state
+
+    def resume_at(self, n: int) -> None:
+        """The engine continues at length `n` from the state the caller just wrote into it."""
+        self.discard_pending()
+        self.kv.length = n
+
     def discard_pending(self) -> None:
         """Forget what is pending after the state was overwritten (a restore): the chain block, the
         last verify's picks and the GDN rows parked for the state that was there."""

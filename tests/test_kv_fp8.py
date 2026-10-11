@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from types import SimpleNamespace
 
 import torch
@@ -66,18 +67,22 @@ def test_a_snapshot_carries_the_scales():
     kv.append(3, x, x, 0)
     kv.append(7, x, x, 0)
     kv.length = 6
-    state = SimpleNamespace(S=torch.zeros(2), conv=torch.zeros(2), primed=True)
+    state = SimpleNamespace(S=torch.zeros(2), conv=torch.zeros(2), primed=True, nbytes=16)
     eng = SimpleNamespace(kv=kv, state=state, cfg=SimpleNamespace(attention_layers=[3, 7],
                           num_key_value_heads=4, head_dim=256), _trace=None, tree=None,
-                          trace=None)
+                          trace=None, settle=lambda: None)
+    from engine.models.qwen3_5 import adapter as A      # the 27B's adapter verbs on the stand-in
+    for f in (A.cache_state, A.cost, A.resume_at, A.discard_pending):
+        setattr(eng, f.__name__, types.MethodType(f, eng))
     snap = C.capture(eng)
-    assert snap.ks is not None and snap.ks.shape == (2, 1, 4, 6)
+    ks = snap.views[2]                                  # k, v, then the e4m3 scales
+    assert ks.shape == (2, 1, 4, 6)
     saved = kv.ks[..., :6].clone()
     kv.ks.zero_()
     kv.k.zero_()
     C.restore(eng, snap)
     assert torch.equal(kv.ks[..., :6], saved)
-    assert snap.nbytes > C.StateSnapshot(6, snap.k, snap.v, state.S, state.conv).nbytes
+    assert snap.nbytes > C.StateSnapshot(6, snap.views[:2], snap.state).nbytes
 
 
 def test_reference_is_sdpa_on_the_engine_mask():

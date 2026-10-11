@@ -52,7 +52,8 @@ def test_paths_through_first_and_later_children():
 
 def _fake_27b():
     cfg = types.SimpleNamespace(attention_layers=[3, 7, 11], num_key_value_heads=4, head_dim=256)
-    state = types.SimpleNamespace(S=torch.zeros(48, 16, 128, 128), conv=torch.zeros(48, 3, 10240, dtype=torch.bfloat16))
+    S, conv = torch.zeros(48, 16, 128, 128), torch.zeros(48, 3, 10240, dtype=torch.bfloat16)
+    state = types.SimpleNamespace(S=S, conv=conv, nbytes=S.numel() * 4 + conv.numel() * 2)
     return types.SimpleNamespace(cfg=cfg, state=state, _pending_walk=True, _pend=("trace", None, [0]))
 
 

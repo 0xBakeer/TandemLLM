@@ -7,6 +7,8 @@ indexer's pooled keys) cannot be cached that way. `ModelState` is the one shape 
 
     sections()        name -> tensor, every part of the recurrent state (not the KV rows, which
                       the caches keep by length); the disk tier writes them under these names
+    views()           the position-indexed buffers, [(name, tensor, token axis)]: what the caches
+                      slice by length (the KV rows, an indexer's keys); version 2, ENG-157
     nbytes()          the sum of the sections
     clone()           an independent copy (a snapshot)
     restore(snap)     copy a snapshot's values into this state in place (captured CUDA graphs
@@ -14,11 +16,12 @@ indexer's pooled keys) cannot be cached that way. `ModelState` is the one shape 
     signature()       names, shapes and dtypes in order: two states with the same signature can
                       restore each other; a file written under another signature is refused
 
-`Qwen38State` is the 27B's: the two tensors it always had, under the names "gdn.S" and "gdn.conv".
-A model with no recurrent state has no sections (an empty dict is a valid state).
+`Qwen38State` is the 27B's: the two tensors it always had, under the names "gdn.S" and "gdn.conv",
+and its KV cache's K and V (and the e4m3 scales with QWEN38_KV_FP8) as views. A model with no
+recurrent state has no sections (an empty dict is a valid state).
 
-What is ported onto this interface is listed in the ENG-221 Memo note; the cache modules still
-read the 27B's tensors directly until ENG-157 moves them (this module changes no caller).
+The caches reach it through the engine's adapter (`eng.cache_state()`, ENG-157): every tier keeps
+the sections in this order and the views' rows by length, and knows no model.
 """
 
 from __future__ import annotations
@@ -32,6 +35,8 @@ import torch
 @runtime_checkable
 class ModelState(Protocol):
     def sections(self) -> dict[str, torch.Tensor]: ...
+
+    def views(self) -> list: ...
 
     def nbytes(self) -> int: ...
 
@@ -58,6 +63,9 @@ class SectionState:
     def sections(self) -> dict[str, torch.Tensor]:
         return dict(self._sections)
 
+    def views(self) -> list:
+        return []
+
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in self.sections().values())
 
@@ -77,12 +85,23 @@ class SectionState:
 
 class Qwen38State(SectionState):
     """The 27B's recurrent state (`engine.model.GDNState`): S and conv of every GDN layer, as the
-    same tensors (no copy), so a restore lands in the buffers its decode graphs captured."""
+    same tensors (no copy), so a restore lands in the buffers its decode graphs captured; with its
+    KV cache (`engine.model.KVCache`), K and V [layers, 1, heads, rows, dim] and, for an e4m3
+    cache, their scales, as views along axis 3."""
 
-    def __init__(self, gdn_state):
-        self.gdn = gdn_state
+    def __init__(self, gdn_state, kv=None):
+        self.gdn, self.kv = gdn_state, kv
         super().__init__({"gdn.S": gdn_state.S, "gdn.conv": gdn_state.conv})
 
     def sections(self) -> dict[str, torch.Tensor]:
         # GDNState.swap() trades S with its spare between blocks: read the live one every time
         return {"gdn.S": self.gdn.S, "gdn.conv": self.gdn.conv}
+
+    def views(self) -> list:
+        kv = self.kv
+        if kv is None:
+            return []
+        out = [("k", kv.k, 3), ("v", kv.v, 3)]
+        if getattr(kv, "fp8", False):
+            out += [("ks", kv.ks, 3), ("vs", kv.vs, 3)]
+        return out

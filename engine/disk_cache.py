@@ -100,6 +100,10 @@ from engine import kvpool as _kvp
 ALIGN = 4096
 MAGIC = b"QSEDISK1"
 FORMAT = 1
+#: anchor files: format 2 names each section as the model's state does (engine/models/state.py,
+#: ENG-157); format 1 (the 27B's before it) named them "S" and "conv", read as "gdn.S" and "gdn.conv"
+ANCHOR_FORMAT = 2
+FORMAT1_SECTIONS = {"S": "gdn.S", "conv": "gdn.conv"}
 GB = 1000 ** 3
 #: the free space the tier never takes its file system below, whatever the settings say
 FLOOR_BYTES = 50 * GB
@@ -529,7 +533,8 @@ class DiskTier:
             raise ValueError(f"{path}: not a disk-cache file")
         n = int.from_bytes(mv[8:12], "little")
         meta = json.loads(bytes(mv[12:12 + n]).decode())
-        if meta.get("format") != FORMAT or meta.get("kind") != kind:
+        if meta.get("kind") != kind or meta.get("format") not in ((FORMAT, ANCHOR_FORMAT) if kind == "anchor"
+                                                                  else (FORMAT,)):
             raise ValueError(f"{path}: format {meta.get('format')} kind {meta.get('kind')}")
         import numpy as np
         if kind == "chunk":
@@ -654,8 +659,8 @@ class DiskTier:
     # --- the staging buffer ------------------------------------------------------------------
     @staticmethod
     def _anchor_layout(eng) -> tuple[list, int]:
-        secs, total = _sections([_nb(eng.state.S), _nb(eng.state.conv)])
-        return secs, total
+        from engine.cache import state_now
+        return _sections([_nb(t) for t in state_now(eng)])
 
     def _chunk_layout(self, views) -> tuple[list, int]:
         return _sections([_row_bytes(t, ax) * self.chunk for t, ax in views])
@@ -663,11 +668,8 @@ class DiskTier:
     def plan_staging(self, eng, drafter=None) -> int:
         """The staging buffer's bytes before it exists, for the residency planner: two anchor
         slots and two chunk slots at the per-token figure the state store uses."""
-        from engine.cache import _drafter_bytes_per_token, _snapshottable
-        per = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads \
-            * eng.cfg.head_dim * eng.kv.k.element_size()
-        if getattr(eng.kv, "fp8", False):
-            per += 2 * _nb(eng.kv.ks) // eng.kv.ks.shape[-1]
+        from engine.cache import _drafter_bytes_per_token, _snapshottable, model_views
+        per = sum(_row_bytes(t, ax) for t, ax in model_views(eng))
         if drafter is not None and (_snapshottable(drafter) or hasattr(drafter, "kv_views")):
             per += _drafter_bytes_per_token(drafter)
         self._est = (align(self._anchor_layout(eng)[1]), align(per * self.chunk + 16 * ALIGN))
@@ -692,7 +694,8 @@ class DiskTier:
                 return
             if self.buf_anchor and len(self._free_anchor) < len(self.buf_anchor):
                 return                         # a slot is in use; the next capture retries
-            cuda = bool(eng.state.S.is_cuda)
+            from engine.cache import state_now
+            cuda = any(t.is_cuda for t in state_now(eng))
             self.buf_anchor = [_Buf(need, cuda) for _ in range(2)]
             self._free_anchor = [0, 1]
 
@@ -826,8 +829,8 @@ class DiskTier:
         return n_chunks * chunk + n_anchors * anchor
 
     def capture(self, job: _Job, eng, L: int) -> None:
-        """The prefill has just written line L: S and conv to an anchor slot, for the writer. A
-        slot still being written means this anchor is not taken (journaled)."""
+        """The prefill has just written line L: the state's sections to an anchor slot, for the
+        writer. A slot still being written means this anchor is not taken (journaled)."""
         if job is None or L not in job.lines:
             return
         self._ensure_anchor_slots(eng)
@@ -835,13 +838,11 @@ class DiskTier:
         if i is None:
             job.drop("staging")
             return
-        (oS, _), (oc, _) = self._anchor_layout(eng)[0]
+        secs = eng.cache_state().sections()
         buf = self.buf_anchor[i]
-        S, conv = eng.state.S, eng.state.conv
-        buf.typed(oS, S.dtype, S.shape).copy_(S)
-        buf.typed(oc, conv.dtype, conv.shape).copy_(conv)
-        self._q.put(("anchor", job, L, i, (str(S.dtype), list(S.shape)),
-                     (str(conv.dtype), list(conv.shape))))
+        for (o, _), t in zip(self._anchor_layout(eng)[0], secs.values()):
+            buf.typed(o, t.dtype, t.shape).copy_(t)
+        self._q.put(("anchor", job, L, i, [(name, str(t.dtype), list(t.shape)) for name, t in secs.items()]))
 
     def seal(self, job: _Job, eng, drafter, rows: int) -> None:
         """The prefill is over (or stopped at `rows`): the chunks below that line may be copied
@@ -952,30 +953,28 @@ class DiskTier:
                 return "budget" if over_budget else "floor"
             self._evict(victim, "budget" if over_budget else "floor", protect)
 
-    def _write_anchor(self, job: _Job, L: int, slot: int, s_meta, c_meta) -> None:
+    def _write_anchor(self, job: _Job, L: int, slot: int, metas) -> None:
         try:
             key = (L, job.hashes[L])
             if key in self.anchors:
                 return
-            (oS, nS), (oc, nc) = self._slot_secs(s_meta, c_meta)
+            offs = self._slot_secs(metas)
             C = self.chunk
             chain = [job.hashes[b] for b in range(C, L + 1, C)]
             cb = self._chain_buf(chain)
-            payload = align(oc + nc)
+            payload = align(offs[-1][0] + offs[-1][1]) if offs else 0
             why = self._room(self._hdr_size("anchor") + payload + len(cb), job)
             if why is not None:
                 job.drop(why)
                 self._event("drop", why=why, tokens=L, what="anchor")
                 return
             buf = self.buf_anchor[slot]
-            secs = [{"name": "S", "dtype": s_meta[0], "shape": s_meta[1], "off": oS, "bytes": nS,
-                     "crc": checksum(buf.view(oS, nS))},
-                    {"name": "conv", "dtype": c_meta[0], "shape": c_meta[1], "off": oc,
-                     "bytes": nc, "crc": checksum(buf.view(oc, nc))}]
+            secs = [{"name": name, "dtype": dt, "shape": shape, "off": o, "bytes": nb, "crc": checksum(buf.view(o, nb))}
+                    for (name, dt, shape), (o, nb) in zip(metas, offs)]
             secs.append({"name": "chain", "dtype": "uint64", "shape": [len(chain)],
                          "off": payload, "bytes": 8 * len(chain), "crc": checksum(cb)})
             line = job.lines[L]
-            meta = {"format": FORMAT, "kind": "anchor", "L": L, "chunk": C, "h": _hx(job.hashes[L]),
+            meta = {"format": ANCHOR_FORMAT, "kind": "anchor", "L": L, "chunk": C, "h": _hx(job.hashes[L]),
                     "fp": self.fp, "created": round(self.clock(), 3), "sections": secs,
                     "entry": line["kind"], "why": line["why"], "label": line["label"],
                     "preview": line["preview"]}
@@ -993,13 +992,11 @@ class DiskTier:
             self._give_anchor_slot(slot)
 
     @staticmethod
-    def _slot_secs(s_meta, c_meta):
+    def _slot_secs(metas):
+        """(offset, bytes) of each section (name, dtype, shape) laid out in an anchor slot."""
         import torch
-        es = torch.empty((), dtype=getattr(torch, s_meta[0].split(".")[-1])).element_size()
-        ec = torch.empty((), dtype=getattr(torch, c_meta[0].split(".")[-1])).element_size()
-        nS = es * _prod(s_meta[1])
-        nc = ec * _prod(c_meta[1])
-        return _sections([nS, nc])[0]
+        return _sections([torch.empty((), dtype=getattr(torch, dt.split(".")[-1])).element_size() * _prod(shape)
+                          for _, dt, shape in metas])[0]
 
     def _wrote(self, s: float, nbytes: int, direct: bool, kind: str) -> None:
         self.stats[f"writes_{kind}"] += 1
@@ -1277,8 +1274,8 @@ class DiskTier:
             if got != want:
                 self._fail("layout", hit, None)
                 return False
-        S, conv = eng.state.S, eng.state.conv
-        cuda = bool(S.is_cuda)
+        state = eng.cache_state().sections()
+        cuda = any(t.is_cuda for t in state.values())
         self._ensure_anchor_slots(eng)
         slot = self._take_anchor_slot(wait=2.0)
         if slot is None:
@@ -1292,16 +1289,17 @@ class DiskTier:
                 ap = hit.anchor["path"]
                 try:
                     am = self._read_header(ap, "anchor")
-                    (oS, nS), (oc, nc) = self._anchor_layout(eng)[0]
-                    sa = {s["name"]: s for s in am["sections"]}
-                    if ([sa["S"]["dtype"], sa["S"]["shape"], sa["conv"]["dtype"],
-                         sa["conv"]["shape"]]
-                            != [str(S.dtype), list(S.shape), str(conv.dtype), list(conv.shape)]):
+                    offs = self._anchor_layout(eng)[0]
+                    alias = FORMAT1_SECTIONS if am.get("format") == 1 else {}
+                    sa = [s for s in am["sections"] if s["name"] != "chain"]
+                    if ([(alias.get(s["name"], s["name"]), s["dtype"], s["shape"], s["off"]) for s in sa]
+                            != [(name, str(t.dtype), list(t.shape), o)
+                                for (name, t), (o, _) in zip(state.items(), offs)]):
                         self._fail("layout", hit, None)
                         return False
-                    nread += read_into(ap, self._hdr_size("anchor"), abuf.view(0, align(oc + nc)))
-                    if (checksum(abuf.view(oS, nS)) != sa["S"]["crc"]
-                            or checksum(abuf.view(oc, nc)) != sa["conv"]["crc"]):
+                    nread += read_into(ap, self._hdr_size("anchor"),
+                                       abuf.view(0, align(offs[-1][0] + offs[-1][1]) if offs else 0))
+                    if any(checksum(abuf.view(o, nb)) != s["crc"] for (o, nb), s in zip(offs, sa)):
                         raise ValueError("checksum")
                 except Exception:                                  # noqa: BLE001
                     self._fail("corrupt", hit, ("anchor", hit.anchor["key"]))
@@ -1343,19 +1341,13 @@ class DiskTier:
                         torch.cuda.current_stream().synchronize()
                     submit(j + 2)
                 nb = cuda and abuf.pinned
-                S.copy_(abuf.typed(oS, S.dtype, S.shape), non_blocking=nb)
-                conv.copy_(abuf.typed(oc, conv.dtype, conv.shape), non_blocking=nb)
+                for (o, _), t in zip(offs, state.values()):
+                    t.copy_(abuf.typed(o, t.dtype, t.shape), non_blocking=nb)
                 if cuda:
                     torch.cuda.current_stream().synchronize()
         finally:
             self._give_anchor_slot(slot)
-        eng._pending_walk = False
-        eng._pend = None                      # a commit pending on the state just overwritten
-        eng.kv.length = L
-        eng.state.primed = L > 0
-        eng._trace = None
-        eng.tree = None
-        eng.trace = None
+        eng.resume_at(L)
         s = time.perf_counter() - t0
         now = self.clock()
         with self.lock:

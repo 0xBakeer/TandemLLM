@@ -14,6 +14,8 @@ To continue a sequence at token L, the engine needs:
 
 The recurrent part is the hard one. A KV row depends only on the tokens up to it, so rows written for an earlier request stay valid. The recurrent state has absorbed every token and cannot be rewound, so a cache must have taken a copy at L.
 
+The caches know no model (ENG-157). Every tier reads a sequence through the engine's adapter: `eng.cache_state()` gives its recurrent sections by name and its position-indexed views with their token axes (engine/models/state.py; for the 27B the sections `gdn.S` and `gdn.conv`, the views K and V and, with an e4m3 cache, their scales), `eng.settle()` lands a pending commit before a copy, `eng.resume_at(n)` puts the engine at length n after a copy was written back, and `eng.cost()` gives the bytes the budgets count. A snapshot, an anchor, the end anchor, a pinned or parked anchor and a disk or spill anchor are the sections' tensors in the state's order; rows are the views' rows. A disk anchor file of format 2 names each section as the state does; the 27B's files of format 1 ("S", "conv") are read as `gdn.S` and `gdn.conv`. `tests/test_cache_any_model.py` runs a made-up third architecture (two sections, three views of other shapes, dtypes and axes) through the snapshot, the resident prefix, the disk tier after a restart and the session spill with no edit in the cache code. The side lane's borrowed engine (`Borrow`) and the side slots still read the 27B's own fields; they move with ENG-241.
+
 ## The caches
 
 | cache | what it keeps | where | default |
