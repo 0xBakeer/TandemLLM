@@ -1,0 +1,5 @@
+{
+ "0": {"chain": {"1": 24.0, "2": 27.9, "3": 30.6, "4": 34.6, "5": 37.4, "6": 41.3}},
+ "step_ms": 3.7,
+ "measured": "2026-10-11 Flash-Next 3.05 on the DGX Spark, 1k context, verify + commit from captured graphs (the bench StairCut started from; the cut follows the live prices online)"
+}

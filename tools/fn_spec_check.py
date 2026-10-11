@@ -37,7 +37,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
-from engine.models.flashnext.spec import Drafter, MTPChainDrafter, MTPGraphDrafter, SpecDecoder  # noqa: E402
+from tools.fn_specloop import Drafter, MTPChainDrafter, MTPGraphDrafter, SpecDecoder  # noqa: E402
 from tools.fn_draft_trace import prompt_ids  # noqa: E402
 from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
 

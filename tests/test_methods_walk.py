@@ -42,6 +42,14 @@ def test_shared_walk_is_the_27b_walk():
     return f"3,000 random trees equal ({deep} walks deeper than one draft)"
 
 
+def test_paths_through_first_and_later_children():
+    t = DraftTree(tokens=[5, 10, 11, 20, 21, 30, 12, 22], parents=[-1, 0, 1, 1, 3, 4, 0, 6])
+    assert walk.accept_tree(t, [12, 0, 0, 0, 0, 0, 22, 9]) == ([0, 6, 7], [12, 22, 9])
+    assert walk.accept_tree(t, [10, 20, 0, 21, 30, 1, 0, 0]) == ([0, 1, 3, 4, 5], [10, 20, 21, 30, 1])
+    assert walk.accept_tree(t, [99] * 8) == ([0], [99])
+    return "a later child, a deep path, the empty path (Flash-Next's walk cases)"
+
+
 def _fake_27b():
     cfg = types.SimpleNamespace(attention_layers=[3, 7, 11], num_key_value_heads=4, head_dim=256)
     state = types.SimpleNamespace(S=torch.zeros(48, 16, 128, 128), conv=torch.zeros(48, 3, 10240, dtype=torch.bfloat16))

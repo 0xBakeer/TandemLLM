@@ -75,6 +75,16 @@ The router releases the narrow drafter at the first round. With the node count c
 
 On the benchmark row with the published NVFP4 set, StairCut reaches 49.89 tok/s against 47.13 for the fixed block 8 and 44.80 for the fixed block 16. On the teacher-forced bench of 25 workloads it averages 90.45 tok/s against 59.31 and 81.95 ([measurement.md](measurement.md)).
 
+## StairCut on Flash-Next, and the shared price files
+
+Flash-Next drafts with its own MTP layer and the shared StairCut (`engine/methods/staircut.py`, ENG-245): each round the MTP head drafts a chain of 4 with its top-2 tokens a depth (`engine/models/flashnext/mtp.py`, one captured graph), and the cut keeps the chain's prefix (and, with `siblings`, second-choice leaves) that maximises (1 + sum of q) / (V(rows) + draft). q comes from `ProbDeciles`: the head's probability mapped to the measured acceptance per tenth of probability, starting from the probability itself and learned from every verified round. The drafter that drives it in the server loop is written once for any model's MTP head (`engine/methods/mtp_drafter.py`).
+
+V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/<profile>.<device>.json` -- Flash-Next 3.05 on the DGX Spark is `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json` -- in the format of the 27B's stair tables:
+
+    {"<context class>": {"<kind>": {"<rows>": ms, ...}, ...}, ..., "step_ms": 3.7, "measured": "how and when"}
+
+`kind` is `chain` or `tree`; the context class is the model's (the 27B's tables key it by context length, Flash-Next's one class is 0). A class not in the file takes the nearest lower one, rows between two measured counts interpolate, rows past the last add `step_ms` a row (else the last two counts' slope). The model follows the live prices online (EMA 0.1 a count, the unmeasured counts shifted by the learned offset), and a price never falls with more rows. A profile without a file for its device logs the missing path once and starts every count at the same 1 ms, so the cut drafts to the full depth until the first rounds price it; the text does not change either way. The device is `dgx-spark` for the GB10, else the GPU's name in lower case (`engine/methods/device.py`).
+
 ## The length router (StairCut off)
 
 Before StairCut, the served profile picked the block width once per request. With the StairCut flags off, `engine/lenrouter.py` still does, so a `serve.env` without them behaves as before.

@@ -19,11 +19,9 @@ sampled requests walked down the greedy tree (`--sampled-tree det`), tool calls,
 the 27B's code. A verified row is the decode step's row bit for bit (ENG-227), so greedy speculation
 writes the plain greedy text and a sampled walk draws exactly what plain sampled decoding draws.
 
-`FlashNextTreeDrafter` is the MTP layer as the loop's tree drafter: the loop syncs the rows it
-committed (`sync(tokens, streams, pos)`); a row's MTP input pairs its streams with the token after it,
-known when the next row arrives or, for the last row, when the next proposal names its anchor. The
-backlog is fed in one call (`FlashNextEngine.mtp_prime`) except the last rows, which ride the draft's
-graph; StairCut cuts the chain and learns from the verify the loop timed (`on_verify`).
+The drafter is the shared MTP tree drafter (engine/methods/mtp_drafter.py) over Flash-Next's MTP head
+(engine/models/flashnext/mtp.py, `draft_heads()["mtp"]`), cut by the shared StairCut whose prior is the
+price file of this pack on this device (ops/prices/qwen3.8-flash-next/<profile>.<device>.json).
 """
 
 from __future__ import annotations
@@ -34,21 +32,22 @@ import time
 import numpy as np
 import torch
 
-from engine.drafters import run_steps
+from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
+from engine.methods.mtp_drafter import MTPTreeDrafter
+from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
-from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine, MTPChainGraph
+from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine
+from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.flashnext.ref import FNModelState
-from engine.models.flashnext.spec import MTPGraphDrafter, StairCut
 from engine.settings import SETTINGS as _S
-from engine.tree import DraftTree
 
 
 #: fingerprint v3 (`FlashNextServing.manifest`): the package's files that compute rows, the tables
 MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/config.py",
            "engine/models/flashnext/engine.py", "engine/models/flashnext/load.py",
-           "engine/models/flashnext/pack.py", "engine/models/flashnext/ple.py",
-           "engine/models/flashnext/ref.py", "engine/models/flashnext/spec.py", "engine/settings.py")
+           "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
+           "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 
@@ -109,6 +108,7 @@ class FlashNextServing:
         self._chain = None                  # a forward_block's rows awaiting their commit
         self.commit_ms = 0.0
         self.captured = False               # the last block captured a verify or commit graph
+        self.heads: dict = {}               # draft heads by name (`draft_heads`)
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
@@ -132,6 +132,14 @@ class FlashNextServing:
 
     def precapture(self, drafter) -> None:
         return None                         # the drafter captured every graph at load (`capture_all`)
+
+    def draft_heads(self) -> dict:
+        """The draft heads this pack carries, by name: its MTP layer ("mtp", made by `add_mtp_head`)."""
+        return self.heads
+
+    def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
+        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len)
+        return self.heads["mtp"]
 
     def settle(self) -> None:
         """Land what is pending, so the state's sections are the sequence's whole (before a
@@ -246,134 +254,30 @@ class FlashNextServing:
             raise ValueError(f"Flash-Next forward at {start}, the state holds {self.st.length} rows")
 
 
-class FlashNextTreeDrafter:
-    """The MTP layer as the server loop's tree drafter (see the module's docstring)."""
-
-    name = "mtp"
-    last_q = None
-    wants_rows = False
-
-    def __init__(self, serving: FlashNextServing, depth: int = 4, siblings: bool = False):
-        self.s, self.fn, self.depth = serving, serving.fn, depth
-        self.cut = StairCut(siblings=siblings)
-        self.mtp = MTPGraphDrafter(self.fn, depth, serving.max_len, cut=self.cut)
-        self.held = None                    # (tokens, streams) of the last rows synced
-        self.queue: list = []               # (streams, next tokens) not fed yet
-        self.round = None                   # the draft ms of the block awaiting its verify
-        self.verify_ms = None
-        self.stats = {"rounds": 0, "draft_ms": 0.0, "fed_rows": 0}
-
-    def report(self) -> str:
-        """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
-        c = self.cut
-        return (f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} "
-                f"draft_ms={c.draft_ms if c.draft_ms is None else round(c.draft_ms, 2)} delta={round(c.delta, 2)} "
-                f"V={ {r: round(v, 1) for r, v in sorted(c.V.items())} } "
-                f"spine_cal={[round(c.c('spine', (b + 0.5) / 10), 2) for b in range(10)]}")
-
-    def capture_all(self) -> None:
-        self.mtp.capture_all()
-
-    # --- the loop's drafter interface -------------------------------------------------------------
-    def reset(self) -> None:
-        self.mtp.st.length = 0
-        self.mtp.st.pool_n = {}
-        self.mtp.pending = None
-        self.held, self.queue, self.round, self.verify_ms = None, [], None, None
-
-    def prime(self, tokens: list[int]) -> None:
-        pass                                # the prompt's rows come through `sync`
-
-    def set_sampling(self, sampler) -> None:
-        pass                                # the draft is the greedy tree; a sampled walk draws on it
-
-    def sync(self, tokens: list[int], streams: torch.Tensor, pos: int, rows=None) -> None:
-        toks = [int(t) for t in tokens]
-        h = streams.reshape(len(toks), -1)
-        if h.shape[0] <= 64:
-            h = h.clone()                   # a static buffer the next forward writes again
-        if self.held is not None:
-            ht, hs = self.held
-            self.queue.append((hs, ht[1:] + [toks[0]]))
-        self.held = (toks, h)
-
-    def observe(self, tokens: list[int]) -> None:
-        # a round that captured a graph took the capture's time: StairCut learns nothing from it
-        # (its price for that row count would start at ~170 ms and the cut would never ask again)
-        if self.round is not None and self.verify_ms is not None and not self.s.captured:
-            self.mtp.observe(list(range(len(tokens))), self.verify_ms + self.s.commit_ms, self.round)
-        self.round, self.verify_ms = None, None
-
-    def on_verify(self, rows: int, ms: float) -> None:
-        self.verify_ms = ms
-
-    def propose_tree(self, context: list[int], k: int) -> DraftTree | None:
-        return run_steps(self.propose_tree_steps(context, k))
-
-    def propose_tree_steps(self, context: list[int], k: int):
-        """The block for the round anchored at context[-1]: the backlog fed, the draft graph launched
-        (the generator stops there so the loop streams the last block meanwhile), the cut."""
-        t0 = time.perf_counter()
-        if not self._feed(int(context[-1])) or k < 1:
-            return None
-        fn, st_m, D = self.fn, self.mtp.st, self.depth
-        rows, nexts = self.mtp.pending
-        self.mtp.pending = None
-        n = len(nexts)
-        cls = fn.qsa_class(st_m.length + n + D - 1)
-        g = self.mtp.graphs.get((n, cls))
-        if g is None:
-            g = self.mtp.graphs[(n, cls)] = MTPChainGraph(fn, st_m, n, D, cls)
-            g.capture()
-        b = fn._mtp_bufs(D)
-        b["stack"][:n].copy_(rows)
-        fn.stage_mtp(st_m, nexts, D)
-        g.graph.replay()
-        host = time.perf_counter() - t0
-        yield                               # the loop streams the last block while the draft runs
-        t1 = time.perf_counter()
-        torch.cuda.current_stream().synchronize()
-        st_m.length += n
-        toks, parents = self.cut.cut(int(context[-1]), b["tok_h"][:D].tolist(), b["prob_h"][:D].tolist())
-        tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
-        # the draft's own cost: its host work on both sides of the stop, not the streaming between
-        # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
-        self.round = (host + time.perf_counter() - t1) * 1e3
-        self.stats["rounds"] += 1
-        self.stats["draft_ms"] += self.round
-        return tree
-
-    # --- internals -------------------------------------------------------------------------------
-    def _feed(self, anchor: int) -> bool:
-        """Every synced row paired with its next token (the last with the anchor); all but the last
-        depth + 1 into the MTP cache now, those into the draft's own feed. False: nothing synced."""
-        if self.held is not None:
-            ht, hs = self.held
-            self.queue.append((hs, ht[1:] + [anchor]))
-            self.held = None
-        if not self.queue:
-            return self.mtp.pending is not None
-        rows = torch.cat([q[0] for q in self.queue]) if len(self.queue) > 1 else self.queue[0][0]
-        nexts = [t for q in self.queue for t in q[1]]
-        self.queue = []
-        n, keep = len(nexts), min(len(nexts), self.depth + 1)
-        if n > keep:
-            self.fn.mtp_prime(rows[:n - keep], nexts[:n - keep], self.mtp.st)
-        self.mtp.pending = (rows[n - keep:], nexts[n - keep:])
-        self.stats["fed_rows"] += n
-        return True
-
-
-#: the repository root (the hot draft vocabulary is ops/fn-hot-vocab.npy)
+#: the repository root (the hot draft vocabulary is ops/fn-hot-vocab.npy, the price files ops/prices/)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+#: the model's name in ops/prices/ and models/
+MODEL_ID = "qwen3.8-flash-next"
+
+
+def profile_of(pack: str) -> str:
+    """The weight profile a pack is served as: the running one (QSE_WEIGHTS), else flashnext-<pack dir>."""
+    return os.environ.get("QSE_WEIGHTS") or "flashnext-" + os.path.basename(os.path.normpath(pack))
+
+
+def prices(pack: str, log=print) -> PriceModel:
+    """StairCut's prior for this pack on this device (ops/prices/<model>/<profile>.<device>.json)."""
+    return PriceModel.load(os.path.join(ROOT, "ops", "prices", MODEL_ID, f"{profile_of(pack)}.{device_id()}.json"),
+                           log=log)
 
 
 def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print):
-    """Flash-Next for the server (`server/app.py` `_load_flashnext`): the pack's weights, the engine in
-    the loop's interface, and with `spec` the MTP drafter over the hot draft head (`FN_DRAFT_HOT` ids of
-    ops/fn-hot-vocab.npy, 0 = the whole vocabulary), its graphs captured -- gated by the load-time
-    self-check (a failed check serves plain decode). `mark(stage)` at "weights", "engine", "drafters"
-    (the server's load ledger). Returns (serving, drafter or None, info)."""
+    """Flash-Next for the server (`serve` below): the pack's weights, the engine in the loop's
+    interface, and with `spec` the shared MTP drafter over the pack's MTP head with the hot draft head
+    (`FN_DRAFT_HOT` ids of ops/fn-hot-vocab.npy, 0 = the whole vocabulary), its graphs captured and
+    StairCut's prior from the price file -- gated by the load-time self-check (a failed check serves
+    plain decode). `mark(stage)` at "weights", "engine", "drafters" (the server's load ledger).
+    Returns (serving, drafter or None, info)."""
     from engine.models.flashnext.load import load as fn_load
     idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
     mark("weights")
@@ -388,7 +292,7 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
         if check["ok"]:
-            drafter = FlashNextTreeDrafter(eng, depth=depth)
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False))
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")

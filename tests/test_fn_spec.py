@@ -5,15 +5,14 @@
     slots never exceed a row count's worth;
   * `window_src` (where a row's conv taps live): equal to a brute-force walk over positions, for the
     GDN conv (distances 3, 2, 1, a state of 3) and the PLE conv (9, 6, 3, a state of 9);
-  * `walk` follows the target's token through the children and stops where none carries it;
   * `FlashNextEngine._tail_cols` (the conv state after a commit) is the last positions of the path;
   * `FlashNextEngine._stage_qsa` (ENG-147): dense rows see every position, sparse rows 2,048 selected
     positions and their tail; a row's own blocks map positions before the block start to cache slots
     and later ones to the row's ancestors; `qsa_class` widens by powers of two past the budget;
   * the n-gram ids of a block's rows (`FlashNextEngine.path_ple_ids`) are the reference hash of each
-    row's own path; the QSA selection from block scores is the reference's stable top-512;
-  * `StairCut` cuts a draft into a valid DFS block, keeps a confident chain and drops an unsure one,
-    adds a sibling only when it pays, and learns its calibration from the walk.
+    row's own path; the QSA selection from block scores is the reference's stable top-512.
+
+The walk and StairCut are the shared ones now: tests/test_methods_walk.py, tests/test_staircut.py.
 """
 
 from __future__ import annotations
@@ -95,16 +94,6 @@ def test_window_src_equals_brute_force():
     return "128 random trees, GDN and PLE windows; the one-row windows are the decode step's"
 
 
-def test_walk():
-    from engine.models.flashnext.spec import walk
-    tokens = [5, 10, 11, 20, 21, 30, 12, 22]
-    parents = [-1, 0, 1, 1, 3, 4, 0, 6]
-    assert walk(tokens, parents, [12, 0, 0, 0, 0, 0, 22, 9]) == [0, 6, 7]
-    assert walk(tokens, parents, [10, 20, 0, 21, 30, 1, 0, 0]) == [0, 1, 3, 4, 5]
-    assert walk(tokens, parents, [99] * 8) == [0]
-    return "paths through first and later children, and the empty path"
-
-
 def test_tail_cols():
     from engine.models.flashnext.engine import FlashNextEngine
     tc = FlashNextEngine._tail_cols
@@ -170,39 +159,6 @@ def test_stage_qsa_rows():
     assert cls(eng2, 2050) == 0 and cls(eng2, 2051) == 1024 and cls(eng2, 4095) == 1024
     assert cls(eng2, 4096) == 2048 and cls(eng2, 32767) == 8192
     return "dense/sparse counts, own-block slots through the ancestors, tails, classes"
-
-
-def test_staircut():
-    from engine.models.flashnext.spec import StairCut
-    sc = StairCut(siblings=True)
-    tok = [[10 + k, 20 + k] for k in range(5)]
-    toks, par = sc.cut(1, tok, [[0.99, 0.005]] * 5)
-    assert toks == [1, 10, 11, 12, 13, 14] and par == [-1, 0, 1, 2, 3, 4], (toks, par)
-    toks, par = sc.cut(1, tok, [[0.05, 0.02]] * 5)
-    assert toks == [1], toks
-    toks, par = sc.cut(1, tok, [[0.3, 0.65]] + [[0.97, 0.01]] * 4)
-    DraftTree(tokens=toks, parents=par).check()
-    assert 20 in toks and toks.index(20) < toks.index(10), (toks, par)          # sibling before the spine
-    # learning: a spine token at p 0.95 that is always rejected pulls its bin down
-    before = sc.c("spine", 0.95)
-    for _ in range(50):
-        sc.cut(1, tok, [[0.95, 0.01]] * 5)
-        sc.observe([0], 30.0, 2.0)
-    assert sc.c("spine", 0.95) < 0.2 < before
-    # prices: a count measured slow does not make the next count cheaper, and the offset moves the rest
-    sc2 = StairCut(siblings=False)
-    sc2.V[3] = 60.0
-    p = sc2.prices(6)
-    assert all(p[r + 1] >= p[r] for r in range(1, 6)) and p[4] >= 60.0, p
-    sc3 = StairCut(siblings=True)
-    for _ in range(80):
-        sc3.cut(1, tok, [[0.99, 0.0]] * 5)
-        sc3.last = (sc3.last[0], sc3.last[1], 2)
-        sc3.observe([0, 1], 40.0, 2.0)               # every 2-row block cost 40 ms: a long context
-    assert sc3.delta > 8.0 and sc3.price(5) > sc3.prior(5) + 8.0
-    toks, par = sc3.cut(1, tok, [[0.99, 0.0]] * 5)
-    assert 20 not in toks, toks                       # a sibling of q 0 is never bought
-    return "confident chain kept, unsure dropped, a paying sibling first, calibration learned, prices monotone"
 
 
 def test_ple_ids_per_path():

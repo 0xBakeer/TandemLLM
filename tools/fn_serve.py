@@ -35,7 +35,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
-from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder, StairCut  # noqa: E402
+from engine.methods.staircut import StairCut  # noqa: E402
+from engine.models.flashnext.serving import prices  # noqa: E402
+from tools.fn_specloop import MTPGraphDrafter, SpecDecoder  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL = "flash-next-3.05"
@@ -70,7 +72,7 @@ class Server:
         self.spec_ok = bool(sc["ok"])
         self.st = eng.new_state(a.max_len)
         self.dg = DecodeGraph(eng, self.st)
-        self.cut = StairCut(siblings=False)
+        self.cut = StairCut(prices(a.pack), siblings=False)
         self.dr = Recorder(self, eng, a.depth, a.max_len, cut=self.cut)
         self.sd = SpecDecoder(eng, self.st, self.dr, graphs=True)
         c = idx.cfg

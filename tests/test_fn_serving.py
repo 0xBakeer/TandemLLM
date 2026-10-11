@@ -1,4 +1,5 @@
-"""SRV-87: the host side of Flash-Next in the server loop (engine/models/flashnext/serving.py), no GPU.
+"""SRV-87: the host side of Flash-Next in the server loop (engine/models/flashnext/serving.py and the
+shared MTP tree drafter, engine/methods/mtp_drafter.py), no GPU.
 
   * the drafter pairs every synced row with the token after it -- the next synced row's token, or for
     the last row the anchor the proposal names -- across prompt chunks, a forced phrase, verified paths
@@ -24,7 +25,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.methods import walk  # noqa: E402
 from engine.models.flashnext.ref import FNState  # noqa: E402
-from engine.models.flashnext.serving import FlashNextServing, FlashNextTreeDrafter  # noqa: E402
+from engine.methods.mtp_drafter import MTPTreeDrafter  # noqa: E402
+from engine.methods.staircut import PriceModel, StairCut  # noqa: E402
+from engine.models.flashnext.serving import FlashNextServing  # noqa: E402
 from engine.tree import DraftTree  # noqa: E402
 
 
@@ -80,27 +83,28 @@ def _rows(pos, n):
 def test_drafter_pairs_rows_with_their_next_token():
     fn = _FN()
     s = FlashNextServing(fn, 64)
-    d = FlashNextTreeDrafter(s, depth=2)
+    d = MTPTreeDrafter(s, s.add_mtp_head(2), StairCut(PriceModel()))
+    assert s.draft_heads()["mtp"] is d.head
     prompt = list(range(100, 110))
     d.sync(prompt[:6], _rows(0, 6), 0)                 # a prompt in two chunks
     d.sync(prompt[6:], _rows(6, 4), 6)
     assert d._feed(500)                                # the first token after the prompt
     # 10 rows: 7 primed at once in position order, the last 3 (depth + 1) for the draft's feed
     assert fn.primed == [([0.0, 1, 2, 3, 4, 5, 6], prompt[1:8], 0)]
-    rows, nexts = d.mtp.pending
+    rows, nexts = d.pending
     assert rows[:, 0].tolist() == [7, 8, 9] and nexts == prompt[8:] + [500]
-    d.mtp.pending = None
-    d.mtp.st.length += 3                               # what the draft's own feed does
+    d.pending = None
+    d.head.st.length += 3                               # what the draft's own feed does
     # a verified path (anchor 500 and two drafts), then a forced phrase, then one decode step
     d.sync([500, 501, 502], _rows(10, 3), 10)
     d.sync([503, 504], _rows(13, 2), 13)
     d.sync([505], _rows(15, 1), 15)
     assert d._feed(506)
     assert fn.primed[-1] == ([10.0, 11, 12], [501, 502, 503], 10)
-    rows, nexts = d.mtp.pending
+    rows, nexts = d.pending
     assert rows[:, 0].tolist() == [13, 14, 15] and nexts == [504, 505, 506]
     d.reset()
-    assert d.mtp.st.length == 0 and d.held is None and d.queue == [] and not d._feed(1)
+    assert d.head.st.length == 0 and d.held is None and d.queue == [] and not d._feed(1)
     return "prompt chunks, forced phrase, decode steps: each row with its next token; backlog primed in order"
 
 

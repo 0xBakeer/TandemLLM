@@ -28,14 +28,16 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
-from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder, StairCut  # noqa: E402
+from engine.methods.staircut import StairCut  # noqa: E402
+from engine.models.flashnext.serving import prices  # noqa: E402
+from tools.fn_specloop import MTPGraphDrafter, SpecDecoder  # noqa: E402
 from tools.fn_draft_trace import prompt_ids  # noqa: E402
 from tools.fn_generate import mem_available_gib  # noqa: E402
 
 
 class Bench:
-    def __init__(self, eng: FlashNextEngine, eos: set):
-        self.eng, self.eos = eng, eos
+    def __init__(self, eng: FlashNextEngine, eos: set, pack: str):
+        self.eng, self.eos, self.pack = eng, eos, pack
         self.st = eng.new_state(eng.max_len)
         self.dg = None
         self.drafters: dict = {}
@@ -70,7 +72,7 @@ class Bench:
         stack = eng.prompt_stack
         dr = self.drafters.get((depth, hot, cut))
         if dr is None:
-            pol = None if cut == "none" else StairCut(siblings=cut == "tree")
+            pol = None if cut == "none" else StairCut(prices(self.pack), siblings=cut == "tree")
             dr = self.drafters[(depth, hot, cut)] = MTPGraphDrafter(eng, depth, eng.max_len, cut=pol)
         sd = self.decoders.get(depth)
         if sd is None:
@@ -107,8 +109,8 @@ class Bench:
                                   "rejections_upper": s["rounds"]}
         if dr.cut is not None:
             extra |= {"rows_a_round": round(s["rows"] / R, 2), "moved_rounds": s["moved"],
-                     "calibration": {k: [round(h / n, 2) if n else None for h, n in v] for k, v in dr.cut.cal.items()},
-                     "verify_ms_by_rows": {r: round(v, 2) for r, v in sorted(dr.cut.V.items())}}
+                     "calibration": {k: [round(h / n, 2) if n else None for h, n in v] for k, v in dr.cut.cal.cal.items()},
+                     "verify_ms_by_rows": {r: round(v, 2) for r, v in sorted(dr.cut.prices.learned(dr.cut.kind)[0].items())}}
         return out, {"tok_s": round((len(out) - 1) / dt, 2), "rounds": s["rounds"],
                      "tokens_a_round": round((len(out) - 1) / R, 3),
                      "accepted_a_round": round(s["accepted"] / R, 3),
@@ -154,7 +156,7 @@ def main() -> None:
         from tools.fn_generate import chat_ids
         res["self_check"] = eng.self_check(chat_ids(tok, "Count from one to twenty in words."))
     res["knobs"]["self_check_first"] = a.self_check
-    b = Bench(eng, eos)
+    b = Bench(eng, eos, a.pack)
     for c in a.classes.split(","):
         ids = prompt_ids(tok, c, a.ctx)          # a class, or one of the extra code requests
         b.plain(ids, 32)                                  # warm: the decode graph
