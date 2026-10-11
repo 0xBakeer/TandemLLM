@@ -305,7 +305,7 @@ export class QseChat extends LightElement {
     }
     const next = applyEvent(this.conv, e);
     this.conv = next;
-    if (e.type === 'run.done' || e.type === 'run.started' || e.type === 'conversation.updated' || e.type === 'tool.asking') this.patchList(next);
+    if (e.type === 'run.done' || e.type === 'run.started' || e.type === 'run.phase' || e.type === 'conversation.updated' || e.type === 'tool.asking') this.patchList(next);
   }
 
   /** a fresh snapshot of the open chat, with the events that came while it was on its way */

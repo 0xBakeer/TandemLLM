@@ -447,3 +447,32 @@ Designer requests (2026-10-12, after building the UI against v0.2; the mock does
     `/v1/chat-app` is then unused by the dashboard.
 11. The global stream (`GET /events`) is not consumed yet; the rail polls `GET /conversations` every
     10 s while the tab is visible. Badges and notifications are a follow-up.
+
+Backend notes (2026-10-12, chatd phase 1: SRV-343, SRV-345, SRV-347, SRV-349; how each request above is met):
+
+1. `GET /capabilities` answers `application/json` through the forward, also when a password is set
+   and the device is not signed in (then `session.signed_in: false`).
+2. A pane without an `id` keeps the provisional `kind:ref` as its id; `ui.changed` carries it.
+3. A `{ui}`-only PATCH never answers 409 and does not move `version`.
+4. Phase 2: `GET /terminals` is `[]`, the WebSocket route answers 503 `sandbox_unavailable`.
+5. `branch.changed` goes to every device, the originating one included. The client applies a
+   snapshot through `store.adopt` (events past the snapshot's `seq` go on top, none twice).
+6. `run.phase` while `queued` carries `queue_position` when the engine's live row (or its SSE
+   comment `: waiting, position N`) has one.
+7. Phase 2 (no tools yet).
+8. Every `conversation.updated` from a change of the summary carries `version`.
+9. `POST /attachments` (multipart `file`, at most 50 MB) answers an `Attachment` with `url`; an
+   image's `preview` is its `url`. A text file goes to the model as a fenced block after the message,
+   an image as an `image_url` part when the model's card says `vision`.
+10. The forward accepts the `qse_dash` cookie; `POST /session {password}` is the dashboard's login.
+11. `GET /events` (the global stream) is served: `conversation.created/updated/deleted`,
+    `run.started`, `run.done`, each with its `gseq`.
+
+Also: the stream starts at the snapshot's `seq` (an older id replays what the snapshot already has).
+`Run.started_by` is filled in a snapshot only for a device other than the one that started the run
+(by its browser and system, e.g. "Chrome on macOS"); `run.started` events carry it as null.
+`Run.acceptance` is null while a run is on (the engine's live row has no rate); the finished
+message's `stats.acceptance` has it. `thinking.budget` null means no cap. A message sent while a run
+is on is queued (`202 {queued: QueuedMessage}`). Branch switches answer 409 `run_active` while a run
+is on. Stop, like the mock, lets the queue drain afterwards. Not in phase 1: compaction (501
+`not_available`), tools, permissions, MCP, prompts, presets, the sandbox.

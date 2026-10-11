@@ -105,7 +105,8 @@ export class QseChatContext extends LightElement {
     const last = lastStats(c);
     const tps = r ? r.decode_tps : last?.decode_tps ?? null;
     const hist = r?.tps_history ?? [];
-    const budget = r?.thinking.budget ?? (c.settings.thinking ? 8_192 : 0);
+    // the contract's null is "no cap" (auto effort, or a model without levels), never a made-up figure
+    const budget = !c.settings.thinking ? 0 : r ? r.thinking.budget : null;
     const used = r?.thinking.used ?? last?.reasoning_tokens ?? 0;
     const elapsed = r ? Math.max(0, Math.round((this.now - Date.parse(r.started_at)) / 1000)) : null;
     return html`<section class="ch-ctx-sec ${r ? 'is-live' : 'is-idle'}" data-sec="now">
@@ -123,7 +124,7 @@ export class QseChatContext extends LightElement {
         ${r?.tool ? html`<div><dt>tool</dt><dd><code>${r.tool.name}</code></dd></div>` : nothing}
       </dl>
       <div class="ch-meter-block">
-        <div class="meter-head"><span>thinking budget</span><span class="num">${budget ? `${exact(used)} of ${exact(budget)}` : 'off'}</span></div>
+        <div class="meter-head"><span>thinking budget</span><span class="num">${budget ? `${exact(used)} of ${exact(budget)}` : budget === 0 ? 'off' : `${exact(used)}, no cap`}</span></div>
         <div class="meter ch-meter"><span class="meter-fill ${budget && used / budget > 0.85 ? 'is-warn' : ''}" style="width:${budget ? Math.min(100, (used / budget) * 100).toFixed(1) : 0}%"></span></div>
       </div>
     </section>`;
