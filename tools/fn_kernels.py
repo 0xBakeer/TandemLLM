@@ -666,6 +666,12 @@ class MoEBank:
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in self.keep)
 
+    def block(self, e: int, j: int):
+        """Projection j (0 gate, 1 up, 2 down) of expert e as an EXL3Block (views; the reference
+        checks dequantise it)."""
+        t, s_u, s_v = self.keep[9 * e + 3 * j: 9 * e + 3 * j + 3]
+        return X.EXL3Block(t, s_u, s_v)
+
 
 def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     """x [M, K] bf16 @ w^T -> fp32 [M, N]; w an fp16 tensor [N, K] or int8 rows (`pack.Int8Rows`)."""
@@ -686,8 +692,13 @@ def mix_up(d: torch.Tensor, n: torch.Tensor, w_up, hc: int, out: torch.Tensor | 
     H = q.shape[0] // hc
     if out is None:
         out = torch.empty(d.shape[0], H, dtype=torch.bfloat16, device=d.device)
-    _module().fn_mix_up(d, n, q, s, out, hc)
+    # a launch stages its rows' activations in shared memory: at most MIX_ROWS rows a launch
+    for r0 in range(0, d.shape[0], MIX_ROWS):
+        _module().fn_mix_up(d[r0:r0 + MIX_ROWS], n[r0:r0 + MIX_ROWS], q, s, out[r0:r0 + MIX_ROWS], hc)
     return out
+
+
+MIX_ROWS = 64
 
 
 def router(logits: torch.Tensor, E: int, k: int, ids=None, wts=None):

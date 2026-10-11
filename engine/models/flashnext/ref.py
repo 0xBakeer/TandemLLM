@@ -250,16 +250,25 @@ class FlashNextRef:
         return h0 + (out.unsqueeze(-2) * inj.unsqueeze(-1)).flatten(-2)
 
     # --- PLE
-    def ple(self, h: torch.Tensor, tokens: torch.Tensor, li: int, st: FNState) -> torch.Tensor:
-        c = self.cfg
-        p = self.pre(li) + "ple."
+    def ple_ids(self, tokens: torch.Tensor, li: int, st: FNState) -> torch.Tensor:
+        """The table rows of `tokens` ([T, heads], on the host); advances the hash context."""
         hsh = self.hash[li]
         ctx = st.ple_ctx.get(li)
         if ctx is None:
-            ctx = torch.full((1, hsh.context_len), c.eos_token_id, dtype=torch.long)
-        ids = hsh.ids(tokens.view(1, -1).cpu(), ctx.cpu())[0]           # [T, heads]
+            ctx = torch.full((1, hsh.context_len), self.cfg.eos_token_id, dtype=torch.long)
+        ids = hsh.ids(tokens.view(1, -1).cpu(), ctx.cpu())[0]
         st.ple_ctx[li] = hsh.next_context(tokens.view(1, -1).cpu(), ctx.cpu())
+        return ids
+
+    def ple(self, h: torch.Tensor, tokens: torch.Tensor, li: int, st: FNState) -> torch.Tensor:
+        ids = self.ple_ids(tokens, li, st)                                  # [T, heads]
         emb = self.tables[li].gather(ids, dtype=self.dtype).to(self.device).flatten(-2)  # [T, E]
+        return self.ple_apply(h, emb, li, st)
+
+    def ple_apply(self, h: torch.Tensor, emb: torch.Tensor, li: int, st: FNState) -> torch.Tensor:
+        """The PLE branch from its gathered rows `emb` [T, E] (no host work: a graph can hold it)."""
+        c = self.cfg
+        p = self.pre(li) + "ple."
         key = self.rms(self.lin(emb, self.w(p + "key_proj.weight")), self.w(p + "norm_key.weight"),
                   c.rms_norm_eps, group=c.hidden_size).unflatten(-1, (c.hc_count, c.hidden_size))
         value = self.lin(emb, self.w(p + "value_proj.weight"))
