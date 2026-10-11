@@ -396,6 +396,30 @@ class FlashNextEngine(FlashNextRef):
         y = K.gate_mul(o.transpose(1, 2), qkv, D)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
+    # ------------------------------------------------------------------------- MTP (ENG-153)
+    @torch.no_grad()
+    def mtp_feed(self, stack: torch.Tensor, next_tokens: torch.Tensor, st_m: FNState):
+        """The MTP layer over committed rows: `stack` [T, hc H] (the trunk's streams at positions
+        st_m.length..) and the tokens that follow them. Returns (logits [T, vocab] of the token after
+        next, the MTP layer's own streams for a deeper draft). The reference's `mtp` on the engine's
+        primitives (EXL3 projections, int8 mixers, the expert kernels); eager."""
+        return self.mtp(stack, next_tokens.to(self.device), st_m)
+
+    @torch.no_grad()
+    def mtp_chain(self, stack_row: torch.Tensor, next_token: int, st_m: FNState, depth: int) -> list[int]:
+        """A greedy draft chain of `depth` tokens from one committed row and its successor: the
+        first feed is real and stays in the MTP layer's cache; the deeper feeds are drafts and are
+        rolled back (the cache is kept by length)."""
+        logits, h = self.mtp_feed(stack_row, torch.tensor([next_token]), st_m)
+        keep = st_m.length
+        out = [int(logits[-1].argmax())]
+        for _ in range(depth - 1):
+            logits, h = self.mtp_feed(h[-1:], torch.tensor([out[-1]]), st_m)
+            out.append(int(logits[-1].argmax()))
+        st_m.length = keep
+        st_m.clamp_pool()
+        return out
+
     # ------------------------------------------------------------------------- generation
     @torch.no_grad()
     def prefill(self, ids: torch.Tensor, st: FNState, chunk: int = 2048) -> torch.Tensor:

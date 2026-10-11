@@ -139,9 +139,11 @@ def apply_tiles(path: str = TILES, dense_path: str = DENSE_SPLITS) -> int:
     return n
 
 
-def load(path: str, device="cuda", mix: str | None = None, log=print, layers=None, first: int | None = None):
-    """(idx, W, banks, tables, timing) for the trunk of the pack at `path` (no MTP layer). `first`:
-    only the first N layers, with `idx.cfg` cut to them (a debug model for checks beside :8000)."""
+def load(path: str, device="cuda", mix: str | None = None, log=print, layers=None, first: int | None = None,
+         mtp: bool = False):
+    """(idx, W, banks, tables, timing) for the trunk of the pack at `path`, and with `mtp` the MTP
+    layer (its weights under `mtp.*`, its experts as banks[-1]; ENG-153). `first`: only the first N
+    layers, with `idx.cfg` cut to them (a debug model for checks beside :8000)."""
     import dataclasses
     if first is not None:
         layers = range(first)
@@ -149,15 +151,15 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
     t0 = time.time()
     tiles = apply_tiles()
     idx = PackIndex.open(path)
-    idx.audit(mtp=False)
+    idx.audit(mtp=mtp)
     c = idx.cfg
     W: dict = {}
     timing = {"index_s": round(time.time() - t0, 2), "tiles": tiles}
     t1 = time.time()
     lay = range(c.num_hidden_layers) if layers is None else layers
-    # every non-expert tensor of the trunk
+    # every non-expert tensor of the trunk (and of the MTP layer)
     for n, t in idx.tensors.items():
-        if n.startswith("mtp.") or t.kind == "expert" or n.endswith(".mul1"):
+        if (n.startswith("mtp.") and not mtp) or t.kind == "expert" or n.endswith(".mul1"):
             continue
         li = int(n.split(".")[1]) if n.startswith("layers.") else None
         if li is not None and li not in lay:
@@ -177,7 +179,7 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
     t1 = time.time()
     # mixers: down + inject as one weight; up alone
     sites = sorted({n.rsplit(".", 2)[0] for n, t in idx.tensors.items()
-                    if t.kind == "mixer" and not n.startswith("mtp.")
+                    if t.kind == "mixer" and (mtp or not n.startswith("mtp."))
                     and (not n.startswith("layers.") or int(n.split(".")[1]) in lay)})
     for site in sites:
         dn = idx.read(site + ".input_mix_weight_down.weight", device)
@@ -189,9 +191,10 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
         W[site + ".rank"] = dn.shape[0]
     timing["mixers_s"] = round(time.time() - t1, 2)
     # fused launches
-    for li in lay:
-        p = f"layers.{li}."
-        if c.is_linear(li):
+    from engine.models.flashnext.ref import MTP
+    for li in list(lay) + ([MTP] if mtp else []):
+        p = "mtp.layers.0." if li == MTP else f"layers.{li}."
+        if li != MTP and c.is_linear(li):
             a = p + "linear_attn."
             g = EXL3Block.group([W[a + "in_proj_qkv.weight"], W[a + "in_proj_z.weight"]], ["qkv", "z"])
             W[a + "qkvz"] = g
@@ -210,6 +213,8 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
         banks[li] = load_banks(idx, li, device)
         if log and li % 8 == 7:
             log(f"[fn-load] experts through layer {li}: {time.time() - t1:.1f} s")
+    if mtp:
+        banks[MTP] = load_banks(idx, 0, device, prefix="mtp.")
     timing["experts_s"] = round(time.time() - t1, 2)
     tables = {li: idx.table for li in c.ple_layers} if idx.table is not None else {}
     if DROP_SHARD_CACHE:
