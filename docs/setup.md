@@ -39,7 +39,7 @@ The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verif
 
 ## The memory estimate
 
-`server/setup/estimate.py` holds the one formula; `models/estimate-cases.json` pins it with 44 cases, and the dashboard's TypeScript copy must give the same answers.
+`server/setup/estimate.py` holds the one formula; `models/estimate-cases.json` pins it with 47 cases, and the dashboard's TypeScript copy must give the same answers.
 
 - The parts: the OS and other programs (the device's `reserved_gib`), the weights and the drafters of the profile, the CUDA graphs, the engine's warm-up workspace, the allocator's reserve, 1.19 GiB per side slot, and every tool that is on.
 - The conversations (KV): with the pool, each slot at 32,768 tokens or its window if smaller (`typical_fill_tokens`); without it, every window in full, since it is allocated at load.
