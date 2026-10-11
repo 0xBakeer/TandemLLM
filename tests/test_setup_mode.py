@@ -83,7 +83,8 @@ def test_the_setup_routes():
 
 class Box:
     """A checkout with ops/ (the real start.sh and engines.sh), a serve.env whose PY is a stub that
-    records how it was started, and PATH shims for setsid and curl (healthy once the stub ran)."""
+    records how it was started, and PATH shims for setsid, curl (healthy once the stub ran) and ss
+    (no port taken: on a box with a live engine the real one sees its port)."""
 
     def __init__(self):
         self.tmp = tempfile.mkdtemp(prefix="setup-mode-")
@@ -106,7 +107,9 @@ class Box:
             fh.write('#!/bin/bash\nexec "$@"\n')
         with open(os.path.join(bin_, "curl"), "w") as fh:
             fh.write('#!/bin/bash\n[ -f "' + os.path.join(self.root, "healthy") + '" ]\n')
-        for f in ("fakepy", "setsid", "curl"):
+        with open(os.path.join(bin_, "ss"), "w") as fh:
+            fh.write('#!/bin/bash\nexit 0\n')
+        for f in ("fakepy", "setsid", "curl", "ss"):
             os.chmod(os.path.join(bin_, f), 0o755)
         with open(os.path.join(REPO, "ops", "serve.env")) as fh:
             env = fh.read()

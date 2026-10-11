@@ -145,9 +145,14 @@ class Box:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def __enter__(self):
+        # the box's own ports (8000, 8124) are free here, whatever this machine runs on them (a
+        # live engine holds :8000 on the reference box); any other port is asked for real
+        self._port_taken = apply._port_taken
+        apply._port_taken = lambda port: port not in (8000, 8124) and self._port_taken(port)
         return self
 
     def __exit__(self, *exc):
+        apply._port_taken = self._port_taken
         self.close()
 
     def files(self) -> set:
