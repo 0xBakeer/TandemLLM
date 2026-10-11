@@ -60,6 +60,8 @@ def test_27b_cost_is_the_dashboards_formula():
     adapter.discard_pending(eng)
     assert eng._pending_walk is False and eng._pend is None
     assert Qwen38Engine.cost is adapter.cost and Qwen38Engine.discard_pending is adapter.discard_pending
+    assert Qwen38Engine.precapture is adapter.precapture and Qwen38Engine.manifest is adapter.manifest
+    assert Qwen38Engine.caps.caches and Qwen38Engine.caps.side_slots
     return f"snapshot_cost {sc}; installed on Qwen38Engine"
 
 

@@ -1586,15 +1586,13 @@ def _statvfs_free(path: str) -> int:
     return st.f_bavail * st.f_frsize
 
 
-def _engine_files(root: str, skip=(), packages=()) -> list[str]:
-    """The engine's own modules the fingerprint reads: every file under `engine/` but the other
-    models' packages and the file names in `skip` (at the top of `engine/`), in a fixed order.
-    `engine/models/` (the model layer, ENG-221) is one of those packages: the 27B reads none of
-    it, so it is left out and the 27B's fingerprint is the bytes it always was; so is
-    `engine/methods/` (the methods written once for every model, ENG-E8), until the arithmetic
-    manifest of fingerprint v3 (ENG-243) names what in it computes rows. A model whose rows
-    its own package computes names it in `packages` (e.g. "models/flashnext"); its files follow
-    the rest, in the same order rule."""
+def _engine_files(root: str, skip=()) -> list[str]:
+    """The engine's own modules fingerprint v2 reads: every file under `engine/` but the model
+    layer's and the other packages, and the file names in `skip` (at the top of `engine/`), in a
+    fixed order. `engine/models/` (the model layer, ENG-221) is left out, so the 27B's fingerprint is
+    the bytes it always was; so is `engine/methods/` (the methods written once for every model,
+    ENG-E8). A model's own fingerprint is v3's, from its adapter's manifest (engine/methods/manifest.py,
+    ENG-243); v2 stays as it is, frozen, to adopt the files it wrote."""
     out = []
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
@@ -1603,10 +1601,6 @@ def _engine_files(root: str, skip=(), packages=()) -> list[str]:
         for name in sorted(files):
             if name.endswith(".py") and not (dirpath == base and name in skip):
                 out.append(os.path.join(dirpath, name))
-    for pkg in packages:
-        for dirpath, dirnames, files in os.walk(os.path.join(base, pkg)):
-            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
-            out.extend(os.path.join(dirpath, n) for n in sorted(files) if n.endswith(".py"))
     return out
 
 
@@ -1632,7 +1626,9 @@ _TOOLS_IMPORT = re.compile(r"^\s*(?:from\s+tools\s+import\s+([\w\s,()]+)|from\s+
 
 #: knob owners whose defaults cannot change the 27B's rows: the server's (no code under `server/`
 #: is in the fingerprint), the model layer's (`engine/models/`, which `_engine_files` leaves out) and
-#: Flash-Next's kernels (`tools/fn_*`, imported only from `engine/models/flashnext/`)
+#: Flash-Next's kernels (`tools/fn_*`, imported only from `engine/models/flashnext/`). Part of the
+#: frozen v2 formula: without it v2 of this tree would not be the served tree's, and v3 could not
+#: adopt its files; v3 counts only the knobs its manifest's files own
 _NOT_27B_KNOBS = ("server/", "engine/models/", "tools/fn_")
 
 
@@ -1687,19 +1683,20 @@ def _tools_modules(root: str, files: list[str]) -> list[str]:
     return [os.path.join(root, "tools", n + ".py") for n in sorted(seen)]
 
 
-def fingerprint(root: str, extra: dict, skip=(), packages=()) -> str:
-    """What the rows on disk depend on besides the tokens: the engine's code (every file under
-    `engine/` but the other models' packages, and the file names in `skip`), the `tools/` modules
+def fingerprint(root: str, extra: dict, skip=()) -> str:
+    """Fingerprint v2 (frozen since ENG-243; the tier and the spill use v3, engine/methods/manifest.py,
+    and compute this one to adopt its files once): what the rows on disk depend on besides the
+    tokens: the engine's code (every file under `engine/` but the model layer and the other
+    packages, and the file names in `skip`), the `tools/` modules
     it imports (`_tools_modules`), and `extra` (the weights, the arithmetic flags, the grid, the
     library versions). A file written under another fingerprint is swept. The tier skips nothing;
     the session spill (engine/spill.py) skips the files that keep state rather than compute it.
     `engine/settings.py` counts by its arithmetic knobs' defaults, not its bytes: 0.4.6-test
     registered seven server knobs there, and that alone swept 13 shared heads (12.4 GB) and 13
-    spilled conversations (29.6 GB) at its start (FX15, 2026-10-08). `packages`: a model's own
-    package under `engine/` (`_engine_files`); empty for the 27B."""
+    spilled conversations (29.6 GB) at its start (FX15, 2026-10-08)."""
     h = hashlib.sha256()
     h.update(b"fp2")
-    files = _engine_files(root, skip, packages)
+    files = _engine_files(root, skip)
     for p in files + _tools_modules(root, files):
         rel = os.path.relpath(p, root)
         h.update(rel.encode())

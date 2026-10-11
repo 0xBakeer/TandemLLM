@@ -1,13 +1,14 @@
-"""The 27B's cold adapter verbs (ENG-E8 step 0): installed on `Qwen38Engine` when this module is
-imported, so the shared server and caches call `eng.cost()`, `eng.discard_pending()` and `eng.manifest()` on either
-model without a branch, and `engine/model.py` (in the 27B's arithmetic manifest) keeps its bytes. The
-server's loader takes the class from here; the hot verbs stay the engine's own methods."""
+"""The 27B's cold adapter verbs (ENG-E8): installed on `Qwen38Engine` when this module is imported, so
+the shared server and caches read `eng.caps` and call `eng.cost()`, `eng.discard_pending()`,
+`eng.manifest()` and `eng.precapture()` on either model without a branch, and `engine/model.py` (in
+the 27B's arithmetic manifest) keeps its bytes. The server's loader takes the class from here; the
+hot verbs stay the engine's own methods."""
 
 from __future__ import annotations
 
 from engine.methods.manifest import Manifest
 from engine.model import Qwen38Engine
-from engine.models.adapter import CostModel
+from engine.models.adapter import Capabilities, CostModel
 
 #: what the 27B's stored rows depend on (fingerprint v3, ENG-243): the forward, verify and commit
 #: bodies, the KV pages and the tree they index, the vision tower (image rows are prompt rows), the
@@ -37,12 +38,25 @@ def discard_pending(eng) -> None:
     eng._pend = None
 
 
+def precapture(eng, drafter) -> int | None:
+    """The verify graphs for every width at the first context class, at load (None: graphs off). A
+    router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits any row count
+    up to 32; the others stay at 2..16 and capture the rest lazily."""
+    if eng._graphs_for(2, 0) is None:
+        return None
+    import engine.model as _M
+    return eng._graphs.precapture(widths=range(2, min(_M.VERIFY_ROWS, getattr(drafter, "max_nodes", 31) + 1) + 1)
+                                  if getattr(drafter, "calc", False) else range(2, 17))
+
+
 def manifest(eng=None) -> Manifest:
     return Manifest(arch="qwen3_5", modules=MODULES)
 
 
+Qwen38Engine.caps = Capabilities(caches=True, side_slots=True)
 Qwen38Engine.cost = cost
 Qwen38Engine.discard_pending = discard_pending
 Qwen38Engine.manifest = manifest
+Qwen38Engine.precapture = precapture
 
-__all__ = ["Qwen38Engine", "cost", "discard_pending", "manifest"]
+__all__ = ["Qwen38Engine", "cost", "discard_pending", "manifest", "precapture"]

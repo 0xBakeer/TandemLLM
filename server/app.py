@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -8672,21 +8673,21 @@ def _make_lenrouter(a, eng, max_len: int, corpus_from=None):
     return drafter
 
 
-def _arch_of(model: str | None) -> str:
-    """The registered architecture of `--model` (engine/models: qwen3_5, qwen4_exp); the 27B's when
-    `--model` names no checkpoint directory (the 27B's snapshot is resolved later)."""
+def _arch_of(model: str | None):
+    """The registered architecture of `--model` (engine/models `REGISTRY`); the 27B's when `--model`
+    names no checkpoint directory (the 27B's snapshot is resolved later)."""
+    from engine.models import REGISTRY, architecture
     if not model or not os.path.isfile(os.path.join(model, "config.json")):
-        return "qwen3_5"
-    from engine.models import architecture
+        return REGISTRY["qwen3_5"]
     with open(os.path.join(model, "config.json")) as f:
-        return architecture(json.load(f)).name
+        return architecture(json.load(f))
 
 
 def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
     """The STATE the request path reads, for every model's loader (SRV-341): the server's own knobs
     from `a`, and in `model` what the loader built -- the tree and sampled-tree mode, the accept rule,
-    the caches (or None/False where the model has none yet) and any model-specific record."""
-    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
+    the device, the caches (or None/False where the model has none yet) and any model-specific record."""
+    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth,
                  model=a.served_model, started=int(time.time()), verbose=a.verbose,
                  max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
                  reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
@@ -8707,15 +8708,14 @@ def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
 
 
 def _load(a) -> None:
-    """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    """The real engine: weights, drafters, caches, the warm-up and the verify graphs (SRV-341, one
+    loader for every model). The model's own part -- its weights, engine, tokenizer and drafter --
+    comes from the builder its registry entry names (`Arch.serve`, chosen by the checkpoint's config;
+    the 27B's is the server's own, `_build_qwen3_5`); what the engine cannot hold yet its adapter's
+    capabilities say (`eng.caps`: the caches, the KV pool and side slots), and the rest is every
+    model's."""
     if _S.get("BLOCKING_SYNC") == "1":
         _blocking_sync()
-    if _arch_of(a.model) == "qwen4_exp":
-        return _load_flashnext(a)
-    from engine.config import load_config
-    from engine.loader import Weights
-    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
-    from transformers import AutoTokenizer
     t0 = time.time()
     # the price table first: a bad file must stop the start before minutes of weight loading
     from engine import prices as _prices
@@ -8725,18 +8725,86 @@ def _load(a) -> None:
     if _pname:
         STATE["price_table"] = _pname
         print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
-    cfg = load_config(a.model)
     from engine.tokfp import fingerprint as _tok_fp
-    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # the suffix stores check it
-    # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
-    STATE["weights_key"] = probe_mod.weights_key([cfg.path, a.nvfp4, a.fp8_head])
     # OPS-41: the allocator and MemAvailable after each stage, the residency planner's split
     led = STATE["load_ledger"] = memsplit.LoadLedger()
     led.mark("start")
+
+    def keys(path, weights) -> None:
+        STATE["tokenizer_sha"] = _tok_fp(path)      # the suffix stores check it
+        # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
+        STATE["weights_key"] = probe_mod.weights_key(weights)
+
+    # what a builder may ask of the server: the keys above, the ledger, the log
+    ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True))
+    m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
+    eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
+    gen_cfg = os.path.join(m["path"], "generation_config.json")
+    cfg_eos = None
+    if os.path.isfile(gen_cfg):
+        cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
+              if a.response_cache else None)
+    if eng.caps.caches:
+        caches = _load_caches(a, tok, drafter, rcache)
+    else:
+        if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
+            print("[cache] prefix, session, resident and disk caches and the KV pool are not built for "
+                  "this model yet (ENG-157): all off", flush=True)
+        caches = {"state_store": None, "session_cache": False, "prefix_cache": False, "session_trim": False,
+                  "resident": None, "prefix_chunk": 0, "suffix_store": None}
+    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
+                         if a.prompt_token_cache > 0 else None)
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], **m["serving"], **caches)
+    led.mark("caches")
+    print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
+    # one warm request, so the first measured one is not paying for Triton autotuning
+    with torch.no_grad():
+        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].to(m["device"]),
+                             4, set()))
+        # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
+        # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
+        # first two chats queued 24 s behind the router's cold questions)
+        _warm_prefill(generate_stream, tok, STATE.get("resident"))
+    led.mark("warmup")
+    # the verify graphs for every width at the first context class, here rather than
+    # inside the first requests (one capture is a fraction of a second, thirty are several)
+    t_g = time.time()
+    with torch.no_grad():
+        n_g = eng.precapture(drafter)
+    if n_g is not None:
+        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+    led.mark("graphs")
+    _kv_after_load(a)
+    if eng.kv.pages is not None:
+        # the warm-up's and the captures' rows are nobody's conversation
+        eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
+    if int(getattr(a, "parallel", 1) or 1) > 1:
+        if eng.caps.side_slots:
+            _build_side_slots(a, m["cfg"], m["w"], tok)
+            led.mark("side_slots")
+        else:
+            print(f"[parallel] --parallel {a.parallel}: side slots are not built for this model yet "
+                  f"(ENG-241): one slot", flush=True)
+    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
+        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
+        for x in led.stages()), flush=True)
+
+
+def _build_qwen3_5(a, ctx) -> dict:
+    """The 27B (and every `qwen3_5` checkpoint): its weights (NVFP4, FP8 head), the KV pool, the
+    engine, the tokenizer, the vision tower and the drafter `--drafter` names. `ctx` as for a
+    registry builder (engine/models `Arch.serve`)."""
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
+    from transformers import AutoTokenizer
+    cfg = load_config(a.model)
+    ctx.keys(cfg.path, [cfg.path, a.nvfp4, a.fp8_head])
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
-    led.mark("weights")
+    ctx.mark("weights")
     if getattr(a, "kv_pool", "off") == "on":
         kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
                                     margin_rows=int(a.kv_margin_rows),
@@ -8746,10 +8814,10 @@ def _load(a) -> None:
             print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
                   "only its accounts, every buffer is allocated in full", flush=True)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
-    led.mark("engine")
+    ctx.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
     _load_vision(a, cfg)
-    led.mark("vision")
+    ctx.mark("vision")
     drafter = None
     if a.drafter == "mtp":
         from engine.drafters.mtp import MTPDrafter
@@ -8794,14 +8862,24 @@ def _load(a) -> None:
         drafter = _make_lenrouter(a, eng, a.max_len)
     if a.narrow_arm == "off" and a.drafter != "lenrouter":
         raise SystemExit("[server] --narrow-arm off is the length router's (--drafter lenrouter)")
-    led.mark("drafters")
-    gen_cfg = os.path.join(cfg.path, "generation_config.json")
-    cfg_eos = None
-    if os.path.isfile(gen_cfg):
-        cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    ctx.mark("drafters")
     relax = Relax(a.relax_tau, a.relax_rank)
+    print(f"[server] {w.report()}")
+    if relax.on:
+        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
+              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
+              f"docs/exactness.md")
+    describe = (f"drafter={a.drafter} depth={a.depth} k={a.k or a.depth} "
+                f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} ")
+    return {"engine": eng, "tok": tok, "drafter": drafter, "path": cfg.path, "device": "cuda",
+            "cfg": cfg, "w": w, "describe": describe,
+            "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax}}
 
-    # --- the serving-time caches (engine/cache.py) ---------------------------------------------
+
+def _load_caches(a, tok, drafter, rcache) -> dict:
+    """The serving-time caches (engine/cache.py) of an engine that can hold them (`eng.caps.caches`):
+    the memory policy, the state store, the resident prefix and its end anchor, the suffix store.
+    Returns their entries of the request-path state."""
     session_on = not a.no_session_cache
     prefix_on = not a.no_prefix_cache
     budget = int(a.cache_budget_gb * (1 << 30))
@@ -8854,8 +8932,6 @@ def _load(a) -> None:
         mem.register("stash", resident.shed_stash)
         mem.register("park", resident.shed_park)
         mem.register("pin", resident.shed_pin)
-    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
-              if a.response_cache else None)
     suffix = None
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
@@ -8869,21 +8945,6 @@ def _load(a) -> None:
         else:
             print(f"[cache] drafter {a.drafter} has no lookup store; the suffix store is being "
                   f"written but nothing reads it")
-
-    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
-                         if a.prompt_token_cache > 0 else None)
-    _serving_state(a, eng, tok, drafter, cfg_eos, rcache,
-                   tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
-                   state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                   session_trim=(a.session_trim == "on"), resident=resident,
-                   prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
-                   suffix_store=suffix)
-    led.mark("caches")
-    print(f"[server] {w.report()}")
-    if relax.on:
-        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
-              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
-              f"docs/exactness.md")
     print(f"[cache] session={'on' if session_on else 'off'} "
           f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
           f"budget={a.cache_budget_gb:.0f} GiB "
@@ -8898,94 +8959,10 @@ def _load(a) -> None:
           f"GiB during a prefill (the workspace at {a.max_len:,} tokens: "
           f"{mem.workspace(a.max_len) / gib:.1f} GiB), reserve slack {a.reserve_slack_gib:g} GiB; "
           f"narrow arm {a.narrow_arm}", flush=True)
-    print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
-          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
-          f" loaded in {time.time() - t0:.1f}s")
-    # one warm request, so the first measured one is not paying for Triton autotuning
-    with torch.no_grad():
-        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
-                             4, set()))
-        # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
-        # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
-        # first two chats queued 24 s behind the router's cold questions)
-        _warm_prefill(generate_stream, tok, STATE.get("resident"))
-    led.mark("warmup")
-    # the verify graphs for every width at the first context class, here rather than
-    # inside the first requests (one capture is a fraction of a second, thirty are several)
-    if eng._graphs_for(2, 0) is not None:
-        t_g = time.time()
-        with torch.no_grad():
-            # a router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits
-            # any row count up to 32; the others stay at 2..16 and capture the rest lazily
-            import engine.model as _M
-            n_g = eng._graphs.precapture(widths=range(2, min(_M.VERIFY_ROWS, getattr(drafter, "max_nodes", 31) + 1) + 1)
-                                         if getattr(drafter, "calc", False) else range(2, 17))
-        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
-    led.mark("graphs")
-    _kv_after_load(a)
-    if eng.kv.pages is not None:
-        # the warm-up's and the captures' rows are nobody's conversation
-        eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
-    if int(getattr(a, "parallel", 1) or 1) > 1:
-        _build_side_slots(a, cfg, w, tok)
-        led.mark("side_slots")
-    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
-        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
-        for x in led.stages()), flush=True)
-
-
-def _load_flashnext(a) -> None:
-    """Qwen3.8-Flash-Next from an EXL3 pack (`--model <pack>`, SRV-87): the engine and its MTP drafter in
-    the server loop's interface (engine/models/flashnext/serving.py), so the request path is the 27B's.
-    The draft is the MTP chain from graphs cut by StairCut over the hot draft head, verified as a tree
-    (`--tree`, a sampled request walks it: `--sampled-tree det`); the load-time self-check gates it.
-    Not yet on Flash-Next (the parity work, ENG-E7): the prefix, session and disk caches, the KV pool,
-    the resident prefix, images, side slots; each is off here and says so."""
-    from engine.models.flashnext.serving import build as fn_build
-    from engine.tokfp import fingerprint as _tok_fp
-    from transformers import AutoTokenizer
-    t0 = time.time()
-    led = STATE["load_ledger"] = memsplit.LoadLedger()
-    led.mark("start")
-    STATE["tokenizer_sha"] = _tok_fp(a.model)
-    STATE["weights_key"] = probe_mod.weights_key([a.model])
-    spec = a.drafter != "none"
-    if a.drafter not in ("mtp", "none"):
-        print(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp", flush=True)
-    tok = AutoTokenizer.from_pretrained(a.model)
-    depth = a.depth if a.depth > 3 else 4
-    eng, drafter, info = fn_build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=led.mark,
-                                  log=lambda m: print(m, flush=True))
-    timing = info["load"]
-    if drafter is not None:
-        a.depth = depth
-    gen_cfg = os.path.join(a.model, "generation_config.json")
-    cfg_eos = json.load(open(gen_cfg)).get("eos_token_id") if os.path.isfile(gen_cfg) else None
-    if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
-        print("[cache] Flash-Next: prefix, session, resident and disk caches and the KV pool are not "
-              "built for this model yet (ENG-E7 parity): all off", flush=True)
-    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
-              if a.response_cache else None)
-    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
-                         if a.prompt_token_cache > 0 else None)
-    _serving_state(a, eng, tok, drafter, cfg_eos, rcache,
-                   tree=drafter is not None, sampled_tree="det", relax=Relax(1.0, 1),
-                   state_store=None, session_cache=False, prefix_cache=False, session_trim=False,
-                   resident=None, prefix_chunk=0, suffix_store=None, flashnext=info,
-                   weights_info={"format": "exl3", "weights": a.model,
-                                 "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
-                                 "draft_head": info["draft_head"]})
-    led.mark("caches")
-    print(f"[server] Flash-Next {a.model}: load {timing.get('total_s')} s, drafter "
-          f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}, "
-          f"max_len {a.max_len:,}, loaded in {time.time() - t0:.1f}s", flush=True)
-    with torch.no_grad():
-        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(), 4, set()))
-        _warm_prefill(generate_stream, tok, None)
-    led.mark("warmup")
-    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
-        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
-        for x in led.stages()), flush=True)
+    return {"state_store": store, "session_cache": session_on, "prefix_cache": prefix_on,
+            "session_trim": (a.session_trim == "on"), "resident": resident,
+            "prefix_chunk": cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
+            "suffix_store": suffix}
 
 
 def _par_room() -> int | None:

@@ -10,10 +10,9 @@ selected here by the checkpoint's own config, never by its file name:
 Each entry names its config reader and its engine by import path, so registering a model imports
 nothing; `Arch.load_config()` / `Arch.engine_class()` import on use.
 
-The package sits outside the disk tier's fingerprint (`engine/disk_cache._engine_files` leaves it
-out like `decision/` and `generative/`): the 27B's fingerprint is the same bytes with or without
-it, and a model under `engine/models/<pkg>/` adds its own package when it opts into the tier
-(`disk_cache.fingerprint(..., packages=("models/<pkg>",))`).
+The package sits outside the disk tier's fingerprint v2 (`engine/disk_cache._engine_files` leaves it
+out like `decision/` and `generative/`), so the 27B's v2 is the same bytes with or without it. A
+model's fingerprint v3 (ENG-243) is what its adapter's `manifest()` lists (engine/methods/manifest.py).
 """
 
 from __future__ import annotations
@@ -30,6 +29,9 @@ class Arch:
     config: str                 # "module:function" -> the model's config from a snapshot path
     engine: str                 # "module:Class" -> the model's engine
     package: str | None = None  # `engine/<package>` holds the model's own code (fingerprint)
+    # "module:function" -> the model built for the server, `serve(a, ctx) -> dict` (server/app.py
+    # `_load`, SRV-341); None: the server's own builder, the 27B's (`_build_qwen3_5`)
+    serve: str | None = None
 
     def _resolve(self, ref: str):
         mod, attr = ref.split(":")
@@ -40,6 +42,9 @@ class Arch:
 
     def engine_class(self):
         return self._resolve(self.engine)
+
+    def serve_builder(self):
+        return self._resolve(self.serve) if self.serve else None
 
 
 REGISTRY: dict[str, Arch] = {}
@@ -64,6 +69,7 @@ register(Arch(
     config="engine.models.flashnext.config:load_flashnext_config",
     engine="engine.models.flashnext.engine:FlashNextEngine",
     package="models/flashnext",
+    serve="engine.models.flashnext.serving:serve",
 ))
 
 

@@ -3,7 +3,8 @@ methods about itself, as data the methods read instead of branching on the model
 
 An adapter is the engine object of one architecture with the verbs the server's loop and the caches
 call (forward, forward_tree, forward_block, commit_tree, rollback_to, picks, hidden_post_norm, kv, state,
-settle, discard_pending, trim_pending, reset) and a `cost()` returning a `CostModel`. Hot verbs are the
+settle, discard_pending, trim_pending, reset, precapture), `caps` (`Capabilities`), `cost()` returning a
+`CostModel` and `manifest()` (what its stored rows depend on, engine/methods/manifest.py). Hot verbs are the
 engine's own bound methods, never wrapped; cold ones may be installed on the engine class by the model's
 adapter module (`engine/models/qwen3_5/adapter.py` for the 27B, whose `engine/model.py` keeps its bytes).
 """
@@ -11,6 +12,15 @@ adapter module (`engine/models/qwen3_5/adapter.py` for the 27B, whose `engine/mo
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """What the shared server may ask of a model's engine beyond the loop's verbs (SRV-341): the
+    server turns off, and says so, what a model cannot hold yet."""
+
+    caches: bool                # the prefix, session, resident and disk caches and the KV pool
+    side_slots: bool            # `--parallel` side slots over the same weights
 
 
 @dataclass(frozen=True)

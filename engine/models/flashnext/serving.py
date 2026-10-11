@@ -36,7 +36,7 @@ import torch
 
 from engine.drafters import run_steps
 from engine.methods.manifest import Manifest
-from engine.models.adapter import CostModel
+from engine.models.adapter import Capabilities, CostModel
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine, MTPChainGraph
 from engine.models.flashnext.ref import FNModelState
 from engine.models.flashnext.spec import MTPGraphDrafter, StairCut
@@ -93,6 +93,8 @@ class _KV:
 class FlashNextServing:
     """`FlashNextEngine` with one state and its graphs, in the server's engine interface."""
 
+    caps = Capabilities(caches=False, side_slots=False)   # ENG-157, ENG-241
+
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
         self.st = fn.new_state(max_len)
@@ -127,6 +129,9 @@ class FlashNextServing:
 
     def manifest(self) -> Manifest:
         return manifest()
+
+    def precapture(self, drafter) -> None:
+        return None                         # the drafter captured every graph at load (`capture_all`)
 
     def settle(self) -> None:
         """Land what is pending, so the state's sections are the sequence's whole (before a
@@ -391,3 +396,34 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
     info = {"pack": pack, "load": timing, "self_check": check,
             "draft_head": f"hot {hot}" if spec else None, "depth": depth if drafter is not None else 0}
     return eng, drafter, info
+
+
+def serve(a, ctx) -> dict:
+    """Qwen3.8-Flash-Next from an EXL3 pack for the server (`--model <pack>`, the registry's `serve`;
+    server/app.py `_load`): the engine and its MTP drafter in the server loop's interface, so the
+    request path is the 27B's. The draft is the MTP chain from graphs cut by StairCut over the hot
+    draft head, verified as a tree that a sampled request walks (`det`); the load-time self-check gates
+    it. `ctx` is the server's: `keys(path, weights)` (the tokenizer's and the weights' fingerprints),
+    `mark(stage)` (the load ledger), `log(line)`. What it cannot hold yet is in `FlashNextServing.caps`."""
+    from transformers import AutoTokenizer
+
+    from engine.spec import Relax
+    ctx.keys(a.model, [a.model])
+    spec = a.drafter != "none"
+    if a.drafter not in ("mtp", "none"):
+        ctx.log(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp")
+    tok = AutoTokenizer.from_pretrained(a.model)
+    depth = a.depth if a.depth > 3 else 4
+    eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log)
+    if drafter is not None:
+        a.depth = depth
+    describe = (f"Flash-Next {a.model}: load {info['load'].get('total_s')} s, drafter "
+                f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}, "
+                f"max_len {a.max_len:,},")
+    return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
+            "cfg": None, "w": None, "describe": describe,
+            "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
+                        "weights_info": {"format": "exl3", "weights": a.model,
+                                         "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
+                                         "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
+                                         "self_check": info["self_check"]}}}

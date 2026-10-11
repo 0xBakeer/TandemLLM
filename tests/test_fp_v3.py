@@ -5,7 +5,9 @@
   * it changes with an edit to a file that computes rows, a `tools/` kernel they import, the default
     of a knob such a file owns, and the content of a tile table a knob names (v2 hashed only the name);
   * Flash-Next's v3 changes with its kernels and its tile tables, not with its server adapter;
-  * the manifest holds every engine module `engine/model.py` imports, transitively;
+  * the manifest holds every engine module `engine/model.py` imports, transitively, and is pinned;
+  * a tile table both models read moves both; the two models' fingerprints differ, so neither reads
+    the other's rows;
   * the adoption record: the first start under v3 adopts v2's files of the same tree (and what v2
     itself read) once, in a directory that already has a v2 record; a restart keeps it, a later
     arithmetic change gets nothing.
@@ -100,6 +102,33 @@ def test_arithmetic_edits_move_the_27b_v3():
         open(p, "w").write(src.replace(own.group(0), own.group(0).replace(f"('{own.group(2)}'", "('77'")))
         assert _fps(d, env)[0] != before, "an engine/model.py knob default"
     return "table content, model.py, a kernel, a cached drafter, an owned knob default: each moves v3"
+
+
+def test_the_27b_manifest_is_pinned():
+    assert M27.modules == (
+        "engine/config.py", "engine/drafters/__init__.py", "engine/drafters/dflash2.py",
+        "engine/drafters/draft_graph.py", "engine/drafters/dspark.py", "engine/drafters/mtp.py",
+        "engine/gdn.py", "engine/kvpool.py", "engine/linear.py", "engine/loader.py", "engine/model.py",
+        "engine/settings.py", "engine/tree.py", "engine/verify_graph.py", "engine/vision.py"), M27.modules
+    assert M27.data == () and M27.arch == "qwen3_5"
+    tools = sorted(os.path.relpath(p, ROOT) for p in mf.files(ROOT, M27)[len(M27.modules):])
+    assert "tools/nvfp4_skinny.py" in tools and not any(t.startswith("tools/fn_") for t in tools), tools
+    return f"{len(M27.modules)} engine modules and {len(tools)} tools/ kernels (docs/caches.md)"
+
+
+def test_a_shared_tile_table_moves_both_and_the_models_never_share_one():
+    with tempfile.TemporaryDirectory() as d:
+        _copy(d)
+        a27, afn, _ = _fps(d)
+        assert a27 != afn, "two models, one fingerprint"
+        p = os.path.join(d, "ops", "exl3-tiles-fused.json")
+        doc = json.load(open(p))
+        k = next(iter(doc))
+        doc[k] = {"changed": True} if not isinstance(doc[k], dict) else {**doc[k], "changed": True}
+        json.dump(doc, open(p, "w"))
+        b27, bfn, _ = _fps(d)
+        assert b27 != a27 and bfn != afn, "one entry of the shared table"
+    return "ops/exl3-tiles-fused.json in both manifests; the 27B's and Flash-Next's fingerprints differ"
 
 
 def test_the_manifest_holds_what_model_py_imports():

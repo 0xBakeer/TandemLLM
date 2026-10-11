@@ -226,13 +226,15 @@ greedy and seeded answers are the plain-decode answers token for token (`tools/f
 --compare` of a `--drafter none` and a `--drafter mtp` server). Not yet on Flash-Next (ENG-E7): the
 prefix, session, resident and disk caches, the KV pool, images, side slots; the server says so at load.
 
-The server holds no model branches for it (ENG-E8): both loaders write the same request-path state
-(`_serving_state`), the walk down a verified block is `engine/methods/walk.py` for both models, and
+The server holds no model branches for it (ENG-E8): one loader serves both models (`_load`, SRV-341;
+the model's builder brings its weights, engine, tokenizer and drafter, and the engine's `caps` say what
+it cannot hold yet -- for Flash-Next the caches and side slots, turned off with a log line), the walk down a verified block is `engine/methods/walk.py` for both models, and
 what the dashboard and the caches ask of an engine goes through the adapter's verbs -- `cost()` (the
 snapshot bytes, `cache.snapshot_cost` on `/health`), `settle()`, `discard_pending()`, `trim_pending(n)`;
 the 27B's are installed on its class by `engine/models/qwen3_5/adapter.py`, so `engine/model.py` keeps its bytes.
-The Flash-Next package builds its own engine and drafter (`serving.build`: the pack, the hot draft head,
-the self-check), and `/health`'s `weights` names the pack and its MTP drafter.
+The Flash-Next package builds its own engine and drafter for the loader (`serving.serve`, named by its
+registry entry: the pack, the hot draft head, the self-check), and `/health`'s `weights` names the pack,
+its MTP drafter, the load time and the self-check.
 
 ## Images
 

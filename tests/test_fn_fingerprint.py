@@ -3,8 +3,9 @@
 `engine/models/`, `engine/methods/` and the knobs owned under them are left out of the 27B's
 fingerprint (engine/disk_cache.py `_engine_files`, `_NOT_27B_KNOBS`), so adding Flash-Next sweeps no
 saved chat. Proof: the fingerprint of this tree equals the fingerprint of a copy without
-`engine/models/` and `engine/methods/` and without those knobs, for the tier (no skip) and for the session spill
-(engine/spill.py's NOT_ARITHMETIC skip); and a model that opts its package in gets another one.
+`engine/models/` and `engine/methods/` and without those knobs, for the tier (no skip) and for the
+session spill (engine/spill.py's NOT_ARITHMETIC skip). A model's own fingerprint is v3's
+(tests/test_fp_v3.py).
 """
 
 from __future__ import annotations
@@ -54,14 +55,6 @@ def test_27b_fingerprint_unchanged_by_the_model_layer():
             b = dc.fingerprint(d, EXTRA, skip=skip)
             assert a == b, (skip, a[:12], b[:12])
     return f"tier and spill fingerprints equal without engine/models and engine/methods ({a[:12]})"
-
-
-def test_a_model_package_changes_its_own_fingerprint():
-    a = dc.fingerprint(ROOT, EXTRA)
-    b = dc.fingerprint(ROOT, EXTRA, packages=("models/flashnext",))
-    files = dc._engine_files(ROOT, packages=("models/flashnext",))
-    assert a != b and any(f.endswith(os.path.join("models", "flashnext", "ref.py")) for f in files)
-    return f"27B {a[:12]} vs Flash-Next {b[:12]}"
 
 
 if __name__ == "__main__":
