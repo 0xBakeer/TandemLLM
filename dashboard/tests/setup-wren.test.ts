@@ -55,6 +55,43 @@ describe('planToolCall', () => {
     expect(planToolCall({ name: 'go_to_step', args: { n: 7 } }, ctx())).toMatchObject({ ok: false, error: S_install() });
     expect(planToolCall({ name: 'next', args: {} }, ctx({ step: 'review' }))).toMatchObject({ ok: false });
   });
+  it('every way to the install step is refused, and no tool call ever starts a job: Finish is the user\'s click', () => {
+    for (const args of [{ n: 7 }, { n: '7' }, { n: 'install' }, { n: 8 }]) {
+      const p = planToolCall({ name: 'go_to_step', args }, ctx({ step: 'review' }));
+      expect(p.ok, JSON.stringify(args)).toBe(false);
+    }
+    expect(planToolCall({ name: 'next', args: {} }, ctx({ step: 'review' }))).toMatchObject({ ok: false });
+    expect(planToolCall({ name: 'set_field', args: { step: 'install', field: 'x', value: 1 } }, ctx())).toMatchObject({ ok: false });
+    // the reducer: Next stops at Review, and even a step change to install starts nothing
+    let st = setupReducer(emptyState(), { type: 'open', model: M, step: 'review' }, M);
+    st = setupReducer(st, { type: 'next' }, M);
+    expect(st.step).toBe('review');
+    st = setupReducer(st, { type: 'go', step: 'install' }, M);
+    expect(st.job).toBeNull();
+    // every action a valid call plans is one of the page's own clicks, never a job
+    const calls = [
+      { name: 'toggle', args: { component: 'vision', on: false } },
+      { name: 'select_profile', args: { id: 'exl3-4.0' } },
+      { name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 2 } },
+      { name: 'go_to_step', args: { n: 6 } },
+      { name: 'next', args: {} },
+      { name: 'previous', args: {} },
+    ];
+    for (const c of calls) {
+      const p = planToolCall(c, ctx({ step: 'methods' }));
+      if (p.ok && p.kind === 'action') for (const a of [...p.actions, ...p.undo]) expect(a.type, c.name).not.toBe('job');
+    }
+  });
+  it('the page posts /v1/setup/apply in one place, finish(), which only the confirm dialog\'s button calls', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const view = readFileSync(fileURLToPath(new URL('../src/setup/view.ts', import.meta.url)), 'utf8');
+    const wrenSrc = readFileSync(fileURLToPath(new URL('../src/setup/wren.ts', import.meta.url)), 'utf8');
+    expect(view.match(/setupApi\.apply\(/g)).toHaveLength(1);
+    expect(view.match(/this\.finish\(\)/g)).toEqual(['this.finish()']);
+    expect(view).toMatch(/class="btn btn-primary setup-confirm-go"[^>]*@click=\$\{\(\) => void this\.finish\(\)\}/);
+    expect(wrenSrc).not.toMatch(/setupApi\.apply|finish\(\)|confirmOpen/);
+  });
   it('a component disabled by a dependency cannot be switched on: the reason goes back', () => {
     const sel = defaults(M);
     sel.components = { ...sel.components, conductor: false, narrator: false, laya: false, shadow: false };
