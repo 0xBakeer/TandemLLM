@@ -53,6 +53,14 @@ export function defaults(m: SetupModel): SetupSelection {
   };
 }
 
+/** The box's own setup as the start, checked like a saved one; the note only when it is not the
+ *  recommended setup anyway. */
+function seeded(m: SetupModel, seed: SetupSelection): { selection: SetupSelection; notices: string[] } {
+  const selection = restoreSelection(m, seed).selection;
+  const same = JSON.stringify(selection) === JSON.stringify(defaults(m));
+  return { selection, notices: same ? [] : [S.seededFromBox] };
+}
+
 /** Check a saved selection against the registry as it is now; bad parts fall back with a note. */
 export function restoreSelection(m: SetupModel, saved: unknown): { selection: SetupSelection; notices: string[] } {
   const d = defaults(m);
@@ -141,7 +149,7 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
       const { selection, notices } = same
         ? restoreSelection(a.model, st.selection)
         : a.seed
-          ? { selection: restoreSelection(a.model, a.seed).selection, notices: [S.seededFromBox] }
+          ? seeded(a.model, a.seed)
           : { selection: defaults(a.model), notices: [] as string[] };
       const step = a.step && a.step !== 'models' ? a.step : same && st.step !== 'models' ? st.step : 'overview';
       return done({ model: a.model.id, selection, step, visited: visit(same ? st.visited : ['models'], step), notice: notices.length ? notices.join(' ') : null });

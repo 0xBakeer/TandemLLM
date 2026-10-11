@@ -76,6 +76,8 @@ describe('setupReducer', () => {
     expect(s.selection).toMatchObject({ profile: 'exl3-6.0', slots: 2 });
     expect(s.selection!.components.vision).toBe(false);
     expect(s.notice).toMatch(/what this box runs now/);
+    // a box that runs the recommended setup: no note
+    expect(run([{ type: 'open', model: M, seed: defaults(M) }]).notice).toBeNull();
     // a bad seed value falls back to the recommended one
     const bad = run([{ type: 'open', model: M, seed: { ...defaults(M), profile: 'exl3-9.9' } }]);
     expect(bad.selection!.profile).toBe('exl3-4.5');
