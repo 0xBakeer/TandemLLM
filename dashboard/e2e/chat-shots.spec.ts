@@ -168,7 +168,8 @@ test('chat phone: empty, drawer, context sheet, panes sheet, permission, setting
   await page.getByRole('button', { name: 'Context panel', exact: true }).click();
   await page.waitForTimeout(400);
   await shot(page, 'context-phone-dark');
-  await page.locator('.ch-scrim').click({ position: { x: 20, y: 400 } });
+  // the context sheet is the full width on a phone: its close button is the way out
+  await page.getByRole('button', { name: 'Close the context panel' }).click();
   await page.getByRole('button', { name: 'Panes', exact: true }).click();
   await page.locator('qse-chat-panes .ch-term-line').first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(800);
