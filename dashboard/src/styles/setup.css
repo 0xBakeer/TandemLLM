@@ -59,6 +59,9 @@ qse-wren-figure {
 }
 .setup-main {
   min-width: 0;
+  /* the mini box lands from 60 px right of a field (wren-land); on a phone that widened the page
+     and the fixed sheet with it (VIS-91). clip, not hidden: the memory bar stays sticky */
+  overflow-x: clip;
 }
 .setup-wren {
   position: sticky;

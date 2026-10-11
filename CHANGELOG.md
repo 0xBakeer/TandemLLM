@@ -12,6 +12,7 @@ Wren, the setup guide's assistant, answers a question in words again (VIS-91). T
 - An invalid change gets one repair. If the repair fails, Wren answers in words with no tools in the prompt, and the page shows one notice that nothing changed. The server drops a highlight the page cannot make, with no repair. The page's last round sends `"tools": false`, so every turn ends in words.
 - A turn shows one notice at most, and none when the repair worked or only a highlight failed.
 - On a phone the sheet stays open while Wren works. A change shows inside the sheet as a toast with Show me, which closes the sheet and scrolls to the field. A refused call leaves the sheet and the figure alone. The desktop panel is as before.
+- On a phone the mini box's landing (0.7.1) started 60 px right of the field and widened the page by 27 px, and the fixed sheet with it, so its close button went off the screen. The setup page now clips that overflow.
 - On the narrator's 4,096 rows, a long chat could cut the page's second round down to the tool's result alone, and the chat template threw "No user query found". The trim now keeps the whole turn Wren answers.
 - Measured on the box (`tests/gpu/setup_wren_gpu.py cases`, Qwen3.5-2B at 4,096 rows): 15 of 15 right on ten requests for a change and five questions, the two from the report among them. No call was invalid, and a turn took 0.7 to 1.6 s. Khaled's conversation replayed on the same 2B: the status answer, then the coding answer in one round, then "Use two slots" in two.
 

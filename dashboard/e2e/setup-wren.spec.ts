@@ -167,11 +167,25 @@ test('VIS-91: 390 px, a change keeps the sheet open with a toast; Show me closes
   await expect(figure(page)).toHaveAttribute('state', 'idle', { timeout: 10_000 });
   expect(await sheetMoves(page)).toEqual({ peek: 0, closed: 0 });
   await expect(page.locator('.wren-panel.is-open')).toHaveCount(1);
+  // the mini box lands from 60 px right of the field: on a phone that must not widen the page
+  // (mobile Chrome widened the layout and the fixed sheet with it, its close button off screen)
+  await page.evaluate(() => {
+    const w = window as unknown as { __wide: number };
+    w.__wide = 0;
+    const t0 = performance.now();
+    const tick = () => {
+      w.__wide = Math.max(w.__wide, document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      if (performance.now() - t0 < 2000) requestAnimationFrame(tick);
+    };
+    tick();
+  });
   await toast.locator('button', { hasText: 'Show me' }).click();
   await expect(page.locator('.wren-panel.is-open')).toHaveCount(0);
   const field = page.locator('[data-field="components.vision"]');
   await expect(field).toHaveAttribute('data-wren-acting', '');
   await expect(field).toBeInViewport();
+  await page.waitForTimeout(2100);
+  expect(await page.evaluate(() => (window as unknown as { __wide: number }).__wide)).toBe(0);
   await expect(page.locator('[data-component="vision"] input')).not.toBeChecked();
 });
 
