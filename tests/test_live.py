@@ -678,6 +678,29 @@ def test_every_one_point_zero_field_is_still_there():
     assert set(req10) <= set(schema["$defs"]["request"]["required"])
 
 
+def test_a_row_names_its_conversation_and_its_thinking_budget():
+    """SRV-347: chatd follows its own requests by the conversation id it sends (`x-session-id:
+    chat-<id>`), and the panel shows the reasoning cap in force; both null when absent."""
+    c = Clock()
+    reg = _reg(c)
+    rec = _rec(c, "chatcmpl-chat")
+    rec.conv = "chat-01JTEST"
+
+    class Think:
+        budget = 8192
+    rec.live_refs = (Think(), None)
+    reg.register(rec)
+    plain = _rec(c, "chatcmpl-plain")
+    reg.register(plain)
+    snap = _valid(reg.snapshot())
+    r = _row(snap, "chatcmpl-chat")
+    assert r["conversation_id"] == "chat-01JTEST" and r["thinking_budget"] == 8192, r
+    p = _row(snap, "chatcmpl-plain")
+    assert p["conversation_id"] is None and p["thinking_budget"] is None, p
+    Think.budget = 0                       # uncapped
+    assert _row(reg.snapshot(), "chatcmpl-chat")["thinking_budget"] is None
+
+
 def test_the_recorded_box_messages_validate():
     """Tests/fixtures/live-1.1-box.json: real 1.1 events from the box, the UI's reference."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

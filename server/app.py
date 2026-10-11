@@ -80,7 +80,7 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
-from server import chat_forward  # noqa: E402
+from server import chat_forward, model_card, tokenize_api  # noqa: E402
 from server import memory_api  # noqa: E402
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
@@ -4591,6 +4591,15 @@ def served_name() -> str:
     return COMPOSITE_NAME if STATE.get("conductor") is not None else str(STATE.get("model") or "")
 
 
+def _card_facts() -> dict:
+    """What the loader serves, for the model card (server/model_card.py): the pack, the window,
+    the default output limit, the vision tower, the effort levels' caps."""
+    w = weights_profile()
+    return {"pack": w.get("name") or w.get("format"), "max_len": STATE.get("max_len"),
+            "max_output": STATE.get("default_max_tokens"), "vision": STATE.get("vision") is not None,
+            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True}
+
+
 def _effort_caps() -> dict:
     """The effort levels' reasoning caps a client's effort word maps to: the router document's
     levels when the conductor is loaded (the Routing screen edits them), else their seed."""
@@ -5412,6 +5421,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not STATE["proxy"].authorize(self)[0]:
                     return
                 out["data"] = out["data"] + STATE["proxy"].models(STATE["started"])
+            # SRV-347: the engine model's capability card (server/model_card.py)
+            out["data"] = model_card.annotate(out["data"], _card_facts())
             if STATE.get("deciders") is not None:
                 # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
@@ -5436,6 +5447,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 card = ({"id": STATE["model"], "object": "model", "created": STATE["started"],
                          "owned_by": "local"} if name == STATE["model"] else None)
+            if card is not None:
+                card = model_card.annotate([card], _card_facts())[0]     # SRV-347
             if card is None and STATE.get("deciders") is not None:
                 card = decider_api.card(STATE["deciders"], name, STATE["started"])
             if card is None and STATE.get("proxy") is not None:
@@ -5540,6 +5553,10 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "invalid_request_error"}})
         if path == "/v1/dashboard/session":
             return self._session("POST", body)
+        if path == "/v1/tokenize":
+            # SRV-347: exact counts with the model's own template (server/tokenize_api.py)
+            return tokenize_api.handle(self, body, lambda b: build_prompt(b, count=True),
+                                       lambda t: len(STATE["tok"](t)["input_ids"]))
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
         if path.startswith("/v1/setup/"):
