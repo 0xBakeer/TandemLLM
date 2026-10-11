@@ -96,6 +96,61 @@ def test_router():
     return "64 rows: ids equal, weights within one bf16 step, tie -> lower index, shared slot 512"
 
 
+def _bf_steps(a: torch.Tensor, b: torch.Tensor) -> float:
+    """max |a - b| in units of the bf16 step at b's magnitude (0 = equal)."""
+    step = torch.where(b == 0, torch.full_like(b, 2 ** -133), b.abs() * 2 ** -7)
+    return ((a.float() - b.float()).abs() / step.float()).max().item()
+
+
+def test_hc_norm_and_inject_norm():
+    from engine.models.flashnext.ref import rms
+    g = torch.Generator(device=DEV).manual_seed(31)
+    M, hc = 32, 4
+    h0 = (torch.randn(M, hc * H, generator=g, device=DEV) * 2).to(torch.bfloat16)
+    out = torch.randn(M, H, generator=g, device=DEV).to(torch.bfloat16)
+    d = torch.randn(M, 324, generator=g, device=DEV) * 3
+    for wdt in (torch.float16, torch.bfloat16):
+        w = (torch.randn(hc * H, generator=g, device=DEV) * 0.1).to(wdt)
+        n = K.hc_norm(h0, w, H, 1e-6)
+        assert _bf_steps(n, rms(h0, w, 1e-6, group=H)) <= 1.0
+        hn, nn = K.inject_norm(h0, out, d, 320, w, hc, 1e-6)
+        inj = 2 * torch.sigmoid(d[:, 320:].to(torch.bfloat16) / hc)
+        want_h = h0 + (out.unsqueeze(-2) * inj.unsqueeze(-1)).flatten(-2)
+        assert torch.equal(hn, want_h)
+        assert _bf_steps(nn, rms(want_h, w, 1e-6, group=H)) <= 1.0
+        h1, n1 = K.inject_norm(h0, out, d, 320, None, hc, 1e-6)
+        assert torch.equal(h1, want_h) and n1 is None
+        one = torch.cat([K.inject_norm(h0[m:m + 1], out[m:m + 1], d[m:m + 1], 320, w, hc, 1e-6)[1] for m in range(M)])
+        assert torch.equal(one, nn)
+        assert torch.equal(torch.cat([K.hc_norm(h0[m:m + 1], w, H, 1e-6) for m in range(M)]), n)
+    return "norm within one bf16 step of torch's, inject bit-equal to torch's expression, rows bit-equal"
+
+
+def test_gated_norm():
+    g = torch.Generator(device=DEV).manual_seed(32)
+    o = torch.randn(48 * 3, 128, generator=g, device=DEV).to(torch.bfloat16)
+    z = torch.randn(48 * 3, 128, generator=g, device=DEV).to(torch.bfloat16)
+    w = (torch.randn(128, generator=g, device=DEV) * 0.3 + 1).to(torch.bfloat16)
+    for sig in (True, False):
+        y = K.gated_norm(o, z, w, 1e-6, sig)
+        hh = o.float()
+        hh = hh * torch.rsqrt(hh.pow(2).mean(-1, keepdim=True) + 1e-6)
+        hh = w * hh.to(torch.bfloat16)
+        act = torch.sigmoid if sig else torch.nn.functional.silu
+        want = (hh * act(z.float())).to(torch.bfloat16)
+        assert _bf_steps(y, want) <= 2.0, sig
+        assert torch.equal(K.gated_norm(o[:48], z[:48], w, 1e-6, sig), y[:48])
+    return "sigmoid and silu gates within two bf16 steps of torch's expression; rows independent"
+
+
+def test_gemv_bf16_out():
+    g = torch.Generator(device=DEV).manual_seed(33)
+    w = (torch.randn(96, H, generator=g, device=DEV) * 0.02).half()
+    x = _x(5, H, 34)
+    assert torch.equal(K.gemv_bf16(x, w), K.gemv(x, w).to(torch.bfloat16))
+    return "the bf16 output is the fp32 output rounded"
+
+
 def _bank(n_exp: int, kbs, shared_k: int, seed: int = 0):
     blocks = []
     for e in range(n_exp + 1):

@@ -1629,8 +1629,9 @@ _TOOLS_IMPORT = re.compile(r"^\s*(?:from\s+tools\s+import\s+([\w\s,()]+)|from\s+
 
 
 #: knob owners whose defaults cannot change the 27B's rows: the server's (no code under `server/`
-#: is in the fingerprint) and the model layer's (`engine/models/`, which `_engine_files` leaves out)
-_NOT_27B_KNOBS = ("server/", "engine/models/")
+#: is in the fingerprint), the model layer's (`engine/models/`, which `_engine_files` leaves out) and
+#: Flash-Next's kernels (`tools/fn_*`, imported only from `engine/models/flashnext/`)
+_NOT_27B_KNOBS = ("server/", "engine/models/", "tools/fn_")
 
 
 def _arithmetic_knobs(path: str) -> bytes | None:

@@ -23,10 +23,8 @@ exact); the selected-key decode of `flashnext` (5668e843) is ENG-147's remaining
 
 from __future__ import annotations
 
-import math
-
+import numpy as np
 import torch
-import torch.nn.functional as F
 
 from engine.models.flashnext.ref import MTP, FlashNextRef, FNState, apply_rope
 from engine.models.flashnext.ple import decode_rows
@@ -42,7 +40,7 @@ class FlashNextEngine(FlashNextRef):
         self.rope_cos, self.rope_sin = cos, sin                          # [max_len, rotary] bf16
         self.dense_limit = (cfg.indexer_budget + cfg.indexer_compress_ratio - 1) if cfg.has_indexer else 1 << 60
         self.g = {}                                                      # the step's device buffers
-        self._moe_bufs: dict = {}
+        self._order1 = torch.empty(0, dtype=torch.int32, device=device)    # one row: launch order
 
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None) -> FNState:
@@ -125,20 +123,102 @@ class FlashNextEngine(FlashNextRef):
             ids, wts = K.router(logits, c.num_experts, c.num_experts_per_tok)
             if self.route_trace is not None:
                 self.route_trace.append((li, ids[:, :-1].long()))
-            K.moe(xs, ids, wts, self.banks[li], out=out[r0:r0 + step])
+            # one row: any launch order is the same arithmetic, so skip the sort
+            order = self._order1 if xs.shape[0] == 1 else None
+            K.moe(xs, ids, wts, self.banks[li], order=order, out=out[r0:r0 + step])
         return out
+
+    # ------------------------------------------------------------------------- the trunk
+    def _mix(self, n, p):
+        """The mixer from its normed streams: (x [M, H], d [M, R + hc] fp32 = down and inject)."""
+        from tools import fn_kernels as K
+        di = K.gemv(n, self.W[p + ".down_inject"])
+        return K.mix_up(di, n, self.W[p + ".input_mix_weight_up.weight"], self.cfg.hc_count), di
+
+    def _site_norm(self, li: int):
+        """The norm weight of layer li's first mixer (the final mixer's past the last layer)."""
+        if li >= self.cfg.num_hidden_layers:
+            return self.W["hyper_connection_mixer.hc_norm.weight"]
+        return self.W[self.pre(li) + "attn_hyper_connection.hc_norm.weight"]
+
+    def trunk(self, h, tokens, st, positions, step: bool = False):
+        """Every layer: each inject writes the streams and, in the same launch, the next site's norm
+        (not in front of a PLE layer, which changes the streams first). Returns the final mixer's
+        normed streams n [M, hc H]; the streams themselves are `self.stack`."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
+        n = None
+        for li in range(c.num_hidden_layers):
+            p = self.pre(li)
+            if li in c.ple_layers:
+                h = h + (self._ple_step(h, li, st) if step else self.ple(h, tokens, li, st))
+                n = None
+            if n is None:
+                n = K.hc_norm(h, self._site_norm(li), H, eps)
+            x, di = self._mix(n, p + "attn_hyper_connection")
+            if c.is_linear(li):
+                out = self._gdn1(x, li, st) if step else self.gdn(x, li, st)
+            else:
+                out = self._attn1(x, li, st) if step else self.attention(x, li, st, positions)
+            h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                                 self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+            x, di = self._mix(n, p + "mlp_hyper_connection")
+            nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
+            h, n = K.inject_norm(h, self.moe(x, li), di, self.W[p + "mlp_hyper_connection.rank"], nxt, hc, eps)
+        self.stack = h
+        if n is None:
+            n = K.hc_norm(h, self._site_norm(c.num_hidden_layers), H, eps)
+        return n
+
+    def final(self, n):
+        """The final mixer (no inject) from its normed streams, and the head: fp32 logits."""
+        from tools import fn_kernels as K
+        d = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
+        x = K.mix_up(d, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], self.cfg.hc_count)
+        return self.lin(x, self.W["lm_head.weight"]).float()
+
+    @torch.no_grad()
+    def forward(self, tokens, st, layers=None, trace=None, head="all"):
+        """A prompt chunk (or any block) through the fused trunk; the reference's forward for a
+        layer subset or a trace."""
+        if layers is not None or trace is not None:
+            return super().forward(tokens, st, layers=layers, trace=trace, head=head)
+        tokens = tokens.view(-1).to(self.device)
+        T = tokens.shape[0]
+        positions = torch.arange(st.length, st.length + T, device=self.device)
+        h = self.embed(tokens).repeat(1, self.cfg.hc_count)
+        n = self.trunk(h, tokens, st, positions)
+        st.length += T
+        if head == "none":
+            return None
+        return self.final(n[-1:] if head == "last" else n)
 
     # ------------------------------------------------------------------------- the decode step
     def alloc_step(self) -> None:
         """The step's input buffers: token, position, [start, start + 1], the PLE rows."""
         c, dev = self.cfg, self.device
         tab = next(iter(self.tables.values())) if self.tables else None
+        nh = c.ngram_heads
+        words = tab.words if tab is not None else 1
+        # one pinned host image and its device copy: [tok, pos, heads x nh] int64, then
+        # [start, end] int32, then the packed rows int16 -- one H2D a step
+        nb = 8 * (2 + nh) + 8 + 2 * nh * words
+        self._hbuf = torch.zeros(nb, dtype=torch.uint8, pin_memory=True)
+        self._copied = torch.cuda.Event()
+        self._copied.record()
+        self._dbuf = torch.zeros(nb, dtype=torch.uint8, device=dev)
+
+        def views(b):
+            i64 = b[: 8 * (2 + nh)].view(torch.int64)
+            i32 = b[8 * (2 + nh): 8 * (2 + nh) + 8].view(torch.int32)
+            rows = b[8 * (2 + nh) + 8:].view(torch.int16).view(nh, words)
+            return i64, i32, rows
+        hi64, hi32, hrows = views(self._hbuf)
+        di64, di32, drows = views(self._dbuf)
+        self._h = {"i64": hi64, "lenp": hi32, "rows": hrows}
         self.g = {
-            "tok": torch.zeros(1, dtype=torch.long, device=dev),
-            "pos": torch.zeros(1, dtype=torch.long, device=dev),
-            "lenp": torch.zeros(2, dtype=torch.int32, device=dev),
-            "packed": torch.zeros(c.ngram_heads, tab.words if tab is not None else 1, dtype=torch.int16, device=dev),
-            "heads": torch.zeros(c.ngram_heads, dtype=torch.long, device=dev),
+            "tok": di64[0:1], "pos": di64[1:2], "heads": di64[2:], "lenp": di32, "packed": drows,
             "mask": torch.ones(1, 1, dtype=torch.bool, device=dev),
             "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=dev),
         }
@@ -149,36 +229,40 @@ class FlashNextEngine(FlashNextRef):
     def stage(self, token: int, st: FNState) -> None:
         """Host work of one step, before the step (or its graph) runs: the PLE rows of `token`
         (hash with the state's context, gather from the table) and the position buffers."""
-        g = self.g
-        g["tok"].fill_(token)
-        g["pos"].fill_(st.length)
-        g["lenp"].copy_(torch.tensor([st.length, st.length + 1], dtype=torch.int32), non_blocking=True)
+        # the pinned image is the previous step's copy source until that copy has run
+        self._copied.synchronize()
+        hb = self._h
+        i64 = hb["i64"].numpy()
+        i64[0], i64[1] = token, st.length
+        hb["lenp"].numpy()[:] = (st.length, st.length + 1)
         for li in self.cfg.ple_layers:
-            ids = self.ple_ids(torch.tensor([token]), li, st)[0]           # [heads]
-            tab = self.tables[li]
-            g["packed"].copy_(tab.gather_packed(ids), non_blocking=True)
-            g["heads"].copy_(tab.head_of(ids), non_blocking=True)
+            hsh, tab = self.hash[li], self.tables[li]
+            ctx = st.ple_ctx.get(li)
+            ctx = [self.cfg.eos_token_id] * hsh.context_len if ctx is None else ctx.view(-1).tolist()
+            ids = hsh.ids_one(token, ctx)
+            st.ple_ctx[li] = torch.tensor([(ctx + [token])[-hsh.context_len:]], dtype=torch.long)
+            hb["rows"].numpy()[:] = tab.map[ids]
+            i64[2:] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
+        self._dbuf.copy_(self._hbuf, non_blocking=True)
+        self._copied.record()
 
     def step(self, st: FNState) -> torch.Tensor:
         """One token from the device buffers (`stage` first); the state advances in place except
         `st.length`, which the caller moves. Returns logits [1, vocab] fp32 (a static buffer)."""
+        from tools import fn_kernels as K
+        from tools.exl3_linear import exl3_matmul
         c, g = self.cfg, self.g
         h = self.W["embed_tokens.weight"].index_select(0, g["tok"]).repeat(1, c.hc_count)
-        for li in range(c.num_hidden_layers):
-            if li in c.ple_layers:
-                tab = self.tables[li]
-                emb = decode_rows(g["packed"], g["heads"], g["bias"], tab.K, g["codebook"])
-                h = h + self.ple_apply(h, emb.to(self.dtype).reshape(1, -1), li, st)
-            x, h0, inj = self.mixer(h, self.pre(li) + "attn_hyper_connection")
-            out = self._gdn1(x, li, st) if c.is_linear(li) else self._attn1(x, li, st)
-            h = self.inject(h0, out, inj)
-            x, h0, inj = self.mixer(h, self.pre(li) + "mlp_hyper_connection")
-            h = self.inject(h0, self.moe(x, li), inj)
-        self.stack = h
-        x = self.mixer(h, "hyper_connection_mixer", combine=False)
-        from tools.exl3_linear import exl3_matmul
+        n = self.trunk(h, None, st, None, step=True)
+        d = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
+        x = K.mix_up(d, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
         exl3_matmul(x, self.W["lm_head.weight"], out=g["logits"])
         return g["logits"]
+
+    def _ple_step(self, h, li, st):
+        g, tab = self.g, self.tables[li]
+        emb = decode_rows(g["packed"], g["heads"], g["bias"], tab.K, g["codebook"])
+        return self.ple_apply(h, emb.to(self.dtype).reshape(1, -1), li, st)
 
     def _gdn1(self, x, li, st):
         from tools import fn_kernels as K
@@ -187,7 +271,7 @@ class FlashNextEngine(FlashNextRef):
         p = self.pre(li) + "linear_attn."
         qkvz = self.lin(x, self.W[p + "qkvz"])[0]
         mixed, z = qkvz[: c.conv_dim], qkvz[c.conv_dim:]
-        ab = K.gemv(x, self.W[p + "ab"]).to(self.dtype)[0]
+        ab = K.gemv_bf16(x, self.W[p + "ab"])[0]
         Hv = c.linear_num_value_heads
         qkv, gg, beta = decode_pre(mixed, st.conv[li], self.W[p + "conv1d.weight"].squeeze(1),
                                    ab[:Hv], ab[Hv:], self.W[p + "A_log"], self.W[p + "dt_bias"])
@@ -197,11 +281,8 @@ class FlashNextEngine(FlashNextRef):
         v = qkv[2 * kd:2 * kd + vd].view(1, 1, Hv, c.linear_value_head_dim)
         o = fused_decode_step(q, k, v, gg.view(1, 1, -1), beta.view(1, 1, -1), st.S[li],
                               rep=c.num_v_per_k).reshape(-1, c.linear_value_head_dim)
-        hh = o.float()
-        hh = hh * torch.rsqrt(hh.pow(2).mean(-1, keepdim=True) + c.rms_norm_eps)
-        hh = self.W[p + "norm.weight"] * hh.to(o.dtype)
-        act = torch.sigmoid if c.output_gate_type == "sigmoid" else F.silu
-        hh = (hh * act(z.view(-1, c.linear_value_head_dim).float())).to(o.dtype)
+        hh = K.gated_norm(o, z.view(-1, c.linear_value_head_dim), self.W[p + "norm.weight"], c.rms_norm_eps,
+                          c.output_gate_type == "sigmoid")
         return self.lin(hh.reshape(1, -1), self.W[p + "out_proj.weight"])
 
     def _attn1(self, x, li, st):

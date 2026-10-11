@@ -150,6 +150,31 @@ class NGramHash:
             blocks.append(ids + offs[a:b].view(1, 1, -1))
         return torch.cat(blocks, dim=-1)[:, -tokens.shape[1]:]
 
+    def ids_one(self, token: int, context: list[int]) -> list[int]:
+        """`ids` for one token after `context` (the last ngram_size-1 tokens), in Python integers
+        with the same int64 wrap-around, without torch: the decode step's host work."""
+        hist = list(context) + [int(token)]
+        t = len(hist) - 1
+        seg = 0                                     # the segment starts after the last EOS before t
+        for i in range(t):
+            if hist[i] == self.eos:
+                seg = i + 1
+        shifted = [hist[t - s] if t - seg >= s else self.eos for s in range(self.ngram_size)]
+        mult = self.mult.tolist()
+        sizes, offs = self.sizes.tolist(), self.offsets.tolist()
+
+        def wrap(v: int) -> int:
+            v &= _MASK64
+            return v - (1 << 64) if v >> 63 else v
+        out = []
+        for n in range(2, self.ngram_size + 1):
+            mixed = wrap(shifted[0] * mult[0])
+            for p in range(1, n):
+                mixed ^= wrap(shifted[p] * mult[p])
+            a = (n - 2) * self.heads_per_ngram
+            out += [mixed % sizes[h] + offs[h] for h in range(a, a + self.heads_per_ngram)]
+        return out
+
     def next_context(self, tokens: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """The context after `tokens` (the last ngram_size-1 tokens of context + tokens)."""
         return torch.cat([context.long(), tokens.long()], dim=-1)[:, -self.context_len:]
@@ -275,6 +300,7 @@ class EXL3NGramTable:
         self.offsets = self._aux("head_offsets").long()
         self.sizes = self._aux("head_vocab_sizes").long()
         self.multipliers = self._aux("layer_multipliers").long()
+        self.offsets_np = self.offsets.numpy()
         if self.bias.shape[1] != ROW_DIM or self.bias.shape[0] != self.offsets.numel():
             raise ValueError(f"{path}: head_bias {tuple(self.bias.shape)} vs {self.offsets.numel()} heads")
         self._codebook: dict = {}
@@ -332,6 +358,16 @@ class EXL3NGramTable:
             with ThreadPoolExecutor(self.THREADS) as ex:
                 list(ex.map(lambda a: work(a, min(a + step, uniq.size)), range(0, uniq.size, step)))
         return torch.from_numpy(rows[inv.reshape(-1)])
+
+    def warm(self) -> None:
+        """Ask the kernel to read the whole table into the page cache, in the background
+        (POSIX_FADV_WILLNEED): a decode step then reads its 16 rows from RAM instead of 16 random
+        NVMe reads. The page cache stays reclaimable (it counts as available memory)."""
+        fd = os.open(self.path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, self.offset, self.rows * self.row_bytes, os.POSIX_FADV_WILLNEED)
+        finally:
+            os.close(fd)
 
     def codebook(self, device) -> torch.Tensor:
         key = str(device)

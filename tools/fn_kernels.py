@@ -52,6 +52,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 
 import torch  # noqa: E402
 
+from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
 # the helper half of exl3_linear's CUDA source: includes, the licence, the trellis decode, mma,
@@ -66,6 +67,15 @@ __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + ::expf(-v
 __device__ __forceinline__ float silu(float v) { return v / (1.0f + ::expf(-v)); }
 __device__ __forceinline__ float bf_lo(uint32_t w) { return __uint_as_float(w << 16); }
 __device__ __forceinline__ float bf_hi(uint32_t w) { return __uint_as_float(w & 0xffff0000u); }
+
+// Programmatic dependent launch: a kernel launched with the attribute may start while its
+// predecessor runs; `pdl_wait` is where it needs the predecessor's output (it returns when the whole
+// predecessor grid has completed and flushed; a no-op without the attribute). Every kernel here
+// triggers right after its wait, so its successor's CTAs can launch and prefetch their weights while
+// it runs. Neither changes what a thread computes.
+__device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;" ::: "memory"); }
+__device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;" :::); }
+__device__ __forceinline__ void prefetch_l2(const void* p) { asm volatile("prefetch.global.L2 [%0];" :: "l"(p)); }
 
 // ------------------------------------------------------------------------------------- gemv
 // 8 bf16 activations from x (16 bytes) as fp32
@@ -100,24 +110,35 @@ template <> struct WVec<__half> {
 
 // the dot of one weight row with MC activation rows, by a group of LPR lanes; every lane ends with
 // the full sums (fixed xor tree)
-template <typename TW, int LPR, int MC>
+// U chunks a pass: their weight loads are issued together (more bytes in flight a lane); each
+// lane still adds its chunks in K order, so the sums are the one-chunk loop's bit for bit
+template <typename TW, int LPR, int MC, int U = 4>
 __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bfloat16* __restrict__ X,
                                         int ldx, int m0, int mc, int K, int sl, float* acc) {
     constexpr int VEC = WVec<TW>::VEC;
+    constexpr int STEP = LPR * VEC;
 #pragma unroll
     for (int m = 0; m < MC; ++m) acc[m] = 0.f;
-    for (int k = sl * VEC; k < K; k += LPR * VEC) {
-        float w[VEC];
-        WVec<TW>::load(wr + k, w);
+    for (int k0 = sl * VEC; k0 < K; k0 += U * STEP) {
+        float w[U][VEC];
+#pragma unroll
+        for (int u = 0; u < U; ++u)
+            if (k0 + u * STEP < K) WVec<TW>::load(wr + k0 + u * STEP, w[u]);
 #pragma unroll
         for (int m = 0; m < MC; ++m) {
             if (m < mc) {
-                float x[VEC];
-                load_x8(X + (size_t)(m0 + m) * ldx + k, x);
-                if (VEC == 16) load_x8(X + (size_t)(m0 + m) * ldx + k + 8, x + 8);
                 float s = acc[m];
 #pragma unroll
-                for (int e = 0; e < VEC; ++e) s = fmaf(x[e], w[e], s);
+                for (int u = 0; u < U; ++u) {
+                    const int k = k0 + u * STEP;
+                    if (k < K) {
+                        float x[VEC];
+                        load_x8(X + (size_t)(m0 + m) * ldx + k, x);
+                        if (VEC == 16) load_x8(X + (size_t)(m0 + m) * ldx + k + 8, x + 8);
+#pragma unroll
+                        for (int e = 0; e < VEC; ++e) s = fmaf(x[e], w[u][e], s);
+                    }
+                }
                 acc[m] = s;
             }
         }
@@ -128,9 +149,12 @@ __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bf
         for (int o = LPR / 2; o > 0; o >>= 1) acc[m] += __shfl_xor_sync(0xffffffffu, acc[m], o);
 }
 
-template <typename TW, int LPR, int MC>
+__device__ __forceinline__ void store_out(float* y, float v) { *y = v; }
+__device__ __forceinline__ void store_out(__nv_bfloat16* y, float v) { *y = __float2bfloat16_rn(v); }
+
+template <typename TW, int LPR, int MC, typename TY>
 __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
-        const TW* __restrict__ W, const float* __restrict__ S, float* __restrict__ Y, int ldy,
+        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy,
         int M, int N, int K) {
     constexpr int RPW = 32 / LPR;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
@@ -138,6 +162,11 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
     const int n = (blockIdx.x * 8 + warp) * RPW + sub;
     const bool live = n < N;
     const TW* wr = W + (size_t)(live ? n : 0) * K;
+    if (live)                                          // the weights do not depend on the predecessor
+        for (int off = sl * 128; off < K * (int)sizeof(TW); off += LPR * 128)
+            prefetch_l2(reinterpret_cast<const char*>(wr) + off);
+    pdl_wait();
+    pdl_trigger();
     for (int m0 = 0; m0 < M; m0 += MC) {
         const int mc = min(MC, M - m0);
         float acc[MC];
@@ -145,7 +174,7 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
         if (live && sl == 0) {
             const float sc = S ? S[n] : 1.0f;
 #pragma unroll
-            for (int m = 0; m < MC; ++m) if (m < mc) Y[(size_t)(m0 + m) * ldy + n] = acc[m] * sc;
+            for (int m = 0; m < MC; ++m) if (m < mc) store_out(Y + (size_t)(m0 + m) * ldy + n, acc[m] * sc);
         }
     }
 }
@@ -159,6 +188,14 @@ __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D
         const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
         __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc) {
     extern __shared__ __nv_bfloat16 a_s[];                 // [M, R]
+    {
+        const int j0 = blockIdx.x * 8 + (threadIdx.x >> 5), s0 = (threadIdx.x & 31) >> 3, l0 = threadIdx.x & 7;
+        if (j0 < H)
+            for (int off = l0 * 128; off < R * (int)sizeof(TW); off += 8 * 128)
+                prefetch_l2(reinterpret_cast<const char*>(W + (size_t)(s0 * H + j0) * R) + off);
+    }
+    pdl_wait();
+    pdl_trigger();
     for (int e = threadIdx.x; e < M * R; e += blockDim.x) {
         const int m = e / R, r = e % R;
         a_s[m * R + r] = __float2bfloat16_rn(silu(bfr(bfr(D[(size_t)m * ldd + r]) * inv_hc)));
@@ -196,6 +233,8 @@ __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D
 template <int PER>
 __global__ void __launch_bounds__(32) router_kernel(const float* __restrict__ L, int ldl, int E, int k,
         int* __restrict__ IDS, float* __restrict__ WTS) {
+    pdl_wait();
+    pdl_trigger();
     const int m = blockIdx.x, lane = threadIdx.x;
     const float* l = L + (size_t)m * ldl;
     float v[PER];
@@ -246,85 +285,89 @@ __global__ void __launch_bounds__(32) router_kernel(const float* __restrict__ L,
 }
 
 // --------------------------------------------------------------------------------- MoE GEMV
+
 // One row of one expert matrix over one 128-column block: XH (fp16 [Kin], shared memory) @ Wi, the
-// K tiles split over the CTA's 8 warps in contiguous slices, the warps added in warp order into
-// RED[128]. Trellis tiles of the 8 columns' tiles stream through cp.async stages per warp.
-template <int KB, int ST>
-__device__ __forceinline__ void moe_row_gemm(const __half* __restrict__ xh, const uint32_t* __restrict__ T,
-        int ldt, int cb, int Kin, uint32_t* __restrict__ stage_all, float* __restrict__ red) {
-    constexpr int TW = 8 * KB;
-    constexpr int NTW = 8;
-    constexpr int SW = NTW * TW;
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int g = lane >> 2, t = lane & 3;
-    uint32_t* stage = stage_all + (size_t)warp * ST * SW;
-    const int KT = Kin / 16;
-    const int per = (KT + 7) / 8;
-    const int k0 = min(KT, warp * per), k1 = min(KT, k0 + per);
-    const int nt0 = cb * 8;
-    float acc[NTW][2][4];
-#pragma unroll
-    for (int j = 0; j < NTW; ++j)
-#pragma unroll
-        for (int h = 0; h < 2; ++h)
-#pragma unroll
-            for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
-    auto issue = [&](int kt, int buf) {
+// K tiles split over the CTA's 8 warps in contiguous slices, each warp's 8 column tiles through
+// cp.async stages, the warp partials added in warp order. `issue_first` streams the first stages
+// (the trellis does not depend on the input, so a kernel calls it before it has the input);
+// `run` waits for XH and finishes. RED [8][128].
+template <int KB, int ST, int WARPS>
+struct RowGemm {
+    static constexpr int TW = 8 * KB, NTW = 8, SW = NTW * TW;
+    const uint32_t* T; int ldt, nt0, k0, k1, lane, warp;
+    uint32_t* stage;
+
+    __device__ __forceinline__ RowGemm(const uint32_t* T_, int ldt_, int cb, int Kin, uint32_t* stage_all)
+        : T(T_), ldt(ldt_), nt0(cb * 8) {
+        lane = threadIdx.x & 31; warp = threadIdx.x >> 5;
+        stage = stage_all + (size_t)warp * ST * SW;
+        const int KT = Kin / 16, per = (KT + WARPS - 1) / WARPS;
+        k0 = min(KT, warp * per); k1 = min(KT, k0 + per);
+    }
+    __device__ __forceinline__ void issue(int kt, int buf) {
         if (kt < k1) {
             const uint4* src = reinterpret_cast<const uint4*>(T + ((size_t)kt * ldt + nt0) * TW);
             uint4* dst = reinterpret_cast<uint4*>(stage + buf * SW);
             for (int c = lane; c < SW / 4; c += 32) cp_async16(dst + c, src + c);
         }
         cp_commit();
-    };
-#pragma unroll
-    for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
-    for (int kt = k0; kt < k1; ++kt) {
-        const int i = kt - k0;
-        issue(kt + ST - 1, (i + ST - 1) % ST);
-        cp_wait<ST - 1>();
-        __syncwarp();
-        const uint32_t* buf = stage + (i % ST) * SW;
-        // A: row 0 only (lanes g == 0); rows 1..15 are zeros
-        const uint32_t* xw = reinterpret_cast<const uint32_t*>(xh + kt * 16);
-        const uint32_t a0 = g == 0 ? xw[t] : 0u, a2 = g == 0 ? xw[t + 4] : 0u;
-#pragma unroll
-        for (int j = 0; j < NTW; ++j) {
-            FragB f0, f1;
-            dq_tile<KB>(buf + j * TW, lane * 8, f0, f1);
-            mma(acc[j][0], a0, 0u, a2, 0u, f0.r[0], f0.r[1]);
-            mma(acc[j][1], a0, 0u, a2, 0u, f1.r[0], f1.r[1]);
-        }
-        __syncwarp();
     }
-    cp_wait<0>();
-    for (int step = 0; step < 8; ++step) {
-        if (warp == step && g == 0) {
+    __device__ __forceinline__ void issue_first() {
+#pragma unroll
+        for (int s = 0; s < ST - 1; ++s) issue(k0 + s, s);
+    }
+    __device__ __forceinline__ void run(const __half* __restrict__ xh, float* __restrict__ red) {
+        const int g = lane >> 2, t = lane & 3;
+        float acc[NTW][2][4];
+#pragma unroll
+        for (int j = 0; j < NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+        for (int kt = k0; kt < k1; ++kt) {
+            const int i = kt - k0;
+            issue(kt + ST - 1, (i + ST - 1) % ST);
+            cp_wait<ST - 1>();
+            __syncwarp();
+            const uint32_t* buf = stage + (i % ST) * SW;
+            // A: row 0 only (lanes g == 0); rows 1..15 are zeros
+            const uint32_t* xw = reinterpret_cast<const uint32_t*>(xh + kt * 16);
+            const uint32_t a0 = g == 0 ? xw[t] : 0u, a2 = g == 0 ? xw[t + 4] : 0u;
+#pragma unroll
+            for (int j = 0; j < NTW; ++j) {
+                FragB f0, f1;
+                dq_tile<KB>(buf + j * TW, lane * 8, f0, f1);
+                mma(acc[j][0], a0, 0u, a2, 0u, f0.r[0], f0.r[1]);
+                mma(acc[j][1], a0, 0u, a2, 0u, f1.r[0], f1.r[1]);
+            }
+            __syncwarp();
+        }
+        cp_wait<0>();
+        if (g == 0) {
 #pragma unroll
             for (int j = 0; j < NTW; ++j)
 #pragma unroll
                 for (int h = 0; h < 2; ++h) {
                     const int col = j * 16 + h * 8 + 2 * t;
-                    if (step == 0) { red[col] = acc[j][h][0]; red[col + 1] = acc[j][h][1]; }
-                    else { red[col] += acc[j][h][0]; red[col + 1] += acc[j][h][1]; }
+                    red[warp * 128 + col] = acc[j][h][0];
+                    red[warp * 128 + col + 1] = acc[j][h][1];
                 }
         }
         __syncthreads();
     }
-}
+};
 
-template <int ST>
-__device__ __forceinline__ void moe_row_gemm_k(int kb, const __half* xh, const uint32_t* T, int ldt,
-        int cb, int Kin, uint32_t* stage, float* red) {
-    switch (kb) {
-        case 2: moe_row_gemm<2, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        case 3: moe_row_gemm<3, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        case 4: moe_row_gemm<4, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        case 5: moe_row_gemm<5, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        case 6: moe_row_gemm<6, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        case 8: moe_row_gemm<8, ST>(xh, T, ldt, cb, Kin, stage, red); break;
-        default: break;
+// warp 0's four columns: the warp partials added in warp order, then the output rotation
+template <int WARPS>
+__device__ __forceinline__ void red_rot(const float* red, int lane, float& v0, float& v1, float& v2, float& v3) {
+    const int c = 4 * lane;
+    v0 = red[c]; v1 = red[c + 1]; v2 = red[c + 2]; v3 = red[c + 3];
+#pragma unroll
+    for (int w = 1; w < WARPS; ++w) {
+        v0 += red[w * 128 + c]; v1 += red[w * 128 + c + 1]; v2 += red[w * 128 + c + 2]; v3 += red[w * 128 + c + 3];
     }
+    wht128(v0, v1, v2, v3, lane);
 }
 
 struct MoEArgs {
@@ -334,23 +377,17 @@ struct MoEArgs {
     const __half* const* sv;       // [E + 1, 3] svh pointers
 };
 
-// grid (2 * I/128, P); blockIdx.y -> pair ORDER[y]; Y [P, 2, I] bf16
-template <int ST>
-__global__ void __launch_bounds__(256) moe_gu_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
-        const int* __restrict__ IDS, const int* __restrict__ ORDER, int S, MoEArgs a,
-        __nv_bfloat16* __restrict__ Y, int H, int I) {
-    extern __shared__ uint32_t smem[];
+template <int KB, int MOE_ST, int WARPS>
+__device__ __forceinline__ void moe_gu_body(const __nv_bfloat16* __restrict__ X, int ldx, int m, int p, int e,
+        int mat, int cb, MoEArgs a, __nv_bfloat16* __restrict__ Y, int H, int I, uint32_t* smem) {
     __half* xh = reinterpret_cast<__half*>(smem);                          // [H]
-    float* red = reinterpret_cast<float*>(smem + H / 2);                   // [128]
-    uint32_t* stage = smem + H / 2 + 128;
+    float* red = reinterpret_cast<float*>(smem + H / 2);                   // [8][128]
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int p = ORDER[blockIdx.y];
-    const int m = p / S;
-    const int e = IDS[p];
-    const int mat = blockIdx.x & 1, cb = blockIdx.x >> 1;
+    RowGemm<KB, MOE_ST, WARPS> rg(a.tr[e * 3 + mat], I / 16, cb, H, smem + H / 2 + 8 * 128);
+    rg.issue_first();
+    // the pair's rotated input (rot_in_kernel's arithmetic), while the first stages stream
     const __half* suh = a.su[e * 3 + mat];
-    // the pair's rotated input: rot_in_kernel's arithmetic, one warp a 128 block
-    for (int blk = warp; blk * 128 < H; blk += 8) {
+    for (int blk = warp; blk * 128 < H; blk += WARPS) {
         const int k = blk * 128 + 4 * lane;
         const uint2 xr = *reinterpret_cast<const uint2*>(X + (size_t)m * ldx + k);
         const uint2 sr = *reinterpret_cast<const uint2*>(suh + k);
@@ -365,10 +402,10 @@ __global__ void __launch_bounds__(256) moe_gu_kernel(const __nv_bfloat16* __rest
         *reinterpret_cast<uint2*>(xh + k) = o;
     }
     __syncthreads();
-    moe_row_gemm_k<ST>(a.kb[e * 3 + mat], xh, a.tr[e * 3 + mat], I / 16, cb, H, stage, red);
+    rg.run(xh, red);
     if (warp == 0) {
-        float v0 = red[4 * lane], v1 = red[4 * lane + 1], v2 = red[4 * lane + 2], v3 = red[4 * lane + 3];
-        wht128(v0, v1, v2, v3, lane);
+        float v0, v1, v2, v3;
+        red_rot<WARPS>(red, lane, v0, v1, v2, v3);
         const int n = cb * 128 + 4 * lane;
         const __half* svh = a.sv[e * 3 + mat];
         const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
@@ -380,24 +417,45 @@ __global__ void __launch_bounds__(256) moe_gu_kernel(const __nv_bfloat16* __rest
     }
 }
 
-// grid (H/128, P); YD [P, H] fp32
-template <int ST>
-__global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __restrict__ YGU,
-        const int* __restrict__ IDS, const int* __restrict__ ORDER, MoEArgs a, float* __restrict__ YD,
-        int H, int I) {
+// grid (2 * I/128, P); blockIdx.y -> pair ORDER[y] (ORDER null: y); Y [P, 2, I] bf16
+template <int ST, int WARPS>
+__global__ void __launch_bounds__(256) moe_gu_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const int* __restrict__ IDS, const int* __restrict__ ORDER, int S, MoEArgs a,
+        __nv_bfloat16* __restrict__ Y, int H, int I) {
     extern __shared__ uint32_t smem[];
+    pdl_wait();                                        // the router's ids, the mixer's x
+    pdl_trigger();
+    const int p = ORDER ? ORDER[blockIdx.y] : blockIdx.y;
+    const int m = p / S;
+    const int e = IDS[p];
+    const int mat = blockIdx.x & 1, cb = blockIdx.x >> 1;
+    switch (a.kb[e * 3 + mat]) {
+        case 2: moe_gu_body<2, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 3: moe_gu_body<3, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 4: moe_gu_body<4, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 5: moe_gu_body<5, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 6: moe_gu_body<6, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 8: moe_gu_body<8, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        default: break;
+    }
+}
+
+template <int KB, int MOE_ST, int WARPS>
+__device__ __forceinline__ void moe_down_body(const __nv_bfloat16* __restrict__ YGU, int p, int e, int cb,
+        MoEArgs a, float* __restrict__ YD, int H, int I, uint32_t* smem) {
     __half* xh = reinterpret_cast<__half*>(smem);                          // [I]
     float* red = reinterpret_cast<float*>(smem + I / 2);
-    uint32_t* stage = smem + I / 2 + 128;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int p = ORDER[blockIdx.y];
-    const int e = IDS[p];
-    const int cb = blockIdx.x;
+    RowGemm<KB, MOE_ST, WARPS> rg(a.tr[e * 3 + 2], H / 16, cb, I, smem + I / 2 + 8 * 128);
+    rg.issue_first();                                  // the weights stream before gate|up is done
+    pdl_wait();
+    pdl_trigger();
+    pdl_trigger();
     const __half* suh = a.su[e * 3 + 2];
     const __nv_bfloat16* yg = YGU + (size_t)p * 2 * I;
     const __nv_bfloat16* yu = yg + I;
     // rot_in_silu_kernel's arithmetic
-    for (int blk = warp; blk * 128 < I; blk += 8) {
+    for (int blk = warp; blk * 128 < I; blk += WARPS) {
         const int k = blk * 128 + 4 * lane;
         const uint2 gr = *reinterpret_cast<const uint2*>(yg + k);
         const uint2 ur = *reinterpret_cast<const uint2*>(yu + k);
@@ -417,10 +475,10 @@ __global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __re
         *reinterpret_cast<uint2*>(xh + k) = o;
     }
     __syncthreads();
-    moe_row_gemm_k<ST>(a.kb[e * 3 + 2], xh, a.tr[e * 3 + 2], H / 16, cb, I, stage, red);
+    rg.run(xh, red);
     if (warp == 0) {
-        float v0 = red[4 * lane], v1 = red[4 * lane + 1], v2 = red[4 * lane + 2], v3 = red[4 * lane + 3];
-        wht128(v0, v1, v2, v3, lane);
+        float v0, v1, v2, v3;
+        red_rot<WARPS>(red, lane, v0, v1, v2, v3);
         const int n = cb * 128 + 4 * lane;
         const __half* svh = a.sv[e * 3 + 2];
         const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
@@ -431,10 +489,33 @@ __global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __re
     }
 }
 
+// grid (H/128, P); YD [P, H] fp32. The ids were written two launches back (the router), before
+// gate|up waited on them, so the pointers and the first trellis stages are read before the wait.
+template <int ST, int WARPS>
+__global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __restrict__ YGU,
+        const int* __restrict__ IDS, const int* __restrict__ ORDER, MoEArgs a, float* __restrict__ YD,
+        int H, int I) {
+    extern __shared__ uint32_t smem[];
+    const int p = ORDER ? ORDER[blockIdx.y] : blockIdx.y;
+    const int e = IDS[p];
+    const int cb = blockIdx.x;
+    switch (a.kb[e * 3 + 2]) {
+        case 2: moe_down_body<2, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 3: moe_down_body<3, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 4: moe_down_body<4, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 5: moe_down_body<5, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 6: moe_down_body<6, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 8: moe_down_body<8, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        default: pdl_wait(); pdl_trigger(); break;
+    }
+}
+
 // grid (H/256, M), 256 threads: out[m, c] = bf16(sum over slots in ascending expert id of w * y)
 __global__ void __launch_bounds__(256) moe_combine_kernel(const float* __restrict__ YD,
         const int* __restrict__ IDS, const float* __restrict__ WTS, int S, __nv_bfloat16* __restrict__ OUT,
         int ldo, int H) {
+    pdl_wait();
+    pdl_trigger();
     const int m = blockIdx.y;
     const int c = blockIdx.x * 256 + threadIdx.x;
     __shared__ int ord[64];
@@ -454,17 +535,125 @@ __global__ void __launch_bounds__(256) moe_combine_kernel(const float* __restric
     OUT[(size_t)m * ldo + c] = __float2bfloat16_rn(acc);
 }
 
+// ------------------------------------------------------------------------------ norms, inject
+// a fixed-order block sum (256 threads): thread-strided, the warp's xor tree, the warps in order
+__device__ __forceinline__ float block_sum(float v, float* sh) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    __syncthreads();
+    if (lane == 0) sh[warp] = v;
+    __syncthreads();
+    float t = sh[0];
+    for (int w = 1; w < (int)(blockDim.x >> 5); ++w) t += sh[w];
+    return t;
+}
+
+template <typename TN> __device__ __forceinline__ float wf(const TN* w, int i);
+template <> __device__ __forceinline__ float wf(const __half* w, int i) { return __half2float(w[i]); }
+template <> __device__ __forceinline__ float wf(const __nv_bfloat16* w, int i) { return __bfloat162float(w[i]); }
+
+// the reference's grouped RMS norm with weight 1 + w over one (row, group): bf16(x r (1 + w)),
+// r = rsqrt(sum(x^2) / G + eps), x in fp32. grid (M, groups), 256 threads, G <= 256 * 16.
+template <typename TN>
+__global__ void __launch_bounds__(256) hc_norm_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const TN* __restrict__ Wn, __nv_bfloat16* __restrict__ Y, int ldy, int G, float eps) {
+    __shared__ float sh[8];
+    pdl_wait();
+    pdl_trigger();
+    const int m = blockIdx.x, g = blockIdx.y;
+    const __nv_bfloat16* x = X + (size_t)m * ldx + g * G;
+    float v[16];
+    float ss = 0.f;
+    int c = 0;
+    for (int i = threadIdx.x; i < G; i += 256, ++c) { v[c] = __bfloat162float(x[i]); ss = fmaf(v[c], v[c], ss); }
+    const float r = rsqrtf(block_sum(ss, sh) / (float)G + eps);
+    c = 0;
+    for (int i = threadIdx.x; i < G; i += 256, ++c)
+        Y[(size_t)m * ldy + g * G + i] = __float2bfloat16_rn(v[c] * r * (1.0f + wf(Wn, g * G + i)));
+}
+
+// the inject of one (row, stream) and the next site's norm of that stream (one group = one stream):
+// inj = 2 bf16(sigmoid(bf16(bf16(d) / hc))), h = bf16(h0 + bf16(out inj)), n = norm(h) (1 + w)
+template <typename TN>
+__global__ void __launch_bounds__(256) inject_norm_kernel(const __nv_bfloat16* __restrict__ H0, int ldh,
+        const __nv_bfloat16* __restrict__ OUT, int ldo, const float* __restrict__ D, int ldd, int R,
+        const TN* __restrict__ Wn, __nv_bfloat16* __restrict__ HN, __nv_bfloat16* __restrict__ NN,
+        int G, float inv_hc, float eps) {
+    __shared__ float sh[8];
+    pdl_wait();
+    pdl_trigger();
+    const int m = blockIdx.x, s = blockIdx.y;
+    const float inj = 2.0f * bfr(sigm(bfr(bfr(D[(size_t)m * ldd + R + s]) * inv_hc)));
+    const __nv_bfloat16* h0 = H0 + (size_t)m * ldh + s * G;
+    const __nv_bfloat16* o = OUT + (size_t)m * ldo;
+    float v[16];
+    float ss = 0.f;
+    int c = 0;
+    for (int i = threadIdx.x; i < G; i += 256, ++c) {
+        v[c] = bfr(__bfloat162float(h0[i]) + bfr(__bfloat162float(o[i]) * inj));
+        HN[(size_t)m * ldh + s * G + i] = __float2bfloat16_rn(v[c]);
+        ss = fmaf(v[c], v[c], ss);
+    }
+    if (Wn == nullptr) return;
+    const float r = rsqrtf(block_sum(ss, sh) / (float)G + eps);
+    c = 0;
+    for (int i = threadIdx.x; i < G; i += 256, ++c)
+        NN[(size_t)m * ldh + s * G + i] = __float2bfloat16_rn(v[c] * r * (1.0f + wf(Wn, s * G + i)));
+}
+
+// the GDN output norm of one head row (D = 128, a warp): bf16(bf16(w bf16(o r)) act(z)), w plain
+__global__ void __launch_bounds__(256) gated_norm_kernel(const __nv_bfloat16* __restrict__ O,
+        const __nv_bfloat16* __restrict__ Z, const __nv_bfloat16* __restrict__ Wn, __nv_bfloat16* __restrict__ Y,
+        int rows, float eps, int sig) {
+    pdl_wait();
+    pdl_trigger();
+    const int lane = threadIdx.x & 31;
+    const int r = blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    float v[4], ss = 0.f;
+#pragma unroll
+    for (int e = 0; e < 4; ++e) { v[e] = __bfloat162float(O[(size_t)r * 128 + lane * 4 + e]); ss = fmaf(v[e], v[e], ss); }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    const float rr = rsqrtf(ss / 128.0f + eps);
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+        const int i = lane * 4 + e;
+        const float hn = bfr(__bfloat162float(Wn[i]) * bfr(v[e] * rr));
+        const float z = __bfloat162float(Z[(size_t)r * 128 + i]);
+        const float a = sig ? sigm(z) : z / (1.0f + ::expf(-z));
+        Y[(size_t)r * 128 + i] = __float2bfloat16_rn(hn * a);
+    }
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------------- host side
+static int g_pdl = 1;      // fn_set_pdl: launch with programmatic stream serialization (QWEN38_FN_PDL)
+
+template <typename... KArgs, typename... Args>
+static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = grid; cfg.blockDim = block; cfg.dynamicSmemBytes = smem; cfg.stream = st;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, k, static_cast<KArgs>(args)...);
+    TORCH_CHECK(e == cudaSuccess, "fn_kernels launch: ", cudaGetErrorString(e));
+}
+
+void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
+
 static int lpr_for(int K) { return K >= 2048 ? 32 : (K >= 512 ? 16 : 8); }
 
 #define GEMV_LAUNCH(TW, LPR, MC)                                                                   \
-    gemv_kernel<TW, LPR, MC><<<dim3((N + 8 * (32 / LPR) - 1) / (8 * (32 / LPR))), 256, 0, st>>>(   \
+    launch(gemv_kernel<TW, LPR, MC, TY>, dim3((N + 8 * (32 / LPR) - 1) / (8 * (32 / LPR))), dim3(256), 0, st, \
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(),             \
-        s_ptr, (float*)y.data_ptr(), (int)y.stride(0), M, N, K)
+        s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K)
 
-template <typename TW>
+template <typename TW, typename TY>
 static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const float* s_ptr,
                           torch::Tensor& y, int M, int N, int K, cudaStream_t st) {
     const int lpr = lpr_for(K);
@@ -480,19 +669,71 @@ void fn_gemv(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> s, t
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 8 == 0, "x bf16 [M, K]");
     TORCH_CHECK(w.dim() == 2 && w.is_contiguous(), "w [N, K] contiguous");
-    TORCH_CHECK(y.dtype() == torch::kFloat && y.stride(1) == 1, "y fp32 [M, N]");
+    TORCH_CHECK((y.dtype() == torch::kFloat || y.dtype() == torch::kBFloat16) && y.stride(1) == 1, "y fp32 or bf16 [M, N]");
     const int M = x.size(0), K = x.size(1), N = w.size(0);
     TORCH_CHECK(w.size(1) == K && y.size(0) == M && y.size(1) == N, "shapes");
-    const float* sp = nullptr;
+    const bool f32 = y.dtype() == torch::kFloat;
     if (w.dtype() == torch::kInt8) {
         TORCH_CHECK(s.has_value() && s->dtype() == torch::kFloat && s->numel() == N, "int8 rows need fp32 scales [N]");
         TORCH_CHECK(K % 16 == 0, "K % 16");
-        sp = (const float*)s->data_ptr();
-        gemv_dispatch<int8_t>(x, w, sp, y, M, N, K, st);
+        const float* sp = (const float*)s->data_ptr();
+        if (f32) gemv_dispatch<int8_t, float>(x, w, sp, y, M, N, K, st);
+        else gemv_dispatch<int8_t, __nv_bfloat16>(x, w, sp, y, M, N, K, st);
     } else {
         TORCH_CHECK(w.dtype() == torch::kHalf && K % 8 == 0, "w int8 or fp16, K % 8");
-        gemv_dispatch<__half>(x, w, nullptr, y, M, N, K, st);
+        if (f32) gemv_dispatch<__half, float>(x, w, nullptr, y, M, N, K, st);
+        else gemv_dispatch<__half, __nv_bfloat16>(x, w, nullptr, y, M, N, K, st);
     }
+}
+
+void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps) {
+    const at::cuda::OptionalCUDAGuard guard(x.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int M = x.size(0), N = x.size(1);
+    TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && y.dtype() == torch::kBFloat16 && y.stride(1) == 1, "bf16 rows");
+    TORCH_CHECK(N % G == 0 && G <= 256 * 16 && w.numel() == N && w.is_contiguous(), "groups");
+    dim3 grid(M, N / G);
+    if (w.dtype() == torch::kHalf)
+        launch(hc_norm_kernel<__half>, grid, dim3(256), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+            (const __half*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
+    else {
+        TORCH_CHECK(w.dtype() == torch::kBFloat16, "norm weight fp16 or bf16");
+        launch(hc_norm_kernel<__nv_bfloat16>, grid, dim3(256), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+            (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
+    }
+}
+
+void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w,
+                    torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps) {
+    const at::cuda::OptionalCUDAGuard guard(h0.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int M = h0.size(0), N = h0.size(1), G = N / hc;
+    TORCH_CHECK(h0.dtype() == torch::kBFloat16 && h0.is_contiguous() && hn.is_contiguous() && nn.is_contiguous(), "h0, hn, nn contiguous bf16");
+    TORCH_CHECK(out.dtype() == torch::kBFloat16 && out.stride(1) == 1 && out.size(1) == G, "out bf16 [M, G]");
+    TORCH_CHECK(d.dtype() == torch::kFloat && d.stride(1) == 1 && d.size(1) >= R + hc, "d fp32 [M, R + hc]");
+    TORCH_CHECK(G <= 256 * 16, "group");
+    dim3 grid(M, hc);
+    const float inv = 1.0f / (float)hc;
+    if (!w.has_value() || w->dtype() == torch::kHalf)
+        launch(inject_norm_kernel<__half>, grid, dim3(256), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
+            (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
+            w.has_value() ? (const __half*)w->data_ptr() : (const __half*)nullptr, (__nv_bfloat16*)hn.data_ptr(),
+            (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
+    else
+        launch(inject_norm_kernel<__nv_bfloat16>, grid, dim3(256), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
+            (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
+            (const __nv_bfloat16*)w->data_ptr(), (__nv_bfloat16*)hn.data_ptr(), (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
+}
+
+void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig) {
+    const at::cuda::OptionalCUDAGuard guard(o.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(o.dtype() == torch::kBFloat16 && z.dtype() == torch::kBFloat16 && w.dtype() == torch::kBFloat16, "bf16");
+    TORCH_CHECK(o.is_contiguous() && z.is_contiguous() && y.is_contiguous() && w.numel() == 128 && o.size(-1) == 128, "head rows of 128");
+    const int rows = o.numel() / 128;
+    launch(gated_norm_kernel, dim3((rows + 7) / 8), dim3(256), 0, st, (const __nv_bfloat16*)o.data_ptr(),
+        (const __nv_bfloat16*)z.data_ptr(), (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), rows,
+        (float)eps, sig ? 1 : 0);
 }
 
 void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<torch::Tensor> s,
@@ -510,14 +751,14 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
     if (w.dtype() == torch::kInt8) {
         TORCH_CHECK(s.has_value() && s->numel() == 4 * H && R % 16 == 0, "int8 scales, R % 16");
         auto k = M == 1 ? mix_up_kernel<int8_t, 1> : mix_up_kernel<int8_t, 8>;
-        k<<<grid, 256, smem, st>>>((const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
+        launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
             (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv);
     } else {
         TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
         auto k = M == 1 ? mix_up_kernel<__half, 1> : mix_up_kernel<__half, 8>;
-        k<<<grid, 256, smem, st>>>((const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
-            (int)n.stride(0), (const __half*)w.data_ptr(), nullptr,
+        launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
+            (int)n.stride(0), (const __half*)w.data_ptr(), (const float*)nullptr,
             (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv);
     }
 }
@@ -530,8 +771,8 @@ void fn_router(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor ids, to
     TORCH_CHECK(ids.dtype() == torch::kInt && wts.dtype() == torch::kFloat && ids.is_contiguous() && wts.is_contiguous(), "ids int32, wts fp32");
     TORCH_CHECK(ids.numel() == M * (k + 1) && wts.numel() == M * (k + 1) && k < 32, "slots");
     TORCH_CHECK(E == 512, "router kernel is built for 512 experts");
-    router_kernel<16><<<M, 32, 0, st>>>((const float*)logits.data_ptr(), (int)logits.stride(0), (int)E, (int)k,
-        (int*)ids.data_ptr(), (float*)wts.data_ptr());
+    launch(router_kernel<16>, dim3(M), dim3(32), 0, st, (const float*)logits.data_ptr(), (int)logits.stride(0), (int)E,
+        (int)k, (int*)ids.data_ptr(), (float*)wts.data_ptr());
 }
 
 static MoEArgs moe_args(const torch::Tensor& tr, const torch::Tensor& kb, const torch::Tensor& su,
@@ -544,13 +785,25 @@ static MoEArgs moe_args(const torch::Tensor& tr, const torch::Tensor& kb, const 
     return a;
 }
 
-constexpr int MOE_ST = 3;
+// cp.async stages a warp keeps (fn_set_moe_st; QWEN38_FN_MOE_ST): fewer stages, less shared
+// memory, more CTAs resident on an SM. The arithmetic does not depend on it.
+static int g_moe_st = 2;
+// warps a MoE CTA splits its K range over (fn_set_moe_warps; QWEN38_FN_MOE_WARPS): sets the order
+// of the partial sums, so a build keeps one value for every row count
+static int g_moe_warps = 8;
 
-// the input row (fp16), the reduction row, and 8 warps x MOE_ST stages x 8 tiles of the bank's
+void fn_set_moe_st(int64_t st) { TORCH_CHECK(st >= 2 && st <= 4, "MoE stages 2..4"); g_moe_st = (int)st; }
+void fn_set_moe_warps(int64_t w) { TORCH_CHECK(w == 4 || w == 8, "MoE warps 4 or 8"); g_moe_warps = (int)w; }
+
+// the input row (fp16), the eight warps' partial rows, and 8 warps x stages x 8 tiles of the bank's
 // widest trellis tile (8 kbmax words)
 static size_t moe_smem(int kin, int kbmax) {
-    return (size_t)(kin / 2 + 128) * 4 + (size_t)8 * MOE_ST * 8 * 8 * kbmax * 4;
+    return (size_t)(kin / 2 + 8 * 128) * 4 + (size_t)g_moe_warps * g_moe_st * 8 * 8 * kbmax * 4;
 }
+
+#define MOE_PICK(KERN) (g_moe_warps == 4                                                            \
+    ? (g_moe_st == 2 ? KERN<2, 4> : (g_moe_st == 3 ? KERN<3, 4> : KERN<4, 4>))                         \
+    : (g_moe_st == 2 ? KERN<2, 8> : (g_moe_st == 3 ? KERN<3, 8> : KERN<4, 8>)))
 
 void fn_moe_gu(torch::Tensor x, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, torch::Tensor kb,
                torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax) {
@@ -558,16 +811,15 @@ void fn_moe_gu(torch::Tensor x, torch::Tensor ids, torch::Tensor order, torch::T
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int M = x.size(0), H = x.size(1), P = ids.numel(), S = P / M, I = y.size(2);
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, H]");
-    TORCH_CHECK(ids.dtype() == torch::kInt && order.dtype() == torch::kInt && order.numel() == P && P == M * S, "ids/order int32 [M S]");
+    TORCH_CHECK(ids.dtype() == torch::kInt && order.dtype() == torch::kInt && (order.numel() == P || order.numel() == 0) && P == M * S, "ids/order int32 [M S] (order empty: launch order)");
     TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.is_contiguous() && y.size(0) == P && y.size(1) == 2, "y bf16 [P, 2, I]");
     TORCH_CHECK(H % 128 == 0 && I % 128 == 0, "H, I multiples of 128");
     const size_t smem = moe_smem(H, (int)kbmax);
-    auto kern = moe_gu_kernel<MOE_ST>;
-    static bool attr = false;
-    if (!attr) { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024); attr = true; }
-    kern<<<dim3(2 * (I / 128), P), 256, smem, st>>>((const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
-        (const int*)ids.data_ptr(), (const int*)order.data_ptr(), S, moe_args(tr, kb, su, sv),
-        (__nv_bfloat16*)y.data_ptr(), H, I);
+    auto kern = MOE_PICK(moe_gu_kernel);
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+    launch(kern, dim3(2 * (I / 128), P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+        (const int*)ids.data_ptr(), order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, S,
+        moe_args(tr, kb, su, sv), (__nv_bfloat16*)y.data_ptr(), H, I);
 }
 
 void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, torch::Tensor kb,
@@ -577,13 +829,13 @@ void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torc
     const int P = ygu.size(0), I = ygu.size(2), H = yd.size(1);
     TORCH_CHECK(ygu.dtype() == torch::kBFloat16 && ygu.is_contiguous() && ygu.size(1) == 2, "ygu bf16 [P, 2, I]");
     TORCH_CHECK(yd.dtype() == torch::kFloat && yd.is_contiguous() && yd.size(0) == P, "yd fp32 [P, H]");
-    TORCH_CHECK(ids.numel() == P && order.numel() == P, "pairs");
+    TORCH_CHECK(ids.numel() == P && (order.numel() == P || order.numel() == 0), "pairs");
     const size_t smem = moe_smem(I, (int)kbmax);
-    auto kern = moe_down_kernel<MOE_ST>;
-    static bool attr = false;
-    if (!attr) { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024); attr = true; }
-    kern<<<dim3(H / 128, P), 256, smem, st>>>((const __nv_bfloat16*)ygu.data_ptr(), (const int*)ids.data_ptr(),
-        (const int*)order.data_ptr(), moe_args(tr, kb, su, sv), (float*)yd.data_ptr(), H, I);
+    auto kern = MOE_PICK(moe_down_kernel);
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+    launch(kern, dim3(H / 128, P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)ygu.data_ptr(), (const int*)ids.data_ptr(),
+        order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, moe_args(tr, kb, su, sv),
+        (float*)yd.data_ptr(), H, I);
 }
 
 void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out) {
@@ -592,7 +844,7 @@ void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torc
     const int M = out.size(0), H = out.size(1), S = ids.numel() / M;
     TORCH_CHECK(S <= 64 && yd.size(0) == M * S && yd.size(1) == H, "combine shapes");
     TORCH_CHECK(out.dtype() == torch::kBFloat16 && out.stride(1) == 1, "out bf16 [M, H]");
-    moe_combine_kernel<<<dim3((H + 255) / 256, M), 256, 0, st>>>((const float*)yd.data_ptr(),
+    launch(moe_combine_kernel, dim3((H + 255) / 256, M), dim3(256), 0, st, (const float*)yd.data_ptr(),
         (const int*)ids.data_ptr(), (const float*)wts.data_ptr(), S, (__nv_bfloat16*)out.data_ptr(),
         (int)out.stride(0), H);
 }
@@ -607,7 +859,14 @@ _CPP = (
     "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax);\n"
     "void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, "
     "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);\n"
-    "void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out);\n")
+    "void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out);\n"
+    "void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps);\n"
+    "void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_t R, "
+    "c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);\n"
+    "void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);\n"
+    "void fn_set_pdl(int64_t on);\n"
+    "void fn_set_moe_st(int64_t st);\n"
+    "void fn_set_moe_warps(int64_t w);\n")
 
 _MOD = None
 
@@ -623,9 +882,13 @@ def _module():
         tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
-                                      "fn_moe_combine"],
+                                      "fn_moe_combine", "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
+                                      "fn_set_pdl", "fn_set_moe_st", "fn_set_moe_warps"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
+        _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
+        _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
+        _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
     return _MOD
 
 
@@ -685,6 +948,40 @@ def gemv(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     return out
 
 
+def gemv_bf16(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`gemv` with the fp32 sums rounded to bf16 in the kernel (what `F.linear` returns in bf16)."""
+    q, s = (w.q, w.s) if hasattr(w, "q") else (w, None)
+    if out is None:
+        out = torch.empty(x.shape[0], q.shape[0], dtype=torch.bfloat16, device=x.device)
+    _module().fn_gemv(x, q, s, out)
+    return out
+
+
+def hc_norm(x: torch.Tensor, w: torch.Tensor, group: int, eps: float, out: torch.Tensor | None = None) -> torch.Tensor:
+    """The reference's grouped RMS norm with weight (1 + w): x [M, n * group] bf16 -> bf16."""
+    if out is None:
+        out = torch.empty_like(x)
+    _module().fn_hc_norm(x, w, out, group, eps)
+    return out
+
+
+def inject_norm(h0: torch.Tensor, out: torch.Tensor, d: torch.Tensor, R: int, w: torch.Tensor | None,
+                hc: int, eps: float):
+    """h = bf16(h0 + bf16(out * inj)) with inj = 2 sigmoid(bf16(d[:, R:]) / hc) per stream, and the
+    next site's norm of h with weight (1 + w) (None: no norm, n is None). Returns (h, n)."""
+    hn = torch.empty_like(h0)
+    nn = torch.empty_like(h0) if w is not None else hn
+    _module().fn_inject_norm(h0, out, d, R, w, hn, nn, hc, eps)
+    return hn, (nn if w is not None else None)
+
+
+def gated_norm(o: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: float, sigmoid: bool) -> torch.Tensor:
+    """The GDN output norm over head rows of 128: bf16(bf16(w * bf16(norm(o))) * act(z)), plain w."""
+    y = torch.empty_like(o)
+    _module().fn_gated_norm(o.contiguous(), z.contiguous(), w, y, eps, sigmoid)
+    return y
+
+
 def mix_up(d: torch.Tensor, n: torch.Tensor, w_up, hc: int, out: torch.Tensor | None = None) -> torch.Tensor:
     """The mixer's second half: d [M, >=R] fp32 (the down projection), n [M, hc H] bf16 (the normed
     streams), w_up [hc H, R] fp16 or Int8Rows -> x [M, H] bf16."""
@@ -721,7 +1018,12 @@ def moe(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, bank: MoEBank, or
     P = M * S
     mod = _module()
     if order is None:
-        order = expert_order(ids)
+        if M > 1:
+            order = expert_order(ids)
+        else:
+            order = _EMPTY.get(x.device)
+            if order is None:
+                order = _EMPTY[x.device] = torch.empty(0, dtype=torch.int32, device=x.device)
     b = bufs if bufs is not None else {}
     ygu = b.get("ygu")
     if ygu is None or ygu.shape[0] != P:
@@ -738,6 +1040,9 @@ def moe(x: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, bank: MoEBank, or
         out = torch.empty(M, bank.H, dtype=torch.bfloat16, device=x.device)
     mod.fn_moe_combine(yd, flat, wts.reshape(-1), out)
     return out
+
+
+_EMPTY: dict = {}
 
 
 def expert_order(ids: torch.Tensor) -> torch.Tensor:

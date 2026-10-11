@@ -35,7 +35,7 @@ def _without_models(dst: str) -> None:
     for node in tree.body:
         if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "KNOBS":
             for k, v in zip(node.value.keys, node.value.values):
-                if ast.literal_eval(v)[1].startswith("engine/models/"):
+                if ast.literal_eval(v)[1].startswith(("engine/models/", "tools/fn_")):
                     drop.append(k.lineno)
     with open(p, "w") as f:
         f.writelines(l for i, l in enumerate(lines, 1) if i not in drop)

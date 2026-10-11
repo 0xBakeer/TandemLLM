@@ -287,9 +287,18 @@ KNOBS: dict[str, tuple] = {
     # '' = `.tandem` in the project)
     'TANDEM_SCRATCH': ('', 'server/conductor/packages.py'),
     # ENG-E7: Qwen3.8-Flash-Next on turboderp's EXL3 packs (engine/models/flashnext/). The 27B's
-    # disk-tier fingerprint leaves knobs owned under engine/models/ out (engine/disk_cache.py).
+    # disk-tier fingerprint leaves knobs owned under engine/models/ and tools/fn_ out (engine/disk_cache.py).
     # The hyper-connection mixers' served width: int8 rows with an fp32 scale, or the pack's fp16
     'FN_MIX': ('int8', 'engine/models/flashnext/pack.py'),
+    # Flash-Next kernels launched with programmatic dependent launch (overlap a launch with its
+    # predecessor's tail; the bits do not change)
+    'FN_PDL': ('1', 'tools/fn_kernels.py'),
+    # cp.async stages of a warp in the MoE kernels (2..4; the bits do not depend on it)
+    'FN_MOE_ST': ('3', 'tools/fn_kernels.py'),
+    # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
+    'FN_MOE_WARPS': ('4', 'tools/fn_kernels.py'),
+    # read the n-gram table into the page cache at load (POSIX_FADV_WILLNEED, in the background)
+    'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
 }
 
 

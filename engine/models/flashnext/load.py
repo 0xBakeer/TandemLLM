@@ -28,8 +28,12 @@ import numpy as np
 import torch
 
 from engine.models.flashnext.pack import PackIndex, mixer_weight
+from engine.settings import SETTINGS as _S
 
 ALIGN = 16
+#: read the n-gram table into the page cache at load (asynchronously; QWEN38_FN_WARM_TABLE=0: rows
+#: come from the NVMe on first use)
+WARM_TABLE = _S.get("FN_WARM_TABLE") == "1"
 
 
 def _region_image(idx: PackIndex, names: list[str]) -> tuple[np.ndarray, dict[str, tuple[int, int]]]:
@@ -85,6 +89,27 @@ def load_banks(idx: PackIndex, layer: int, device, prefix: str = "") -> "object"
     return MoEBank(experts, device)
 
 
+TILES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                     "ops", "fn-exl3-tiles.json")
+
+
+def apply_tiles(path: str = TILES) -> int:
+    """Flash-Next's own EXL3 splits (tools/fn_tiles.py) for its dense shapes; the 27B's shapes are
+    not in the file, so its table is untouched. Returns the entries applied."""
+    import json
+    from tools.exl3_linear import set_config
+    if not os.path.isfile(path):
+        return 0
+    n = 0
+    for k, v in json.load(open(path)).items():
+        if k.startswith("_"):
+            continue
+        N, Kin, kb = (int(x) for x in k.split("x"))
+        set_config(N, Kin, kb, {"S": int(v["S"]), "wk": int(v["wk"]), "cfg": int(v["cfg"]), "cfg2": int(v["cfg2"])})
+        n += 1
+    return n
+
+
 def load(path: str, device="cuda", mix: str | None = None, log=print, layers=None, first: int | None = None):
     """(idx, W, banks, tables, timing) for the trunk of the pack at `path` (no MTP layer). `first`:
     only the first N layers, with `idx.cfg` cut to them (a debug model for checks beside :8000)."""
@@ -93,11 +118,12 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
         layers = range(first)
     from tools.exl3_linear import EXL3Block
     t0 = time.time()
+    tiles = apply_tiles()
     idx = PackIndex.open(path)
     idx.audit(mtp=False)
     c = idx.cfg
     W: dict = {}
-    timing = {"index_s": round(time.time() - t0, 2)}
+    timing = {"index_s": round(time.time() - t0, 2), "tiles": tiles}
     t1 = time.time()
     lay = range(c.num_hidden_layers) if layers is None else layers
     # every non-expert tensor of the trunk
@@ -157,6 +183,9 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
             log(f"[fn-load] experts through layer {li}: {time.time() - t1:.1f} s")
     timing["experts_s"] = round(time.time() - t1, 2)
     tables = {li: idx.table for li in c.ple_layers} if idx.table is not None else {}
+    if idx.table is not None and WARM_TABLE:
+        idx.table.warm()
+    timing["table_warm"] = bool(idx.table is not None and WARM_TABLE)
     if first is not None:
         idx.cfg = dataclasses.replace(c, num_hidden_layers=first, layer_types=c.layer_types[:first])
     timing["total_s"] = round(time.time() - t0, 2)

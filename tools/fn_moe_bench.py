@@ -44,9 +44,19 @@ def main() -> None:
     ap.add_argument("--banks", type=int, default=12)
     ap.add_argument("--rows", type=int, nargs="+", default=[1, 4, 16, 32])
     ap.add_argument("--reps", type=int, default=20)
+    ap.add_argument("--st", type=int, nargs="+", default=[2, 3, 4], help="MoE cp.async stages to compare")
+    ap.add_argument("--warps", type=int, nargs="+", default=[8], help="MoE warps a CTA to compare")
     a = ap.parse_args()
     banks = [bank(a.experts, a.k, a.shared_k, s) for s in range(a.banks)]
     g = torch.Generator().manual_seed(0)
+    for w in a.warps:
+        K._module().fn_set_moe_warps(w)
+        for st in a.st:
+            K._module().fn_set_moe_st(st)
+            run(a, banks, g, st, w)
+
+
+def run(a, banks, g, st, warps) -> None:
     for M in a.rows:
         xs, idss, wss, outs, bufs, byts = [], [], [], [], [], 0
         for b, sizes in banks:
@@ -77,7 +87,7 @@ def main() -> None:
         torch.cuda.synchronize()
         ms = ev[0].elapsed_time(ev[1]) / a.reps / len(banks)
         gbs = byts / len(banks) / (ms / 1e3) / 1e9
-        print(json.dumps({"M": M, "k": a.k, "shared_k": a.shared_k, "experts": a.experts, "banks": a.banks,
+        print(json.dumps({"warps": warps, "st": st, "M": M, "k": a.k, "shared_k": a.shared_k, "experts": a.experts, "banks": a.banks,
                           "ms_per_call": round(ms, 4), "mb_per_call": round(byts / len(banks) / 1e6, 2),
                           "gb_s": round(gbs, 1)}), flush=True)
 

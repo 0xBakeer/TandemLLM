@@ -107,7 +107,13 @@ def step_checks(eng: FlashNextEngine, ids: list[int], k: int = 8) -> dict:
         agree += int(int(x.argmax()) == int(z.argmax()))
         worst = max(worst, (x - z).abs().max().item())
         tok = int(x.argmax())
-    return {"steps": k, "graph_eq_eager": equal, "argmax_eq_forward": agree, "max_abs_vs_forward": round(worst, 4)}
+    # the fused trunk against the reference-structured layers on the same kernels (torch glue)
+    s1, s2 = eng.new_state(eng.max_len), eng.new_state(eng.max_len)
+    f = eng.forward(torch.tensor(ids), s1)[-1]
+    rl = eng.forward(torch.tensor(ids), s2, layers=list(range(eng.cfg.num_hidden_layers)))[-1]
+    return {"steps": k, "graph_eq_eager": equal, "argmax_eq_forward": agree, "max_abs_vs_forward": round(worst, 4),
+            "fused_vs_ref_layers_argmax_eq": int(int(f.argmax()) == int(rl.argmax())),
+            "fused_vs_ref_layers_max_abs": round((f - rl).abs().max().item(), 4)}
 
 
 def main() -> None:
@@ -133,7 +139,9 @@ def main() -> None:
     print(f"[fn] loaded {res['load']}, MemAvailable {res['mem_after_load_gib']} GiB", flush=True)
     tok = AutoTokenizer.from_pretrained(a.pack)
     eos = set(idx.cfg.eos_token_ids)
-    res["knobs"] = {"QWEN38_FN_MIX": MIX, "max_len": a.max_len, "graph_max_lc": 2048, "ctx": a.ctx, "new": a.new,
+    from engine.settings import SETTINGS
+    res["knobs"] = {"QWEN38_FN_MIX": MIX, "QWEN38_FN_PDL": SETTINGS.get("FN_PDL"),
+                    "QWEN38_FN_WARM_TABLE": SETTINGS.get("FN_WARM_TABLE"), "max_len": a.max_len, "graph_max_lc": 2048, "ctx": a.ctx, "new": a.new,
                     "greedy": True, "thinking": False, "speculation": "off", "batch": 1, "kv_dtype": "bf16",
                     "prefill_chunk": 2048, "env": {k: v for k, v in os.environ.items()
                                                    if k.startswith(("QWEN38_", "QSE_"))}}
