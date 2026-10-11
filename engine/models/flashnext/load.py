@@ -27,10 +27,15 @@ from collections import defaultdict
 import numpy as np
 import torch
 
-from engine.models.flashnext.pack import PackIndex, mixer_weight
+from engine.models.flashnext.pack import TABLE_FILE, PackIndex, mixer_weight
 from engine.settings import SETTINGS as _S
 
 ALIGN = 16
+#: drop the page cache of the shards once their tensors are on the device (posix_fadvise DONTNEED,
+#: no root): the GPU's allocations do not wait for the kernel to reclaim cache, and ~50 GB of it
+#: beside the weights is the 2026-09-25 NVRM out-of-memory (tools/drop_page_cache.py). The n-gram
+#: table, which decode reads, is kept (QWEN38_FN_WARM_TABLE).
+DROP_SHARD_CACHE = _S.get("FN_DROP_SHARD_CACHE") == "1"
 #: read the n-gram table into the page cache at load (asynchronously; QWEN38_FN_WARM_TABLE=0: rows
 #: come from the NVMe on first use)
 WARM_TABLE = _S.get("FN_WARM_TABLE") == "1"
@@ -54,6 +59,19 @@ def _region_image(idx: PackIndex, names: list[str]) -> tuple[np.ndarray, dict[st
         where[t.name] = (o, t.nbytes)
         o += -(-t.nbytes // ALIGN) * ALIGN
     return img, where
+
+
+def drop_cache(paths: list[str]) -> int:
+    """posix_fadvise(DONTNEED) over each file; the bytes asked for (the cache dropped is at most that)."""
+    n = 0
+    for p in paths:
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            n += os.fstat(fd).st_size
+        finally:
+            os.close(fd)
+    return n
 
 
 def load_banks(idx: PackIndex, layer: int, device, prefix: str = "") -> "object":
@@ -194,6 +212,9 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
             log(f"[fn-load] experts through layer {li}: {time.time() - t1:.1f} s")
     timing["experts_s"] = round(time.time() - t1, 2)
     tables = {li: idx.table for li in c.ple_layers} if idx.table is not None else {}
+    if DROP_SHARD_CACHE:
+        timing["shard_cache_dropped_gb"] = round(drop_cache([os.path.join(idx.path, f) for f in idx.files
+                                                             if f != TABLE_FILE]) / 1e9, 1)
     if idx.table is not None and WARM_TABLE:
         idx.table.warm()
     timing["table_warm"] = bool(idx.table is not None and WARM_TABLE)

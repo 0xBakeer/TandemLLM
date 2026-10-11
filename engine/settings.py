@@ -302,6 +302,8 @@ KNOBS: dict[str, tuple] = {
     'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
     # read the n-gram table into the page cache at load (POSIX_FADV_WILLNEED, in the background)
     'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
+    # drop the shards' page cache after the load (the table's is kept); 0 = keep it (a warm reload)
+    'FN_DROP_SHARD_CACHE': ('1', 'engine/models/flashnext/load.py'),
 }
 
 
