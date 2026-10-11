@@ -80,9 +80,10 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
                             f"capture_lock.LOCK in the same `with`")
     # N2: the narrator's decode step (engine/generative/qwen35.py) is the third
     # draft_graph.py twice: the lone draft graph and the packed draft of parallel requests
-    # ENG-221: Flash-Next's decode step (engine/models/flashnext/engine.py DecodeGraph)
+    # ENG-221: Flash-Next's decode step (engine/models/flashnext/engine.py DecodeGraph); ENG-227/153:
+    # its verify block (VerifyGraph), its commit (CommitGraph) and its MTP chain draft (MTPChainGraph)
     assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/drafters/draft_graph.py",
-                             "engine/generative/qwen35.py", "engine/models/flashnext/engine.py",
+                             "engine/generative/qwen35.py"] + ["engine/models/flashnext/engine.py"] * 4 + [
                              "engine/verify_graph.py"], found
     return f"{len(found)} capture sites, each under the lock"
 

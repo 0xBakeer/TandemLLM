@@ -763,13 +763,14 @@ __global__ void __launch_bounds__(256) dense_kernel(const __nv_bfloat16* __restr
     dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem);
 }
 
-// ------------------------------------------------------------------------- attention, one token
-// grid (Hq + 2 Hk + 1), D threads: CTA h < Hq normalises query head h (1 + w) and rotates its first
-// ROT dims at the position in POS (the reference's rope: bf16(bf16(x c) + bf16(rot(x) s)));
-// Hq..Hq+Hk-1 the same for the key heads, written into the cache at POS; then the value heads into
-// the cache; the last CTA the indexer key. QKV: per q head [q (D) | gate (D)], then k, then v.
-__global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __restrict__ QKV,
-        const __nv_bfloat16* __restrict__ IQK, const int64_t* __restrict__ POS,
+// ------------------------------------------------------------------------- attention, a row's inputs
+// grid (Hq + 2 Hk + 1, M), D threads: CTA h < Hq of row m normalises query head h (1 + w) and rotates
+// its first ROT dims at the row's position POS[m] (the reference's rope: bf16(bf16(x c) + bf16(rot(x) s)));
+// Hq..Hq+Hk-1 the same for the key heads, written into the cache at the row's slot SLOT[m] (its
+// position for a decode step; its place in the block for a verify); then the value heads into the
+// cache; the last CTA the indexer key. QKV row: per q head [q (D) | gate (D)], then k, then v.
+__global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
+        const __nv_bfloat16* __restrict__ IQK, int ldi, const int64_t* __restrict__ POS, const int64_t* __restrict__ SLOT,
         const __nv_bfloat16* __restrict__ QW, const __nv_bfloat16* __restrict__ KW,
         const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN,
         __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
@@ -778,19 +779,20 @@ __global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __r
     __shared__ float nv[256];
     pdl_wait();
     pdl_trigger();
-    const int b = blockIdx.x, t = threadIdx.x;
-    const int64_t pos = POS[0];
+    const int b = blockIdx.x, t = threadIdx.x, m = blockIdx.y;
+    const int64_t pos = POS[m], slot = SLOT[m];
+    const __nv_bfloat16* qkv = QKV + (size_t)m * ldq;
     if (b >= Hq + Hk) {
         if (b < Hq + 2 * Hk) {
             const int vh = b - Hq - Hk;
-            VC[((size_t)vh * cap + pos) * D + t] = QKV[(size_t)Hq * 2 * D + (size_t)Hk * D + vh * D + t];
+            VC[((size_t)vh * cap + slot) * D + t] = qkv[(size_t)Hq * 2 * D + (size_t)Hk * D + vh * D + t];
         } else if (IKC != nullptr && t < ihd) {
-            IKC[(size_t)pos * ihd + t] = IQK[ioff + t];
+            IKC[(size_t)slot * ihd + t] = IQK[(size_t)m * ldi + ioff + t];
         }
         return;
     }
     const bool isq = b < Hq;
-    const float x = __bfloat162float(isq ? QKV[(size_t)b * 2 * D + t] : QKV[(size_t)Hq * 2 * D + (b - Hq) * D + t]);
+    const float x = __bfloat162float(isq ? qkv[(size_t)b * 2 * D + t] : qkv[(size_t)Hq * 2 * D + (b - Hq) * D + t]);
     const float r = rsqrtf(block_sum(x * x, sh) / (float)D + eps);
     const float n = bfr(x * r * (1.0f + __bfloat162float((isq ? QW : KW)[t])));
     nv[t] = n;
@@ -801,19 +803,20 @@ __global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __r
         const float rh = t < ROT / 2 ? -nv[t + ROT / 2] : nv[t - ROT / 2];
         o = bfr(bfr(n * c) + bfr(rh * sn));
     }
-    if (isq) Q[(size_t)b * D + t] = __float2bfloat16_rn(o);
-    else KC[((size_t)(b - Hq) * cap + pos) * D + t] = __float2bfloat16_rn(o);
+    if (isq) Q[((size_t)m * Hq + b) * D + t] = __float2bfloat16_rn(o);
+    else KC[((size_t)(b - Hq) * cap + slot) * D + t] = __float2bfloat16_rn(o);
 }
 
-// y[h D + d] = bf16(o[h D + d] * bf16(sigmoid(gate[h][d]))), gate in QKV beside each query head
+// y[m][h D + d] = bf16(o[m][h D + d] * bf16(sigmoid(gate))), the gate beside each query head in row m of QKV
 __global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __restrict__ O,
-        const __nv_bfloat16* __restrict__ QKV, __nv_bfloat16* __restrict__ Y, int n, int D) {
+        const __nv_bfloat16* __restrict__ QKV, int ldq, __nv_bfloat16* __restrict__ Y, int n, int per, int D) {
     pdl_wait();
     pdl_trigger();
     const int i = blockIdx.x * 256 + threadIdx.x;
     if (i >= n) return;
-    const int h = i / D, d = i % D;
-    const float g = bfr(sigm(__bfloat162float(QKV[(size_t)h * 2 * D + D + d])));
+    const int m = i / per, r = i % per;
+    const int h = r / D, d = r % D;
+    const float g = bfr(sigm(__bfloat162float(QKV[(size_t)m * ldq + (size_t)h * 2 * D + D + d])));
     Y[i] = __float2bfloat16_rn(__bfloat162float(O[i]) * g);
 }
 
@@ -898,19 +901,21 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
     if (y.dtype() == torch::kFloat) { DENSE_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_KB(false) }
 }
 
-void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor qw,
-                  torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc,
+void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot,
+                  torch::Tensor qw, torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc,
                   torch::Tensor vc, c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps) {
     const at::cuda::OptionalCUDAGuard guard(qkv.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
-    const int D = q.size(1), ROT = cos.size(1), cap = kc.size(1);
-    TORCH_CHECK(D == 256 && qkv.is_contiguous() && qkv.numel() == hq * 2 * D + 2 * hk * D, "qkv [Hq 2D + 2 Hk D], D 256");
-    TORCH_CHECK(q.is_contiguous() && kc.is_contiguous() && vc.is_contiguous() && kc.size(0) == hk && kc.size(2) == D, "caches [Hk, cap, D]");
-    TORCH_CHECK(pos.dtype() == torch::kLong && cos.dtype() == torch::kBFloat16 && ROT % 2 == 0 && ROT <= D, "pos int64, cos/sin bf16");
+    const int D = q.size(2), ROT = cos.size(1), cap = kc.size(1), M = qkv.size(0);
+    TORCH_CHECK(D == 256 && qkv.dim() == 2 && qkv.stride(1) == 1 && qkv.size(1) == hq * 2 * D + 2 * hk * D, "qkv [M, Hq 2D + 2 Hk D], D 256");
+    TORCH_CHECK(q.is_contiguous() && q.size(0) == M && kc.is_contiguous() && vc.is_contiguous() && kc.size(0) == hk && kc.size(2) == D, "q [M, Hq, D], caches [Hk, cap, D]");
+    TORCH_CHECK(pos.dtype() == torch::kLong && slot.dtype() == torch::kLong && pos.numel() >= M && slot.numel() >= M, "pos, slot int64 [M]");
+    TORCH_CHECK(cos.dtype() == torch::kBFloat16 && ROT % 2 == 0 && ROT <= D, "cos/sin bf16");
     const int ihd = ikc.has_value() ? ikc->size(1) : 0;
-    TORCH_CHECK(ihd <= 256, "indexer head");
-    launch(attn_prep_kernel, dim3(hq + 2 * hk + 1), dim3(D), 0, st, (const __nv_bfloat16*)qkv.data_ptr(),
-        iqk.has_value() ? (const __nv_bfloat16*)iqk->data_ptr() : (const __nv_bfloat16*)nullptr, (const int64_t*)pos.data_ptr(),
+    TORCH_CHECK(ihd <= 256 && (!iqk.has_value() || (iqk->dim() == 2 && iqk->stride(1) == 1)), "indexer head, iqk [M, n]");
+    launch(attn_prep_kernel, dim3(hq + 2 * hk + 1, M), dim3(D), 0, st, (const __nv_bfloat16*)qkv.data_ptr(), (int)qkv.stride(0),
+        iqk.has_value() ? (const __nv_bfloat16*)iqk->data_ptr() : (const __nv_bfloat16*)nullptr, iqk.has_value() ? (int)iqk->stride(0) : 0,
+        (const int64_t*)pos.data_ptr(), (const int64_t*)slot.data_ptr(),
         (const __nv_bfloat16*)qw.data_ptr(), (const __nv_bfloat16*)kw.data_ptr(), (const __nv_bfloat16*)cos.data_ptr(),
         (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)q.data_ptr(), (__nv_bfloat16*)kc.data_ptr(),
         (__nv_bfloat16*)vc.data_ptr(), ikc.has_value() ? (__nv_bfloat16*)ikc->data_ptr() : (__nv_bfloat16*)nullptr,
@@ -920,10 +925,11 @@ void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Te
 void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D) {
     const at::cuda::OptionalCUDAGuard guard(o.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
-    TORCH_CHECK(o.is_contiguous() && y.is_contiguous() && qkv.is_contiguous(), "contiguous");
-    const int n = o.numel();
+    TORCH_CHECK(o.is_contiguous() && y.is_contiguous() && qkv.dim() == 2 && qkv.stride(1) == 1, "o, y contiguous; qkv [M, n]");
+    const int n = o.numel(), M = qkv.size(0);
+    TORCH_CHECK(n % M == 0, "rows");
     launch(gate_mul_kernel, dim3((n + 255) / 256), dim3(256), 0, st, (const __nv_bfloat16*)o.data_ptr(),
-        (const __nv_bfloat16*)qkv.data_ptr(), (__nv_bfloat16*)y.data_ptr(), n, (int)D);
+        (const __nv_bfloat16*)qkv.data_ptr(), (int)qkv.stride(0), (__nv_bfloat16*)y.data_ptr(), n, n / M, (int)D);
 }
 
 static int lpr_for(int K) { return K >= 2048 ? 32 : (K >= 512 ? 16 : 8); }
@@ -1180,7 +1186,7 @@ _CPP = (
     "void fn_set_pdl(int64_t on);\n"
     "void fn_set_moe_st(int64_t st);\n"
     "void fn_set_moe_warps(int64_t w);\n"
-    "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor qw, "
+    "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
     "torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc, torch::Tensor vc, "
     "c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps);\n"
     "void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D);\n"
@@ -1332,21 +1338,25 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     return out
 
 
-def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, ioff: int, eps: float):
-    """One token's attention inputs: query heads normed (1 + w) and rotated -> [Hq, D]; key heads
-    the same and value heads as they are, into the caches kc/vc [Hk, cap, D] at pos (int64 [1] on
-    the device); the indexer key iqk[ioff:ioff + ihd] into ikc [cap, ihd]. qkv [Hq 2D + 2 Hk D]."""
+def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, ioff: int, eps: float, slot=None):
+    """The attention inputs of M rows: query heads normed (1 + w) and rotated at the row's position ->
+    [M, Hq, D]; key heads the same and value heads as they are, into the caches kc/vc [Hk, cap, D] at
+    the row's slot; the indexer key iqk[:, ioff:ioff + ihd] into ikc [cap, ihd]. qkv [M, Hq 2D + 2 Hk D],
+    pos / slot int64 [M] on the device (slot None: the position)."""
     D = kc.shape[2]
-    q = torch.empty(hq, D, dtype=torch.bfloat16, device=qkv.device)
-    _module().fn_attn_prep(qkv.reshape(-1), None if iqk is None else iqk.reshape(-1), pos, qw, kw, cos, sin, q,
-                           kc, vc, ikc, hq, hk, ioff, eps)
+    qkv = qkv.reshape(-1, qkv.shape[-1])
+    q = torch.empty(qkv.shape[0], hq, D, dtype=torch.bfloat16, device=qkv.device)
+    _module().fn_attn_prep(qkv, None if iqk is None else iqk.reshape(-1, iqk.shape[-1]), pos,
+                           pos if slot is None else slot, qw, kw, cos, sin, q, kc, vc, ikc, hq, hk, ioff, eps)
     return q
 
 
 def gate_mul(o: torch.Tensor, qkv: torch.Tensor, D: int) -> torch.Tensor:
-    """bf16(o * bf16(sigmoid(gate))) per query head, the gate beside each head in qkv."""
-    y = torch.empty(1, o.numel(), dtype=torch.bfloat16, device=o.device)
-    _module().fn_gate_mul(o, qkv.reshape(-1), y, D)
+    """bf16(o * bf16(sigmoid(gate))) per row and query head, the gate beside each head in qkv's row:
+    o [M, Hq, D] (any view of M Hq D contiguous values) -> [M, Hq D]."""
+    qkv = qkv.reshape(-1, qkv.shape[-1])
+    y = torch.empty(qkv.shape[0], o.numel() // qkv.shape[0], dtype=torch.bfloat16, device=o.device)
+    _module().fn_gate_mul(o.contiguous(), qkv, y, D)
     return y
 
 

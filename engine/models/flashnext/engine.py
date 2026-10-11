@@ -1,24 +1,31 @@
-"""Flash-Next on the board (ENG-221): the reference forward with its weight reads on the kernels, and
-a one-token decode step that reads its inputs from device buffers, so a CUDA graph can hold it.
+"""Flash-Next on the board (ENG-221, ENG-227): the reference forward with its weight reads on the
+kernels, and a row step -- one decode token, or a verify block of up to 32 draft rows -- that reads
+its inputs from device buffers, so a CUDA graph can hold it.
 
 `FlashNextRef` (ref.py) is the model, operation for operation, checked against `transformers`. This
 class keeps its structure and routes what reads weights to kernels over the pack's formats:
 
-  EXL3 projections and the head     tools/exl3_linear.exl3_matmul (q|k|v and qkv|z as one group)
+  EXL3 projections and the head     tools/fn_kernels.dense (up to 32 rows), tools/exl3_linear above
   mixers (int8 rows or fp16)        tools/fn_kernels.gemv (down and inject in one weight) + mix_up
   router, routed and shared experts tools/fn_kernels.router + moe (one bank, the shared expert last)
   GDN a/b, PLE projections (fp16)   tools/fn_kernels.gemv
-  GDN recurrence (decode)           tools/gdn_kernels.decode_pre + fused_decode_step (the 27B's)
-  attention (decode, dense regime)  tools/attn_kernels.decode_attention_dev (length on the device)
+  GDN conv, gates and recurrence    tools/fn_seq_kernels.gdn_pre + gdn_rows (a row's path)
+  PLE gate and dilated conv         tools/fn_seq_kernels.ple_gate + ple_conv (a row's path)
+  attention                         tools/fn_seq_kernels.attn_rows (a row's visible keys)
 
-`forward()` (the reference's) serves a prompt chunk of any length. `step()` is one token whose id,
-position and PLE rows sit in device buffers (`self.g`); `DecodeGraph` captures it once and replays it
-per token. Every part of `step()` computes its row with the arithmetic of the row-invariant kernels,
-so the decode step is the reference a verify block (ENG-227) has to equal bit for bit.
+`forward()` (the reference's) serves a prompt chunk of any length. `rows_step()` is M rows whose
+tokens, positions, cache slots, ancestors and PLE rows sit in device buffers (`stage` for a decode
+token, `stage_rows` for a draft block in DFS pre-order); `DecodeGraph` and `VerifyGraph` capture it.
+Every part of a row is computed with an instruction sequence that does not depend on the other rows
+or on where its predecessors sit, so the row of a verify block is the decode step's row at that
+position bit for bit: a greedy speculative run writes the plain greedy text (ENG-227). A decode step
+advances the state in place; a verify block writes nothing but KV rows past the length and keeps what
+`commit` needs, which then walks the accepted path's GDN rows again from the entry state (the decode
+arithmetic), takes the conv windows from the path and moves the path's KV rows into place.
 
-The decode step covers the dense attention regime: a context of up to `indexer_budget + 3` tokens
-(2,051), where QSA keeps every token. Past it the step takes the reference's attention (eager, slow,
-exact); the selected-key decode of `flashnext` (5668e843) is ENG-147's remaining work.
+The row step covers the dense attention regime: a context of up to `indexer_budget + 3` tokens
+(2,051), where QSA keeps every token. Past it a decode step takes the reference's attention (eager,
+slow, exact) and a verify block is refused; the selected-key path is ENG-147's work.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import torch
 
 from engine import capture_lock
 from engine.settings import SETTINGS as _S
-from engine.models.flashnext.ref import FlashNextRef, FNState
+from engine.models.flashnext.ref import MTP, FlashNextRef, FNState
 from engine.models.flashnext.ple import decode_rows
 
 
@@ -46,8 +53,23 @@ class FlashNextEngine(FlashNextRef):
         cos, sin = FlashNextRef.rope(self, torch.arange(max_len))
         self.rope_cos, self.rope_sin = cos, sin                          # [max_len, rotary] bf16
         self.dense_limit = (cfg.indexer_budget + cfg.indexer_compress_ratio - 1) if cfg.has_indexer else 1 << 60
-        self.g = {}                                                      # the step's device buffers
+        self._rb: dict = {}                                              # rows buffers by row count
         self._order1 = torch.empty(0, dtype=torch.int32, device=device)    # one row: launch order
+        self.rec: dict = {}                                              # what a commit needs
+        # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
+        # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
+        self._wc: dict = {}
+        for li in cfg.linear_layers:
+            a = self.pre(li) + "linear_attn."
+            if a + "conv1d.weight" not in W:
+                continue
+            self._wc[li] = W[a + "conv1d.weight"].reshape(cfg.conv_dim, -1).to(torch.bfloat16).contiguous()
+            self._wc[("alog", li)] = W[a + "A_log"].float().contiguous()
+            self._wc[("dtb", li)] = W[a + "dt_bias"].float().contiguous()
+        for li in cfg.ple_layers:
+            w = self.pre(li) + "ple.conv1d.weight"
+            if w in W:
+                self._wc[("ple", li)] = W[w].reshape(W[w].shape[0], -1).to(torch.bfloat16).contiguous()
 
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None) -> FNState:
@@ -277,123 +299,363 @@ class FlashNextEngine(FlashNextRef):
             return None
         return self.final(n[-1:] if head == "last" else n)
 
-    # ------------------------------------------------------------------------- the decode step
-    def alloc_step(self) -> None:
-        """The step's input buffers: token, position, [start, start + 1], the PLE rows."""
+    # ------------------------------------------------------------------------- rows: decode and verify
+    def _rows_buffers(self, M: int, key=None) -> dict:
+        """The device inputs of an M-row call and their pinned host image (one H2D copy a call):
+
+          tok, pos, slot      int64 [M]: the token, its position (block start + depth) and its cache
+                              slot (block start + row; equal to the position in a chain)
+          heads, packed       the PLE rows: hash head int64 [M nh], packed table row int16 [M nh, words]
+          actl                int32 [M, 4]: visible keys, block start, dense flag (attn_rows)
+          anc                 int32 [M, ANC]: the cache slot of the row's ancestor at each depth
+          gctl                int32 [M, 2]: the GDN tile's (load, save) (gdn_rows)
+          csrc, psrc          int32 [M, 3]: where the GDN conv taps (distance 3, 2, 1) and the PLE
+                              conv taps (9, 6, 3) live: a row of the block or a state column
+        """
+        key = M if key is None else key
+        rb = self._rb.get(key)
+        if rb is not None:
+            return rb
+        from tools import fn_seq_kernels as SK
         c, dev = self.cfg, self.device
         tab = next(iter(self.tables.values())) if self.tables else None
         nh = c.ngram_heads
         words = tab.words if tab is not None else 1
-        # one pinned host image and its device copy: [tok, pos, heads x nh] int64, then
-        # [start, end] int32, then the packed rows int16 -- one H2D a step
-        nb = 8 * (2 + nh) + 8 + 2 * nh * words
-        self._hbuf = torch.zeros(nb, dtype=torch.uint8, pin_memory=True)
-        self._copied = torch.cuda.Event()
-        self._copied.record()
-        self._dbuf = torch.zeros(nb, dtype=torch.uint8, device=dev)
+        n64 = M * (3 + nh)
+        w32 = (("actl", 4), ("anc", SK.ANC), ("gctl", 2), ("csrc", 3), ("psrc", 3))
+        n32 = M * sum(w for _, w in w32)
+        n32 += n32 % 2                                          # the int16 rows start 8-byte aligned
+        nb = 8 * n64 + 4 * n32 + 2 * M * nh * words
 
         def views(b):
-            i64 = b[: 8 * (2 + nh)].view(torch.int64)
-            i32 = b[8 * (2 + nh): 8 * (2 + nh) + 8].view(torch.int32)
-            rows = b[8 * (2 + nh) + 8:].view(torch.int16).view(nh, words)
-            return i64, i32, rows
-        hi64, hi32, hrows = views(self._hbuf)
-        di64, di32, drows = views(self._dbuf)
-        self._h = {"i64": hi64, "lenp": hi32, "rows": hrows}
-        self.g = {
-            "tok": di64[0:1], "pos": di64[1:2], "heads": di64[2:], "lenp": di32, "packed": drows,
-            "mask": torch.ones(1, 1, dtype=torch.bool, device=dev),
-            "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=dev),
-            "next": torch.zeros(1, dtype=torch.long, device=dev),
-        }
-        self._next_h = torch.zeros(1, dtype=torch.long, pin_memory=True)
-        if tab is not None:
-            self.g["bias"] = tab.bias.to(dev)
-            self.g["codebook"] = tab.codebook(dev)
+            i64 = b[: 8 * n64].view(torch.int64)
+            i32 = b[8 * n64: 8 * n64 + 4 * n32].view(torch.int32)
+            v = {"tok": i64[:M], "pos": i64[M:2 * M], "slot": i64[2 * M:3 * M], "heads": i64[3 * M:]}
+            k = 0
+            for name, w in w32:
+                v[name] = i32[k:k + M * w].view(M, w)
+                k += M * w
+            v["packed"] = b[8 * n64 + 4 * n32:].view(torch.int16).view(M * nh, words)
+            return v
+        hbuf = torch.zeros(nb, dtype=torch.uint8, pin_memory=True)
+        dbuf = torch.zeros(nb, dtype=torch.uint8, device=dev)
+        copied = torch.cuda.Event()
+        copied.record()
+        rb = {"M": M, "hbuf": hbuf, "dbuf": dbuf, "h": views(hbuf), "d": views(dbuf), "copied": copied,
+              "logits": torch.zeros(M, c.vocab_size, dtype=torch.float32, device=dev),
+              "next": torch.zeros(M, dtype=torch.long, device=dev),
+              "next_h": torch.zeros(M, dtype=torch.long, pin_memory=True), "attn": {}}
+        rb["d"]["sel"] = torch.zeros(M, SK.NSEL, dtype=torch.int32, device=dev)
+        if M == 1:                                   # a decode step: everything but the position is fixed
+            h = rb["h"]
+            h["gctl"].numpy()[:] = (-2, -1)
+            h["csrc"].numpy()[:] = (-1, -2, -3)
+            h["psrc"].numpy()[:] = (-1, -4, -7)
+        self._rb[key] = rb
+        return rb
+
+    def _ple_dev(self) -> dict:
+        if not hasattr(self, "_pled"):
+            tab = next(iter(self.tables.values()))
+            self._pled = {"bias": tab.bias.to(self.device), "codebook": tab.codebook(self.device)}
+        return self._pled
 
     def stage(self, token: int, st: FNState) -> None:
-        """Host work of one step, before the step (or its graph) runs: the PLE rows of `token`
-        (hash with the state's context, gather from the table) and the position buffers."""
-        # the pinned image is the previous step's copy source until that copy has run
-        self._copied.synchronize()
-        hb = self._h
-        i64 = hb["i64"].numpy()
-        i64[0], i64[1] = token, st.length
-        hb["lenp"].numpy()[:] = (st.length, st.length + 1)
+        """Host work of one decode step (before the step or its graph runs): the token, its position,
+        its PLE rows (hash with the state's context, which advances, and gather from the table)."""
+        rb = self._rows_buffers(1)
+        rb["copied"].synchronize()             # the image is the previous call's copy source until then
+        h, L = rb["h"], st.length
+        h["tok"].numpy()[0] = token
+        h["pos"].numpy()[0] = h["slot"].numpy()[0] = L
+        h["actl"].numpy()[0, :3] = (L + 1, L, 1)
+        h["anc"].numpy()[0, 0] = L
         for li in self.cfg.ple_layers:
-            hsh, tab = self.hash[li], self.tables[li]
-            ctx = st.ple_ctx.get(li)
-            ctx = [self.cfg.eos_token_id] * hsh.context_len if ctx is None else ctx.view(-1).tolist()
-            ids = hsh.ids_one(token, ctx)
+            hsh = self.hash[li]
+            ctx = self._ple_ctx(st, li)
+            self._ple_fill(h, 0, li, hsh.ids_one(token, ctx))
             st.ple_ctx[li] = torch.tensor([(ctx + [token])[-hsh.context_len:]], dtype=torch.long)
-            hb["rows"].numpy()[:] = tab.map[ids]
-            i64[2:] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
-        self._dbuf.copy_(self._hbuf, non_blocking=True)
-        self._copied.record()
+        rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+        rb["copied"].record()
 
-    def step(self, st: FNState) -> torch.Tensor:
-        """One token from the device buffers (`stage` first); the state advances in place except
-        `st.length`, which the caller moves. Returns logits [1, vocab] fp32 (a static buffer)."""
+    def _ple_ctx(self, st: FNState, li: int) -> list[int]:
+        ctx = st.ple_ctx.get(li)
+        return [self.cfg.eos_token_id] * self.hash[li].context_len if ctx is None else ctx.view(-1).tolist()
+
+    def _ple_fill(self, h: dict, row: int, li: int, ids: list[int]) -> None:
+        tab = self.tables[li]
+        nh = self.cfg.ngram_heads
+        h["packed"].numpy()[row * nh:(row + 1) * nh] = tab.map[ids]
+        h["heads"].numpy()[row * nh:(row + 1) * nh] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
+
+    def stage_rows(self, tokens: list[int], parents: list[int], st: FNState) -> None:
+        """Host work of a verify block: `tokens` in DFS pre-order with `parents` (-1 for the first
+        row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path."""
+        from tools import fn_seq_kernels as SK
+        M = len(tokens)
+        if self.cfg.has_indexer and st.length + M > self.dense_limit:
+            raise NotImplementedError("a verify block past the dense attention regime (ENG-147)")
+        rb = self._rows_buffers(M)
+        rb["copied"].synchronize()
+        h, L = rb["h"], st.length
+        depth, paths = [], []
+        for i, p in enumerate(parents):
+            depth.append(0 if p < 0 else depth[p] + 1)
+            paths.append([i] if p < 0 else paths[p] + [i])
+        d = np.asarray(depth, dtype=np.int64)
+        h["tok"].numpy()[:] = tokens
+        h["pos"].numpy()[:] = L + d
+        h["slot"].numpy()[:] = L + np.arange(M)
+        actl = h["actl"].numpy()
+        actl[:, 0] = L + d + 1
+        actl[:, 1] = L
+        actl[:, 2] = 1
+        anc = h["anc"].numpy()
+        for i, pa in enumerate(paths):
+            anc[i, :len(pa)] = L + np.asarray(pa)
+        ctl, _ = SK.tree_ctl(parents)
+        h["gctl"].numpy()[:] = ctl
+        h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
+        h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
+        for li in self.cfg.ple_layers:
+            hsh = self.hash[li]
+            ctx0 = self._ple_ctx(st, li)
+            for i, pa in enumerate(paths):
+                ctx = (ctx0 + [tokens[a] for a in pa[:-1]])[-hsh.context_len:]
+                self._ple_fill(h, i, li, hsh.ids_one(tokens[i], ctx))
+        rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+        rb["copied"].record()
+        self._block = (list(tokens), list(parents), paths)
+
+    def rows_step(self, st: FNState, M: int, write: bool = False) -> torch.Tensor:
+        """M rows from the device buffers (`stage` / `stage_rows` first) through the trunk and the
+        head. `write` (one row, a decode step): the recurrent and conv states advance in place.
+        Otherwise nothing but the KV rows at the block's slots is written, and what a commit needs is
+        kept in `self.rec`. Returns logits [M, vocab] fp32 (a static buffer) and leaves the greedy
+        tokens in rows["next"] and its pinned host copy. `st.length` is the caller's."""
         from tools import fn_kernels as K
-        c, g = self.cfg, self.g
-        h = self.W["embed_tokens.weight"].index_select(0, g["tok"]).repeat(1, c.hc_count)
+        c = self.cfg
+        rb = self._rows_buffers(M)
+        self._cur, self._write = rb, write
+        self.rec = {}
+        d = rb["d"]
+        h = self.W["embed_tokens.weight"].index_select(0, d["tok"]).repeat(1, c.hc_count)
         n = self.trunk(h, None, st, None, step=True)
-        d = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
-        x = K.mix_up(d, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
+        dd = K.gemv(n, self.W["hyper_connection_mixer.down_inject"])
+        x = K.mix_up(dd, n, self.W["hyper_connection_mixer.input_mix_weight_up.weight"], c.hc_count)
         if DENSE_MAX:
-            K.dense(x, self.W["lm_head.weight"], out=g["logits"])
+            K.dense(x, self.W["lm_head.weight"], out=rb["logits"])
         else:
             from tools.exl3_linear import exl3_matmul
-            exl3_matmul(x, self.W["lm_head.weight"], out=g["logits"])
-        # the greedy token, and its copy into pinned host memory: the host reads it after a sync
-        torch.argmax(g["logits"][0], dim=-1, keepdim=True, out=g["next"])
-        self._next_h.copy_(g["next"], non_blocking=True)
-        return g["logits"]
+            exl3_matmul(x, self.W["lm_head.weight"], out=rb["logits"])
+        # the greedy tokens, and their copy into pinned host memory: the host reads them after a sync
+        torch.argmax(rb["logits"], dim=-1, out=rb["next"])
+        rb["next_h"].copy_(rb["next"], non_blocking=True)
+        self.rec["stack"] = self.stack
+        return rb["logits"]
+
+    def step(self, st: FNState) -> torch.Tensor:
+        """One decode token from the device buffers (`stage` first); the state advances in place except
+        `st.length`, which the caller moves. Returns logits [1, vocab] fp32 (a static buffer)."""
+        return self.rows_step(st, 1, write=True)
+
+    @property
+    def g(self) -> dict:
+        """The decode step's buffers (the one-row call's)."""
+        return self._rb.get(1, {})
+
+    @torch.no_grad()
+    def verify(self, tokens: list[int], parents: list[int], st: FNState, graphs: dict | None = None) -> list[int]:
+        """The target's greedy token at every row of a draft block (DFS pre-order, `parents`), eager or
+        from `graphs` (M -> VerifyGraph). Each row's token is the decode step's at that position bit
+        for bit. Nothing in `st` moves until `commit`."""
+        M = len(tokens)
+        gr = graphs.get(M) if graphs is not None else None
+        if gr is not None and gr.graph is None:
+            gr.capture()
+        self.stage_rows(tokens, parents, st)
+        if gr is not None:
+            gr.replay()
+        else:
+            self.rows_step(st, M)
+        torch.cuda.current_stream().synchronize()
+        return self._rb[M]["next_h"].tolist()
+
+    @torch.no_grad()
+    def commit(self, st: FNState, path: list[int], graphs: dict | None = None) -> torch.Tensor:
+        """Keep the rows `path` (a root-to-node path of the last verify block, row 0 first): the GDN
+        states walked again over the path's rows from the round's entry state (the decode step's
+        arithmetic, written in place), the conv windows and the PLE conv state taken from the path,
+        the path's KV rows moved down to their positions, the PLE context advanced, the length moved.
+        `graphs` ((rows, path length, moved) -> CommitGraph): from a captured graph, which reads the
+        verify graph's own intermediates. Returns the path's streams [len(path), hc H] (the MTP
+        layer's input; a static buffer with graphs)."""
+        tokens = self._block[0]
+        key = self.stage_commit(st, path)
+        if graphs is not None:
+            g = graphs.get(key)
+            if g is None:
+                g = graphs[key] = CommitGraph(self, st, key)
+                g.capture()
+            g.graph.replay()
+        else:
+            self.commit_dev(st, key)
+        for li in self.cfg.ple_layers:
+            hsh = self.hash[li]
+            st.ple_ctx[li] = torch.tensor([(self._ple_ctx(st, li) + [tokens[i] for i in path])[-hsh.context_len:]],
+                                          dtype=torch.long)
+        st.length += len(path)
+        return self._commit_bufs(key)["stack"]
+
+    def _commit_bufs(self, key) -> dict:
+        """A commit's device inputs (path rows, KV source and destination slots, the conv tails) and
+        its pinned host image; the path's streams as the output."""
+        cb = self._rb.get(("commit",) + key)
+        if cb is not None:
+            return cb
+        c, dev = self.cfg, self.device
+        M, n, _ = key
+        w9 = (c.ple_conv_kernel_size - 1) * c.ngram_size
+        sizes = (("idx", n), ("src", n), ("dst", n), ("c3", c.linear_conv_kernel_dim - 1), ("c9", w9))
+        tot = sum(w for _, w in sizes)
+        hbuf = torch.zeros(tot, dtype=torch.int64, pin_memory=True)
+        dbuf = torch.zeros(tot, dtype=torch.int64, device=dev)
+
+        def views(b):
+            out, k = {}, 0
+            for name, w in sizes:
+                out[name] = b[k:k + w]
+                k += w
+            return out
+        copied = torch.cuda.Event()
+        copied.record()
+        cb = {"hbuf": hbuf, "dbuf": dbuf, "h": views(hbuf), "d": views(dbuf), "copied": copied,
+              "stack": torch.zeros(n, c.hc_count * c.hidden_size, dtype=self.dtype, device=dev)}
+        self._rb[("commit",) + key] = cb
+        return cb
+
+    def stage_commit(self, st: FNState, path: list[int]) -> tuple:
+        M, n = len(self._block[0]), len(path)
+        moved = any(path[j] != j for j in range(n))
+        key = (M, n, moved)
+        cb = self._commit_bufs(key)
+        cb["copied"].synchronize()
+        h, L = cb["h"], st.length
+        h["idx"].numpy()[:] = path
+        h["src"].numpy()[:] = [L + r for r in path]
+        h["dst"].numpy()[:] = L + np.arange(n)
+        h["c3"].numpy()[:] = self._tail_cols(path, h["c3"].numel())
+        h["c9"].numpy()[:] = self._tail_cols(path, h["c9"].numel())
+        cb["dbuf"].copy_(cb["hbuf"], non_blocking=True)
+        cb["copied"].record()
+        return key
+
+    def commit_dev(self, st: FNState, key) -> None:
+        """The device half of `commit` (capturable): every input from `_commit_bufs(key)`."""
+        from tools import fn_seq_kernels as SK
+        c, rec = self.cfg, self.rec
+        cb = self._commit_bufs(key)
+        d = cb["d"]
+        idx = d["idx"]
+        chain = self._chain_ctl(key[1])
+        for li in c.linear_layers:
+            qkvz, y, gg, beta = rec[li]
+            SK.gdn_rows(y.index_select(0, idx), c.key_dim, gg.index_select(0, idx), beta.index_select(0, idx),
+                        st.S[li], self._scratch(), chain, c.num_v_per_k, True)
+            hist = torch.cat([st.conv[li][0], qkvz[:, :c.conv_dim].T], 1)
+            st.conv[li][0].copy_(hist.index_select(1, d["c3"]))
+        if key[2]:
+            for li in c.attention_layers:
+                st.k[li].index_copy_(1, d["dst"], st.k[li].index_select(1, d["src"]))
+                st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
+                if li in st.ik:
+                    st.ik[li].index_copy_(0, d["dst"], st.ik[li].index_select(0, d["src"]))
+        for li in c.ple_layers:
+            hist = torch.cat([st.ple_conv[li][0], rec[("ple", li)].T], 1)
+            st.ple_conv[li][0].copy_(hist.index_select(1, d["c9"]))
+        torch.index_select(rec["stack"], 0, idx, out=cb["stack"])
+
+    @staticmethod
+    def _tail_cols(path: list[int], w: int) -> list[int]:
+        """The last `w` positions along `path` as columns of [state (w columns) | the block's rows]."""
+        return (list(range(w)) + [w + r for r in path])[-w:]
+
+    def _chain_ctl(self, n: int) -> torch.Tensor:
+        if not hasattr(self, "_chains"):
+            self._chains = {}
+        if n not in self._chains:
+            self._chains[n] = torch.tensor([[-2, -1]] + [[-1, -1]] * (n - 1), dtype=torch.int32, device=self.device)
+        return self._chains[n]
+
+    def _scratch(self) -> torch.Tensor:
+        """The GDN tiles a tree block parks (one slot a branching row, at most 31); allocated once."""
+        if not hasattr(self, "_stk"):
+            c = self.cfg
+            self._stk = torch.empty(31, c.linear_num_value_heads, c.linear_key_head_dim, c.linear_value_head_dim,
+                                    dtype=torch.float32, device=self.device)
+        return self._stk
 
     def _ple_step(self, h, li, st):
-        g, tab = self.g, self.tables[li]
-        emb = decode_rows(g["packed"], g["heads"], g["bias"], tab.K, g["codebook"])
-        return self.ple_apply(h, emb.to(self.dtype).reshape(1, -1), li, st)
+        """PLE of the rows: the gathered n-gram rows decoded, key/value projections, the gate, the norm,
+        the dilated conv over the row's path (`psrc`), all row-invariant."""
+        from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c, d = self.cfg, self._cur["d"]
+        p = self.pre(li) + "ple."
+        H, eps = c.hidden_size, c.rms_norm_eps
+        tab, pd = self.tables[li], self._ple_dev()
+        M = h.shape[0]
+        emb = decode_rows(d["packed"], d["heads"], pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(M, -1)
+        key = K.hc_norm(K.gemv_bf16(emb, self.W[p + "key_proj.weight"]), self.W[p + "norm_key.weight"], H, eps)
+        val = K.gemv_bf16(emb, self.W[p + "value_proj.weight"])
+        qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
+        gv = SK.ple_gate(key, qry, val, c.hc_count)
+        gvn = K.hc_norm(gv, self.W[p + "norm_conv.weight"], H, eps)
+        out = SK.ple_conv(gvn, gv, st.ple_conv[li], self._wc[("ple", li)], d["psrc"])
+        if self._write:
+            ps = st.ple_conv[li]
+            ps.copy_(torch.cat([ps[..., 1:], gvn.T.unsqueeze(0)], -1))
+        else:
+            self.rec[("ple", li)] = gvn
+        return out
 
     def _gdn1(self, x, li, st):
+        """The GDN layer of the rows: qkv|z and a|b, the conv over each row's window and the gates
+        (`csrc`), the delta rule over the block's tree (`gctl`), the gated norm, out_proj."""
         from tools import fn_kernels as K
-        from tools.gdn_kernels import decode_pre, fused_decode_step
-        c = self.cfg
+        from tools import fn_seq_kernels as SK
+        c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "linear_attn."
-        qkvz = self.lin(x, self.W[p + "qkvz"])[0]
-        mixed, z = qkvz[: c.conv_dim], qkvz[c.conv_dim:]
-        ab = K.gemv_bf16(x, self.W[p + "ab"])[0]
-        Hv = c.linear_num_value_heads
-        qkv, gg, beta = decode_pre(mixed, st.conv[li], self.W[p + "conv1d.weight"].squeeze(1),
-                                   ab[:Hv], ab[Hv:], self.W[p + "A_log"], self.W[p + "dt_bias"])
-        kd, vd = c.key_dim, c.value_dim
-        q = qkv[:kd].view(1, 1, c.linear_num_key_heads, c.linear_key_head_dim)
-        k = qkv[kd:2 * kd].view(1, 1, c.linear_num_key_heads, c.linear_key_head_dim)
-        v = qkv[2 * kd:2 * kd + vd].view(1, 1, Hv, c.linear_value_head_dim)
-        o = fused_decode_step(q, k, v, gg.view(1, 1, -1), beta.view(1, 1, -1), st.S[li],
-                              rep=c.num_v_per_k).reshape(-1, c.linear_value_head_dim)
-        hh = K.gated_norm(o, z.view(-1, c.linear_value_head_dim), self.W[p + "norm.weight"], c.rms_norm_eps,
-                          c.output_gate_type == "sigmoid")
-        return self.lin(hh.reshape(1, -1), self.W[p + "out_proj.weight"])
+        M = x.shape[0]
+        qkvz = self.lin(x, self.W[p + "qkvz"])
+        ab = K.gemv_bf16(x, self.W[p + "ab"])
+        y, gg, beta = SK.gdn_pre(qkvz, st.conv[li], self._wc[li], d["csrc"], ab, self._wc[("alog", li)],
+                                 self._wc[("dtb", li)], shift=self._write)
+        o = SK.gdn_rows(y, c.key_dim, gg, beta, st.S[li], self._scratch(), d["gctl"], c.num_v_per_k, self._write)
+        if not self._write:
+            self.rec[li] = (qkvz, y, gg, beta)
+        z = qkvz[:, c.conv_dim:]
+        hh = K.gated_norm(o.view(-1, c.linear_value_head_dim), z.reshape(-1, c.linear_value_head_dim),
+                          self.W[p + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        return self.lin(hh.view(M, -1), self.W[p + "out_proj.weight"])
 
     def _attn1(self, x, li, st):
-        """Attention of one token, dense regime, position and length from the device buffers:
-        q|k|v and the indexer projection, one prep launch (norms, rope, cache writes), the
-        attention, the output gate, o_proj."""
+        """Attention of the rows: q|k|v and the indexer projection, one prep launch (norms, rope at
+        each row's position, cache writes at each row's slot), attention over each row's visible keys
+        (`actl`, `anc`), the output gate, o_proj."""
         from tools import fn_kernels as K
-        from tools.attn_kernels import decode_attention_dev
-        c, g = self.cfg, self.g
+        from tools import fn_seq_kernels as SK
+        c, d = self.cfg, self._cur["d"]
         p = self.pre(li) + "self_attn."
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
         qkv = self.lin(x, self.W[p + "qkv"])
         iqk = self.lin(x, self.W[p + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
-        q = K.attn_prep(qkv, iqk, g["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+        q = K.attn_prep(qkv, iqk, d["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
                         self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), Hq, Hk,
-                        c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0, c.rms_norm_eps)
-        max_lc = self.g.get("max_lc", 2048)
-        o = decode_attention_dev(q.view(1, Hq, 1, D), st.k[li].unsqueeze(0), st.v[li].unsqueeze(0),
-                                 g["lenp"], g["mask"], max_lc)
-        y = K.gate_mul(o.transpose(1, 2), qkv, D)
+                        c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0, c.rms_norm_eps,
+                        slot=d["slot"])
+        o = SK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"], bufs=self._cur["attn"])
+        y = K.gate_mul(o, qkv, D)
         return self.lin(y, self.W[p + "o_proj.weight"])
 
     # ------------------------------------------------------------------------- MTP (ENG-153)
@@ -420,6 +682,136 @@ class FlashNextEngine(FlashNextRef):
         st_m.clamp_pool()
         return out
 
+    def new_mtp_state(self, cap: int | None = None) -> FNState:
+        """The MTP layer's cache (KV and indexer keys of its one attention layer), allocated up front."""
+        c, cap = self.cfg, cap or self.max_len
+        st = FNState(cap=cap)
+        st.k[MTP] = torch.zeros(c.num_key_value_heads, cap, c.head_dim, dtype=self.dtype, device=self.device)
+        st.v[MTP] = torch.zeros_like(st.k[MTP])
+        if c.has_indexer:
+            st.ik[MTP] = torch.zeros(cap, c.indexer_head_dim, dtype=self.dtype, device=self.device)
+        return st
+
+    def mtp_rows(self, st_m: FNState, key, stack_in: torch.Tensor):
+        """The MTP layer over the rows of buffers `key` (tokens, positions, slots, ancestors staged by
+        `stage_mtp`), from the streams `stack_in` [M, hc H]: the reference's input fusion (rms of the
+        token's embedding -> fc_embedding, rms of all hc H streams -> fc_hidden per stream, added),
+        its attention layer through the trunk's row kernels on the MTP cache, the MoE (bank -1), its
+        own final mixer. Returns (x [M, H], the layer's streams [M, hc H]); the head is the caller's."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
+        M = stack_in.shape[0]
+        rb = self._rows_buffers(M, key)
+        self._cur, self._write, self.rec = rb, False, {}
+        d = rb["d"]
+        e = self.rms(self.W["embed_tokens.weight"].index_select(0, d["tok"]).to(self.dtype),
+                     self.W["mtp.pre_fc_norm_embedding.weight"], eps)
+        e = self.lin(e, self.W["mtp.fc_embedding.weight"])
+        hs = self.rms(stack_in, self.W["mtp.pre_fc_norm_hidden.weight"], eps)
+        hs = self.lin(hs.reshape(M * hc, H), self.W["mtp.fc_hidden.weight"]).view(M, hc, H)
+        h = (hs + e.unsqueeze(1)).flatten(1)
+        p = self.pre(MTP)
+        n = K.hc_norm(h, self.W[p + "attn_hyper_connection.hc_norm.weight"], H, eps)
+        x, di = self._mix(n, p + "attn_hyper_connection")
+        out = self._attn1(x, MTP, st_m)
+        h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                             self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+        x, di = self._mix(n, p + "mlp_hyper_connection")
+        yd, ids, wts = self.moe_parts(x, MTP)
+        h, n = K.combine_inject_norm(h, yd, ids, wts, di, self.W[p + "mlp_hyper_connection.rank"],
+                                     self.W["mtp.hyper_connection_mixer.hc_norm.weight"], hc, eps)
+        dd = K.gemv(n, self.W["mtp.hyper_connection_mixer.down_inject"])
+        x = K.mix_up(dd, n, self.W["mtp.hyper_connection_mixer.input_mix_weight_up.weight"], hc)
+        return x, h
+
+    def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int) -> None:
+        """Host work of a greedy chain draft at st_m.length: the feed of n = len(nexts) committed rows
+        (their streams copied into the static input on the device by the caller), then depth - 1
+        one-row draft steps after them, each at its own position (cache slot = position)."""
+        n, L = len(nexts), st_m.length
+        if L + n + depth > self.dense_limit:
+            raise NotImplementedError("an MTP draft past the dense attention regime (ENG-147)")
+        for j in range(depth):
+            M = n if j == 0 else 1
+            rb = self._rows_buffers(M, ("mtp", j, M))
+            rb["copied"].synchronize()
+            h = rb["h"]
+            p0 = L if j == 0 else L + n + j - 1
+            pos = p0 + np.arange(M)
+            if j == 0:
+                h["tok"].numpy()[:] = nexts
+            h["pos"].numpy()[:] = pos
+            h["slot"].numpy()[:] = pos
+            actl = h["actl"].numpy()
+            actl[:, 0] = pos + 1
+            actl[:, 1] = p0
+            actl[:, 2] = 1
+            anc = h["anc"].numpy()
+            for i in range(M):
+                anc[i, :i + 1] = p0 + np.arange(i + 1)
+            rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+            rb["copied"].record()
+
+    def _mtp_bufs(self, depth: int) -> dict:
+        b = getattr(self, "_mtpb", None)
+        if b is None or b["drafts"].numel() < depth:
+            c = self.cfg
+            b = self._mtpb = {"stack": torch.zeros(33, c.hc_count * c.hidden_size, dtype=self.dtype, device=self.device),
+                              "drafts": torch.zeros(max(depth, 32), dtype=torch.long, device=self.device),
+                              "drafts_h": torch.zeros(max(depth, 32), dtype=torch.long, pin_memory=True),
+                              "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=self.device),
+                              "hot_i": torch.zeros(1, dtype=torch.long, device=self.device)}
+        if self.draft_head is not None and ("hot", self.draft_ids.numel()) not in b:
+            b[("hot", self.draft_ids.numel())] = torch.zeros(1, self.draft_ids.numel(), dtype=torch.float32,
+                                                             device=self.device)
+        return b
+
+    draft_head = None          # Int8Rows over a hot vocabulary (`set_draft_head`), else the full head
+    draft_ids = None
+
+    def set_draft_head(self, ids) -> None:
+        """Draft over a hot vocabulary `ids` (token ids; None: the full head): the head's rows,
+        dequantised and stored as int8 rows with an fp32 scale (`tools.fn_kernels.gemv`), read in place
+        of the full EXL3 head by the MTP drafts. Only the drafts change; the verify reads the served
+        head. A head once built is kept for the process (captured draft graphs point into it)."""
+        if ids is None:
+            self.draft_head = self.draft_ids = None
+            return
+        from engine.models.flashnext.pack import Int8Rows
+        heads = self.__dict__.setdefault("_draft_heads", {})
+        key = hash(bytes(memoryview(np.ascontiguousarray(np.asarray(ids, dtype=np.int64)))))
+        if key not in heads:
+            idx = torch.as_tensor(np.asarray(ids, dtype=np.int64), device=self.device)
+            w = self.W["lm_head.weight"].dequant()
+            heads[key] = (Int8Rows.of(w.index_select(0, idx).half().contiguous()), idx)
+            del w
+            torch.cuda.empty_cache()
+        self.draft_head, self.draft_ids = heads[key]
+
+    def mtp_chain_dev(self, st_m: FNState, n: int, depth: int) -> None:
+        """A greedy chain of `depth` drafts on the device (`stage_mtp` first, the n committed rows'
+        streams in `_mtp_bufs()["stack"]`): the feed, then each draft's token and streams into the
+        next step without the host; the drafts land in `drafts` and its pinned copy."""
+        from tools import fn_kernels as K
+        b = self._mtp_bufs(depth)
+        x, h = self.mtp_rows(st_m, ("mtp", 0, n), b["stack"][:n])
+        for j in range(depth):
+            if self.draft_head is not None:
+                hot = b[("hot", self.draft_ids.numel())]
+                K.gemv(x[-1:], self.draft_head, out=hot)
+                torch.argmax(hot[0], dim=-1, keepdim=True, out=b["hot_i"])
+                torch.index_select(self.draft_ids, 0, b["hot_i"], out=b["drafts"][j:j + 1])
+            else:
+                K.dense(x[-1:], self.W["lm_head.weight"], out=b["logits"])
+                torch.argmax(b["logits"][0], dim=-1, keepdim=True, out=b["drafts"][j:j + 1])
+            if j + 1 == depth:
+                break
+            nxt = self._rows_buffers(1, ("mtp", j + 1, 1))["d"]["tok"]
+            nxt.copy_(b["drafts"][j:j + 1])
+            x, h = self.mtp_rows(st_m, ("mtp", j + 1, 1), h[-1:])
+        b["drafts_h"].copy_(b["drafts"], non_blocking=True)
+
     # ------------------------------------------------------------------------- generation
     @torch.no_grad()
     def prefill(self, ids: torch.Tensor, st: FNState, chunk: int = 2048) -> torch.Tensor:
@@ -435,8 +827,6 @@ class FlashNextEngine(FlashNextRef):
         """One token through `step` (no graph), or the reference's forward past the dense regime."""
         if st.length + 1 > self.dense_limit:
             return self.forward(torch.tensor([token], device=self.device), st)
-        if not self.g:
-            self.alloc_step()
         self.stage(token, st)
         out = self.step(st)
         st.length += 1
@@ -444,14 +834,14 @@ class FlashNextEngine(FlashNextRef):
 
 
 class DecodeGraph:
-    """`FlashNextEngine.step` captured once for a state and a context class; `__call__(token)` stages
-    the token (host), replays, and moves the length. Past `max_lc` or the dense regime it runs eager."""
+    """`FlashNextEngine.step` captured once for a state; `__call__(token)` stages the token (host),
+    replays, and moves the length. Past the dense regime it runs eager (the reference's attention,
+    until ENG-147). `max_lc` is kept for the callers; the step serves every length up to the regime's
+    end (its attention reads the length from the device)."""
 
     def __init__(self, eng: FlashNextEngine, st: FNState, max_lc: int = 2048):
         self.eng, self.st, self.max_lc = eng, st, max_lc
-        if not eng.g:
-            eng.alloc_step()
-        eng.g["max_lc"] = max_lc
+        eng._rows_buffers(1)
         self.graph = None
 
     def capture(self) -> None:
@@ -476,22 +866,25 @@ class DecodeGraph:
         st.ple_ctx.update(pctx)
         st.length = length
 
+    def _graphed(self) -> bool:
+        return self.st.length + 1 <= self.eng.dense_limit
+
     @torch.no_grad()
     def greedy(self, token: int) -> int:
         """One greedy step: the next token, read from the graph's own argmax (no extra launch)."""
         eng, st = self.eng, self.st
-        if st.length + 1 > min(self.max_lc, eng.dense_limit) or self.graph is None:
+        if not self._graphed() or self.graph is None:
             return int(self(token)[0].argmax())
         eng.stage(token, st)
         self.graph.replay()
         st.length += 1
         torch.cuda.current_stream().synchronize()
-        return int(eng._next_h[0])
+        return int(eng.g["next_h"][0])
 
     @torch.no_grad()
     def __call__(self, token: int) -> torch.Tensor:
         eng, st = self.eng, self.st
-        if st.length + 1 > min(self.max_lc, eng.dense_limit):
+        if not self._graphed():
             return eng.decode_eager(token, st)
         if self.graph is None:
             self.capture()
@@ -499,6 +892,84 @@ class DecodeGraph:
         self.graph.replay()
         st.length += 1
         return eng.g["logits"]
+
+
+class VerifyGraph:
+    """`FlashNextEngine.rows_step` of an M-row verify block captured once for a state: every block
+    of M rows (chain or tree; positions, slots, ancestors and the GDN tile's walk are device inputs)
+    replays it. `replay()` after `stage_rows`; the commit then reads the graph's own intermediates."""
+
+    def __init__(self, eng: FlashNextEngine, st: FNState, M: int):
+        self.eng, self.st, self.M = eng, st, M
+        self.graph = None
+        self.rec: dict = {}
+
+    def capture(self) -> None:
+        eng, st, M = self.eng, self.st, self.M
+        eng.stage_rows([0] * M, list(range(-1, M - 1)), st)   # writes only KV rows past the length
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                eng.rows_step(st, M)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+            eng.rows_step(st, M)
+        torch.cuda.synchronize()
+        self.rec = eng.rec
+
+    def replay(self) -> None:
+        self.graph.replay()
+        self.eng.rec = self.rec
+
+
+class CommitGraph:
+    """`FlashNextEngine.commit_dev` for a verify block of M rows and a path of n rows (moved or not),
+    captured once after that block's VerifyGraph (it reads the verify graph's intermediates). The
+    warm-up runs write the state: it is saved and restored around them."""
+
+    def __init__(self, eng: FlashNextEngine, st: FNState, key: tuple):
+        self.eng, self.st, self.key = eng, st, key
+        self.graph = None
+
+    def capture(self) -> None:
+        eng, st = self.eng, self.st
+        saved = {k: v.clone() for k, v in _state_tensors(st).items()}
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            eng.commit_dev(st, self.key)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+            eng.commit_dev(st, self.key)
+        torch.cuda.synchronize()
+        for k, v in _state_tensors(st).items():
+            v.copy_(saved[k])
+
+
+class MTPChainGraph:
+    """`FlashNextEngine.mtp_chain_dev` for a feed of n rows and a chain depth, captured once for an MTP
+    cache: the whole draft (feed, depth - 1 deeper steps, every head and argmax) is one replay."""
+
+    def __init__(self, eng: FlashNextEngine, st_m: FNState, n: int, depth: int):
+        self.eng, self.st_m, self.n, self.depth = eng, st_m, n, depth
+        self.graph = None
+
+    def capture(self) -> None:
+        eng, st_m = self.eng, self.st_m
+        eng.stage_mtp(st_m, [0] * self.n, self.depth)       # writes only cache rows past the length
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                eng.mtp_chain_dev(st_m, self.n, self.depth)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+            eng.mtp_chain_dev(st_m, self.n, self.depth)
+        torch.cuda.synchronize()
 
 
 def _state_tensors(st: FNState) -> dict:
