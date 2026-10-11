@@ -1,9 +1,9 @@
 // the chat reducer: a run's events in order, a tool call's life, a catch-up replay equals the
 // live path, and the attachment state machine's words.
 import { describe, expect, it } from 'vitest';
-import { applyEvent, applyEvents, firstLine, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
+import { adopt, applyEvent, applyEvents, firstLine, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
 import { attachLabel, initialAttachment, onEvent, onStreamState, onTick, LOST_AFTER_MS } from '../src/chat/connection';
-import type { ChatEvent, Conversation, Run, TurnStats } from '../src/chat/types';
+import type { ChatEvent, Conversation, Run, StampedEvent, TurnStats } from '../src/chat/types';
 
 function conv(): Conversation {
   return {
@@ -159,6 +159,23 @@ describe('the chat reducer', () => {
     // the output in tool.done wins over the streamed one
     const d = applyEvents(conv(), [...TURN.slice(0, 15), { type: 'tool.done', message_id: 'a1', call_id: 'k1', status: 'done', is_error: false, output: { content: 'final', is_error: false, bytes: 5, exit_code: 0 } }]);
     expect((d.messages[1].parts[1] as { output: { content: string } }).output.content).toBe('final');
+  });
+
+  it('a snapshot that arrives after some of the stream: the events past its seq go on top, the rest are not applied twice', () => {
+    const stamped: StampedEvent[] = TURN.map((event, i) => ({ id: String(i + 1), event }));
+    const full = applyEvents(conv(), TURN);
+    // the server's snapshot at seq 6 (the thinking part streamed), while the device already had 1..10
+    const snap: Conversation = { ...applyEvents(conv(), TURN.slice(0, 6)), seq: '6' };
+    const { conv: got, floor } = adopt(snap, stamped.slice(0, 10));
+    expect(floor).toBe(10);
+    expect(got.seq).toBe('10');
+    const rest = applyEvents(got, TURN.slice(10));
+    expect(rest.messages).toEqual(full.messages);
+    expect((rest.messages[1].parts[0] as { text: string }).text).toBe('read the test first');
+    // a snapshot newer than everything the device has: nothing to add
+    const ahead = adopt({ ...full, seq: String(TURN.length) }, stamped.slice(0, 5));
+    expect(ahead.floor).toBe(TURN.length);
+    expect(ahead.conv.messages).toEqual(full.messages);
   });
 
   it('text helpers: the first line, the copy text, the last figures', () => {

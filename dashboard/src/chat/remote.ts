@@ -81,10 +81,16 @@ export class RemoteChatBackend implements ChatBackend {
   }
 
   subscribe(id: string, lastEventId: string | null, h: StreamHandler): Subscription {
+    // a connection with an id replays what it missed before `event: current`; those events reach
+    // the view as replays (no pane opens, no reload for a branch change it already has)
+    let replaying = false;
     const stream = new ResumableStream({
       url: (last) => `${apiBase()}${PREFIX}/conversations/${enc(id)}/events${last ? `?after=${encodeURIComponent(last)}` : ''}`,
       onEvent: (ev) => {
-        if (ev.event === 'current') return h.onCurrent();
+        if (ev.event === 'current') {
+          replaying = false;
+          return h.onCurrent();
+        }
         if (ev.event === 'reset') return h.onState('error', 'reset');
         let data: ChatEvent;
         try {
@@ -93,9 +99,12 @@ export class RemoteChatBackend implements ChatBackend {
           return;
         }
         const type = (ev.event && ev.event !== 'message' ? ev.event : (data as { type?: string }).type) as ChatEvent['type'];
-        h.onEvent({ id: ev.id ?? '', event: { ...data, type } as ChatEvent }, false);
+        h.onEvent({ id: ev.id ?? '', event: { ...data, type } as ChatEvent }, replaying);
       },
-      onState: (s, d) => h.onState(s, d),
+      onState: (s, d) => {
+        if (s === 'open') replaying = stream.lastId != null;
+        h.onState(s, d);
+      },
     });
     stream.lastId = lastEventId;
     stream.start();

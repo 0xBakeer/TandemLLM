@@ -514,27 +514,29 @@ qse-chat-thread {
   line-height: 1.55;
 }
 
-/* the Now line */
+/* the Now line: a row of its own above the scrolling thread, so it reserves its height and never
+   covers a message or a tool card */
+.ch-now-dock {
+  flex: none;
+  width: 100%;
+  max-width: var(--ch-measure);
+  margin: 0 auto;
+  padding: 10px 20px 2px;
+  box-sizing: border-box;
+}
 .ch-now {
-  position: sticky;
-  top: 8px;
-  z-index: 3;
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 8px 12px 8px 8px;
   border: 1px solid var(--rule-strong);
   border-radius: var(--radius);
-  /* opaque: it rides over the thread while sticky, and nothing shows through it */
   background: var(--bg-2);
-  box-shadow: inset 3px 0 0 var(--orange), 0 6px 18px rgba(0, 0, 0, 0.28);
+  box-shadow: inset 3px 0 0 var(--orange);
   font-size: var(--fs-sm);
 }
-:root[data-theme='light'] .ch-now {
-  box-shadow: inset 3px 0 0 var(--orange), 0 6px 18px rgba(15, 22, 32, 0.12);
-}
 .ch-now.is-permission {
-  box-shadow: inset 3px 0 0 var(--warn-ink), 0 6px 18px rgba(0, 0, 0, 0.28);
+  box-shadow: inset 3px 0 0 var(--warn-ink);
 }
 .ch-now-fig {
   flex: none;
@@ -2635,8 +2637,8 @@ qse-chat-panes {
     padding: 12px 12px 8px;
     gap: 14px;
   }
-  .ch-now {
-    top: 4px;
+  .ch-now-dock {
+    padding: 6px 12px 0;
   }
   .ch-now-nums {
     gap: 8px;

@@ -24,7 +24,7 @@ import './panes';
 import './settings';
 import { pickBackend, VersionConflict, type ChatBackend, type Subscription } from './backend';
 import { attachLabel, initialAttachment, onEvent as attachEvent, onStreamState, onTick, type Attachment as Attach } from './connection';
-import { applyEvent, messageText } from './store';
+import { adopt, applyEvent, messageText } from './store';
 import type { QseChatComposer } from './composer';
 import { defaultPane, type OpenPane, type Dock } from './panes';
 import type { SettingsSection } from './settings';
@@ -38,7 +38,6 @@ const LS = {
   size: 'qse.chat.panesize',
   last: 'qse.chat.last',
   draft: (id: string) => `qse.chat.draft.${id}`,
-  seen: (id: string) => `qse.chat.seq.${id}`,
 };
 
 function lsGet(k: string): string | null {
@@ -99,6 +98,10 @@ export class QseChat extends LightElement {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   private resuming = false;
   private wantId: string | null = null;
+  /** the last seq the conversation in hand includes: an event at or below it is a duplicate */
+  private floor = 0;
+  /** the events applied lately, for a snapshot that arrives after some of them (store.adopt) */
+  private recent: StampedEvent[] = [];
 
   // ---- lifecycle ------------------------------------------------------------------------------
 
@@ -241,12 +244,14 @@ export class QseChat extends LightElement {
   // ---- the stream -----------------------------------------------------------------------------
 
   private attachTo(c: Conversation): void {
-    const seen = sessionStorage.getItem(LS.seen(c.id));
-    // resume from what this device saw last, else from the snapshot's seq (no replay needed)
-    const since = seen && Number(seen) < Number(c.seq) ? seen : c.seq;
-    this.resuming = !!seen && since !== c.seq;
+    // the snapshot holds every event up to its seq, so the stream starts there; an older id would
+    // replay events the snapshot already has and double their text. A dropped stream resumes
+    // with Last-Event-ID (lib/sse.ts) and catches up from where it was.
+    this.floor = Number(c.seq) || 0;
+    this.recent = [];
+    this.resuming = false;
     this.attach = initialAttachment();
-    this.sub = this.backend!.subscribe(c.id, since, {
+    this.sub = this.backend!.subscribe(c.id, c.seq, {
       onEvent: (ev: StampedEvent, replay) => this.onStreamEvent(c.id, ev, replay),
       onCurrent: () => {
         this.attach = attachEvent(this.attach, true);
@@ -281,14 +286,17 @@ export class QseChat extends LightElement {
 
   private onStreamEvent(id: string, ev: StampedEvent, replay: boolean): void {
     if (!this.conv || this.conv.id !== id) return;
-    if (ev.id) sessionStorage.setItem(LS.seen(id), ev.id);
+    if (ev.id && Number(ev.id) <= this.floor) return;
+    if (ev.id) {
+      this.floor = Number(ev.id);
+      this.recent.push(ev);
+      if (this.recent.length > 2_000) this.recent.splice(0, this.recent.length - 2_000);
+    }
     const e = ev.event;
     this.attach = attachEvent(this.attach, !replay);
     if (e.type === 'branch.changed' && !replay && e.head_id !== this.conv.head_id) {
-      // another device switched or made a branch: this one re-reads the conversation
-      void this.backend!.getConversation(id).then((c) => {
-        if (this.conv?.id === id) this.conv = { ...c, run: this.conv.run ?? c.run };
-      });
+      // this device or another switched or made a branch: re-read the conversation
+      void this.backend!.getConversation(id).then((c) => this.adoptSnapshot(c));
       return;
     }
     if (e.type === 'pane.open' && !replay) {
@@ -298,6 +306,14 @@ export class QseChat extends LightElement {
     const next = applyEvent(this.conv, e);
     this.conv = next;
     if (e.type === 'run.done' || e.type === 'run.started' || e.type === 'conversation.updated' || e.type === 'tool.asking') this.patchList(next);
+  }
+
+  /** a fresh snapshot of the open chat, with the events that came while it was on its way */
+  private adoptSnapshot(c: Conversation): void {
+    if (this.conv?.id !== c.id) return;
+    const { conv, floor } = adopt(c, this.recent);
+    this.conv = conv;
+    this.floor = floor;
   }
 
   private patchList(c: Conversation): void {
@@ -407,8 +423,21 @@ export class QseChat extends LightElement {
     lsSet(LS.draft(id), null);
     let atts = attachments;
     if (this.backend!.kind === 'remote' && attachments.length) {
-      // the remote wants uploads first; the mock takes the attachment as is
-      atts = attachments;
+      // the remote wants uploads first (CONTRACT section 8, request 9); a file that fails keeps
+      // the message in the composer. The thumbnail stays the device's own until `url` answers.
+      atts = [];
+      for (const a of attachments) {
+        try {
+          const f = this.composer?.fileOf(a.id);
+          if (!f) throw new Error('the file is no longer there');
+          const up = await this.backend!.uploadAttachment(f);
+          atts.push({ ...up, preview: a.preview ?? null });
+        } catch (e) {
+          this.composer?.restore(text, attachments);
+          this.say('warn', `${a.name} did not upload (${(e as Error).message}); the message stays in the composer.`);
+          return;
+        }
+      }
     }
     if (c.run) {
       await this.guard(() => this.backend!.queue(id, text, clientMsgId()), 'Queue');
@@ -662,7 +691,7 @@ export class QseChat extends LightElement {
       @ch-edit=${(e: CustomEvent<{ messageId: string; text: string }>) => void this.guard(() => this.backend!.edit(c.id, e.detail.messageId, e.detail.text, clientMsgId()), 'Edit')}
       @ch-regenerate=${(e: CustomEvent<{ messageId: string }>) => void this.guard(() => this.backend!.regenerate(c.id, e.detail.messageId), 'Regenerate')}
       @ch-continue=${() => void this.guard(() => this.backend!.continueRun(c.id), 'Continue')}
-      @ch-branch=${(e: CustomEvent<{ messageId: string; index: number }>) => void this.guard(() => this.backend!.switchBranch(c.id, e.detail.messageId, e.detail.index).then((n) => (this.conv = { ...n, run: this.conv?.run ?? n.run })), 'Branch')}
+      @ch-branch=${(e: CustomEvent<{ messageId: string; index: number }>) => void this.guard(() => this.backend!.switchBranch(c.id, e.detail.messageId, e.detail.index).then((n) => this.adoptSnapshot(n)), 'Branch')}
       @ch-open-pane=${(e: CustomEvent<{ pane: PaneRef; inline?: { content: string; lang: string } | null }>) => void this.openPane(e.detail.pane, e.detail.inline)}
       @ch-unqueue=${(e: CustomEvent<{ id: string }>) => void this.guard(() => this.backend!.unqueue(c.id, e.detail.id), 'Queue')}
       @ch-send-now=${(e: CustomEvent<{ id: string }>) => void this.guard(() => this.backend!.sendNow(c.id, e.detail.id), 'Send now')}

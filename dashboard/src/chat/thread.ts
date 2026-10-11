@@ -57,9 +57,10 @@ export class QseChatThread extends LightElement {
   render() {
     const c = this.conv;
     if (!c) return html`<div class="ch-scroll"></div>`;
-    return html`<div class="ch-scroll" role="log" aria-live="polite" aria-relevant="additions" @scroll=${this.onScroll}>
+    // the Now line sits in its own row above the scrolling thread: it takes its height there and
+    // never covers a message or a tool card (as a sticky card inside the scroll it did)
+    return html`${c.run ? html`<div class="ch-now-dock">${this.renderNow(c)}</div>` : nothing}<div class="ch-scroll" role="log" aria-live="polite" aria-relevant="additions" @scroll=${this.onScroll}>
       <div class="ch-col">
-        ${c.run ? this.renderNow(c) : nothing}
         ${c.compactions.length && !c.messages.length ? nothing : nothing}
         ${repeat(
           c.messages,

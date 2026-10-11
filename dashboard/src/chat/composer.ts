@@ -24,6 +24,8 @@ export class QseChatComposer extends LightElement {
   @property({ type: String }) draft = '';
   @state() private text = '';
   @state() private files: Attachment[] = [];
+  /** the File behind each attachment chip, for the upload before a send (CONTRACT 8, request 9) */
+  private blobs = new Map<string, File>();
   @state() private pop: 'none' | 'model' | 'effort' | 'tools' = 'none';
   @state() private slash: { items: SlashCommand[]; index: number } | null = null;
   @state() private dragging = false;
@@ -60,6 +62,16 @@ export class QseChatComposer extends LightElement {
   }
   focusArea(): void {
     this.area()?.focus();
+  }
+  /** the File of an attachment this composer made (the view uploads it before the send) */
+  fileOf(id: string): File | undefined {
+    return this.blobs.get(id);
+  }
+  /** a send that could not go out: its text and files come back to the composer */
+  restore(text: string, files: Attachment[]): void {
+    this.text = text;
+    this.files = files;
+    this.fire('ch-draft', { text });
   }
   private area(): HTMLTextAreaElement | null {
     return this.querySelector<HTMLTextAreaElement>('#ch-input');
@@ -168,7 +180,9 @@ export class QseChatComposer extends LightElement {
       const kind: Attachment['kind'] = f.type.startsWith('image/') ? 'image' : f.type === 'application/pdf' ? 'pdf' : f.type.startsWith('text/') || /\.(md|txt|py|ts|js|json|yaml|yml|toml|csv)$/i.test(f.name) ? 'text' : 'file';
       let preview: string | null = null;
       if (kind === 'image' && f.size <= MAX_PREVIEW_BYTES) preview = await readDataUrl(f);
-      out.push({ id: localId('att'), name: f.name, kind, bytes: f.size, mime: f.type || 'application/octet-stream', preview });
+      const att: Attachment = { id: localId('att'), name: f.name, kind, bytes: f.size, mime: f.type || 'application/octet-stream', preview };
+      this.blobs.set(att.id, f);
+      out.push(att);
     }
     this.files = [...this.files, ...out];
   }

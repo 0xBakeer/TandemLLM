@@ -2,7 +2,7 @@
 // (a catch-up replay of events after Last-Event-ID) and the live stream go through the same
 // code, and the order is unit-tested. Nothing here touches the DOM or the network.
 
-import type { ChatEvent, Conversation, Message, Part, Run, ToolCallPart } from './types';
+import type { ChatEvent, Conversation, Message, Part, Run, StampedEvent, ToolCallPart } from './types';
 
 export const TPS_HISTORY = 120;
 
@@ -94,6 +94,23 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
 
 export function applyEvents(c: Conversation, evs: ChatEvent[]): Conversation {
   return evs.reduce(applyEvent, c);
+}
+
+/** A snapshot that replaces the conversation in hand (a reload after `branch.changed`, a branch
+ *  switch): it holds every event up to its `seq`. The stream may already have delivered events
+ *  after that seq to the old copy, so those are applied again on top; the ones up to it are in
+ *  the snapshot and are not. Returns the conversation and the last seq it now includes, below
+ *  which the view drops any event (it would apply twice). */
+export function adopt(snap: Conversation, recent: StampedEvent[]): { conv: Conversation; floor: number } {
+  let floor = Number(snap.seq) || 0;
+  let conv = snap;
+  for (const ev of recent) {
+    const id = Number(ev.id);
+    if (!ev.id || id <= floor || ev.event.type === 'branch.changed') continue;
+    conv = applyEvent(conv, ev.event);
+    floor = id;
+  }
+  return { conv: { ...conv, seq: String(floor) }, floor };
 }
 
 function mapMessage(ms: Message[], id: string, f: (m: Message) => Message): Message[] {
