@@ -294,8 +294,8 @@ export class QseWren extends LightElement {
                 first = false;
                 this.emit('first-token');
               } else this.emit('delta');
-              this.fig?.chirp();
-              this.fabFig?.chirp();
+              this.fig?.blip();
+              this.fabFig?.blip();
               this.scrollLog();
             } else if (ev.type === 'tool_call') {
               calls.push({ id: ev.id || `call_${++callSeq}`, name: ev.name, args: ev.args });
