@@ -7721,7 +7721,9 @@ def cache_stats() -> dict:
         ic = STATE.get("image_cache")
         out["vision"] = {"tower_bytes": tower.nbytes, **tower.stats,
                          "embed_cache": ic.report() if ic is not None else None}
-    if eng is not None:
+    if eng is not None and hasattr(eng, "snapshot_cost"):
+        out["snapshot_cost"] = eng.snapshot_cost()          # Flash-Next (its state's own sections)
+    elif eng is not None:
         cfg = eng.cfg
         kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
         out["snapshot_cost"] = {
@@ -8678,10 +8680,22 @@ def _make_lenrouter(a, eng, max_len: int, corpus_from=None):
     return drafter
 
 
+def _arch_of(model: str | None) -> str:
+    """The registered architecture of `--model` (engine/models: qwen3_5, qwen4_exp); the 27B's when
+    `--model` names no checkpoint directory (the 27B's snapshot is resolved later)."""
+    if not model or not os.path.isfile(os.path.join(model, "config.json")):
+        return "qwen3_5"
+    from engine.models import architecture
+    with open(os.path.join(model, "config.json")) as f:
+        return architecture(json.load(f)).name
+
+
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
     if _S.get("BLOCKING_SYNC") == "1":
         _blocking_sync()
+    if _arch_of(a.model) == "qwen4_exp":
+        return _load_flashnext(a)
     from engine.config import load_config
     from engine.loader import Weights
     from engine.model import Qwen38Engine
@@ -8915,6 +8929,95 @@ def _load(a) -> None:
     if int(getattr(a, "parallel", 1) or 1) > 1:
         _build_side_slots(a, cfg, w, tok)
         led.mark("side_slots")
+    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
+        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
+        for x in led.stages()), flush=True)
+
+
+def _load_flashnext(a) -> None:
+    """Qwen3.8-Flash-Next from an EXL3 pack (`--model <pack>`, SRV-87): the engine and its MTP drafter in
+    the server loop's interface (engine/models/flashnext/serving.py), so the request path is the 27B's.
+    The draft is the MTP chain from graphs cut by StairCut over the hot draft head, verified as a tree
+    (`--tree`, a sampled request walks it: `--sampled-tree det`); the load-time self-check gates it.
+    Not yet on Flash-Next (the parity work, ENG-E7): the prefix, session and disk caches, the KV pool,
+    the resident prefix, images, side slots; each is off here and says so."""
+    import numpy as np
+    from engine.models.flashnext.engine import FlashNextEngine
+    from engine.models.flashnext.load import load as fn_load
+    from engine.models.flashnext.serving import FlashNextServing, FlashNextTreeDrafter
+    from engine.tokfp import fingerprint as _tok_fp
+    from transformers import AutoTokenizer
+    t0 = time.time()
+    led = STATE["load_ledger"] = memsplit.LoadLedger()
+    led.mark("start")
+    STATE["tokenizer_sha"] = _tok_fp(a.model)
+    STATE["weights_key"] = probe_mod.weights_key([a.model])
+    spec = a.drafter != "none"
+    if a.drafter not in ("mtp", "none"):
+        print(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp", flush=True)
+    idx, W, banks, tables, timing = fn_load(a.model, "cuda", mtp=spec)
+    led.mark("weights")
+    fn = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=a.max_len)
+    eng = FlashNextServing(fn, a.max_len)
+    led.mark("engine")
+    tok = AutoTokenizer.from_pretrained(a.model)
+    drafter, check = None, None
+    if spec:
+        hot = int(_S.get("FN_DRAFT_HOT"))
+        if hot:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            fn.set_draft_head(np.load(os.path.join(root, "ops", "fn-hot-vocab.npy"))[:hot])
+        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
+                                       tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=print)
+        if check["ok"]:
+            depth = a.depth if a.depth > 3 else 4
+            drafter = FlashNextTreeDrafter(eng, depth=depth)
+            drafter.capture_all()
+            a.depth = depth
+        else:
+            print("[server] Flash-Next self-check FAILED: speculation off, plain decode only", flush=True)
+    led.mark("drafters")
+    gen_cfg = os.path.join(a.model, "generation_config.json")
+    cfg_eos = json.load(open(gen_cfg)).get("eos_token_id") if os.path.isfile(gen_cfg) else None
+    if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
+        print("[cache] Flash-Next: prefix, session, resident and disk caches and the KV pool are not "
+              "built for this model yet (ENG-E7 parity): all off", flush=True)
+    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
+              if a.response_cache else None)
+    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
+                         if a.prompt_token_cache > 0 else None)
+    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
+                 tree=drafter is not None, sampled_tree="det", relax=Relax(1.0, 1),
+                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
+                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
+                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
+                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
+                 draining=False,
+                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
+                 reasoning_effort=a.reasoning_effort,
+                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
+                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
+                                     a.frequency_penalty, a.no_repeat_ngram),
+                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
+                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
+                               if a.pattern_stop else None),
+                 argloop=a.argloop,
+                 state_store=None, session_cache=False, prefix_cache=False, session_trim=False,
+                 resident=None, prefill_heartbeat=float(a.prefill_heartbeat_s), prefix_chunk=0,
+                 response_cache=rcache, suffix_store=None, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"),
+                 flashnext={"pack": a.model, "load": timing, "self_check": check,
+                            "draft_head": f"hot {_S.get('FN_DRAFT_HOT')}" if spec else None,
+                            "depth": a.depth if drafter is not None else 0})
+    led.mark("caches")
+    print(f"[server] Flash-Next {a.model}: load {timing.get('total_s')} s, drafter "
+          f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}, "
+          f"max_len {a.max_len:,}, loaded in {time.time() - t0:.1f}s", flush=True)
+    with torch.no_grad():
+        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(), 4, set()))
+        _warm_prefill(generate_stream, tok, None)
+    led.mark("warmup")
     print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
         f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
         for x in led.stages()), flush=True)

@@ -320,6 +320,9 @@ KNOBS: dict[str, tuple] = {
     # GEMVs of few output rows (mixer down, router, GDN a/b) with each row's K split over the warps of a
     # CTA (more loads in flight); sets their summation order, so a build keeps one value
     'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),
+    # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
+    # (int8 rows; 0 = the full EXL3 head)
+    'FN_DRAFT_HOT': ('32768', 'server/app.py'),
 }
 
 
