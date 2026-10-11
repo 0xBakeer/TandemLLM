@@ -21,7 +21,8 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_SLOW            ten tokens a second
     FAKE_TPS <n>         <n> tokens a second (the parallel load: backends of different speeds)
     FAKE_STALL <s>       stop for <s> seconds after the third token
-    FAKE_DROP            close the connection after five tokens, no [DONE]
+    FAKE_DROP            close the connection after five tokens, no [DONE] (FAKE_DROP_ONCE: only
+                         the first time per text, so a client's retry gets through)
     FAKE_429             429 with Retry-After: 1 (FAKE_429_ONCE: only the first time per text)
     FAKE_503             503 (FAKE_503_ONCE: only the first time per text)
     FAKE_500             500
@@ -411,6 +412,15 @@ def make_handler(fake: Fake):
                 with fake.lock:
                     fake.streams -= 1
 
+        def _drop_now(self, text: str) -> bool:
+            if "FAKE_DROP_ONCE" not in text:
+                return True
+            with fake.lock:
+                k = ("FAKE_DROP", text)
+                first = k not in fake.once
+                fake.once.add(k)
+            return first
+
         def _send_chunk(self, data: bytes):
             self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
             self.wfile.flush()
@@ -461,7 +471,7 @@ def make_handler(fake: Fake):
                     self._send_chunk(b"data: [DONE]\n\n")
                     self._send_chunk(b"")
                     return
-                if k == 5 and "FAKE_DROP" in text:
+                if k == 5 and "FAKE_DROP" in text and self._drop_now(text):
                     self.wfile.flush()
                     self.close_connection = True
                     self.connection.shutdown(2)

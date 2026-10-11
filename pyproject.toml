@@ -50,6 +50,7 @@ tandem-dash = "proxy.__main__:main"
 [tool.setuptools]
 include-package-data = false
 packages = [
+  "chatd",
   "proxy",
   "proxy.adapters",
   "proxy.dashboard",
