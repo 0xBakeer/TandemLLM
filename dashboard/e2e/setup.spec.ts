@@ -168,7 +168,7 @@ test('a failed smoke rolls back and offers the way back to Review', async ({ pag
   await finish(page);
   await expect(page.locator('[data-job-state="rolled_back"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.inst-step[data-step="smoke"]')).toHaveClass(/is-failed/);
-  await expect(page.locator('[data-rolled-back]')).toContainText('went back to exl3-6.0');
+  await expect(page.locator('[data-rolled-back]')).toContainText('went back to exl3-4.5');
   await page.locator('.inst-actions button', { hasText: 'Back to Review' }).click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'review');
 });
@@ -211,6 +211,24 @@ test('storage that throws: the wizard works and says progress is not saved', asy
   await expect(page.locator('[data-setup-notice]')).toContainText('progress will not be kept');
   await page.locator('[data-profile-card="exl3-4.0"]').click();
   await expect(page.locator('.wcard.is-selected')).toHaveAttribute('data-profile-card', 'exl3-4.0');
+});
+
+test('the guide starts from what the box runs now; Review warns when a client-facing setting changes', async ({ page, request }) => {
+  await setupMock(request, { current: { profile: 'exl3-6.0', slots: 2, components: { vision: false } } });
+  await open(page, `#/setup/${MODEL}/weights`);
+  await expect(page.locator('.wcard.is-selected')).toHaveAttribute('data-profile-card', 'exl3-6.0');
+  await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
+  await page.goto(`./#/setup/${MODEL}/components`);
+  await expect(page.locator('[data-component="vision"] input')).not.toBeChecked();
+  await page.goto(`./#/setup/${MODEL}/review`);
+  await expect(page.locator('.rv-changes')).toContainText('Nothing in serve.env changes.');
+  await page.goto(`./#/setup/${MODEL}/methods`);
+  await page.locator('details.adv summary').click();
+  const port = page.locator('[data-field="methods.port"] input');
+  await port.fill('8124');
+  await port.press('Tab');
+  await page.goto(`./#/setup/${MODEL}/review`);
+  await expect(page.locator('.rv-notes')).toContainText('PORT changes from 8000 to 8124');
 });
 
 test('setup mode: #/ goes to #/setup and the other views are off with a reason', async ({ page, request }) => {

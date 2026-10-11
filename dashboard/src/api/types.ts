@@ -1165,6 +1165,15 @@ export interface SetupSelection {
   device?: string;
 }
 
+/** 1.0+: GET /v1/setup/models/{id}/current: what the box runs now, as a selection (the wizard's
+ *  seed); a value the registry cannot express stays recommended and is listed in `unmatched`. */
+export interface SetupCurrent {
+  contract_version: SetupContract;
+  model: string;
+  selection: SetupSelection;
+  unmatched: { field: string; value: unknown }[];
+}
+
 /** POST /v1/setup/estimate {selection} (also the TS copy's input, models/estimate-cases.json). */
 export type SetupEstimateRequest = SetupSelection;
 export interface SetupEstimatePart {

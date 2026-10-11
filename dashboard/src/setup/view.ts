@@ -141,8 +141,7 @@ export class QseSetup extends LightElement {
     try {
       const m = await setupApi.model(id);
       this.model = { state: 'ready', data: m };
-      const step = this.routeStep();
-      this.dispatch({ type: 'open', model: m, step: step ?? undefined }, false);
+      await this.openModel(m, this.routeStep() ?? undefined);
     } catch (e) {
       const d = describeError(e);
       this.model = { state: 'error', endpoint: d.endpoint, message: d.status === 404 ? `${S.modelsError} (${id})` : d.message };
@@ -157,6 +156,20 @@ export class QseSetup extends LightElement {
     } catch {
       /* the bar keeps its last reading */
     }
+  }
+
+  /** open a model: this browser's progress for it, else what the box runs now (the server's
+   *  reading of serve.env), else the recommended setup */
+  private async openModel(m: SetupModel, step: SetupStepId | undefined): Promise<void> {
+    let seed: SetupSelection | null = null;
+    if (!(this.wiz.model === m.id && this.wiz.selection)) {
+      try {
+        seed = (await setupApi.current(m.id)).selection;
+      } catch {
+        seed = null; // an older server, or none: the recommended setup
+      }
+    }
+    this.dispatch({ type: 'open', model: m, step, seed }, false);
   }
 
   private get m(): SetupModel | null {
@@ -186,7 +199,7 @@ export class QseSetup extends LightElement {
       return;
     }
     if (this.wiz.model !== id || !this.wiz.selection) {
-      this.dispatch({ type: 'open', model: m, step: isStepId(stepRaw) ? stepRaw : undefined }, false);
+      void this.openModel(m, isStepId(stepRaw) ? stepRaw : undefined);
       return;
     }
     let step: SetupStepId = isStepId(stepRaw) ? stepRaw : 'overview';

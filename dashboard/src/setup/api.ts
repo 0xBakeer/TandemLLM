@@ -10,6 +10,7 @@ import type {
   SetupAssistantStatus,
   SetupChatEvent,
   SetupChatRequest,
+  SetupCurrent,
   SetupDevice,
   SetupEstimate,
   SetupJob,
@@ -41,6 +42,7 @@ const post = <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> 
 export const setupApi = {
   models: () => get<SetupModelsList>('/v1/setup/models'),
   model: (id: string) => get<SetupModel>(`/v1/setup/models/${encodeURIComponent(id)}`),
+  current: (id: string) => get<SetupCurrent>(`/v1/setup/models/${encodeURIComponent(id)}/current`),
   device: () => get<SetupDevice>('/v1/setup/device'),
   estimate: (sel: SetupSelection, signal?: AbortSignal) => post<SetupEstimate>('/v1/setup/estimate', sel, signal),
   plan: (sel: SetupSelection, signal?: AbortSignal) => post<SetupPlan>('/v1/setup/plan', { selection: sel }, signal),

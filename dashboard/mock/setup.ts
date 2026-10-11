@@ -18,6 +18,8 @@
 //   unauthorized: bool (an admin password is set: every /v1/setup route answers 401 until
 //   POST /v1/dashboard/session {token: QSE_MOCK_TOKEN or "mock"} signs in), loginOff: bool (with
 //   unauthorized: the dashboard login is off, so that POST is a 404 as on the server)
+//   current: a partial selection: what the box runs (GET /v1/setup/models/{id}/current, the
+//   wizard's seed; its profile becomes `active`)
 //   reset: true (all of the above back to the start)
 //
 // In setup mode every other /v1 route answers 503 setup_mode (mock/server.ts), as server/app.py's
@@ -101,12 +103,22 @@ const START: Options = {
   estimateDown: false,
   planDown: false,
   models: 'ok',
-  active: 'exl3-6.0',
+  active: 'exl3-4.5',
   unauthorized: false,
   loginOff: false,
 };
 
 const TOKEN = process.env.QSE_MOCK_TOKEN ?? 'mock';
+/** server/setup/apply.py CLIENT_FACING: the changes every client notices, warned about in Review */
+const CLIENT_FACING: Record<string, string> = {
+  HOST: 'the engine listens on another address; clients and the reverse proxy may not reach it any more.',
+  PORT: 'clients, the reverse proxy and the watchdog must use the new port.',
+  SERVED_MODEL: 'clients that ask for the old model name get an error until they use the new one.',
+  QSE_BACKENDS: 'the model names routed to other servers or cloud APIs change with it.',
+};
+function clientFacing(changes: SetupEnvChange[]): string[] {
+  return changes.filter((c) => CLIENT_FACING[c.key]).map((c) => `${c.key} changes from ${c.current ?? 'unset'} to ${c.next ?? 'unset'}: ${CLIENT_FACING[c.key]}`);
+}
 /** server/setup_api.py PLAN_STATUS: 412 for what the box lacks, 409 for the rest */
 const PLAN_STATUS: Record<string, number> = { missing_token: 412, missing_assets: 412, disk_full: 412, no_overlay_hook: 412 };
 /** the checkout the mock box runs from (run/setup.env lives there) */
@@ -138,8 +150,11 @@ export class MockSetup {
   /** serve.env as it is now on the mock box */
   env: Record<string, string> = {};
 
+  /** what the mock box runs, as GET .../current answers it */
+  box: SetupSelection = defaults(MODEL);
+
   constructor() {
-    this.env = this.envFor({ ...defaults(MODEL), profile: 'exl3-6.0' });
+    this.env = this.envFor(this.box);
   }
 
   reset(): void {
@@ -148,7 +163,8 @@ export class MockSetup {
     this.sessions.clear();
     this.awayUntil = 0;
     this.awayFrom = 0;
-    this.env = this.envFor({ ...defaults(MODEL), profile: 'exl3-6.0' });
+    this.box = defaults(MODEL);
+    this.env = this.envFor(this.box);
   }
 
   control(b: Record<string, unknown>): Record<string, unknown> {
@@ -157,6 +173,16 @@ export class MockSetup {
     for (const k of Object.keys(START)) if (k in b) o[k] = b[k];
     if (typeof b.gap_s === 'number') this.o.gapMs = b.gap_s * 1000;
     if (b.assistant === 'loading') this.loadStartedAt = Date.now();
+    if (b.current && typeof b.current === 'object') {
+      // the box runs another setup than the recommended one (a partial selection over it)
+      const c = b.current as Partial<SetupSelection>;
+      const d = defaults(MODEL);
+      this.box = checkSelection(MODEL, { ...d, ...c, components: { ...d.components, ...c.components }, methods: { ...d.methods, ...c.methods }, advanced: { ...d.advanced, ...c.advanced }, model: MODEL.id });
+      this.o.active = this.box.profile;
+      this.env = this.envFor(this.box);
+    } else if (typeof b.active === 'string') {
+      this.box = { ...this.box, profile: b.active };
+    }
     return { ...this.o };
   }
 
@@ -289,7 +315,7 @@ export class MockSetup {
       ok: errors.length === 0,
       errors,
       error_codes: codes,
-      warnings: [...(this.o.password ? [] : ['No admin password is set: anyone who can reach this port can run the setup, apply it and reset the box. Generate one in the advanced step.']), ...(est.fits && !est.fits_worst ? [est.notes[0]] : [])],
+      warnings: [...clientFacing(changes), ...(this.o.password ? [] : ['No admin password is set: anyone who can reach this port can run the setup, apply it and reset the box. Generate one in the advanced step.']), ...(est.fits && !est.fits_worst ? [est.notes[0]] : [])],
       profile: { current: this.o.setupMode ? null : this.o.active, next: prof.id, on_disk: onDisk, download_gb: onDisk ? 0 : prof.disk_gb },
       changes,
       restart: true,
@@ -363,6 +389,7 @@ export class MockSetup {
       const finish = t + 100;
       setTimeout(() => {
         this.o.active = prof;
+        this.box = sel;
         this.onDisk[prof] = true;
         this.env = this.envFor(sel);
       }, finish).unref?.();
@@ -448,7 +475,7 @@ export class MockSetup {
       ? []
       : [
           item(`${E}/cache/disk-${this.o.active}`, "Disk cache and parked chats (the running profile's)", 11.2 * GIB, true, { action: 'engine', note: 'the engine clears it itself' }),
-          item(`${E}/cache/disk-exl3-4.5`, 'Disk cache and parked chats', 3.1 * GIB),
+          item(`${E}/cache/disk-${this.o.active === 'exl3-6.0' ? 'exl3-4.5' : 'exl3-6.0'}`, 'Disk cache and parked chats', 3.1 * GIB),
           ...(this.o.shadowOn ? [item(`${E}/cache/shadow`, "The shadow reader's saved sessions", 0.6 * GIB, true, { action: 'skip', note: 'kept while the shadow reader runs' })] : []),
           item(`${E}/suffix`, 'The lookup store', 412 * 2 ** 20, true, { action: 'engine', note: 'the engine empties it itself' }),
           memory('state_store', 'The state store (memory)'),
@@ -626,6 +653,8 @@ export class MockSetup {
     }
     const mm = path.match(/^\/v1\/setup\/models\/([^/]+)$/);
     if (mm) return decodeURIComponent(mm[1]) === MODEL.id ? json(200, MODEL) : err(404, 'not_found', `no model ${mm[1]}`);
+    const mc = path.match(/^\/v1\/setup\/models\/([^/]+)\/current$/);
+    if (mc) return decodeURIComponent(mc[1]) === MODEL.id ? json(200, { contract_version: '1.0', model: MODEL.id, selection: this.box, unmatched: [] }) : err(404, 'not_found', `no model ${mc[1]}`);
     if (path === '/v1/setup/device') return json(200, this.device());
     const refuse = (e: unknown) => (e instanceof SelectionError ? err(e.status, e.code, e.message) : err(500, 'internal_error', String(e)));
     if (path === '/v1/setup/estimate' && method === 'POST') {

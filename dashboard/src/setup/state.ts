@@ -101,7 +101,9 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
 export type ParallelKey = 'slots' | 'window' | 'side_window' | 'kv_pool' | 'floor_gb';
 
 export type SetupAction =
-  | { type: 'open'; model: SetupModel; step?: SetupStepId }
+  /** seed: what the box runs now (GET .../current), used when this browser has no progress for
+   *  the model; checked like a saved selection */
+  | { type: 'open'; model: SetupModel; step?: SetupStepId; seed?: SetupSelection | null }
   | { type: 'go'; step: SetupStepId }
   | { type: 'next' }
   | { type: 'previous' }
@@ -136,7 +138,11 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
   switch (a.type) {
     case 'open': {
       const same = st.model === a.model.id && st.selection;
-      const { selection, notices } = same ? restoreSelection(a.model, st.selection) : { selection: defaults(a.model), notices: [] as string[] };
+      const { selection, notices } = same
+        ? restoreSelection(a.model, st.selection)
+        : a.seed
+          ? { selection: restoreSelection(a.model, a.seed).selection, notices: [S.seededFromBox] }
+          : { selection: defaults(a.model), notices: [] as string[] };
       const step = a.step && a.step !== 'models' ? a.step : same && st.step !== 'models' ? st.step : 'overview';
       return done({ model: a.model.id, selection, step, visited: visit(same ? st.visited : ['models'], step), notice: notices.length ? notices.join(' ') : null });
     }

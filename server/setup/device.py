@@ -31,6 +31,35 @@ def ops_dir() -> str:
     return os.environ.get("QSE_OPS_DIR") or os.path.join(registry.ROOT, "ops")
 
 
+_repo_cache: dict = {}
+
+
+def repo_ops(ops: str | None = None, timeout: float = 10.0) -> str:
+    """The ops folder that holds profiles/ and active-profile: serve.env's REPO/ops, as
+    ops/use-profile.sh reads them. On an install.sh box the serve.env (and QSE_OPS_DIR) is in
+    run/ops, beside the scripts, while the profiles are under the checkout serve.env names."""
+    ops = ops or ops_dir()
+    hit = _repo_cache.get(ops)
+    if hit is not None and time.monotonic() - hit[0] < DISK_TTL_S:
+        return hit[1]
+    out = ops
+    env_file = os.path.join(ops, "serve.env")
+    if os.path.isfile(env_file):
+        try:
+            r = subprocess.run(["bash", "-c", 'set -a; . "$ENVF" >/dev/null 2>&1; '
+                                              'printf "%s" "${REPO:-}"'],
+                               capture_output=True, text=True, timeout=timeout,
+                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                    "HOME": os.path.expanduser("~"), "ENVF": env_file})
+            repo = r.stdout.strip()
+            if repo and os.path.isdir(os.path.join(repo, "ops", "profiles")):
+                out = os.path.join(repo, "ops")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _repo_cache[ops] = (time.monotonic(), out)
+    return out
+
+
 def meminfo() -> dict:
     out = {}
     try:
@@ -125,14 +154,17 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
 
 
 def active_profile() -> str | None:
-    """The profile the running engine serves (QSE_WEIGHTS), else ops/active-profile."""
+    """The profile the running engine serves (QSE_WEIGHTS), else active-profile under serve.env's
+    REPO (repo_ops: an install.sh box keeps it there, not beside its run/ops/serve.env)."""
     if os.environ.get("QSE_WEIGHTS"):
         return os.environ["QSE_WEIGHTS"]
-    try:
-        with open(os.path.join(ops_dir(), "active-profile")) as fh:
-            return fh.read().strip() or None
-    except OSError:
-        return None
+    for d in dict.fromkeys((repo_ops(), ops_dir())):
+        try:
+            with open(os.path.join(d, "active-profile")) as fh:
+                return fh.read().strip() or None
+        except OSError:
+            continue
+    return None
 
 
 def preset(m: dict, total_gib: float | None, gpu_name: str | None) -> str | None:
@@ -201,3 +233,4 @@ def read(state: dict, *, inflight: dict, busy: bool, assistant: dict, gpu=None,
 def clear() -> None:
     with _lock:
         _cache.update(at=0.0, out=None, disk_at=0.0, disk={})
+        _repo_cache.clear()

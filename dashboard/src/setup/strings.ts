@@ -69,6 +69,7 @@ export const S = {
   storageOff: 'This browser does not let the page save, so your progress will not be kept.',
   storageCorrupt: 'The guide could not read the saved progress, so it starts from the recommended setup.',
   storageOld: 'The saved progress is from an older version of the guide, so it starts from the recommended setup.',
+  seededFromBox: 'The guide starts from what this box runs now. "Use the recommended values" on a step goes back to ours.',
   savedProfileGone: (id: string) => `The guide no longer offers the saved weights ${id}, so it picked the recommended ones.`,
   savedComponentGone: (id: string) => `The guide no longer offers the saved tool ${id} and left it out.`,
   savedValueBad: (label: string) => `The saved value of ${label} is no longer valid, so the guide went back to the recommended one.`,

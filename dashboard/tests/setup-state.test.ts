@@ -70,6 +70,20 @@ describe('setupReducer', () => {
     expect(s.selection!.profile).toBe('exl3-4.0');
     expect(s.step).toBe('review');
   });
+  it('a new model starts from what the box runs (the seed), checked, with a note', () => {
+    const seed = { ...defaults(M), profile: 'exl3-6.0', slots: 2, components: { ...defaults(M).components, vision: false } };
+    const s = run([{ type: 'open', model: M, seed }]);
+    expect(s.selection).toMatchObject({ profile: 'exl3-6.0', slots: 2 });
+    expect(s.selection!.components.vision).toBe(false);
+    expect(s.notice).toMatch(/what this box runs now/);
+    // a bad seed value falls back to the recommended one
+    const bad = run([{ type: 'open', model: M, seed: { ...defaults(M), profile: 'exl3-9.9' } }]);
+    expect(bad.selection!.profile).toBe('exl3-4.5');
+  });
+  it("this browser's progress wins over the seed", () => {
+    const s = run([{ type: 'open', model: M }, { type: 'profile', id: 'exl3-4.0' }, { type: 'open', model: M, seed: { ...defaults(M), profile: 'exl3-6.0' } }]);
+    expect(s.selection!.profile).toBe('exl3-4.0');
+  });
   it('ignores an unknown profile', () => {
     const s = run([{ type: 'open', model: M }, { type: 'profile', id: 'exl3-9.9' }]);
     expect(s.selection!.profile).toBe('exl3-4.5');

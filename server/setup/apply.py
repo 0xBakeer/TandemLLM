@@ -191,7 +191,108 @@ def resolve_env(keys: list[str], *, profile: str | None = None, overlay: str | N
     return out
 
 
+# ---------------------------------------------------------------------- the box now
+def _expand(v: str | None) -> str:
+    return (v or "").replace("${HOME}", os.path.expanduser("~"))
+
+
+def current_selection(m: dict) -> dict:
+    """What the box runs now as a selection (GET /v1/setup/models/{id}/current): the active
+    profile and every registry knob as ops/serve.env resolves it (with run/setup.env), so the
+    wizard starts from this box and not from the recommended setup, and the plan only lists what
+    the user changes. A value the registry cannot express (a HOST that is neither option, a tool
+    whose knobs disagree) stays at the recommended one and is listed in `unmatched`."""
+    keys = sorted(set(registry.env_keys(m)) | set(m["parallelism"]["knobs"].values()))
+    env = resolve_env(keys)
+    unmatched = []
+    body: dict = {"model": m["id"]}
+    active = device_mod.active_profile()
+    if active and registry.profile(m, active) is not None:
+        body["profile"] = active
+    comps = {}
+    for c in m["components"]:
+        if c["required"] or not c["knobs"]:
+            continue
+        votes = set()
+        for key, v in c["knobs"].items():
+            now = env.get(key, "")
+            if v["on"] is None:
+                votes.add(now != _expand(v["off"]))
+            elif now == _expand(v["on"]):
+                votes.add(True)
+            elif now == _expand(v["off"]) or (v["off"] == "" and key not in env):
+                votes.add(False)
+            else:
+                votes.add(None)
+        if votes in ({True}, {False}):
+            comps[c["id"]] = votes == {True}
+        else:
+            unmatched.append({"field": f"components.{c['id']}",
+                              "value": {k: env.get(k) for k in c["knobs"]}})
+    body["components"] = comps
+    par = m["parallelism"]
+    for name, key in par["knobs"].items():
+        v = env.get(key)
+        if v is None:
+            continue
+        if name == "kv_pool":
+            if v in ("on", "off"):
+                body[name] = v == "on"
+            continue
+        try:
+            body[name] = float(v) if name == "floor_gb" else int(v)
+        except ValueError:
+            unmatched.append({"field": f"parallelism.{name}", "value": v})
+    for group in ("methods", "advanced"):
+        vals = {}
+        for f in m[group]:
+            if not f["knob"] or f["knob"] not in env:
+                continue
+            raw = env[f["knob"]]
+            try:
+                v = {"int": int, "number": float}.get(f["type"], str)(raw)
+            except ValueError:
+                v = raw
+            if f["type"] == "bool":
+                v = raw.lower() in ("1", "true", "on", "yes")
+            if registry.field_error(f, v):
+                unmatched.append({"field": f"{group}.{f['id']}", "value": raw})
+            else:
+                vals[f["id"]] = v
+        body[group] = vals
+    # what does not check (a window off its step, tools that need each other) falls back to the
+    # recommended values, the fewest parts first
+    parts = {"components": ["components"], "parallelism": list(par["knobs"]),
+             "methods": ["methods", "advanced"]}
+    tries = [()] + [(k,) for k in parts] + [("components", "parallelism"),
+                                             ("components", "methods"),
+                                             ("parallelism", "methods"), tuple(parts)]
+    first_error = None
+    for drop in tries:
+        b = {k: v for k, v in body.items() if not any(k in parts[d] for d in drop)}
+        try:
+            sel = estimate_mod.check(m, b)
+        except estimate_mod.SelectionError as exc:
+            first_error = first_error or str(exc)
+            continue
+        if drop:
+            unmatched.append({"field": ", ".join(drop), "value": first_error})
+        break
+    return {"contract_version": "1.0", "model": m["id"], "selection": sel, "unmatched": unmatched}
+
+
 # ---------------------------------------------------------------------- the plan
+# the keys a change of which every client notices, and what to do about it
+CLIENT_FACING = {
+    "HOST": "the engine listens on another address; clients and the reverse proxy may not reach "
+            "it any more.",
+    "PORT": "clients, the reverse proxy and the watchdog must use the new port.",
+    "SERVED_MODEL": "clients that ask for the old model name get an error until they use the new "
+                    "one.",
+    "QSE_BACKENDS": "the model names routed to other servers or cloud APIs change with it.",
+}
+
+
 def secrets_file() -> str:
     return os.environ.get("QSE_SECRETS") or os.path.expanduser("~/.qwen38-spark-engine/secrets.env")
 
@@ -247,6 +348,11 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         cur, nxt = current.get(k), with_overlay.get(k)
         if cur != nxt:
             changes.append({"key": k, "current": cur, "next": nxt, "from": _source(m, k)})
+    for c in changes:
+        why = CLIENT_FACING.get(c["key"])
+        if why:
+            warnings.append(f"{c['key']} changes from {c['current'] or 'unset'} to "
+                            f"{c['next'] or 'unset'}: {why}")
     old_port = int(current.get("PORT") or 8000) if (current.get("PORT") or "").isdigit() else 8000
     new_port = int(sel["advanced"].get("port") or old_port)
     if new_port != old_port and _port_taken(new_port):
@@ -629,7 +735,7 @@ class Runner:
         except estimate_mod.SelectionError as exc:
             return self._fail("check", f"the selection does not check: {exc}")
         if not PROFILE_ID.match(sel["profile"]) or not os.path.isfile(
-                os.path.join(self.ops, "profiles", sel["profile"] + ".env")):
+                os.path.join(device_mod.repo_ops(self.ops), "profiles", sel["profile"] + ".env")):
             return self._fail("check", f"no ops/profiles/{sel['profile']}.env on this box")
         prev = self._previous()
         p = plan(m, sel, setup_mode=spec["setup_mode"], password_set=True)
@@ -704,7 +810,7 @@ class Runner:
     def _previous(self) -> str | None:
         prev = self.spec.get("previous")
         if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
-                os.path.join(self.ops, "profiles", prev + ".env"))):
+                os.path.join(device_mod.repo_ops(self.ops), "profiles", prev + ".env"))):
             return None
         return prev
 

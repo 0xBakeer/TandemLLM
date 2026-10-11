@@ -4,6 +4,7 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models                 a tile per models/<id>/model.yaml, and the files that did not load
     GET  /v1/setup/models/{id}            the model.yaml as JSON, with `wizard_fields` (the step schema)
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
+    GET  /v1/setup/models/{id}/current    what the box runs now, as a selection (the wizard's seed)
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
     POST /v1/setup/estimate {selection}   the memory estimate (server/setup/estimate.py)
     POST /v1/setup/plan {selection}       the review step's facts (server/setup/apply.py)
@@ -141,6 +142,12 @@ def _get(h, app, parts: list[str]) -> None:
             return None
         return h._json(200, dict(m, contract_version=CONTRACT,
                                  wizard_fields=registry.wizard_fields(m)), extra_headers=NO_STORE)
+    if len(parts) == 3 and parts[0] == "models" and parts[2] == "current":
+        m = _model(h, parts[1])
+        if m is None:
+            return None
+        from server.setup import apply
+        return h._json(200, apply.current_selection(m), extra_headers=NO_STORE)
     if len(parts) == 3 and parts[0] == "models" and parts[2] == "steps":
         m = _model(h, parts[1])
         if m is None:

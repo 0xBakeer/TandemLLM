@@ -38,6 +38,13 @@ The test matrix:
      use-profile.sh never rolls back itself (QSE_NO_ROLLBACK) and the rollback's smoke names the
      old served model; the setup-mode marker comes back unchanged (its HOST) on a rollback and after
      a crash; the smoke asks for 512 tokens          test_the_runners_hard_cases
+ 12  the wizard's seed is the box as it runs (GET .../current): the active profile, the overlay's
+     slots, window, tools, port and served name; a HOST neither option names is listed as unmatched;
+     the plan warns when HOST, PORT, SERVED_MODEL or QSE_BACKENDS change
+                                                         test_the_current_selection
+ 13  an install.sh box (serve.env and the scripts in run/ops, the profiles and active-profile under
+     serve.env's REPO): the active profile and the profile files are found there, and a job runs
+                                                         test_an_install_sh_box
  11  a timed-out command's whole process group goes; a pid that is not the runner's any more (another
      start time, another boot) is not alive; every overlay value is quoted, so a value with a ; in
      it stays one word                                   test_timeouts_liveness_and_quoting
@@ -542,6 +549,55 @@ def test_timeouts_liveness_and_quoting():
         got = apply.resolve_env(["VISION"])
         assert got["VISION"].startswith("a b;touch"), got
         assert not os.path.exists(os.path.join(box.tmp, "pwn"))
+
+
+def test_the_current_selection():
+    with Box() as box:
+        apply.write_overlay(M, _sel(slots=2, window=65_536, components={"vision": False},
+                                    advanced={"port": 8124, "served_model": "mine"}))
+        app.STATE.clear()
+        app.STATE.update(auth=auth.Auth(None, None), started=time.time(), wren=FakeWren())
+        code, b = _api("GET", f"/v1/setup/models/{M['id']}/current")
+        assert code == 200, b
+        sel = b["selection"]
+        assert sel["profile"] == "exl3-6.0" and sel["slots"] == 2 and sel["window"] == 65_536
+        assert sel["components"]["vision"] is False and sel["advanced"]["port"] == 8124
+        assert sel["advanced"]["served_model"] == "mine" and b["unmatched"] == [], b
+        # the plan from that seed changes nothing; a port and a name change are warned about
+        p = _plan(estimate.check(M, sel))
+        assert p["changes"] == [], p["changes"]
+        p = _plan(estimate.check(M, dict(sel, advanced=dict(sel["advanced"], port=8125,
+                                                                served_model="other"))))
+        assert any(w.startswith("PORT changes from 8124 to 8125") for w in p["warnings"]), p
+        assert any(w.startswith("SERVED_MODEL changes from mine to other") for w in p["warnings"])
+        # a HOST the registry has no option for stays recommended and is listed
+        with open(apply.overlay_path(), "a") as fh:
+            fh.write("HOST='192.168.178.143'\n")
+        b = apply.current_selection(M)
+        assert b["selection"]["advanced"]["host"] == "0.0.0.0"
+        assert {"field": "advanced.host", "value": "192.168.178.143"} in b["unmatched"], b
+
+
+def test_an_install_sh_box():
+    with Box() as box:
+        run_ops = os.path.join(box.tmp, "install", "run", "ops")
+        os.makedirs(run_ops)
+        shutil.copy(os.path.join(box.ops, "serve.env"), run_ops)
+        for sc in apply.SCRIPTS:
+            shutil.copy(os.path.join(box.ops, sc), run_ops)
+        os.environ["QSE_OPS_DIR"] = run_ops
+        device_mod.clear()
+        try:
+            assert device_mod.repo_ops() == box.ops
+            assert device_mod.active_profile() == "exl3-6.0"
+            rec = Recorder()
+            jid = _job(_sel())
+            assert apply.Runner(jid, cmd=rec, http=_smoke_ok(), ops=run_ops).main() == 0, \
+                apply.read_job(jid)
+            assert rec.calls[0]["argv"][1] == os.path.join(run_ops, "use-profile.sh")
+        finally:
+            os.environ["QSE_OPS_DIR"] = box.ops
+            device_mod.clear()
 
 
 class Req(app.Handler):
