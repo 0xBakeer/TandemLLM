@@ -188,61 +188,66 @@ def test_a_client_too_far_behind_gets_reset():
 
 
 def test_the_replay_to_live_switch_has_no_gap_and_no_duplicate():
-    """10,000 events emitted from one thread while subscribers attach at random moments from
-    others; every subscriber's replay plus live part is contiguous from its `after`."""
+    """10,000 attaches at random moments from four threads while events are emitted without a
+    pause; every subscriber's replay plus live part is contiguous from its `after`."""
     c = Chat()
     try:
         cid = c.new()
         conv = c.svc.conv(cid)
-        total = 10_000
         start_seq = conv.last_seq
+        attaches = 10_000
         stop = threading.Event()
 
         def emitter():
-            for _ in range(total):
-                c.svc.emit(conv, {"type": "queue.changed", "queue": []})
-            stop.set()
-        results = []
-
-        def attacher(seed):
-            rng = random.Random(seed)
             while not stop.is_set():
-                time.sleep(rng.random() * 0.01)
+                c.svc.emit(conv, {"type": "queue.changed", "queue": []})
+        results = []
+        lock = threading.Lock()
+
+        def attacher(seed, n):
+            rng = random.Random(seed)
+            for _ in range(n):
                 last = conv.last_seq
-                after = max(start_seq, last - rng.randint(0, RESET_BEHIND - 1))
+                after = max(start_seq, last - rng.randint(0, 200))
                 sub, replay = c.svc.attach(cid, after)
                 if sub is None:
                     continue
                 got = [r[0] for r in replay]
-                deadline = time.monotonic() + 0.05 + rng.random() * 0.05
-                while time.monotonic() < deadline:
-                    items = sub.take(0.01) or []
-                    got += [i[0] for i in items if i[0] is not None]
+                for _ in range(rng.randint(0, 3)):
+                    time.sleep(rng.random() * 0.002)
+                    got += [i[0] for i in (sub.take(0) or []) if i[0] is not None]
                 c.svc.detach(cid, sub)
-                results.append((after, got))
-        threads = [threading.Thread(target=attacher, args=(k,)) for k in range(4)]
+                got += [i[0] for i in (sub.take(0) or []) if i[0] is not None]
+                with lock:
+                    results.append((after, got))
+        em = threading.Thread(target=emitter)
+        em.start()
+        threads = [threading.Thread(target=attacher, args=(k, attaches // 4)) for k in range(4)]
         for t in threads:
             t.start()
-        emitter()
         for t in threads:
             t.join()
-        assert len(results) > 20, len(results)
+        stop.set()
+        em.join()
+        assert len(results) == attaches, len(results)
+        live = sum(1 for after, got in results if got and got[-1] > after + 200)
         for after, got in results:
             assert got == list(range(after + 1, after + 1 + len(got))), (after, got[:5])
+        assert conv.last_seq - start_seq > 1000 and live > 0
     finally:
         c.close()
 
 
 def test_deltas_are_coalesced():
+    """A 10,000-token answer is under 500 stored events (one delta every 50 ms)."""
     c = Chat(tps=2000.0)
     try:
         cid = c.new()
-        c.send(cid, "FAKE_LONG 2000 go")
-        s = c.wait_idle(cid)
-        assert len(text_of(s["messages"][-1]).split()) == 2000
-        n = c.svc.store.one("SELECT COUNT(*) FROM events WHERE conversation_id = ? AND "
-                            "type = 'part.delta'", (cid,))[0]
-        assert n < 100, n                       # 1 s of streaming, one delta every 50 ms
+        c.send(cid, "FAKE_LONG 10000 go")
+        s = c.wait_idle(cid, 30)
+        assert len(text_of(s["messages"][-1]).split()) == 10_000
+        n = c.svc.store.one("SELECT COUNT(*) FROM events WHERE conversation_id = ?", (cid,))[0]
+        assert n < 500, n
     finally:
         c.close()
 
