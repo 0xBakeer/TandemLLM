@@ -618,6 +618,8 @@ def test_the_current_selection_of_unset_keys():
         text = open(apply.overlay_path()).read()
         for k in ("QWEN38_SUFFIX_STORE", "VISION", "RESPONSE_CACHE", "SESSION_SPILL"):
             assert f"\n{k}=" not in text, text
+        written = sum(1 for x in text.splitlines() if x and not x.startswith("#"))
+        assert f"write run/setup.env ({written} keys;" in p["commands"][0], (written, p["commands"])
         after = apply.resolve_env(keys)
         assert {k: v for k, v in after.items() if k.startswith("QWEN38_")} == \
             {k: v for k, v in before.items() if k.startswith("QWEN38_")}

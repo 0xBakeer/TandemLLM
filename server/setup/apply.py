@@ -417,7 +417,8 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
                         f"(about {prof['disk_gb']:g} GB from {prof['hf_repo']})")
     if new_port != old_port:
         commands.append(f"bash ops/stop.sh 120   (the engine on port {old_port})")
-    commands.append(f"write run/setup.env ({len(keys)} keys; the old one kept as a .bak)")
+    written = len(_without_unset_defaults(overlay_values(m, sel), sel["profile"]))
+    commands.append(f"write run/setup.env ({written} keys; the old one kept as a .bak)")
     if sel["advanced"].get("admin_password") == "generate":
         commands.append("bash ops/make-secrets.sh --admin")
     commands.append(f"bash ops/use-profile.sh {prof['id']}   (stop, start, smoke, roll back on "
@@ -837,7 +838,7 @@ class Runner:
             # the old engine is stopped already: the rollback starts it again
             self._fail("write_config", f"{exc}")
             return self._rollback(m, spec, backup, prev, old_port, new_port)
-        self.step("write_config", "done", f"run/setup.env, {len(overlay_values(m, sel))} keys"
+        self.step("write_config", "done", f"run/setup.env, {len(_without_unset_defaults(overlay_values(m, sel), sel['profile']))} keys"
                                           + (f"; the old one is {os.path.basename(backup)}"
                                              if backup else ""))
         # switch
