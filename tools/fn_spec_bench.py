@@ -29,7 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
 from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder, StairCut  # noqa: E402
-from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
+from tools.fn_draft_trace import prompt_ids  # noqa: E402
+from tools.fn_generate import mem_available_gib  # noqa: E402
 
 
 class Bench:
@@ -155,7 +156,7 @@ def main() -> None:
     res["knobs"]["self_check_first"] = a.self_check
     b = Bench(eng, eos)
     for c in a.classes.split(","):
-        ids = class_prompt(tok, c, a.ctx)
+        ids = prompt_ids(tok, c, a.ctx)          # a class, or one of the extra code requests
         b.plain(ids, 32)                                  # warm: the decode graph
         P, pm = b.plain(ids, a.new)
         row = {"prompt_tokens": len(ids), "plain": pm, "spec": {}}

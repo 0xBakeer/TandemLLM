@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
 from engine.models.flashnext.spec import Drafter, MTPChainDrafter, MTPGraphDrafter, SpecDecoder  # noqa: E402
+from tools.fn_draft_trace import prompt_ids  # noqa: E402
 from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
 
 
@@ -205,7 +206,7 @@ def main() -> None:
     sc = eng.self_check(class_prompt(tok, "chat", 0))
     res["self_check"] = sc
     for c in a.classes.split(","):
-        ids = class_prompt(tok, c, a.ctx)
+        ids = prompt_ids(tok, c, a.ctx)          # a class, or one of the extra code requests
         P, tps = plain(eng, ids, a.new, eos)
         row = {"prompt_tokens": len(ids), "plain_tokens": len(P), "plain_tok_s": round(tps, 2), "modes": {}}
         for m in modes:
