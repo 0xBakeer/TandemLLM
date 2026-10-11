@@ -248,6 +248,9 @@ def test_cross_site_posts_are_refused():
     for headers in ok:
         code, b = call("POST", "/v1/setup/reset", body, headers)
         assert code == 200 and b["dry_run"] is True, (headers, code, b)
+    # a body over the cap is refused before anything reads it
+    code, b = call("POST", "/v1/setup/assistant/chat", body, {"Content-Length": str(600 * 1024)})
+    assert code == 413 and b["error"]["code"] == "too_large", b
     # GETs are reads and need none of it
     code, _ = call("GET", "/v1/setup/reset", None, {"Sec-Fetch-Site": "cross-site"})
     assert code == 200

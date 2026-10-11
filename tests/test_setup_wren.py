@@ -372,7 +372,7 @@ def test_page_state():
     p = model.prompts[0]
     assert "sk-very-secret-1" not in p and "<set>" in p and "<empty>" in p and "generate" in p
     assert "The page state (data)" in p and "Ignore the rules" in p
-    page["visible"] = {"rows": ["x" * 200] * 400}
+    page["visible"] = {"rows": ["x" * 200] * 200}
     ev = _events(w, page=page)
     assert ev[-1]["type"] == "done", ev[-1]
     assert "left out: too long" in model.prompts[-1]
@@ -404,6 +404,76 @@ def test_one_stream_and_unload_mid_stream():
     w.unload()
     t.join(10)
     assert got[-1] == {"type": "error", "message": "Wren went to sleep"}, got[-3:]
+
+
+class SlowLoad(Scripted):
+    """A load that waits for `go`."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.go = threading.Event()
+
+    def load(self, where):
+        self.go.wait(10)
+        self.loaded = True
+
+
+def test_unload_while_loading():
+    _on_disk()
+    w, model = _wren(SlowLoad())
+    w.load()
+    assert w.state == "loading"
+    slot = w.slot
+    w.unload("asked")
+    assert w.slot is None and w.state == "not_loaded"
+    model.go.set()
+    for _ in range(100):
+        if slot.state == "not_loaded":
+            break
+        time.sleep(0.05)
+    assert slot.state == "not_loaded" and not model.loaded, "the copy loaded after the unload stayed"
+
+
+def test_caps_and_wrong_types():
+    _on_disk()
+    w, model = _wren(Scripted(replies=["ok"] * 10))
+    _loaded(w)
+    page = {"model": "qwen3.8-27b", "step": "methods", "step_index": 5, "selection": {}}
+    big = dict(page, visible={"rows": ["x" * 1000] * 80})
+    ev = _events(w, page=big)
+    assert ev[-1]["type"] == "error" and "KiB of page state" in ev[-1]["message"], ev
+    many = [{"role": "user", "content": "y" * 7000} for _ in range(10)]
+    ev = list(w.chat({"messages": many, "page": page}))
+    assert ev[-1]["type"] == "error" and "together" in ev[-1]["message"], ev
+    calls = [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "", "tool_calls": [
+                 {"id": str(i), "name": "next", "args": {}} for i in range(9)]},
+             {"role": "user", "content": "again"}]
+    ev = list(w.chat({"messages": calls, "page": page}))
+    assert ev[-1]["type"] == "error" and "tool_calls" in ev[-1]["message"], ev
+    # a wrong type is a clean event, never a TypeError
+    for bad in ({"model": ["qwen3.8-27b"]}, {"model": {"x": 1}}, {"step": ["a"]}):
+        ev = _events(w, page=dict(page, **bad))
+        assert ev[-1]["type"] == "done", (bad, ev[-1])
+    m = registry.get("qwen3.8-27b")
+    for field in (["slots"], {"a": 1}, 3):
+        args, why = tools.check(m, "explain", {"field": field})
+        assert args is None and "nothing called" in why, (field, why)
+    # a long history (59 turns that fit the caps, not the window) is rendered a bounded number
+    # of times, not once per dropped turn
+    class Long(Scripted):
+        def encode_chat(self, msgs, defs):
+            text = json.dumps(msgs)
+            self.prompts.append(text)
+            return [1] * (len(text) // 4)
+
+    w2, long_model = _wren(Long(replies=["ok"]))
+    _loaded(w2)
+    hist = [{"role": "user" if i % 2 == 0 else "assistant", "content": "q" * 1000}
+            for i in range(59)] + [{"role": "user", "content": "last"}]
+    ev = list(w2.chat({"messages": hist, "page": page}))
+    assert ev[-1]["type"] == "done", ev[-1]
+    assert len(long_model.prompts) <= wren.MAX_RENDERS, len(long_model.prompts)
 
 
 def test_never_beside_a_request():

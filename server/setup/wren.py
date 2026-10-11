@@ -56,6 +56,15 @@ REPAIRS = 2
 TURN_S = 180.0
 MAX_MESSAGES = 60
 MAX_TEXT = 8000
+# what one chat body may hold beyond that: all messages' text together, the tool calls of one
+# message and the JSON of one call's arguments, the page state's JSON; and how often one prompt is
+# rendered through the chat template while old turns are dropped to fit the window
+MAX_TOTAL_TEXT = 64_000
+MAX_CALLS = 8
+MAX_ARGS = 2_000
+MAX_PAGE = 64 * 1024
+MAX_RENDERS = 6
+LOAD_WAIT_S = 900.0
 RANK = 5          # after every request (0-2) and TandemLLM's own jobs (server/app.py RANK_SHADOW = 4)
 SECRET = re.compile(r"pass|token|secret|api_?key|hf_", re.I)
 TOOL_OPEN = "<tool_call>"
@@ -127,18 +136,27 @@ def check_messages(messages) -> list[dict]:
     """The conversation the browser sent, in the template's form; ValueError when it is not one."""
     if not isinstance(messages, list) or not messages or len(messages) > MAX_MESSAGES:
         raise ValueError(f"messages: a list of 1 to {MAX_MESSAGES} messages")
-    out = []
+    out, total = [], 0
     for i, msg in enumerate(messages):
         if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant", "tool"):
             raise ValueError(f"messages[{i}]: a user, assistant or tool message")
         content = msg.get("content") or ""
         if not isinstance(content, str) or len(content) > MAX_TEXT:
             raise ValueError(f"messages[{i}].content: text of at most {MAX_TEXT} characters")
+        total += len(content)
+        if total > MAX_TOTAL_TEXT:
+            raise ValueError(f"messages: at most {MAX_TOTAL_TEXT} characters together; clear the "
+                             f"chat and ask again")
         m = {"role": msg["role"], "content": content}
         calls = msg.get("tool_calls") or []
         if msg["role"] == "assistant" and calls:
-            if not isinstance(calls, list):
-                raise ValueError(f"messages[{i}].tool_calls: a list")
+            if not isinstance(calls, list) or len(calls) > MAX_CALLS:
+                raise ValueError(f"messages[{i}].tool_calls: a list of at most {MAX_CALLS}")
+            for c in calls:
+                if not isinstance(c, dict) or len(json.dumps(c.get("args"))) > MAX_ARGS or \
+                        len(str(c.get("name") or "")) > 64:
+                    raise ValueError(f"messages[{i}].tool_calls: a name and at most {MAX_ARGS} "
+                                     f"characters of arguments each")
             m["tool_calls"] = [{"type": "function", "function": {
                 "name": str(c.get("name") or ""), "arguments": c.get("args") if
                 isinstance(c.get("args"), dict) else {}}} for c in calls if isinstance(c, dict)]
@@ -313,14 +331,27 @@ class Wren:
             slot, borrowed = self.slot, self.borrowed
             self.slot, self.borrowed, self.refusal, self.error = None, False, None, None
         if slot is not None and not borrowed:
-            slot.unload()
-            if slot.device is not None and getattr(slot.device, "cuda", False):
+            if not slot.unload() and slot.state == "loading":
+                # a load in flight cannot be stopped: its copy goes as soon as it is in
+                threading.Thread(target=self._unload_when_loaded, args=(slot, why), daemon=True,
+                                 name="wren-unload-after-load").start()
+            elif slot.device is not None and getattr(slot.device, "cuda", False):
                 import torch
                 torch.cuda.empty_cache()
         if slot is not None:
             self.log(f"[wren] {'let go of the narrator' if borrowed else 'unloaded'} ({why})")
         self.stats[f"unload_{why}"] += 1
         return self.status()
+
+    def _unload_when_loaded(self, slot, why: str) -> None:
+        t_end = time.monotonic() + LOAD_WAIT_S
+        while slot.state == "loading" and time.monotonic() < t_end:
+            time.sleep(0.2)
+        if slot.state in ("loaded", "failed") and slot.unload():
+            if slot.device is not None and getattr(slot.device, "cuda", False):
+                import torch
+                torch.cuda.empty_cache()
+            self.log(f"[wren] unloaded after its load ended ({why})")
 
     def reclaim(self, want: int = 0) -> int:
         """The KV pool's first role level: Wren's own copy goes before the shadow reader and the
@@ -383,10 +414,15 @@ class Wren:
                 f"{RULES}")
         defs = tools.definitions(m)
         hist = list(messages)
+        renders = 0
         while True:
             ids = self._encode(model, [{"role": "system", "content": head}] + hist, defs)
+            renders += 1
             if len(ids) + max_new <= window or len(hist) <= 1:
                 break
+            if renders >= MAX_RENDERS - 1:
+                hist = [messages[-1]]             # enough renders: the last message alone
+                continue
             hist = hist[1:]                       # the oldest turn first; the system text never
             while hist and hist[0]["role"] != "user":
                 hist = hist[1:]
@@ -487,12 +523,17 @@ class Wren:
             return
         page = body.get("page") if isinstance(body.get("page"), dict) else {}
         try:
+            if len(json.dumps(page)) > MAX_PAGE:
+                raise ValueError(f"page: at most {MAX_PAGE // 1024} KiB of page state")
             messages = check_messages(body.get("messages"))
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             yield {"type": "error", "message": str(exc)}
             return
+        if not isinstance(page.get("step"), (str, type(None))):
+            page = dict(page, step=None)
         models, _ = registry.load_all()
-        m = models.get(page.get("model")) or next(iter(models.values()), None)
+        mid = page.get("model")
+        m = (models.get(mid) if isinstance(mid, str) else None) or next(iter(models.values()), None)
         if m is None:
             yield {"type": "error", "message": "no model is registered in models/"}
             return

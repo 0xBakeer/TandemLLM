@@ -40,6 +40,8 @@ from server.setup import registry, tools
 
 CONTRACT = "1.0"
 NO_STORE = (("Cache-Control", "no-store"),)
+# the largest POST body a setup route takes (Wren's chat with its page state is the largest)
+MAX_BODY = 512 * 1024
 # one setup job at a time: the check for a running job and the new job's folder under one lock
 _JOB_LOCK = threading.Lock()
 
@@ -120,6 +122,13 @@ def handle(h, app, method: str, path: str, body) -> None:
         bad = same_origin_json(h.headers)
         if bad is not None:
             return _err(h, *bad)
+        try:
+            n = int(h.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n > MAX_BODY:
+            return _err(h, 413, "too_large", f"a setup request body is at most "
+                                              f"{MAX_BODY // 1024} KiB")
     sub = path[len("/v1/setup"):].strip("/")
     parts = [unquote(x) for x in sub.split("/")] if sub else []
     try:

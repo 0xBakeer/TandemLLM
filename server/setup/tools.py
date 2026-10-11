@@ -144,7 +144,7 @@ def check(m: dict, name: str, args) -> tuple[dict | None, str | None]:
     if name == "explain":
         names = ({f["field"] for s in steps for f in s["fields"]} | {s["id"] for s in steps}
                  | {c["id"] for c in m["components"]} | {p["id"] for p in m["profiles"]})
-        if args["field"] not in names:
+        if not isinstance(args["field"], str) or args["field"] not in names:
             return None, f"there is nothing called {args['field']!r} on the page"
         return args, None
     return args, None                                   # next, previous
