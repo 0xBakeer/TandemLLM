@@ -32,8 +32,8 @@ from tools.fn_generate import class_prompt  # noqa: E402
 @torch.no_grad()
 def run_class(eng: FlashNextEngine, ids: list[int], new: int, depth: int, eos: set) -> dict:
     st = eng.new_state(eng.max_len)
-    logits = eng.prefill(torch.tensor(ids), st)
-    S = eng.stack.clone()                              # the prompt's streams [L, hc H]
+    logits = eng.prefill(torch.tensor(ids), st, keep_stack=True)
+    S = eng.prompt_stack                               # the prompt's streams [L, hc H]
     L = len(ids)
     st_m = FNState(cap=eng.max_len)
     x = int(logits[0].argmax())                        # x_L

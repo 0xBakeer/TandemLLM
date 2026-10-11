@@ -30,6 +30,8 @@ slow, exact) and a verify block is refused; the selected-key path is ENG-147's w
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import torch
 
@@ -56,6 +58,15 @@ class FlashNextEngine(FlashNextRef):
         self._rb: dict = {}                                              # rows buffers by row count
         self._order1 = torch.empty(0, dtype=torch.int32, device=device)    # one row: launch order
         self.rec: dict = {}                                              # what a commit needs
+        self.host_ms: dict = {}                                          # host staging time by part
+        # the commit folded into the next call (QWEN38_FN_FOLD_COMMIT): the accepted path's GDN rows,
+        # parked a layer, applied by the next verify block or decode step to each state tile as it
+        # loads it (bit for bit the commit's own walk); `_pend_owner` is the state they belong to
+        self.fold = _S.get("FN_FOLD_COMMIT") == "1"
+        self._pend: dict = {}
+        self._pend_n = torch.zeros(max(len(cfg.linear_layers), 1), dtype=torch.int32, device=device)
+        self._lin_idx = {li: i for i, li in enumerate(cfg.linear_layers)}
+        self._pend_owner = None
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
         self._wc: dict = {}
@@ -88,14 +99,42 @@ class FlashNextEngine(FlashNextRef):
                 st.v[li] = torch.zeros_like(st.k[li])
                 if c.has_indexer:
                     st.ik[li] = torch.zeros(cap, c.indexer_head_dim, dtype=self.dtype, device=dev)
+                    st.pool[li] = self._pool_tensor(cap)
         for li in c.ple_layers:
             st.ple_conv[li] = torch.zeros(1, c.hc_hidden, (c.ple_conv_kernel_size - 1) * c.ngram_size,
                                           dtype=self.dtype, device=dev)
         return st
 
+    def _pool_tensor(self, cap: int) -> torch.Tensor:
+        """The pooled indexer keys of a cache of `cap` tokens: a row a block of 4, kept up to date by
+        every decode step and commit (ENG-147), plus the rows a commit may write past the last block."""
+        from tools import fn_seq_kernels as SK
+        return torch.zeros(cap // self.cfg.indexer_compress_ratio + SK.OWN + 1, self.cfg.indexer_head_dim,
+                           dtype=self.dtype, device=self.device)
+
+    @torch.no_grad()
+    def build_pool(self, st: FNState, layers=None) -> None:
+        """Pool every complete block of the state's indexer keys (after a prefill, which the reference
+        forward runs without the pool). The same kernel as a step's, so the bits are the step's."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        nb = st.length // c.indexer_compress_ratio
+        if not c.has_indexer or nb == 0:
+            return
+        dev = self.device
+        b = torch.arange(nb, dtype=torch.int32, device=dev)
+        slots = (b[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=dev)).contiguous()
+        for li in (layers if layers is not None else c.attention_layers):
+            p = self.pre(li) + "self_attn.indexer."
+            SK.qsa_pool(st.ik[li], slots, b * 4, self.W[p + "k_layernorm.weight"], self.rope_cos, self.rope_sin,
+                        c.rms_norm_eps, out=st.pool[li][:nb])
+
     def reset(self, st: FNState) -> None:
+        if self._pend_owner is st:
+            self._pend_n.zero_()
+            self._pend_owner = None
         st.reset_inplace()
-        for d in (st.k, st.v, st.ik):
+        for d in (st.k, st.v, st.ik, st.pool):
             for v in d.values():
                 v.zero_()
 
@@ -311,6 +350,11 @@ class FlashNextEngine(FlashNextRef):
           gctl                int32 [M, 2]: the GDN tile's (load, save) (gdn_rows)
           csrc, psrc          int32 [M, 3]: where the GDN conv taps (distance 3, 2, 1) and the PLE
                               conv taps (9, 6, 3) live: a row of the block or a state column
+          qctl                int32 [M, 4]: QSA complete blocks, first own block (ENG-147)
+          oslot, opos         int32 [M, OWN, 4], [M, OWN]: the key slots and first position of the
+                              row's own blocks (those holding positions of the round)
+          tail                int32 [M, 3]: the positions past the row's last complete block
+          pidx                int64 [1]: the pool row a decode step writes (its own block)
         """
         key = M if key is None else key
         rb = self._rb.get(key)
@@ -321,8 +365,9 @@ class FlashNextEngine(FlashNextRef):
         tab = next(iter(self.tables.values())) if self.tables else None
         nh = c.ngram_heads
         words = tab.words if tab is not None else 1
-        n64 = M * (3 + nh)
-        w32 = (("actl", 4), ("anc", SK.ANC), ("gctl", 2), ("csrc", 3), ("psrc", 3))
+        n64 = M * (3 + nh) + 1
+        w32 = (("actl", 4), ("anc", SK.ANC), ("gctl", 2), ("csrc", 3), ("psrc", 3), ("qctl", 4),
+               ("oslot", SK.OWN * 4), ("opos", SK.OWN), ("tail", 3))
         n32 = M * sum(w for _, w in w32)
         n32 += n32 % 2                                          # the int16 rows start 8-byte aligned
         nb = 8 * n64 + 4 * n32 + 2 * M * nh * words
@@ -330,7 +375,8 @@ class FlashNextEngine(FlashNextRef):
         def views(b):
             i64 = b[: 8 * n64].view(torch.int64)
             i32 = b[8 * n64: 8 * n64 + 4 * n32].view(torch.int32)
-            v = {"tok": i64[:M], "pos": i64[M:2 * M], "slot": i64[2 * M:3 * M], "heads": i64[3 * M:]}
+            v = {"tok": i64[:M], "pos": i64[M:2 * M], "slot": i64[2 * M:3 * M], "heads": i64[3 * M:n64 - 1],
+                 "pidx": i64[n64 - 1:]}
             k = 0
             for name, w in w32:
                 v[name] = i32[k:k + M * w].view(M, w)
@@ -346,6 +392,8 @@ class FlashNextEngine(FlashNextRef):
               "next": torch.zeros(M, dtype=torch.long, device=dev),
               "next_h": torch.zeros(M, dtype=torch.long, pin_memory=True), "attn": {}}
         rb["d"]["sel"] = torch.zeros(M, SK.NSEL, dtype=torch.int32, device=dev)
+        if c.has_indexer:
+            rb["d"]["iq"] = torch.zeros(M, c.indexer_n_heads, c.indexer_head_dim, dtype=self.dtype, device=dev)
         if M == 1:                                   # a decode step: everything but the position is fixed
             h = rb["h"]
             h["gctl"].numpy()[:] = (-2, -1)
@@ -368,8 +416,9 @@ class FlashNextEngine(FlashNextRef):
         h, L = rb["h"], st.length
         h["tok"].numpy()[0] = token
         h["pos"].numpy()[0] = h["slot"].numpy()[0] = L
-        h["actl"].numpy()[0, :3] = (L + 1, L, 1)
         h["anc"].numpy()[0, 0] = L
+        self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0,
+                        np.array([L]), h["anc"].numpy(), 1)
         for li in self.cfg.ple_layers:
             hsh = self.hash[li]
             ctx = self._ple_ctx(st, li)
@@ -377,6 +426,45 @@ class FlashNextEngine(FlashNextRef):
             st.ple_ctx[li] = torch.tensor([(ctx + [token])[-hsh.context_len:]], dtype=torch.long)
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
+
+    def _stage_qsa(self, h: dict, L: int, own0: int, pos: np.ndarray, anc: np.ndarray, n: int) -> None:
+        """The attention control of n rows at positions `pos`: positions below L are cache slots,
+        from L on the row's ancestor at that depth (`anc`). Rows whose complete blocks fit the budget
+        see every position (dense); the others see their selected blocks and their tail (QSA). The
+        row's own blocks start at block own0 (the shared pool holds the blocks before it)."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        r = c.indexer_compress_ratio if c.has_indexer else 4
+        nblk = (pos + 1) // r
+        dense = (nblk <= SK.TOPK) | (not c.has_indexer)
+        actl = h["actl"].numpy()
+        actl[:n, 0] = np.where(dense, pos + 1, 4 * SK.TOPK + pos + 1 - r * nblk)
+        actl[:n, 1] = L
+        actl[:n, 2] = dense
+        if not c.has_indexer:
+            return
+        q = (r * (own0 + np.arange(SK.OWN)))[:, None] + np.arange(r)[None, :]          # [OWN, 4] positions
+        ai = anc[:n][:, np.clip(q - L, 0, anc.shape[1] - 1)]                         # [n, OWN, 4]
+        slots = np.where(q[None] < L, q[None], np.where(q[None] <= pos[:, None, None], ai, 0))
+        h["oslot"].numpy()[:n] = slots.reshape(n, -1)
+        h["opos"].numpy()[:n] = r * (own0 + np.arange(SK.OWN))
+        qc = h["qctl"].numpy()
+        qc[:n, 0] = nblk
+        qc[:n, 1] = own0
+        h["tail"].numpy()[:n] = r * nblk[:, None] + np.arange(3)[None, :]
+        h["pidx"].numpy()[0] = own0
+
+    def qsa_class(self, last: int) -> int:
+        """The context class of a call whose last position is `last`: 0 while every row is dense
+        (no indexer work), else the score width in blocks (a power of two, at least 1,024)."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        if not c.has_indexer or (last + 1) // c.indexer_compress_ratio <= SK.TOPK:
+            return 0
+        nb = 1024
+        while nb * c.indexer_compress_ratio < last + 1:
+            nb *= 2
+        return nb
 
     def _ple_ctx(self, st: FNState, li: int) -> list[int]:
         ctx = st.ple_ctx.get(li)
@@ -393,8 +481,6 @@ class FlashNextEngine(FlashNextRef):
         row, which sits at the state's length). Nothing in `st` changes; `commit` keeps a path."""
         from tools import fn_seq_kernels as SK
         M = len(tokens)
-        if self.cfg.has_indexer and st.length + M > self.dense_limit:
-            raise NotImplementedError("a verify block past the dense attention regime (ENG-147)")
         rb = self._rows_buffers(M)
         rb["copied"].synchronize()
         h, L = rb["h"], st.length
@@ -406,13 +492,10 @@ class FlashNextEngine(FlashNextRef):
         h["tok"].numpy()[:] = tokens
         h["pos"].numpy()[:] = L + d
         h["slot"].numpy()[:] = L + np.arange(M)
-        actl = h["actl"].numpy()
-        actl[:, 0] = L + d + 1
-        actl[:, 1] = L
-        actl[:, 2] = 1
         anc = h["anc"].numpy()
         for i, pa in enumerate(paths):
             anc[i, :len(pa)] = L + np.asarray(pa)
+        self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M)
         ctl, _ = SK.tree_ctl(parents)
         h["gctl"].numpy()[:] = ctl
         h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
@@ -427,16 +510,18 @@ class FlashNextEngine(FlashNextRef):
         rb["copied"].record()
         self._block = (list(tokens), list(parents), paths)
 
-    def rows_step(self, st: FNState, M: int, write: bool = False) -> torch.Tensor:
+    def rows_step(self, st: FNState, M: int, write: bool = False, cls: int = 0) -> torch.Tensor:
         """M rows from the device buffers (`stage` / `stage_rows` first) through the trunk and the
-        head. `write` (one row, a decode step): the recurrent and conv states advance in place.
-        Otherwise nothing but the KV rows at the block's slots is written, and what a commit needs is
-        kept in `self.rec`. Returns logits [M, vocab] fp32 (a static buffer) and leaves the greedy
-        tokens in rows["next"] and its pinned host copy. `st.length` is the caller's."""
+        head. `write` (one row, a decode step): the recurrent and conv states and the pooled indexer
+        keys advance in place. Otherwise nothing but the KV rows at the block's slots is written, and
+        what a commit needs is kept in `self.rec`. `cls` (`qsa_class`): 0 = every row dense, else the
+        indexer selects each sparse row's blocks over that many block scores. Returns logits [M, vocab]
+        fp32 (a static buffer) and leaves the greedy tokens in rows["next"] and its pinned host copy.
+        `st.length` is the caller's."""
         from tools import fn_kernels as K
         c = self.cfg
         rb = self._rows_buffers(M)
-        self._cur, self._write = rb, write
+        self._cur, self._write, self._cls = rb, write, cls
         self.rec = {}
         d = rb["d"]
         h = self.W["embed_tokens.weight"].index_select(0, d["tok"]).repeat(1, c.hc_count)
@@ -451,13 +536,15 @@ class FlashNextEngine(FlashNextRef):
         # the greedy tokens, and their copy into pinned host memory: the host reads them after a sync
         torch.argmax(rb["logits"], dim=-1, out=rb["next"])
         rb["next_h"].copy_(rb["next"], non_blocking=True)
+        if self.fold:
+            self._pend_n.zero_()                   # every GDN layer applied its parked rows
         self.rec["stack"] = self.stack
         return rb["logits"]
 
-    def step(self, st: FNState) -> torch.Tensor:
+    def step(self, st: FNState, cls: int | None = None) -> torch.Tensor:
         """One decode token from the device buffers (`stage` first); the state advances in place except
         `st.length`, which the caller moves. Returns logits [1, vocab] fp32 (a static buffer)."""
-        return self.rows_step(st, 1, write=True)
+        return self.rows_step(st, 1, write=True, cls=self.qsa_class(st.length) if cls is None else cls)
 
     @property
     def g(self) -> dict:
@@ -470,14 +557,26 @@ class FlashNextEngine(FlashNextRef):
         from `graphs` (M -> VerifyGraph). Each row's token is the decode step's at that position bit
         for bit. Nothing in `st` moves until `commit`."""
         M = len(tokens)
-        gr = graphs.get(M) if graphs is not None else None
-        if gr is not None and gr.graph is None:
-            gr.capture()
+        depth = [0] * M
+        for i, p in enumerate(parents):
+            depth[i] = 0 if p < 0 else depth[p] + 1
+        cls = self.qsa_class(st.length + max(depth))
+        self.settle(st)
+        gr = None
+        if graphs is not None:
+            gr = graphs.get((M, cls))
+            if gr is None:
+                gr = graphs[(M, cls)] = VerifyGraph(self, st, M, cls)
+                gr.capture()
+        t0 = time.perf_counter()
         self.stage_rows(tokens, parents, st)
+        self.host_ms["stage_rows"] = self.host_ms.get("stage_rows", 0.0) + 1e3 * (time.perf_counter() - t0)
+        self._vcls = cls
         if gr is not None:
             gr.replay()
         else:
-            self.rows_step(st, M)
+            self.rows_step(st, M, cls=cls)
+        self._pend_owner = None
         torch.cuda.current_stream().synchronize()
         return self._rb[M]["next_h"].tolist()
 
@@ -491,7 +590,10 @@ class FlashNextEngine(FlashNextRef):
         verify graph's own intermediates. Returns the path's streams [len(path), hc H] (the MTP
         layer's input; a static buffer with graphs)."""
         tokens = self._block[0]
+        self.settle(st)
+        t0 = time.perf_counter()
         key = self.stage_commit(st, path)
+        self.host_ms["stage_commit"] = self.host_ms.get("stage_commit", 0.0) + 1e3 * (time.perf_counter() - t0)
         if graphs is not None:
             g = graphs.get(key)
             if g is None:
@@ -505,6 +607,8 @@ class FlashNextEngine(FlashNextRef):
             st.ple_ctx[li] = torch.tensor([(self._ple_ctx(st, li) + [tokens[i] for i in path])[-hsh.context_len:]],
                                           dtype=torch.long)
         st.length += len(path)
+        if self.fold:
+            self._pend_owner = st
         return self._commit_bufs(key)["stack"]
 
     def _commit_bufs(self, key) -> dict:
@@ -513,8 +617,9 @@ class FlashNextEngine(FlashNextRef):
         cb = self._rb.get(("commit",) + key)
         if cb is not None:
             return cb
+        from tools import fn_seq_kernels as SK
         c, dev = self.cfg, self.device
-        M, n, _ = key
+        M, n = key[0], key[1]
         w9 = (c.ple_conv_kernel_size - 1) * c.ngram_size
         sizes = (("idx", n), ("src", n), ("dst", n), ("c3", c.linear_conv_kernel_dim - 1), ("c9", w9))
         tot = sum(w for _, w in sizes)
@@ -531,13 +636,20 @@ class FlashNextEngine(FlashNextRef):
         copied.record()
         cb = {"hbuf": hbuf, "dbuf": dbuf, "h": views(hbuf), "d": views(dbuf), "copied": copied,
               "stack": torch.zeros(n, c.hc_count * c.hidden_size, dtype=self.dtype, device=dev)}
+        # the pool rows a commit refreshes: the blocks from the round's first block on (int32 slots
+        # and first positions, int64 pool rows), from the committed cache after the moves
+        cb["h32"] = torch.zeros(SK.OWN * 5, dtype=torch.int32, pin_memory=True)
+        cb["d32"] = torch.zeros(SK.OWN * 5, dtype=torch.int32, device=dev)
+        cb["hpi"] = torch.zeros(SK.OWN, dtype=torch.int64, pin_memory=True)
+        cb["dpi"] = torch.zeros(SK.OWN, dtype=torch.int64, device=dev)
         self._rb[("commit",) + key] = cb
         return cb
 
     def stage_commit(self, st: FNState, path: list[int]) -> tuple:
+        from tools import fn_seq_kernels as SK
         M, n = len(self._block[0]), len(path)
         moved = any(path[j] != j for j in range(n))
-        key = (M, n, moved)
+        key = (M, n, moved, getattr(self, "_vcls", 0))
         cb = self._commit_bufs(key)
         cb["copied"].synchronize()
         h, L = cb["h"], st.length
@@ -546,6 +658,15 @@ class FlashNextEngine(FlashNextRef):
         h["dst"].numpy()[:] = L + np.arange(n)
         h["c3"].numpy()[:] = self._tail_cols(path, h["c3"].numel())
         h["c9"].numpy()[:] = self._tail_cols(path, h["c9"].numel())
+        if self.cfg.has_indexer:
+            r = self.cfg.indexer_compress_ratio
+            b = L // r + np.arange(SK.OWN)
+            h32 = cb["h32"].numpy()
+            h32[:SK.OWN * 4] = np.clip((r * b)[:, None] + np.arange(r)[None, :], 0, st.cap - 1).reshape(-1)
+            h32[SK.OWN * 4:] = r * b
+            cb["hpi"].numpy()[:] = np.clip(b, 0, next(iter(st.pool.values())).shape[0] - 1)
+            cb["d32"].copy_(cb["h32"], non_blocking=True)
+            cb["dpi"].copy_(cb["hpi"], non_blocking=True)
         cb["dbuf"].copy_(cb["hbuf"], non_blocking=True)
         cb["copied"].record()
         return key
@@ -560,8 +681,14 @@ class FlashNextEngine(FlashNextRef):
         chain = self._chain_ctl(key[1])
         for li in c.linear_layers:
             qkvz, y, gg, beta = rec[li]
-            SK.gdn_rows(y.index_select(0, idx), c.key_dim, gg.index_select(0, idx), beta.index_select(0, idx),
-                        st.S[li], self._scratch(), chain, c.num_v_per_k, True)
+            if self.fold:
+                py, pg, pb = self._pend_bufs(li)
+                torch.index_select(y, 0, idx, out=py[:key[1]])
+                torch.index_select(gg, 0, idx, out=pg[:key[1]])
+                torch.index_select(beta, 0, idx, out=pb[:key[1]])
+            else:
+                SK.gdn_rows(y.index_select(0, idx), c.key_dim, gg.index_select(0, idx), beta.index_select(0, idx),
+                            st.S[li], self._scratch(), chain, c.num_v_per_k, True)
             hist = torch.cat([st.conv[li][0], qkvz[:, :c.conv_dim].T], 1)
             st.conv[li][0].copy_(hist.index_select(1, d["c3"]))
         if key[2]:
@@ -570,10 +697,59 @@ class FlashNextEngine(FlashNextRef):
                 st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
                 if li in st.ik:
                     st.ik[li].index_copy_(0, d["dst"], st.ik[li].index_select(0, d["src"]))
+        if c.has_indexer:
+            # the blocks the round touched, pooled again from the committed keys (ENG-147)
+            slots, posb = cb["d32"][:SK.OWN * 4].view(SK.OWN, 4), cb["d32"][SK.OWN * 4:]
+            for li in c.attention_layers:
+                own = SK.qsa_pool(st.ik[li], slots, posb, self.W[self.pre(li) + "self_attn.indexer.k_layernorm.weight"],
+                                  self.rope_cos, self.rope_sin, c.rms_norm_eps)
+                st.pool[li].index_copy_(0, cb["dpi"], own)
         for li in c.ple_layers:
             hist = torch.cat([st.ple_conv[li][0], rec[("ple", li)].T], 1)
             st.ple_conv[li][0].copy_(hist.index_select(1, d["c9"]))
         torch.index_select(rec["stack"], 0, idx, out=cb["stack"])
+        if self.fold:
+            self._pend_n.fill_(key[1])
+
+    def _pend_bufs(self, li: int):
+        b = self._pend.get(li)
+        if b is None:
+            c = self.cfg
+            b = self._pend[li] = (torch.zeros(33, c.conv_dim, dtype=self.dtype, device=self.device),
+                                  torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device),
+                                  torch.zeros(33, c.linear_num_value_heads, dtype=torch.float32, device=self.device))
+        return b
+
+    def _parked(self, li: int):
+        """The parked rows of GDN layer li for its next kernel call (None without the fold)."""
+        if not self.fold:
+            return None
+        i = self._lin_idx[li]
+        return self._pend_bufs(li) + (self._pend_n[i:i + 1],)
+
+    @torch.no_grad()
+    def flush(self) -> None:
+        """Apply the parked GDN rows to their state now (before anything that reads the state other
+        than a verify block or a decode step: the reference forward, a snapshot)."""
+        st = self._pend_owner
+        if st is None:
+            return
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        z = self._chain_ctl(1)[:0]
+        for li in c.linear_layers:
+            py = self._pend_bufs(li)[0]
+            SK.gdn_rows(py[:0], c.key_dim, self._pend_bufs(li)[1][:0], self._pend_bufs(li)[2][:0], st.S[li],
+                        self._scratch(), z, c.num_v_per_k, False,
+                        out=torch.empty(0, c.linear_num_value_heads, 128, dtype=torch.bfloat16, device=self.device),
+                        pre=self._parked(li))
+        self._pend_n.zero_()
+        self._pend_owner = None
+
+    def settle(self, st: FNState) -> None:
+        """Before a call on `st`: parked rows of another state are applied to that state first."""
+        if self._pend_owner is not None and self._pend_owner is not st:
+            self.flush()
 
     @staticmethod
     def _tail_cols(path: list[int], w: int) -> list[int]:
@@ -631,7 +807,8 @@ class FlashNextEngine(FlashNextRef):
         ab = K.gemv_bf16(x, self.W[p + "ab"])
         y, gg, beta = SK.gdn_pre(qkvz, st.conv[li], self._wc[li], d["csrc"], ab, self._wc[("alog", li)],
                                  self._wc[("dtb", li)], shift=self._write)
-        o = SK.gdn_rows(y, c.key_dim, gg, beta, st.S[li], self._scratch(), d["gctl"], c.num_v_per_k, self._write)
+        o = SK.gdn_rows(y, c.key_dim, gg, beta, st.S[li], self._scratch(), d["gctl"], c.num_v_per_k, self._write,
+                        pre=self._parked(li))
         if not self._write:
             self.rec[li] = (qkvz, y, gg, beta)
         z = qkvz[:, c.conv_dim:]
@@ -650,10 +827,26 @@ class FlashNextEngine(FlashNextRef):
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
         qkv = self.lin(x, self.W[p + "qkv"])
         iqk = self.lin(x, self.W[p + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+        cls = self._cls if c.has_indexer else 0
+        ip = p + "indexer."
         q = K.attn_prep(qkv, iqk, d["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
                         self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), Hq, Hk,
                         c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0, c.rms_norm_eps,
-                        slot=d["slot"])
+                        slot=d["slot"], qln=self.W[ip + "q_layernorm.weight"] if cls else None,
+                        iq=d["iq"] if cls else None)
+        if c.has_indexer and (cls or self._write):
+            # the pooled keys of the row's own blocks (from its own path); a decode step also keeps
+            # its block in the shared pool (garbage until the block is complete, then its value)
+            own = SK.qsa_pool(st.ik[li], d["oslot"].view(-1, 4), d["opos"].view(-1), self.W[ip + "k_layernorm.weight"],
+                              self.rope_cos, self.rope_sin, c.rms_norm_eps)
+            if self._write:
+                st.pool[li].index_copy_(0, d["pidx"], own[:1])
+            if cls:
+                sc = self._cur.get(("sc", cls))
+                if sc is None:
+                    sc = self._cur[("sc", cls)] = torch.empty(x.shape[0], cls, dtype=torch.float32, device=x.device)
+                SK.qsa_scores(d["iq"], st.pool[li], own.view(x.shape[0], SK.OWN, -1), d["qctl"], cls, out=sc)
+                SK.qsa_select(sc, d["tail"], d["sel"])
         o = SK.attn_rows(q, st.k[li], st.v[li], d["actl"], d["anc"], d["sel"], bufs=self._cur["attn"])
         y = K.gate_mul(o, qkv, D)
         return self.lin(y, self.W[p + "o_proj.weight"])
@@ -690,9 +883,10 @@ class FlashNextEngine(FlashNextRef):
         st.v[MTP] = torch.zeros_like(st.k[MTP])
         if c.has_indexer:
             st.ik[MTP] = torch.zeros(cap, c.indexer_head_dim, dtype=self.dtype, device=self.device)
+            st.pool[MTP] = self._pool_tensor(cap)
         return st
 
-    def mtp_rows(self, st_m: FNState, key, stack_in: torch.Tensor):
+    def mtp_rows(self, st_m: FNState, key, stack_in: torch.Tensor, cls: int = 0):
         """The MTP layer over the rows of buffers `key` (tokens, positions, slots, ancestors staged by
         `stage_mtp`), from the streams `stack_in` [M, hc H]: the reference's input fusion (rms of the
         token's embedding -> fc_embedding, rms of all hc H streams -> fc_hidden per stream, added),
@@ -703,7 +897,7 @@ class FlashNextEngine(FlashNextRef):
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         M = stack_in.shape[0]
         rb = self._rows_buffers(M, key)
-        self._cur, self._write, self.rec = rb, False, {}
+        self._cur, self._write, self.rec, self._cls = rb, False, {}, cls
         d = rb["d"]
         e = self.rms(self.W["embed_tokens.weight"].index_select(0, d["tok"]).to(self.dtype),
                      self.W["mtp.pre_fc_norm_embedding.weight"], eps)
@@ -725,13 +919,16 @@ class FlashNextEngine(FlashNextRef):
         x = K.mix_up(dd, n, self.W["mtp.hyper_connection_mixer.input_mix_weight_up.weight"], hc)
         return x, h
 
-    def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int) -> None:
+    def stage_mtp(self, st_m: FNState, nexts: list[int], depth: int) -> int:
         """Host work of a greedy chain draft at st_m.length: the feed of n = len(nexts) committed rows
         (their streams copied into the static input on the device by the caller), then depth - 1
-        one-row draft steps after them, each at its own position (cache slot = position)."""
+        one-row draft steps after them, each at its own position (cache slot = position), and the
+        pool rows the feed completes. Returns the context class of the draft (`qsa_class`)."""
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
         n, L = len(nexts), st_m.length
-        if L + n + depth > self.dense_limit:
-            raise NotImplementedError("an MTP draft past the dense attention regime (ENG-147)")
+        r = c.indexer_compress_ratio if c.has_indexer else 4
+        cls = self.qsa_class(L + n + depth - 1)
         for j in range(depth):
             M = n if j == 0 else 1
             rb = self._rows_buffers(M, ("mtp", j, M))
@@ -743,25 +940,43 @@ class FlashNextEngine(FlashNextRef):
                 h["tok"].numpy()[:] = nexts
             h["pos"].numpy()[:] = pos
             h["slot"].numpy()[:] = pos
-            actl = h["actl"].numpy()
-            actl[:, 0] = pos + 1
-            actl[:, 1] = p0
-            actl[:, 2] = 1
             anc = h["anc"].numpy()
             for i in range(M):
                 anc[i, :i + 1] = p0 + np.arange(i + 1)
+            # the feed's rows own the blocks from its first; a draft step's shared pool ends where the
+            # feed's committed rows end (the pool is refreshed after the feed)
+            self._stage_qsa(h, p0, (L if j == 0 else L + n) // r, pos, anc, M)
             rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
             rb["copied"].record()
+        if c.has_indexer:
+            b = self._mtp_bufs(depth)
+            blk = L // r + np.arange(SK.OWN)
+            h32 = b["h32"].numpy()
+            h32[:SK.OWN * 4] = np.clip((r * blk)[:, None] + np.arange(r)[None, :], 0, st_m.cap - 1).reshape(-1)
+            h32[SK.OWN * 4:] = r * blk
+            b["hpi"].numpy()[:] = np.clip(blk, 0, st_m.pool[MTP].shape[0] - 1)
+            b["d32"].copy_(b["h32"], non_blocking=True)
+            b["dpi"].copy_(b["hpi"], non_blocking=True)
+        return cls
 
     def _mtp_bufs(self, depth: int) -> dict:
+        """The MTP chain's static buffers: the committed rows' streams (input), and per draft step the
+        top-2 tokens and their probabilities under the draft head (output, with pinned copies)."""
         b = getattr(self, "_mtpb", None)
-        if b is None or b["drafts"].numel() < depth:
+        if b is None:
             c = self.cfg
             b = self._mtpb = {"stack": torch.zeros(33, c.hc_count * c.hidden_size, dtype=self.dtype, device=self.device),
-                              "drafts": torch.zeros(max(depth, 32), dtype=torch.long, device=self.device),
-                              "drafts_h": torch.zeros(max(depth, 32), dtype=torch.long, pin_memory=True),
-                              "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=self.device),
-                              "hot_i": torch.zeros(1, dtype=torch.long, device=self.device)}
+                              "tok": torch.zeros(32, 2, dtype=torch.long, device=self.device),
+                              "prob": torch.zeros(32, 2, dtype=torch.float32, device=self.device),
+                              "tok_h": torch.zeros(32, 2, dtype=torch.long, pin_memory=True),
+                              "prob_h": torch.zeros(32, 2, dtype=torch.float32, pin_memory=True),
+                              "logits": torch.zeros(1, c.vocab_size, dtype=torch.float32, device=self.device)}
+            from tools import fn_seq_kernels as SK
+            b["h32"] = torch.zeros(SK.OWN * 5, dtype=torch.int32, pin_memory=True)
+            b["d32"] = torch.zeros(SK.OWN * 5, dtype=torch.int32, device=self.device)
+            b["hpi"] = torch.zeros(SK.OWN, dtype=torch.int64, pin_memory=True)
+            b["dpi"] = torch.zeros(SK.OWN, dtype=torch.int64, device=self.device)
+        assert depth <= 32
         if self.draft_head is not None and ("hot", self.draft_ids.numel()) not in b:
             b[("hot", self.draft_ids.numel())] = torch.zeros(1, self.draft_ids.numel(), dtype=torch.float32,
                                                              device=self.device)
@@ -789,64 +1004,92 @@ class FlashNextEngine(FlashNextRef):
             torch.cuda.empty_cache()
         self.draft_head, self.draft_ids = heads[key]
 
-    def mtp_chain_dev(self, st_m: FNState, n: int, depth: int) -> None:
+    def mtp_chain_dev(self, st_m: FNState, n: int, depth: int, cls: int = 0) -> None:
         """A greedy chain of `depth` drafts on the device (`stage_mtp` first, the n committed rows'
         streams in `_mtp_bufs()["stack"]`): the feed, then each draft's token and streams into the
-        next step without the host; the drafts land in `drafts` and its pinned copy."""
+        next step without the host. Per step the top-2 tokens and their probabilities under the draft
+        head land in `tok` / `prob` and their pinned copies (the second token is a sibling candidate)."""
         from tools import fn_kernels as K
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
         b = self._mtp_bufs(depth)
-        x, h = self.mtp_rows(st_m, ("mtp", 0, n), b["stack"][:n])
+        x, h = self.mtp_rows(st_m, ("mtp", 0, n), b["stack"][:n], cls)
+        if c.has_indexer:                     # the blocks the feed completed, into the MTP pool
+            ip = self.pre(MTP) + "self_attn.indexer."
+            own = SK.qsa_pool(st_m.ik[MTP], b["d32"][:SK.OWN * 4].view(SK.OWN, 4), b["d32"][SK.OWN * 4:],
+                              self.W[ip + "k_layernorm.weight"], self.rope_cos, self.rope_sin, c.rms_norm_eps)
+            st_m.pool[MTP].index_copy_(0, b["dpi"], own)
         for j in range(depth):
             if self.draft_head is not None:
-                hot = b[("hot", self.draft_ids.numel())]
-                K.gemv(x[-1:], self.draft_head, out=hot)
-                torch.argmax(hot[0], dim=-1, keepdim=True, out=b["hot_i"])
-                torch.index_select(self.draft_ids, 0, b["hot_i"], out=b["drafts"][j:j + 1])
+                lg = b[("hot", self.draft_ids.numel())]
+                K.gemv(x[-1:], self.draft_head, out=lg)
             else:
-                K.dense(x[-1:], self.W["lm_head.weight"], out=b["logits"])
-                torch.argmax(b["logits"][0], dim=-1, keepdim=True, out=b["drafts"][j:j + 1])
+                lg = b["logits"]
+                K.dense(x[-1:], self.W["lm_head.weight"], out=lg)
+            vals, ids = torch.topk(lg[0], 2)
+            z = torch.exp(lg[0] - vals[0]).sum()
+            b["prob"][j].copy_(torch.exp(vals - vals[0]) / z)
+            b["tok"][j].copy_(self.draft_ids.index_select(0, ids) if self.draft_head is not None else ids)
             if j + 1 == depth:
                 break
-            nxt = self._rows_buffers(1, ("mtp", j + 1, 1))["d"]["tok"]
-            nxt.copy_(b["drafts"][j:j + 1])
-            x, h = self.mtp_rows(st_m, ("mtp", j + 1, 1), h[-1:])
-        b["drafts_h"].copy_(b["drafts"], non_blocking=True)
+            self._rows_buffers(1, ("mtp", j + 1, 1))["d"]["tok"].copy_(b["tok"][j, :1])
+            x, h = self.mtp_rows(st_m, ("mtp", j + 1, 1), h[-1:], cls)
+        b["tok_h"].copy_(b["tok"], non_blocking=True)
+        b["prob_h"].copy_(b["prob"], non_blocking=True)
 
     # ------------------------------------------------------------------------- generation
     @torch.no_grad()
-    def prefill(self, ids: torch.Tensor, st: FNState, chunk: int = 2048) -> torch.Tensor:
-        """The prompt in chunks (the reference's batched forward); logits of the last row."""
+    def prefill(self, ids: torch.Tensor, st: FNState, chunk: int = 2048, keep_stack: bool = False) -> torch.Tensor:
+        """The prompt in chunks (the reference's batched forward); logits of the last row. `keep_stack`:
+        every row's pre-final-mixer streams in `self.prompt_stack` [T, hc H] (the MTP layer's input;
+        `self.stack` holds the last chunk's only)."""
+        self.flush()
         out = None
+        stacks = []
         for i in range(0, ids.numel(), chunk):
             last = i + chunk >= ids.numel()
             out = self.forward(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
+            if keep_stack:
+                stacks.append(self.stack)
+            if st.length > 4096:
+                # the reference attention's score blocks grow with the context; cached blocks of one
+                # chunk fit no request of the next (a 32k prompt held tens of GB, 2026-10-11)
+                torch.cuda.empty_cache()
+        self.prompt_stack = torch.cat(stacks) if keep_stack else None
+        if st.pool:
+            self.build_pool(st)
         return out[-1:]
 
     @torch.no_grad()
     def decode_eager(self, token: int, st: FNState) -> torch.Tensor:
-        """One token through `step` (no graph), or the reference's forward past the dense regime."""
-        if st.length + 1 > self.dense_limit:
-            return self.forward(torch.tensor([token], device=self.device), st)
+        """One token through `step` (no graph)."""
+        self.settle(st)
         self.stage(token, st)
         out = self.step(st)
+        self._pend_owner = None
         st.length += 1
         return out
 
 
 class DecodeGraph:
-    """`FlashNextEngine.step` captured once for a state; `__call__(token)` stages the token (host),
-    replays, and moves the length. Past the dense regime it runs eager (the reference's attention,
-    until ENG-147). `max_lc` is kept for the callers; the step serves every length up to the regime's
-    end (its attention reads the length from the device)."""
+    """`FlashNextEngine.step` captured once for a state and a context class (`qsa_class`: dense, or the
+    width of the indexer's block scores); `__call__(token)` stages the token (host), replays the
+    class's graph (captured when the length first enters it), and moves the length. `max_lc` is kept
+    for the callers; the step reads the length from the device."""
 
     def __init__(self, eng: FlashNextEngine, st: FNState, max_lc: int = 2048):
         self.eng, self.st, self.max_lc = eng, st, max_lc
         eng._rows_buffers(1)
+        self.graphs: dict = {}
+        self.stacks: dict = {}                 # class -> the graph's streams output [1, hc H]
         self.graph = None
 
-    def capture(self) -> None:
+    def capture(self, cls: int | None = None) -> None:
         eng, st = self.eng, self.st
+        cls = eng.qsa_class(st.length) if cls is None else cls
+        eng.settle(st)
         saved = {k: v.clone() for k, v in _state_tensors(st).items()}
+        saved_n = eng._pend_n.clone()
         pctx = dict(st.ple_ctx)
         length = st.length
         s = torch.cuda.Stream()
@@ -854,29 +1097,36 @@ class DecodeGraph:
         with torch.cuda.stream(s):
             for _ in range(2):
                 eng.stage(0, st)
-                eng.step(st)
+                eng.step(st, cls)
         torch.cuda.current_stream().wait_stream(s)
-        self.graph = torch.cuda.CUDAGraph()
-        with capture_lock.LOCK, torch.cuda.graph(self.graph):
-            eng.step(st)
+        g = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(g):
+            eng.step(st, cls)
+        self.stacks[cls] = eng.stack
         torch.cuda.synchronize()
         for k, v in _state_tensors(st).items():         # the warm-up steps wrote the state: undo
             v.copy_(saved[k])
+        eng._pend_n.copy_(saved_n)
         st.ple_ctx.clear()
         st.ple_ctx.update(pctx)
         st.length = length
+        self.graphs[cls] = self.graph = g
 
-    def _graphed(self) -> bool:
-        return self.st.length + 1 <= self.eng.dense_limit
+    def _ready(self) -> None:
+        cls = self.eng.qsa_class(self.st.length)
+        if cls not in self.graphs:
+            self.capture(cls)
+        self.graph = self.graphs[cls]
 
     @torch.no_grad()
     def greedy(self, token: int) -> int:
         """One greedy step: the next token, read from the graph's own argmax (no extra launch)."""
         eng, st = self.eng, self.st
-        if not self._graphed() or self.graph is None:
-            return int(self(token)[0].argmax())
+        self._ready()
+        eng.settle(st)
         eng.stage(token, st)
         self.graph.replay()
+        eng._pend_owner = None
         st.length += 1
         torch.cuda.current_stream().synchronize()
         return int(eng.g["next_h"][0])
@@ -884,12 +1134,11 @@ class DecodeGraph:
     @torch.no_grad()
     def __call__(self, token: int) -> torch.Tensor:
         eng, st = self.eng, self.st
-        if not self._graphed():
-            return eng.decode_eager(token, st)
-        if self.graph is None:
-            self.capture()
+        self._ready()
+        eng.settle(st)
         eng.stage(token, st)
         self.graph.replay()
+        eng._pend_owner = None
         st.length += 1
         return eng.g["logits"]
 
@@ -899,8 +1148,8 @@ class VerifyGraph:
     of M rows (chain or tree; positions, slots, ancestors and the GDN tile's walk are device inputs)
     replays it. `replay()` after `stage_rows`; the commit then reads the graph's own intermediates."""
 
-    def __init__(self, eng: FlashNextEngine, st: FNState, M: int):
-        self.eng, self.st, self.M = eng, st, M
+    def __init__(self, eng: FlashNextEngine, st: FNState, M: int, cls: int = 0):
+        self.eng, self.st, self.M, self.cls = eng, st, M, cls
         self.graph = None
         self.rec: dict = {}
 
@@ -911,11 +1160,11 @@ class VerifyGraph:
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
-                eng.rows_step(st, M)
+                eng.rows_step(st, M, cls=self.cls)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
         with capture_lock.LOCK, torch.cuda.graph(self.graph):
-            eng.rows_step(st, M)
+            eng.rows_step(st, M, cls=self.cls)
         torch.cuda.synchronize()
         self.rec = eng.rec
 
@@ -936,6 +1185,7 @@ class CommitGraph:
     def capture(self) -> None:
         eng, st = self.eng, self.st
         saved = {k: v.clone() for k, v in _state_tensors(st).items()}
+        saved_n = eng._pend_n.clone()
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -947,34 +1197,40 @@ class CommitGraph:
         torch.cuda.synchronize()
         for k, v in _state_tensors(st).items():
             v.copy_(saved[k])
+        eng._pend_n.copy_(saved_n)
 
 
 class MTPChainGraph:
     """`FlashNextEngine.mtp_chain_dev` for a feed of n rows and a chain depth, captured once for an MTP
     cache: the whole draft (feed, depth - 1 deeper steps, every head and argmax) is one replay."""
 
-    def __init__(self, eng: FlashNextEngine, st_m: FNState, n: int, depth: int):
-        self.eng, self.st_m, self.n, self.depth = eng, st_m, n, depth
+    def __init__(self, eng: FlashNextEngine, st_m: FNState, n: int, depth: int, cls: int = 0):
+        self.eng, self.st_m, self.n, self.depth, self.cls = eng, st_m, n, depth, cls
         self.graph = None
 
     def capture(self) -> None:
         eng, st_m = self.eng, self.st_m
-        eng.stage_mtp(st_m, [0] * self.n, self.depth)       # writes only cache rows past the length
+        # writes only cache rows past the length, and pool rows the next feed writes again
+        eng.stage_mtp(st_m, [0] * self.n, self.depth)
+        saved = {k: v.clone() for k, v in st_m.pool.items()}
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
-                eng.mtp_chain_dev(st_m, self.n, self.depth)
+                eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
         with capture_lock.LOCK, torch.cuda.graph(self.graph):
-            eng.mtp_chain_dev(st_m, self.n, self.depth)
+            eng.mtp_chain_dev(st_m, self.n, self.depth, self.cls)
         torch.cuda.synchronize()
+        for k, v in st_m.pool.items():
+            v.copy_(saved[k])
 
 
 def _state_tensors(st: FNState) -> dict:
     out = {}
-    for name, d in (("S", st.S), ("conv", st.conv), ("k", st.k), ("v", st.v), ("ik", st.ik), ("pconv", st.ple_conv)):
+    for name, d in (("S", st.S), ("conv", st.conv), ("k", st.k), ("v", st.v), ("ik", st.ik), ("pconv", st.ple_conv),
+                    ("pool", st.pool)):
         for li, t in d.items():
             out[f"{name}.{li}"] = t
     return out

@@ -304,6 +304,10 @@ KNOBS: dict[str, tuple] = {
     'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
     # drop the shards' page cache after the load (the table's is kept); 0 = keep it (a warm reload)
     'FN_DROP_SHARD_CACHE': ('1', 'engine/models/flashnext/load.py'),
+    # ENG-227: a speculative round's commit parks the accepted path's GDN rows and the next verify
+    # block or decode step applies them as it loads each state tile (one read of the GDN state less
+    # a round; the same arithmetic); 0 = the commit walks them itself
+    'FN_FOLD_COMMIT': ('1', 'engine/models/flashnext/engine.py'),
 }
 
 

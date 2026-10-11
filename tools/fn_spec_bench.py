@@ -5,8 +5,9 @@
 
 Per class (tools/fn_generate.py's prompts at `--ctx`), on one state reused by every run (so the
 captured graphs are reused): plain greedy decode through `DecodeGraph`, then greedy speculation with
-the MTP chain drafter (`MTPGraphDrafter`) at each depth. Each configuration runs once to capture its
-graphs (not timed) and once timed. Recorded: tok/s = (tokens - 1) / the time from the first round's
+the MTP drafter (`MTPGraphDrafter`) at each depth, as the fixed chain or cut by `StairCut` (chain, or
+tree with sibling leaves; its calibration and prices learn across the classes in order, never from a
+warm-up run). Each configuration runs once to capture its graphs (not timed) and once timed. Recorded: tok/s = (tokens - 1) / the time from the first round's
 start to the last round's end; the round's parts measured on the host after a device sync (draft =
 the MTP graph incl. its heads, verify = staging + the verify graph, commit = the GDN re-walk and the
 cache moves); tokens a round; the p50 round; whether the text equals the plain text. A verify of N
@@ -27,7 +28,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
-from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder  # noqa: E402
+from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder, StairCut  # noqa: E402
 from tools.fn_generate import class_prompt, mem_available_gib  # noqa: E402
 
 
@@ -39,10 +40,10 @@ class Bench:
         self.drafters: dict = {}
         self.decoders: dict = {}
 
-    def prefill(self, ids: list[int]) -> int:
+    def prefill(self, ids: list[int], keep_stack: bool = False) -> int:
         eng = self.eng
         eng.reset(self.st)
-        return int(eng.prefill(torch.tensor(ids), self.st)[0].argmax())
+        return int(eng.prefill(torch.tensor(ids), self.st, keep_stack=keep_stack)[0].argmax())
 
     def plain(self, ids: list[int], new: int) -> tuple[list[int], dict]:
         first = self.prefill(ids)
@@ -59,22 +60,27 @@ class Bench:
         dt = time.perf_counter() - t0
         return out, {"tok_s": round((len(out) - 1) / dt, 2), "ms_p50": round(1e3 * statistics.median(per), 2)}
 
-    def spec(self, ids: list[int], new: int, depth: int, hot: int) -> tuple[list[int], dict]:
+    def spec(self, ids: list[int], new: int, depth: int, hot: int, cut: str = "none",
+             warm: bool = False) -> tuple[list[int], dict]:
         eng = self.eng
-        first = self.prefill(ids)
-        stack = eng.stack.clone()
-        dr = self.drafters.get((depth, hot))
+        first = self.prefill(ids, keep_stack=True)
+        stack = eng.prompt_stack
+        dr = self.drafters.get((depth, hot, cut))
         if dr is None:
-            dr = self.drafters[(depth, hot)] = MTPGraphDrafter(eng, depth, eng.max_len)
+            pol = None if cut == "none" else StairCut(siblings=cut == "tree")
+            dr = self.drafters[(depth, hot, cut)] = MTPGraphDrafter(eng, depth, eng.max_len, cut=pol)
         sd = self.decoders.get(depth)
         if sd is None:
             sd = self.decoders[depth] = SpecDecoder(eng, self.st, dr, graphs=True)
         sd.drafter = dr
+        if dr.cut is not None:
+            dr.cut.frozen = warm
         dr.st.length = 0
         dr.st.pool_n = {}
         dr.prime(stack, ids, first)
         dr.capture_all()
         sd.stats = {k: 0 if isinstance(v, int) else 0.0 for k, v in sd.stats.items()}
+        eng.host_ms = {}
         rounds: list = []
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -82,12 +88,16 @@ class Bench:
         dt = time.perf_counter() - t0
         s = sd.stats
         R = max(s["rounds"], 1)
+        extra = {"host_ms_a_round": {k: round(v / R, 3) for k, v in eng.host_ms.items()}}
+        if dr.cut is not None:
+            extra |= {"rows_a_round": round(s["rows"] / R, 2), "moved_rounds": s["moved"],
+                     "calibration": {k: [round(h / n, 2) if n else None for h, n in v] for k, v in dr.cut.cal.items()}}
         return out, {"tok_s": round((len(out) - 1) / dt, 2), "rounds": s["rounds"],
                      "tokens_a_round": round((len(out) - 1) / R, 3),
                      "accepted_a_round": round(s["accepted"] / R, 3),
                      "draft_ms": round(1e3 * s["draft_s"] / R, 2), "verify_ms": round(1e3 * s["verify_s"] / R, 2),
                      "commit_ms": round(1e3 * s["commit_s"] / R, 2),
-                     "round_ms_p50": round(statistics.median(r[0] for r in rounds), 2) if rounds else None}
+                     "round_ms_p50": round(statistics.median(r[0] for r in rounds), 2) if rounds else None, **extra}
 
 
 def main() -> None:
@@ -97,27 +107,36 @@ def main() -> None:
     ap.add_argument("--ctx", type=int, default=1024)
     ap.add_argument("--new", type=int, default=256)
     ap.add_argument("--depths", default="1,2,3,4")
+    ap.add_argument("--cut", default="none", help="none = the fixed chain of each depth; chain / tree = "
+                    "StairCut over the MTP draft of that depth, spine only / with sibling leaves")
+    ap.add_argument("--self-check", action="store_true", help="run the load-time self-check first (the "
+                    "phase-1 open item: a slower decode after it in the same process)")
     ap.add_argument("--hot", default="0", help="draft-head vocabularies: 0 = the full head, K = the first K "
                     "ids of ops/fn-hot-vocab.npy (int8 rows)")
+    ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
     idx, W, banks, tables, timing = load(a.pack, "cuda", mtp=True)
-    eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=4096)
+    eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(a.pack)
     eos = set(idx.cfg.eos_token_ids)
-    depths = [int(x) for x in a.depths.split(",")]
+    depths = [int(x) for x in a.depths.split(",") if x]
     hots = [int(x) for x in a.hot.split(",")]
     import numpy as np
     hot_ids = np.load(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ops", "fn-hot-vocab.npy"))
     from engine.settings import SETTINGS
     res = {"pack": a.pack, "load": timing, "mem_after_load_gib": mem_available_gib(),
-           "knobs": {"ctx": a.ctx, "new": a.new, "depths": depths, "hot": hots, "greedy": True, "thinking": False, "batch": 1,
-                     "kv_dtype": "bf16", "max_len": 4096, "drafter": "MTP chain, graphs; head: hot 0 = full EXL3 (248,320), else int8 rows of the first K hot ids",
+           "knobs": {"ctx": a.ctx, "new": a.new, "depths": depths, "hot": hots, "cut": a.cut.split(","), "greedy": True, "thinking": False, "batch": 1,
+                     "kv_dtype": "bf16", "max_len": a.max_len, "drafter": "MTP chain, graphs; head: hot 0 = full EXL3 (248,320), else int8 rows of the first K hot ids",
                      "verify": "graphs per row count", "QWEN38_FN_PDL": SETTINGS.get("FN_PDL"),
                      "QWEN38_FN_DENSE": SETTINGS.get("FN_DENSE"), "QWEN38_FN_MIX": SETTINGS.get("FN_MIX"),
                      "env": {k: v for k, v in os.environ.items() if k.startswith("QWEN38_")}},
            "classes": {}}
+    if a.self_check:
+        from tools.fn_generate import chat_ids
+        res["self_check"] = eng.self_check(chat_ids(tok, "Count from one to twenty in words."))
+    res["knobs"]["self_check_first"] = a.self_check
     b = Bench(eng, eos)
     for c in a.classes.split(","):
         ids = class_prompt(tok, c, a.ctx)
@@ -127,11 +146,11 @@ def main() -> None:
         print(f"[bench] {c} plain {json.dumps(pm)}", flush=True)
         for hot in hots:
             eng.set_draft_head(hot_ids[:hot] if hot else None)
-            for d in depths:
-                b.spec(ids, a.new, d, hot)                # warm: every graph this depth uses
-                S, sm = b.spec(ids, a.new, d, hot)
+            for d, cut in [(d, c_) for d in depths for c_ in a.cut.split(",")]:
+                b.spec(ids, a.new, d, hot, cut, warm=True)  # captures every graph; teaches the cut nothing
+                S, sm = b.spec(ids, a.new, d, hot, cut)
                 sm["equal_plain"] = S == P
-                tag = str(d) if not hot else f"{d}/hot{hot}"
+                tag = (str(d) if not hot else f"{d}/hot{hot}") + ("" if cut == "none" else f"/{cut}")
                 row["spec"][tag] = sm
                 print(f"[bench] {c} depth {tag} {json.dumps(sm)}", flush=True)
         res["classes"][c] = row

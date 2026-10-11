@@ -88,6 +88,29 @@ def test_gdn_rows_tree_equals_decode_walk():
     return f"{M}-row tree = decode walk per row, commit walk = decode state, vs fp32 rel {rel:.1e}"
 
 
+def test_gdn_rows_parked_commit_folded():
+    """Parked rows applied by the next call (the folded commit) leave the state of a separate commit
+    walk, and the call's rows after them equal the rows after a separate commit, bit for bit."""
+    M = len(TREE)
+    qkv, gg, beta, S = _gdn_inputs(M + 5, 3)
+    stk = torch.empty(31, H, D, D, device=DEV)
+    ctl = torch.tensor(SK.tree_ctl(TREE)[0], dtype=torch.int32, device=DEV)
+    chain = torch.tensor([[-2, -1]] + [[-1, -1]] * 4, dtype=torch.int32, device=DEV)
+    pre = (qkv[M:].contiguous(), gg[M:].contiguous(), beta[M:].contiguous())
+    s1 = S.clone()
+    SK.gdn_rows(pre[0], KD, pre[1], pre[2], s1, stk, chain, 3, True)            # the commit walk
+    o1 = SK.gdn_rows(qkv[:M], KD, gg[:M], beta[:M], s1.clone(), stk, ctl, 3, False)
+    s2 = S.clone()
+    n = torch.tensor([5], dtype=torch.int32, device=DEV)
+    o2 = SK.gdn_rows(qkv[:M], KD, gg[:M], beta[:M], s2, stk, ctl, 3, False, pre=pre + (n,))
+    assert torch.equal(s1, s2) and torch.equal(o1, o2)
+    z = torch.tensor([0], dtype=torch.int32, device=DEV)                       # nothing parked: no change
+    s3 = S.clone()
+    o3 = SK.gdn_rows(qkv[:M], KD, gg[:M], beta[:M], s3, stk, ctl, 3, False, pre=pre + (z,))
+    assert torch.equal(s3, S) and torch.equal(o3, SK.gdn_rows(qkv[:M], KD, gg[:M], beta[:M], S.clone(), stk, ctl, 3, False))
+    return "5 parked rows folded into a 12-row tree call = commit walk then the call, bit for bit"
+
+
 def test_gdn_pre_windows_equal_decode_shift():
     M = len(TREE)
     g = _g(2)
@@ -249,9 +272,94 @@ def test_attn_prep_and_gate_mul_rows():
     return "rows (rope at the position, cache at the slot) = one-row calls; gate rows = one-row calls"
 
 
-TESTS = [test_tree_helpers, test_gdn_rows_tree_equals_decode_walk, test_gdn_pre_windows_equal_decode_shift,
+def _rope_tables(n, rot=64):
+    inv = 1.0 / (1e7 ** (torch.arange(0, rot, 2, device=DEV).float() / rot))
+    ang = torch.arange(n, device=DEV)[:, None].float() * inv[None]
+    return torch.cat([ang.cos(), ang.cos()], -1).to(torch.bfloat16), torch.cat([ang.sin(), ang.sin()], -1).to(torch.bfloat16)
+
+
+def test_qsa_pool_scores_and_selection():
+    """Pooled keys within a bf16 step of the reference's arithmetic; scores rows = one-row calls and
+    the own blocks equal the shared pool's for the same keys; the selection over 3,000 random keys
+    picks the reference's blocks."""
+    g = _g(11)
+    cap, L, NH, M = 4096, 3000, 4, 3
+    eps = 1e-6
+    ikc = torch.randn(cap, 128, generator=g, device=DEV).to(torch.bfloat16)
+    kln = (torch.randn(128, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+    cos, sin = _rope_tables(cap)
+    nb = L // 4
+    b = torch.arange(nb, dtype=torch.int32, device=DEV)
+    slots = (b[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=DEV)).contiguous()
+    pool = SK.qsa_pool(ikc, slots, b * 4, kln, cos, sin, eps)
+    gm = ikc[: nb * 4].view(nb, 4, 128).float().mean(1).to(torch.bfloat16).float()
+    gm = (gm * torch.rsqrt(gm.pow(2).mean(-1, keepdim=True) + eps) * (1 + kln.float())).to(torch.bfloat16).float()
+    c, sn = cos[b.long() * 4].float(), sin[b.long() * 4].float()
+    xr = gm[:, :64]
+    rot = torch.cat([-xr[:, 32:], xr[:, :32]], -1)
+    ref = torch.cat([((xr * c).to(torch.bfloat16).float() + (rot * sn).to(torch.bfloat16).float()), gm[:, 64:]], -1)
+    steps = ((pool.float() - ref).abs() / ref.abs().clamp_min(1e-2)).max().item()
+    assert steps < 3 * 2 ** -7, steps
+    iq = torch.randn(M, NH, 128, generator=g, device=DEV).to(torch.bfloat16)
+    # rows at positions L - 1 + t: own blocks from block (L - 1) // 4, pooled from the same slots
+    own0 = (L - 1) // 4
+    ob = own0 + torch.arange(SK.OWN, device=DEV, dtype=torch.int32)
+    os_ = (ob[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=DEV)).contiguous()
+    own = SK.qsa_pool(ikc, os_, ob * 4, kln, cos, sin, eps).unsqueeze(0).expand(M, -1, -1).contiguous()
+    qctl = torch.zeros(M, 4, dtype=torch.int32, device=DEV)
+    for t in range(M):
+        qctl[t, 0], qctl[t, 1] = (L - 1 + t + 1) // 4, own0
+    NB = 1024
+    sc = SK.qsa_scores(iq, pool, own, qctl, NB)
+    for t in range(M):
+        assert torch.equal(SK.qsa_scores(iq[t:t + 1], pool, own[t:t + 1], qctl[t:t + 1], NB)[0], sc[t]), t
+    shared = qctl.clone()
+    shared[:, 1] = 10 ** 6                              # every block from the shared pool
+    full = SK.qsa_scores(iq, pool, own, shared, NB)
+    assert torch.equal(full, sc), "own blocks pooled from the same keys must score as the shared pool"
+    sel = torch.zeros(M, SK.NSEL, dtype=torch.int32, device=DEV)
+    tail = torch.stack([qctl[:, 0] * 4 + k for k in range(3)], 1).int().contiguous()
+    SK.qsa_select(sc, tail, sel)
+    overlap = []
+    for t in range(M):
+        p = L - 1 + t
+        want = SK.qsa_reference(iq[t], ikc, kln, cos, sin, p, eps)
+        got = sel[t, :len(want)].long()
+        assert torch.equal(got[2048:], want[2048:]), (t, got[2048:], want[2048:])      # the tail
+        overlap.append(len(set(got[:2048].tolist()) & set(want[:2048].tolist())) / 2048)
+    assert min(overlap) >= 0.99, overlap
+    return f"pool within {steps:.1e} rel of the reference; score rows = one-row calls; selection overlap {min(overlap):.4f}"
+
+
+def test_attn_prep_indexer_query():
+    g = _g(42)
+    Hq, Hk, AD, cap, ihd, M = 24, 2, 256, 64, 128, 4
+    qkv = torch.randn(M, Hq * 2 * AD + 2 * Hk * AD, generator=g, device=DEV).to(torch.bfloat16)
+    iqk = torch.randn(M, 5 * ihd, generator=g, device=DEV).to(torch.bfloat16)
+    qw = kw = (torch.randn(AD, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+    qln = (torch.randn(ihd, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+    cos, sin = _rope_tables(cap)
+    pos = torch.tensor([3, 9, 9, 20], device=DEV)
+    kc = torch.zeros(Hk, cap, AD, dtype=torch.bfloat16, device=DEV)
+    vc, ikc = torch.zeros_like(kc), torch.zeros(cap, ihd, dtype=torch.bfloat16, device=DEV)
+    iq = torch.zeros(M, 4, ihd, dtype=torch.bfloat16, device=DEV)
+    K.attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, Hq, Hk, 4 * ihd, 1e-6, qln=qln, iq=iq)
+    from engine.models.flashnext.ref import apply_rope, rms
+    want = apply_rope(rms(iqk[:, :4 * ihd].view(M, 4, ihd), qln, 1e-6), cos[pos][:, None], sin[pos][:, None])
+    steps = ((iq.float() - want.float()).abs() / want.float().abs().clamp_min(1e-2)).max().item()
+    assert steps < 3 * 2 ** -7, steps
+    for m in range(M):
+        one = torch.zeros(1, 4, ihd, dtype=torch.bfloat16, device=DEV)
+        K.attn_prep(qkv[m:m + 1], iqk[m:m + 1], pos[m:m + 1], qw, kw, cos, sin, kc.clone(), vc.clone(), ikc.clone(),
+                    Hq, Hk, 4 * ihd, 1e-6, qln=qln, iq=one)
+        assert torch.equal(one[0], iq[m]), m
+    return f"indexer query (norm 1 + w, rope at the position) within {steps:.1e} rel of torch; rows = one-row calls"
+
+
+TESTS = [test_tree_helpers, test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
-         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows]
+         test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows, test_qsa_pool_scores_and_selection,
+         test_attn_prep_indexer_query]
 
 
 if __name__ == "__main__":

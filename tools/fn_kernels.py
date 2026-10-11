@@ -768,13 +768,15 @@ __global__ void __launch_bounds__(256) dense_kernel(const __nv_bfloat16* __restr
 // its first ROT dims at the row's position POS[m] (the reference's rope: bf16(bf16(x c) + bf16(rot(x) s)));
 // Hq..Hq+Hk-1 the same for the key heads, written into the cache at the row's slot SLOT[m] (its
 // position for a decode step; its place in the block for a verify); then the value heads into the
-// cache; the last CTA the indexer key. QKV row: per q head [q (D) | gate (D)], then k, then v.
+// cache; the next CTA the indexer key; then (QSA, ENG-147) one CTA an indexer query head, normed
+// (1 + w) over ihd and rotated like a query head. QKV row: per q head [q (D) | gate (D)], then k, then v.
 __global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __restrict__ QKV, int ldq,
         const __nv_bfloat16* __restrict__ IQK, int ldi, const int64_t* __restrict__ POS, const int64_t* __restrict__ SLOT,
         const __nv_bfloat16* __restrict__ QW, const __nv_bfloat16* __restrict__ KW,
         const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN,
         __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
-        __nv_bfloat16* __restrict__ IKC, int Hq, int Hk, int D, int ROT, int ioff, int ihd, int cap, float eps) {
+        __nv_bfloat16* __restrict__ IKC, int Hq, int Hk, int D, int ROT, int ioff, int ihd, int cap, float eps,
+        const __nv_bfloat16* __restrict__ QLN, __nv_bfloat16* __restrict__ IQ, int nhi) {
     __shared__ float sh[8];
     __shared__ float nv[256];
     pdl_wait();
@@ -782,6 +784,23 @@ __global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __r
     const int b = blockIdx.x, t = threadIdx.x, m = blockIdx.y;
     const int64_t pos = POS[m], slot = SLOT[m];
     const __nv_bfloat16* qkv = QKV + (size_t)m * ldq;
+    if (b > Hq + 2 * Hk) {
+        const int ih = b - Hq - 2 * Hk - 1;
+        const float x = t < ihd ? __bfloat162float(IQK[(size_t)m * ldi + ih * ihd + t]) : 0.f;
+        const float r = rsqrtf(block_sum(x * x, sh) / (float)ihd + eps);
+        const float n = t < ihd ? bfr(x * r * (1.0f + __bfloat162float(QLN[t]))) : 0.f;
+        nv[t] = n;
+        __syncthreads();
+        if (t >= ihd) return;
+        float o = n;
+        if (t < ROT) {
+            const float c = __bfloat162float(COS[(size_t)pos * ROT + t]), sn = __bfloat162float(SIN[(size_t)pos * ROT + t]);
+            const float rh = t < ROT / 2 ? -nv[t + ROT / 2] : nv[t - ROT / 2];
+            o = bfr(bfr(n * c) + bfr(rh * sn));
+        }
+        IQ[((size_t)m * nhi + ih) * ihd + t] = __float2bfloat16_rn(o);
+        return;
+    }
     if (b >= Hq + Hk) {
         if (b < Hq + 2 * Hk) {
             const int vh = b - Hq - Hk;
@@ -903,7 +922,8 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
 
 void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot,
                   torch::Tensor qw, torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc,
-                  torch::Tensor vc, c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps) {
+                  torch::Tensor vc, c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps,
+                  c10::optional<torch::Tensor> qln, c10::optional<torch::Tensor> iq) {
     const at::cuda::OptionalCUDAGuard guard(qkv.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int D = q.size(2), ROT = cos.size(1), cap = kc.size(1), M = qkv.size(0);
@@ -913,13 +933,18 @@ void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Te
     TORCH_CHECK(cos.dtype() == torch::kBFloat16 && ROT % 2 == 0 && ROT <= D, "cos/sin bf16");
     const int ihd = ikc.has_value() ? ikc->size(1) : 0;
     TORCH_CHECK(ihd <= 256 && (!iqk.has_value() || (iqk->dim() == 2 && iqk->stride(1) == 1)), "indexer head, iqk [M, n]");
-    launch(attn_prep_kernel, dim3(hq + 2 * hk + 1, M), dim3(D), 0, st, (const __nv_bfloat16*)qkv.data_ptr(), (int)qkv.stride(0),
+    const int nhi = iq.has_value() ? iq->size(1) : 0;
+    TORCH_CHECK(!iq.has_value() || (qln.has_value() && iq->is_contiguous() && iq->size(0) == M && iq->size(2) == ihd
+                && iqk.has_value()), "iq [M, heads, ihd] with q_layernorm and iqk");
+    launch(attn_prep_kernel, dim3(hq + 2 * hk + 1 + nhi, M), dim3(D), 0, st, (const __nv_bfloat16*)qkv.data_ptr(), (int)qkv.stride(0),
         iqk.has_value() ? (const __nv_bfloat16*)iqk->data_ptr() : (const __nv_bfloat16*)nullptr, iqk.has_value() ? (int)iqk->stride(0) : 0,
         (const int64_t*)pos.data_ptr(), (const int64_t*)slot.data_ptr(),
         (const __nv_bfloat16*)qw.data_ptr(), (const __nv_bfloat16*)kw.data_ptr(), (const __nv_bfloat16*)cos.data_ptr(),
         (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)q.data_ptr(), (__nv_bfloat16*)kc.data_ptr(),
         (__nv_bfloat16*)vc.data_ptr(), ikc.has_value() ? (__nv_bfloat16*)ikc->data_ptr() : (__nv_bfloat16*)nullptr,
-        (int)hq, (int)hk, D, ROT, (int)ioff, ihd, cap, (float)eps);
+        (int)hq, (int)hk, D, ROT, (int)ioff, ihd, cap, (float)eps,
+        qln.has_value() ? (const __nv_bfloat16*)qln->data_ptr() : (const __nv_bfloat16*)nullptr,
+        iq.has_value() ? (__nv_bfloat16*)iq->data_ptr() : (__nv_bfloat16*)nullptr, nhi);
 }
 
 void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D) {
@@ -1188,7 +1213,8 @@ _CPP = (
     "void fn_set_moe_warps(int64_t w);\n"
     "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
     "torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc, torch::Tensor vc, "
-    "c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps);\n"
+    "c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps, "
+    "c10::optional<torch::Tensor> qln, c10::optional<torch::Tensor> iq);\n"
     "void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D);\n"
     "void fn_combine_inject_norm(torch::Tensor h0, torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, "
     "torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);\n"
@@ -1338,16 +1364,18 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     return out
 
 
-def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, ioff: int, eps: float, slot=None):
+def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, ioff: int, eps: float, slot=None,
+              qln=None, iq=None):
     """The attention inputs of M rows: query heads normed (1 + w) and rotated at the row's position ->
     [M, Hq, D]; key heads the same and value heads as they are, into the caches kc/vc [Hk, cap, D] at
     the row's slot; the indexer key iqk[:, ioff:ioff + ihd] into ikc [cap, ihd]. qkv [M, Hq 2D + 2 Hk D],
-    pos / slot int64 [M] on the device (slot None: the position)."""
+    pos / slot int64 [M] on the device (slot None: the position). With `iq` ([M, heads, ihd] bf16) and
+    `qln` (q_layernorm): the indexer query heads iqk[:, :heads ihd], normed (1 + w) and rotated, into iq."""
     D = kc.shape[2]
     qkv = qkv.reshape(-1, qkv.shape[-1])
     q = torch.empty(qkv.shape[0], hq, D, dtype=torch.bfloat16, device=qkv.device)
     _module().fn_attn_prep(qkv, None if iqk is None else iqk.reshape(-1, iqk.shape[-1]), pos,
-                           pos if slot is None else slot, qw, kw, cos, sin, q, kc, vc, ikc, hq, hk, ioff, eps)
+                           pos if slot is None else slot, qw, kw, cos, sin, q, kc, vc, ikc, hq, hk, ioff, eps, qln, iq)
     return q
 
 

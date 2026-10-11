@@ -93,13 +93,13 @@ def plain(eng: FlashNextEngine, ids: list[int], new: int, eos: set) -> tuple[lis
 def spec(eng: FlashNextEngine, ids: list[int], new: int, eos: set, mode: str, truth: list[int], depth: int,
          seed: int) -> tuple[list[int], dict]:
     st = eng.new_state(eng.max_len)
-    logits = eng.prefill(torch.tensor(ids), st)
+    logits = eng.prefill(torch.tensor(ids), st, keep_stack=not mode.startswith("oracle"))
     first = int(logits[0].argmax())
     if mode.startswith("oracle"):
         dr = OracleDrafter(truth, depth, eng.cfg.vocab_size, seed)
     else:
         dr = (MTPGraphDrafter if mode == "mtp-graph" else MTPChainDrafter)(eng, depth, eng.max_len)
-        dr.prime(eng.stack.clone(), ids, first)
+        dr.prime(eng.prompt_stack, ids, first)
     sd = SpecDecoder(eng, st, dr, graphs=mode != "oracle-eager")
     out = sd.generate(first, new, eos)
     s = dict(sd.stats)
@@ -118,17 +118,18 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=6)
     ap.add_argument("--modes", default="oracle,oracle-eager,mtp,mtp-graph")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--max-len", type=int, default=4096)
     ap.add_argument("--json")
     a = ap.parse_args()
     from transformers import AutoTokenizer
     modes = a.modes.split(",")
     idx, W, banks, tables, timing = load(a.pack, "cuda", mtp=any(m.startswith("mtp") for m in modes))
-    eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=4096)
+    eng = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=a.max_len)
     tok = AutoTokenizer.from_pretrained(a.pack)
     eos = set(idx.cfg.eos_token_ids)
     res = {"pack": a.pack, "load": timing, "mem_after_load_gib": mem_available_gib(),
            "knobs": {"ctx": a.ctx, "new": a.new, "depth": a.depth, "modes": modes, "seed": a.seed, "greedy": True,
-                     "thinking": False, "kv_dtype": "bf16", "max_len": 4096}, "classes": {}}
+                     "thinking": False, "kv_dtype": "bf16", "max_len": a.max_len}, "classes": {}}
     sc = eng.self_check(class_prompt(tok, "chat", 0))
     res["self_check"] = sc
     for c in a.classes.split(","):

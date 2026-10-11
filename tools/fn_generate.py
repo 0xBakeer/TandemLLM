@@ -5,7 +5,8 @@
 
 Single stream, greedy, thinking off, no speculation. Per prompt class (tools/exl3_fastrun.py's
 prose, code and chat requests) the prompt is that request after held-out text of its kind
-(bench/heldout_prose.txt, bench/heldout_code.txt), cut so the templated prompt is `--ctx` tokens;
+(bench/heldout_prose.txt, bench/heldout_code.txt; past their end the other held-out texts and
+bench/calib.txt, repeated), cut so the templated prompt is `--ctx` tokens;
 the prompt is prefilled (the reference's batched forward on the kernels), then `--new` tokens are
 decoded one at a time through the captured decode step (`DecodeGraph`). decode tok/s =
 (new - 1) / the time from the first decoded token to the last (each token waits for its argmax on
@@ -53,8 +54,13 @@ def class_prompt(tok, cls: str, ctx: int) -> list[int]:
     ask = ASK[cls]
     if ctx <= 0:
         return chat_ids(tok, ask)
-    fill = open(os.path.join(ROOT, "bench", FILL[cls])).read()
+    # the class's own held-out text first; past its end (8k, 32k) the other held-out texts and
+    # bench/calib.txt, repeated (tools/exl3_fastrun.py's prefill_text)
+    names = [FILL[cls]] + [n for n in ("heldout_prose.txt", "heldout_code.txt", "calib.txt") if n != FILL[cls]]
+    fill = "\n\n".join(open(os.path.join(ROOT, "bench", n)).read() for n in names)
     fid = tok(fill, add_special_tokens=False)["input_ids"]
+    while len(fid) < ctx:
+        fid = fid + fid
     lo, hi = 0, len(fid)
     while lo < hi:                                  # the longest fill that keeps the prompt <= ctx
         mid = (lo + hi + 1) // 2
