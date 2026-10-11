@@ -5,7 +5,8 @@
 
 Variants (switches the engine reads per call, so no reload): `base` = the build's defaults;
 `dense` / `nodense` = EXL3 projections of up to 32 rows on tools/fn_kernels.dense or on
-tools/exl3_linear's kernel (engine.DENSE_MAX); `nopdl` =
+tools/exl3_linear's kernel (engine.DENSE_MAX); `nosplit` = few-row GEMVs on the one-warp-a-row kernel
+(fn_set_gemv_split(0)); `nopdl` =
 Flash-Next kernels launched without programmatic dependent launch (fn_set_pdl(0)). Every round
 runs every variant in order, then the next round in reverse order (A B C, C B A, ...), each on the
 prose, code and chat prompts at `--ctx` (tools/fn_generate.py's), decode tok/s through a freshly
@@ -36,6 +37,7 @@ BASE_DENSE = E.DENSE_MAX
 def apply(variant: str) -> None:
     E.DENSE_MAX = {"dense": 32, "nodense": 0}.get(variant, BASE_DENSE)
     K._module().fn_set_pdl(0 if variant == "nopdl" else 1)
+    K._module().fn_set_gemv_split(0 if variant == "nosplit" else int(E._S.get("FN_GEMV_SPLIT") == "1"))
 
 
 def main() -> None:
@@ -76,8 +78,8 @@ def main() -> None:
     same = {f"{c}": all(texts[(c, v)] == texts[(c, "base")] for v in variants if v == "nopdl")
             for c in prompts if (c, "base") in texts}
     res = {"knobs": {"ctx": a.ctx, "new": a.new, "rounds": a.rounds, "greedy": True, "thinking": False},
-           "rows": rows, "mean_tok_s": summ, "nopdl_same_text": same, "load": timing}
-    print(json.dumps({"mean_tok_s": summ, "nopdl_same_text": same}), flush=True)
+           "rows": rows, "mean_tok_s": summ, "same_text": same, "load": timing}
+    print(json.dumps({"mean_tok_s": summ, "same_text": same}), flush=True)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 

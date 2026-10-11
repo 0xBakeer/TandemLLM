@@ -10,7 +10,8 @@ reduction runs across rows, no tile shape depends on M. The `_rows` twins of the
                 hyper-connection mixers, `pack.Int8Rows`) or fp16 (router, PLE projections, the GDN
                 a/b projections). A group of LPR lanes owns one output row; each lane sums its
                 strided K slice in K order, the group adds the lanes by a fixed xor tree, then the
-                scale. 16-byte weight loads.
+                scale. 16-byte weight loads. A weight of few rows (mixer down, router, GDN a/b) splits
+                each row's K over the warps of a CTA, the slices added in warp order (gemv_split).
   mix_up        the mixer's second half in one launch: a = bf16(silu(bf16(d) / hc)) (the down
                 projection d from `gemv`), the up projection of a, and the stream mean
                 x[j] = bf16(sum_s bf16(bf16(sigmoid(bf16(up_s . a))) * n[s H + j]) / hc) -- one warp
@@ -176,6 +177,37 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
 #pragma unroll
             for (int m = 0; m < MC; ++m) if (m < mc) store_out(Y + (size_t)(m0 + m) * ldy + n, acc[m] * sc);
         }
+    }
+}
+
+// The same dot products for a weight of few rows (`gemv_split`): one CTA a row, its K split into KS
+// contiguous slices, warp w the slice w with gemv_kernel's lane-strided sums, the slices added in warp
+// order; KS is a function of the weight's shape, so a row's bits do not depend on M.
+template <typename TW, int MC, typename TY>
+__global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K) {
+    __shared__ float red[8][MC];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
+    const int n = blockIdx.x, kc = K / ks, k0 = warp * kc;
+    const TW* wr = W + (size_t)n * K + k0;
+    for (int off = lane * 128; off < kc * (int)sizeof(TW); off += 32 * 128)
+        prefetch_l2(reinterpret_cast<const char*>(wr) + off);
+    pdl_wait();
+    pdl_trigger();
+    for (int m0 = 0; m0 < M; m0 += MC) {
+        const int mc = min(MC, M - m0);
+        float acc[MC];
+        row_dot<TW, 32, MC>(wr, X + k0, ldx, m0, mc, kc, lane, acc);
+        if (lane == 0)
+#pragma unroll
+            for (int m = 0; m < MC; ++m) red[warp][m] = acc[m];
+        __syncthreads();
+        if (threadIdx.x < mc) {
+            float t = red[0][threadIdx.x];
+            for (int w = 1; w < ks; ++w) t += red[w][threadIdx.x];
+            store_out(Y + (size_t)(m0 + threadIdx.x) * ldy + n, t * (S ? S[n] : 1.0f));
+        }
+        __syncthreads();
     }
 }
 
@@ -843,6 +875,7 @@ __global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __re
 
 // --------------------------------------------------------------------------------- host side
 static int g_pdl = 1;      // fn_set_pdl: launch with programmatic stream serialization (QWEN38_FN_PDL)
+static int g_gemv_split = 1;   // fn_set_gemv_split: few-row weights on gemv_split_kernel (QWEN38_FN_GEMV_SPLIT)
 
 template <typename... KArgs, typename... Args>
 static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t st, Args... args) {
@@ -857,6 +890,7 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
 }
 
 void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
+void fn_set_gemv_split(int64_t on) { g_gemv_split = on ? 1 : 0; }
 
 template <typename... KArgs, typename... Args>
 static void launch_cluster(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, int S, cudaStream_t st, Args... args) {
@@ -973,9 +1007,25 @@ static int gemv_warps(int N, int LPR) {
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(),             \
         s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K)
 
+// K slices of a gemv_split launch for a weight of N rows and K columns (1: gemv_kernel): as many warps
+// as the board holds at once (48 SMs x 64) while a slice keeps at least 256 columns
+static int gemv_split_ks(int N, int K, int vec) {
+    if (N > 640) return 1;
+    int ks = 1;
+    while (ks < 8 && N * ks * 2 <= 3072 && K % (ks * 2 * vec) == 0 && K / (ks * 2) >= 256) ks *= 2;
+    return ks;
+}
+
 template <typename TW, typename TY>
 static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const float* s_ptr,
                           torch::Tensor& y, int M, int N, int K, cudaStream_t st) {
+    const int ks = g_gemv_split ? gemv_split_ks(N, K, WVec<TW>::VEC) : 1;
+    if (ks > 1) {
+        auto kern = M == 1 ? gemv_split_kernel<TW, 1, TY> : gemv_split_kernel<TW, 8, TY>;
+        launch(kern, dim3(N), dim3(32 * ks), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+               (const TW*)w.data_ptr(), s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K);
+        return;
+    }
     const int lpr = lpr_for(K);
     if (M == 1) {
         if (lpr == 32) GEMV_LAUNCH(TW, 32, 1); else if (lpr == 16) GEMV_LAUNCH(TW, 16, 1); else GEMV_LAUNCH(TW, 8, 1);
@@ -1199,6 +1249,7 @@ _CPP = (
     "void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<torch::Tensor> s, "
     "torch::Tensor x, int64_t hc);\n"
     "void fn_router(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor ids, torch::Tensor wts);\n"
+
     "void fn_moe_gu(torch::Tensor x, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, "
     "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax);\n"
     "void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, "
@@ -1209,6 +1260,7 @@ _CPP = (
     "c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);\n"
     "void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);\n"
     "void fn_set_pdl(int64_t on);\n"
+    "void fn_set_gemv_split(int64_t on);\n"
     "void fn_set_moe_st(int64_t st);\n"
     "void fn_set_moe_warps(int64_t w);\n"
     "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot, torch::Tensor qw, "
@@ -1236,11 +1288,12 @@ def _module():
         _MOD = load_inline(name=f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                       "fn_moe_combine", "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                      "fn_set_pdl", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                      "fn_set_pdl", "fn_set_gemv_split", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                       "fn_gate_mul", "fn_dense", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
+        _MOD.fn_set_gemv_split(int(_S.get("FN_GEMV_SPLIT") == "1"))
         _MOD.fn_set_moe_st(int(_S.get("FN_MOE_ST")))
         _MOD.fn_set_moe_warps(int(_S.get("FN_MOE_WARPS")))
     return _MOD

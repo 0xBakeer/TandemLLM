@@ -91,9 +91,23 @@ class Bench:
         s = sd.stats
         R = max(s["rounds"], 1)
         extra = {"host_ms_a_round": {k: round(v / R, 3) for k, v in eng.host_ms.items()}}
+        if hot:
+            # the emitted tokens the hot draft head cannot propose, and of those the ones already in the
+            # prompt or the output so far (what a hot vocabulary widened by the context would add)
+            hot_ids = set(eng.draft_ids.tolist())
+            seen = set(ids)
+            miss = miss_ctx = 0
+            for t in out[1:]:
+                if t not in hot_ids:
+                    miss += 1
+                    miss_ctx += t in seen
+                seen.add(t)
+            extra["hot_cover"] = {"emitted": len(out) - 1, "not_hot": miss, "not_hot_in_context": miss_ctx,
+                                  "rejections_upper": s["rounds"]}
         if dr.cut is not None:
             extra |= {"rows_a_round": round(s["rows"] / R, 2), "moved_rounds": s["moved"],
-                     "calibration": {k: [round(h / n, 2) if n else None for h, n in v] for k, v in dr.cut.cal.items()}}
+                     "calibration": {k: [round(h / n, 2) if n else None for h, n in v] for k, v in dr.cut.cal.items()},
+                     "verify_ms_by_rows": {r: round(v, 2) for r, v in sorted(dr.cut.V.items())}}
         return out, {"tok_s": round((len(out) - 1) / dt, 2), "rounds": s["rounds"],
                      "tokens_a_round": round((len(out) - 1) / R, 3),
                      "accepted_a_round": round(s["accepted"] / R, 3),

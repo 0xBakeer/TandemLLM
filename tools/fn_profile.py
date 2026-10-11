@@ -79,6 +79,19 @@ def main() -> None:
         for _ in range(a.steps):
             g.graph.replay()
         torch.cuda.synchronize()
+    # critical-path time: with programmatic dependent launch a kernel starts before its predecessor
+    # ends and waits; charge each kernel only from max(its start, the predecessor's end) to its end
+    kev = sorted(((e.time_range.start, e.time_range.end, e.name) for e in prof.events()
+                  if e.device_type.name == "CUDA"), key=lambda t: t[0])
+    eff = defaultdict(float)
+    eff_k = defaultdict(float)
+    prev_end = None
+    for t0, t1, name in kev:
+        start = t0 if prev_end is None else max(t0, prev_end)
+        if t1 > start:
+            eff[family(name)] += (t1 - start) / 1e3 / a.steps
+            eff_k[name] += (t1 - start) / 1e3 / a.steps
+        prev_end = t1 if prev_end is None else max(prev_end, t1)
     per = defaultdict(float)
     cnt = defaultdict(int)
     for e in prof.key_averages():
@@ -94,6 +107,9 @@ def main() -> None:
     out = {"ctx": len(ids), "replay_ms": round(replay_ms, 3), "step_ms": round(step_ms, 3),
            "kernel_ms": round(kernel_ms, 3), "launches": sum(cnt.values()),
            "families_ms": {k: round(v, 3) for k, v in sorted(fam.items(), key=lambda x: -x[1])},
+           "critical_path_ms": {k: round(v, 3) for k, v in sorted(eff.items(), key=lambda x: -x[1])},
+           "critical_path_total_ms": round(sum(eff.values()), 3),
+           "critical_path_top": [(k[:90], round(v, 4)) for k, v in sorted(eff_k.items(), key=lambda x: -x[1])[:a.top]],
            "top": [(k[:90], round(v, 4), cnt[k]) for k, v in sorted(per.items(), key=lambda x: -x[1])[:a.top]],
            "bytes": budget["parts"], "bytes_total": budget["total"],
            "ceiling_ms_at_273": round(budget["total"] / 273e9 * 1e3, 3)}
