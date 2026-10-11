@@ -9,6 +9,14 @@ on the GPU, alone or borrowing the narrator's copy. No model of Qwen's in this p
           one narrator line N0; Wren borrows the loaded slot (MemAvailable must not move by more
           than 0.3 GiB), one turn; the narrator's line again must equal N0 to the token.
 
+  cases   VIS-91: Wren at the borrow's window (4,096 rows) on its own copy, on the case set below:
+          ten requests for a change and five questions, among them the two of the live report
+          ("What is the box running now?", then "Which one is for coding tasks?" on the Model
+          step). A request passes when the right call comes and no other change; a question
+          passes when words come, no change, and the words name what the table says. After a
+          change the page's second round (the tool's result back) must end in words.
+          QSE_WREN_MODEL=qwen3.5-4b measures the 4B on the same set.
+
 Run on the box while :8000 has been idle for at least 10 minutes, under the box lock, with the
 served environment and a private lock path for the planner (the real one is the test's own):
     flock -n ~/.qwen38-box.flock env BOX_LOCK=/tmp/wren-gpu.flock \\
@@ -142,6 +150,105 @@ def borrow() -> dict:
             "narrator_still_loaded_after_wren_unload": still == "loaded"}
 
 
+def page_for(step: str) -> dict:
+    """The page state the browser sends on `step` (checks.ts buildPageState), from the defaults."""
+    from server.setup import estimate, registry
+    m = registry.get("qwen3.8-27b")
+    sel = estimate.defaults(m)
+    steps = {s["id"]: s for s in registry.wizard_fields(m)}
+    index = list(steps).index(step)
+    def value(f):
+        if step == "weights":
+            return sel["profile"]
+        if step == "components":
+            return sel["components"].get(f)
+        if step == "parallelism":
+            return sel.get(f)
+        return (sel.get("methods") or {}).get(f, (sel.get("advanced") or {}).get(f))
+    fields = [{"field": f["field"], "label": f["label"], "type": f["type"], "value": value(f["field"])}
+              for f in steps[step]["fields"]]
+    titles = dict(registry.STEPS)
+    return {"model": m["id"], "step": step, "step_index": index,
+            "selection": {k: sel.get(k) for k in ("model", "profile", "components", "slots",
+                                                  "window", "side_window", "kv_pool", "floor_gb")},
+            "visible": {"title": titles[step], **({"fields": fields} if fields else {})}}
+
+
+# (step, what the user says, the call it wants or None for a question, words a question's answer
+# must hold: any one of them)
+CASES = [
+    ("overview", "What is the box running now?", None, ("exl3-6.0",)),
+    ("overview", "Which one is for coding tasks?", None, ("exl3-2.5", "124")),
+    ("weights", "Which profile is closest to the original model?", None, ("exl3-6.0",)),
+    ("components", "What does the shadow reader do?", None, ("shadow",)),
+    ("parallelism", "How much memory does one slot take?", None, ("3.26", "104.25", "26.06")),
+    ("components", "Turn the narrator off.", ("toggle", {"component": "narrator", "on": False}), ()),
+    ("components", "Switch vision off, please.", ("toggle", {"component": "vision", "on": False}), ()),
+    ("parallelism", "Use two slots.", ("set_field", {"step": "parallelism", "field": "slots",
+                                                     "value": 2}), ()),
+    ("parallelism", "Set the window to 65536 tokens.", ("set_field", {
+        "step": "parallelism", "field": "window", "value": 65536}), ()),
+    ("parallelism", "Turn the shared KV pool off.", ("set_field", {
+        "step": "parallelism", "field": "kv_pool", "value": False}), ()),
+    ("weights", "Take the 4.0 weights.", ("select_profile", {"id": "exl3-4.0"}), ()),
+    ("weights", "Pick EXL3 6.0.", ("select_profile", {"id": "exl3-6.0"}), ()),
+    ("methods", "Set the reasoning effort to low.", ("set_field", {
+        "step": "methods", "field": "reasoning_effort", "value": "low"}), ()),
+    ("overview", "Go to the next step.", ("next", {}), ()),
+    ("parallelism", "Open the tools step.", ("go_to_step", {"n": 3}), ()),
+]
+
+
+def cases() -> dict:
+    from engine.generative.qwen35 import Qwen35Model
+    import urllib.request
+    try:      # the live box's facts, as the server gives them to Wren (setup_api.device_facts)
+        with urllib.request.urlopen("http://127.0.0.1:8000/v1/setup/device", timeout=5) as r:
+            d = json.load(r)
+        facts = {k: d.get(k) for k in ("mode", "preset", "mem_total_gb", "mem_available_gb", "gpu",
+                                       "disk", "active_profile", "profiles_on_disk",
+                                       "hf_token_present", "password_set")}
+    except OSError:
+        facts = {"mem_available_gb": round(avail(), 1)}
+    app.STATE.clear()
+    w = wren.Wren(app, device_facts=lambda: facts, setup_mode=True,
+                  log=lambda s: print(s, flush=True))
+    w._qwen = lambda name, folder: Qwen35Model(name, folder, max_ctx=4096)
+    app.STATE["wren"] = w
+    w.load()
+    while w.state == "loading":
+        time.sleep(0.2)
+    st = w.status()
+    out, right = [], 0
+    for step, text, want, words in CASES:
+        page = page_for(step)
+        t = turn(w, text, page)
+        changes = [c for c in t["tool_calls"] if c["name"] != "explain"]
+        if want is None:
+            ok = (bool(t["text"].strip()) and not changes
+                  and any(x.lower() in t["text"].lower() for x in words))
+        else:
+            ok = changes == [{"name": want[0], "args": want[1]}]
+            if changes:
+                # the page's second round: the result goes back and the turn must end in words
+                msgs = [{"role": "user", "content": text},
+                        {"role": "assistant", "content": t["text"], "tool_calls": [
+                            {"id": f"c{i}", "name": c["name"], "args": c["args"]}
+                            for i, c in enumerate(t["tool_calls"])]}] + [
+                        {"role": "tool", "content": json.dumps({"ok": True, "result": "ok"})}
+                        for _ in t["tool_calls"]]
+                said = ""
+                for ev in w.chat({"messages": msgs, "page": page}):
+                    said += ev.get("delta", "") if ev["type"] == "text" else ""
+                t["second_round"] = said
+                ok = ok and bool(said.strip() or t["text"].strip())
+        right += ok
+        out.append(dict(t, step=step, ok=ok))
+    w.unload("asked")
+    return {"part": "cases", "model": st["model"], "window": st["window"],
+            "right": f"{right} of {len(CASES)}", "cases": out, "stats": dict(w.stats)}
+
+
 if __name__ == "__main__":
     for part in sys.argv[1:] or ["own", "borrow"]:
-        print(json.dumps({"own": own, "borrow": borrow}[part]()), flush=True)
+        print(json.dumps({"own": own, "borrow": borrow, "cases": cases}[part]()), flush=True)
