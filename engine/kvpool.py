@@ -1,9 +1,9 @@
 """The shared KV pool: a sequence's KV window is reserved as ADDRESSES, and memory is committed
 only for the rows a conversation actually holds.
 
-Why: before this, every sequence slot allocated its whole window at load -- 104.25 KiB a token
+Why: before this, every sequence slot allocated its whole window at load -- 106.5 KiB a token
 (64 KiB of engine attention KV, 2 x 20 KiB of drafter context KV, 256 B of rotary table) -- so four
-slots of 262,144 tokens would have taken ~104 GiB before serving anything. The box could only
+slots of 262,144 tokens would have taken ~106 GiB before serving anything. The box could only
 afford one long window and three short ones, and even those pushed the narrator and the Laya
 decider out of memory (2026-10-10, OPS-89).
 
