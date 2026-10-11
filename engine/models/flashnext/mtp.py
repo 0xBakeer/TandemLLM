@@ -14,6 +14,7 @@ import time
 import torch
 
 from engine.models.flashnext.engine import FlashNextEngine, MTPChainGraph
+from engine.models.flashnext.ref import MTP
 
 
 class FlashNextMTPHead:
@@ -26,6 +27,20 @@ class FlashNextMTPHead:
     def reset(self) -> None:
         self.st.length = 0
         self.st.pool_n = {}
+
+    def views(self) -> list:
+        """The head's position-indexed cache as (tensor, token axis): the MTP layer's K, V and indexer
+        keys (the caches keep its rows with the trunk's, ENG-157)."""
+        st = self.st
+        return [(st.k[MTP], 1), (st.v[MTP], 1)] + ([(st.ik[MTP], 0)] if MTP in st.ik else [])
+
+    def resume(self, n: int) -> None:
+        """The head's cache is valid for its first `n` rows (a cache wrote them back, or they are in
+        place): the length, and the pooled indexer keys built again from those rows."""
+        self.st.length = int(n)
+        self.st.pool_n = {}
+        if n > 0:
+            self.fn.build_pool(self.st, layers=[MTP])
 
     def prime(self, rows: torch.Tensor, nexts: list[int]) -> None:
         """Rows [n, hc H] and the token after each into the head's cache, in one call (a backlog)."""

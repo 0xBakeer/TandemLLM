@@ -513,9 +513,12 @@ class SessionSpill:
             self._bufs = [dc._Buf(payload, cuda) for _ in range(2)]
         return self._bufs
 
-    def _hdr(self, i: int = 0):
+    def _hdr(self, i: int = 0, size: int = ALIGN):
         if not self._hbufs:
             self._hbufs = [dc._Buf(ALIGN, False) for _ in range(2)]
+        if self._hbufs[i].nbytes < size:
+            self._hbufs[i].close()
+            self._hbufs[i] = dc._Buf(size, False)
         return self._hbufs[i]
 
     def _anchor_buf(self, eng):
@@ -560,10 +563,12 @@ class SessionSpill:
         zs = list(self._zp().map(_zc, [mv[o:o + n] for o, n in frames]))
         total = sum(len(z) for z in zs)
         payload = sum(n for _, n in frames)
-        out = self._cbuf(self._obufs, slot, dc.align(ALIGN + payload + payload // 64 + (1 << 20)))
         meta = dict(meta, z={"c": CODEC_NAME, "fr": CODEC_FRAME, "zl": [len(z) for z in zs]})
-        self._put_header(out, meta)
-        o = ALIGN
+        raw = json.dumps(meta, separators=(",", ":")).encode()
+        h = hdr_len(len(raw))
+        out = self._cbuf(self._obufs, slot, dc.align(h + payload + payload // 64 + (1 << 20)))
+        self._put_header(out, meta, raw)
+        o = h
         om = out.view(0, out.nbytes)
         for z in zs:
             om[o:o + len(z)] = z
@@ -573,7 +578,7 @@ class SessionSpill:
         direct = dc.write_file(path, [out.view(0, size)], False)
         rec["bytes"] = size
         rec["z"] = meta["z"]
-        rec["raw"] = ALIGN + payload
+        rec["raw"] = h + payload
         return direct
 
     def _read_block(self, p: str, bl: dict, slot: int, buf, secs) -> tuple[int, dict]:
@@ -582,9 +587,10 @@ class SessionSpill:
         as byte planes (`_planes_from_host` joins them on the device)."""
         z = bl.get("z")
         if not z:
-            hb = self._hdr(slot)
-            n = dc.read_into(p, 0, hb.view(0, ALIGN))
-            n += dc.read_into(p, ALIGN, buf.view(0, int(bl["bytes"]) - ALIGN))
+            h = int(bl.get("hdr", ALIGN))
+            hb = self._hdr(slot, h)
+            n = dc.read_into(p, 0, hb.view(0, h))
+            n += dc.read_into(p, h, buf.view(0, int(bl["bytes"]) - h))
             return n, self._get_header(hb)
         size = int(bl["bytes"])
         cb = self._cbuf(self._cbufs, slot, size)
@@ -597,7 +603,7 @@ class SessionSpill:
             raise ValueError("codec frames")
         cm = cb.view(0, size)
         sm = buf.view(0, buf.nbytes)
-        args, o = [], ALIGN
+        args, o = [], hdr_len(int.from_bytes(bytes(cb.view(8, 4)), "little"))
         for (off, ln), zl in zip(frames, z["zl"]):
             args.append((cm[o:o + zl], sm[off:off + ln]))
             o += zl
@@ -626,16 +632,23 @@ class SessionSpill:
             self._abuf = None
 
     @staticmethod
-    def _put_header(buf, meta: dict):
-        raw = json.dumps(meta, separators=(",", ":")).encode()
-        if len(raw) > ALIGN - 12:
-            raise ValueError(f"a spill header of {len(raw)} bytes")
-        hdr = buf.view(0, ALIGN)
-        hdr[:ALIGN] = b"\0" * ALIGN
+    def _put_header(buf, meta: dict, raw: bytes | None = None):
+        """The header of a file, on as many lines as its metadata needs (`hdr_len`); `buf` holds it."""
+        raw = raw if raw is not None else json.dumps(meta, separators=(",", ":")).encode()
+        size = hdr_len(len(raw))
+        if buf.nbytes < size:
+            raise ValueError(f"a spill header of {len(raw)} bytes in a buffer of {buf.nbytes}")
+        hdr = buf.view(0, size)
+        hdr[:size] = b"\0" * size
         hdr[:8] = MAGIC
         hdr[8:12] = len(raw).to_bytes(4, "little")
         hdr[12:12 + len(raw)] = raw
         return hdr
+
+    def _header_for(self, i: int, meta: dict):
+        """`meta` as a header in header buffer `i`, grown to its length."""
+        raw = json.dumps(meta, separators=(",", ":")).encode()
+        return self._put_header(self._hdr(i, hdr_len(len(raw))), meta, raw)
 
     @staticmethod
     def _get_header(buf) -> dict:
@@ -875,11 +888,12 @@ class SessionSpill:
                             zrecs.append(rec)
                             written += 1
                             continue
-                        hdr = self._put_header(self._hdr(slot), meta)
-                        size = ALIGN + payload
+                        hdr = self._header_for(slot, meta)
+                        size = len(hdr) + payload
                         pending[slot] = self._writer().submit(
                             _write, os.path.join(path, fname), [hdr, buf.view(0, payload)], False)
-                        blocks.append({"b": b, "rows": r, "sums": sums, "bytes": size})
+                        blocks.append({"b": b, "rows": r, "sums": sums, "bytes": size,
+                                       **({"hdr": len(hdr)} if len(hdr) != ALIGN else {})})
                         written += 1
                         nbytes += size
                         wbytes += size
@@ -933,9 +947,10 @@ class SessionSpill:
                         abuf.typed(o, t.dtype, t.shape).copy_(x, non_blocking=cuda and abuf.pinned)
                     if cuda:
                         torch.cuda.current_stream().synchronize()
-                    hdr = self._put_header(self._hdr(), {"b": b, "sums": sums})
+                    hdr = self._header_for(0, {"b": b, "sums": sums})
                     dc.write_file(os.path.join(path, fname), [hdr, abuf.view(0, anc_payload)], fsync=False)
-                    files.append({"file": fname, "b": b, "sums": sums})
+                    files.append({"file": fname, "b": b, "sums": sums,
+                                  **({"hdr": len(hdr)} if len(hdr) != ALIGN else {})})
                     nbytes += anc_size
                     wbytes += anc_size
             tm["anchors"] = (time.perf_counter() - q) * 1e3
@@ -1215,7 +1230,7 @@ class SessionSpill:
                 for f in man["anchor_files"]:
                     p = os.path.join(e.path, f["file"])
                     try:
-                        nread += dc.read_into(p, ALIGN, abuf.view(0, anc_payload))
+                        nread += dc.read_into(p, int(f.get("hdr", ALIGN)), abuf.view(0, anc_payload))
                     except Exception:                              # noqa: BLE001
                         return self._failed(e, "read", res, low)
                     if f["file"] == "end.anc":
@@ -1301,6 +1316,12 @@ class SessionSpill:
                 "writes": self.guard.report() if self.guard is not None else None,
                 "list": rows[:10], "events": self.events[-10:],
                 **{k: (dict(v) if isinstance(v, dict) else v) for k, v in self.stats.items()}}
+
+
+def hdr_len(n: int) -> int:
+    """A file's header for `n` bytes of metadata: on as many lines as it needs (one for every file
+    before ENG-157, and for a model with few sections)."""
+    return max(ALIGN, dc.align(12 + n))
 
 
 def state_sums(x) -> list[int]:

@@ -106,7 +106,7 @@ In this order, each on the new model:
 ## What is still specific to Qwen3.8
 
 - `engine/model.py` implements this family's forward: the Gated DeltaNet layer with its gated norm, attention with a gated output and partial rotary, and the dense MLP. A new family needs its own layer code behind the same verify, commit and cache interfaces. A model with a mixture of experts also needs expert routing inside the verify.
-- The second family, Qwen3.8-Flash-Next (`engine/models/flashnext/`, turboderp's EXL3 packs), is served through the same server and request loop with its MTP drafter ([server.md](server.md#qwen38-flash-next-srv-87)); the caches, the KV pool, images and side slots are not wired to it yet (ENG-157, ENG-241, VIS-97).
+- The second family, Qwen3.8-Flash-Next (`engine/models/flashnext/`, turboderp's EXL3 packs), is served through the same server and request loop with its MTP drafter and the same caches ([server.md](server.md#qwen38-flash-next-srv-87), [caches.md](caches.md#what-a-state-is)); the KV pool, images and side slots are not wired to it yet (ENG-241, VIS-97).
 - The recurrent-layer kernels assume Gated DeltaNet's state shape (heads of 128 by 128).
 - Tile tables and router prices are measured for this model's shapes on the GB10. A new model or a new board needs its own sweep (`tools/fp8_probe.py --sweep`, `tools/nvfp4_skinny.py`) and its own price curve.
 - Some modules read their switches into globals at import. Two engines with different settings cannot share one process yet.

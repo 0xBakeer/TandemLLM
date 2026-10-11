@@ -523,6 +523,7 @@ class DiskTier:
         return rec["bytes"]
 
     def _read_header(self, path: str, kind: str, chain: bool = False) -> dict:
+        """The file's metadata, `meta["_hdr"]` the header's length (where the payload starts)."""
         size = self._hdr_size(kind)
         if self._hdr_r is None or self._hdr_r.nbytes < size:
             self._hdr_r = _Buf(max(size, self._hdr_size("chunk"), self._hdr_size("anchor")),
@@ -532,13 +533,23 @@ class DiskTier:
         if bytes(mv[:8]) != MAGIC:
             raise ValueError(f"{path}: not a disk-cache file")
         n = int.from_bytes(mv[8:12], "little")
+        full = self._hdr_len(n, kind)
+        if full > size:
+            # a long section list (a model of many layers): the metadata runs past the first line
+            self._hdr_r.close()
+            self._hdr_r = _Buf(full, cuda=False)
+            mv = self._hdr_r.view(0, full)
+            read_into(path, 0, mv)
+            size = full
         meta = json.loads(bytes(mv[12:12 + n]).decode())
         if meta.get("kind") != kind or meta.get("format") not in ((FORMAT, ANCHOR_FORMAT) if kind == "anchor"
                                                                   else (FORMAT,)):
             raise ValueError(f"{path}: format {meta.get('format')} kind {meta.get('kind')}")
         import numpy as np
+        meta["_hdr"] = size
+        j = max(ALIGN, align(12 + n))
         if kind == "chunk":
-            meta["tokens"] = np.frombuffer(mv[ALIGN:ALIGN + 8 * self.chunk], dtype="<i8").tolist()
+            meta["tokens"] = np.frombuffer(mv[j:j + 8 * self.chunk], dtype="<i8").tolist()
         elif chain:
             sec = next(x for x in meta["sections"] if x["name"] == "chain")
             cb = _Buf(align(sec["bytes"]), cuda=False)
@@ -553,7 +564,14 @@ class DiskTier:
         return meta
 
     def _hdr_size(self, kind: str) -> int:
+        """The shortest header: one line of metadata (and a chunk's token ids after it)."""
         return align(ALIGN + 8 * self.chunk) if kind == "chunk" else ALIGN
+
+    def _hdr_len(self, n: int, kind: str) -> int:
+        """The header of a file whose metadata is `n` bytes: the metadata on as many lines as it
+        needs (one for every file before ENG-157), then a chunk's token ids."""
+        j = max(ALIGN, align(12 + n))
+        return j + align(8 * self.chunk) if kind == "chunk" else j
 
     def _chain_buf(self, chain: list[int]) -> memoryview:
         """An anchor's chain -- the hash of every chunk line up to it -- as an aligned section."""
@@ -567,21 +585,21 @@ class DiskTier:
         return mv
 
     def _header(self, meta: dict, kind: str, tokens=None) -> memoryview:
-        size = self._hdr_size(kind)
-        if self._hdr_w is None:
-            self._hdr_w = _Buf(max(self._hdr_size("chunk"), self._hdr_size("anchor")), cuda=False)
-        mv = self._hdr_w.view(0, size)
         raw = json.dumps(meta, separators=(",", ":")).encode()
-        lim = ALIGN - 12
-        if len(raw) > lim:
-            raise ValueError(f"a {kind} header of {len(raw)} bytes (at most {lim})")
+        size = self._hdr_len(len(raw), kind)
+        if self._hdr_w is None or self._hdr_w.nbytes < size:
+            if self._hdr_w is not None:
+                self._hdr_w.close()
+            self._hdr_w = _Buf(max(size, self._hdr_size("chunk"), self._hdr_size("anchor")), cuda=False)
+        mv = self._hdr_w.view(0, size)
         mv[:size] = b"\0" * size
         mv[:8] = MAGIC
         mv[8:12] = len(raw).to_bytes(4, "little")
         mv[12:12 + len(raw)] = raw
         if tokens is not None:
             import numpy as np
-            mv[ALIGN:ALIGN + 8 * len(tokens)] = np.asarray(tokens, dtype="<i8").tobytes()
+            j = max(ALIGN, align(12 + len(raw)))
+            mv[j:j + 8 * len(tokens)] = np.asarray(tokens, dtype="<i8").tobytes()
         return mv
 
     # --- the persistent part of the index: counts, sessions, hits ----------------------------
@@ -1297,7 +1315,7 @@ class DiskTier:
                                 for (name, t), (o, _) in zip(state.items(), offs)]):
                         self._fail("layout", hit, None)
                         return False
-                    nread += read_into(ap, self._hdr_size("anchor"),
+                    nread += read_into(ap, am["_hdr"],
                                        abuf.view(0, align(offs[-1][0] + offs[-1][1]) if offs else 0))
                     if any(checksum(abuf.view(o, nb)) != s["crc"] for (o, nb), s in zip(offs, sa)):
                         raise ValueError("checksum")
@@ -1310,8 +1328,7 @@ class DiskTier:
 
                 def submit(j):
                     if j < len(todo):
-                        futs[j] = pool.submit(read_into, todo[j][1]["path"],
-                                              self._hdr_size("chunk"),
+                        futs[j] = pool.submit(read_into, todo[j][1]["path"], todo[j][1]["_hdr"],
                                               self.buf_chunk[j % 2].view(0, payload))
                 submit(0)
                 submit(1)

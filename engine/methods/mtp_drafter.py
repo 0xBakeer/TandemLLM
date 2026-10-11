@@ -7,9 +7,16 @@ the last `depth` + 1 rows, which ride the round's own feed (`head.launch`); the 
 StairCut (engine/methods/staircut.py), which learns from the verify the loop timed (`on_verify`).
 
 What it asks of the head (Flash-Next's: engine/models/flashnext/mtp.py): `depth`, `reset()`,
-`prime(rows, nexts)`, `capture_all()`, `launch(rows, nexts)` (asynchronous) and `read()` -> per depth
-the top-2 tokens and their probabilities. Of the engine: `captured` (the last block captured a verify
-or commit graph) and `commit_ms`.
+`prime(rows, nexts)`, `capture_all()`, `launch(rows, nexts)` (asynchronous), `read()` -> per depth
+the top-2 tokens and their probabilities, `views()` and `resume(n)`. Of the engine: `captured` (the
+last block captured a verify or commit graph), `commit_ms` and `last_streams()` (the last committed
+row's streams, a section of its cache state).
+
+The caches (ENG-157) keep the head's cache with the engine's rows: `kv_views` (the resident prefix,
+the disk tier, the spill), `state_snapshot` / `state_restore` (the state store) and `state_resume(n)`
+(a resume in place). After a resume at n the head holds rows below n - 1 and the row at n - 1 waits for
+its next token, as it did when the rows were written. A row the head had not fed when a cache took
+it is stale; it changes a draft, never the text (the verify decides).
 """
 
 from __future__ import annotations
@@ -106,7 +113,42 @@ class MTPTreeDrafter:
         self.stats["draft_ms"] += self.round
         return tree
 
+    # --- the caches (ENG-157) -------------------------------------------------------------------
+    def kv_views(self) -> list:
+        return self.head.views()
+
+    def snapshot_bytes_per_token(self) -> int:
+        return sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in self.head.views())
+
+    def state_resume(self, n: int) -> None:
+        n = int(n)
+        self.head.resume(max(0, n - 1))
+        self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self.held = ([0], self.s.last_streams().clone()) if n > 0 else None
+
+    def state_snapshot(self) -> dict:
+        """The head's cache after every synced row that knows its next token went in."""
+        self._flush()
+        L = int(self.head.st.length)
+        return {"len": L, "views": tuple(t.narrow(ax, 0, L).clone() for t, ax in self.head.views())}
+
+    def state_restore(self, snap: dict) -> None:
+        L = int(snap["len"])
+        for (t, ax), x in zip(self.head.views(), snap["views"]):
+            t.narrow(ax, 0, L).copy_(x)
+        self.head.resume(L)
+        self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self.held = ([0], self.s.last_streams().clone())
+
     # --- internals -------------------------------------------------------------------------------
+    def _flush(self) -> None:
+        """Feed the queue and the round's own feed now (every row there knows its next token)."""
+        rows = [q[0] for q in self.queue] + ([self.pending[0]] if self.pending is not None else [])
+        nexts = [t for q in self.queue for t in q[1]] + (list(self.pending[1]) if self.pending is not None else [])
+        self.queue, self.pending = [], None
+        if nexts:
+            self.head.prime(torch.cat(rows) if len(rows) > 1 else rows[0], nexts)
+
     def _feed(self, anchor: int) -> bool:
         """Every synced row paired with its next token (the last with the anchor); all but the last
         depth + 1 into the head's cache now, those into the round's own feed. False: nothing synced."""

@@ -6,7 +6,8 @@ phrase or one decode token at the state's length), `forward_tree` (a draft block
 row), `commit_tree` (keep a path), `hidden_post_norm` (the rows a drafter syncs from), `picks` (the
 verify's own greedy tokens), `kv.length`, `reset`; the walk down a block is the shared one
 (engine/methods/walk.py). The caches and the dashboard add the adapter's cold verbs (ENG-E8): `cost`,
-`settle`, `discard_pending`, `trim_pending`. `FlashNextServing` maps it onto `FlashNextEngine`:
+`cache_state` (`FlashNextCacheState`: what the caches keep, ENG-157), `resume_at`, `settle`,
+`discard_pending`, `trim_pending`. `FlashNextServing` maps it onto `FlashNextEngine`:
 
   forward, one token      the captured decode step (`DecodeGraph`), streams of that row
   forward, more tokens    the prefill kernels (`FlashNextEngine.prefill`), every row's streams
@@ -39,7 +40,7 @@ from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine
 from engine.models.flashnext.mtp import FlashNextMTPHead
-from engine.models.flashnext.ref import FNModelState
+from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
 
 
@@ -89,15 +90,62 @@ class _KV:
         return self._s.max_len
 
 
+class FlashNextCacheState(SectionState):
+    """What the caches keep of a Flash-Next sequence (engine/models/state.py, ENG-157). Sections: the
+    GDN states and conv tails, the PLE conv state and its token context (a fixed buffer, the end-of-
+    text id where the sequence has none yet) and `mtp.h_last`, the last committed row's streams (the
+    MTP layer's next input, which waits for its next token). Views: K, V and the indexer keys of every
+    attention layer. The pooled indexer keys are derived and built again after a restore
+    (`FlashNextServing.resume_at`)."""
+
+    def __init__(self, serving: "FlashNextServing"):
+        self.s = serving
+
+    def sections(self) -> dict:
+        s, st = self.s, self.s.st
+        for li, buf in s._ctx.items():
+            ctx = st.ple_ctx.get(li)
+            if ctx is None:
+                buf.fill_(s.cfg.eos_token_id)
+            else:
+                buf.copy_(ctx.view(1, -1))
+        out = {}
+        for li in sorted(st.S):
+            out[f"gdn.S.{li}"] = st.S[li]
+        for li in sorted(st.conv):
+            out[f"gdn.conv.{li}"] = st.conv[li]
+        for li in sorted(st.ple_conv):
+            out[f"ple.conv.{li}"] = st.ple_conv[li]
+        for li in sorted(s._ctx):
+            out[f"ple.ctx.{li}"] = s._ctx[li]
+        out["mtp.h_last"] = s._h_last
+        return out
+
+    def views(self) -> list:
+        st = self.s.st
+        out = []
+        for li in sorted(st.k):
+            out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+            if li in st.ik:
+                out.append((f"ik.{li}", st.ik[li], 0))
+        return out
+
+
 class FlashNextServing:
     """`FlashNextEngine` with one state and its graphs, in the server's engine interface."""
 
-    caps = Capabilities(caches=False, side_slots=False)   # ENG-157, ENG-241
+    # the caches' grid: the prefill kernels' chunk (FN_PREFILL_CHUNK), so a resumed prefill runs the
+    # chunks a cold one runs; side slots: ENG-241
+    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
         self.st = fn.new_state(max_len)
-        self.state = FNModelState(self.st)  # recurrent, conv and PLE sections (engine/models/state.py)
+        c, dev = fn.cfg, fn.device
+        self._ctx = {li: torch.full((1, fn.hash[li].context_len), c.eos_token_id, dtype=torch.long, device=dev)
+                     for li in c.ple_layers}
+        self._h_last = torch.zeros(1, c.hc_count * c.hidden_size, dtype=fn.dtype, device=dev)
+        self.state = FlashNextCacheState(self)
         self.kv = _KV(self)
         self.dg = None                      # the decode step's graphs, made on the first decode token
         self.vgraphs: dict = {}
@@ -148,13 +196,22 @@ class FlashNextServing:
         if self.fn._pend_owner is self.st:
             self.fn.flush()
 
-    def cache_state(self) -> FNModelState:
+    def cache_state(self) -> FlashNextCacheState:
         return self.state
 
     def resume_at(self, n: int) -> None:
-        """The engine continues at length `n` from the state the caller just wrote into it."""
+        """The engine continues at length `n` from the state the caller just wrote into it: the PLE
+        context from its section, the length, the pooled indexer keys built from the keys in place."""
         self.discard_pending()
+        for li, buf in self._ctx.items():
+            self.st.ple_ctx[li] = buf.view(1, -1).cpu().clone()
         self.kv.length = n
+        if n > 0:
+            self.fn.build_pool(self.st)
+
+    def last_streams(self) -> torch.Tensor:
+        """The last committed row's streams [1, hc H] (`mtp.h_last`)."""
+        return self._h_last
 
     def discard_pending(self) -> None:
         """Forget what is pending after the state was overwritten (a restore): the chain block, the
@@ -203,10 +260,12 @@ class FlashNextServing:
             cls = self.fn.qsa_class(start)
             lg = self.dg(int(ids[0]))
             self._hidden = self.dg.stacks[cls].view(1, 1, -1)
+            self._h_last.copy_(self._hidden[0, -1:])
             self.stats["decode_steps"] += 1
             return lg.view(1, 1, -1)
         lg = self.fn.prefill(ids, self.st, keep_stack=True)
         self._hidden = self.fn.prompt_stack.unsqueeze(0)
+        self._h_last.copy_(self._hidden[0, T - 1:T])
         self.stats["prefill_rows"] += T
         return lg.view(1, 1, -1)
 
@@ -233,9 +292,11 @@ class FlashNextServing:
     def commit_tree(self, path: list[int]) -> None:
         t0 = time.perf_counter()
         n_graphs = len(self.cgraphs)
-        self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
+        stack = self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
         self.commit_ms = (time.perf_counter() - t0) * 1e3
         self.captured |= len(self.cgraphs) > n_graphs
+        if path:
+            self._h_last.copy_(stack[len(path) - 1:len(path)])
 
     @torch.no_grad()
     def forward_block(self, block: torch.Tensor, start: int) -> torch.Tensor:

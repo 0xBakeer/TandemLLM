@@ -20,6 +20,8 @@ from __future__ import annotations
 import os
 import sys
 
+import types
+
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,13 +36,19 @@ from engine.tree import DraftTree  # noqa: E402
 class _Cfg:
     attention_layers = (3,)
     num_key_value_heads, head_dim, indexer_head_dim, has_indexer = 2, 8, 4, True
+    ple_layers = {1: 0}
+    eos_token_id, hc_count, hidden_size = 3, 1, 3
 
 
 class _FN:
     """What the adapters read of FlashNextEngine, on the host."""
 
+    device, dtype = "cpu", torch.float32
+
     def __init__(self):
         self.cfg = _Cfg()
+        self.hash = {1: types.SimpleNamespace(context_len=2)}
+        self.pools: list = []
         self.primed: list = []
         self.resets = 0
         self.commits: list = []
@@ -54,13 +62,22 @@ class _FN:
         self._pend_owner = None
 
     def new_state(self, cap=None):
-        st = FNState(cap=cap or 64)
+        cap = cap or 64
+        st = FNState(cap=cap)
         st.S[0] = torch.zeros(1, 2, 4, 4)
         st.conv[0] = torch.zeros(1, 3, 3)
+        st.ple_conv[1] = torch.zeros(1, 3, 9)
+        st.k[3], st.v[3], st.ik[3] = torch.zeros(2, cap, 8), torch.zeros(2, cap, 8), torch.zeros(cap, 4)
         return st
 
     def new_mtp_state(self, cap=None):
-        return FNState(cap=cap or 64)
+        cap = cap or 64
+        st = FNState(cap=cap)
+        st.k[-1], st.v[-1], st.ik[-1] = torch.zeros(2, cap, 8), torch.zeros(2, cap, 8), torch.zeros(cap, 4)
+        return st
+
+    def build_pool(self, st, layers=None):
+        self.pools.append((st.length, layers))
 
     def mtp_prime(self, stack, nexts, st_m):
         self.primed.append((stack[:, 0].tolist(), list(nexts), st_m.length))
@@ -73,6 +90,7 @@ class _FN:
     def commit(self, st, path, graphs=None):
         self.commits.append(list(path))
         st.length += len(path)
+        return torch.full((len(path), 3), float(st.length))
 
 
 def _rows(pos, n):
@@ -130,7 +148,9 @@ def test_walk_and_kv_length():
     cost = s.cost()
     sc = cost.snapshot_cost()
     assert sc["recurrent_bytes"] == 2 * 4 * 4 * 4 and sc["kv_bytes_per_token"] == (2 * 8 * 2 + 4) * 2
-    assert sc["conv_bytes"] == 9 * 4 and cost.section_bytes == sc["recurrent_bytes"] + sc["conv_bytes"]
+    # the GDN conv tails and the PLE conv state; the sections add the PLE context and the MTP input
+    assert sc["conv_bytes"] == (9 + 27) * 4
+    assert cost.section_bytes == sc["recurrent_bytes"] + sc["conv_bytes"] + 2 * 8 + 3 * 4
     return "walk with stops at the root and deep; pending chain committed on read; reset; pool clamp; refusal; cost"
 
 
@@ -158,6 +178,52 @@ def test_pending_verbs():
     s.settle()
     assert fn._pend_owner is other and fn.flushes == 1
     return "trim inside a pending chain, drop it, refuse absorbed rows; settle lands chain and parked rows; discard"
+
+
+def test_the_cache_state_and_a_resume():
+    fn = _FN()
+    s = FlashNextServing(fn, 64)
+    sec = s.cache_state().sections()
+    assert list(sec) == ["gdn.S.0", "gdn.conv.0", "ple.conv.1", "ple.ctx.1", "mtp.h_last"], list(sec)
+    assert sec["ple.ctx.1"].tolist() == [[3, 3]]                     # no context yet: the end-of-text id
+    assert [n for n, _, _ in s.cache_state().views()] == ["k.3", "v.3", "ik.3"]
+    s.st.ple_ctx[1] = torch.tensor([[5, 6]])
+    s.st.length = 4
+    s.commit_tree([0, 1])                                             # h_last: the path's last row
+    assert s.last_streams().tolist() == [[6.0, 6.0, 6.0]]
+    kept = tuple(t.clone() for t in s.cache_state().sections().values())
+    assert kept[3].tolist() == [[5, 6]]
+    s.st.ple_ctx[1] = torch.tensor([[9, 9]])
+    s.st.S[0].fill_(7.0)
+    for t, x in zip(s.cache_state().sections().values(), kept):      # what `state_load` does
+        t.copy_(x)
+    s.resume_at(6)
+    assert s.st.ple_ctx[1].tolist() == [[5, 6]] and float(s.st.S[0].abs().sum()) == 0.0
+    assert s.st.length == 6 and fn.pools[-1] == (6, None)
+    assert s.cost().section_bytes == sum(t.numel() * t.element_size() for t in kept)
+    return "5 sections (the PLE context and the MTP input among them), 3 views; a resume restores them"
+
+
+def test_the_drafter_resumes_and_snapshots_its_head():
+    fn = _FN()
+    s = FlashNextServing(fn, 64)
+    d = MTPTreeDrafter(s, s.add_mtp_head(2), StairCut(PriceModel()))
+    assert [t.shape for t, _ in d.kv_views()] == [(2, 64, 8), (2, 64, 8), (64, 4)]
+    d.sync(list(range(100, 110)), _rows(0, 10), 0)
+    d.sync([110, 111], _rows(10, 2), 10)                              # rows 0..9 now know their next token
+    snap = d.state_snapshot()
+    assert snap["len"] == 10 and fn.primed[-1][2] == 0 and len(fn.primed[-1][1]) == 10
+    assert d.held[0] == [110, 111] and d.queue == []
+    s.st.length = 12
+    s._h_last.fill_(11.0)
+    d.state_resume(12)                                                # a resume in place at 12
+    assert d.head.st.length == 11 and fn.pools[-1] == (11, [-1])
+    assert d.held[1].tolist() == [[11.0, 11.0, 11.0]] and d.pending is None and d.queue == []
+    d.state_restore(snap)
+    assert d.head.st.length == 10 and fn.pools[-1] == (10, [-1])
+    d.state_resume(0)
+    assert d.held is None and d.head.st.length == 0
+    return "the head's views; a snapshot feeds the queue first; resume and restore set its length and the waiting row"
 
 
 if __name__ == "__main__":

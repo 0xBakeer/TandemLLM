@@ -223,12 +223,15 @@ code. Speculation is the pack's MTP layer as a tree drafter (StairCut over a 4-d
 draft head `QWEN38_FN_DRAFT_HOT`), gated by the load-time self-check; a sampled request walks the
 greedy tree (`--sampled-tree det` is implied). A verified row is the decode step's row bit for bit, so
 greedy and seeded answers are the plain-decode answers token for token (`tools/fn_server_check.py
---compare` of a `--drafter none` and a `--drafter mtp` server). Not yet on Flash-Next (ENG-E7): the
-prefix, session, resident and disk caches, the KV pool, images, side slots; the server says so at load.
+--compare` of a `--drafter none` and a `--drafter mtp` server). The caches are the 27B's (ENG-157): the
+resident prefix with its end anchor, pin and park, the state store, the disk tier and the session spill,
+on Flash-Next's grid of 4,096 tokens (its prefill chunk, `caps.anchor_grid`); a disk tier and a spill
+need a folder of their own per profile, since a file of another fingerprint is swept. Not yet on
+Flash-Next: the KV pool, images, side slots (ENG-241, VIS-97); the server says so at load.
 
 The server holds no model branches for it (ENG-E8): one loader serves both models (`_load`, SRV-341;
 the model's builder brings its weights, engine, tokenizer and drafter, and the engine's `caps` say what
-it cannot hold yet -- for Flash-Next the caches and side slots, turned off with a log line), the walk down a verified block is `engine/methods/walk.py` for both models, and
+it cannot hold yet -- for Flash-Next the side slots, turned off with a log line), the walk down a verified block is `engine/methods/walk.py` for both models, and
 what the dashboard and the caches ask of an engine goes through the adapter's verbs -- `cost()` (the
 snapshot bytes, `cache.snapshot_cost` on `/health`), `settle()`, `discard_pending()`, `trim_pending(n)`;
 the 27B's are installed on its class by `engine/models/qwen3_5/adapter.py`, so `engine/model.py` keeps its bytes.

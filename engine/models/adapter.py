@@ -21,6 +21,7 @@ class Capabilities:
 
     caches: bool                # the prefix, session, resident and disk caches and the KV pool
     side_slots: bool            # `--parallel` side slots over the same weights
+    anchor_grid: int | None = None   # the caches' grid (restore points, chunk files); None: --prefix-chunk
 
 
 @dataclass(frozen=True)

@@ -41,11 +41,12 @@ class _ToyState(SectionState):
         self.eng = eng
 
     def sections(self):
-        return {"toy.sum": self.eng.s1, "toy.count": self.eng.s2}
+        e = self.eng
+        return {"toy.sum": e.s1, "toy.count": e.s2, **{f"toy.layer.{k}": x for k, x in enumerate(e.xs)}}
 
     def views(self):
         e = self.eng
-        return [("a", e.va, 1), ("b", e.vb, 0), ("c", e.vc, 2)]
+        return [("a", e.va, 1), ("b", e.vb, 0), ("c", e.vc, 2), *((f"x{k}", x, 0) for k, x in enumerate(e.xv))]
 
 
 class Toy:
@@ -53,7 +54,11 @@ class Toy:
     its rows (three views) depend on the token and the state before it, so a row and the state
     after a position depend only on the tokens up to it."""
 
-    def __init__(self, max_len: int = 512):
+    def __init__(self, max_len: int = 512, wide: int = 0):
+        # `wide`: that many more sections and views (a model of many layers: its file headers run
+        # past one line)
+        self.xs = [torch.zeros(2, 3) for _ in range(wide)]
+        self.xv = [torch.zeros(max_len, 2) for _ in range(wide // 2)]
         self.s1 = torch.zeros(3, 5)
         self.s2 = torch.zeros(2, dtype=torch.long)
         self.va = torch.zeros(2, max_len, 4, dtype=torch.bfloat16)
@@ -68,7 +73,7 @@ class Toy:
         return _ToyState(self)
 
     def cost(self) -> CostModel:
-        sec = sum(t.numel() * t.element_size() for t in (self.s1, self.s2))
+        sec = sum(t.numel() * t.element_size() for t in self.cache_state().sections().values())
         row = sum(t.numel() // t.shape[ax] * t.element_size() for _, t, ax in self.cache_state().views())
         return CostModel(section_bytes=sec, view_bytes_per_token=row, parts={"recurrent": sec})
 
@@ -87,6 +92,8 @@ class Toy:
     def reset(self):
         self.s1.zero_()
         self.s2.zero_()
+        for x in self.xs:
+            x.zero_()
         self.kv.length = 0
 
     def window_ok(self, i):
@@ -102,8 +109,12 @@ class Toy:
             self.va[:, p] = (self.s1[:2, :4] * 0.25 + t).to(torch.bfloat16)
             self.vb[p] = self.s1[0, :3] - t
             self.vc[0, :, p] = torch.tensor([t, int(self.s2[0]) % 97], dtype=torch.float16)
+            for k, x in enumerate(self.xv):
+                x[p] = self.s1[1, :2] + k
             self.s1.mul_(0.5).add_(torch.arange(15.0).view(3, 5) * (t % 7))
             self.s2 += torch.tensor([1, t])
+            for k, x in enumerate(self.xs):
+                x.add_(self.s1[:2, :3] * (k + 1))
             rows.append(self.s1.flatten()[:8].clone())
         self.kv.length = start + len(ids)
         self.hidden_post_norm = torch.stack(rows).unsqueeze(0)
@@ -112,15 +123,16 @@ class Toy:
         return lg
 
 
-def _cold(ids):
-    eng = Toy()
+def _cold(ids, wide=0):
+    eng = Toy(wide=wide)
     lg, _, _ = cache.prefill(eng, None, ids, "cpu", chunk=CH)
     return eng, lg
 
 
 def _same(eng, ref, n, lg=None, ref_lg=None):
     assert eng.kv.length == ref.kv.length == n
-    assert torch.equal(eng.s1, ref.s1) and torch.equal(eng.s2, ref.s2)
+    for a, b in zip(eng.cache_state().sections().values(), ref.cache_state().sections().values()):
+        assert torch.equal(a, b)
     for (_, a, ax), (_, b, _) in zip(eng.cache_state().views(), ref.cache_state().views()):
         assert torch.equal(a.narrow(ax, 0, n), b.narrow(ax, 0, n))
     if lg is not None:
@@ -159,40 +171,50 @@ def _tier(d):
                                free_bytes=lambda p: 10 ** 15, head_anchors=2, min_tokens=CH).open()
 
 
-def test_the_disk_tier_round_trips_a_new_model_after_a_restart():
+def _disk_round_trip(wide):
     ids = tokens(150, seed=5)
     with tempfile.TemporaryDirectory() as d:
         t = _tier(d)
-        cache.prefill(Toy(), None, ids, "cpu", chunk=CH, disk=t)
+        cache.prefill(Toy(wide=wide), None, ids, "cpu", chunk=CH, disk=t)
         assert t.flush()
         t.close()
         anc = os.listdir(os.path.join(d, "anchors"))
         assert len(anc) == 1
         meta = t._read_header(os.path.join(d, "anchors", anc[0]), "anchor")
-        assert meta["format"] == 2 and [s["name"] for s in meta["sections"]] == ["toy.sum", "toy.count", "chain"]
+        names = [s["name"] for s in meta["sections"]]
+        assert meta["format"] == 2 and names[:2] == ["toy.sum", "toy.count"] and names[-1] == "chain"
+        chunk = t._read_header(os.path.join(d, "chunks", os.listdir(os.path.join(d, "chunks"))[0]), "chunk")
         t2 = _tier(d)                                  # a restart
         prompt = ids + tokens(20, seed=6)
-        eng = Toy()
+        eng = Toy(wide=wide)
         info = {}
         lg, reused, _ = cache.prefill(eng, None, prompt, "cpu", chunk=CH, disk=t2, info=info)
         assert (info.get("kind"), reused) == ("disk", 144), (info, reused)
-        ref, ref_lg = _cold(prompt)
+        ref, ref_lg = _cold(prompt, wide)
         _same(eng, ref, len(prompt), lg, ref_lg)
         t2.close()
-    return "anchor format 2 with the state's names; restored after a restart, equal to a cold run"
+        return meta["_hdr"], chunk["_hdr"]
 
 
-def test_the_session_spill_round_trips_a_new_model():
+def test_the_disk_tier_round_trips_a_new_model_after_a_restart():
+    h = _disk_round_trip(0)
+    hw = _disk_round_trip(120)
+    assert h[0] == disk_cache.ALIGN and hw[0] > disk_cache.ALIGN and hw[1] > h[1], (h, hw)
+    return (f"anchor format 2 with the state's names; restored after a restart, equal to a cold run; "
+            f"122 sections and 63 views: headers of {hw[0]} / {hw[1]} bytes")
+
+
+def _spill_round_trip(wide, codec="off"):
     d = tempfile.mkdtemp(prefix="toy-spill-")
     try:
         t = _tier(d)
         sp = spill.SessionSpill(os.path.join(d, "sessions"), chunk=CH, fingerprint="toy", tier=t,
-                                settings={"budget_gb": 1.0, "min_tokens": 64, "drain_min_tokens": CH, "codec": "off"},
+                                settings={"budget_gb": 1.0, "min_tokens": 64, "drain_min_tokens": CH, "codec": codec},
                                 free_bytes=lambda p: 10 ** 15, floor_bytes=0).open()
-        eng, res = Toy(), cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, end=True)
+        eng, res = Toy(wide=wide), cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, end=True)
         ids = tokens(130, seed=7)
         cache.prefill(eng, None, ids, "cpu", chunk=CH, resident=res)
-        ref = Toy()
+        ref = Toy(wide=wide)
         cache.prefill(ref, None, ids, "cpu", chunk=CH)
         anchors0 = {b: tuple(x.clone() for x in a) for b, a in res.anchors.items()}
         info = sp.save_resident(res, eng, None, "evict")
@@ -206,10 +228,19 @@ def test_the_session_spill_round_trips_a_new_model():
             assert torch.equal(a.narrow(ax, 0, 130), b.narrow(ax, 0, 130))
         for b in sorted(anchors0)[-4:]:
             assert all(torch.equal(x, y) for x, y in zip(res.anchors[b], anchors0[b]))
+        man = sp.entries[info["eid"]].man
         t.close()
+        return max(int(bl.get("hdr", disk_cache.ALIGN)) for bl in man["blocks"])
     finally:
         shutil.rmtree(d, ignore_errors=True)
-    return "rows of 3 views and the newest anchors back in place, bit for bit"
+
+
+def test_the_session_spill_round_trips_a_new_model():
+    assert _spill_round_trip(0) == disk_cache.ALIGN
+    h = _spill_round_trip(300)
+    assert h > disk_cache.ALIGN, h
+    _spill_round_trip(300, codec="zstd")                # compressed blocks with the long header
+    return f"rows and the newest anchors back in place, bit for bit; 302 sections, 153 views: block headers {h} bytes"
 
 
 def test_a_27b_anchor_file_of_format_1_is_still_read():

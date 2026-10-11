@@ -8738,6 +8738,8 @@ def _load(a) -> None:
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
               if a.response_cache else None)
     if eng.caps.caches:
+        if eng.caps.anchor_grid:
+            a.prefix_chunk = int(eng.caps.anchor_grid)     # the model's own grid (its prefill chunk)
         caches = _load_caches(a, tok, drafter, rcache)
     else:
         if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
