@@ -116,6 +116,28 @@ def step_checks(eng: FlashNextEngine, ids: list[int], k: int = 8) -> dict:
             "fused_vs_ref_layers_max_abs": round((f - rl).abs().max().item(), 4)}
 
 
+def injected_self_check(eng: FlashNextEngine, ids: list[int]) -> dict:
+    """The self-check on a build whose multi-row MoE call differs from the one-row call in one bit
+    (the lowest bit of one output of row 5): it must fail and name that row."""
+    from tools import fn_kernels as K
+    orig = K.moe
+
+    def flipped(x, ids_, wts, bank, **kw):
+        out = orig(x, ids_, wts, bank, **kw)
+        if x.shape[0] > 1 and out.shape[0] > 5:
+            out[5, 7] = (out[5, 7].view(torch.int16) ^ 1).view(torch.bfloat16)
+        return out
+    K.moe = flipped
+    before = eng.spec_ok
+    try:
+        r = eng.self_check(ids)
+    finally:
+        K.moe = orig
+        eng.spec_ok = before
+    assert not r["ok"] and r["first_diff"]["row"] == 5, r
+    return r
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pack", required=True)
@@ -154,8 +176,10 @@ def main() -> None:
     if not a.skip_checks:
         res["step_checks"] = step_checks(eng, chat_ids(tok, "Name three rivers in Europe."))
         print(f"[fn] step checks: {res['step_checks']}", flush=True)
+        res["self_check"] = eng.self_check(chat_ids(tok, "Count from one to twenty in words."))
+        res["self_check_injected"] = injected_self_check(eng, chat_ids(tok, "Count from one to twenty in words."))
     res["classes"] = {}
-    for cls in a.classes.split(","):
+    for cls in [c for c in a.classes.split(",") if c]:
         ids = class_prompt(tok, cls, a.ctx)
         out, m = greedy(eng, ids, a.new, eos)
         m["text_head"] = tok.decode(out[:48], skip_special_tokens=True)

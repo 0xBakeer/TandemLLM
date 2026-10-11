@@ -151,6 +151,36 @@ def test_gemv_bf16_out():
     return "the bf16 output is the fp32 output rounded"
 
 
+def test_attn_prep_and_gate_mul():
+    from engine.models.flashnext.ref import apply_rope, rms
+    g = torch.Generator(device=DEV).manual_seed(41)
+    Hq, Hk, D, cap, rot, ihd = 24, 2, 256, 64, 64, 128
+    qkv = torch.randn(Hq * 2 * D + 2 * Hk * D, generator=g, device=DEV).to(torch.bfloat16)
+    iqk = torch.randn(5 * ihd, generator=g, device=DEV).to(torch.bfloat16)
+    qw = (torch.randn(D, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+    kw = (torch.randn(D, generator=g, device=DEV) * 0.1).to(torch.bfloat16)
+    ang = torch.arange(cap, device=DEV)[:, None].float() * torch.rand(rot // 2, generator=g, device=DEV)[None]
+    cos = torch.cat([ang.cos(), ang.cos()], -1).to(torch.bfloat16)
+    sin = torch.cat([ang.sin(), ang.sin()], -1).to(torch.bfloat16)
+    kc = torch.zeros(Hk, cap, D, dtype=torch.bfloat16, device=DEV)
+    vc, ikc = torch.zeros_like(kc), torch.zeros(cap, ihd, dtype=torch.bfloat16, device=DEV)
+    pos = torch.tensor([37], device=DEV)
+    q = K.attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, Hq, Hk, 4 * ihd, 1e-6)
+    qg = qkv[: Hq * 2 * D].view(1, Hq, 2 * D)
+    cs, sn = cos[37:38, None], sin[37:38, None]
+    want_q = apply_rope(rms(qg[..., :D].contiguous(), qw, 1e-6), cs, sn)[0]
+    kk = qkv[Hq * 2 * D: Hq * 2 * D + Hk * D].view(1, Hk, D)
+    want_k = apply_rope(rms(kk, kw, 1e-6), cs, sn)[0]
+    assert _bf_steps(q, want_q) <= 1.0 and _bf_steps(kc[:, 37], want_k) <= 1.0
+    assert torch.equal(vc[:, 37], qkv[Hq * 2 * D + Hk * D:].view(Hk, D)) and torch.equal(ikc[37], iqk[4 * ihd:])
+    assert kc[:, :37].abs().max() == 0 and vc[:, 38:].abs().max() == 0
+    o = torch.randn(1, Hq, D, generator=g, device=DEV).to(torch.bfloat16)
+    y = K.gate_mul(o, qkv, D)
+    want = (o.reshape(1, -1) * torch.sigmoid(qg[..., D:].reshape(1, -1)))
+    assert torch.equal(y, want)
+    return "q/k norm + rope within one bf16 step of torch's, caches written at the device position only, gate bit-equal"
+
+
 def _bank(n_exp: int, kbs, shared_k: int, seed: int = 0):
     blocks = []
     for e in range(n_exp + 1):

@@ -12,6 +12,15 @@ TandemLLM gets this by fixing the reduction order. Every tile table is keyed by 
 
 Row invariance is what keeps a tree verify, and later parallel requests, close to the one-token decode. It does not make them identical: the output head uses a different kernel for one row than for several, and the verify path of the recurrent and attention layers orders the one-token arithmetic differently, so a near tie between the two best tokens can go the other way. [exactness.md](exactness.md) has the full contract and its measured exception.
 
+### Verify twins
+
+A verify twin is the multi-row form of a one-row decode kernel, and its rows must be the one-row call's bits. The convention for kernel authors (ENG-221, from the Kolibri kernels):
+
+- The twin of a kernel is the same entry point called with M rows when the kernel is row-invariant by construction (every Flash-Next kernel in `tools/fn_kernels.py`: `gemv`, `mix_up`, `router`, `moe`, the norms), and an entry point named `<kernel>_rows` beside the one-row kernel when the one-row kernel is specialised.
+- By construction means a row's instruction sequence does not depend on M: the row, or the (row, expert) pair of a mixture of experts, owns its program on a grid axis; a split of K over warps or cluster ranks depends on the weight's shape only; partials are added in a fixed order; no atomics.
+- The test for a twin compares an M-row call with M one-row calls bit for bit, for M = 2 to 32, with rows that share inputs (for experts: rows that pick the same experts). `tests/gpu/test_fn_kernels_gpu.py` is the pattern.
+- The launch order of the programs may change, the arithmetic may not: the MoE kernels launch the pairs in ascending expert id so rows that share an expert read its tiles back to back from L2.
+
 ## NVFP4 matrix products
 
 The weights are 4-bit and the activations 16-bit (W4A16). The engine never uses the FP4 tensor-core path. On this chip an FP4 operand still has to travel through shared memory and a decode step before a tensor core sees it, and the chip has 99 KB of shared memory per SM. A 4-bit activation path would also need its own quantiser and quality gate, to save at most the 8 % of traffic the activations are.

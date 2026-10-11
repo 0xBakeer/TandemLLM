@@ -26,7 +26,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from engine.models.flashnext.ref import MTP, FlashNextRef, FNState, apply_rope
+from engine import capture_lock
+from engine.models.flashnext.ref import FlashNextRef, FNState
 from engine.models.flashnext.ple import decode_rows
 
 
@@ -126,7 +127,56 @@ class FlashNextEngine(FlashNextRef):
             # one row: any launch order is the same arithmetic, so skip the sort
             order = self._order1 if xs.shape[0] == 1 else None
             K.moe(xs, ids, wts, self.banks[li], order=order, out=out[r0:r0 + step])
+        if self._moe_record is not None:
+            self._moe_record.append((li, x.clone(), ids.clone(), wts.clone(), out.clone()))
         return out
+
+    _moe_record = None
+    spec_ok = False            # the load-time self-check passed (speculation may run)
+    TREE_ROWS = (0, 1, 2, 3, 5, 6, 8, 11)
+
+    @torch.no_grad()
+    def self_check(self, prompt: list[int], steps: int = 12, log=print) -> dict:
+        """ENG-223's load-time check of the expert kernel's verify twins on real routing: decode
+        `steps` tokens one at a time (the decode step), recording every layer's MoE input, ids,
+        weights and output; then run each layer's rows again as one `steps`-row chain call and an
+        8-row tree-shaped call (rows TREE_ROWS, out of order), with the router recomputed from the
+        recorded inputs, and compare every row bit for bit. Any difference leaves `spec_ok` False
+        and the log names the layer and the row."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        st = self.new_state(self.max_len)
+        logits = self.prefill(torch.tensor(prompt), st)
+        tok = int(logits[0].argmax())
+        self._moe_record = rec = []
+        try:
+            for _ in range(steps):
+                tok = int(self.decode_eager(tok, st)[0].argmax())
+        finally:
+            self._moe_record = None
+        by_layer: dict = {}
+        for li, x, ids, wts, out in rec:
+            by_layer.setdefault(li, []).append((x, ids, wts, out))
+        bad = None
+        checked = 0
+        for li, rows in sorted(by_layer.items()):
+            X = torch.cat([r[0] for r in rows])
+            I = torch.cat([r[1] for r in rows])
+            Wt = torch.cat([r[2] for r in rows])
+            O = torch.cat([r[3] for r in rows])
+            ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
+            for name, sel in (("chain", list(range(len(rows)))), ("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)])):
+                sl = torch.tensor(sel, device=X.device)
+                got = K.moe(X[sl].contiguous(), I[sl].contiguous(), Wt[sl].contiguous(), self.banks[li])
+                for j, t in enumerate(sel):
+                    checked += 1
+                    if bad is None and not (torch.equal(got[j], O[t]) and torch.equal(ids[t], I[t]) and torch.equal(wts[t], Wt[t])):
+                        bad = {"layer": li, "row": t, "call": name}
+        self.spec_ok = bad is None
+        res = {"ok": self.spec_ok, "steps": steps, "layers": len(by_layer), "rows_checked": checked, "first_diff": bad}
+        if log:
+            log(f"[fn-selfcheck] {'PASS' if self.spec_ok else 'FAIL: speculation stays off'}: {res}")
+        return res
 
     # ------------------------------------------------------------------------- the trunk
     def _mix(self, n, p):
@@ -286,31 +336,24 @@ class FlashNextEngine(FlashNextRef):
         return self.lin(hh.reshape(1, -1), self.W[p + "out_proj.weight"])
 
     def _attn1(self, x, li, st):
-        """Attention of one token, dense regime, position and length from the device buffers."""
+        """Attention of one token, dense regime, position and length from the device buffers:
+        q|k|v and the indexer projection, one prep launch (norms, rope, cache writes), the
+        attention, the output gate, o_proj."""
+        from tools import fn_kernels as K
         from tools.attn_kernels import decode_attention_dev
         c, g = self.cfg, self.g
         p = self.pre(li) + "self_attn."
         D, Hq, Hk = c.head_dim, c.num_attention_heads, c.num_key_value_heads
-        qkv = self.lin(x, self.W[p + "qkv"])[0]
-        qg = qkv[: Hq * 2 * D].view(1, Hq, 2 * D)
-        q, gate = qg[..., :D], qg[..., D:].reshape(1, -1)
-        q = self.rms(q.contiguous(), self.W[p + "q_norm.weight"], c.rms_norm_eps)
-        k = self.rms(qkv[Hq * 2 * D: Hq * 2 * D + Hk * D].view(1, Hk, D), self.W[p + "k_norm.weight"], c.rms_norm_eps)
-        v = qkv[Hq * 2 * D + Hk * D:].view(1, Hk, D)
-        cos, sin = self.rope_cos.index_select(0, g["pos"]), self.rope_sin.index_select(0, g["pos"])
-        q = apply_rope(q, cos[:, None], sin[:, None])
-        k = apply_rope(k, cos[:, None], sin[:, None])
-        st.k[li].index_copy_(1, g["pos"], k.transpose(0, 1).contiguous())
-        st.v[li].index_copy_(1, g["pos"], v.transpose(0, 1).contiguous())
-        if c.has_indexer:
-            ip = p + "indexer."
-            qk = self.lin(x, self.W[ip + "index_qk_proj.weight"])
-            st.ik[li].index_copy_(0, g["pos"], qk[:, c.indexer_n_heads * c.indexer_head_dim:].contiguous())
+        qkv = self.lin(x, self.W[p + "qkv"])
+        iqk = self.lin(x, self.W[p + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+        q = K.attn_prep(qkv, iqk, g["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+                        self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), Hq, Hk,
+                        c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0, c.rms_norm_eps)
         max_lc = self.g.get("max_lc", 2048)
-        o = decode_attention_dev(q.transpose(0, 1).unsqueeze(0), st.k[li].unsqueeze(0), st.v[li].unsqueeze(0),
+        o = decode_attention_dev(q.view(1, Hq, 1, D), st.k[li].unsqueeze(0), st.v[li].unsqueeze(0),
                                  g["lenp"], g["mask"], max_lc)
-        o = o[0].transpose(0, 1).reshape(1, -1)
-        return self.lin(o * torch.sigmoid(gate), self.W[p + "o_proj.weight"])
+        y = K.gate_mul(o.transpose(1, 2), qkv, D)
+        return self.lin(y, self.W[p + "o_proj.weight"])
 
     # ------------------------------------------------------------------------- generation
     @torch.no_grad()
@@ -359,7 +402,7 @@ class DecodeGraph:
                 eng.step(st)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
+        with capture_lock.LOCK, torch.cuda.graph(self.graph):
             eng.step(st)
         torch.cuda.synchronize()
         for k, v in _state_tensors(st).items():         # the warm-up steps wrote the state: undo

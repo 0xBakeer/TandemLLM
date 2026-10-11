@@ -159,7 +159,7 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
     constexpr int RPW = 32 / LPR;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int sub = lane / LPR, sl = lane % LPR;
-    const int n = (blockIdx.x * 8 + warp) * RPW + sub;
+    const int n = (blockIdx.x * (blockDim.x >> 5) + warp) * RPW + sub;
     const bool live = n < N;
     const TW* wr = W + (size_t)(live ? n : 0) * K;
     if (live)                                          // the weights do not depend on the predecessor
@@ -536,7 +536,7 @@ __global__ void __launch_bounds__(256) moe_combine_kernel(const float* __restric
 }
 
 // ------------------------------------------------------------------------------ norms, inject
-// a fixed-order block sum (256 threads): thread-strided, the warp's xor tree, the warps in order
+// a fixed-order block sum (up to 1024 threads): thread-strided, the warp's xor tree, the warps in order
 __device__ __forceinline__ float block_sum(float v, float* sh) {
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
 #pragma unroll
@@ -554,43 +554,43 @@ template <> __device__ __forceinline__ float wf(const __half* w, int i) { return
 template <> __device__ __forceinline__ float wf(const __nv_bfloat16* w, int i) { return __bfloat162float(w[i]); }
 
 // the reference's grouped RMS norm with weight 1 + w over one (row, group): bf16(x r (1 + w)),
-// r = rsqrt(sum(x^2) / G + eps), x in fp32. grid (M, groups), 256 threads, G <= 256 * 16.
+// r = rsqrt(sum(x^2) / G + eps), x in fp32. grid (M, groups), 1024 threads, G <= 4096.
 template <typename TN>
-__global__ void __launch_bounds__(256) hc_norm_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+__global__ void __launch_bounds__(1024) hc_norm_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const TN* __restrict__ Wn, __nv_bfloat16* __restrict__ Y, int ldy, int G, float eps) {
-    __shared__ float sh[8];
+    __shared__ float sh[32];
     pdl_wait();
     pdl_trigger();
     const int m = blockIdx.x, g = blockIdx.y;
     const __nv_bfloat16* x = X + (size_t)m * ldx + g * G;
-    float v[16];
+    float v[4];
     float ss = 0.f;
     int c = 0;
-    for (int i = threadIdx.x; i < G; i += 256, ++c) { v[c] = __bfloat162float(x[i]); ss = fmaf(v[c], v[c], ss); }
+    for (int i = threadIdx.x; i < G; i += blockDim.x, ++c) { v[c] = __bfloat162float(x[i]); ss = fmaf(v[c], v[c], ss); }
     const float r = rsqrtf(block_sum(ss, sh) / (float)G + eps);
     c = 0;
-    for (int i = threadIdx.x; i < G; i += 256, ++c)
+    for (int i = threadIdx.x; i < G; i += blockDim.x, ++c)
         Y[(size_t)m * ldy + g * G + i] = __float2bfloat16_rn(v[c] * r * (1.0f + wf(Wn, g * G + i)));
 }
 
 // the inject of one (row, stream) and the next site's norm of that stream (one group = one stream):
 // inj = 2 bf16(sigmoid(bf16(bf16(d) / hc))), h = bf16(h0 + bf16(out inj)), n = norm(h) (1 + w)
 template <typename TN>
-__global__ void __launch_bounds__(256) inject_norm_kernel(const __nv_bfloat16* __restrict__ H0, int ldh,
+__global__ void __launch_bounds__(1024) inject_norm_kernel(const __nv_bfloat16* __restrict__ H0, int ldh,
         const __nv_bfloat16* __restrict__ OUT, int ldo, const float* __restrict__ D, int ldd, int R,
         const TN* __restrict__ Wn, __nv_bfloat16* __restrict__ HN, __nv_bfloat16* __restrict__ NN,
         int G, float inv_hc, float eps) {
-    __shared__ float sh[8];
+    __shared__ float sh[32];
     pdl_wait();
     pdl_trigger();
     const int m = blockIdx.x, s = blockIdx.y;
     const float inj = 2.0f * bfr(sigm(bfr(bfr(D[(size_t)m * ldd + R + s]) * inv_hc)));
     const __nv_bfloat16* h0 = H0 + (size_t)m * ldh + s * G;
     const __nv_bfloat16* o = OUT + (size_t)m * ldo;
-    float v[16];
+    float v[4];
     float ss = 0.f;
     int c = 0;
-    for (int i = threadIdx.x; i < G; i += 256, ++c) {
+    for (int i = threadIdx.x; i < G; i += blockDim.x, ++c) {
         v[c] = bfr(__bfloat162float(h0[i]) + bfr(__bfloat162float(o[i]) * inj));
         HN[(size_t)m * ldh + s * G + i] = __float2bfloat16_rn(v[c]);
         ss = fmaf(v[c], v[c], ss);
@@ -598,7 +598,7 @@ __global__ void __launch_bounds__(256) inject_norm_kernel(const __nv_bfloat16* _
     if (Wn == nullptr) return;
     const float r = rsqrtf(block_sum(ss, sh) / (float)G + eps);
     c = 0;
-    for (int i = threadIdx.x; i < G; i += 256, ++c)
+    for (int i = threadIdx.x; i < G; i += blockDim.x, ++c)
         NN[(size_t)m * ldh + s * G + i] = __float2bfloat16_rn(v[c] * r * (1.0f + wf(Wn, s * G + i)));
 }
 
@@ -627,6 +627,60 @@ __global__ void __launch_bounds__(256) gated_norm_kernel(const __nv_bfloat16* __
     }
 }
 
+// ------------------------------------------------------------------------- attention, one token
+// grid (Hq + 2 Hk + 1), D threads: CTA h < Hq normalises query head h (1 + w) and rotates its first
+// ROT dims at the position in POS (the reference's rope: bf16(bf16(x c) + bf16(rot(x) s)));
+// Hq..Hq+Hk-1 the same for the key heads, written into the cache at POS; then the value heads into
+// the cache; the last CTA the indexer key. QKV: per q head [q (D) | gate (D)], then k, then v.
+__global__ void __launch_bounds__(256) attn_prep_kernel(const __nv_bfloat16* __restrict__ QKV,
+        const __nv_bfloat16* __restrict__ IQK, const int64_t* __restrict__ POS,
+        const __nv_bfloat16* __restrict__ QW, const __nv_bfloat16* __restrict__ KW,
+        const __nv_bfloat16* __restrict__ COS, const __nv_bfloat16* __restrict__ SIN,
+        __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC, __nv_bfloat16* __restrict__ VC,
+        __nv_bfloat16* __restrict__ IKC, int Hq, int Hk, int D, int ROT, int ioff, int ihd, int cap, float eps) {
+    __shared__ float sh[8];
+    __shared__ float nv[256];
+    pdl_wait();
+    pdl_trigger();
+    const int b = blockIdx.x, t = threadIdx.x;
+    const int64_t pos = POS[0];
+    if (b >= Hq + Hk) {
+        if (b < Hq + 2 * Hk) {
+            const int vh = b - Hq - Hk;
+            VC[((size_t)vh * cap + pos) * D + t] = QKV[(size_t)Hq * 2 * D + (size_t)Hk * D + vh * D + t];
+        } else if (IKC != nullptr && t < ihd) {
+            IKC[(size_t)pos * ihd + t] = IQK[ioff + t];
+        }
+        return;
+    }
+    const bool isq = b < Hq;
+    const float x = __bfloat162float(isq ? QKV[(size_t)b * 2 * D + t] : QKV[(size_t)Hq * 2 * D + (b - Hq) * D + t]);
+    const float r = rsqrtf(block_sum(x * x, sh) / (float)D + eps);
+    const float n = bfr(x * r * (1.0f + __bfloat162float((isq ? QW : KW)[t])));
+    nv[t] = n;
+    __syncthreads();
+    float o = n;
+    if (t < ROT) {
+        const float c = __bfloat162float(COS[(size_t)pos * ROT + t]), sn = __bfloat162float(SIN[(size_t)pos * ROT + t]);
+        const float rh = t < ROT / 2 ? -nv[t + ROT / 2] : nv[t - ROT / 2];
+        o = bfr(bfr(n * c) + bfr(rh * sn));
+    }
+    if (isq) Q[(size_t)b * D + t] = __float2bfloat16_rn(o);
+    else KC[((size_t)(b - Hq) * cap + pos) * D + t] = __float2bfloat16_rn(o);
+}
+
+// y[h D + d] = bf16(o[h D + d] * bf16(sigmoid(gate[h][d]))), gate in QKV beside each query head
+__global__ void __launch_bounds__(256) gate_mul_kernel(const __nv_bfloat16* __restrict__ O,
+        const __nv_bfloat16* __restrict__ QKV, __nv_bfloat16* __restrict__ Y, int n, int D) {
+    pdl_wait();
+    pdl_trigger();
+    const int i = blockIdx.x * 256 + threadIdx.x;
+    if (i >= n) return;
+    const int h = i / D, d = i % D;
+    const float g = bfr(sigm(__bfloat162float(QKV[(size_t)h * 2 * D + D + d])));
+    Y[i] = __float2bfloat16_rn(__bfloat162float(O[i]) * g);
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------------- host side
@@ -646,10 +700,47 @@ static void launch(void (*k)(KArgs...), dim3 grid, dim3 block, size_t smem, cuda
 
 void fn_set_pdl(int64_t on) { g_pdl = on ? 1 : 0; }
 
+void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor qw,
+                  torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc,
+                  torch::Tensor vc, c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps) {
+    const at::cuda::OptionalCUDAGuard guard(qkv.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int D = q.size(1), ROT = cos.size(1), cap = kc.size(1);
+    TORCH_CHECK(D == 256 && qkv.is_contiguous() && qkv.numel() == hq * 2 * D + 2 * hk * D, "qkv [Hq 2D + 2 Hk D], D 256");
+    TORCH_CHECK(q.is_contiguous() && kc.is_contiguous() && vc.is_contiguous() && kc.size(0) == hk && kc.size(2) == D, "caches [Hk, cap, D]");
+    TORCH_CHECK(pos.dtype() == torch::kLong && cos.dtype() == torch::kBFloat16 && ROT % 2 == 0 && ROT <= D, "pos int64, cos/sin bf16");
+    const int ihd = ikc.has_value() ? ikc->size(1) : 0;
+    TORCH_CHECK(ihd <= 256, "indexer head");
+    launch(attn_prep_kernel, dim3(hq + 2 * hk + 1), dim3(D), 0, st, (const __nv_bfloat16*)qkv.data_ptr(),
+        iqk.has_value() ? (const __nv_bfloat16*)iqk->data_ptr() : (const __nv_bfloat16*)nullptr, (const int64_t*)pos.data_ptr(),
+        (const __nv_bfloat16*)qw.data_ptr(), (const __nv_bfloat16*)kw.data_ptr(), (const __nv_bfloat16*)cos.data_ptr(),
+        (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)q.data_ptr(), (__nv_bfloat16*)kc.data_ptr(),
+        (__nv_bfloat16*)vc.data_ptr(), ikc.has_value() ? (__nv_bfloat16*)ikc->data_ptr() : (__nv_bfloat16*)nullptr,
+        (int)hq, (int)hk, D, ROT, (int)ioff, ihd, cap, (float)eps);
+}
+
+void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D) {
+    const at::cuda::OptionalCUDAGuard guard(o.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(o.is_contiguous() && y.is_contiguous() && qkv.is_contiguous(), "contiguous");
+    const int n = o.numel();
+    launch(gate_mul_kernel, dim3((n + 255) / 256), dim3(256), 0, st, (const __nv_bfloat16*)o.data_ptr(),
+        (const __nv_bfloat16*)qkv.data_ptr(), (__nv_bfloat16*)y.data_ptr(), n, (int)D);
+}
+
 static int lpr_for(int K) { return K >= 2048 ? 32 : (K >= 512 ? 16 : 8); }
 
+// warps a CTA: as many as keep at least two CTAs an SM (a row group is one warp's, so the sums do
+// not depend on it)
+static int gemv_warps(int N, int LPR) {
+    const int warps_needed = (N + 32 / LPR - 1) / (32 / LPR);
+    return warps_needed >= 8 * 96 ? 8 : (warps_needed >= 4 * 96 ? 4 : 2);
+}
+
 #define GEMV_LAUNCH(TW, LPR, MC)                                                                   \
-    launch(gemv_kernel<TW, LPR, MC, TY>, dim3((N + 8 * (32 / LPR) - 1) / (8 * (32 / LPR))), dim3(256), 0, st, \
+    launch(gemv_kernel<TW, LPR, MC, TY>,                                                           \
+        dim3((N + gemv_warps(N, LPR) * (32 / LPR) - 1) / (gemv_warps(N, LPR) * (32 / LPR))),       \
+        dim3(32 * gemv_warps(N, LPR)), 0, st,                                                      \
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(),             \
         s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K)
 
@@ -691,14 +782,14 @@ void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, do
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
     const int M = x.size(0), N = x.size(1);
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && y.dtype() == torch::kBFloat16 && y.stride(1) == 1, "bf16 rows");
-    TORCH_CHECK(N % G == 0 && G <= 256 * 16 && w.numel() == N && w.is_contiguous(), "groups");
+    TORCH_CHECK(N % G == 0 && G <= 1024 * 4 && w.numel() == N && w.is_contiguous(), "groups");
     dim3 grid(M, N / G);
     if (w.dtype() == torch::kHalf)
-        launch(hc_norm_kernel<__half>, grid, dim3(256), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+        launch(hc_norm_kernel<__half>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
             (const __half*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
     else {
         TORCH_CHECK(w.dtype() == torch::kBFloat16, "norm weight fp16 or bf16");
-        launch(hc_norm_kernel<__nv_bfloat16>, grid, dim3(256), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
+        launch(hc_norm_kernel<__nv_bfloat16>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
             (const __nv_bfloat16*)w.data_ptr(), (__nv_bfloat16*)y.data_ptr(), (int)y.stride(0), (int)G, (float)eps);
     }
 }
@@ -711,16 +802,16 @@ void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_
     TORCH_CHECK(h0.dtype() == torch::kBFloat16 && h0.is_contiguous() && hn.is_contiguous() && nn.is_contiguous(), "h0, hn, nn contiguous bf16");
     TORCH_CHECK(out.dtype() == torch::kBFloat16 && out.stride(1) == 1 && out.size(1) == G, "out bf16 [M, G]");
     TORCH_CHECK(d.dtype() == torch::kFloat && d.stride(1) == 1 && d.size(1) >= R + hc, "d fp32 [M, R + hc]");
-    TORCH_CHECK(G <= 256 * 16, "group");
+    TORCH_CHECK(G <= 1024 * 4, "group");
     dim3 grid(M, hc);
     const float inv = 1.0f / (float)hc;
     if (!w.has_value() || w->dtype() == torch::kHalf)
-        launch(inject_norm_kernel<__half>, grid, dim3(256), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
+        launch(inject_norm_kernel<__half>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
             (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
             w.has_value() ? (const __half*)w->data_ptr() : (const __half*)nullptr, (__nv_bfloat16*)hn.data_ptr(),
             (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
     else
-        launch(inject_norm_kernel<__nv_bfloat16>, grid, dim3(256), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
+        launch(inject_norm_kernel<__nv_bfloat16>, grid, dim3(1024), 0, st, (const __nv_bfloat16*)h0.data_ptr(), N,
             (const __nv_bfloat16*)out.data_ptr(), (int)out.stride(0), (const float*)d.data_ptr(), (int)d.stride(0), (int)R,
             (const __nv_bfloat16*)w->data_ptr(), (__nv_bfloat16*)hn.data_ptr(), (__nv_bfloat16*)nn.data_ptr(), G, inv, (float)eps);
 }
@@ -866,7 +957,11 @@ _CPP = (
     "void fn_gated_norm(torch::Tensor o, torch::Tensor z, torch::Tensor w, torch::Tensor y, double eps, bool sig);\n"
     "void fn_set_pdl(int64_t on);\n"
     "void fn_set_moe_st(int64_t st);\n"
-    "void fn_set_moe_warps(int64_t w);\n")
+    "void fn_set_moe_warps(int64_t w);\n"
+    "void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor qw, "
+    "torch::Tensor kw, torch::Tensor cos, torch::Tensor sin, torch::Tensor q, torch::Tensor kc, torch::Tensor vc, "
+    "c10::optional<torch::Tensor> ikc, int64_t hq, int64_t hk, int64_t ioff, double eps);\n"
+    "void fn_gate_mul(torch::Tensor o, torch::Tensor qkv, torch::Tensor y, int64_t D);\n")
 
 _MOD = None
 
@@ -883,7 +978,8 @@ def _module():
         _MOD = load_inline(name=f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
                                       "fn_moe_combine", "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
-                                      "fn_set_pdl", "fn_set_moe_st", "fn_set_moe_warps"],
+                                      "fn_set_pdl", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
+                                      "fn_gate_mul"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
@@ -979,6 +1075,24 @@ def gated_norm(o: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: float, si
     """The GDN output norm over head rows of 128: bf16(bf16(w * bf16(norm(o))) * act(z)), plain w."""
     y = torch.empty_like(o)
     _module().fn_gated_norm(o.contiguous(), z.contiguous(), w, y, eps, sigmoid)
+    return y
+
+
+def attn_prep(qkv, iqk, pos, qw, kw, cos, sin, kc, vc, ikc, hq: int, hk: int, ioff: int, eps: float):
+    """One token's attention inputs: query heads normed (1 + w) and rotated -> [Hq, D]; key heads
+    the same and value heads as they are, into the caches kc/vc [Hk, cap, D] at pos (int64 [1] on
+    the device); the indexer key iqk[ioff:ioff + ihd] into ikc [cap, ihd]. qkv [Hq 2D + 2 Hk D]."""
+    D = kc.shape[2]
+    q = torch.empty(hq, D, dtype=torch.bfloat16, device=qkv.device)
+    _module().fn_attn_prep(qkv.reshape(-1), None if iqk is None else iqk.reshape(-1), pos, qw, kw, cos, sin, q,
+                           kc, vc, ikc, hq, hk, ioff, eps)
+    return q
+
+
+def gate_mul(o: torch.Tensor, qkv: torch.Tensor, D: int) -> torch.Tensor:
+    """bf16(o * bf16(sigmoid(gate))) per query head, the gate beside each head in qkv."""
+    y = torch.empty(1, o.numel(), dtype=torch.bfloat16, device=o.device)
+    _module().fn_gate_mul(o, qkv.reshape(-1), y, D)
     return y
 
 
