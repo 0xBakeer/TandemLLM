@@ -603,6 +603,11 @@ def test_the_current_selection_of_unset_keys():
         assert comps["response_cache"] is False and comps["nvme_spill"] is True, b
         assert comps["proxy"] is False, comps         # start.sh's ${QSE_BACKENDS:-off}
         assert b["unmatched"] == [], b["unmatched"]
+        # Review from there does not list them: the overlay writes what the engine runs with anyway
+        p = _plan(estimate.check(M, b["selection"]))
+        listed = {c["key"] for c in p["changes"]}
+        assert not listed & {"QWEN38_SUFFIX_STORE", "VISION", "RESPONSE_CACHE", "SESSION_SPILL"}, \
+            p["changes"]
         # an explicit empty folder is the store off, as before
         with open(env_file, "a") as fh:
             fh.write("QWEN38_SUFFIX_STORE=\n")

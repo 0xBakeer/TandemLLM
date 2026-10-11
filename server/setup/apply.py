@@ -369,7 +369,8 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
     changes = []
     for k in keys:
         cur, nxt = current.get(k), with_overlay.get(k)
-        if cur != nxt:
+        # an unset key the overlay sets to what the engine runs with anyway is no change
+        if (cur if cur is not None else _unset_default(k)) != nxt:
             changes.append({"key": k, "current": cur, "next": nxt, "from": _source(m, k)})
     for c in changes:
         why = CLIENT_FACING.get(c["key"])
