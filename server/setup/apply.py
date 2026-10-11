@@ -149,9 +149,20 @@ def render_overlay(m: dict, sel: dict, when: str | None = None) -> str:
              "# reads it after the weight profile, so it never sets the weights."]
     # always quoted: single quotes, or double quotes around the one expansion it keeps (${HOME});
     # _value_ok refuses quotes, backslashes, backticks and every other $ in a value
-    for key, v in overlay_values(m, sel).items():
+    for key, v in _without_unset_defaults(overlay_values(m, sel), sel["profile"]).items():
         lines.append(f'{key}="{v}"' if "${HOME}" in v else f"{key}='{v}'")
     return "\n".join(lines) + "\n"
+
+
+def _without_unset_defaults(values: dict, profile: str | None = None) -> dict:
+    """`values` less every key ops/serve.env alone leaves unset whose value is what the engine
+    runs with then anyway (`_unset_default`): the engine's environment stays as it was. The disk
+    tier's and the spill's fingerprint counts every QWEN38_* variable that is set, so writing the
+    lookup store's default folder into the overlay of a box that never set it swept that profile's
+    saved heads and parked chats at the switch."""
+    base = resolve_env(list(values), profile=profile, overlay=os.devnull)
+    return {k: v for k, v in values.items()
+            if k in base or _unset_default(k) is None or _expand(v) != _unset_default(k)}
 
 
 def hook_present(ops: str | None = None) -> bool:
@@ -369,8 +380,9 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
     changes = []
     for k in keys:
         cur, nxt = current.get(k), with_overlay.get(k)
-        # an unset key the overlay sets to what the engine runs with anyway is no change
-        if (cur if cur is not None else _unset_default(k)) != nxt:
+        # unset is what the engine runs with then (the overlay leaves such a key out)
+        if (cur if cur is not None else _unset_default(k)) != \
+                (nxt if nxt is not None else _unset_default(k)):
             changes.append({"key": k, "current": cur, "next": nxt, "from": _source(m, k)})
     for c in changes:
         why = CLIENT_FACING.get(c["key"])

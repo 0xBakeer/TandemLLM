@@ -608,7 +608,27 @@ def test_the_current_selection_of_unset_keys():
         listed = {c["key"] for c in p["changes"]}
         assert not listed & {"QWEN38_SUFFIX_STORE", "VISION", "RESPONSE_CACHE", "SESSION_SPILL"}, \
             p["changes"]
-        # an explicit empty folder is the store off, as before
+        # the overlay of that selection leaves the engine's environment as it was: every key it
+        # resolves to the same value, and no QWEN38_* variable is set that was not (the disk tier's
+        # fingerprint counts them, and a new one swept the profile's saved chats at the switch)
+        sel = estimate.check(M, b["selection"])
+        keys = list(apply.overlay_values(M, sel))
+        before = apply.resolve_env(keys)
+        apply.write_overlay(M, sel)
+        text = open(apply.overlay_path()).read()
+        for k in ("QWEN38_SUFFIX_STORE", "VISION", "RESPONSE_CACHE", "SESSION_SPILL"):
+            assert f"\n{k}=" not in text, text
+        after = apply.resolve_env(keys)
+        assert {k: v for k, v in after.items() if k.startswith("QWEN38_")} == \
+            {k: v for k, v in before.items() if k.startswith("QWEN38_")}
+        assert apply.current_selection(M)["selection"] == b["selection"]
+        # a change the user asks for is written: the store off
+        apply.write_overlay(M, estimate.check(M, dict(b["selection"], components=dict(
+            comps, lookup=False))))
+        assert "QWEN38_SUFFIX_STORE=''" in open(apply.overlay_path()).read()
+        assert apply.current_selection(M)["selection"]["components"]["lookup"] is False
+        os.unlink(apply.overlay_path())
+        # an explicit empty folder in serve.env is the store off, as before
         with open(env_file, "a") as fh:
             fh.write("QWEN38_SUFFIX_STORE=\n")
         assert apply.current_selection(M)["selection"]["components"]["lookup"] is False
