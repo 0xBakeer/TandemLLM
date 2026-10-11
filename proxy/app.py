@@ -41,6 +41,7 @@ from proxy import hostcollect
 from proxy import route as route_mod
 from proxy.service import PROXY_PATHS, Service
 from server import auth as auth_mod
+from server import chat_forward
 from server import dashboard_api
 from server import live as live_mod
 from server import parallel as parallel_mod
@@ -187,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self._strip_session():
             return
+        if chat_forward.route(self, "GET", STATE["auth"]):     # the Chat tab's chatd (SRV-343)
+            return
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
             return static.serve(self, self.path, STATE.get("dashboard_dir"))
@@ -264,6 +267,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self._strip_session():
             return
+        if chat_forward.route(self, "POST", STATE["auth"]):
+            return
         path = self.path.split("?")[0].rstrip("/")
         t_arrival = time.perf_counter()
         raw = self._read_raw()
@@ -306,6 +311,8 @@ class Handler(BaseHTTPRequestHandler):
         svc.serve(self, path, raw, body, route, user, t_arrival=t_arrival)
 
     def _write(self, method: str):
+        if chat_forward.route(self, method, STATE["auth"]):
+            return
         path = self.path.split("?")[0].rstrip("/")
         raw = self._read_raw()
         try:

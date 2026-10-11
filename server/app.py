@@ -80,6 +80,7 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
+from server import chat_forward  # noqa: E402
 from server import memory_api  # noqa: E402
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
@@ -4925,6 +4926,11 @@ class Handler(BaseHTTPRequestHandler):
                                                      f"SameSite=Strict; Path=/; "
                                                      f"Max-Age={auth_mod.SESSION_S}{secure}"),))
 
+    def _chat(self, method: str) -> bool:
+        """`/v1/chat-app/*`: the Chat tab's service, chatd, behind the dashboard's auth
+        (server/chat_forward.py, SRV-343); False for every other path."""
+        return chat_forward.route(self, method, _auth())
+
     def _send_empty(self, code: int, headers: tuple = ()) -> None:
         try:
             self.send_response(code)
@@ -5300,6 +5306,8 @@ class Handler(BaseHTTPRequestHandler):
         self._tandem = None
         if self._strip_session():
             return
+        if self._chat("GET"):
+            return
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
             # the dashboard's static shell: public, no data in it
@@ -5451,6 +5459,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(501, f"Unsupported method ('{self.command}')")
 
     def do_DELETE(self):
+        if self._chat("DELETE"):
+            return
         path = self.path.split("?")[0].rstrip("/")
         if path == "/v1/dashboard/session":
             return self._session("DELETE")
@@ -5462,9 +5472,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_PUT(self):
+        if self._chat("PUT"):
+            return
         return self._conductor_write("PUT")
 
     def do_PATCH(self):
+        if self._chat("PATCH"):
+            return
         return self._conductor_write("PATCH")       # VIS-48: a session's keep
 
     def _config(self, method: str, path: str, body) -> None:
@@ -5509,6 +5523,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._tandem = None
         if self._strip_session():
+            return
+        if self._chat("POST"):                      # before the JSON read: uploads are multipart
             return
         path = self.path.split("?")[0].rstrip("/")
         try:
