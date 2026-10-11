@@ -57,8 +57,11 @@ class SpecDecoder:
     """The round loop over one sequence. `graphs`: verify blocks from captured graphs (one per row
     count, captured on first use)."""
 
-    def __init__(self, eng: FlashNextEngine, st: FNState, drafter: Drafter, graphs: bool = True):
+    def __init__(self, eng: FlashNextEngine, st: FNState, drafter: Drafter, graphs: bool = True,
+                 log_union: bool = False):
         self.eng, self.st, self.drafter = eng, st, drafter
+        self.log_union = log_union
+        self.union: dict = {}          # rows -> [rounds, sum over layers of distinct experts read]
         self.graphs: dict | None = {} if graphs else None
         self.commit_graphs: dict | None = {} if graphs else None
         self.stats = {"rounds": 0, "rows": 0, "accepted": 0, "moved": 0, "draft_s": 0.0, "verify_s": 0.0,
@@ -82,6 +85,8 @@ class SpecDecoder:
             t1 = time.perf_counter()
             target = eng.verify(tokens, parents, st, self.graphs)
             t2 = time.perf_counter()
+            if self.log_union:
+                self._union(len(tokens))
             path = walk(tokens, parents, target)
             stack = eng.commit(st, path, self.commit_graphs)
             emitted = [tokens[r] for r in path[1:]] + [target[path[-1]]]
@@ -107,6 +112,19 @@ class SpecDecoder:
             if emit is not None and emit(out[n0:]) is False:
                 break
         return out
+
+
+    def _union(self, M: int) -> None:
+        """The distinct routed experts the verify block's rows read, summed over the MoE layers."""
+        E = self.eng.cfg.num_experts
+        ids = [v for k, v in self.eng.rec.items() if isinstance(k, tuple) and k[0] == "ids"]
+        if not ids:
+            return
+        a = torch.stack([i[:M] for i in ids]).cpu()                    # [layers, M, k + 1]
+        n = sum(len(set(x.tolist()) - {E}) for x in a.view(a.shape[0], -1))
+        u = self.union.setdefault(M, [0, 0])
+        u[0] += 1
+        u[1] += n
 
 
 class MTPChainDrafter(Drafter):

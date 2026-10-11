@@ -51,6 +51,7 @@ class Bench:
             self.dg = DecodeGraph(self.eng, self.st)
             self.dg.capture()
         out, per = [first], []
+        self.eng.host_ms = {}
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         while len(out) < new and out[-1] not in self.eos:
@@ -58,7 +59,8 @@ class Bench:
             out.append(self.dg.greedy(out[-1]))
             per.append(time.perf_counter() - ts)
         dt = time.perf_counter() - t0
-        return out, {"tok_s": round((len(out) - 1) / dt, 2), "ms_p50": round(1e3 * statistics.median(per), 2)}
+        return out, {"tok_s": round((len(out) - 1) / dt, 2), "ms_p50": round(1e3 * statistics.median(per), 2),
+                     "stage_ms_a_token": round(self.eng.host_ms.get("stage", 0.0) / max(len(out) - 1, 1), 3)}
 
     def spec(self, ids: list[int], new: int, depth: int, hot: int, cut: str = "none",
              warm: bool = False) -> tuple[list[int], dict]:

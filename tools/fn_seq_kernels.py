@@ -20,7 +20,8 @@ the decode step's row bit for bit, which is the property lossless speculation ne
                  in order and then a fixed xor tree inside a warp. Per row the tile comes from the
                  previous row (registers), the entry state, or a scratch slot where an earlier row
                  with a second child left it (`ctl`); the tile is written back to the state only
-                 when asked (decode, commit).
+                 when asked (decode, commit). Parked rows (`pre`, the last commit's path) are walked
+                 first and written back: the commit folded into the next call.
   ple_gate       PLE's gate: g = bf16(sum bf16(key query) / sqrt(H)) per (row, stream), its signed
                  square root, gv = bf16(bf16(sigmoid(g)) value) -- the reference's bf16 roundings.
   ple_conv       PLE's dilated depthwise conv (4 taps, dilation 3) over the normed gv of the row and
@@ -32,6 +33,11 @@ the decode step's row bit for bit, which is the property lossless speculation ne
                  into fixed chunks of 256 (nine cover the 2,051 keys a query ever sees), each chunk a
                  program, combined in chunk order. A row's arithmetic is a function of its own query
                  and visible keys only.
+  qsa_pool       a pooled indexer key: the mean of a block's 4 raw keys, the norm, the rope at the
+                 block's first position (the shared pool, and a verify row's own blocks)
+  qsa_scores     a row's block scores: relu(q_h . pooled) summed over the heads in order
+  qsa_topk       the 512 best blocks of a row (ties to the lower block), ascending, then the tail:
+                 one bitonic sort in shared memory a row
 
 Built on first use for sm_121a (CUDA via torch.utils.cpp_extension) and Triton (attention).
 """
@@ -344,6 +350,57 @@ __global__ void __launch_bounds__(256) qsa_scores_kernel(const __nv_bfloat16* __
     if (lane == 0) SC[(size_t)t * NB + b] = tot / sqrtf(128.0f);
 }
 
+// The selection of one row (a CTA, 1,024 threads): keys (~ord(score) << 32 | block) over the row's NB
+// scores bitonic-sorted ascending in shared memory -- score descending, the lower block first on ties
+// (a stable descending sort's order) -- then the first TOPK blocks sorted ascending, 4 positions each,
+// then the row's tail. NB a power of two, <= 8,192.
+__device__ __forceinline__ uint32_t ord_f(float f) {
+    const uint32_t u = __float_as_uint(f + 0.0f);          // -0.0 ties with +0.0, as in a float compare
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+__global__ void __launch_bounds__(1024) qsa_topk_kernel(const float* __restrict__ SC, int NB,
+        const int* __restrict__ TAIL, int* __restrict__ SEL, int nsel, int TOPK) {
+    extern __shared__ unsigned long long keys[];
+    pdl_wait();
+    pdl_trigger();
+    const int t = blockIdx.x;
+    for (int i = threadIdx.x; i < NB; i += blockDim.x)
+        keys[i] = ((unsigned long long)(~ord_f(SC[(size_t)t * NB + i])) << 32) | (unsigned)i;
+    __syncthreads();
+    for (int k = 2; k <= NB; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = threadIdx.x; i < NB; i += blockDim.x) {
+                const int ixj = i ^ j;
+                if (ixj > i) {
+                    const unsigned long long a = keys[i], b = keys[ixj];
+                    if (((i & k) == 0) == (a > b)) { keys[i] = b; keys[ixj] = a; }
+                }
+            }
+            __syncthreads();
+        }
+    }
+    // the kept blocks, ascending: keys[0 .. TOPK) hold them; sort their block numbers
+    unsigned* blk = reinterpret_cast<unsigned*>(keys + TOPK);
+    for (int i = threadIdx.x; i < TOPK; i += blockDim.x) blk[i] = (unsigned)(keys[i] & 0xffffffffu);
+    __syncthreads();
+    for (int k = 2; k <= TOPK; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = threadIdx.x; i < TOPK; i += blockDim.x) {
+                const int ixj = i ^ j;
+                if (ixj > i) {
+                    const unsigned a = blk[i], b = blk[ixj];
+                    if (((i & k) == 0) == (a > b)) { blk[i] = b; blk[ixj] = a; }
+                }
+            }
+            __syncthreads();
+        }
+    }
+    int* out = SEL + (size_t)t * nsel;
+    for (int i = threadIdx.x; i < 4 * TOPK; i += blockDim.x) out[i] = (int)blk[i >> 2] * 4 + (i & 3);
+    if (threadIdx.x < 3) out[4 * TOPK + threadIdx.x] = TAIL[t * 3 + threadIdx.x];
+}
+
 }  // namespace
 
 static int g_pdl = 1;
@@ -447,6 +504,27 @@ void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, to
         (const __nv_bfloat16*)sin.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)cos.size(1), (float)eps);
 }
 
+void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk) {
+    const at::cuda::OptionalCUDAGuard guard(sc.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int M = sc.size(0), NB = sc.size(1);
+    TORCH_CHECK(sc.dtype() == torch::kFloat && sc.is_contiguous() && NB <= 8192 && (NB & (NB - 1)) == 0 && NB >= topk,
+                "scores fp32 [M, NB], NB a power of two <= 8192");
+    TORCH_CHECK(tail.dtype() == torch::kInt && tail.is_contiguous() && sel.dtype() == torch::kInt && sel.is_contiguous()
+                && sel.size(1) >= 4 * topk + 3, "tail int32 [M, 3], sel int32 [M, >= 4 topk + 3]");
+    const size_t smem = (size_t)NB * 8 + (size_t)topk * 4;
+    cudaFuncSetAttribute(qsa_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(M); cfg.blockDim = dim3(1024); cfg.dynamicSmemBytes = smem; cfg.stream = st;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = g_pdl;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    cudaError_t e = cudaLaunchKernelEx(&cfg, qsa_topk_kernel, (const float*)sc.data_ptr(), NB, (const int*)tail.data_ptr(),
+                                       (int*)sel.data_ptr(), (int)sel.size(1), (int)topk);
+    TORCH_CHECK(e == cudaSuccess, "qsa_topk launch: ", cudaGetErrorString(e));
+}
+
 void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc) {
     const at::cuda::OptionalCUDAGuard guard(iq.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -474,7 +552,8 @@ _CPP = (
     "torch::Tensor y);\n"
     "void seq_qsa_pool(torch::Tensor ikc, torch::Tensor slots, torch::Tensor posb, torch::Tensor kln, torch::Tensor cos, "
     "torch::Tensor sin, torch::Tensor out, double eps);\n"
-    "void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc);\n")
+    "void seq_qsa_scores(torch::Tensor iq, torch::Tensor pool, torch::Tensor own, torch::Tensor qctl, torch::Tensor sc);\n"
+    "void seq_qsa_topk(torch::Tensor sc, torch::Tensor tail, torch::Tensor sel, int64_t topk);\n")
 
 _MOD = None
 
@@ -489,7 +568,7 @@ def _module():
         tag = hashlib.sha1((_CPP + _CUDA).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_seq_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[_CUDA],
                            functions=["seq_set_pdl", "seq_gdn_pre", "seq_gdn_rows", "seq_ple_gate", "seq_ple_conv",
-                                      "seq_qsa_pool", "seq_qsa_scores"],
+                                      "seq_qsa_pool", "seq_qsa_scores", "seq_qsa_topk"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.seq_set_pdl(int(_S.get("FN_PDL") == "1"))
@@ -646,7 +725,16 @@ def qsa_select(sc, tail, sel):
     """The visible positions of each row from its block scores: the TOPK best blocks (ties to the
     lower block: a stable sort), in ascending order, 4 positions each, then the row's tail positions
     (tail int32 [M, 3], the positions past the last complete block; `actl` holds how many are real)
-    -> written into sel int32 [M, >= 4 TOPK + 3]. Fixed shapes, no host sync."""
+    -> written into sel int32 [M, >= 4 TOPK + 3]. Fixed shapes, no host sync. One kernel a call up to
+    8,192 blocks (32k of context), torch sorts past it (and on the CPU); the same selection."""
+    if sc.is_cuda and sc.shape[1] <= 8192:
+        _module().seq_qsa_topk(sc, tail, sel, TOPK)
+        return sel
+    return qsa_select_torch(sc, tail, sel)
+
+
+def qsa_select_torch(sc, tail, sel):
+    """`qsa_select` in torch ops (the reference for the kernel; contexts past 32k)."""
     M = sc.shape[0]
     top = torch.sort(sc, dim=1, descending=True, stable=True).indices[:, :TOPK]
     blk = torch.sort(top, dim=1).values

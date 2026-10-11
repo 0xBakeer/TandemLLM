@@ -307,6 +307,8 @@ class FlashNextEngine(FlashNextRef):
             R = self.W[p + "mlp_hyper_connection.rank"]
             if x.shape[0] <= self.MOE_ROWS:
                 yd, ids, wts = self.moe_parts(x, li)
+                if step and not self._write:
+                    self.rec[("ids", li)] = ids            # the experts a verify block reads (ENG-155 prices)
                 h, n = K.combine_inject_norm(h, yd, ids, wts, di, R, nxt, hc, eps)
             else:
                 h, n = K.inject_norm(h, self.moe(x, li), di, R, nxt, hc, eps)
@@ -466,6 +468,13 @@ class FlashNextEngine(FlashNextRef):
             nb *= 2
         return nb
 
+    @staticmethod
+    def path_ple_ids(hsh, ctx0: list[int], tokens: list[int], paths: list[list[int]]) -> list[list[int]]:
+        """The n-gram row ids of every row of a block: each row hashed after the tokens on its own
+        path (its ancestors, then the state's context `ctx0` before the block)."""
+        n = hsh.context_len
+        return [hsh.ids_one(tokens[pa[-1]], (ctx0 + [tokens[a] for a in pa[:-1]])[-n:]) for pa in paths]
+
     def _ple_ctx(self, st: FNState, li: int) -> list[int]:
         ctx = st.ple_ctx.get(li)
         return [self.cfg.eos_token_id] * self.hash[li].context_len if ctx is None else ctx.view(-1).tolist()
@@ -502,10 +511,8 @@ class FlashNextEngine(FlashNextRef):
         h["psrc"].numpy()[:] = SK.window_src(parents, (9, 6, 3), 9)
         for li in self.cfg.ple_layers:
             hsh = self.hash[li]
-            ctx0 = self._ple_ctx(st, li)
-            for i, pa in enumerate(paths):
-                ctx = (ctx0 + [tokens[a] for a in pa[:-1]])[-hsh.context_len:]
-                self._ple_fill(h, i, li, hsh.ids_one(tokens[i], ctx))
+            for i, ids in enumerate(self.path_ple_ids(hsh, self._ple_ctx(st, li), tokens, paths)):
+                self._ple_fill(h, i, li, ids)
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
         self._block = (list(tokens), list(parents), paths)
@@ -1124,7 +1131,9 @@ class DecodeGraph:
         eng, st = self.eng, self.st
         self._ready()
         eng.settle(st)
+        t0 = time.perf_counter()
         eng.stage(token, st)
+        eng.host_ms["stage"] = eng.host_ms.get("stage", 0.0) + 1e3 * (time.perf_counter() - t0)
         self.graph.replay()
         eng._pend_owner = None
         st.length += 1

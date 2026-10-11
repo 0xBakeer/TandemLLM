@@ -59,6 +59,7 @@ def plain(eng: FlashNextEngine, ids: list[int], new: int, eos: set) -> dict:
     out = [int(eng.prefill(torch.tensor(ids), st)[0].argmax())]
     g = DecodeGraph(eng, st)
     g._ready()
+    eng.host_ms = {}
     per = []
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -68,6 +69,7 @@ def plain(eng: FlashNextEngine, ids: list[int], new: int, eos: set) -> dict:
         per.append(time.perf_counter() - ts)
     dt = time.perf_counter() - t0
     return {"tokens": len(out), "tok_s": round((len(out) - 1) / dt, 2), "ms_p50": round(1e3 * statistics.median(per), 2),
+            "stage_ms_a_token": round(eng.host_ms.get("stage", 0.0) / max(len(out) - 1, 1), 3),
             "graph_classes": sorted(g.graphs)}
 
 

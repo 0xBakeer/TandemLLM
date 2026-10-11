@@ -356,10 +356,28 @@ def test_attn_prep_indexer_query():
     return f"indexer query (norm 1 + w, rope at the position) within {steps:.1e} rel of torch; rows = one-row calls"
 
 
+def test_qsa_topk_kernel_equals_torch():
+    """The one-kernel selection = the torch selection (stable top-512 with ties, ascending, tail)."""
+    g = _g(13)
+    out = []
+    for NB, M in ((1024, 3), (2048, 2), (8192, 4)):
+        sc = (torch.randn(M, NB, generator=g, device=DEV) * 4).round()            # many exact ties
+        nblk = torch.randint(513, NB + 1, (M,), generator=g, device=DEV)
+        sc[torch.arange(NB, device=DEV)[None, :] >= nblk[:, None]] = float("-inf")
+        tail = (nblk[:, None] * 4 + torch.arange(3, device=DEV)[None, :]).int().contiguous()
+        a = torch.zeros(M, SK.NSEL, dtype=torch.int32, device=DEV)
+        b = torch.zeros_like(a)
+        SK.qsa_select(sc, tail, a)
+        SK.qsa_select_torch(sc, tail, b)
+        assert torch.equal(a, b), NB
+        out.append(NB)
+    return f"bit-equal to the torch sorts at {out} blocks with ties"
+
+
 TESTS = [test_tree_helpers, test_gdn_rows_tree_equals_decode_walk, test_gdn_rows_parked_commit_folded, test_gdn_pre_windows_equal_decode_shift,
          test_ple_gate_and_conv_rows, test_attn_rows_tree_equals_decode_and_reference,
          test_attn_rows_selected_positions, test_attn_prep_and_gate_mul_rows, test_qsa_pool_scores_and_selection,
-         test_attn_prep_indexer_query]
+         test_attn_prep_indexer_query, test_qsa_topk_kernel_equals_torch]
 
 
 if __name__ == "__main__":

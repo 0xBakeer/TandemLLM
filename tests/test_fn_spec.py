@@ -10,6 +10,8 @@
   * `FlashNextEngine._stage_qsa` (ENG-147): dense rows see every position, sparse rows 2,048 selected
     positions and their tail; a row's own blocks map positions before the block start to cache slots
     and later ones to the row's ancestors; `qsa_class` widens by powers of two past the budget;
+  * the n-gram ids of a block's rows (`FlashNextEngine.path_ple_ids`) are the reference hash of each
+    row's own path; the QSA selection from block scores is the reference's stable top-512;
   * `StairCut` cuts a draft into a valid DFS block, keeps a confident chain and drops an unsure one,
     adds a sibling only when it pays, and learns its calibration from the walk.
 """
@@ -188,6 +190,54 @@ def test_staircut():
         sc.observe([0], 30.0, 2.0)
     assert sc.c("spine", 0.95) < 0.2 < before
     return "confident chain kept, unsure dropped, a paying sibling first, calibration learned"
+
+
+def test_ple_ids_per_path():
+    """Every row's n-gram ids are the reference hash of its own path (EOS resets included)."""
+    import torch
+    from engine.models.flashnext.engine import FlashNextEngine
+    from engine.models.flashnext.ple import NGramHash
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fn_tiny import tiny
+    cfg = tiny()[0]
+    hsh = NGramHash.from_config(cfg, 0)
+    rng = random.Random(5)
+    for _ in range(64):
+        parents = _random_tree(rng, rng.randint(1, 24))
+        tokens = [rng.choice([cfg.eos_token_id, 5, 6, 7, 9, 11]) for _ in parents]
+        ctx0 = [rng.randrange(cfg.vocab_size) for _ in range(hsh.context_len)]
+        paths = []
+        for i, p in enumerate(parents):
+            paths.append([i] if p < 0 else paths[p] + [i])
+        got = FlashNextEngine.path_ple_ids(hsh, ctx0, tokens, paths)
+        for i, pa in enumerate(paths):
+            seq = torch.tensor([[tokens[a] for a in pa]])
+            want = hsh.ids(seq, torch.tensor([ctx0]))[0, -1].tolist()
+            assert got[i] == want, (parents, i)
+    return "64 random trees: each row's 16 ids = the batched reference hash of its path"
+
+
+def test_qsa_select_cpu():
+    """The selection from block scores: the 512 best (ties to the lower block), ascending, then the
+    tail; equal to the reference's stable top-k per row."""
+    import torch
+    from engine.models.flashnext.ref import topk_stable
+    from tools.fn_seq_kernels import NSEL, qsa_select
+    g = torch.Generator().manual_seed(9)
+    M, NB = 4, 2048
+    nblk = torch.tensor([700, 1500, 513, 2048])
+    sc = torch.randn(M, NB, generator=g).round(decimals=1)          # many exact ties
+    sc[torch.arange(NB)[None, :] >= nblk[:, None]] = float("-inf")
+    tail = (nblk[:, None] * 4 + torch.arange(3)[None, :]).int()
+    sel = torch.zeros(M, NSEL, dtype=torch.int32)
+    qsa_select(sc, tail, sel)
+    for t in range(M):
+        _, top = topk_stable(sc[t, :int(nblk[t])], 512)
+        blk = torch.sort(top).values
+        want = (blk[:, None] * 4 + torch.arange(4)).flatten()
+        assert torch.equal(sel[t, :2048].long(), want), t
+        assert sel[t, 2048:2051].tolist() == tail[t].tolist()
+    return "4 rows with ties: the reference's blocks in ascending order, then the tail"
 
 
 if __name__ == "__main__":
