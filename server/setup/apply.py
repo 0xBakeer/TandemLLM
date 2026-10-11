@@ -196,6 +196,22 @@ def _expand(v: str | None) -> str:
     return (v or "").replace("${HOME}", os.path.expanduser("~"))
 
 
+def _unset_default(key: str) -> str | None:
+    """What the engine runs with when serve.env leaves `key` unset: a QWEN38_* knob's default in
+    engine/settings.py, else the `${KEY:-default}` the ops/start.sh that started this server
+    passes on. None: neither names one."""
+    if key.startswith("QWEN38_"):
+        from engine.settings import KNOBS
+        d = KNOBS.get(key[len("QWEN38_"):], (None,))[0]
+        return None if d is None else os.path.expanduser(str(d))
+    try:
+        with open(os.path.join(device_mod.ops_dir(), "start.sh")) as fh:
+            found = set(re.findall(r"\$\{" + re.escape(key) + r":-([^}]*)\}", fh.read()))
+    except OSError:
+        return None
+    return found.pop() if len(found) == 1 else None
+
+
 def current_selection(m: dict) -> dict:
     """What the box runs now as a selection (GET /v1/setup/models/{id}/current): the active
     profile and every registry knob as ops/serve.env resolves it (with run/setup.env), so the
@@ -215,12 +231,19 @@ def current_selection(m: dict) -> dict:
             continue
         votes = set()
         for key, v in c["knobs"].items():
-            now = env.get(key, "")
+            on, off = _expand(v["on"]), _expand(v["off"])
+            now = env.get(key)
+            if now is None:
+                # unset is what the engine then runs with when that is one of the tool's two
+                # values (the lookup store's default folder: on; start.sh's ${VISION:-on}), else
+                # empty, as a role's unset model is
+                d = _unset_default(key)
+                now = d if d is not None and d in ((off,) if v["on"] is None else (on, off)) else ""
             if v["on"] is None:
-                votes.add(now != _expand(v["off"]))
-            elif now == _expand(v["on"]):
+                votes.add(now != off)
+            elif now == on:
                 votes.add(True)
-            elif now == _expand(v["off"]) or (v["off"] == "" and key not in env):
+            elif now == off:
                 votes.add(False)
             else:
                 votes.add(None)

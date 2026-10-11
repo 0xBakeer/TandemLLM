@@ -586,6 +586,29 @@ def test_the_current_selection():
         assert {"field": "advanced.host", "value": "192.168.178.143"} in b["unmatched"], b
 
 
+def test_the_current_selection_of_unset_keys():
+    # a box whose serve.env predates the setup guide's keys (the reference box's): an unset key is
+    # what the engine then runs with, the lookup store's default folder or start.sh's default
+    with Box() as box:
+        shutil.copy(os.path.join(REPO, "ops", "start.sh"), box.ops)
+        env_file = os.path.join(box.ops, "serve.env")
+        with open(env_file) as fh:
+            lines = fh.read().splitlines()
+        gone = ("VISION=", "RESPONSE_CACHE=", "SESSION_SPILL=", "QSE_BACKENDS=")
+        with open(env_file, "w") as fh:
+            fh.write("\n".join(x for x in lines if not x.startswith(gone)) + "\n")
+        b = apply.current_selection(M)
+        comps = b["selection"]["components"]
+        assert comps["lookup"] is True and comps["vision"] is True, b
+        assert comps["response_cache"] is False and comps["nvme_spill"] is True, b
+        assert comps["proxy"] is False, comps         # start.sh's ${QSE_BACKENDS:-off}
+        assert b["unmatched"] == [], b["unmatched"]
+        # an explicit empty folder is the store off, as before
+        with open(env_file, "a") as fh:
+            fh.write("QWEN38_SUFFIX_STORE=\n")
+        assert apply.current_selection(M)["selection"]["components"]["lookup"] is False
+
+
 def test_an_install_sh_box():
     with Box() as box:
         run_ops = os.path.join(box.tmp, "install", "run", "ops")
