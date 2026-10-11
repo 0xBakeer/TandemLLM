@@ -1586,17 +1586,25 @@ def _statvfs_free(path: str) -> int:
     return st.f_bavail * st.f_frsize
 
 
-def _engine_files(root: str, skip=()) -> list[str]:
+def _engine_files(root: str, skip=(), packages=()) -> list[str]:
     """The engine's own modules the fingerprint reads: every file under `engine/` but the other
-    models' packages and the file names in `skip` (at the top of `engine/`), in a fixed order."""
+    models' packages and the file names in `skip` (at the top of `engine/`), in a fixed order.
+    `engine/models/` (the model layer, ENG-221) is one of those packages: the 27B reads none of
+    it, so it is left out and the 27B's fingerprint is the bytes it always was. A model whose rows
+    its own package computes names it in `packages` (e.g. "models/flashnext"); its files follow
+    the rest, in the same order rule."""
     out = []
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative",
+        dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative", "models",
                                                                "__pycache__"))
         for name in sorted(files):
             if name.endswith(".py") and not (dirpath == base and name in skip):
                 out.append(os.path.join(dirpath, name))
+    for pkg in packages:
+        for dirpath, dirnames, files in os.walk(os.path.join(base, pkg)):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            out.extend(os.path.join(dirpath, n) for n in sorted(files) if n.endswith(".py"))
     return out
 
 
@@ -1620,12 +1628,18 @@ _TOOLS_IMPORT = re.compile(r"^\s*(?:from\s+tools\s+import\s+([\w\s,()]+)|from\s+
                            r"import|import\s+tools\.(\w+))", re.M)
 
 
+#: knob owners whose defaults cannot change the 27B's rows: the server's (no code under `server/`
+#: is in the fingerprint) and the model layer's (`engine/models/`, which `_engine_files` leaves out)
+_NOT_27B_KNOBS = ("server/", "engine/models/")
+
+
 def _arithmetic_knobs(path: str) -> bytes | None:
     """The knobs of `engine/settings.py` that the server does not own, as (name, default) in name
     order: the defaults the engine's and the kernels' modules read. A knob the server reads (the
     regenerate rule, a decider's queue, a package's address) cannot change a prefill's rows, as no
-    code under `server/` is in the fingerprint. None when the file has no literal `KNOBS` table
-    (the caller hashes the bytes then)."""
+    code under `server/` is in the fingerprint; nor can a knob of another model's package
+    (`_NOT_27B_KNOBS`). None when the file has no literal `KNOBS` table (the caller hashes the
+    bytes then)."""
     import ast
     try:
         with open(path, "rb") as f:
@@ -1641,7 +1655,7 @@ def _arithmetic_knobs(path: str) -> bytes | None:
             except ValueError:
                 return None
             rows = sorted((str(k), v[0]) for k, v in knobs.items()
-                          if not str(v[1] if len(v) > 1 else "").startswith("server/"))
+                          if not str(v[1] if len(v) > 1 else "").startswith(_NOT_27B_KNOBS))
             return json.dumps(rows, default=str).encode()
     return None
 
@@ -1670,7 +1684,7 @@ def _tools_modules(root: str, files: list[str]) -> list[str]:
     return [os.path.join(root, "tools", n + ".py") for n in sorted(seen)]
 
 
-def fingerprint(root: str, extra: dict, skip=()) -> str:
+def fingerprint(root: str, extra: dict, skip=(), packages=()) -> str:
     """What the rows on disk depend on besides the tokens: the engine's code (every file under
     `engine/` but the other models' packages, and the file names in `skip`), the `tools/` modules
     it imports (`_tools_modules`), and `extra` (the weights, the arithmetic flags, the grid, the
@@ -1678,10 +1692,11 @@ def fingerprint(root: str, extra: dict, skip=()) -> str:
     the session spill (engine/spill.py) skips the files that keep state rather than compute it.
     `engine/settings.py` counts by its arithmetic knobs' defaults, not its bytes: 0.4.6-test
     registered seven server knobs there, and that alone swept 13 shared heads (12.4 GB) and 13
-    spilled conversations (29.6 GB) at its start (FX15, 2026-10-08)."""
+    spilled conversations (29.6 GB) at its start (FX15, 2026-10-08). `packages`: a model's own
+    package under `engine/` (`_engine_files`); empty for the 27B."""
     h = hashlib.sha256()
     h.update(b"fp2")
-    files = _engine_files(root, skip)
+    files = _engine_files(root, skip, packages)
     for p in files + _tools_modules(root, files):
         rel = os.path.relpath(p, root)
         h.update(rel.encode())
