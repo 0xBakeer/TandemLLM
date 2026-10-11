@@ -4,10 +4,14 @@
     the last row the anchor the proposal names -- across prompt chunks, a forced phrase, verified paths
     and single decode steps; the backlog past depth + 1 rows is primed in one call, in position order,
     and the last rows ride the draft's own feed;
-  * the walk down a block follows the target's picks and adds the target's token at the stop;
+  * the walk down a block (the shared engine/methods/walk.py) follows the target's picks and adds the
+    target's token at the stop;
   * `kv.length` reads the state's length after a pending chain commit; zero resets; another length
     keeps the rows by length and clamps the pooled keys;
-  * a forward that does not start at the state's length is refused.
+  * a forward that does not start at the state's length is refused;
+  * the adapter's cold verbs: `cost()` from the state's sections, `settle()` lands a pending chain and
+    the parked GDN rows, `discard_pending()` drops them, `trim_pending(n)` cuts a pending chain and
+    refuses a cut inside rows the state absorbed.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.methods import walk  # noqa: E402
 from engine.models.flashnext.ref import FNState  # noqa: E402
 from engine.models.flashnext.serving import FlashNextServing, FlashNextTreeDrafter  # noqa: E402
 from engine.tree import DraftTree  # noqa: E402
@@ -36,6 +41,14 @@ class _FN:
         self.primed: list = []
         self.resets = 0
         self.commits: list = []
+        self._pend_owner = None
+        self._pend_n = torch.ones(2, dtype=torch.int32)
+        self.flushes = 0
+
+    def flush(self):
+        self.flushes += 1
+        self._pend_n.zero_()
+        self._pend_owner = None
 
     def new_state(self, cap=None):
         st = FNState(cap=cap or 64)
@@ -95,9 +108,9 @@ def test_walk_and_kv_length():
     fn = _FN()
     s = FlashNextServing(fn, 64)
     tree = DraftTree(tokens=[7, 8, 9, 4, 5], parents=[-1, 0, 1, 0, 3])
-    assert s.accept_tree(tree, [8, 9, 1, 0, 0]) == ([0, 1, 2], [8, 9, 1])
-    assert s.accept_tree(tree, [4, 0, 0, 5, 6]) == ([0, 3, 4], [4, 5, 6])
-    assert s.accept_tree(tree, [2, 0, 0, 0, 0]) == ([0], [2])
+    assert walk.accept_tree(tree, [8, 9, 1, 0, 0]) == ([0, 1, 2], [8, 9, 1])
+    assert walk.accept_tree(tree, [4, 0, 0, 5, 6]) == ([0, 3, 4], [4, 5, 6])
+    assert walk.accept_tree(tree, [2, 0, 0, 0, 0]) == ([0], [2])
     s._chain = 3                                       # a chain block whose commit waits
     assert s.kv.length == 3 and fn.commits == [[0, 1, 2]] and s._chain is None
     s.st.pool_n = {3: 5}
@@ -110,9 +123,37 @@ def test_walk_and_kv_length():
         raise AssertionError("a forward off the state's length must be refused")
     except ValueError:
         pass
-    cost = s.snapshot_cost()
-    assert cost["recurrent_bytes"] == 2 * 4 * 4 * 4 and cost["kv_bytes_per_token"] == (2 * 8 * 2 + 4) * 2
-    return "walk with stops at the root and deep; pending chain committed on read; reset; pool clamp; refusal"
+    cost = s.cost()
+    sc = cost.snapshot_cost()
+    assert sc["recurrent_bytes"] == 2 * 4 * 4 * 4 and sc["kv_bytes_per_token"] == (2 * 8 * 2 + 4) * 2
+    assert sc["conv_bytes"] == 9 * 4 and cost.section_bytes == sc["recurrent_bytes"] + sc["conv_bytes"]
+    return "walk with stops at the root and deep; pending chain committed on read; reset; pool clamp; refusal; cost"
+
+
+def test_pending_verbs():
+    fn = _FN()
+    s = FlashNextServing(fn, 64)
+    s.st.length = 10
+    s._chain = 4                                       # a chain block at 10..13 whose commit waits
+    assert s.trim_pending(12) and fn.commits == [[0, 1]] and s.st.length == 12 and s._chain is None
+    s._chain = 3
+    assert s.trim_pending(12) and fn.commits == [[0, 1]] and s.st.length == 12   # none kept: dropped
+    assert s.trim_pending(12) and not s.trim_pending(11) and s.st.length == 12   # absorbed: refused
+    s._chain = 2
+    assert not s.trim_pending(20) and s.st.length == 12 and s._chain == 2       # past the chain: no
+    fn._pend_owner = s.st                              # parked GDN rows of this state
+    s.settle()
+    assert fn.commits[-1] == [0, 1] and fn.flushes == 1 and fn._pend_owner is None and s.st.length == 14
+    fn._pend_owner, fn._pend_n[:] = s.st, 3
+    s._chain, s.picks = 2, [1, 2]
+    s.discard_pending()
+    assert s._chain is None and s.picks is None and fn._pend_owner is None and int(fn._pend_n.sum()) == 0
+    other = FNState(cap=8)
+    fn._pend_owner = other                             # another state's parked rows are not ours
+    s.discard_pending()
+    s.settle()
+    assert fn._pend_owner is other and fn.flushes == 1
+    return "trim inside a pending chain, drop it, refuse absorbed rows; settle lands chain and parked rows; discard"
 
 
 if __name__ == "__main__":

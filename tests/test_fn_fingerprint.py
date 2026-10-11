@@ -1,9 +1,9 @@
-"""ENG-221: the model layer leaves the 27B's disk-tier fingerprint as it was.
+"""ENG-221 / ENG-E8: the model layer and the shared methods leave the 27B's disk-tier fingerprint as it was.
 
-`engine/models/` and the knobs owned under it are left out of the 27B's fingerprint
-(engine/disk_cache.py `_engine_files`, `_NOT_27B_KNOBS`), so adding Flash-Next sweeps no saved
-chat. Proof: the fingerprint of this tree equals the fingerprint of a copy without
-`engine/models/` and without those knobs, for the tier (no skip) and for the session spill
+`engine/models/`, `engine/methods/` and the knobs owned under them are left out of the 27B's
+fingerprint (engine/disk_cache.py `_engine_files`, `_NOT_27B_KNOBS`), so adding Flash-Next sweeps no
+saved chat. Proof: the fingerprint of this tree equals the fingerprint of a copy without
+`engine/models/` and `engine/methods/` and without those knobs, for the tier (no skip) and for the session spill
 (engine/spill.py's NOT_ARITHMETIC skip); and a model that opts its package in gets another one.
 """
 
@@ -24,7 +24,7 @@ EXTRA = {"weights": "exl3-6.0", "flags": {"X": "1"}}
 
 def _without_models(dst: str) -> None:
     shutil.copytree(os.path.join(ROOT, "engine"), os.path.join(dst, "engine"),
-                    ignore=shutil.ignore_patterns("__pycache__", "models"))
+                    ignore=shutil.ignore_patterns("__pycache__", "models", "methods"))
     shutil.copytree(os.path.join(ROOT, "tools"), os.path.join(dst, "tools"),
                     ignore=shutil.ignore_patterns("__pycache__"))
     p = os.path.join(dst, "engine", "settings.py")
@@ -43,15 +43,17 @@ def _without_models(dst: str) -> None:
 
 def test_27b_fingerprint_unchanged_by_the_model_layer():
     assert os.path.isdir(os.path.join(ROOT, "engine", "models", "flashnext"))
+    assert os.path.isfile(os.path.join(ROOT, "engine", "methods", "walk.py"))
     with tempfile.TemporaryDirectory() as d:
         _without_models(d)
         assert not os.path.exists(os.path.join(d, "engine", "models"))
+        assert not os.path.exists(os.path.join(d, "engine", "methods"))
         from engine.spill import NOT_ARITHMETIC
         for skip in ((), NOT_ARITHMETIC):
             a = dc.fingerprint(ROOT, EXTRA, skip=skip)
             b = dc.fingerprint(d, EXTRA, skip=skip)
             assert a == b, (skip, a[:12], b[:12])
-    return f"tier and spill fingerprints equal without engine/models ({a[:12]})"
+    return f"tier and spill fingerprints equal without engine/models and engine/methods ({a[:12]})"
 
 
 def test_a_model_package_changes_its_own_fingerprint():

@@ -179,7 +179,7 @@ def test_side_graphs_off_builds_no_graph_pool_and_estimates_less():
     QSE_SIDE_SLOT_CONST_GB overrides the estimate either way."""
     import argparse
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from engine.model import Qwen38Engine
+    from engine.models.qwen3_5.adapter import Qwen38Engine
     from server import app as A
     e = Qwen38Engine.__new__(Qwen38Engine)
     e._graphs, e.graphs_off = None, True

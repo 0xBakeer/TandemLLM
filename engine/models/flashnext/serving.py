@@ -3,9 +3,10 @@
 
 The server's loop (`_generate_stream`) speaks a small interface: `forward` (a prompt chunk, a forced
 phrase or one decode token at the state's length), `forward_tree` (a draft block; logits of every
-row), `accept_tree` (the walk), `commit_tree` (keep a path), `hidden_post_norm` (the rows a drafter
-syncs from), `picks` (the verify's own greedy tokens), `kv.length`, `reset`. `FlashNextServing` maps
-it onto `FlashNextEngine`:
+row), `commit_tree` (keep a path), `hidden_post_norm` (the rows a drafter syncs from), `picks` (the
+verify's own greedy tokens), `kv.length`, `reset`; the walk down a block is the shared one
+(engine/methods/walk.py). The caches and the dashboard add the adapter's cold verbs (ENG-E8): `cost`,
+`settle`, `discard_pending`, `trim_pending`. `FlashNextServing` maps it onto `FlashNextEngine`:
 
   forward, one token      the captured decode step (`DecodeGraph`), streams of that row
   forward, more tokens    the prefill kernels (`FlashNextEngine.prefill`), every row's streams
@@ -27,15 +28,34 @@ graph; StairCut cuts the chain and learns from the verify the loop timed (`on_ve
 
 from __future__ import annotations
 
+import os
 import time
 
+import numpy as np
 import torch
 
 from engine.drafters import run_steps
+from engine.methods.manifest import Manifest
+from engine.models.adapter import CostModel
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine, MTPChainGraph
 from engine.models.flashnext.ref import FNModelState
 from engine.models.flashnext.spec import MTPGraphDrafter, StairCut
+from engine.settings import SETTINGS as _S
 from engine.tree import DraftTree
+
+
+#: fingerprint v3 (`FlashNextServing.manifest`): the package's files that compute rows, the tables
+MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/config.py",
+           "engine/models/flashnext/engine.py", "engine/models/flashnext/load.py",
+           "engine/models/flashnext/pack.py", "engine/models/flashnext/ple.py",
+           "engine/models/flashnext/ref.py", "engine/models/flashnext/spec.py", "engine/settings.py")
+TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
+
+
+def manifest() -> Manifest:
+    """What Flash-Next's stored rows depend on (fingerprint v3, ENG-243): its package's arithmetic
+    (not this adapter), the knob registry, its own tile tables; the `tools/` kernels follow."""
+    return Manifest(arch="qwen4_exp", modules=MODULES, data=TABLES)
 
 
 class _KV:
@@ -51,7 +71,7 @@ class _KV:
 
     @property
     def length(self) -> int:
-        self._s._settle()
+        self._s._settle_chain()
         return self._s.st.length
 
     @length.setter
@@ -94,17 +114,51 @@ class FlashNextServing:
     def hidden_post_norm(self) -> torch.Tensor:
         return self._hidden
 
-    def snapshot_cost(self) -> dict:
-        """What a state snapshot holds (the dashboard's cache costs): the recurrent and conv sections,
-        and the cache rows a token adds (K, V and the indexer key of every attention layer)."""
-        sec = self.state.sections()
+    def cost(self) -> CostModel:
+        """What a state snapshot holds: its sections whole (the recurrent, conv and PLE ones) and the
+        cache rows a token adds (K, V and the indexer key of every attention layer, bf16)."""
+        sec = {k: t.numel() * t.element_size() for k, t in self.state.sections().items()}
         c = self.cfg
         per_tok = len(c.attention_layers) * (c.num_key_value_heads * c.head_dim * 2
                                              + (c.indexer_head_dim if c.has_indexer else 0)) * 2
-        return {"recurrent_bytes": sum(t.numel() * t.element_size() for k, t in sec.items() if k.startswith("gdn.S")),
-                "conv_bytes": sum(t.numel() * t.element_size() for k, t in sec.items()
-                                  if k.startswith(("gdn.conv", "ple.conv"))),
-                "kv_bytes_per_token": per_tok}
+        return CostModel(section_bytes=sum(sec.values()), view_bytes_per_token=per_tok,
+                         parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
+                                "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
+
+    def manifest(self) -> Manifest:
+        return manifest()
+
+    def settle(self) -> None:
+        """Land what is pending, so the state's sections are the sequence's whole (before a
+        snapshot): a chain block's commit, and the GDN rows the folded commit parked for the next call."""
+        self._settle_chain()
+        if self.fn._pend_owner is self.st:
+            self.fn.flush()
+
+    def discard_pending(self) -> None:
+        """Forget what is pending after the state was overwritten (a restore): the chain block, the
+        last verify's picks and the GDN rows parked for the state that was there."""
+        self._chain = None
+        self.picks = None
+        if self.fn._pend_owner is self.st:
+            self.fn._pend_n.zero_()
+            self.fn._pend_owner = None
+
+    def trim_pending(self, n: int) -> bool:
+        """Bring the state back to length `n` inside work not yet committed: a chain block
+        (`forward_block`) whose commit waits keeps only its rows below `n` (none: the verify moved
+        nothing but its own KV rows). False, and nothing changed, when the state already absorbed the
+        rows past `n` -- a verified path is committed whole, conv tails included (cutting inside it is
+        ENG-235's)."""
+        n, L = int(n), self.st.length
+        if self._chain is None:
+            return n == L
+        if not L <= n <= L + self._chain:
+            return False
+        self._chain = None
+        if n > L:
+            self.commit_tree(list(range(n - L)))
+        return True
 
     def window_ok(self, i: int) -> bool:
         return False                        # no layer-major prefill window (engine/cache.py)
@@ -118,7 +172,7 @@ class FlashNextServing:
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
         """Rows `ids` at positions start..: one token through the decode step, more through the prefill
         kernels. Logits [1, 1, vocab] of the last row (fp32)."""
-        self._settle()
+        self._settle_chain()
         ids = ids.view(-1)
         self._at(start)
         T = ids.numel()
@@ -140,7 +194,7 @@ class FlashNextServing:
         """A draft block in DFS pre-order (row 0 the anchor at `start`): every row's logits [M, vocab]
         fp32 (a static buffer), its greedy pick in `picks`, its streams in `hidden_post_norm`. Nothing
         but the block's own KV rows is written until `commit_tree`."""
-        self._settle()
+        self._settle_chain()
         self._at(start)
         toks = [int(t) for t in block.view(-1).tolist()]
         M = len(toks)
@@ -153,20 +207,6 @@ class FlashNextServing:
         self.stats["verify_blocks"] += 1
         self.stats["verify_rows"] += M
         return rb["logits"][:M]
-
-    @staticmethod
-    def accept_tree(tree, picks: list[int]) -> tuple[list[int], list[int]]:
-        """The walk down the block along the target's own tokens: (path, new tokens)."""
-        node, path = 0, [0]
-        while True:
-            want = picks[node]
-            nxt = next((c for c in range(node + 1, len(tree.tokens))
-                        if tree.parents[c] == node and tree.tokens[c] == want), None)
-            if nxt is None:
-                break
-            path.append(nxt)
-            node = nxt
-        return path, [tree.tokens[i] for i in path[1:]] + [picks[node]]
 
     @torch.no_grad()
     def commit_tree(self, path: list[int]) -> None:
@@ -191,7 +231,7 @@ class FlashNextServing:
         self.commit_tree(list(range(int(keep))))
 
     # --- internals -------------------------------------------------------------------------------
-    def _settle(self) -> None:
+    def _settle_chain(self) -> None:
         if self._chain is not None:
             n, self._chain = self._chain, None
             self.commit_tree(list(range(n)))
@@ -317,3 +357,37 @@ class FlashNextTreeDrafter:
         self.mtp.pending = (rows[n - keep:], nexts[n - keep:])
         self.stats["fed_rows"] += n
         return True
+
+
+#: the repository root (the hot draft vocabulary is ops/fn-hot-vocab.npy)
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print):
+    """Flash-Next for the server (`server/app.py` `_load_flashnext`): the pack's weights, the engine in
+    the loop's interface, and with `spec` the MTP drafter over the hot draft head (`FN_DRAFT_HOT` ids of
+    ops/fn-hot-vocab.npy, 0 = the whole vocabulary), its graphs captured -- gated by the load-time
+    self-check (a failed check serves plain decode). `mark(stage)` at "weights", "engine", "drafters"
+    (the server's load ledger). Returns (serving, drafter or None, info)."""
+    from engine.models.flashnext.load import load as fn_load
+    idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
+    mark("weights")
+    fn = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max_len)
+    eng = FlashNextServing(fn, max_len)
+    mark("engine")
+    drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
+    if spec:
+        if hot:
+            fn.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
+        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
+                                       tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
+        if check["ok"]:
+            drafter = FlashNextTreeDrafter(eng, depth=depth)
+            drafter.capture_all()
+        else:
+            log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")
+    mark("drafters")
+    info = {"pack": pack, "load": timing, "self_check": check,
+            "draft_head": f"hot {hot}" if spec else None, "depth": depth if drafter is not None else 0}
+    return eng, drafter, info

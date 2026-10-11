@@ -42,6 +42,7 @@ from engine import cache  # noqa: E402
 from engine import kvpool  # noqa: E402  (SRV-307 the shared KV pool)
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
+from engine.methods import walk  # noqa: E402  (ENG-E8 the walk every model's blocks take)
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
@@ -1491,7 +1492,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # logits after it, so then the loop takes it
                         picks_d = eng.picks if eng.picks is not None and pen is None else None
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
-                        path, new = eng.accept_tree(tree, picks_t)
+                        path, new = walk.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
@@ -1898,8 +1899,7 @@ def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> 
         eng.tap = tap
         eng.state.restore(saved)
         eng.kv.length = length
-        eng._pending_walk = False
-        eng._pend = None
+        eng.discard_pending()
 
 
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
@@ -7721,16 +7721,8 @@ def cache_stats() -> dict:
         ic = STATE.get("image_cache")
         out["vision"] = {"tower_bytes": tower.nbytes, **tower.stats,
                          "embed_cache": ic.report() if ic is not None else None}
-    if eng is not None and hasattr(eng, "snapshot_cost"):
-        out["snapshot_cost"] = eng.snapshot_cost()          # Flash-Next (its state's own sections)
-    elif eng is not None:
-        cfg = eng.cfg
-        kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
-        out["snapshot_cost"] = {
-            "recurrent_bytes": eng.state.S.numel() * 4,
-            "conv_bytes": eng.state.conv.numel() * eng.state.conv.element_size(),
-            "kv_bytes_per_token": kv_per_token,
-        }
+    if eng is not None:
+        out["snapshot_cost"] = eng.cost().snapshot_cost()   # the model's adapter (engine/models/adapter.py)
     return out
 
 
@@ -8690,6 +8682,30 @@ def _arch_of(model: str | None) -> str:
         return architecture(json.load(f)).name
 
 
+def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
+    """The STATE the request path reads, for every model's loader (SRV-341): the server's own knobs
+    from `a`, and in `model` what the loader built -- the tree and sampled-tree mode, the accept rule,
+    the caches (or None/False where the model has none yet) and any model-specific record."""
+    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
+                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
+                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
+                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
+                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
+                 draining=False,
+                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
+                 reasoning_effort=a.reasoning_effort,
+                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
+                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
+                                     a.frequency_penalty, a.no_repeat_ngram),
+                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
+                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
+                               if a.pattern_stop else None),
+                 argloop=a.argloop,
+                 prefill_heartbeat=float(a.prefill_heartbeat_s),
+                 response_cache=rcache, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"), **model)
+
+
 def _load(a) -> None:
     """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
     if _S.get("BLOCKING_SYNC") == "1":
@@ -8698,7 +8714,7 @@ def _load(a) -> None:
         return _load_flashnext(a)
     from engine.config import load_config
     from engine.loader import Weights
-    from engine.model import Qwen38Engine
+    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
     from transformers import AutoTokenizer
     t0 = time.time()
     # the price table first: a bad file must stop the start before minutes of weight loading
@@ -8856,28 +8872,12 @@ def _load(a) -> None:
 
     STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
                          if a.prompt_token_cache > 0 else None)
-    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
-                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
-                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
-                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
-                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
-                 draining=False,
-                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
-                 reasoning_effort=a.reasoning_effort,
-                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
-                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
-                                     a.frequency_penalty, a.no_repeat_ngram),
-                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
-                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
-                               if a.pattern_stop else None),
-                 argloop=a.argloop,
-                 state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                 session_trim=(a.session_trim == "on"),
-                 resident=resident, prefill_heartbeat=float(a.prefill_heartbeat_s),
-                 prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
-                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
-                 usage_default=(a.usage_default == "on"))
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache,
+                   tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
+                   state_store=store, session_cache=session_on, prefix_cache=prefix_on,
+                   session_trim=(a.session_trim == "on"), resident=resident,
+                   prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
+                   suffix_store=suffix)
     led.mark("caches")
     print(f"[server] {w.report()}")
     if relax.on:
@@ -8941,10 +8941,7 @@ def _load_flashnext(a) -> None:
     (`--tree`, a sampled request walks it: `--sampled-tree det`); the load-time self-check gates it.
     Not yet on Flash-Next (the parity work, ENG-E7): the prefix, session and disk caches, the KV pool,
     the resident prefix, images, side slots; each is off here and says so."""
-    import numpy as np
-    from engine.models.flashnext.engine import FlashNextEngine
-    from engine.models.flashnext.load import load as fn_load
-    from engine.models.flashnext.serving import FlashNextServing, FlashNextTreeDrafter
+    from engine.models.flashnext.serving import build as fn_build
     from engine.tokfp import fingerprint as _tok_fp
     from transformers import AutoTokenizer
     t0 = time.time()
@@ -8955,29 +8952,13 @@ def _load_flashnext(a) -> None:
     spec = a.drafter != "none"
     if a.drafter not in ("mtp", "none"):
         print(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp", flush=True)
-    idx, W, banks, tables, timing = fn_load(a.model, "cuda", mtp=spec)
-    led.mark("weights")
-    fn = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=a.max_len)
-    eng = FlashNextServing(fn, a.max_len)
-    led.mark("engine")
     tok = AutoTokenizer.from_pretrained(a.model)
-    drafter, check = None, None
-    if spec:
-        hot = int(_S.get("FN_DRAFT_HOT"))
-        if hot:
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            fn.set_draft_head(np.load(os.path.join(root, "ops", "fn-hot-vocab.npy"))[:hot])
-        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
-                                       tokenize=False, add_generation_prompt=True, enable_thinking=False)
-        check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=print)
-        if check["ok"]:
-            depth = a.depth if a.depth > 3 else 4
-            drafter = FlashNextTreeDrafter(eng, depth=depth)
-            drafter.capture_all()
-            a.depth = depth
-        else:
-            print("[server] Flash-Next self-check FAILED: speculation off, plain decode only", flush=True)
-    led.mark("drafters")
+    depth = a.depth if a.depth > 3 else 4
+    eng, drafter, info = fn_build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=led.mark,
+                                  log=lambda m: print(m, flush=True))
+    timing = info["load"]
+    if drafter is not None:
+        a.depth = depth
     gen_cfg = os.path.join(a.model, "generation_config.json")
     cfg_eos = json.load(open(gen_cfg)).get("eos_token_id") if os.path.isfile(gen_cfg) else None
     if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
@@ -8987,29 +8968,13 @@ def _load_flashnext(a) -> None:
               if a.response_cache else None)
     STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
                          if a.prompt_token_cache > 0 else None)
-    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=drafter is not None, sampled_tree="det", relax=Relax(1.0, 1),
-                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
-                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
-                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
-                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
-                 draining=False,
-                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
-                 reasoning_effort=a.reasoning_effort,
-                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
-                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
-                                     a.frequency_penalty, a.no_repeat_ngram),
-                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
-                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
-                               if a.pattern_stop else None),
-                 argloop=a.argloop,
-                 state_store=None, session_cache=False, prefix_cache=False, session_trim=False,
-                 resident=None, prefill_heartbeat=float(a.prefill_heartbeat_s), prefix_chunk=0,
-                 response_cache=rcache, suffix_store=None, suffix_scope=a.suffix_store_scope,
-                 usage_default=(a.usage_default == "on"),
-                 flashnext={"pack": a.model, "load": timing, "self_check": check,
-                            "draft_head": f"hot {_S.get('FN_DRAFT_HOT')}" if spec else None,
-                            "depth": a.depth if drafter is not None else 0})
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache,
+                   tree=drafter is not None, sampled_tree="det", relax=Relax(1.0, 1),
+                   state_store=None, session_cache=False, prefix_cache=False, session_trim=False,
+                   resident=None, prefix_chunk=0, suffix_store=None, flashnext=info,
+                   weights_info={"format": "exl3", "weights": a.model,
+                                 "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
+                                 "draft_head": info["draft_head"]})
     led.mark("caches")
     print(f"[server] Flash-Next {a.model}: load {timing.get('total_s')} s, drafter "
           f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}, "
@@ -9182,7 +9147,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     warmed and its verify graphs captured before the server answers. The engine's own memory
     policy (engine/cache.py `Budget`) then counts what the side slots took as the engine's: its
     ceiling and peak go up by that much, so slot 0's caches are not shed for it."""
-    from engine.model import Qwen38Engine
+    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
     n = int(a.parallel)
     if a.drafter not in ("lenrouter", "none"):
         raise SystemExit(f"[parallel] --parallel {n} is built for --drafter lenrouter (or none), "
@@ -9601,17 +9566,20 @@ def identity() -> dict:
 
 def weights_profile() -> dict:
     """The weight profile this process serves (QSE_WEIGHTS, exported from ops/profiles/<name>.env):
-    its name, the target's weights, the drafters, the draft head and the sampler's nucleus."""
+    its name, the target's weights, the drafters, the draft head and the sampler's nucleus; a loader
+    that serves weights the profile's knobs do not name records its own (`weights_info`)."""
     e = os.environ
     exl3 = _S.get("EXL3") or None
     nv = e.get("NV") or _S.get("NVFP4") or None
-    return {"name": e.get("QSE_WEIGHTS") or None,
-            "format": "exl3" if exl3 else ("nvfp4" if nv else None),
-            "weights": exl3 or nv,
-            "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
-            "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
-            "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
-            "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
+    out = {"name": e.get("QSE_WEIGHTS") or None,
+           "format": "exl3" if exl3 else ("nvfp4" if nv else None),
+           "weights": exl3 or nv,
+           "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
+           "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
+           "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
+           "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
+    out.update(dict.get(STATE, "weights_info") or {})
+    return out
 
 
 def serve_until_drained(httpd) -> None:

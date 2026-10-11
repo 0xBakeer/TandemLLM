@@ -1590,14 +1590,16 @@ def _engine_files(root: str, skip=(), packages=()) -> list[str]:
     """The engine's own modules the fingerprint reads: every file under `engine/` but the other
     models' packages and the file names in `skip` (at the top of `engine/`), in a fixed order.
     `engine/models/` (the model layer, ENG-221) is one of those packages: the 27B reads none of
-    it, so it is left out and the 27B's fingerprint is the bytes it always was. A model whose rows
+    it, so it is left out and the 27B's fingerprint is the bytes it always was; so is
+    `engine/methods/` (the methods written once for every model, ENG-E8), until the arithmetic
+    manifest of fingerprint v3 (ENG-243) names what in it computes rows. A model whose rows
     its own package computes names it in `packages` (e.g. "models/flashnext"); its files follow
     the rest, in the same order rule."""
     out = []
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
-        dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative", "models",
-                                                               "__pycache__"))
+        dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative", "methods",
+                                                               "models", "__pycache__"))
         for name in sorted(files):
             if name.endswith(".py") and not (dirpath == base and name in skip):
                 out.append(os.path.join(dirpath, name))
@@ -1714,13 +1716,18 @@ def fingerprint(root: str, extra: dict, skip=(), packages=()) -> str:
 EQUIV_FILE = "fp-equal.json"
 
 
-def equivalents(root_dir: str, fp: str, legacy: str | None) -> tuple:
+def equivalents(root_dir: str, fp: str, legacy: str | None, formula: str | None = None) -> tuple:
     """The fingerprints whose files a tier (and its session spill) under `fp` may read besides
     `fp`'s own. The first start under the current formula adopts the files of the formula before
     it computed on this same tree (`fingerprint_legacy`): same engine bytes, flags, weights and
     grid, so the same rows. The adoption is written to `root_dir/fp-equal.json` and from then on
     that record alone counts: a later build reads those files only under the same `fp`, and a
-    `tools/` change (which the old formula did not see) sweeps them as it sweeps any other."""
+    `tools/` change (which the old formula did not see) sweeps them as it sweeps any other.
+
+    `formula` (fingerprint v3, ENG-243, engine/methods/manifest.py): the adoption is recorded per
+    formula (`formulas` in the record), so a directory that already has a record still adopts once
+    more -- `legacy` is then the previous formula's fingerprint of this tree, and what that one
+    read comes along."""
     path = os.path.join(root_dir, EQUIV_FILE)
     try:
         with open(path) as f:
@@ -1729,10 +1736,15 @@ def equivalents(root_dir: str, fp: str, legacy: str | None) -> tuple:
             doc = {}
     except (OSError, ValueError):
         doc = None
-    if doc is None:
-        doc = {}
+    formulas = (doc or {}).get("formulas")
+    formulas = formulas if isinstance(formulas, dict) else {}
+    if doc is None if formula is None else formula not in formulas:
+        doc = {} if doc is None else doc
         if legacy and legacy != fp:
-            doc[fp] = [legacy]
+            prev = doc.get(legacy) if formula is not None else None
+            doc[fp] = sorted({legacy, *(str(x) for x in (prev if isinstance(prev, list) else []))} - {fp})
+        if formula is not None:
+            doc["formulas"] = {**formulas, formula: fp}
         try:
             os.makedirs(root_dir, mode=0o700, exist_ok=True)
             tmp = path + ".tmp"
@@ -1741,4 +1753,5 @@ def equivalents(root_dir: str, fp: str, legacy: str | None) -> tuple:
             os.replace(tmp, path)
         except OSError:
             pass
-    return tuple(str(x) for x in doc.get(fp, []) if x != fp)
+    got = doc.get(fp, [])
+    return tuple(str(x) for x in (got if isinstance(got, list) else []) if x != fp)

@@ -37,7 +37,8 @@ if not torch.cuda.is_available():
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from engine.model import Qwen38Engine, forward_tree_multi  # noqa: E402
+from engine.model import forward_tree_multi  # noqa: E402
+from engine.models.qwen3_5.adapter import Qwen38Engine  # noqa: E402  (the served class: its cold verbs)
 from engine.tree import DraftTree  # noqa: E402
 from engine.penalty import PenaltySpec  # noqa: E402
 from engine.spec import Relax  # noqa: E402

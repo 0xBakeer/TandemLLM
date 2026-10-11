@@ -322,7 +322,7 @@ KNOBS: dict[str, tuple] = {
     'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
-    'FN_DRAFT_HOT': ('32768', 'server/app.py'),
+    'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),
 }
 
 
