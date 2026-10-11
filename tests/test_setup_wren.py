@@ -13,10 +13,18 @@ The test matrix:
      narrator's window; letting go leaves the narrator loaded     test_borrows_the_narrator
   5  a turn: thinking, talking, the text without the tool-call markup, a checked tool call (the
      value as the field's type), done with the sources   test_a_turn_with_a_tool_call
-  6  an invalid call is never sent: the model sees why and tries again (at most twice), then the
-     turn ends with a sentence and no call; a turn that only highlights something and says nothing
-     goes on once for the words           test_invalid_calls_are_repaired_twice,
-                                          test_a_lone_highlight_is_followed_by_words
+  6  an invalid call is never sent: the model sees why and tries again once, then answers in
+     words with no tools in the prompt; a turn that only highlights something and says nothing
+     goes on once for the words, with the tools off; a call written with the tools off is dropped,
+     and a turn always ends in words (VIS-91)
+                                          test_invalid_calls_are_repaired_once,
+                                          test_a_lone_highlight_is_followed_by_words,
+                                          test_one_repair_then_words_with_the_tools_off,
+                                          test_a_forced_answer_is_always_words
+  6b explain takes only what the page can highlight, never a step (VIS-91)
+                                          test_explain_takes_only_what_the_page_can_point_at
+  6c the prompt has the step's ids, and the measured table on the model, overview and weights
+     steps (VIS-91)                       test_the_step_and_its_ids_are_in_the_prompt
   7  the tools: only the seven, each checked against the step schema; no finish, apply or reset
                                                          test_the_tool_checks
   8  retrieval: a question about a tool brings the tool's registry sentence into the prompt, among
@@ -262,7 +270,7 @@ def test_a_turn_with_a_tool_call():
     assert w.stats["tool_valid"] == 1 and w.stats["turns"] == 1
 
 
-def test_invalid_calls_are_repaired_twice():
+def test_invalid_calls_are_repaired_once():
     _on_disk()
     good = call_xml("toggle", component="vision", on="false")
     w, model = _wren(Scripted(replies=["Done. " + call_xml("finish"), "Sorry. " + good]))
@@ -278,7 +286,7 @@ def test_invalid_calls_are_repaired_twice():
     _loaded(w)
     ev = _events(w)
     assert not [e for e in ev if e["type"] == "tool_call"], ev
-    assert len(model.prompts) == 3, len(model.prompts)               # the first and two repairs
+    assert len(model.prompts) == 3, len(model.prompts)             # the first, a repair, words
     assert "could not make that change" in "".join(e.get("delta", "") for e in ev)
     assert ev[-1]["type"] == "done"
 
@@ -299,6 +307,119 @@ def test_a_lone_highlight_is_followed_by_words():
     _loaded(w)
     _events(w)
     assert len(model.prompts) == 1                          # words came with it: no second turn
+
+
+def test_explain_takes_only_what_the_page_can_point_at():
+    """VIS-91: the live 2B called explain("overview") after every answer. The server took a step's
+    id as valid, the page could not point at a step and refused it, and the browser asked again
+    four times. explain now takes what the page can highlight, the same set as tools.ts."""
+    steps = registry.wizard_fields(M)
+    for s in steps:
+        assert tools.check(M, "explain", {"field": s["id"]})[1], s["id"]
+    enum = set(next(d for d in tools.definitions(M) if d["function"]["name"] == "explain")
+               ["function"]["parameters"]["properties"]["field"]["enum"])
+    want = ({c["id"] for c in M["components"]} | {f["id"] for f in M["methods"] + M["advanced"]}
+            | {p["id"] for p in M["profiles"]}
+            | {"slots", "window", "side_window", "kv_pool", "floor_gb"})
+    assert enum == want, (enum ^ want)
+    for name in sorted(want):
+        assert tools.check(M, "explain", {"field": name})[1] is None, name
+
+
+def test_one_repair_then_words_with_the_tools_off():
+    """VIS-91: an invalid call gets one repair; when that is invalid too the model answers in
+    words with no tools in the prompt, and the turn says nothing changed."""
+    _on_disk()
+    bad = call_xml("set_field", step="parallelism", field="slots", value=9)
+    w, model = _wren(Scripted(replies=[bad, bad, "Four is the most this model allows."]))
+    _loaded(w)
+    ev = _events(w)
+    assert not [e for e in ev if e["type"] == "tool_call"], ev
+    assert len(model.prompts) == 3, len(model.prompts)               # the first, one repair, words
+    assert model.prompts[1].endswith(json.dumps(tools.definitions(M))), "the repair has the tools"
+    assert model.prompts[2].endswith("[]"), model.prompts[2][-200:]   # the words: no tools at all
+    text = "".join(e.get("delta", "") for e in ev)
+    assert text == "Four is the most this model allows.", repr(text)
+    assert ev[-1] == {"type": "done", "finish": "stop", "sources": ev[-1]["sources"],
+                      "unchanged": True}, ev[-1]
+    assert w.stats["tool_invalid"] == 2 and w.stats["forced_words"] == 1
+
+
+def test_a_forced_answer_is_always_words():
+    """VIS-91: with the tools off a call the model still writes is dropped, never sent, and a turn
+    that ends with no words at all gets a plain sentence."""
+    _on_disk()
+    lone = call_xml("explain", field="shadow")
+    w, model = _wren(Scripted(replies=[lone, lone]))
+    _loaded(w)
+    ev = _events(w, "What does the shadow reader do?")
+    assert [e["name"] for e in ev if e["type"] == "tool_call"] == ["explain"], ev
+    assert model.prompts[1].endswith("[]")
+    text = "".join(e.get("delta", "") for e in ev)
+    assert text and "<tool_call>" not in text, repr(text)
+    assert ev[-1]["type"] == "done" and "unchanged" not in ev[-1], ev[-1]
+    # the page asks for words only (its last round): one pass, no tools, no call sent
+    w, model = _wren(Scripted(replies=["Done. " + call_xml("next")]))
+    _loaded(w)
+    ev = list(w.chat({"messages": [{"role": "user", "content": "next please"}],
+                      "page": {"model": "qwen3.8-27b", "step": "weights"}, "tools": False}))
+    assert len(model.prompts) == 1 and model.prompts[0].endswith("[]")
+    assert not [e for e in ev if e["type"] == "tool_call"] and ev[-1]["finish"] == "stop", ev
+    assert "".join(e.get("delta", "") for e in ev) == "Done."
+    ev = list(w.chat({"messages": [{"role": "user", "content": "hi"}], "page": {}, "tools": "no"}))
+    assert ev[-1]["type"] == "error" and "tools" in ev[-1]["message"], ev
+
+
+def test_the_step_and_its_ids_are_in_the_prompt():
+    """VIS-91: "Which one is for coding tasks?" on the Model step had no table to answer from. The
+    prompt now has the step's measured table with the code column, and the ids a tool may name."""
+    _on_disk()
+    w, model = _wren(Scripted(replies=["ok", "ok", "ok"]))
+    _loaded(w)
+    _events(w, "Which one is for coding tasks?",
+            page={"model": "qwen3.8-27b", "step": "overview", "step_index": 1, "selection": {}})
+    p = model.prompts[0]
+    assert "exl3-2.5 | 56.22 | 89.05 | 124.17" in p, p[:3000]
+    assert "fastest for code: exl3-2.5 (124.17 tok/s)" in p, p[:3000]
+    assert "This step has no fields" in p
+    w.device_facts = lambda: {"active_profile": "exl3-6.0"}
+    _events(w, "What runs now?", page={"model": "qwen3.8-27b", "step": "overview"})
+    assert "It runs the weight profile exl3-6.0 now." in model.prompts[-1]
+    model.prompts.pop()
+    _events(w, "Use two slots", page={"model": "qwen3.8-27b", "step": "parallelism",
+                                      "step_index": 4, "selection": {}})
+    assert "slots, window, side_window, kv_pool, floor_gb" in model.prompts[1]
+    assert "104.25 KiB" in model.prompts[1] and "3.26 GiB at 32,768 tokens" in model.prompts[1]
+    assert "The measured table:" not in model.prompts[1]
+    _events(w, "What is on this step?", page={"model": "qwen3.8-27b", "step": "components",
+                                              "step_index": 3, "selection": {}})
+    assert "narrator" in model.prompts[2].split("The ids on this step")[1][:600]
+
+
+def test_a_long_prompt_keeps_the_turn_it_answers():
+    """VIS-91: on the narrator's 4,096 rows the page's second round (the user's message, Wren's
+    call, its result) did not fit, the trim kept the tool's result alone, and the chat template
+    threw "No user query found". The turn being answered is never cut."""
+    _on_disk()
+
+    class Template(Scripted):
+        def encode_chat(self, msgs, defs):
+            assert any(x["role"] == "user" for x in msgs), "No user query found in messages."
+            text = json.dumps(msgs) + json.dumps(defs)
+            self.prompts.append(text)
+            return [1] * (len(text) // 3)
+
+    w, model = _wren(Template(max_ctx=4096, replies=["Done."] * 4))
+    _loaded(w)
+    msgs = [{"role": "user", "content": "q" * 3000}, {"role": "assistant", "content": "a" * 3000},
+            {"role": "user", "content": "Use two slots. " + "please " * 700},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "name": "set_field",
+                 "args": {"step": "parallelism", "field": "slots", "value": 2}}]},
+            {"role": "tool", "content": json.dumps({"ok": True, "result": "ok"})}]
+    ev = list(w.chat({"messages": msgs, "page": {"model": "qwen3.8-27b", "step": "parallelism"}}))
+    assert ev[-1]["type"] == "done", ev[-1]
+    assert "Use two slots." in model.prompts[-1] and "q" * 3000 not in model.prompts[-1]
 
 
 def test_wren_is_a_role_in_the_memory_figures():

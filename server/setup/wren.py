@@ -28,8 +28,15 @@ slice; Wren then waits until the engine is idle again.
 
 THE PROMPT, every turn: the persona and rules (wren_system.md), the page state as compact JSON
 (fields named like a secret are only "<set>" or "<empty>"), the box's facts, the top sections of
-the reference text for the user's last message and the current step, and the conversation, cut
-from its oldest turn to fit the window. Chat content is never logged; the counters are.
+the reference text for the user's last message and the current step, the step itself (the ids a
+tool call may name there, and on the model, overview and weights steps the measured table), and
+the conversation, cut from its oldest turn to fit the window. Chat content is never logged; the
+counters are.
+
+A TURN ENDS IN WORDS (VIS-91). An invalid change gets one repair with the model seeing why; when
+that is invalid too, or the model only pointed at something and said nothing, it answers once more
+with no tools in the prompt, and any call it still writes is dropped. A highlight it may not make
+is dropped without a repair. The page asks with `tools: false` for its own last round.
 """
 
 from __future__ import annotations
@@ -52,7 +59,7 @@ MAX_NEW = 512
 SLICE_MS = 150.0
 IDLE_UNLOAD_S = 300.0
 IDLE_CHECK_S = 15.0
-REPAIRS = 2
+REPAIRS = 1
 TURN_S = 180.0
 MAX_MESSAGES = 60
 MAX_TEXT = 8000
@@ -76,6 +83,13 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "wren_system.
 # in go_to_step's: 7 of 10, and 8 of 10 with the page's visible fields in the page state
 INTRO, _, RULES = SYSTEM.partition("\n\nHow you answer:")
 RULES = "How you answer:" + RULES
+NO_TOOLS = "The tools are off for this answer: answer the user in words only."
+NO_WORDS = "I could not answer that here. Please ask it in other words."
+NOT_CHANGED = "I could not make that change on the page, so nothing changed."
+TABLE_STEPS = ("models", "overview", "weights")
+# what a step is about, for the search: "overview" names no section, and on the Model step "Which
+# one is for coding tasks?" found the conductor's coding profile instead of the weight profiles
+STEP_WORDS = {"overview": "weight profile speed tok/s", "weights": "weight profile"}
 
 
 def model_dir(name: str) -> str:
@@ -130,6 +144,58 @@ def page_text(page: dict, cap: int) -> str:
         else:
             out[k] = "(left out: too long)"
     return json.dumps(out, separators=(",", ":"))[:cap]
+
+
+def step_text(m: dict, step) -> str:
+    """The current step for the prompt: the ids a tool call may name on it, and on the model,
+    overview and weights steps the measured table the page shows (VIS-91: "Which one is for coding
+    tasks?" on the Model step had no table to answer from)."""
+    label = dict(registry.STEPS).get(step, step) if isinstance(step, str) else None
+    out = [f"This step: {step} ({label})." if label else "This step: unknown."]
+    ids = tools.step_ids(m, step)
+    if not ids:
+        out.append("This step has no fields to change or highlight.")
+    else:
+        verb = {"weights": "select_profile and explain", "components": "toggle and explain"}.get(
+            step, "set_field and explain")
+        out.append(f"The ids on this step ({verb}): {', '.join(ids)}.")
+    par = m.get("parallelism") or {}
+    if step == "parallelism" and par.get("kv_bytes_per_token"):
+        kv, fill = par["kv_bytes_per_token"], par.get("typical_fill_tokens") or 32768
+        top = (par.get("window") or {}).get("max") or fill
+        out.append(f"What a slot takes: {kv / 1024:g} KiB of memory a token of its window. With "
+                   f"the shared KV pool a slot takes memory as its conversation grows: "
+                   f"{kv * fill / 2**30:.2f} GiB at {fill:,} tokens, {kv * top / 2**30:.2f} GiB "
+                   f"with its whole window of {top:,} tokens. Each slot after the first also "
+                   f"takes {par.get('side_slot_const_gib', 0):g} GiB.")
+    meas = m.get("measurements") or {}
+    if step in TABLE_STEPS and meas.get("rows"):
+        prof = {p["id"]: p for p in m["profiles"]}
+        tasks = ("prose", "chat", "code")
+        out.append(f"The measured table: the weight profiles and how fast each one ran, in "
+                   f"tokens a second (greedy, 512 new tokens, build {meas.get('build')}, "
+                   f"{meas.get('date')}). Code is the column for coding tasks. KL is how far the "
+                   f"weights drift from the original model; lower is closer:")
+        out.append("profile | " + " | ".join(tasks) + " | KL | weights GiB")
+        best = {}
+        for r in meas["rows"]:
+            p = prof.get(r["profile"]) or {}
+            cells = r["cells"].get("greedy_512") or {}
+            speed = [(cells.get(t) or {}).get("tok_s") for t in tasks]
+            out.append(" | ".join([r["profile"]] + ["-" if v is None else f"{v:g}" for v in speed]
+                                  + [f"{(p.get('quality') or {}).get('kl_vs_bf16', '-')}",
+                                     f"{p.get('weights_gib', '-')}"])
+                       + ("" if r.get("comparable") else " (another build)"))
+            for t, v in zip(tasks, speed):
+                if v is not None and r.get("comparable") and v > best.get(t, ("", 0))[1]:
+                    best[t] = (r["profile"], v)
+        out.append("; ".join(f"fastest for {t}: {b[0]} ({b[1]:g} tok/s)" for t, b in best.items())
+                   + "; closest to the original: " + min(
+                       (p for p in m["profiles"] if (p.get("quality") or {}).get("kl_vs_bf16")
+                        is not None), key=lambda p: p["quality"]["kl_vs_bf16"])["id"]
+                   + ". Recommended: " + ", ".join(p["id"] for p in m["profiles"]
+                                                   if p.get("recommended")) + ".")
+    return "\n".join(out)
 
 
 def check_messages(messages) -> list[dict]:
@@ -395,44 +461,55 @@ class Wren:
                                              add_generation_prompt=True, enable_thinking=False)
         return model.encode_text(text)
 
-    def prompt(self, m: dict, messages: list[dict], page: dict, model) -> tuple[list[int], list]:
-        """The ids of this turn's prompt and the sources it quoted."""
+    def prompt(self, m: dict, messages: list[dict], page: dict, model,
+               use_tools: bool = True) -> tuple[list[int], list]:
+        """The ids of this turn's prompt and the sources it quoted; with `use_tools` False the
+        prompt has no tool definitions and says the answer is words only."""
         window = self.window()
         max_new = min(MAX_NEW, window // 8)
         small = window < WINDOW
         last = next((x["content"] for x in reversed(messages) if x["role"] == "user"), "")
         step = page.get("step") if isinstance(page, dict) else None
-        sources = self.knowledge.search(f"{last} {step or ''}", k=4,
+        sources = self.knowledge.search(f"{last} {STEP_WORDS.get(step, step or '')}", k=4,
                                         max_chars=2400 if small else 5200)
         facts = self.device_facts() if self.device_facts is not None else {}
         ref = "\n\n".join(f"[{i + 1}] {s['title']} ({s['path']})\n{s['text']}"
                           for i, s in enumerate(sources))
+        here = step_text(m, step)
+        # said in words: in JSON the 2B took the page's profile for the one that runs
+        runs = (f"It runs the weight profile {facts['active_profile']} now.\n"
+                if isinstance(facts, dict) and facts.get("active_profile") else "")
+        rules = RULES if use_tools else f"{RULES}\n\n{NO_TOOLS}"
         head = (f"{INTRO}\n\nThe model on this page: {m['name']} ({m['id']}).\n\n"
                 f"Reference text:\n{ref or '(nothing matched)'}\n\n"
-                f"The box now (read only):\n{json.dumps(facts, separators=(',', ':'))[:800]}\n\n"
+                f"The box now (read only):\n{runs}"
+                f"{json.dumps(facts, separators=(',', ':'))[:800]}\n\n"
                 f"The page state (data):\n{page_text(page, 1800 if small else 3500)}\n\n"
-                f"{RULES}")
-        defs = tools.definitions(m)
+                f"{here}\n\n{rules}")
+        defs = tools.definitions(m) if use_tools else []
+        # the turn being answered, from the user's last message on (its calls and their results
+        # with it), is never cut: a template needs the user's message (VIS-91: the page's second
+        # round on a 4,096-row borrow was cut to the tool's result alone, and the template threw)
+        turn = messages[max(i for i, x in enumerate(messages) if x["role"] == "user"):]
         hist = list(messages)
         renders = 0
         while True:
             ids = self._encode(model, [{"role": "system", "content": head}] + hist, defs)
             renders += 1
-            if len(ids) + max_new <= window or len(hist) <= 1:
+            if len(ids) + max_new <= window or len(hist) <= len(turn):
                 break
             if renders >= MAX_RENDERS - 1:
-                hist = [messages[-1]]             # enough renders: the last message alone
+                hist = turn                       # enough renders: this turn alone
                 continue
             hist = hist[1:]                       # the oldest turn first; the system text never
-            while hist and hist[0]["role"] != "user":
+            while hist[0]["role"] != "user":
                 hist = hist[1:]
-            if not hist:
-                hist = [messages[-1]]
         if len(ids) + max_new > window:
-            # one message alone is too long for the window: the reference text goes, then the page
-            head = (f"{INTRO}\n\nThe page state (data):\n{page_text(page, 600)}\n\n{RULES}")
+            # this turn alone is too long for the window: the reference text goes, the page shrinks
+            head = (f"{INTRO}\n\nThe page state (data):\n{page_text(page, 600)}\n\n"
+                    f"{here}\n\n{rules}")
             sources = []
-            ids = self._encode(model, [{"role": "system", "content": head}, hist[-1]], defs)
+            ids = self._encode(model, [{"role": "system", "content": head}] + turn, defs)
         return ids, sources
 
     # ------------------------------------------------------------------ the chat
@@ -531,6 +608,10 @@ class Wren:
             return
         if not isinstance(page.get("step"), (str, type(None))):
             page = dict(page, step=None)
+        use_tools = body.get("tools", True)
+        if not isinstance(use_tools, bool):
+            yield {"type": "error", "message": "tools: true or false"}
+            return
         models, _ = registry.load_all()
         mid = page.get("model")
         m = (models.get(mid) if isinstance(mid, str) else None) or next(iter(models.values()), None)
@@ -541,12 +622,13 @@ class Wren:
         yield {"type": "state", "state": "thinking"}
         model = self.slot.model
         deadline = self.clock() + TURN_S
-        sources_out, finish, talked, emitted, said_more = [], "stop", False, 0, False
+        sources_out, finish, talked, emitted = [], "stop", False, 0
+        said, repairs, unchanged, changed = "", 0, False, False
         names = list(tools.NAMES)
         from server.toolcall import parse_tool_calls, schema_types
         types = schema_types(tools.definitions(m))
-        for attempt in range(REPAIRS + 1):
-            ids, sources = self.prompt(m, messages, page, model)
+        while True:
+            ids, sources = self.prompt(m, messages, page, model, use_tools=use_tools)
             for s in sources:
                 if s["path"] not in [x["path"] for x in sources_out]:
                     sources_out.append({"path": s["path"], "title": s["title"]})
@@ -555,14 +637,15 @@ class Wren:
                 yield {"type": "error", "message": "the conversation is too long for Wren; clear "
                                                    "the chat and ask again."}
                 return
-            sent = 0
+            # a second pass's words go after the first's, a paragraph apart
+            sep, sent = ("\n\n" if said else ""), 0
             try:
                 for ev in self._generate(ids, max_new, deadline):
                     if ev[0] == "text":
                         if not talked:
                             talked = True
                             yield {"type": "state", "state": "talking"}
-                        yield {"type": "text", "delta": ev[1][sent:]}
+                        yield {"type": "text", "delta": (sep if not sent else "") + ev[1][sent:]}
                         sent = len(ev[1])
                     else:
                         text, finish = ev[1], ev[2]
@@ -576,7 +659,17 @@ class Wren:
             content, calls = parse_tool_calls(text, names, eos=finish == "stop", types=types)
             visible = content.split(TOOL_OPEN)[0].rstrip()
             if len(visible) > sent:
-                yield {"type": "text", "delta": visible[sent:]}
+                yield {"type": "text", "delta": (sep if not sent else "") + visible[sent:]}
+                sent = len(visible)
+            if sent:
+                said += sep + visible
+            if not use_tools:
+                # the words-only pass: a call the model still writes goes nowhere
+                self.stats["tool_dropped"] += len(calls)
+                if not said.strip():
+                    said = NOT_CHANGED if unchanged else NO_WORDS
+                    yield {"type": "text", "delta": said}
+                break
             bad, shown = [], []
             for c in calls:
                 fn = c["function"]
@@ -585,38 +678,52 @@ class Wren:
                     self.stats["tool_valid"] += 1
                     emitted += 1
                     shown.append((fn["name"], args))
+                    changed = changed or fn["name"] != "explain"
                     yield {"type": "tool_call", "id": c["id"], "name": fn["name"], "args": args}
                 else:
                     self.stats["tool_invalid"] += 1
                     bad.append((c, why))
-            if not bad and shown and not visible.strip() and not said_more and \
-                    all(n == "explain" for n, _ in shown) and attempt < REPAIRS:
-                # only a highlight and no words: the question still wants its answer (a 2B
-                # model often points before it speaks); the highlight changed nothing
-                said_more = True
-                self.stats["explain_then_answer"] += 1
-                messages = messages + [
-                    {"role": "assistant", "content": "", "tool_calls": [
-                        {"type": "function", "function": {"name": n, "arguments": a}}
-                        for n, a in shown]}] + [
-                    {"role": "tool", "content": "ok: it is highlighted on the page. Now answer "
-                                                "the user in words."} for _ in shown]
+            # a highlight the page cannot make is dropped: it would change nothing
+            bad_changes = [(c, why) for c, why in bad if c["function"]["name"] != "explain"]
+            if bad_changes and repairs < REPAIRS:
+                # the model sees its own invalid calls and why, and tries once more
+                repairs += 1
+                messages = messages + _said(visible, bad_changes) + [
+                    {"role": "tool", "content": f"error: {why}. Nothing changed on the page."}
+                    for _, why in bad_changes]
                 continue
-            if not bad:
-                break
-            if attempt == REPAIRS:
-                yield {"type": "text", "delta": "\n\nI could not make that change on the page. "
-                                                "Please set it yourself."}
-                break
-            # the model sees its own invalid calls and why, and tries again (at most REPAIRS times)
-            messages = messages + [
-                {"role": "assistant", "content": visible, "tool_calls": [
-                    {"type": "function", "function": {"name": c["function"]["name"],
-                                                      "arguments": _args(c)}} for c, _ in bad]}
-            ] + [{"role": "tool", "content": f"error: {why}. Nothing changed on the page."}
-                 for _, why in bad]
+            if bad_changes:
+                unchanged = not changed
+                self.stats["forced_words"] += 1
+                messages = messages + _said(visible, bad_changes) + [
+                    {"role": "tool", "content": f"error: {why}. Nothing changed on the page."}
+                    for _, why in bad_changes]
+                use_tools = False
+                continue
+            if not said.strip() and (shown or bad) and all(n == "explain" for n, _ in shown):
+                # only a highlight (or none it could make) and no words: the question still wants
+                # its answer, in words, with the tools off (a 2B model often points before it
+                # speaks, and with the tools on it points again)
+                self.stats["explain_then_answer"] += 1
+                if shown:
+                    messages = messages + [
+                        {"role": "assistant", "content": "", "tool_calls": [
+                            {"type": "function", "function": {"name": n, "arguments": a}}
+                            for n, a in shown]}] + [
+                        {"role": "tool", "content": "ok: it is highlighted on the page. Now "
+                                                    "answer the user in words."} for _ in shown]
+                use_tools = False
+                continue
+            break
         yield {"type": "done", "finish": "tool_calls" if emitted else finish,
-               "sources": sources_out}
+               "sources": sources_out, **({"unchanged": True} if unchanged else {})}
+
+
+def _said(visible: str, bad: list) -> list[dict]:
+    """The assistant message with its invalid calls, as the model wrote them."""
+    return [{"role": "assistant", "content": visible, "tool_calls": [
+        {"type": "function", "function": {"name": c["function"]["name"], "arguments": _args(c)}}
+        for c, _ in bad]}]
 
 
 def _args(call: dict) -> dict:

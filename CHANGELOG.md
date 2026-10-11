@@ -2,6 +2,20 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.7.2, 2026-10-11
+
+Wren, the setup guide's assistant, answers a question in words again (VIS-91). The text the engine writes does not change: only `server/setup/`, `dashboard/` and the docs changed, and the engine's modules are the same bytes as in 0.7.0, so the disk caches keep their fingerprint.
+
+- On a phone with 0.7.1, Wren answered on the Model step and then called `explain("overview")`, the name of the step. The server took a step's name as valid, the page refused it, and the page asked again, four times. "Which one is for coding tasks?" got eight lines of "Wren tried something that does not exist", the 4-round stop and no answer. The sheet dropped to a peek and rose again once per call.
+- `explain` now takes only what the page can highlight: a tool, a method or advanced field, a weight profile or a parallelism field. The server and `tools.ts` check the same set.
+- The prompt has the current step: the ids a tool call may name there, and on the Models, Model and Weights steps the measured table with the fastest profile for each task. It also says which profile the box runs. The question about coding tasks found the conductor's "coding" profile before; it now gets `exl3-2.5` at 124.17 tokens a second.
+- An invalid change gets one repair. If the repair fails, Wren answers in words with no tools in the prompt, and the page shows one notice that nothing changed. The server drops a highlight the page cannot make, with no repair. The page's last round sends `"tools": false`, so every turn ends in words.
+- A turn shows one notice at most, and none when the repair worked or only a highlight failed.
+- On a phone the sheet stays open while Wren works. A change shows inside the sheet as a toast with Show me, which closes the sheet and scrolls to the field. A refused call leaves the sheet and the figure alone. The desktop panel is as before.
+- On a phone the mini box's landing (0.7.1) started 60 px right of the field and widened the page by 27 px, and the fixed sheet with it, so its close button went off the screen. The setup page now clips that overflow.
+- On the narrator's 4,096 rows, a long chat could cut the page's second round down to the tool's result alone, and the chat template threw "No user query found". The trim now keeps the whole turn Wren answers.
+- Measured on the box (`tests/gpu/setup_wren_gpu.py cases`, Qwen3.5-2B at 4,096 rows): 15 of 15 right on ten requests for a change and five questions, the two from the report among them. No call was invalid, and a turn took 0.7 to 1.6 s. Khaled's conversation replayed on the same 2B: the status answer, then the coding answer in one round, then "Use two slots" in two.
+
 ## 0.7.1, 2026-10-11
 
 Wren, the setup guide's assistant, is drawn as the gold DGX Spark box from the video "7 weeks with one DGX Spark" instead of a bird. The text does not change: only `dashboard/` changed, and the engine's modules are the same bytes as in 0.7.0, so the disk caches keep their fingerprint.

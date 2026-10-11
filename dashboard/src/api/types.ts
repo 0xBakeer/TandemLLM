@@ -1310,6 +1310,8 @@ export interface SetupPageState {
 export interface SetupChatRequest {
   messages: SetupChatMessage[];
   page: SetupPageState;
+  /** false: answer in words only (the page's last round); the server renders no tools and drops a call */
+  tools?: boolean;
 }
 export interface SetupSource {
   path: string;
@@ -1319,7 +1321,7 @@ export type SetupChatEvent =
   | { type: 'state'; state: 'thinking' | 'loading' | 'talking' }
   | { type: 'text'; delta: string }
   | { type: 'tool_call'; id: string; name: SetupToolName; args: Record<string, unknown> }
-  | { type: 'done'; finish: 'stop' | 'length' | 'time' | 'tool_calls'; sources: SetupSource[] }
+  | { type: 'done'; finish: 'stop' | 'length' | 'time' | 'tool_calls'; sources: SetupSource[]; unchanged?: boolean }
   | { type: 'error'; message: string };
 
 /** POST /v1/setup/plan {selection}: the review step's facts, nothing changes. */

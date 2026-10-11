@@ -12,7 +12,10 @@ the user's buttons.
     select_profile(id)              the weight profile
     go_to_step(n)                   step n, 0..7
     next(), previous()              one step on or back
-    explain(field)                  point at a field, a tool or a profile while Wren explains it
+    explain(field)                  point at a field, a tool or a profile while Wren explains it;
+                                    a step is not a field (VIS-91: the 2B called explain("overview")
+                                    after every answer, the page could not point at a step, and the
+                                    browser asked again four times)
 """
 
 from __future__ import annotations
@@ -23,6 +26,25 @@ import re
 from server.setup import registry
 
 NAMES = ("set_field", "toggle", "select_profile", "go_to_step", "next", "previous", "explain")
+PARALLEL = ("slots", "window", "side_window", "kv_pool", "floor_gb")
+
+
+def explain_ids(m: dict) -> list[str]:
+    """What the page can highlight, the same set as planToolCall's explain in tools.ts: a tool, a
+    method or advanced field, a weight profile, a field of the parallelism step."""
+    return sorted({c["id"] for c in m["components"]} | {f["id"] for f in m["methods"] + m["advanced"]}
+                  | {p["id"] for p in m["profiles"]} | set(PARALLEL))
+
+
+def step_ids(m: dict, step) -> list[str]:
+    """The ids a call may name on step `step`: the profiles on weights, the tools on components,
+    the fields on parallelism and methods; none on the others."""
+    if step == "weights":
+        return [p["id"] for p in m["profiles"]]
+    for s in registry.wizard_fields(m):
+        if s["id"] == step and s["id"] != "weights":
+            return [f["field"] for f in s["fields"]]
+    return []
 
 
 def definitions(m: dict) -> list[dict]:
@@ -30,8 +52,6 @@ def definitions(m: dict) -> list[dict]:
     steps = registry.wizard_fields(m)
     step_ids = [s["id"] for s in steps if s["fields"]]
     comps = [c["id"] for c in m["components"] if not c["required"]]
-    names = sorted({f["field"] for s in steps for f in s["fields"]} | set(comps)
-                   | {p["id"] for p in m["profiles"]} | {s["id"] for s in steps})
 
     def fn(name, description, props=None, required=()):
         return {"type": "function", "function": {
@@ -58,9 +78,9 @@ def definitions(m: dict) -> list[dict]:
            {"n": {"type": "integer", "minimum": 0, "maximum": len(steps) - 1}}, ("n",)),
         fn("next", "Go to the next step."),
         fn("previous", "Go back one step."),
-        fn("explain", "Highlight a field, a tool or a weight profile for the user. It changes "
-           "nothing and looks nothing up: the field names are in set_field's description.",
-           {"field": {"type": "string", "enum": names}}, ("field",)),
+        fn("explain", "Highlight a field, a tool or a weight profile when the user asks where "
+           "it is. It changes nothing and looks nothing up, and a step is not a field.",
+           {"field": {"type": "string", "enum": explain_ids(m)}}, ("field",)),
     ]
 
 
@@ -142,9 +162,8 @@ def check(m: dict, name: str, args) -> tuple[dict | None, str | None]:
             return None, f"n is a step number from 0 to {len(steps) - 1}"
         return args, None
     if name == "explain":
-        names = ({f["field"] for s in steps for f in s["fields"]} | {s["id"] for s in steps}
-                 | {c["id"] for c in m["components"]} | {p["id"] for p in m["profiles"]})
-        if not isinstance(args["field"], str) or args["field"] not in names:
-            return None, f"there is nothing called {args['field']!r} on the page"
+        if not isinstance(args["field"], str) or args["field"] not in explain_ids(m):
+            return None, (f"there is nothing called {args['field']!r} on the page to highlight; a "
+                          f"step is not a field, and a question needs no tool")
         return args, None
     return args, None                                   # next, previous

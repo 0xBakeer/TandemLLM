@@ -350,7 +350,14 @@ export class QseSetup extends LightElement {
           if (target.field) void this.highlight(target.step, target.field);
         }
       : null;
-    return { ok: true, result: plan.result, summary: plan.actions.length ? plan.summary : null, undo };
+    // the phone's Show me: the sheet is closed by then; open the field's step if the user left it
+    const reveal = target.field
+      ? () => {
+          if (target.step !== this.wiz.step) this.dispatch({ type: 'go', step: target.step });
+          void this.highlight(target.step, target.field);
+        }
+      : null;
+    return { ok: true, result: plan.result, summary: plan.actions.length ? plan.summary : null, undo, reveal };
   }
 
   /** the field pulses for 1.2 s and the mini gold box hops onto it; offscreen, it scrolls into view */
