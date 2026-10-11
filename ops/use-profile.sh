@@ -9,6 +9,7 @@
 # Everything but the weights is shared: serve.env, the conductor, ledger, caches, crons. The active profile
 # is ops/active-profile, which serve.env reads, so start.sh, the watchdog and the @reboot line always start
 # it. The switch holds the box lock (~/.qwen38-box.flock), so the watchdog leaves the restart alone.
+# QSE_NO_ROLLBACK=1 leaves a failed switch to the caller (the setup guide's apply job).
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="${1:-}"; MODE="${2:-switch}"
@@ -103,7 +104,11 @@ say "switching $PREV -> $NAME (MemAvailable $(memavail) GB)"
 STATUS_REASON="switching the weights to $NAME" "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done
 T1=$(date +%s)
+# QSE_NO_ROLLBACK=1: the caller rolls back itself (the setup guide's apply job puts its old
+# run/setup.env back first; a rollback here would start the old profile under the new overlay)
+NO_ROLLBACK="${QSE_NO_ROLLBACK:-0}"
 if [ "$(memavail)" -lt "$MEM_NEED_GB" ]; then
+    [ "$NO_ROLLBACK" = "1" ] && { say "MemAvailable $(memavail) GB < ${MEM_NEED_GB} GB after the stop; the caller rolls back"; exit 7; }
     say "MemAvailable $(memavail) GB < ${MEM_NEED_GB} GB after the stop; starting $PREV again"
     start_profile "$PREV"; exit 7
 fi
@@ -112,6 +117,7 @@ if start_profile "$NAME" && smoke "$NAME"; then
     say "OK: $NAME live on :$PORT; stop $((T1-T0)) s, start+smoke $((T2-T1)) s, total $((T2-T0)) s; MemAvailable $(memavail) GB"
     exit 0
 fi
+[ "$NO_ROLLBACK" = "1" ] && { say "FAILED on $NAME; the caller rolls back"; exit 1; }
 say "FAILED on $NAME; rolling back to $PREV"
 STATUS_REASON="rolling back to $PREV" "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done

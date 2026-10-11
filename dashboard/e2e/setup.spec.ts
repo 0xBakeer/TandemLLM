@@ -153,6 +153,16 @@ test('Finish: Wren is asked to unload, the steps run, the way out appears', asyn
   await expect(page.locator('.inst-actions a', { hasText: 'See it run' })).toHaveAttribute('href', '#/performance');
 });
 
+test('requests still running: the job waits for them before anything stops, and says so', async ({ page, request }) => {
+  await setupMock(request, { waitIdle: true });
+  await finish(page);
+  const step = page.locator('.inst-step[data-step="write_config"]');
+  await expect(step).toHaveClass(/is-waiting/, { timeout: 10_000 });
+  await expect(step).toContainText('waiting for 2 requests to finish');
+  await expect(page.locator('[data-job-state="done"]')).toBeVisible({ timeout: 20_000 });
+  await expect(step).toHaveClass(/is-done/);
+});
+
 test('a failed smoke rolls back and offers the way back to Review', async ({ page, request }) => {
   await setupMock(request, { scenario: 'rollback' });
   await finish(page);

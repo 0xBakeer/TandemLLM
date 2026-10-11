@@ -72,10 +72,10 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 | check | the selection, the memory, the disk, the files the profile needs, the HF token, the box lock |
 | unload_assistant | Wren is unloaded before the job starts |
 | fetch | `bash ops/use-profile.sh <profile> --fetch-only`, skipped when the weights are on disk |
-| write_config | `run/setup.env`, the old one kept as `run/setup.env.bak-<time>`; with a port change, `bash ops/stop.sh 120` first; with "generate", `bash ops/make-secrets.sh --admin` |
-| switch | `bash ops/use-profile.sh <profile>`: stop, start, smoke, and its own rollback of the profile |
-| smoke | `/health` names the profile and one short chat answers |
-| rollback | on a failed switch or smoke: the old `run/setup.env` back, then the previous profile (in setup mode, setup mode again) |
+| write_config | first `waiting` until no request runs or waits on the engine (10 minutes at most, else nothing changes); then `run/setup.env`, every value quoted, the old one kept as `run/setup.env.bak-<time>`; with a port change, `bash ops/stop.sh 120` first, and a failure after that stop goes through the rollback; with "generate", `bash ops/make-secrets.sh --admin` |
+| switch | `bash ops/use-profile.sh <profile>` with `QSE_NO_ROLLBACK=1`: stop, start, smoke; a failure is this job's rollback, not the script's (which would start the old profile under the new overlay); in setup mode `run/setup-pending` goes first, a copy kept in the job's folder |
+| smoke | `/health` names the profile and one chat answers (512 tokens at most, as use-profile.sh asks) |
+| rollback | on a failed switch or smoke: with a port change the engine on the new port is stopped first, then the old `run/setup.env` comes back and the previous profile starts with its own served name in the smoke (in setup mode, the marker comes back unchanged, its HOST too, and setup mode starts again; a runner that crashes puts the marker back as well) |
 
 `ops/serve.env` is never edited. It reads `run/setup.env` after the weight profile, so the overlay never sets the weights. A box whose `serve.env` predates the setup guide must get those last lines first; the plan says so.
 

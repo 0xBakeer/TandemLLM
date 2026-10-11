@@ -1611,8 +1611,23 @@ qse-wren-figure {
   color: var(--err);
   font-weight: 600;
 }
-.inst-step.is-running .inst-label {
+.inst-step.is-running .inst-label,
+.inst-step.is-waiting .inst-label {
   font-weight: 600;
+}
+.inst-dot.is-waiting {
+  border-color: var(--warn);
+  animation: inst-wait 1.4s ease-in-out infinite;
+}
+@keyframes inst-wait {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inst-dot.is-waiting {
+    animation: none;
+  }
 }
 .inst-step.is-pending .inst-label,
 .inst-step.is-skipped .inst-label {

@@ -783,6 +783,11 @@ else
             # setup mode until the setup guide's apply job removes it (a reboot comes back to it)
             mkdir -p "$SRC/run"
             printf 'HOST=%s\n' "$HOST" > "$SRC/run/setup-pending"
+        elif [ -f "$SRC/run/setup-pending" ]; then
+            # a plain install configures the engine itself: an old --setup's marker would make
+            # every start setup mode again
+            rm -f "$SRC/run/setup-pending"
+            info "removed an earlier --setup's run/setup-pending: the engine starts configured"
         fi
         mkdir -p "$DIR/state/usage"
         ok "wrote $RUN/ops/serve.env (StairCut on: QWEN38_LEN_SWITCH=$(sed -n 's/^QWEN38_LEN_SWITCH=//p' "$RUN/ops/serve.env"), QWEN38_LEN_MODE=$(sed -n 's/^QWEN38_LEN_MODE=//p' "$RUN/ops/serve.env"))"

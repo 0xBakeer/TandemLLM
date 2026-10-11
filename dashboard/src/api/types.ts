@@ -1343,7 +1343,8 @@ export interface SetupPlan {
 }
 
 export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'write_config' | 'switch' | 'smoke' | 'rollback';
-export type SetupJobStepState = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+/** waiting: the step waits for the engine's requests to finish before anything stops (1.0+) */
+export type SetupJobStepState = 'pending' | 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
 export interface SetupJobStep {
   id: SetupJobStepId;
   label: string;

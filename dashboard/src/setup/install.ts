@@ -140,6 +140,7 @@ export class QseInstallProgress extends LightElement {
     if (s.state === 'done') return icon('check');
     if (s.state === 'failed') return icon('x');
     if (s.state === 'running') return html`<span class="inst-spin" aria-hidden="true"></span>`;
+    if (s.state === 'waiting') return html`<span class="inst-dot is-waiting" aria-hidden="true"></span>`;
     return html`<span class="inst-dot" aria-hidden="true"></span>`;
   }
 

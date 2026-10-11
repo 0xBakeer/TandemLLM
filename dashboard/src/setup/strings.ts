@@ -235,7 +235,7 @@ export const S = {
     failed: 'The install failed',
     rolled_back: 'The install failed and the box went back to the previous setup',
   } as Record<string, string>,
-  stepState: { pending: 'waiting', running: 'running', done: 'done', failed: 'failed', skipped: 'skipped' } as Record<SetupJobStepState, string>,
+  stepState: { pending: 'not started', waiting: 'waiting for requests', running: 'running', done: 'done', failed: 'failed', skipped: 'skipped' } as Record<SetupJobStepState, string>,
   /** reset level 2's job (kind reset) */
   resetJobState: {
     queued: 'Waiting to start',

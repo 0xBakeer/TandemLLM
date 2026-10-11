@@ -32,6 +32,15 @@ The test matrix:
   9  the real runner, detached (its own session) with stub scripts and a local engine for the
      smoke: the job runs to done on its own and the status responder serves its state
                                                          test_the_detached_runner
+ 10  the runner's hard cases: it waits for the engine to be idle before anything stops (the step
+     says `waiting`; too long and nothing changed); a port change that fails is stopped on the new
+     port before the old overlay comes back, and a failure after the old engine stopped rolls back;
+     use-profile.sh never rolls back itself (QSE_NO_ROLLBACK) and the rollback's smoke names the
+     old served model; the setup-mode marker comes back unchanged (its HOST) on a rollback and after
+     a crash; the smoke asks for 512 tokens          test_the_runners_hard_cases
+ 11  a timed-out command's whole process group goes; a pid that is not the runner's any more (another
+     start time, another boot) is not alive; every overlay value is quoted, so a value with a ; in
+     it stays one word                                   test_timeouts_liveness_and_quoting
 
 Run: python tests/test_setup_apply.py
 """
@@ -148,10 +157,10 @@ def test_the_overlay():
         sel = _sel(slots=2, window=65_536, components={"vision": False},
                    advanced={"served_model": "my-model"})
         text = apply.render_overlay(M, sel)
-        assert "QSE_PARALLEL=2\n" in text and "MAX_LEN=65536\n" in text
-        assert "QSE_SIDE_MAX_LEN=65536\n" in text and "QSE_KV_POOL=on\n" in text
+        assert "QSE_PARALLEL='2'\n" in text and "MAX_LEN='65536'\n" in text
+        assert "QSE_SIDE_MAX_LEN='65536'\n" in text and "QSE_KV_POOL='on'\n" in text
         assert 'QSE_CONDUCTOR_CONFIG="${HOME}/.qwen38-spark-engine/conductor"' in text
-        assert "VISION=off\n" in text and "SERVED_MODEL=my-model\n" in text
+        assert "VISION='off'\n" in text and "SERVED_MODEL='my-model'\n" in text
         assert "QSE_DISK_CACHE" not in text                  # on: the profile's folder stands
         apply.write_overlay(M, sel)
         got = apply.resolve_env(["QSE_PARALLEL", "VISION", "QSE_DISK_CACHE", "SERVED_MODEL",
@@ -264,7 +273,8 @@ def _job(sel, setup_mode=False, previous="exl3-6.0"):
 
 ALLOWED_ARGS = {"--fetch-only", "--setup", "--admin", "120"} | {p["id"] for p in M["profiles"]}
 ALLOWED_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
-               "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "SMOKE_URL", "SMOKE_MODEL"}
+               "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "SMOKE_URL", "SMOKE_MODEL",
+               "QSE_NO_ROLLBACK"}
 
 
 def test_nothing_outside_the_allowlist():
@@ -388,6 +398,150 @@ def test_rollback():
         assert seen == [("use-profile.sh", False), ("stop.sh", True), ("start.sh", True)], seen
         assert rec.calls[-1]["argv"][2:] == ["--setup"]
         assert apply.read_job(jid)["state"] == "rolled_back"
+
+
+def test_the_runners_hard_cases():
+    # idle: two requests run, then none; the step waits and says so
+    with Box() as box:
+        seen = iter([2, 2, 0])
+
+        def busy_http(url, body=None, timeout=10):
+            if url.endswith("/health") and ":8000/" in url:
+                n = next(seen, 0)
+                return {"status": "ok", "weights": {"name": "exl3-4.5"},
+                        "inflight": {"running": n, "waiting": 0, "lane": 0}}
+            return _smoke_ok()(url, body, timeout)
+
+        rec = Recorder()
+        jid = _job(_sel())
+        r = apply.Runner(jid, cmd=rec, http=busy_http, ops=box.ops, sleep=lambda s: None)
+        assert r.main() == 0
+        evs = [e["event"] for e in apply.events(jid)]
+        waits = [e["step"] for e in evs if e["type"] == "step" and e["step"]["state"] == "waiting"]
+        assert waits and waits[0]["id"] == "write_config" and "2 requests" in waits[0]["detail"]
+        # too long: nothing stops, nothing is written
+        real = apply.IDLE_WAIT_S
+        apply.IDLE_WAIT_S = 0
+        try:
+            def always_busy(url, body=None, timeout=10):
+                return {"status": "ok", "inflight": {"running": 1}}
+            rec = Recorder()
+            before = open(apply.overlay_path()).read()
+            jid = _job(_sel(slots=2))
+            assert apply.Runner(jid, cmd=rec, http=always_busy, ops=box.ops,
+                                sleep=lambda s: None).main() == 1
+            job = apply.read_job(jid)
+            assert job["failed_step"] == "write_config" and "nothing changed" in job["message"]
+            assert rec.calls == [] and open(apply.overlay_path()).read() == before
+        finally:
+            apply.IDLE_WAIT_S = real
+    # a port change that fails: the new port is stopped under the new overlay, then the old one
+    # comes back; use-profile.sh never rolls back itself; the rollback's smoke names the old model
+    with Box() as box:
+        apply.write_overlay(M, _sel(slots=3, advanced={"served_model": "old-name"},
+                                    components={"conductor": False, "narrator": False,
+                                                "laya": False, "shadow": False}))
+        old = open(apply.overlay_path()).read()
+        seen = []
+        rec = Recorder(rc={"use-profile.sh exl3-4.5": 1})
+
+        def look(argv, **kw):
+            with open(apply.overlay_path()) as fh:
+                seen.append((" ".join(os.path.basename(a) for a in argv[1:]),
+                             "PORT='8124'" in fh.read()))
+            return rec(argv, **kw)
+
+        jid = _job(_sel(advanced={"port": 8124}))
+        assert apply.Runner(jid, cmd=look, http=_smoke_ok(), ops=box.ops).main() == 1
+        assert seen == [("stop.sh 120", False), ("use-profile.sh exl3-4.5", True),
+                        ("stop.sh 120", True), ("use-profile.sh exl3-6.0", False)], seen
+        assert open(apply.overlay_path()).read() == old
+        assert all(c["env"].get("QSE_NO_ROLLBACK") == "1" for c in rec.calls
+                   if os.path.basename(c["argv"][1]) == "use-profile.sh")
+        assert rec.calls[-1]["env"]["SMOKE_MODEL"] == "old-name", rec.calls[-1]["env"]
+        assert rec.calls[-1]["env"]["SMOKE_URL"] == "http://127.0.0.1:8000/v1"
+        # a failure after the old engine stopped (make-secrets) goes through the rollback
+        rec = Recorder(rc={"make-secrets.sh": 1})
+        jid = _job(_sel(advanced={"port": 8124, "admin_password": "generate"}))
+        assert apply.Runner(jid, cmd=rec, http=_smoke_ok(), ops=box.ops).main() == 1
+        seq = [" ".join(os.path.basename(a) for a in c["argv"][1:]) for c in rec.calls]
+        assert seq == ["stop.sh 120", "make-secrets.sh --admin", "stop.sh 120",
+                       "use-profile.sh exl3-6.0"], seq
+        job = apply.read_job(jid)
+        assert job["failed_step"] == "write_config" and job["state"] == "rolled_back", job
+        assert open(apply.overlay_path()).read() == old
+    # setup mode: the marker (with its HOST) comes back unchanged, on a rollback and after a crash
+    with Box() as box:
+        pending = os.path.join(box.root, "run", "setup-pending")
+        with open(pending, "w") as fh:
+            fh.write("HOST=0.0.0.0\n")
+        # a stale marker beside a serving engine: the plan says so
+        assert any("run/setup-pending" in w for w in _plan()["warnings"])
+        assert not any("run/setup-pending" in w for w in _plan(setup_mode=True)["warnings"])
+        jid = _job(_sel(), setup_mode=True, previous=None)
+        assert apply.Runner(jid, cmd=Recorder(rc={"use-profile.sh exl3-4.5": 1}),
+                            http=_smoke_ok(), ops=box.ops).main() == 1
+        assert open(pending).read() == "HOST=0.0.0.0\n"
+
+        def crash(argv, **kw):
+            if os.path.basename(argv[1]) == "use-profile.sh":
+                raise RuntimeError("the runner died here")
+            return 0
+
+        jid = _job(_sel(), setup_mode=True, previous=None)
+        assert apply.Runner(jid, cmd=crash, http=_smoke_ok(), ops=box.ops).main() == 1
+        assert open(pending).read() == "HOST=0.0.0.0\n"
+        # a good install drops it for good
+        bodies = []
+
+        def ok(url, body=None, timeout=10):
+            if body is not None:
+                bodies.append(body)
+            return _smoke_ok()(url, body, timeout)
+
+        jid = _job(_sel(), setup_mode=True, previous=None)
+        assert apply.Runner(jid, cmd=Recorder(), http=ok, ops=box.ops).main() == 0
+        assert not os.path.exists(pending)
+        assert bodies and bodies[-1]["max_tokens"] == 512
+
+
+def test_timeouts_liveness_and_quoting():
+    with Box() as box:
+        pidfile = os.path.join(box.tmp, "child.pid")
+        script = os.path.join(box.tmp, "slow.sh")
+        with open(script, "w") as fh:
+            fh.write(f'#!/bin/bash\nsleep 60 &\necho $! > "{pidfile}"\nwait\n')
+        lines = []
+        t0 = time.monotonic()
+        rc = apply._run_cmd(["bash", script], timeout=1.5, env={"PATH": os.environ["PATH"]},
+                            cwd=box.tmp, line=lines.append)
+        assert rc == 124 and time.monotonic() - t0 < 10
+        child = int(open(pidfile).read())
+        time.sleep(0.3)
+        try:
+            os.kill(child, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        assert not alive, "the script's child outlived the timeout"
+        # liveness: the same pid with another start time or another boot is not the runner
+        real = apply._proc_identity
+        apply._proc_identity = lambda pid: {"pid_start": 111, "boot_id": "b1"}
+        try:
+            assert apply._alive(os.getpid(), 111, "b1")
+            assert not apply._alive(os.getpid(), 222, "b1")
+            assert not apply._alive(os.getpid(), 111, "b2")
+            assert apply._alive(os.getpid())                  # an older job without them
+        finally:
+            apply._proc_identity = real
+        # quoting: a value with ; and a space stays one value when serve.env sources it
+        sel = _sel()
+        m = json.loads(json.dumps(M))
+        m["components"][6]["knobs"]["VISION"]["on"] = "a b;touch " + os.path.join(box.tmp, "pwn")
+        apply.write_overlay(m, sel)
+        got = apply.resolve_env(["VISION"])
+        assert got["VISION"].startswith("a b;touch"), got
+        assert not os.path.exists(os.path.join(box.tmp, "pwn"))
 
 
 class Req(app.Handler):

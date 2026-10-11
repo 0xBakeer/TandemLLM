@@ -13,6 +13,8 @@ selection's checked numbers, `shell=False`, a minimal environment, a timeout eac
                       the assets, the HF token, the overlay hook in serve.env, the box lock
     unload_assistant  Wren unloaded (the server does it before it starts the runner)
     fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when on disk)
+    (waiting)         write_config waits until no request runs or waits on the engine (its /health,
+                      IDLE_WAIT_S at most; then nothing has changed and the job fails)
     write_config      run/setup.env from the registry's keys and the selection, the old one kept
                       as run/setup.env.bak-<utc>, written whole and renamed into place; with a
                       port change the engine on the old port is stopped first (bash ops/stop.sh);
@@ -40,6 +42,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -73,6 +76,9 @@ def jobs_dir() -> str:
 DISK_MARGIN_GB = 60          # ops/use-profile.sh's: the disk tier and the spill grow into it
 SCRIPTS = ("use-profile.sh", "start.sh", "stop.sh", "make-secrets.sh")
 TIMEOUTS = {"fetch": 7200, "switch": 1800, "stop": 300, "secrets": 60, "start": 900}
+# before anything stops, the engine's requests finish: at most this long, asked this often
+IDLE_WAIT_S = 600
+IDLE_POLL_S = 2.0
 JOB_ID = re.compile(r"^[a-f0-9]{16}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 STEPS = (("check", "Check the selection, the disk and the box"),
@@ -141,8 +147,10 @@ def render_overlay(m: dict, sel: dict, when: str | None = None) -> str:
              f"{sel['profile']}.",
              "# Generated: the next apply replaces it and reset level 2 removes it. ops/serve.env",
              "# reads it after the weight profile, so it never sets the weights."]
+    # always quoted: single quotes, or double quotes around the one expansion it keeps (${HOME});
+    # _value_ok refuses quotes, backslashes, backticks and every other $ in a value
     for key, v in overlay_values(m, sel).items():
-        lines.append(f'{key}="{v}"' if "$" in v else f"{key}={v}")
+        lines.append(f'{key}="{v}"' if "${HOME}" in v else f"{key}='{v}'")
     return "\n".join(lines) + "\n"
 
 
@@ -243,6 +251,9 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
     new_port = int(sel["advanced"].get("port") or old_port)
     if new_port != old_port and _port_taken(new_port):
         error("port_in_use", f"Port {new_port} is in use by another program on this box.")
+    if not setup_mode and os.path.exists(pending_path()):
+        warnings.append("run/setup-pending is on this box while the engine serves a model: its "
+                        "next plain start would be setup mode. The install removes it.")
     if not password_set:
         warnings.append("No admin password is set: anyone who can reach this port can run the "
                         "setup, apply it and reset the box. Generate one in the advanced step.")
@@ -365,15 +376,37 @@ def read_job(jid: str) -> dict | None:
     except (OSError, ValueError):
         return None
     starting = job["state"] == "queued" and time.time() - job.get("created_at", 0) < 30
-    if job["state"] in ("queued", "running") and not starting and not _alive(job.get("pid")):
+    if job["state"] in ("queued", "running") and not starting and not _alive(
+            job.get("pid"), job.get("pid_start"), job.get("boot_id")):
         job.update(state="failed", message="interrupted: the job's process is gone",
                    ended_at=job.get("ended_at") or time.time())
     return job
 
 
-def _alive(pid) -> bool:
+def _proc_identity(pid: int) -> dict:
+    """What tells this process apart from a later one with the same pid: its start time (clock
+    ticks since boot, /proc/<pid>/stat field 22) and the boot's id. Empty off Linux."""
+    out = {}
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            out["pid_start"] = int(fh.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/sys/kernel/random/boot_id") as fh:
+            out["boot_id"] = fh.read().strip()
+    except (OSError, IndexError, ValueError):
+        return {}
+    return out
+
+
+def _alive(pid, pid_start=None, boot_id=None) -> bool:
+    """The runner `pid` still runs: the pid exists, is no zombie, and (when the job recorded
+    them) it is the same process: the same boot and the same start time; a reboot or a reused pid
+    is not the runner."""
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if pid_start is not None or boot_id is not None:
+        now = _proc_identity(pid)
+        if now and (now.get("boot_id") != boot_id or now.get("pid_start") != pid_start):
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -465,7 +498,11 @@ def _run_cmd(argv: list[str], *, timeout: float, env: dict, cwd: str, line) -> i
     sel.register(p.stdout, selectors.EVENT_READ)
     while True:
         if time.monotonic() > t_end:
-            p.kill()
+            # its own session: the whole group goes (use-profile.sh's start.sh, curl, a fetch)
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                p.kill()
             p.wait()
             line(f"[setup] {os.path.basename(argv[1])}: no end after {timeout:.0f} s, stopped")
             return 124
@@ -486,11 +523,11 @@ class Runner:
     every argv)."""
 
     def __init__(self, jid: str, *, cmd=_run_cmd, http=None, ops: str | None = None,
-                 clock=time.time):
+                 clock=time.time, sleep=time.sleep):
         self.jid, self.dir = jid, job_dir(jid)
         self.cmd, self.http = cmd, http or _http
         self.ops = ops or device_mod.ops_dir()
-        self.clock = clock
+        self.clock, self.sleep = clock, sleep
         with open(os.path.join(self.dir, "job.json")) as fh:
             self.spec = json.load(fh)
         with open(os.path.join(self.dir, "state.json")) as fh:
@@ -549,7 +586,7 @@ class Runner:
 
     # -- the job
     def main(self) -> int:
-        self.job.update(state="running", pid=os.getpid())
+        self.job.update(state="running", pid=os.getpid(), **_proc_identity(os.getpid()))
         self._save()
         self._emit({"type": "job", "job": dict(self.job)})
         self.step("unload_assistant", "done", "Wren was unloaded before the job started")
@@ -560,6 +597,10 @@ class Runner:
             self.log(f"[setup] the job stopped: {type(exc).__name__}: {exc}")
             self.job["message"] = f"{type(exc).__name__}: {exc}"[:400]
             ok = False
+        if not ok and self.spec.get("setup_mode") and not os.path.exists(pending_path()) \
+                and self._restore_marker():
+            # a box with no engine must still come up in setup mode on its next start
+            self.log("[setup] run/setup-pending put back: the next start is setup mode again")
         end = self.job["state"] if self.job["state"] in ("done", "rolled_back") else (
             "done" if ok else "failed")
         self.job.update(state=end, ended_at=self.clock())
@@ -590,10 +631,7 @@ class Runner:
         if not PROFILE_ID.match(sel["profile"]) or not os.path.isfile(
                 os.path.join(self.ops, "profiles", sel["profile"] + ".env")):
             return self._fail("check", f"no ops/profiles/{sel['profile']}.env on this box")
-        prev = spec.get("previous")
-        if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
-                os.path.join(self.ops, "profiles", prev + ".env"))):
-            prev = None
+        prev = self._previous()
         p = plan(m, sel, setup_mode=spec["setup_mode"], password_set=True)
         if p["errors"]:
             return self._fail("check", " ".join(p["errors"]))
@@ -612,43 +650,63 @@ class Runner:
                 return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
                                            f"else changed")
             self.step("fetch", "done")
-        # write_config
-        self.step("write_config", "running")
+        # write_config: nothing has changed until the engine is idle
         old_port, new_port = spec["ports"]["current"], spec["ports"]["next"]
-        if new_port != old_port:
+        if not self._wait_idle("write_config", old_port):
+            return False
+        self.step("write_config", "running")
+        stopped = new_port != old_port
+        if stopped:
             self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
-        backup = write_overlay(m, sel, self.clock)
-        self.job["backup"] = backup
-        if sel["advanced"].get("admin_password") == "generate":
-            rc = self.run(self.argv("make-secrets.sh", "--admin"), TIMEOUTS["secrets"])
-            if rc != 0:
+        backup = None
+        try:
+            backup = write_overlay(m, sel, self.clock)
+            self.job["backup"] = backup
+            if sel["advanced"].get("admin_password") == "generate":
+                rc = self.run(self.argv("make-secrets.sh", "--admin"), TIMEOUTS["secrets"])
+                if rc != 0:
+                    raise RuntimeError(f"ops/make-secrets.sh failed (exit {rc})")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            if not stopped:
                 restore_overlay(backup)
-                return self._fail("write_config", f"ops/make-secrets.sh failed (exit {rc}); the "
-                                                  f"old configuration is back")
+                return self._fail("write_config", f"{exc}; the old configuration is back")
+            # the old engine is stopped already: the rollback starts it again
+            self._fail("write_config", f"{exc}")
+            return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("write_config", "done", f"run/setup.env, {len(overlay_values(m, sel))} keys"
                                           + (f"; the old one is {os.path.basename(backup)}"
                                              if backup else ""))
         # switch
         self.step("switch", "running", "about 4 minutes; the dashboard is away meanwhile")
-        if spec["setup_mode"] and os.path.exists(pending_path()):
-            os.unlink(pending_path())
+        self._take_marker()
         smoke_model = "TandemLLM" if sel["components"].get("conductor") else \
             sel["advanced"].get("served_model", "qwen38-spark-engine")
+        # use-profile.sh does not roll back itself (QSE_NO_ROLLBACK): it would restart the old
+        # profile under the new overlay, and this runner's rollback would do it all again
         rc = self.run(self.argv("use-profile.sh", sel["profile"]), TIMEOUTS["switch"],
-                      SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=smoke_model)
+                      SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=smoke_model,
+                      QSE_NO_ROLLBACK="1")
         if rc != 0:
             self._fail("switch", f"the new setup did not start (ops/use-profile.sh exit {rc})")
-            return self._rollback(m, spec, backup, prev, old_port)
+            return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         # smoke
         self.step("smoke", "running")
         why = self._smoke(sel["profile"], new_port, smoke_model)
         if why:
             self._fail("smoke", why)
-            return self._rollback(m, spec, backup, prev, old_port)
+            return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("smoke", "done", f"{sel['profile']} answers on port {new_port}")
         self.job["message"] = f"{sel['profile']} is live on port {new_port}."
+        self._drop_marker_copy()
         return True
+
+    def _previous(self) -> str | None:
+        prev = self.spec.get("previous")
+        if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
+                os.path.join(self.ops, "profiles", prev + ".env"))):
+            return None
+        return prev
 
     def _reset_steps(self, m: dict) -> bool:
         """Reset level 2: the overlay and its backups go (the overlay kept in the job's folder
@@ -661,10 +719,7 @@ class Runner:
         if _box_lock_held():
             return self._fail("check", "the box lock (~/.qwen38-box.flock) is held; try again "
                                        "later")
-        prev = spec.get("previous")
-        if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
-                os.path.join(self.ops, "profiles", prev + ".env"))):
-            prev = None
+        prev = self._previous()
         self.step("check", "done", f"{len(p['changes'])} settings go back")
         if p["profile"]["on_disk"]:
             self.step("fetch", "skipped", "the weights are on this box")
@@ -675,38 +730,93 @@ class Runner:
                 return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
                                            f"else changed")
             self.step("fetch", "done")
-        self.step("write_config", "running")
         old_port, new_port = p["ports"]["current"], p["ports"]["next"]
-        if new_port != old_port:
-            self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
+        if not self._wait_idle("write_config", old_port):
+            return False
+        self.step("write_config", "running")
         keep = os.path.join(self.dir, "setup.env.before")
         overlay = overlay_path()
         if os.path.exists(overlay):
             shutil.copy2(overlay, keep)
+        backup = keep if os.path.exists(keep) else None
+        if new_port != old_port:
+            # stopped under the overlay that names the old port
+            self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
         gone = 0
         for f in glob.glob(overlay + "*"):
             if f == overlay or ".bak-" in f:
                 os.unlink(f)
                 gone += 1
         self.step("write_config", "done", f"run/setup.env and {max(0, gone - 1)} backup(s) removed")
-        backup = keep if os.path.exists(keep) else None
         self.step("switch", "running", "about 4 minutes; the dashboard is away meanwhile")
-        if spec["setup_mode"] and os.path.exists(pending_path()):
-            os.unlink(pending_path())
+        self._take_marker()
         rc = self.run(self.argv("use-profile.sh", prof), TIMEOUTS["switch"],
-                      SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=p["smoke_model"])
+                      SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=p["smoke_model"],
+                      QSE_NO_ROLLBACK="1")
         if rc != 0:
             self._fail("switch", f"the engine did not start (ops/use-profile.sh exit {rc})")
-            return self._rollback(m, spec, backup, prev, old_port)
+            return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         self.step("smoke", "running")
         why = self._smoke(prof, new_port, p["smoke_model"])
         if why:
             self._fail("smoke", why)
-            return self._rollback(m, spec, backup, prev, old_port)
+            return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("smoke", "done", f"{prof} answers on port {new_port}")
         self.job["message"] = f"The shipped configuration runs, on {prof}."
+        self._drop_marker_copy()
         return True
+
+    # -- idle, the setup-mode marker
+    def _wait_idle(self, sid: str, port: int) -> bool:
+        """Before anything stops: no request runs or waits on the engine (its /health, which a
+        tool on the box reads in full), at most IDLE_WAIT_S; the step shows `waiting`
+        meanwhile. Setup mode has no engine to wait for."""
+        if self.spec.get("setup_mode"):
+            return True
+        t_end = time.monotonic() + IDLE_WAIT_S
+        shown = None
+        while True:
+            try:
+                h = self.http(f"http://127.0.0.1:{port}/health", timeout=5)
+                inf = (h or {}).get("inflight") or {}
+                n = int(inf.get("running", 0)) + int(inf.get("waiting", 0)) + \
+                    int(inf.get("lane", 0))
+            except Exception:                                    # noqa: BLE001
+                return True                 # no engine answers: there is nothing to drain
+            if n == 0:
+                return True
+            if n != shown:
+                shown = n
+                self.step(sid, "waiting", f"waiting for {n} request{'s' if n != 1 else ''} to "
+                                          f"finish before the restart")
+            if time.monotonic() > t_end:
+                return self._fail(sid, f"{n} request{'s' if n != 1 else ''} still ran after "
+                                       f"{IDLE_WAIT_S // 60} minutes; nothing changed. Try again "
+                                       f"when the engine is idle.")
+            self.sleep(IDLE_POLL_S)
+
+    def _take_marker(self) -> None:
+        """run/setup-pending goes before the switch (start.sh would start setup mode again), a
+        copy kept in the job's folder: a rollback or a crash puts it back unchanged (its HOST)."""
+        pend = pending_path()
+        if os.path.exists(pend):
+            shutil.copy2(pend, os.path.join(self.dir, "setup-pending.before"))
+            os.unlink(pend)
+
+    def _restore_marker(self) -> bool:
+        saved = os.path.join(self.dir, "setup-pending.before")
+        if not os.path.exists(saved):
+            return False
+        os.makedirs(run_dir(), exist_ok=True)
+        shutil.copy2(saved, pending_path())
+        return True
+
+    def _drop_marker_copy(self) -> None:
+        try:
+            os.unlink(os.path.join(self.dir, "setup-pending.before"))
+        except OSError:
+            pass
 
     def _smoke(self, profile: str, port: int, model: str) -> str | None:
         base = f"http://127.0.0.1:{port}"
@@ -716,7 +826,8 @@ class Runner:
             return f"/health did not answer ({type(exc).__name__})"
         if ((h or {}).get("weights") or {}).get("name") != profile:
             return f"/health does not name {profile}"
-        body = {"model": model, "max_tokens": 16, "temperature": 0,
+        # use-profile.sh's own smoke: a thinking-capable template may spend tokens before the word
+        body = {"model": model, "max_tokens": 512, "temperature": 0,
                 "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
                 "chat_template_kwargs": {"enable_thinking": False}}
         try:
@@ -729,23 +840,33 @@ class Runner:
         self.log(f"[smoke] {text.strip()[:60]}")
         return None
 
-    def _rollback(self, m, spec, backup, prev, old_port) -> bool:
+    def _rollback(self, m, spec, backup, prev, old_port, new_port=None) -> bool:
         self.step("rollback", "running")
+        if new_port is not None and new_port != old_port:
+            # whatever started on the new port goes first, while the overlay still names it
+            self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
         restore_overlay(backup)
         if spec["setup_mode"]:
-            os.makedirs(run_dir(), exist_ok=True)
-            with open(pending_path(), "w") as fh:
-                fh.write("setup mode: the apply job rolled back\n")
+            if not self._restore_marker():
+                os.makedirs(run_dir(), exist_ok=True)
+                with open(pending_path(), "w") as fh:
+                    fh.write("setup mode: the apply job rolled back\n")
             self.run(self.argv("stop.sh", "120"), TIMEOUTS["stop"])
             rc = self.run(self.argv("start.sh", "--setup"), TIMEOUTS["start"])
         elif prev is not None:
+            got = resolve_env(["SERVED_MODEL", "QSE_CONDUCTOR_CONFIG"])
+            cond = got.get("QSE_CONDUCTOR_CONFIG") or "off"
+            smoke = "TandemLLM" if cond not in ("", "off") else (got.get("SERVED_MODEL") or
+                                                                 "qwen38-spark-engine")
             rc = self.run(self.argv("use-profile.sh", prev), TIMEOUTS["switch"],
-                          SMOKE_URL=f"http://127.0.0.1:{old_port}/v1")
+                          SMOKE_URL=f"http://127.0.0.1:{old_port}/v1", SMOKE_MODEL=smoke,
+                          QSE_NO_ROLLBACK="1")
         else:
             rc = self.run(self.argv("start.sh"), TIMEOUTS["start"])
         if rc == 0:
             self.step("rollback", "done", "the previous setup runs again")
             self.job.update(state="rolled_back", rolled_back=True)
+            self._drop_marker_copy()
         else:
             self.step("rollback", "failed", f"the previous setup did not start either (exit {rc}); "
                                             f"see logs/engine.log on the box")

@@ -12,6 +12,7 @@
 //   hfToken: bool, password: bool, busy: n (requests running), setupMode: bool (/health mode)
 //   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3),
 //   shadowOn: bool (the shadow reader runs: its sessions are kept, `skip`, and reported in `failed`)
+//   waitIdle: bool (the next job's write_config first waits for 2 requests to finish)
 //   estimateDown: bool, planDown: bool, models: ok | empty | error | broken
 //   active: <profile id> (what the box runs), secretsExist: bool (generate is refused, secrets_exist)
 //   unauthorized: bool (an admin password is set: every /v1/setup route answers 401 until
@@ -69,6 +70,7 @@ interface Options {
   resetPartial: boolean;
   resetEmpty: boolean;
   shadowOn: boolean;
+  waitIdle: boolean;
   secretsExist: boolean;
   estimateDown: boolean;
   planDown: boolean;
@@ -94,6 +96,7 @@ const START: Options = {
   resetPartial: false,
   resetEmpty: false,
   shadowOn: false,
+  waitIdle: false,
   secretsExist: false,
   estimateDown: false,
   planDown: false,
@@ -327,6 +330,11 @@ export class MockSetup {
     step('unload_assistant', 600 * slow, ['[wren] unloading qwen3.5-2b (4.4 GiB back)']);
     if (fetch) step('fetch', 2600 * slow, [`[profile] fetching ${prof} from ${MODEL.profiles.find((p) => p.id === prof)?.hf_repo}`, '[hf] 25 % of 18.4 GB', '[hf] 50 %', '[hf] 75 %', '[hf] 100 %, sha256 ok']);
     else step('fetch', 0, [], 'skipped', 'already on the box');
+    if (this.o.waitIdle) {
+      // apply.py _wait_idle: the step waits for the engine's requests before anything stops
+      tl.push({ at: t, ev: { type: 'step', step: { id: 'write_config', label: STEP_LABELS.write_config, state: 'waiting', started_at: null, ended_at: null, detail: 'waiting for 2 requests to finish before the restart' } } });
+      t += 2500;
+    }
     step('write_config', 600 * slow, kind === 'reset' ? ['[setup] run/setup.env and 1 backup(s) removed'] : ['[setup] run/setup.env.bak-20261010T081200Z kept', `[setup] run/setup.env: ${Object.keys(this.envFor(sel)).length} keys`]);
     const switchStart = t;
     step('switch', 2800 * slow, [`[profile] switching ${this.o.active} -> ${prof}`, '[engine] stopping (draining 0 requests)', '[engine] starting', '[memory] load stages: weights, drafters, graphs', '[engine] ready on :8000']);
