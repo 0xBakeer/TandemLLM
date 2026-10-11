@@ -1,0 +1,11 @@
+{
+  "name": "TandemLLM",
+  "short_name": "TandemLLM",
+  "description": "The engine's own dashboard and chat.",
+  "start_url": "./#/chat",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#161d25",
+  "theme_color": "#161d25",
+  "icons": [{ "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

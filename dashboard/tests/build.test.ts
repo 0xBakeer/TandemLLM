@@ -24,7 +24,7 @@ describe('dist/', () => {
     expect(html).toMatch(/href="\.\/assets\//);
     expect(html).not.toMatch(/https?:\/\//);
   });
-  it.skipIf(!present)('total gzip size is under 300 KB', () => {
+  it.skipIf(!present)('total gzip size is under 400 KB', () => {
     let total = 0;
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
@@ -34,6 +34,6 @@ describe('dist/', () => {
       }
     };
     walk(DIST);
-    expect(total).toBeLessThan(300 * 1024);
+    expect(total).toBeLessThan(400 * 1024);
   });
 });

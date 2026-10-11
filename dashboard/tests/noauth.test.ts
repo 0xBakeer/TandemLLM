@@ -123,8 +123,13 @@ describe('AU1: no password prompt in the source', () => {
       }
     };
     walk(root);
-    expect(users).toEqual([join('setup', 'view.ts')]);
+    // the Chat tab (VIS-99) shows the same card, and only when the server says a password is set
+    // and this device is not signed in (CONTRACT.md section 2 and 7.8)
+    expect(users.sort()).toEqual([join('chat', 'view.ts'), join('setup', 'view.ts')]);
     const view = readFileSync(join(root, 'setup', 'view.ts'), 'utf8');
     expect(view).toMatch(/this\.unauthorized \? html`<qse-setup-signin><\/qse-setup-signin>`/);
+    const chat = readFileSync(join(root, 'chat', 'view.ts'), 'utf8');
+    expect(chat).toMatch(/this\.needSignIn = .*password_set && !this\.caps\.session\.signed_in/);
+    expect(chat).toMatch(/if \(this\.needSignIn\) return this\.renderSignIn\(\)/);
   });
 });

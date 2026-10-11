@@ -28,6 +28,7 @@ import { S } from './setup/strings';
 
 /** `short`: the label in the phone's bottom bar, where seven tabs share 390 px */
 const TABS: { view: View; label: string; short?: string }[] = [
+  { view: 'chat', label: 'Chat' },
   { view: 'usage', label: 'Usage' },
   { view: 'performance', label: 'Performance', short: 'Perf' },
   { view: 'dev', label: 'Dev' },
@@ -41,6 +42,10 @@ const TABS: { view: View; label: string; short?: string }[] = [
 /** The Playground view is its own chunk; the element upgrades in place once the chunk has loaded. */
 let playgroundChunk: Promise<unknown> | null = null;
 const loadPlayground = () => (playgroundChunk ??= import('./views/playground'));
+/** The Chat tab (VIS-99): the conversation, its panes and the Context panel, its own chunk; the
+ *  mock backend and the remote client load inside it on demand. */
+let chatChunk: Promise<unknown> | null = null;
+const loadChat = () => (chatChunk ??= import('./chat/view'));
 /** The Conductor view, its own chunk too: the editors are not needed on the pages watched daily. */
 let conductorChunk: Promise<unknown> | null = null;
 const loadConductor = () => (conductorChunk ??= import('./views/conductor'));
@@ -257,6 +262,9 @@ export class QseApp extends LightElement {
   private renderView(): TemplateResult {
     if (!this.booted || (this.setupMode && this.route.view !== 'setup')) return html``;
     switch (this.route.view) {
+      case 'chat':
+        void loadChat();
+        return html`<qse-chat .params=${this.route.params} .path=${this.route.path}></qse-chat>`;
       case 'usage':
         return html`<qse-usage .summary=${this.summary} .params=${this.route.params}></qse-usage>`;
       case 'performance':

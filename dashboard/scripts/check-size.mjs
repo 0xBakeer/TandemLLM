@@ -1,4 +1,5 @@
-// Prints the gzip size of every file in dist/ and fails above the 300 KB budget.
+// Prints the gzip size of every file in dist/ and fails above the 400 KB budget (300 KB before the
+// Chat tab, VIS-99, which is its own chunk of about 40 KB gzip plus the mock it loads on demand).
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -17,8 +18,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 300 KB)`);
-if (total > 300 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 400 KB)`);
+if (total > 400 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
