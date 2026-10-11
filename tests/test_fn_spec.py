@@ -189,7 +189,20 @@ def test_staircut():
         sc.cut(1, tok, [[0.95, 0.01]] * 5)
         sc.observe([0], 30.0, 2.0)
     assert sc.c("spine", 0.95) < 0.2 < before
-    return "confident chain kept, unsure dropped, a paying sibling first, calibration learned"
+    # prices: a count measured slow does not make the next count cheaper, and the offset moves the rest
+    sc2 = StairCut(siblings=False)
+    sc2.V[3] = 60.0
+    p = sc2.prices(6)
+    assert all(p[r + 1] >= p[r] for r in range(1, 6)) and p[4] >= 60.0, p
+    sc3 = StairCut(siblings=True)
+    for _ in range(80):
+        sc3.cut(1, tok, [[0.99, 0.0]] * 5)
+        sc3.last = (sc3.last[0], sc3.last[1], 2)
+        sc3.observe([0, 1], 40.0, 2.0)               # every 2-row block cost 40 ms: a long context
+    assert sc3.delta > 8.0 and sc3.price(5) > sc3.prior(5) + 8.0
+    toks, par = sc3.cut(1, tok, [[0.99, 0.0]] * 5)
+    assert 20 not in toks, toks                       # a sibling of q 0 is never bought
+    return "confident chain kept, unsure dropped, a paying sibling first, calibration learned, prices monotone"
 
 
 def test_ple_ids_per_path():

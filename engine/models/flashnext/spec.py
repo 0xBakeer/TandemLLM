@@ -174,8 +174,10 @@ class StairCut:
     the sibling. Calibration maps the draft head's probability to the measured rate of acceptance, per
     tenth of probability, starting from the probability itself (a prior of 4 rounds a bin) and learned
     online from every verified round. V(rows) is the measured verify-and-commit time a row count costs,
-    started from the 2026-10-11 bench (Flash-Next 3.05, 1k) and followed online (EMA 0.1); a verify of
-    N rows reads the union of the experts its rows route to, so the price is a ramp, not a flat stair.
+    started from the 2026-10-11 bench (Flash-Next 3.05, 1k) and followed online (EMA 0.1); the counts
+    not measured yet follow the prior shifted by the learned offset (a long context moves every
+    count), and the prices never fall with more rows. A verify of N rows reads the union of the
+    experts its rows route to, so the price is a ramp, not a flat stair.
     """
 
     V0 = {1: 24.0, 2: 27.9, 3: 30.6, 4: 34.6, 5: 37.4, 6: 41.3}   # verify + commit, ms (bench 2026-10-11)
@@ -183,17 +185,29 @@ class StairCut:
 
     def __init__(self, siblings: bool = True, max_rows: int = 32):
         self.siblings, self.max_rows = siblings, max_rows
-        self.V = dict(self.V0)
+        self.V: dict = {}              # learned verify + commit ms by row count (EMA 0.1)
+        self.delta = 0.0               # learned shift of the prior table (the context moves it)
         self.draft_ms = None
         self.cal = {"spine": [[0.0, 0.0] for _ in range(10)], "sib": [[0.0, 0.0] for _ in range(10)]}
         self.last = None
         self.frozen = False            # observe nothing (a warm-up run of a measurement)
 
+    def prior(self, rows: int) -> float:
+        top = max(self.V0)
+        return self.V0[rows] if rows in self.V0 else self.V0[top] + self.STEP * (rows - top)
+
+    def prices(self, n: int) -> list[float]:
+        """The verify + commit price of 1..n rows: learned where measured, else the prior table
+        shifted by the learned offset; never cheaper for more rows (a cut must not buy a row for
+        nothing because one count was measured at a busier moment than the next)."""
+        out, p = [0.0], 0.0
+        for r in range(1, n + 1):
+            p = max(p, self.V.get(r, self.prior(r) + self.delta))
+            out.append(p)
+        return out
+
     def price(self, rows: int) -> float:
-        if rows in self.V:
-            return self.V[rows]
-        top = max(self.V)
-        return self.V[top] + self.STEP * (rows - top)
+        return self.prices(rows)[rows]
 
     def c(self, kind: str, p: float) -> float:
         b = min(int(p * 10), 9)
@@ -210,22 +224,23 @@ class StairCut:
             reach *= c1
             spine_q.append(reach)
         draft = self.draft_ms or 0.0
-        best = (1.0 / (self.price(1) + draft), 0, ())
+        price = self.prices(min(self.max_rows, 2 * D + 1))
+        best = (1.0 / (price[1] + draft), 0, ())
         for n in range(1, D + 1):
             gain = 1.0 + sum(spine_q[:n])
             rows = 1 + n
             if rows > self.max_rows:
                 break
-            score = gain / (self.price(rows) + draft)
+            score = gain / (price[rows] + draft)
             if score > best[0]:
                 best = (score, n, ())
             # siblings at depths 1..n + 1 (a sibling's parent is the spine node above it), best first
             sibs = []
             for k in sorted(range(min(n + 1, D)), key=lambda k: -sib_q[k]):
-                if rows + 1 > self.max_rows:
+                if rows + 1 > self.max_rows or sib_q[k] <= 0.0:
                     break
                 g2, r2 = gain + sib_q[k], rows + 1
-                s2 = g2 / (self.price(r2) + draft)
+                s2 = g2 / (price[r2] + draft)
                 if s2 <= score:
                     break
                 gain, rows, score = g2, r2, s2
@@ -265,6 +280,7 @@ class StairCut:
                 self._learn("sib", prob[k][1], ("sib", k) in on)
         verify = round_ms
         self.V[rows] = verify if rows not in self.V else 0.9 * self.V[rows] + 0.1 * verify
+        self.delta = 0.9 * self.delta + 0.1 * (verify - self.prior(rows))
         self.draft_ms = draft_ms if self.draft_ms is None else 0.9 * self.draft_ms + 0.1 * draft_ms
 
     def _learn(self, kind: str, p: float, hit: bool) -> None:
