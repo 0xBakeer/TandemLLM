@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.7.1, 2026-10-11
+
+Wren, the setup guide's assistant, is drawn as the gold DGX Spark box from the video "7 weeks with one DGX Spark" instead of a bird. The text does not change: only `dashboard/` changed, and the engine's modules are the same bytes as in 0.7.0, so the disk caches keep their fingerprint.
+
+- The box has the eight states the bird had, each with its own face. Idle, it smiles and blinks. It leans toward the message box as the user types, and question marks float above it as it thinks. Loading, it half closes its eyes inside the progress ring. Its mouth opens with the streamed text of an answer. To change a field it hops toward the page, and a small copy of the box lands on that field. An error brings a sweat drop and "?!", and asleep it closes its eyes under a drifting z.
+- With reduced motion each state is a still face, and no two states look the same.
+- This release swaps the dashboard's `dist` on a running engine, so `/health` reports 0.7.0 until the engine's next restart.
+
 ## 0.7.0, 2026-10-11
 
 The dashboard has a setup guide at `#/setup`, with a small assistant called Wren beside it. The text does not change: the guide is not on the serving path, a chat request never reaches it, and the engine imports it only when a `/v1/setup` route is called. [docs/setup.md](docs/setup.md) describes all of it.

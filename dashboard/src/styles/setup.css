@@ -1,31 +1,39 @@
 /* The setup guide (VIS-78), Wren (VIS-80) and the reset levels (VIS-82). Built on tokens.css: cobalt
    is data and selection, signal orange is "now" and the current step, red is over budget. The one
-   addition is Wren's plumage, a warm cocoa that is the only organic colour on the page. */
+   addition is Wren's figure, the gold DGX Spark box (VIS-89): its gold, cheek pink and ink stay the
+   same in both themes; the cut edge, the paper shadow and the glow change with the background. */
 
 :root {
-  --wren-body: #a8714a;
-  --wren-wing: #7d5236;
-  --wren-bar: #4e321f;
-  --wren-belly: #e3c39b;
-  --wren-brow: #f2dfc2;
-  --wren-beak: #f7a24f;
-  --wren-eye: #120c08;
-  --wren-leg: #c58b5e;
-  --wren-cheek: rgba(240, 140, 110, 0.35);
-  --wren-perch: #4a5868;
+  --spark-front: #d9ad63;
+  --spark-top: #ecd29b;
+  --spark-chin: #c99c55;
+  --spark-dot: #a47b3c;
+  --spark-lit: #fff3c8;
+  --spark-ink: #1f1c2b;
+  --spark-blush: #f29aa7;
+  --spark-tongue: #ee8191;
+  --spark-feet: #4a4456;
+  --spark-seam: #fbf1d9;
+  --spark-sweat: #8fd3f2;
+  --spark-led: #76b900;
+  --spark-led-amber: #f0b13a;
+  --spark-led-off: #8f6c33;
+  --spark-mark: var(--ink-2);
+  --spark-alarm: var(--err);
+  /* cream edge, the paper shadow, the floor shadow and a warm glow behind the box */
+  --spark-edge: #fbf1d9;
+  --spark-cut: rgba(8, 5, 0, 0.4);
+  --spark-ground: rgba(0, 0, 0, 0.28);
+  --spark-glow: rgba(255, 196, 110, 0.2);
   --setup-wren-w: 360px;
 }
 :root[data-theme='light'] {
-  --wren-body: #9a6440;
-  --wren-wing: #6f4729;
-  --wren-bar: #3f2817;
-  --wren-belly: #ecd2ae;
-  --wren-brow: #fff6e8;
-  --wren-beak: #d95926;
-  --wren-eye: #1a120c;
-  --wren-leg: #a26a43;
-  --wren-cheek: rgba(225, 110, 80, 0.3);
-  --wren-perch: #9aa7b4;
+  /* a gold-brown edge on the light page, a softer shadow, no glow */
+  --spark-edge: #8a6428;
+  --spark-cut: rgba(90, 60, 10, 0.2);
+  --spark-ground: rgba(60, 40, 10, 0.14);
+  --spark-glow: transparent;
+  --spark-feet: #26242e;
 }
 
 qse-setup,
@@ -1687,7 +1695,7 @@ qse-wren-figure {
   gap: 8px;
 }
 
-/* ---- Wren's acting: the field's highlight and the perched wren ---------------------------- */
+/* ---- Wren's acting: the field's highlight and the mini gold box --------------------------- */
 [data-wren-acting] {
   position: relative;
   animation: wren-pulse 1.2s ease-out;
@@ -1706,36 +1714,81 @@ qse-wren-figure {
     box-shadow: 0 0 0 2px var(--orange), 0 0 0 7px var(--orange-wash);
   }
 }
-.wren-perch {
+.wren-mini {
   position: absolute;
   right: 18px;
-  top: -16px;
+  top: -19px;
   z-index: 3;
   pointer-events: none;
+  transform-origin: 50% 100%;
   animation: wren-land 1.6s cubic-bezier(0.3, 0.7, 0.4, 1) both;
 }
-.wren-perch-bird {
+.wren-mini-box {
   display: block;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+  overflow: visible;
 }
-.wren-perch-bird .pb-body,
-.wren-perch-bird .pb-head {
-  fill: var(--wren-body);
+.wren-mini-box .mw-foot {
+  fill: var(--spark-feet);
+  stroke: var(--spark-edge);
+  stroke-width: 0.5;
 }
-.wren-perch-bird .pb-tail {
-  fill: var(--wren-wing);
+.wren-mini-box .mw-edge {
+  fill: var(--spark-edge);
+  stroke: var(--spark-edge);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
 }
-.wren-perch-bird .pb-beak {
-  fill: var(--wren-beak);
+.wren-mini-box .mw-front {
+  fill: var(--spark-front);
 }
-.wren-perch-bird .pb-eye {
-  fill: var(--wren-eye);
+.wren-mini-box .mw-top {
+  fill: var(--spark-top);
 }
-.wren-perch-bird .pb-legs {
-  stroke: var(--wren-leg);
-  stroke-width: 1.2;
+.wren-mini-box .mw-blush {
+  fill: var(--spark-blush);
+}
+.wren-mini-box .mw-eyes ellipse,
+.wren-mini-box .mw-o {
+  fill: var(--spark-ink);
+}
+/* the eyes on the field below */
+.wren-mini-box .mw-eyes {
+  transform: translateY(0.8px);
+}
+.wren-mini-box .mw-smile {
   fill: none;
+  stroke: var(--spark-ink);
+  stroke-width: 0.85;
   stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* an "o" in the air, a smile from the landing on (still: the smile) */
+.wren-mini-box .mw-o {
+  opacity: 0;
+  animation: mw-o 1.6s both;
+}
+.wren-mini-box .mw-smile {
+  animation: mw-smile 1.6s both;
+}
+@keyframes mw-o {
+  0%,
+  40% {
+    opacity: 1;
+  }
+  44%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes mw-smile {
+  0%,
+  40% {
+    opacity: 0;
+  }
+  44%,
+  100% {
+    opacity: 1;
+  }
 }
 @keyframes wren-land {
   0% {
@@ -1744,19 +1797,19 @@ qse-wren-figure {
   }
   35% {
     opacity: 1;
-    transform: translate(0, -6px);
+    transform: translate(0, -6px) scale(0.92, 1.1);
   }
   45% {
-    transform: translate(0, 0) scale(1.08, 0.9);
+    transform: translate(0, 0) scale(1.14, 0.84);
   }
   55% {
     transform: translate(0, 0) scale(1);
   }
   62% {
-    transform: translate(-3px, -5px);
+    transform: translate(-3px, -5px) scale(0.96, 1.05);
   }
   70% {
-    transform: translate(-4px, 0) scale(1.05, 0.94);
+    transform: translate(-4px, 0) scale(1.08, 0.92);
   }
   88% {
     opacity: 1;
@@ -1768,414 +1821,496 @@ qse-wren-figure {
   }
 }
 
-/* ---- the wren figure --------------------------------------------------------------------- */
-.wren {
+/* ---- Wren's figure: the gold box ------------------------------------------------------------
+   figure.ts draws the parts; the svg carries the pose (data-eyes, -mouth, -extra, -led, -motion,
+   from poseFor in figure-state.ts) and the state (data-state) for the loops below. */
+qse-wren-figure {
+  position: relative;
+  isolation: isolate;
+}
+/* the warm glow behind the box, dark theme only */
+qse-wren-figure::before {
+  content: '';
+  position: absolute;
+  inset: 16% -6% -6%;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, var(--spark-glow), transparent);
+  pointer-events: none;
+  animation: gb-glow 3.4s ease-in-out infinite;
+}
+.wren-fab qse-wren-figure::before {
+  opacity: 0.5;
+  animation: none;
+}
+:root[data-theme='light'] qse-wren-figure::before {
+  display: none;
+}
+.goldbox {
   overflow: visible;
   display: block;
 }
-.wren * {
+.goldbox * {
   transform-box: view-box;
 }
-.wren .w-perch path {
-  fill: none;
-  stroke: var(--wren-perch);
-  stroke-width: 2.4;
-  stroke-linecap: round;
+.gb-ground {
+  fill: var(--spark-ground);
+  transform-origin: 50px 88.6px;
 }
-.wren .w-legs path {
-  fill: none;
-  stroke: var(--wren-leg);
-  stroke-width: 1.8;
-  stroke-linecap: round;
+.gb-feet rect {
+  fill: var(--spark-feet);
+  stroke: var(--spark-edge);
+  stroke-width: 0.9;
+}
+.gb-cut {
+  fill: var(--spark-cut);
+}
+.gb-edge {
+  fill: var(--spark-edge);
+  stroke: var(--spark-edge);
+  stroke-width: 3;
   stroke-linejoin: round;
 }
-.wren .w-body,
-.wren .w-head-fill,
-.wren .w-tail-fill {
-  fill: var(--wren-body);
+.gb-front {
+  fill: var(--spark-front);
 }
-.wren .w-tail-fill {
-  fill: var(--wren-wing);
+.gb-chin {
+  fill: var(--spark-chin);
 }
-.wren .w-wing-fill {
-  fill: var(--wren-wing);
+.gb-top {
+  fill: var(--spark-top);
 }
-.wren .w-belly {
-  fill: var(--wren-belly);
-}
-.wren .w-bar {
+.gb-seam {
   fill: none;
-  stroke: var(--wren-bar);
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  opacity: 0.85;
-}
-.wren .w-brow {
-  fill: none;
-  stroke: var(--wren-brow);
-  stroke-width: 1.8;
+  stroke: var(--spark-seam);
+  stroke-width: 1.2;
   stroke-linecap: round;
 }
-.wren .w-cheek {
-  fill: var(--wren-cheek);
+.gb-dots {
+  fill: var(--spark-dot);
 }
-.wren .w-eye {
-  fill: var(--wren-eye);
+.gb-lit circle {
+  fill: var(--spark-lit);
+  opacity: 0;
+  animation: gb-wave 1.6s ease-in-out infinite;
 }
-.wren .w-glint {
+.gb-led,
+.gb-led-halo {
+  fill: var(--spark-led);
+}
+.gb-led-halo {
+  opacity: 0.28;
+  transform-origin: 86.4px 43.4px;
+}
+.gb-blush {
+  fill: var(--spark-blush);
+}
+.gb-eye ellipse {
+  fill: var(--spark-ink);
+}
+.gb-glint {
   fill: #fff;
 }
-.wren .w-lid {
-  fill: var(--wren-body);
-  transform-origin: 29.7px 37.3px;
-  transform: scaleY(0);
+.gb-eye-l {
+  transform-origin: 38.6px 56.4px;
 }
-.wren .w-shut {
+.gb-eye-r {
+  transform-origin: 61.4px 56.4px;
+}
+.gb-lid {
+  fill: var(--spark-front);
+  opacity: 0;
+}
+.gb-shut,
+.gb-m {
   fill: none;
-  stroke: var(--wren-eye);
-  stroke-width: 1.3;
+  stroke: var(--spark-ink);
+  stroke-width: 1.7;
   stroke-linecap: round;
+  stroke-linejoin: round;
   opacity: 0;
 }
-.wren .w-beak-up,
-.wren .w-beak-lo {
-  fill: var(--wren-beak);
+.gb-fill {
+  fill: var(--spark-ink);
+  stroke: none;
 }
-.wren .w-beak-lo {
-  transform-origin: 22.6px 45.4px;
+.gb-tongue {
+  fill: var(--spark-tongue);
+  stroke: none;
 }
-.wren .w-head {
-  transform-origin: 40px 50px;
-  transition: transform 0.35s cubic-bezier(0.3, 0.7, 0.4, 1);
+.gb-m-open {
+  transform-origin: 50px 67px;
 }
-.wren .w-tail {
-  transform-origin: 74px 56px;
-  transition: transform 0.35s ease;
-}
-.wren .w-breathe {
-  transform-origin: 52px 77px;
-}
-.wren .w-all {
-  transform-origin: 50px 86px;
-}
-.wren .w-wing {
-  transform-origin: 50px 54px;
-}
-.wren .w-ruffle path {
-  fill: none;
-  stroke: var(--wren-wing);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-}
-.wren .w-ruffle {
+.goldbox text {
+  font: 800 11px var(--font-ui);
+  fill: var(--spark-mark);
   opacity: 0;
 }
-.wren .w-dots circle {
-  fill: var(--ink-2);
-  opacity: 0;
-}
-.wren .w-z text {
-  fill: var(--ink-2);
-  font: 600 11px var(--font-ui);
-  opacity: 0;
-}
-.wren .w-z text:nth-child(2) {
+.gb-question text:nth-child(1) {
   font-size: 9px;
 }
-.wren .w-z text:nth-child(3) {
-  font-size: 7px;
+.gb-question text:nth-child(3) {
+  font-size: 13px;
 }
-.wren .w-spark path {
+.gb-z text:nth-child(1) {
+  font-size: 12px;
+}
+.gb-z text:nth-child(3) {
+  font-size: 8px;
+}
+.gb-alarm {
+  opacity: 0;
+  transform-origin: 78px 18px;
+}
+.gb-alarm text {
+  fill: var(--spark-alarm);
+  font-size: 15px;
+  opacity: 1;
+}
+.gb-sweat {
+  fill: var(--spark-sweat);
+  transform-origin: 87px 36px;
+}
+.gb-spark path {
   stroke: var(--orange-hi);
   stroke-width: 1.8;
   stroke-linecap: round;
 }
-.wren .w-spark {
+.gb-spark {
   opacity: 0;
-  transform-origin: 14px 18px;
+  transform-origin: 14px 15px;
 }
-.wren .w-ring-track {
+.gb-all {
+  transform-origin: 50px 87.6px;
+  transition: transform 0.35s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+.gb-body {
+  transform-origin: 50px 82.4px;
+}
+.gb-eyes,
+.gb-eye {
+  transition: transform 0.3s cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+.w-ring-track {
   fill: none;
   stroke: var(--rule-strong);
   stroke-width: 2.5;
 }
-.wren .w-ring-fill,
-.wren .w-ring-spin {
+.w-ring-fill,
+.w-ring-spin {
   fill: none;
   stroke: var(--cobalt-hi);
   stroke-width: 2.5;
   stroke-linecap: round;
   transform: rotate(-90deg);
-  transform-origin: 50px 52px;
+  transform-origin: 50px 58px;
   transition: stroke-dasharray 0.4s ease;
 }
-.wren .w-ring-spin {
+.w-ring-spin {
   animation: w-spin 1.4s linear infinite;
 }
 
-/* idle: breathing, a blink, a tail flick now and then, a glance */
-.wren[data-state='idle'] .w-breathe,
-.wren[data-state='listening'] .w-breathe {
-  animation: w-breathe 3.4s ease-in-out infinite;
+/* the still pose: eyes */
+.goldbox[data-eyes='dot'] .gb-eye {
+  animation: gb-blink 4.6s infinite;
 }
-.wren[data-state='idle'] .w-lid,
-.wren[data-state='listening'] .w-lid,
-.wren[data-state='talking'] .w-lid {
-  animation: w-blink 4.8s infinite;
+.goldbox[data-eyes='wide'] .gb-eye {
+  transform: translate(1.4px, 1.8px) scale(1.12);
 }
-.wren[data-state='idle'] .w-tail {
-  animation: w-flick 7.5s ease-in-out infinite;
+.goldbox[data-eyes='up'] .gb-eyes {
+  transform: translate(1.8px, -2.2px);
 }
-.wren[data-state='idle'] .w-head {
-  animation: w-glance 9s ease-in-out infinite;
-}
-/* listening: head tilted toward the composer, tail up */
-.wren[data-state='listening'] .w-head {
-  transform: rotate(-17deg) translate(-1px, 1px);
-}
-.wren[data-state='listening'] .w-tail {
-  transform: rotate(-9deg);
-}
-/* thinking: looks one way, then the other, under three dots */
-.wren[data-state='thinking'] .w-head {
-  transform: rotate(-8deg);
-  animation: w-look 2.6s ease-in-out infinite;
-}
-.wren[data-state='thinking'] .w-dots circle {
-  opacity: 0.85;
-  animation: w-dot 1.3s ease-in-out infinite;
-}
-.wren[data-state='thinking'] .w-dots circle:nth-child(2) {
-  animation-delay: 0.18s;
-}
-.wren[data-state='thinking'] .w-dots circle:nth-child(3) {
-  animation-delay: 0.36s;
-}
-.wren[data-state='thinking'] .w-breathe {
-  animation: w-breathe 2.4s ease-in-out infinite;
-}
-/* loading: preening the wing inside the progress ring */
-.wren[data-state='loading'] .w-head {
-  transform: rotate(30deg) translate(4px, 2px);
-  animation: w-preen 1.7s ease-in-out infinite;
-}
-.wren[data-state='loading'] .w-wing {
-  animation: w-wingfluff 1.7s ease-in-out infinite;
-}
-.wren[data-state='loading'] .w-lid {
-  transform: scaleY(0.55);
-}
-/* talking: the beak moves while text arrives (WAAPI chirps add to it) */
-.wren[data-state='talking'] .w-beak-lo {
-  transform: rotate(10deg);
-  animation: w-beak 0.26s ease-in-out infinite alternate;
-}
-.wren[data-state='talking'] .w-head {
-  animation: w-bob 0.9s ease-in-out infinite;
-}
-.wren[data-state='talking'] .w-breathe {
-  animation: w-breathe 1.6s ease-in-out infinite;
-}
-/* acting: on its toes, wings half open (the hop itself is WAAPI) */
-.wren[data-state='acting'] .w-all {
-  transform: translateY(-3px);
-}
-.wren[data-state='acting'] .w-wing {
-  transform: rotate(-26deg) translate(2px, -4px);
-}
-.wren[data-state='acting'] .w-tail {
-  transform: rotate(-12deg);
-}
-/* error: ruffled feathers, drooped head, one shake */
-.wren[data-state='error'] .w-ruffle {
+.goldbox[data-eyes='lid'] .gb-lid {
   opacity: 1;
 }
-.wren[data-state='error'] .w-head {
-  transform: rotate(16deg) translate(2px, 3px);
+.goldbox[data-eyes='side'] .gb-eyes {
+  transform: translateX(-2.8px);
 }
-.wren[data-state='error'] .w-tail {
-  transform: rotate(18deg);
+.goldbox[data-eyes='small'] .gb-eye-l {
+  transform: translateX(-1.4px) scale(0.8);
 }
-.wren[data-state='error'] .w-lid {
-  transform: scaleY(0.5);
+.goldbox[data-eyes='small'] .gb-eye-r {
+  transform: translateX(1.4px) scale(0.8);
 }
-.wren[data-state='error'] .w-all {
-  animation: w-shake 0.5s ease-in-out 1;
+.goldbox[data-small][data-eyes='small'] .gb-eye-l {
+  transform: translateX(-1.4px);
 }
-/* sleeping: head tucked, eyes shut, slow breath, a drifting z */
-.wren[data-state='sleeping'] .w-head {
-  transform: rotate(22deg) translate(5px, 5px);
+.goldbox[data-small][data-eyes='small'] .gb-eye-r {
+  transform: translateX(1.4px);
 }
-.wren[data-state='sleeping'] .w-eye,
-.wren[data-state='sleeping'] .w-glint,
-.wren[data-state='sleeping'] .w-lid {
+.goldbox[data-eyes='shut'] .gb-eye {
   opacity: 0;
 }
-.wren[data-state='sleeping'] .w-shut {
+.goldbox[data-eyes='shut'] .gb-shut {
   opacity: 1;
 }
-.wren[data-state='sleeping'] .w-tail {
-  transform: rotate(14deg);
+/* mouth */
+.goldbox[data-mouth='smile'] .gb-m-smile,
+.goldbox[data-mouth='o'] .gb-m-o,
+.goldbox[data-mouth='flat'] .gb-m-flat,
+.goldbox[data-mouth='wide'] .gb-m-wide,
+.goldbox[data-mouth='wavy'] .gb-m-wavy,
+.goldbox[data-mouth='tiny'] .gb-m-tiny {
+  opacity: 1;
 }
-.wren[data-state='sleeping'] .w-breathe {
-  animation: w-breathe 5.2s ease-in-out infinite;
+/* open: nearly shut between deltas, blip() opens it */
+.goldbox[data-mouth='open'] .gb-m-open {
+  opacity: 1;
+  transform: scaleY(0.5);
 }
-.wren[data-state='sleeping'] .w-z text {
-  animation: w-z 3.6s ease-in infinite;
+/* extra */
+.goldbox[data-extra='question'] .gb-question text,
+.goldbox[data-extra='z'] .gb-z text {
+  opacity: 0.9;
 }
-.wren[data-state='sleeping'] .w-z text:nth-child(2) {
-  animation-delay: 1.2s;
+.goldbox[data-extra='alarm'] .gb-alarm,
+.goldbox[data-extra='spark'] .gb-spark {
+  opacity: 1;
 }
-.wren[data-state='sleeping'] .w-z text:nth-child(3) {
-  animation-delay: 2.4s;
+/* status LED */
+.goldbox[data-led='amber'] :is(.gb-led, .gb-led-halo),
+.goldbox[data-led='blink'] :is(.gb-led, .gb-led-halo) {
+  fill: var(--spark-led-amber);
+}
+.goldbox[data-led='off'] .gb-led {
+  fill: var(--spark-led-off);
+}
+.goldbox[data-led='off'] .gb-led-halo {
+  opacity: 0;
+}
+/* motion, still part */
+.goldbox[data-motion='lean'] .gb-all {
+  transform: rotate(3deg);
+}
+.goldbox[data-motion='hop'] .gb-all {
+  transform: translateY(-3px);
 }
 
-@keyframes w-breathe {
+/* the loops */
+.goldbox[data-motion='breathe'] .gb-body {
+  animation: gb-breathe 3.4s ease-in-out infinite;
+}
+.goldbox[data-motion='slow'] .gb-body {
+  animation: gb-breathe 4.2s ease-in-out infinite;
+}
+.goldbox[data-motion='sleep'] .gb-body {
+  animation: gb-breathe 5s ease-in-out infinite;
+}
+.goldbox[data-motion='wiggle'] .gb-all {
+  animation: gb-wiggle 1.3s ease-in-out infinite;
+}
+.goldbox[data-motion='bounce'] .gb-all {
+  animation: gb-bounce 0.9s ease-in-out infinite;
+}
+.goldbox[data-motion='shake'] .gb-all {
+  animation: gb-shake 0.5s ease-in-out 1;
+}
+.goldbox[data-state='idle'] .gb-eyes {
+  animation: gb-glance 9s ease-in-out infinite;
+}
+.goldbox[data-eyes='up'] .gb-eyes {
+  animation: gb-look 2.6s ease-in-out infinite;
+}
+.goldbox[data-extra='question'] .gb-question text {
+  animation: gb-float 2.4s ease-in infinite;
+}
+.goldbox[data-extra='z'] .gb-z text {
+  animation: gb-float 3.6s ease-in infinite;
+}
+.goldbox[data-extra='question'] .gb-question text:nth-child(2) {
+  animation-delay: 0.8s;
+}
+.goldbox[data-extra='question'] .gb-question text:nth-child(3) {
+  animation-delay: 1.6s;
+}
+.goldbox[data-extra='z'] .gb-z text:nth-child(2) {
+  animation-delay: 1.2s;
+}
+.goldbox[data-extra='z'] .gb-z text:nth-child(3) {
+  animation-delay: 2.4s;
+}
+.goldbox[data-extra='alarm'] .gb-alarm {
+  animation: gb-pop 0.4s cubic-bezier(0.3, 1.6, 0.5, 1) 1 both;
+}
+.goldbox[data-extra='alarm'] .gb-sweat {
+  animation: gb-drip 2.4s ease-in-out infinite;
+}
+.goldbox[data-extra='spark'] .gb-spark {
+  animation: gb-twinkle 0.45s ease-in-out infinite alternate;
+}
+.goldbox[data-led='breathe'] :is(.gb-led, .gb-led-halo) {
+  animation: gb-led 3.4s ease-in-out infinite;
+}
+.goldbox[data-led='amber'] :is(.gb-led, .gb-led-halo) {
+  animation: gb-led-blink 1s steps(1) infinite;
+}
+.goldbox[data-led='blink'] :is(.gb-led, .gb-led-halo) {
+  animation: gb-led-blink 0.4s steps(1) infinite;
+}
+.goldbox[data-led='flash'] .gb-led-halo {
+  animation: gb-led-flash 0.6s ease-out 1;
+}
+
+@keyframes gb-glow {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes gb-breathe {
   0%,
   100% {
     transform: scale(1, 1);
   }
   50% {
-    transform: scale(1.025, 1.04);
+    transform: scale(0.99, 1.025);
   }
 }
-@keyframes w-blink {
+@keyframes gb-blink {
   0%,
-  92%,
+  95%,
   100% {
-    transform: scaleY(0);
-  }
-  95% {
     transform: scaleY(1);
   }
-}
-@keyframes w-flick {
-  0%,
-  86%,
-  100% {
-    transform: rotate(0);
-  }
-  89% {
-    transform: rotate(-10deg);
-  }
-  92% {
-    transform: rotate(4deg);
-  }
-  95% {
-    transform: rotate(-3deg);
+  97.4% {
+    transform: scaleY(0.1);
   }
 }
-@keyframes w-glance {
+@keyframes gb-glance {
   0%,
   55%,
   100% {
-    transform: rotate(0);
+    transform: translateX(0);
   }
   60%,
   76% {
-    transform: rotate(-7deg);
-  }
-  80% {
-    transform: rotate(3deg);
-  }
-}
-@keyframes w-look {
-  0%,
-  100% {
-    transform: rotate(-12deg);
-  }
-  35% {
-    transform: rotate(-12deg) translateX(-1px);
-  }
-  50%,
-  80% {
-    transform: rotate(9deg) translate(1px, -1px);
-  }
-}
-@keyframes w-dot {
-  0%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.35;
-  }
-  45% {
-    transform: translateY(-2.5px);
-    opacity: 1;
-  }
-}
-@keyframes w-preen {
-  0%,
-  100% {
-    transform: rotate(30deg) translate(4px, 2px);
-  }
-  30% {
-    transform: rotate(38deg) translate(7px, 4px);
-  }
-  45% {
-    transform: rotate(33deg) translate(6px, 3px);
-  }
-  60% {
-    transform: rotate(39deg) translate(7px, 4px);
-  }
-}
-@keyframes w-wingfluff {
-  0%,
-  100% {
-    transform: rotate(0);
-  }
-  35% {
-    transform: rotate(-6deg) translateY(-1px);
-  }
-  60% {
-    transform: rotate(-3deg);
-  }
-}
-@keyframes w-beak {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(15deg);
-  }
-}
-@keyframes w-bob {
-  0%,
-  100% {
-    transform: rotate(0);
-  }
-  50% {
-    transform: rotate(-4deg) translateY(-0.6px);
-  }
-}
-@keyframes w-shake {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  20% {
-    transform: translateX(-3px);
-  }
-  40% {
-    transform: translateX(3px);
-  }
-  60% {
     transform: translateX(-2px);
   }
   80% {
     transform: translateX(1px);
   }
 }
-@keyframes w-z {
+@keyframes gb-look {
+  0%,
+  100% {
+    transform: translate(-1.8px, -2.2px);
+  }
+  45%,
+  90% {
+    transform: translate(1.8px, -2.2px);
+  }
+}
+@keyframes gb-wiggle {
+  0%,
+  100% {
+    transform: rotate(-1.6deg);
+  }
+  50% {
+    transform: rotate(1.6deg);
+  }
+}
+@keyframes gb-bounce {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1.8px);
+  }
+}
+@keyframes gb-shake {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0);
+  }
+  20% {
+    transform: translateX(-3px) rotate(-3deg);
+  }
+  40% {
+    transform: translateX(3px) rotate(3deg);
+  }
+  60% {
+    transform: translateX(-2px) rotate(-2deg);
+  }
+  80% {
+    transform: translateX(1px) rotate(1deg);
+  }
+}
+@keyframes gb-float {
   0% {
     opacity: 0;
-    transform: translate(4px, 6px);
+    transform: translate(-3px, 6px);
   }
   25% {
     opacity: 0.9;
   }
   100% {
     opacity: 0;
-    transform: translate(-6px, -10px);
+    transform: translate(3px, -8px);
+  }
+}
+@keyframes gb-pop {
+  from {
+    transform: scale(0.4);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+@keyframes gb-drip {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(2.4px);
+  }
+}
+@keyframes gb-twinkle {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes gb-wave {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.95;
+  }
+}
+@keyframes gb-led {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes gb-led-blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+@keyframes gb-led-flash {
+  0% {
+    opacity: 1;
+    transform: scale(2);
+  }
+  100% {
+    opacity: 0.28;
+    transform: scale(1);
   }
 }
 @keyframes w-spin {
@@ -2207,7 +2342,7 @@ qse-wren-figure {
   gap: 4px 12px;
   padding: 12px 12px 10px 10px;
   border-bottom: 1px solid var(--rule);
-  background: radial-gradient(120% 140% at 0% 100%, color-mix(in srgb, var(--wren-body) 14%, transparent), transparent 60%);
+  background: radial-gradient(120% 140% at 0% 100%, color-mix(in srgb, var(--spark-front) 14%, transparent), transparent 60%);
 }
 .wren-titles {
   padding-bottom: 8px;
@@ -2307,7 +2442,7 @@ qse-wren-figure {
 }
 .wren-msg.is-assistant {
   padding-left: 12px;
-  border-left: 2px solid color-mix(in srgb, var(--wren-body) 70%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--spark-front) 70%, transparent);
 }
 .wren-msg.is-assistant p + p,
 .wren-msg.is-assistant ul,
@@ -2978,16 +3113,18 @@ qse-wren-figure {
 
 /* ---- reduced motion: still poses, nothing moves -------------------------------------------- */
 @media (prefers-reduced-motion: reduce) {
-  .wren *,
-  .wren-perch,
+  .goldbox *,
+  .wren-mini,
+  .wren-mini-box *,
+  qse-wren-figure::before,
   [data-wren-acting],
   .wren-typing span,
-  .inst-spin,
-  .wren .w-ring-spin {
+  .inst-spin {
     animation: none !important;
   }
-  .wren .w-head,
-  .wren .w-tail,
+  .goldbox .gb-all,
+  .goldbox .gb-eyes,
+  .goldbox .gb-eye,
   .membar-seg,
   .membar-floor,
   .membar-nowtick,
@@ -3000,11 +3137,11 @@ qse-wren-figure {
   .spar-slot-fit {
     transition: none !important;
   }
-  .wren[data-state='thinking'] .w-dots circle,
-  .wren[data-state='sleeping'] .w-z text {
-    opacity: 0.8;
+  /* still poses: the open mouth half open, the mini box on its field */
+  .goldbox[data-mouth='open'] .gb-m-open {
+    transform: scaleY(0.8);
   }
-  .wren-perch {
+  .wren-mini {
     opacity: 1;
   }
 }

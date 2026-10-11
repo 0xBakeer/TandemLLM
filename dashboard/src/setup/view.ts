@@ -23,7 +23,7 @@ import { buildPageState, howToFix, overSentence, planFixStep, stepIssues, tokenB
 import { availability, isOn } from './deps';
 import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
-import { PERCH_WREN, reducedMotion } from './figure';
+import { MINI_WREN, reducedMotion } from './figure';
 import './install';
 import './measure-table';
 import './memory-bar';
@@ -353,7 +353,7 @@ export class QseSetup extends LightElement {
     return { ok: true, result: plan.result, summary: plan.actions.length ? plan.summary : null, undo };
   }
 
-  /** the field pulses for 1.2 s and a small wren perches on it; offscreen, it scrolls into view */
+  /** the field pulses for 1.2 s and the mini gold box hops onto it; offscreen, it scrolls into view */
   private async highlight(step: SetupStepId, field: string | null): Promise<void> {
     if (!field) return;
     await this.updateComplete;
@@ -362,15 +362,15 @@ export class QseSetup extends LightElement {
     const r = el.getBoundingClientRect();
     if (r.top < 120 || r.bottom > innerHeight - 80) el.scrollIntoView({ block: 'center', behavior: reducedMotion() ? 'auto' : 'smooth' });
     el.setAttribute('data-wren-acting', '');
-    el.querySelector(':scope > .wren-perch')?.remove();
-    const perch = document.createElement('span');
-    perch.className = 'wren-perch';
-    perch.setAttribute('aria-hidden', 'true');
-    el.append(perch);
-    litRender(PERCH_WREN, perch);
+    el.querySelector(':scope > .wren-mini')?.remove();
+    const mini = document.createElement('span');
+    mini.className = 'wren-mini';
+    mini.setAttribute('aria-hidden', 'true');
+    el.append(mini);
+    litRender(MINI_WREN, mini);
     setTimeout(() => {
       el.removeAttribute('data-wren-acting');
-      perch.remove();
+      mini.remove();
     }, 1600);
   }
 
