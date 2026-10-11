@@ -38,6 +38,7 @@ if os.path.dirname(os.path.dirname(os.path.abspath(__file__))) not in sys.path:
 
 import torch  # noqa: E402
 
+from engine.settings import SETTINGS as _S  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 
 _HELPERS = X._CUDA[: X._CUDA.index("constexpr float RSQRT128")]
@@ -473,10 +474,21 @@ def moe_grouped(x: torch.Tensor, ids: torch.Tensor, bank, rows: int = GROUP_ROWS
     return yd
 
 
+# the library GEMM of `mm_rows`: "fp32" = the exact weights (int8 times its scale in fp32) and fp32 sums
+# (the decode path's GEMV arithmetic up to summation order), "fp16" = weights rounded to fp16 on the
+# tensor cores (QWEN38_FN_PREFILL_MM). 2026-10-11: fp16 failed the agreement gate at 3k code (kernels vs
+# decode path 95.6 % against the decode path's 97.2 % with the reference), fp32 passed every context
+# and class at 1k/3k/8k, at 1,243 vs 1,441 tok/s (8k); two fp16 terms failed too and were slower.
+MM = _S.get("FN_PREFILL_MM")
+
+
 def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
     """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 rows with an fp32 scale
-    (`pack.Int8Rows`) or fp16 [N, K]; int8 rows dequantised to fp16 for the call (q s in fp32, rounded
-    once); x rounded to fp16 (normed or gated activations, inside fp16's range)."""
+    (`pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
+    dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores."""
+    if MM == "fp32":
+        wf = w.q.float() * w.s.view(-1, 1) if hasattr(w, "q") else w.float()
+        return x.float() @ wf.T
     if hasattr(w, "q"):
         wf = torch.empty(w.q.shape, dtype=torch.float16, device=w.q.device)
         torch.mul(w.q, w.s.view(-1, 1), out=wf)
@@ -488,20 +500,22 @@ def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
 def qsa_scores_rows(iq: torch.Tensor, pool: torch.Tensor, nblk: torch.Tensor, NB: int, block: int = 1024) -> torch.Tensor:
     """The indexer's block scores of a chunk's rows on the library GEMM, the reference's arithmetic
     (`ref.qsa_mask`: fp32 products, relu, summed over the heads in order, / sqrt(head dim)): iq [M, NH, D]
-    bf16, pool [>= NB, D] bf16 (every complete block pooled), nblk int [M] (a row's complete blocks)
+    bf16, pool [blocks, D] bf16 (every complete block pooled; may hold fewer than NB rows), nblk int [M]
+    (a row's complete blocks)
     -> fp32 [M, NB], -inf past a row's complete blocks. In blocks of `block` rows (the products of one
     block are [block NH, NB] fp32)."""
     M, NH, D = iq.shape
-    pk = pool[:NB].float().T
-    out = torch.empty(M, NB, dtype=torch.float32, device=iq.device)
-    cols = torch.arange(NB, device=iq.device)
+    nb = min(NB, pool.shape[0])              # the score width may pass the pool (a cache under NB blocks)
+    pk = pool[:nb].float().T
+    out = torch.full((M, NB), float("-inf"), dtype=torch.float32, device=iq.device)
+    cols = torch.arange(nb, device=iq.device)
     for r0 in range(0, M, block):
         r1 = min(M, r0 + block)
-        sc = torch.relu(iq[r0:r1].reshape(-1, D).float() @ pk).view(r1 - r0, NH, NB)
+        sc = torch.relu(iq[r0:r1].reshape(-1, D).float() @ pk).view(r1 - r0, NH, nb)
         acc = sc[:, 0]
         for h in range(1, NH):
             acc = acc + sc[:, h]
-        out[r0:r1] = (acc / D ** 0.5).masked_fill(cols[None, :] >= nblk[r0:r1, None], float("-inf"))
+        out[r0:r1, :nb] = (acc / D ** 0.5).masked_fill(cols[None, :] >= nblk[r0:r1, None], float("-inf"))
     return out
 
 

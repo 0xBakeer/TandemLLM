@@ -23,10 +23,10 @@ A verify twin is the multi-row form of a one-row decode kernel, and its rows mus
 
 ### Prefill kernels (Flash-Next, ENG-225)
 
-A prompt chunk is not verified against anything, so its kernels have no twin contract: they share work across rows and are checked by next-token agreement with the reference forward (`tools/fn_prefill_check.py`), the decode path's own agreement being the yardstick. `tools/fn_prefill_kernels.py`:
+A prompt chunk is not verified against anything, so its kernels have no twin contract: they share work across rows and are checked by next-token agreement (`tools/fn_prefill_check.py`): the kernel path against the decode path at least as close as the decode path is to the reference forward (within one point), no disagreement where both paths are sure (margins above 5), greedy continuations equal or first differing at a near tie. It is reported as agreement and margins, never as lossless. `tools/fn_prefill_kernels.py`:
 
 - `moe_grouped`: a chunk's (row, expert) pairs sorted by expert, each pair's input rotated with its expert's factors into the mma A-fragment order (an expert's rows padded to 16, one 16-byte load a lane and row tile), one GEMM over the experts' row groups that decodes each expert's trellis tiles once for up to 32 rows. The CTAs of one item (its matrix and column blocks) are adjacent on the grid, so its rows stream from memory once.
-- `mm_rows`: the mixers, the router, PLE and GDN a/b on the library GEMM (int8 rows dequantised to fp16 for the call).
+- `mm_rows`: the mixers, the router, PLE and GDN a/b on the library GEMM with the weights exact in fp32 (`QWEN38_FN_PREFILL_MM=fp32`; fp16 weights failed the agreement gate at 3k).
 - `qsa_scores_rows`: a chunk's QSA block scores as one GEMM, the reference's arithmetic.
 - Attention, the GDN conv and gates, the PLE gate and conv reuse the decode path's sequence kernels with M rows (`attn_rows`, `gdn_pre`, `ple_gate`, `ple_conv`); the delta rule is `tools/gdn_prefill_kernels.py` with the key heads as they are.
 

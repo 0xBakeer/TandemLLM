@@ -185,7 +185,10 @@ def test_qsa_scores_rows():
     SK.qsa_select(want, tail, sb)
     same = int((sa[:, :2048] == sb[:, :2048]).all(1).sum())
     assert same >= M - 3, same
-    return f"vs the score kernel {r:.0e}; -inf past the complete blocks; the same 512 blocks in {same} of {M} rows"
+    short = PK.qsa_scores_rows(iq, pool[:NB - 300], nblk.clamp(max=NB - 310), NB, block=128)
+    assert short.shape == (M, NB) and bool(torch.isinf(short[:, NB - 310:]).all())
+    return (f"vs the score kernel {r:.0e}; -inf past the complete blocks; the same 512 blocks in {same} of {M} rows;"
+            " a pool shorter than the score width")
 
 
 if __name__ == "__main__":
