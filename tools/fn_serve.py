@@ -16,7 +16,8 @@ chain, the hot-vocabulary draft head): lossless, the text is plain greedy decodi
 (tools/fn_spec_check.py). A request with temperature > 0 samples from the plain decode step (no
 speculation). A conversation that extends the previous request's tokens reuses the state (only the new
 tokens are prefilled); anything else starts over. Contexts past 2,051 tokens run the QSA selection on
-the kernels (ENG-147); the prefill is the reference forward (about 200 tokens a second).
+the kernels (ENG-147); the prompt and the MTP layer's catch-up run on the prefill kernels (ENG-225,
+about 1,400 tokens a second at 8k).
 """
 
 import argparse
@@ -34,7 +35,6 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine  # noqa: E402
 from engine.models.flashnext.load import load  # noqa: E402
-from engine.models.flashnext.ref import MTP  # noqa: E402
 from engine.models.flashnext.spec import MTPGraphDrafter, SpecDecoder, StairCut  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -115,10 +115,7 @@ class Server:
         self.ids = list(ids)
         L, m = len(ids), dr.st.length
         if self.spec_ok and L - 1 > m:            # the MTP layer catches up over the new positions
-            for i in range(m, L - 1, 2048):
-                j = min(i + 2048, L - 1)
-                eng.mtp_feed(self.hist[i:j], torch.tensor(ids[i + 1:j + 1]), dr.st)
-            eng.build_pool(dr.st, layers=[MTP])
+            eng.mtp_prime(self.hist[m:L - 1], ids[m + 1:L], dr.st)
         return logits, reuse
 
     def generate(self, ids: list[int], max_tokens: int, temperature: float, top_p: float, emit) -> dict:

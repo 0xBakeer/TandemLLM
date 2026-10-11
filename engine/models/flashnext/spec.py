@@ -20,7 +20,7 @@ import time
 import torch
 
 from engine.models.flashnext.engine import FlashNextEngine, MTPChainGraph
-from engine.models.flashnext.ref import MTP, FNState
+from engine.models.flashnext.ref import FNState
 
 
 def walk(tokens: list[int], parents: list[int], target: list[int]) -> list[int]:
@@ -307,12 +307,7 @@ class MTPGraphDrafter(Drafter):
     def prime(self, stack: torch.Tensor, ids: list[int], first: int) -> None:
         L = len(ids)
         if L > 1:
-            for i in range(0, L - 1, 2048):            # the reference's forward, in prompt-sized chunks
-                j = min(i + 2048, L - 1)
-                self.eng.mtp_feed(stack[i:j], torch.tensor(ids[i + 1:j + 1]), self.st)
-                if j > 4096:
-                    torch.cuda.empty_cache()           # as FlashNextEngine.prefill
-            self.eng.build_pool(self.st, layers=[MTP])
+            self.eng.mtp_prime(stack[:L - 1], ids[1:L], self.st)
         self.pending = (stack[L - 1:L], [first])
 
     def capture_all(self) -> None:

@@ -1471,6 +1471,16 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     return yd
 
 
+def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+    """The combine alone: yd [M S, H] fp32 (every pair's expert output), ids / wts [M, S] -> [M, H] bf16
+    (the slots of a row in ascending expert id, fp32, one rounding; `moe`'s last launch)."""
+    M = ids.shape[0]
+    if out is None:
+        out = torch.empty(M, yd.shape[1], dtype=torch.bfloat16, device=yd.device)
+    _module().fn_moe_combine(yd, ids.reshape(-1), wts.reshape(-1), out)
+    return out
+
+
 def combine_inject_norm(h0, yd, ids, wts, d, R: int, w, hc: int, eps: float):
     """`inject_norm` of the MoE's output, its combine done in the same launch (the bits of
     `moe_combine` followed by `inject_norm`). Returns (h, n)."""

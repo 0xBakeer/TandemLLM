@@ -44,6 +44,10 @@ from engine.models.flashnext.ple import decode_rows
 # rows up to which an EXL3 projection runs on tools/fn_kernels.dense (the kernel's limit);
 # QWEN38_FN_DENSE=0: the library path of tools/exl3_linear for every row count (an A/B)
 DENSE_MAX = 32 if _S.get("FN_DENSE") == "1" else 0
+# ENG-225: a prompt chunk through the prefill kernels (tools/fn_prefill_kernels.py: experts grouped by
+# expert, mixers and attention on many rows) or the reference forward ("ref"), and the chunk length
+PREFILL = _S.get("FN_PREFILL")
+PREFILL_CHUNK = int(_S.get("FN_PREFILL_CHUNK"))
 
 
 class FlashNextEngine(FlashNextRef):
@@ -280,32 +284,40 @@ class FlashNextEngine(FlashNextRef):
             return self.W["hyper_connection_mixer.hc_norm.weight"]
         return self.W[self.pre(li) + "attn_hyper_connection.hc_norm.weight"]
 
-    def trunk(self, h, tokens, st, positions, step: bool = False):
+    def trunk(self, h, tokens, st, positions, step: bool = False, pre: bool = False):
         """Every layer: each inject writes the streams and, in the same launch, the next site's norm
         (not in front of a PLE layer, which changes the streams first). Returns the final mixer's
-        normed streams n [M, hc H]; the streams themselves are `self.stack`."""
+        normed streams n [M, hc H]; the streams themselves are `self.stack`. `pre`: a prompt chunk
+        through the prefill kernels (ENG-225)."""
         from tools import fn_kernels as K
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
+        mix = self._mix_pre if pre else self._mix
         n = None
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
             if li in c.ple_layers:
-                h = h + (self._ple_step(h, li, st) if step else self.ple(h, tokens, li, st))
+                if step:
+                    h = h + self._ple_step(h, li, st)
+                else:
+                    h = h + (self._ple_pre(h, tokens, li, st) if pre else self.ple(h, tokens, li, st))
                 n = None
             if n is None:
                 n = K.hc_norm(h, self._site_norm(li), H, eps)
-            x, di = self._mix(n, p + "attn_hyper_connection")
+            x, di = mix(n, p + "attn_hyper_connection")
             if c.is_linear(li):
-                out = self._gdn1(x, li, st) if step else self.gdn(x, li, st)
+                out = self._gdn1(x, li, st) if step else (self._gdn_pre(x, li, st) if pre else self.gdn(x, li, st))
             else:
-                out = self._attn1(x, li, st) if step else self.attention(x, li, st, positions)
+                out = self._attn1(x, li, st) if step else (self._attn_pre(x, li, st) if pre else
+                                                           self.attention(x, li, st, positions))
             h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
                                  self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
-            x, di = self._mix(n, p + "mlp_hyper_connection")
+            x, di = mix(n, p + "mlp_hyper_connection")
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
-            if x.shape[0] <= self.MOE_ROWS:
+            if pre:
+                h, n = K.inject_norm(h, self._moe_pre(x, li), di, R, nxt, hc, eps)
+            elif x.shape[0] <= self.MOE_ROWS:
                 yd, ids, wts = self.moe_parts(x, li)
                 if step and not self._write:
                     self.rec[("ids", li)] = ids            # the experts a verify block reads (ENG-155 prices)
@@ -339,6 +351,182 @@ class FlashNextEngine(FlashNextRef):
         if head == "none":
             return None
         return self.final(n[-1:] if head == "last" else n)
+
+    # ------------------------------------------------------------------------- prompt chunks (ENG-225)
+    @torch.no_grad()
+    def forward_pre(self, tokens, st, head="all"):
+        """A prompt chunk through the prefill kernels: the trunk's arithmetic shared across rows (experts
+        grouped by expert, mixers and the router on the library GEMM, attention over each row's visible
+        keys with the QSA selection on the kernels, the GDN conv and gates in one launch, the chunked
+        delta rule). Agrees with `forward` on the next token, not bit for bit (tools/fn_prefill_check.py).
+        Advances `st` as `forward` does: caches, recurrent and conv states, the pooled indexer keys."""
+        tokens = tokens.view(-1).to(self.device)
+        T = tokens.shape[0]
+        self._pre = self._pre_ctl(st.length, T)
+        h = self.embed(tokens).repeat(1, self.cfg.hc_count)
+        n = self.trunk(h, tokens, st, None, pre=True)
+        st.length += T
+        self._pre = None
+        if head == "none":
+            return None
+        return self.final(n[-1:] if head == "last" else n)
+
+    def _pre_ctl(self, L0: int, T: int) -> dict:
+        """What every layer of a chunk at positions L0..L0+T-1 shares: the positions, the GDN conv and
+        PLE conv taps along the chain (`gdn_pre` / `ple_conv` sources), each row's attention control
+        (`attn_rows`: visible keys, no ancestors, dense flag), and past 2,051 tokens the QSA inputs
+        (`qsa_scores_rows` / `qsa_select`: complete blocks, all in the shared pool; the tail)."""
+        from tools import fn_seq_kernels as SK
+        c, dev = self.cfg, self.device
+        pos = torch.arange(L0, L0 + T, device=dev)
+        m = torch.arange(T, device=dev)[:, None]
+
+        def chain(dists, slen):
+            d = torch.tensor(dists, device=dev)[None, :]
+            return torch.where(m - d >= 0, m - d, -1 - (slen - d + m)).to(torch.int32).contiguous()
+        out = {"pos": pos, "csrc": chain((3, 2, 1), c.linear_conv_kernel_dim - 1),
+               "psrc": chain((9, 6, 3), (c.ple_conv_kernel_size - 1) * c.ngram_size), "bufs": {}}
+        r = c.indexer_compress_ratio if c.has_indexer else 4
+        nblk = (pos + 1) // r
+        dense = (nblk <= SK.TOPK) | (not c.has_indexer)
+        ctl = torch.zeros(T, 4, dtype=torch.int32, device=dev)
+        ctl[:, 0] = torch.where(dense, pos + 1, 4 * SK.TOPK + pos + 1 - r * nblk)
+        ctl[:, 1] = 1 << 30                      # no row's keys come from ancestors: every key is cached
+        ctl[:, 2] = dense
+        out.update(ctl=ctl, anc=torch.zeros(T, 1, dtype=torch.int32, device=dev),
+                   sel=torch.zeros(T, SK.NSEL, dtype=torch.int32, device=dev), cls=self.qsa_class(L0 + T - 1))
+        if c.has_indexer:
+            b = torch.arange(L0 // r, (L0 + T) // r, dtype=torch.int32, device=dev)
+            out.update(nblk=nblk, tail=(r * nblk[:, None] + torch.arange(3, device=dev)[None, :]).to(torch.int32),
+                       pool=(L0 // r, (L0 + T) // r), pool_slots=(b[:, None] * r + torch.arange(r, dtype=torch.int32,
+                                                                                               device=dev)).contiguous(),
+                       pool_pos=(b * r).contiguous())
+        return out
+
+    def _mix_pre(self, n, p):
+        """The mixer of a chunk: down and inject on the library GEMM (fp32), the up projection of
+        a = bf16(silu(bf16(d) / hc)) likewise, the stream mean with mix_up's roundings."""
+        from tools import fn_prefill_kernels as PK
+        c = self.cfg
+        di = PK.mm_rows(n, self.W[p + ".down_inject"])
+        R = self.W[p + ".rank"]
+        a = torch.nn.functional.silu(di[:, :R].to(self.dtype).float() / c.hc_count).to(self.dtype)
+        return PK.mix_tail(PK.mm_rows(a, self.W[p + ".input_mix_weight_up.weight"]), n, c.hc_count), di
+
+    def _moe_pre(self, x, li):
+        """The MoE of a chunk: the router (library GEMM, the router kernel), every pair's expert output
+        grouped by expert (`moe_grouped`), the combine (`moe_combine`: one CTA a row's columns reads
+        each pair's output once; the decode path folds it into the inject, four times a row) -> [M, H]."""
+        from tools import fn_kernels as K
+        from tools import fn_prefill_kernels as PK
+        c = self.cfg
+        ids, wts = K.router(PK.mm_rows(x, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
+        if self.route_trace is not None:
+            self.route_trace.append((li, ids[:, :-1].long()))
+        return K.moe_combine(PK.moe_grouped(x, ids, self.banks[li]), ids, wts)
+
+    def _attn_pre(self, x, li, st):
+        """Attention of a chunk: q|k|v and the indexer projection, the prep kernel (norms, rope, the
+        chunk's keys, values and indexer keys into the caches at their positions), the chunk's complete
+        blocks pooled into the shared pool, past 2,051 tokens each row's block scores and its top 512,
+        attention over each row's visible keys (`attn_rows`), the output gate, o_proj."""
+        from tools import fn_kernels as K
+        from tools import fn_prefill_kernels as PK
+        from tools import fn_seq_kernels as SK
+        c, P = self.cfg, self._pre
+        p = self.pre(li) + "self_attn."
+        ip = p + "indexer."
+        qkv = self.lin(x, self.W[p + "qkv"])
+        iqk = self.lin(x, self.W[ip + "index_qk_proj.weight"]) if c.has_indexer else None
+        cls = P["cls"] if c.has_indexer else 0
+        iq = None
+        if cls:
+            iq = P["bufs"].get("iq")
+            if iq is None:
+                iq = P["bufs"]["iq"] = torch.empty(x.shape[0], c.indexer_n_heads, c.indexer_head_dim,
+                                                   dtype=self.dtype, device=x.device)
+        q = K.attn_prep(qkv, iqk, P["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+                        self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), c.num_attention_heads,
+                        c.num_key_value_heads, c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0,
+                        c.rms_norm_eps, qln=self.W[ip + "q_layernorm.weight"] if cls else None, iq=iq)
+        if c.has_indexer and P["pool"][1] > P["pool"][0]:
+            SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], self.rope_cos,
+                        self.rope_sin, c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
+        if cls:
+            sc = PK.qsa_scores_rows(iq, st.pool[li], P["nblk"], cls)
+            SK.qsa_select(sc, P["tail"], P["sel"])
+            del sc
+        o = SK.attn_rows(q, st.k[li], st.v[li], P["ctl"], P["anc"], P["sel"], bufs=P["bufs"])
+        y = K.gate_mul(o, qkv, c.head_dim)
+        return self.lin(y, self.W[p + "o_proj.weight"])
+
+    def _gdn_pre(self, x, li, st):
+        """The GDN layer of a chunk: qkv|z (EXL3), a|b on the library GEMM, the conv over the chain and
+        the gates in one launch (`gdn_pre`), the chunked delta rule (`delta_rule`), the gated norm,
+        out_proj. The conv state keeps the chunk's last three inputs."""
+        from tools import fn_kernels as K
+        from tools import fn_prefill_kernels as PK
+        from tools import fn_seq_kernels as SK
+        from tools.gdn_prefill_kernels import CHUNK as GDN_CHUNK, fused_chunk_prefill, fused_prefill_refusal
+        c = self.cfg
+        a = self.pre(li) + "linear_attn."
+        T = x.shape[0]
+        C = c.conv_dim
+        qkvz = self.lin(x, self.W[a + "qkvz"])
+        ab = PK.mm_rows(x, self.W[a + "ab"]).to(self.dtype)
+        y, g, beta = SK.gdn_pre(qkvz, st.conv[li], self._wc[li], self._pre["csrc"], ab, self._wc[("alog", li)],
+                                self._wc[("dtb", li)])
+        w = c.linear_conv_kernel_dim - 1
+        hist = qkvz[-w:, :C].T if T >= w else torch.cat([st.conv[li][0], qkvz[:, :C].T], 1)[:, -w:]
+        st.conv[li][0].copy_(hist)
+        kd = c.key_dim
+        q = y[:, :kd].view(1, T, -1, c.linear_key_head_dim)
+        k = y[:, kd:2 * kd].view(1, T, -1, c.linear_key_head_dim)
+        v = y[:, 2 * kd:].view(1, T, -1, c.linear_value_head_dim)
+        H = c.linear_num_value_heads
+        g, beta = g.view(1, T, H), beta.view(1, T, H)
+        if T > 64 and not fused_prefill_refusal(GDN_CHUNK):
+            # the key heads as they are (the kernel maps value heads to them) and value blocks of 16:
+            # 10.2 vs 15.4 ms a layer at 4,096 rows (2026-10-11), the output within one bf16 step
+            o, S = fused_chunk_prefill(q, k, v, g, beta, st.S[li], chunk_size=GDN_CHUNK, bv=16)
+        else:
+            if c.num_v_per_k > 1:
+                q = q.repeat_interleave(c.num_v_per_k, dim=2)
+                k = k.repeat_interleave(c.num_v_per_k, dim=2)
+            o, S = self.delta_rule(q, k, v, g, beta, st.S[li])
+        st.S[li].copy_(S)
+        z = qkvz[:, C:]
+        hh = K.gated_norm(o.reshape(-1, c.linear_value_head_dim).to(self.dtype), z.reshape(-1, c.linear_value_head_dim),
+                          self.W[a + "norm.weight"], c.rms_norm_eps, c.output_gate_type == "sigmoid")
+        return self.lin(hh.view(T, -1), self.W[a + "out_proj.weight"])
+
+    def _ple_pre(self, h, tokens, li, st):
+        """PLE of a chunk: the n-gram rows hashed on the host (the reference's `ple_ids`, which advances
+        the context), read from the table's page cache as the decode step reads them and decoded on the
+        device, the projections on the library GEMM, then the step's kernels (gate, norms, the dilated
+        conv over the chain); the conv state keeps the last 9."""
+        from tools import fn_kernels as K
+        from tools import fn_prefill_kernels as PK
+        from tools import fn_seq_kernels as SK
+        c = self.cfg
+        p = self.pre(li) + "ple."
+        H, eps = c.hidden_size, c.rms_norm_eps
+        T = h.shape[0]
+        tab, pd = self.tables[li], self._ple_dev()
+        ids = self.ple_ids(tokens, li, st).reshape(-1).numpy()
+        packed = torch.from_numpy(np.asarray(tab.map[ids])).to(self.device)
+        heads = torch.from_numpy(np.searchsorted(tab.offsets_np, ids, side="right") - 1).to(self.device)
+        emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(T, -1)
+        key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
+        val = PK.mm_rows(emb, self.W[p + "value_proj.weight"]).to(self.dtype)
+        qry = K.hc_norm(h, self.W[p + "norm_query.weight"], H, eps)
+        gv = SK.ple_gate(key, qry, val, c.hc_count)
+        gvn = K.hc_norm(gv, self.W[p + "norm_conv.weight"], H, eps)
+        out = SK.ple_conv(gvn, gv, st.ple_conv[li], self._wc[("ple", li)], self._pre["psrc"])
+        ps = st.ple_conv[li]
+        w = ps.shape[-1]
+        ps[0].copy_(gvn[-w:].T if T >= w else torch.cat([ps[0], gvn.T], 1)[:, -w:])
+        return out
 
     # ------------------------------------------------------------------------- rows: decode and verify
     def _rows_buffers(self, M: int, key=None) -> dict:
@@ -1045,17 +1233,24 @@ class FlashNextEngine(FlashNextRef):
         b["prob_h"].copy_(b["prob"], non_blocking=True)
 
     # ------------------------------------------------------------------------- generation
+    prefill_path = PREFILL           # "kernels" (ENG-225) or "ref"
+
     @torch.no_grad()
-    def prefill(self, ids: torch.Tensor, st: FNState, chunk: int = 2048, keep_stack: bool = False) -> torch.Tensor:
-        """The prompt in chunks (the reference's batched forward); logits of the last row. `keep_stack`:
-        every row's pre-final-mixer streams in `self.prompt_stack` [T, hc H] (the MTP layer's input;
-        `self.stack` holds the last chunk's only)."""
+    def prefill(self, ids: torch.Tensor, st: FNState, chunk: int | None = None, keep_stack: bool = False,
+                path: str | None = None) -> torch.Tensor:
+        """The prompt in chunks; logits of the last row. `path`: "kernels" (`forward_pre`, ENG-225) or
+        "ref" (the reference's batched forward); default `prefill_path`. `keep_stack`: every row's
+        pre-final-mixer streams in `self.prompt_stack` [T, hc H] (the MTP layer's input; `self.stack`
+        holds the last chunk's only)."""
         self.flush()
+        path = path or self.prefill_path
+        fwd = self.forward_pre if path == "kernels" else self.forward
+        chunk = chunk or (PREFILL_CHUNK if path == "kernels" else 2048)
         out = None
         stacks = []
         for i in range(0, ids.numel(), chunk):
             last = i + chunk >= ids.numel()
-            out = self.forward(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
+            out = fwd(ids[i:i + chunk].to(self.device), st, head="last" if last else "none")
             if keep_stack:
                 stacks.append(self.stack)
             if st.length > 4096:
@@ -1063,9 +1258,56 @@ class FlashNextEngine(FlashNextRef):
                 # chunk fit no request of the next (a 32k prompt held tens of GB, 2026-10-11)
                 torch.cuda.empty_cache()
         self.prompt_stack = torch.cat(stacks) if keep_stack else None
-        if st.pool:
+        if st.pool and path != "kernels":            # the kernel path pools every chunk's blocks itself
             self.build_pool(st)
         return out[-1:]
+
+    @torch.no_grad()
+    def mtp_prime(self, stack: torch.Tensor, next_tokens: list[int], st_m: FNState, path: str | None = None) -> None:
+        """The MTP layer's cache over committed rows: `stack` [T, hc H] (the trunk's streams at
+        positions st_m.length..) and the tokens that follow them, in chunks; on the prefill kernels
+        (`mtp_pre`) or the reference's `mtp_feed` with the pool built after."""
+        path = path or self.prefill_path
+        T = len(next_tokens)
+        chunk = PREFILL_CHUNK if path == "kernels" else 2048
+        for i in range(0, T, chunk):
+            j = min(i + chunk, T)
+            nt = torch.tensor(next_tokens[i:j])
+            if path == "kernels":
+                self.mtp_pre(stack[i:j], nt, st_m)
+            else:
+                self.mtp_feed(stack[i:j], nt, st_m)
+            if st_m.length > 4096:
+                torch.cuda.empty_cache()           # as `prefill`
+        if path != "kernels":
+            self.build_pool(st_m, layers=[MTP])
+
+    @torch.no_grad()
+    def mtp_pre(self, stack: torch.Tensor, next_tokens: torch.Tensor, st_m: FNState) -> torch.Tensor:
+        """The MTP layer over a chunk of committed rows on the prefill kernels: the reference's input
+        fusion, its attention and MoE through `_attn_pre` / `_moe_pre`; the cache advances. Returns the
+        layer's streams [T, hc H] (the final mixer and the head are the drafts' business)."""
+        from tools import fn_kernels as K
+        c = self.cfg
+        H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
+        T = next_tokens.numel()
+        self._pre = self._pre_ctl(st_m.length, T)
+        e = self.rms(self.embed(next_tokens.view(-1)), self.W["mtp.pre_fc_norm_embedding.weight"], eps)
+        e = self.lin(e, self.W["mtp.fc_embedding.weight"])
+        hs = self.rms(stack, self.W["mtp.pre_fc_norm_hidden.weight"], eps)
+        hs = self.lin(hs.reshape(T * hc, H), self.W["mtp.fc_hidden.weight"]).view(T, hc, H)
+        h = (hs + e.unsqueeze(1)).flatten(1)
+        p = self.pre(MTP)
+        n = K.hc_norm(h, self.W[p + "attn_hyper_connection.hc_norm.weight"], H, eps)
+        x, di = self._mix_pre(n, p + "attn_hyper_connection")
+        out = self._attn_pre(x, MTP, st_m)
+        h, n = K.inject_norm(h, out, di, self.W[p + "attn_hyper_connection.rank"],
+                             self.W[p + "mlp_hyper_connection.hc_norm.weight"], hc, eps)
+        x, di = self._mix_pre(n, p + "mlp_hyper_connection")
+        h, _ = K.inject_norm(h, self._moe_pre(x, MTP), di, self.W[p + "mlp_hyper_connection.rank"], None, hc, eps)
+        st_m.length += T
+        self._pre = None
+        return h
 
     @torch.no_grad()
     def decode_eager(self, token: int, st: FNState) -> torch.Tensor:

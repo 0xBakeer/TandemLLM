@@ -21,6 +21,17 @@ A verify twin is the multi-row form of a one-row decode kernel, and its rows mus
 - The test for a twin compares an M-row call with M one-row calls bit for bit, for M = 2 to 32, with rows that share inputs (for experts: rows that pick the same experts). `tests/gpu/test_fn_kernels_gpu.py` is the pattern.
 - The launch order of the programs may change, the arithmetic may not: the MoE kernels launch the pairs in ascending expert id so rows that share an expert read its tiles back to back from L2.
 
+### Prefill kernels (Flash-Next, ENG-225)
+
+A prompt chunk is not verified against anything, so its kernels have no twin contract: they share work across rows and are checked by next-token agreement with the reference forward (`tools/fn_prefill_check.py`), the decode path's own agreement being the yardstick. `tools/fn_prefill_kernels.py`:
+
+- `moe_grouped`: a chunk's (row, expert) pairs sorted by expert, each pair's input rotated with its expert's factors into the mma A-fragment order (an expert's rows padded to 16, one 16-byte load a lane and row tile), one GEMM over the experts' row groups that decodes each expert's trellis tiles once for up to 32 rows. The CTAs of one item (its matrix and column blocks) are adjacent on the grid, so its rows stream from memory once.
+- `mm_rows`: the mixers, the router, PLE and GDN a/b on the library GEMM (int8 rows dequantised to fp16 for the call).
+- `qsa_scores_rows`: a chunk's QSA block scores as one GEMM, the reference's arithmetic.
+- Attention, the GDN conv and gates, the PLE gate and conv reuse the decode path's sequence kernels with M rows (`attn_rows`, `gdn_pre`, `ple_gate`, `ple_conv`); the delta rule is `tools/gdn_prefill_kernels.py` with the key heads as they are.
+
+`QWEN38_FN_PREFILL=ref` keeps the reference's batched forward; `QWEN38_FN_PREFILL_CHUNK` is the chunk length (4,096).
+
 ## NVFP4 matrix products
 
 The weights are 4-bit and the activations 16-bit (W4A16). The engine never uses the FP4 tensor-core path. On this chip an FP4 operand still has to travel through shared memory and a decode step before a tensor core sees it, and the chip has 99 KB of shared memory per SM. A 4-bit activation path would also need its own quantiser and quality gate, to save at most the 8 % of traffic the activations are.
