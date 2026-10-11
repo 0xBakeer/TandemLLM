@@ -402,3 +402,31 @@ test('@apply PW_TARGET through Finish: every step on the way, then that profile 
   const health = await (await page.request.get('/health')).json();
   expect(health.weights.name).toBe(target);
 });
+
+test('@setupmode a box in setup mode: /health says so, the page opens on the guide, the other views are off', async ({ page }) => {
+  const health = await (await page.request.get('/health')).json();
+  expect(health.mode).toBe('setup');
+  // the model list is empty (a client that lists models keeps working); a chat is 503 setup_mode
+  const models = await (await page.request.get('/v1/models')).json();
+  expect(models.data).toEqual([]);
+  const chat = await page.request.post('/v1/chat/completions', { data: { model: 'TandemLLM', messages: [{ role: 'user', content: 'hi' }], max_tokens: 4 } });
+  expect(chat.status()).toBe(503);
+  const chatBody = await chat.json();
+  expect(chatBody.error.code).toBe('setup_mode');
+  note(`setupmode-${isPhone(page) ? 'phone' : 'desktop'}`, { health, models, chat: { status: chat.status(), body: chatBody } });
+  await page.goto('./#/usage');
+  await expect(page).toHaveURL(/#\/setup$/);
+  await expect(page.locator(`.mtile[data-model="${MODEL}"]`)).toBeVisible();
+  await expect(page.locator('.topbar .pill')).toHaveText('setup');
+  await expect(page.locator('[data-setup-mode]')).toBeVisible();
+  if (!isPhone(page)) await expect(page.locator('.rail .rail-tab.is-off')).toHaveCount(7);
+  await shot(page, 'setupmode-0-tiles');
+  await page.locator(`.mtile[data-model="${MODEL}"]`).click();
+  await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'overview');
+  await page.goto(`./#/setup/${MODEL}/weights`);
+  await expect(page.locator('.wcard').first()).toBeVisible();
+  await shot(page, 'setupmode-1-weights');
+  if (isPhone(page)) await page.locator('.wren-fab').click();
+  await expect(page.locator('.wren-panel')).toHaveAttribute('data-phase', /ready|loading|asleep/);
+  await shot(page, 'setupmode-2-wren');
+});
