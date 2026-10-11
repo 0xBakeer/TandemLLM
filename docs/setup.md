@@ -52,14 +52,18 @@ The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verif
 
 Wren is Qwen3.5-2B (Qwen3.5-0.8B when the 2B is not on disk) on the engine's own forward, in the plainest setup the engine has: one sequence, a window of 8,192 rows, thinking off, greedy, no caches. Its persona and rules are `server/setup/wren_system.md`.
 
-- Each turn it reads the page's state (fields named like a secret arrive as `<set>`), the box's free memory and disk, and the four best sections of a BM25 search over `docs/*.md`, the manual's chapters, `models/*/model.yaml` and the packages that describe TandemLLM.
-- It can ask the page to `set_field`, `toggle`, `select_profile`, `go_to_step`, `next`, `previous` and `explain`. The browser runs every call; the server checks each one against the step schema first. An invalid call never reaches the browser: Wren sees why and tries again, at most twice.
+- Each turn it reads the page's state (fields named like a secret arrive as `<set>`), the box's free memory and disk and the profile it runs, and the four best sections of a BM25 search over `docs/*.md`, the manual's chapters, `models/*/model.yaml` and the packages that describe TandemLLM. It also reads the current step: the ids a tool call may name there, and on the three steps that show the measured table, the table itself with the fastest profile for each task.
+- It can ask the page to `set_field`, `toggle`, `select_profile`, `go_to_step`, `next`, `previous` and `explain`. `explain` takes only what the page can highlight, and a step's name is not one of them. The browser runs every call; the server checks each one against the step schema first. An invalid change never reaches the browser: Wren sees why and tries once more. If that fails too, Wren answers in words with no tools in the prompt, and the page shows one notice that nothing changed. A highlight it cannot make goes nowhere.
+- A turn always ends in words. After a call the page sends the result back and asks again, at most 4 rounds. A change the page refuses gets one repair, and the last round asks for words only (`"tools": false` in the chat body), so the server gives the model no tools and drops any call it still writes.
+- On a phone the sheet stays open while Wren works. A change shows in the sheet as a toast with Show me, which closes the sheet, scrolls to the field and highlights it. A refused call leaves the sheet alone.
 - It cannot finish, apply, reset, load or unload anything.
 - On a serving engine it loads only when asked (`POST /v1/setup/assistant/load`), through the residency planner. If the narrator is loaded with the same model, Wren borrows the narrator's copy and costs no memory. It is the first thing given back when the KV pool needs memory, and it unloads itself after 5 minutes without a poll or a chat.
 - It generates in slices of 150 ms while no request runs or waits, so a request that arrives waits at most one slice.
 - The chat's text is never logged.
 
 On the reference box (2026-10-11, `tests/gpu/setup_wren_gpu.py`) Wren's own copy loads in 22 s and holds 3.62 GiB on the device; MemAvailable drops 5.0 to 5.2 GiB at the first load, of which 1.1 to 1.5 GiB is the process's CUDA context, which stays. Later loads and unloads return within the box's own noise (0.2 to 0.4 GiB), with the process's RSS and the allocator flat. Borrowing the narrator costs 0.03 to 0.06 GiB, and the narrator's next line is the same to the token. A turn takes 1 to 3 s, the first words after 0.4 to 0.7 s. On ten plain requests and three questions, the 2B made the right call or answered 10 times of 13; Qwen3.5-4B (`QSE_WREN_MODEL=qwen3.5-4b`) 12 of 13, at about 2.5 times the time a turn. The 2B sometimes mixes the numbers of two profiles in an answer, so the page's own numbers stay the reference.
+
+0.7.1 on a phone (2026-10-11 10:13): after an answer on the Model step, the 2B called `explain("overview")`, the name of the step. The server took it as valid, the page refused it, and the page asked again four times. Each round brought two more refused calls. The question about coding tasks got eight notices and the 4-round stop instead of an answer, and the sheet dropped to a peek once per call. Measured again on the box with 0.7.2 (`tests/gpu/setup_wren_gpu.py cases`, the 2B at the narrator's 4,096 rows): 15 of 15 right on ten requests for a change and five questions, the two of the report among them. No call was invalid, Wren said what it changed after every change, and a turn took 0.7 to 1.6 s. The question about coding tasks now gets `exl3-2.5` at 124.17 tokens a second, in one round.
 
 ## The install job
 
@@ -124,5 +128,5 @@ POST /v1/setup/reset                   {level, confirm, dry_run?}
 GET  /v1/setup/assistant/status        Wren's state; a poll keeps it loaded
 POST /v1/setup/assistant/load          load Wren
 POST /v1/setup/assistant/unload        unload Wren
-POST /v1/setup/assistant/chat          {messages, page} -> SSE (/v1/setup/chat is the same)
+POST /v1/setup/assistant/chat          {messages, page, tools?} -> SSE (/v1/setup/chat is the same)
 ```
