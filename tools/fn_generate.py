@@ -141,7 +141,7 @@ def injected_self_check(eng: FlashNextEngine, ids: list[int]) -> dict:
     finally:
         K.moe_experts = orig
         eng.spec_ok = before
-    assert not r["ok"] and r["first_diff"]["row"] == 5, r
+    assert not r["ok"] and r["first_diff"]["row"] == 5 and r["first_diff"]["call"] == "chain8", r
     return r
 
 

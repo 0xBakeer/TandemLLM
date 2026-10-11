@@ -156,14 +156,16 @@ class FlashNextEngine(FlashNextRef):
     spec_ok = False            # the load-time self-check passed (speculation may run)
     MOE_ROWS = 2048            # rows the MoE takes in one call (11 pairs a row on the grid's y axis)
     TREE_ROWS = (0, 1, 2, 3, 5, 6, 8, 11)
+    CHAIN_WIDTHS = (2, 4, 8, 12, 16, 32)
 
     @torch.no_grad()
-    def self_check(self, prompt: list[int], steps: int = 12, log=print) -> dict:
+    def self_check(self, prompt: list[int], steps: int = 32, log=print) -> dict:
         """ENG-223's load-time check of the expert kernel's verify twins on real routing: decode
         `steps` tokens one at a time (the decode step), recording every layer's MoE input, ids,
-        weights and every pair's expert output; then run each layer's rows again as one
-        `steps`-row chain call and an 8-row tree-shaped call (rows TREE_ROWS, out of order), with
-        the router recomputed from the recorded inputs, and compare every row bit for bit (the
+        weights and every pair's expert output; then run each layer's rows again as chain calls of
+        every verify width in CHAIN_WIDTHS (the first rows) and an 8-row tree-shaped call (rows
+        TREE_ROWS, out of order), with the router recomputed from the recorded inputs, and compare
+        every row bit for bit (the
         combine is per row and per column, so equal pairs give an equal sum). Any difference
         leaves `spec_ok` False and the log names the layer and the row."""
         from tools import fn_kernels as K
@@ -189,7 +191,9 @@ class FlashNextEngine(FlashNextRef):
             Wt = torch.cat([r[2] for r in rows])
             Y = torch.cat([r[3] for r in rows]).view(len(rows), S, -1)        # each row's pairs
             ids, wts = K.router(K.gemv(X, self.W[self.pre(li) + "mlp.router"]), c.num_experts, c.num_experts_per_tok)
-            for name, sel in (("chain", list(range(len(rows)))), ("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)])):
+            calls = [(f"chain{w}", list(range(w))) for w in self.CHAIN_WIDTHS if w <= len(rows)]
+            calls.append(("tree", [t for t in self.TREE_ROWS[::-1] if t < len(rows)]))
+            for name, sel in calls:
                 sl = torch.tensor(sel, device=X.device)
                 got = K.moe_experts(X[sl].contiguous(), I[sl].contiguous(), self.banks[li]).view(len(sel), S, -1)
                 for j, t in enumerate(sel):
