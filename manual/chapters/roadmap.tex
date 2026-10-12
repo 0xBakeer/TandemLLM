@@ -4,7 +4,7 @@ Today the engine serves two main models, one at a time (Qwen3.8-27B and Qwen3.8-
 
 \section{A mixture-of-experts model, and what is left}
 
-Qwen3.8-Flash-Next is served (Chapter~\ref{ch:flashnext}), from turboderp's EXL3 packs and not from the NVFP4 checkpoint this chapter once planned. Four parts are open. Its vision tower is not loaded yet. The 5.05 pack codes its experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8. No pack's quality against the BF16 model is measured, because the 360~GB release does not fit the board. And parallel requests are on with three slots, but three together take as long as one after the other; CUDA graphs for the joint pass are next. After it, other EXL3 models that fit one board, Qwen3.6-35B-A3B among them.
+Qwen3.8-Flash-Next is served (Chapter~\ref{ch:flashnext}), from turboderp's EXL3 packs and not from the NVFP4 checkpoint this chapter once planned. Three parts are open. The 5.05 pack codes its experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8. No pack's quality against the BF16 model is measured, because the 360~GB release does not fit the board. And parallel requests are on with three slots, but three together take as long as one after the other; CUDA graphs for the joint pass are next. After it, other EXL3 models that fit one board, Qwen3.6-35B-A3B among them.
 
 \section{Parallel requests}
 

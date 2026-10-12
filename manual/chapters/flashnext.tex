@@ -40,14 +40,14 @@ turboderp publishes Flash-Next in five sizes, one branch each of \code{turboderp
 \midrule
 \code{flashnext-2.05} & 61.5~GB & 32.85~GiB & 24.44~GiB, warm & 262,144 \\
 \code{flashnext-3.05} & 85.1~GB & 47.87~GiB & 30.4~GiB, cold & 262,144 (recommended profile) \\
-\code{flashnext-4.05} & 106.1~GB & 62.47~GiB & 36.36~GiB, cold & 212,992 \\
+\code{flashnext-4.05} & 106.1~GB & 62.47~GiB & 36.36~GiB, cold & 208,896 \\
 \code{flashnext-5.05} & 121.9~GB & 77.16~GiB & 36.36~GiB, cold & does not load yet \\
 \code{flashnext-6.05} & 137.7~GB & 91.87~GiB & 36.36~GiB, cold & none: it does not fit \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-One request of 260,800 tokens through the server, on each of the three packs that load, decided those windows (Figure~\ref{fig:fn-fit}). The Setup Guide's estimate is calibrated on these three runs and predicts their lowest MemAvailable within 0.7~GiB. On the box the other programs took 4.6~GiB; the estimate's frame keeps 10~GiB for them, which is why 4.05 comes out at 212,992 tokens although its run at 260,800 kept MemAvailable above the floor.
+One request of 260,800 tokens through the server, on each of the three packs that load, decided those windows (Figure~\ref{fig:fn-fit}). The Setup Guide's estimate is calibrated on these three runs and predicts their lowest MemAvailable within 0.7~GiB. On the box the other programs took 4.6~GiB; the estimate's frame keeps 10~GiB for them, which is why 4.05 comes out at 208,896 tokens with the vision tower on (212,992 without) although its run at 260,800 kept MemAvailable above the floor. 5.05 would come out at 53,248 with the tower and 65,536 without, once it loads.
 
 \begin{figure}[htbp]
 \centering
@@ -157,7 +157,7 @@ Each profile sets its engine's ceiling and peak with the arithmetic in the file:
 
 \code{ops/use-profile.sh flashnext-3.05} switches the box to Flash-Next as it switches between the 27B's profiles: it fetches the pack's branch when it is missing (pinned to its commit, checked against the hub's sha256, the shared n-gram table hard-linked), stops the engine under the box lock, starts the new profile and rolls back to the previous one, 27B or Flash-Next, when the smoke check fails. \code{ops/start.sh} passes the profile's \code{QSE_ENGINE_FLAGS} (\code{--model <pack> --drafter mtp}) and the server picks the engine from the checkpoint's own configuration. The watchdog and the reboot line start the active profile, whichever model it is. Chapter~\ref{ch:operations} has the rest.
 
-Behind the server everything is the 27B's code: every route, reasoning formats and budgets, tool calls and grammar masks, penalties, logprobs, seeds, stops, the live view and the usage rows. The conductor and its roles run in front of it; the shadow reader does not, because its outputs were validated on the 27B's reasoning only, and the status says so. The dashboard's system view names the pack and its branch, shows \code{max_len} against the pack's largest window, and reports the table under its policy. Images are not wired to Flash-Next (VIS-97).
+Behind the server everything is the 27B's code: every route, reasoning formats and budgets, tool calls and grammar masks, penalties, logprobs, seeds, stops, the live view and the usage rows. The conductor and its roles run in front of it; the shadow reader does not, because its outputs were validated on the 27B's reasoning only, and the status says so. The dashboard's system view names the pack and its branch, shows \code{max_len} against the pack's largest window, and reports the table under its policy. Flash-Next reads images through the pack's own vision tower on the EXL3 kernels, with the image rows' three-axis rotary positions (VIS-97, \code{VISION=on} in its profiles). On 3.05 the image chats answered the same with the MTP drafter and without (5 of 5: two single-image chats, a two-image chat of 2,089 prompt tokens and a second turn from the caches), and a text-only answer is the same with the tower loaded and without. Against transformers' \code{Qwen4ExpVisionModel} on the dequantised weights the tower's outputs sit within the official model's own BF16 noise (0.048 to 0.090 from the fp32 model, against 0.046 to 0.104). In the language model the text rows after an image keep the text's own agreement (KL 0.019 after 140 image rows and 0.0025 after 2,184 with the sparse attention on, top-1 97.9 ~\%; the text floor 0.022), and every verify pick equals the decode (\code{tools/fn_vision_check.py}, VIS-97).
 
 Parallel requests work on Flash-Next without changing any answer, and its profiles turn them on: three slots over one engine with the KV pool (\code{QSE_PARALLEL=3}, \code{QSE_KV_POOL=on}). On fresh servers three requests arriving together took 27.18~s against 27.03~s one after the other, the same total throughput, and the first tokens came at 2.2 to 6.1~s instead of up to about 20~s for the last of three. One request alone decodes at 45.78~tok/s with three slots, 45.79 with one (\measured). At a 262,144-token window with two 65,536-token side slots, a 260,800-token prompt kept MemAvailable at 31.6~GiB or more. Table~\ref{tab:fn-parallel} lists the limits.
 
@@ -186,6 +186,6 @@ memory ceiling, peak, reserve slack & 66, 77, 2~GiB \\
 \item Quality against the BF16 model, per pack. The BF16 release is 360~GB and does not fit the board; the registry's quality fields are empty.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}. The rates in this chapter are single requests, mostly one run each.
 \item A sweep of StairCut's prices. The price file is provisional: class 0 holds online-learned prices, and the other classes single requests.
-\item The 5.05 pack, which needs a 7-bit expert kernel; the 6.05 pack, which needs more than one board; and Flash-Next's own vision tower.
+\item The 5.05 pack, which needs a 7-bit expert kernel, and the 6.05 pack, which needs more than one board.
 \item Whether parallel requests pay on Flash-Next: one run of three, and no timing of the joint pass on its own.
 \end{itemize}
