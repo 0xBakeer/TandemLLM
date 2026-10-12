@@ -163,12 +163,12 @@ def test_the_prewarm_yields_to_requests_and_to_another_conversation_in_use():
             done.set()
             th.join()
         # B used the rows a moment ago: they stay
-        app.STATE["last_request_ts"] = time.time()
+        app.STATE["last_request_end"] = time.time()
         w = app._cache_prewarm(list(nxt), "A")
         assert w["prewarmed"] is False and w["why"] == "resident_in_use", w
         assert res.owner == "B" and sp.stats["restores"] == 0
         # a read longer than MAX_MS is not started
-        app.STATE["last_request_ts"] = 0
+        app.STATE["last_request_end"] = 0
         real = cache_peek.MAX_MS
         cache_peek.MAX_MS = -1.0
         try:

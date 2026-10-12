@@ -2816,7 +2816,7 @@ def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
         if got["tier"] != "nvme_spill" or sp is None or res is None:
             why = "not_on_nvme"
         elif (res.valid and res.owner is not None and res.owner != session
-              and time.time() - float(STATE.get("last_request_ts") or 0) < cache_peek.IDLE_S):
+              and time.time() - float(STATE.get("last_request_end") or 0) < cache_peek.IDLE_S):
             why = "resident_in_use"
         elif float(got.get("restore_ms") or 0) > cache_peek.MAX_MS:
             why = "too_long"
@@ -4656,6 +4656,7 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     with a 400, failed or abandoned. The ledger's `submit` never blocks.
     """
     STATE["last_request_ts"] = rec.ts
+    STATE["last_request_end"] = time.time()          # the prewarm's "in use" (SRV-349)
     if not rec.replay:
         cache_peek.RATES.note(int(rec.forwarded), rec.prompt_ms)    # the peek's estimate
     try:
