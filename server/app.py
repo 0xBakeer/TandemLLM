@@ -2812,8 +2812,10 @@ def _cache_peek(ids: list[int], session: str | None) -> dict | None:
 
 
 def _request_waiting() -> bool:
-    """A request waits for the engine (the prewarm's yield, SRV-349)."""
-    return bool(WAITERS) or INFLIGHT["waiting"] > 0
+    """A request waits for the engine (the prewarm's yield, SRV-349): queued, or running on a side
+    slot, whose GPU turns the prewarm holds with the engine lock (live: a short request that took
+    a side slot waited 1,246 ms behind a prewarm's save and restore)."""
+    return bool(WAITERS) or INFLIGHT["waiting"] > 0 or INFLIGHT["running"] > 0
 
 
 def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
