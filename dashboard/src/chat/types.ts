@@ -272,6 +272,8 @@ export interface Compaction {
   after_tokens: number;
   summary: string;
   duration_ms?: number;
+  /** the first message the model still reads in full; the thread's divider sits above it */
+  boundary_id?: string;
 }
 
 export interface ConversationUsage {

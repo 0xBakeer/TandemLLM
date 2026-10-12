@@ -478,7 +478,7 @@ class AgentMixin:
         ids = {m["id"] for m in path}
         return [{"id": r["id"], "at": iso(r["created"]), "before_tokens": r["before_tokens"],
                  "after_tokens": r["after_tokens"], "summary": r["summary"],
-                 "duration_ms": r["duration_ms"]}
+                 "duration_ms": r["duration_ms"], "boundary_id": r["boundary_id"]}
                 for r in self.store.all("SELECT * FROM compactions WHERE conversation_id = ? "
                                         "ORDER BY created", (cid,)) if r["boundary_id"] in ids]
 
@@ -615,7 +615,8 @@ class AgentMixin:
                             run.id if run else None))
             self.emit(conv, {"type": "compaction", "compaction": {
                 "id": cid, "at": iso(now_ms()), "before_tokens": before_tokens,
-                "after_tokens": kept, "summary": text, "duration_ms": ms}})
+                "after_tokens": kept, "summary": text, "duration_ms": ms,
+                "boundary_id": path[b]["id"]}})
         self.log(f"[compact] {conv.id} {before_tokens} -> {kept} tokens in {ms} ms")
         return True
 

@@ -168,7 +168,7 @@ interface ContextReport {
     backend?: 'engine' | 'proxy' | 'cloud';      // v0.2
   };
 }
-interface Compaction { id: string; at: string; before_tokens: number; after_tokens: number; summary: string; duration_ms?: number }
+interface Compaction { id: string; at: string; before_tokens: number; after_tokens: number; summary: string; duration_ms?: number; boundary_id?: string }   // boundary_id: the first message the model still reads in full; the thread's divider sits above it
 interface ConversationUsage {
   turns: number; prompt_tokens: number; completion_tokens: number; reasoning_tokens: number;
   cached_tokens: number; tool_calls: number; wall_s: number; cost_usd?: number | null;

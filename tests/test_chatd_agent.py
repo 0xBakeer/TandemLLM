@@ -408,6 +408,9 @@ def test_compaction_summarizes_older_turns_and_the_model_gets_the_summary():
         assert len(users) == 2 and users[-1] == "and now?" and users[0].startswith("turn 2")
         assert last["max_tokens"] < 5000
         assert len(s["messages"]) == 8                          # the store keeps every message
+        # the thread's divider sits above the first message the model still reads in full
+        kept = next(m for m in s["messages"] if m["id"] == cp["boundary_id"])
+        assert kept["role"] == "user" and kept["parts"][0]["text"].startswith("turn 2")
     finally:
         c.close()
 

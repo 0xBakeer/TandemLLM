@@ -1775,6 +1775,38 @@ qse-chat-context {
   color: var(--ink);
 }
 
+/* the compaction divider in the thread (Chat 7): where the model's history now starts */
+.ch-divider {
+  margin: 4px 0 16px;
+}
+.ch-divider-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 0;
+  background: none;
+  border: 0;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.ch-divider-btn::before,
+.ch-divider-btn::after {
+  content: '';
+  flex: 1;
+  min-width: 16px;
+  border-top: 1px dashed var(--rule-strong);
+}
+.ch-divider-btn::before {
+  flex: 0 0 16px;
+}
+.ch-divider-more {
+  color: var(--cobalt-hi);
+}
+
 /* ---- the panes ---------------------------------------------------------------------------------- */
 qse-chat-panes {
   background: var(--bg-2);

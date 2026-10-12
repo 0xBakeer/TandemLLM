@@ -601,7 +601,9 @@ export class MockChatBackend implements ChatBackend {
   async compact(id: string): Promise<void> {
     const st = this.get(id);
     const ctx = this.context(st);
-    const cp: Compaction = { id: localId('cp'), at: new Date().toISOString(), before_tokens: ctx.used, after_tokens: Math.max(2_000, Math.round(ctx.used * 0.32)), summary: `Folded ${this.materialize(st).length} messages into a summary: the question, what was tried, the current state of the sandbox, and the open items.` };
+    const path = this.materialize(st);
+    const users = path.filter((m) => m.role === 'user');
+    const cp: Compaction = { id: localId('cp'), at: new Date().toISOString(), before_tokens: ctx.used, after_tokens: Math.max(2_000, Math.round(ctx.used * 0.32)), duration_ms: 1_200, boundary_id: users.length >= 2 ? users[users.length - 2].id : path[0]?.id, summary: `Folded ${path.length} messages into a summary: the question, what was tried, the current state of the sandbox, and the open items.` };
     st.compactions = [...st.compactions, cp];
     this.emit(st, { type: 'compaction', compaction: cp });
     this.emit(st, { type: 'context.changed', context: this.context(st) });

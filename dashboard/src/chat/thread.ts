@@ -15,8 +15,8 @@ import { copyButton, icon } from '../ui/bits';
 import type { QseWrenFigure } from '../setup/figure';
 import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
-import { messageText } from './store';
-import { toolLabel, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
+import { dividersByMessage, dividerWords, messageText } from './store';
+import { toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -28,6 +28,7 @@ export class QseChatThread extends LightElement {
   @property({ type: Number }) now = Date.now();
   @state() private editing: { id: string; text: string } | null = null;
   @state() private openCalls = new Set<string>();
+  @state() private openDividers = new Set<string>();
   private stickToEnd = true;
   private lastDeltaAt = 0;
 
@@ -57,18 +58,34 @@ export class QseChatThread extends LightElement {
   render() {
     const c = this.conv;
     if (!c) return html`<div class="ch-scroll"></div>`;
+    const dividers = dividersByMessage(c);
     // the Now line sits in its own row above the scrolling thread: it takes its height there and
     // never covers a message or a tool card (as a sticky card inside the scroll it did)
     return html`${c.run ? html`<div class="ch-now-dock">${this.renderNow(c)}</div>` : nothing}<div class="ch-scroll" role="log" aria-live="polite" aria-relevant="additions" @scroll=${this.onScroll}>
       <div class="ch-col">
-        ${c.compactions.length && !c.messages.length ? nothing : nothing}
         ${repeat(
           c.messages,
           (m) => m.id,
-          (m, i) => this.renderMessage(c, m, i),
+          (m, i) => html`${(dividers.get(m.id) ?? []).map((cp) => this.renderDivider(cp))}${this.renderMessage(c, m, i)}`,
         )}
         ${c.queue.length ? html`<div class="ch-queue" aria-label="queued messages">${c.queue.map((q) => html`<div class="ch-queued" data-queued=${q.id}><span class="ch-queued-word">queued</span><span class="ch-queued-text">${q.text}</span><button type="button" class="btn btn-ghost btn-sm" title="Send now: stops the current answer, keeps its text" @click=${() => this.fire('ch-send-now', { id: q.id })}>${icon('send')} Send now</button><button type="button" class="btn btn-ghost btn-sm" aria-label="Remove from the queue" title="Remove" @click=${() => this.fire('ch-unqueue', { id: q.id })}>${icon('x')}</button></div>`)}<p class="ch-queue-hint">${c.run ? 'goes in after the current step' : 'goes in next'}</p></div>` : nothing}
       </div>
+    </div>`;
+  }
+
+  /** Chat 7: where the model's history now starts. The messages above stay; the divider opens to
+   *  the summary that replaced them for the model. */
+  private renderDivider(cp: Compaction): TemplateResult {
+    const open = this.openDividers.has(cp.id);
+    const toggle = () => {
+      const s = new Set(this.openDividers);
+      if (open) s.delete(cp.id);
+      else s.add(cp.id);
+      this.openDividers = s;
+    };
+    return html`<div class="ch-divider" data-compaction=${cp.id} role="note">
+      <button type="button" class="ch-divider-btn" aria-expanded=${open} @click=${toggle}>${icon('doc')}<span>${dividerWords(cp)}</span><span class="ch-divider-more">${open ? 'hide summary' : 'show summary'}</span></button>
+      ${open ? html`<p class="ch-cp-summary">${cp.summary}</p>` : nothing}
     </div>`;
   }
 
@@ -342,3 +359,4 @@ function hash(s: string): string {
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
   return (h >>> 0).toString(36);
 }
+

@@ -230,3 +230,16 @@ describe('the attachment to a running chat', () => {
     expect(onStreamState(a, 'unauthorized', false, 3).state).toBe('lost');
   });
 });
+
+describe('the compaction divider', () => {
+  const cp = { id: 'cp1', at: '2026-10-12T00:00:00Z', before_tokens: 214_000, after_tokens: 18_000, summary: 's', duration_ms: 1_200 };
+  it('sits above the first message the model still reads, else above the first message', async () => {
+    const { dividersByMessage, dividerWords } = await import('../src/chat/store');
+    const c = conv();
+    c.messages = [...c.messages, { ...c.messages[0], id: 'u2' }];
+    expect([...dividersByMessage({ ...c, compactions: [{ ...cp, boundary_id: 'u2' }] }).keys()]).toEqual(['u2']);
+    expect([...dividersByMessage({ ...c, compactions: [{ ...cp, boundary_id: 'gone' }] }).keys()]).toEqual(['u1']);
+    expect(dividersByMessage({ ...c, messages: [], compactions: [cp] }).size).toBe(0);
+    expect(dividerWords(cp)).toBe('Earlier messages summarized: 214K to 18K tokens, 1.2 s');
+  });
+});

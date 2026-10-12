@@ -2,7 +2,8 @@
 // (a catch-up replay of events after Last-Event-ID) and the live stream go through the same
 // code, and the order is unit-tested. Nothing here touches the DOM or the network.
 
-import type { ChatEvent, Conversation, Message, Part, Run, StampedEvent, ToolCallPart } from './types';
+import { compact, fixed } from '../lib/format';
+import type { ChatEvent, Compaction, Conversation, Message, Part, Run, StampedEvent, ToolCallPart } from './types';
 
 export const TPS_HISTORY = 120;
 
@@ -161,4 +162,22 @@ export function lastStats(c: Conversation) {
     if (m.role === 'assistant' && m.stats) return m.stats;
   }
   return null;
+}
+
+/** the compactions by the message they sit above; one whose first kept message is not on this
+ *  branch (or that names none) sits above the first message */
+export function dividersByMessage(c: Pick<Conversation, 'compactions' | 'messages'>): Map<string, Compaction[]> {
+  const out = new Map<string, Compaction[]>();
+  const ids = new Set(c.messages.map((m) => m.id));
+  for (const cp of c.compactions) {
+    const at = cp.boundary_id && ids.has(cp.boundary_id) ? cp.boundary_id : c.messages[0]?.id;
+    if (!at) continue;
+    out.set(at, [...(out.get(at) ?? []), cp]);
+  }
+  return out;
+}
+
+export function dividerWords(cp: Compaction): string {
+  const t = cp.duration_ms != null ? `, ${cp.duration_ms < 10_000 ? fixed(cp.duration_ms / 1000, 1) : Math.round(cp.duration_ms / 1000)} s` : '';
+  return `Earlier messages summarized: ${compact(cp.before_tokens)} to ${compact(cp.after_tokens)} tokens${t}`;
 }
