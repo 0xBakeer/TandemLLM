@@ -152,6 +152,8 @@ test('the engine has three slots and the system view names the pack', async ({ b
   const page = await ctx.newPage();
   await page.goto('./#/system');
   await expect(page.locator('body')).toContainText('flashnext-3.05', { timeout: 20_000 });
+  // the memory plan's PREFIX_CHUNK is the grid the engine runs, locked, with no restart pending
+  await expect(page.locator('body')).toContainText("the model's own grid: 4,096 tokens");
   await page.screenshot({ path: `${SHOTS}/rc080-5-system.png`, fullPage: true });
   await ctx.close();
 });
