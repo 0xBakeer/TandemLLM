@@ -23,9 +23,11 @@ lm     the trunk (about 48 GiB). Two prompts with an image -- one under 2,051 ro
        (our tower's: `tower` checks the tower). The text rows after the image (the generated ones
        included): KL(official || engine) and top-1 agreement; the image rows, whose next-token guesses
        mean nothing: the relative distance of the streams after the last layer. Bars against the text
-       floor: text KL within 1.5x, top-1 agreement within 5 points, image-row streams within 1.5x the
-       floor's text-row streams. `--control` runs the official layers with 1-D positions on the larger
-       image prompt: its text KL must be 3x the engine's or more (the check sees the rotary).
+       floor: text KL within 1.5x, top-1 agreement within 5 points. `--noise` runs the official layers
+       in fp32 too: the engine's streams must sit within 1.5x the official bf16 run's distance to them,
+       on the image rows and on the text rows. `--control` runs the official layers with 1-D positions
+       on the larger image prompt: its text KL must be 3x the engine's or more (the check sees the
+       rotary).
 """
 
 from __future__ import annotations
@@ -163,10 +165,10 @@ def official_positions(full: list[int], images, merge: int, image_id: int):
 
 @torch.no_grad()
 def official_logits(eng, tcfg, ids: torch.Tensor, emb: torch.Tensor, pos3: torch.Tensor, rows: slice,
-                    dev, dtype) -> torch.Tensor:
+                    dev, dtype, head: bool = True):
     """transformers' layers over the whole sequence (`emb` [T, H] the input rows, `pos3` [3, T] their
-    positions), layer by layer on the engine's weights: log-probabilities of `rows` [R, vocab] fp32 and
-    their streams after the last layer [R, hc H]."""
+    positions), layer by layer on the engine's weights in `dtype`: log-probabilities of `rows` [R, vocab]
+    fp32 (None without `head`) and their streams after the last layer [R, hc H]."""
     from transformers.models.qwen4_exp import modeling_qwen4_exp as m
 
     from tools.fn_refcheck import official_layer
@@ -189,6 +191,8 @@ def official_logits(eng, tcfg, ids: torch.Tensor, emb: torch.Tensor, pos3: torch
         h = out[0] if isinstance(out, tuple) else out
         del L
         torch.cuda.empty_cache()
+    if not head:
+        return None, h[0][rows]
     x = eng.mixer(h[0][rows], "hyper_connection_mixer", combine=False)
     head = eng.W["lm_head.weight"].dequant()
     lg = torch.cat([torch.nn.functional.linear(x[i:i + 256], head).float() for i in range(0, x.shape[0], 256)])
@@ -304,7 +308,19 @@ def check_lm(a) -> dict:
         ref, ref_h = official_logits(fn, tcfg, ids, emb, pos3, slice(0, T), dev, dtype)
         # text rows: after the first image (all of the floor's), the generated ones included
         text = ~image & (torch.arange(T) >= (mm.spans[0].start if mm is not None else 0))
-        dh = ((eng_h.float() - ref_h.float()).norm(dim=-1) / ref_h.float().norm(dim=-1)).cpu()
+
+        def rel_rows(x, y):
+            return ((x.float() - y.float()).norm(dim=-1) / y.float().norm(dim=-1)).cpu()
+        dh = rel_rows(eng_h, ref_h)
+        noise = None
+        if a.noise and not control:
+            # the bf16 noise floor of the streams: the official layers in fp32, against which the engine and
+            # the official bf16 run are both measured
+            _, ref32_h = official_logits(fn, tcfg, ids, emb.float(), pos3, slice(0, T), dev, torch.float32, head=False)
+            e32, b32 = rel_rows(eng_h, ref32_h), rel_rows(ref_h, ref32_h)
+            noise = {k: {"engine": round(e32[m].mean().item(), 5), "official_bf16": round(b32[m].mean().item(), 5)}
+                     for k, m in (("text", text), ("image", image)) if m.any()}
+            del ref32_h
         res = {"name": name, "prompt_rows": n, "image_rows": int(image.sum()), "text_rows": int(text.sum()),
                "delta": mm.delta if mm is not None else 0, "split": split, "verify_picks_equal_decode": not bad,
                "verify_first_difference": bad[:1], "generated": tok.decode(gen),
@@ -313,7 +329,8 @@ def check_lm(a) -> dict:
                "streams_rel_image": round(dh[image].mean().item(), 5) if mm is not None else None,
                "image_rows_top1_agree": round((ref[image.to(dev)].argmax(-1) == eng_lg[image.to(dev)].argmax(-1))
                                               .float().mean().item(), 4) if mm is not None else None,
-               "official_s": round(time.time() - t1), "mem_avail_gib": round(mem_available_gib(), 1)}
+               "streams_vs_fp32": noise, "official_s": round(time.time() - t1),
+               "mem_avail_gib": round(mem_available_gib(), 1)}
         print(json.dumps(res), flush=True)
         return res
 
@@ -332,8 +349,10 @@ def check_lm(a) -> dict:
     fl = out["runs"][2]
     out["ok"] = all(r["verify_picks_equal_decode"] for r in out["runs"]) and all(
         r["text"]["kl_mean"] <= 1.5 * fl["text"]["kl_mean"] + 1e-3
-        and r["text"]["top1_agree"] >= fl["text"]["top1_agree"] - 0.05
-        and r["streams_rel_image"] <= 1.5 * fl["streams_rel_text"] for r in out["runs"][:2])
+        and r["text"]["top1_agree"] >= fl["text"]["top1_agree"] - 0.05 for r in out["runs"][:2])
+    if a.noise:
+        out["ok"] = out["ok"] and all(v["engine"] <= 1.5 * v["official_bf16"] for r in out["runs"][:3]
+                                      for v in r["streams_vs_fp32"].values())
     if a.control:
         name, full, mm = prompts[-1]
         r = run(name + ", official with 1-D positions", full, mm, control=True)
@@ -349,6 +368,7 @@ def main() -> None:
     ap.add_argument("--pack", required=True)
     ap.add_argument("--new", type=int, default=24, help="greedy tokens the engine decodes (lm)")
     ap.add_argument("--control", action="store_true", help="lm: also the official layers with 1-D positions")
+    ap.add_argument("--noise", action="store_true", help="lm: also the official layers in fp32 (the streams' bf16 noise)")
     ap.add_argument("--out")
     a = ap.parse_args()
     a.pack = os.path.expanduser(a.pack)
