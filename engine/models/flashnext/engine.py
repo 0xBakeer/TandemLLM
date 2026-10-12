@@ -73,6 +73,7 @@ class FlashNextEngine(FlashNextRef):
         self._pend_owner = None
         self._joint: dict = {}          # id(state) -> (block, rec, class) of its block in the last joint pass
         self._mtp_key = 0               # whose MTP chain buffers the next draft uses (a head's `key`)
+        self.joint_timing = None        # a dict: `verify_multi` adds each part's GPU ms (a measurement)
         # the sequence kernels' weight forms: GDN conv taps [C, 4] bf16, A_log and dt_bias fp32, the
         # PLE conv taps rounded to bf16 (the reference casts them to the activations' dtype)
         self._wc: dict = {}
@@ -810,6 +811,16 @@ class FlashNextEngine(FlashNextRef):
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         S = c.num_experts_per_tok + 1
+        jt = self.joint_timing
+        marks = []
+
+        def mark(name):
+            # QWEN38 joint-pass timing (tools/fn_joint_check.py --timing): an event at each part's start
+            if jt is not None:
+                ev = torch.cuda.Event(enable_timing=True)
+                ev.record()
+                marks.append((name, ev))
+        mark("stage")
         self.flush()
         cx = []
         for j, (tokens, parents, st) in enumerate(items):
@@ -827,10 +838,12 @@ class FlashNextEngine(FlashNextRef):
 
         def use(x):
             self._cur, self._write, self._cls, self.rec = x["rb"], False, x["cls"], x["rec"]
+        mark("mix")
         hs = [self.W["embed_tokens.weight"].index_select(0, x["rb"]["d"]["tok"]).repeat(1, hc) for x in cx]
         ns = [None] * len(cx)
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
+            mark("mix")
             xs, dis = [], []
             for j, x in enumerate(cx):
                 use(x)
@@ -843,24 +856,30 @@ class FlashNextEngine(FlashNextRef):
                 xs.append(xa)
                 dis.append(di)
             X = torch.cat(xs)
+            mark("proj")
             if c.is_linear(li):
                 a = p + "linear_attn."
                 qkvz, ab = self.lin(X, self.W[a + "qkvz"]), K.gemv_bf16(X, self.W[a + "ab"])
+                mark("gdn")
                 parts = []
                 for j, x in enumerate(cx):
                     use(x)
                     parts.append(self._gdn1_core(qkvz[rows[j]], ab[rows[j]], li, x["st"]))
+                mark("proj")
                 out = self.lin(torch.cat(parts), self.W[a + "out_proj.weight"])
             else:
                 a = p + "self_attn."
                 qkv = self.lin(X, self.W[a + "qkv"])
                 iqk = self.lin(X, self.W[a + "indexer.index_qk_proj.weight"]) if c.has_indexer else None
+                mark("attn")
                 parts = []
                 for j, x in enumerate(cx):
                     use(x)
                     parts.append(self._attn1_core(qkv[rows[j]], iqk[rows[j]] if iqk is not None else None, li,
                                                   x["st"]))
+                mark("proj")
                 out = self.lin(torch.cat(parts), self.W[a + "o_proj.weight"])
+            mark("mix")
             xs, dis2 = [], []
             for j in range(len(cx)):
                 hs[j], ns[j] = K.inject_norm(hs[j], out[rows[j]], dis[j], self.W[p + "attn_hyper_connection.rank"],
@@ -870,12 +889,15 @@ class FlashNextEngine(FlashNextRef):
                 dis2.append(di)
             nxt = None if li + 1 in c.ple_layers else self._site_norm(li + 1)
             R = self.W[p + "mlp_hyper_connection.rank"]
+            mark("moe")
             yd, ids, wts = self.moe_parts(torch.cat(xs), li)
+            mark("mix")
             for j, x in enumerate(cx):
                 r = rows[j]
                 x["rec"][("ids", li)] = ids[r]
                 hs[j], ns[j] = K.combine_inject_norm(hs[j], yd[r.start * S:r.stop * S], ids[r], wts[r], dis2[j], R,
                                                      nxt, hc, eps)
+        mark("head")
         heads = []
         for j, x in enumerate(cx):
             if ns[j] is None:
@@ -897,6 +919,12 @@ class FlashNextEngine(FlashNextRef):
             self._joint[id(x["st"])] = (x["block"], x["rec"], x["cls"])
             out.append((rb["logits"][:x["M"]], rb["next"][:x["M"]], hs[j]))
         self._pend_owner = None
+        if jt is not None:
+            mark("end")
+            torch.cuda.synchronize()
+            for (name, a), (_, b) in zip(marks, marks[1:]):
+                jt[name] = jt.get(name, 0.0) + a.elapsed_time(b)
+            jt["passes"] = jt.get("passes", 0) + 1
         return out
 
     @torch.no_grad()

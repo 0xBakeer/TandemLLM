@@ -9290,7 +9290,9 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                                       .input_ids[0].cuda(),
                                       getattr(d2, "WARM_TOKENS", 4) if warming is not None else 4, set()))
                 _warm_prefill(_generate_stream, tok, res_i)    # FX17: the router's question shape
-                if make is None and a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
+                if make is not None:
+                    e2.precapture(d2)          # its class 0 graphs now, not in its first request
+                elif a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
                     e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
                                           else range(2, 17))
             values.update({k: None for k in ("last_ctx", "last_prompt_n", "hidden_spans",

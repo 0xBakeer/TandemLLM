@@ -398,8 +398,12 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     s.st.length = 500
     s.commit_tree([0])
     assert not s.captured
+    # after the server's warm-up: the state starts over and class 0's graphs are taken at once
+    s.st.length = 500
+    s.idle_captures = lambda: iter([1, 2, 3]) if s.st.length == 0 else None
+    assert s.precapture(None) is None and s.precapture(object()) == 3 and s.st.length == 0
     return ("8 graphs of the 1,024 class (2 widths, 4 commits, a moved one over a tree, 2 feeds); then nothing owed; "
-            "a first replay unpriced")
+            "a first replay unpriced; class 0 right after the warm-up")
 
 
 def test_a_capture_saves_only_what_its_warm_up_writes():

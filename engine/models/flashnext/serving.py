@@ -232,8 +232,16 @@ class FlashNextServing:
     def manifest(self) -> Manifest:
         return manifest()
 
-    def precapture(self, drafter) -> None:
-        return None                         # the drafter captured every graph at load (`capture_all`)
+    def precapture(self, drafter) -> int | None:
+        """After the server's warm-up: the warm-up's rows are nobody's conversation, so the state starts
+        over and class 0's graphs (the shapes the rounds use, from the prior and the warm-up) are
+        captured now, not in the first request (2026-10-12: the first short request after a restart
+        drafted at 38.5 tok/s while it captured them, 58 after). Returns the graphs captured."""
+        if drafter is None:
+            return None
+        self.kv.length = 0
+        steps = self.idle_captures()
+        return sum(1 for _ in steps) if steps is not None else 0
 
     def draft_heads(self) -> dict:
         """The draft heads this pack carries, by name: its MTP layer ("mtp", made by `add_mtp_head`)."""
