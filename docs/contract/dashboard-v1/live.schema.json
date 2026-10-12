@@ -681,6 +681,21 @@
           ],
           "minimum": 0,
           "description": "VIS-58: the prompt tokens TandemLLM added (its notes); prompt_tokens is the client's count and cached_tokens never exceeds it"
+        },
+        "conversation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "SRV-347: the conversation the request belongs to (the body's conversation id, else x-session-id), null when the client sent none"
+        },
+        "thinking_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "SRV-347: the reasoning cap in force, in tokens; null when uncapped or thinking is off"
         }
       },
       "required": [

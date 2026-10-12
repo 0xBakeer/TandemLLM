@@ -7,6 +7,9 @@
 #   bash ops/make-secrets.sh --rotate [--admin] replaces the file (every dashboard session ends);
 #                                               an admin password already there stays one
 #
+# QSE_CHAT_FORWARD_KEY (OPS-103) is the key the engine server's /v1/chat-app forward sends to chatd
+# (server/chat_forward.py); both read it from here. A file made before it gets the line added.
+#
 # QSE_METRICS_TOKEN is for Prometheus (the k8s Secret `qse-metrics-token`). QSE_ADMIN_TOKEN is the
 # admin password: with it set, every admin route (the conductor's writes, the memory, the cache
 # routes) needs it, and the dashboard, which has no sign-in screen yet, can no longer edit. Without
@@ -24,18 +27,24 @@ for a in "$@"; do
         *) echo "[secrets] unknown argument $a (--rotate, --admin)"; exit 2 ;;
     esac
 done
+tok() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 if [ -f "$FILE" ] && [ $ROTATE = 0 ]; then
+    if ! grep -q "^QSE_CHAT_FORWARD_KEY=." "$FILE"; then
+        echo "QSE_CHAT_FORWARD_KEY=$(tok)" >> "$FILE"
+        echo "[secrets] added QSE_CHAT_FORWARD_KEY to $FILE; restart the engine and chatd to use it"
+        exit 0
+    fi
     echo "[secrets] $FILE exists; --rotate replaces it"; exit 0
 fi
 [ -f "$FILE" ] && grep -q "^QSE_ADMIN_TOKEN=." "$FILE" && ADMIN=1
 umask 077
 mkdir -p "$DIR"
-tok() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 TMP="$FILE.tmp.$$"
 {
     echo "# access tokens for the qwen38-spark-engine :8000 service; made $(date -Iseconds)"
     [ $ADMIN = 1 ] && echo "QSE_ADMIN_TOKEN=$(tok)"
     echo "QSE_METRICS_TOKEN=$(tok)"
+    echo "QSE_CHAT_FORWARD_KEY=$(tok)"
 } > "$TMP"
 chmod 600 "$TMP"
 mv "$TMP" "$FILE"

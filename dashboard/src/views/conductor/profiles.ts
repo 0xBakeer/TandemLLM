@@ -216,7 +216,7 @@ export class QseCondProfiles extends LightElement {
     if (ed.loadError) return html`<div class="state state-error" role="alert"><div class="state-title">${icon('warn')} ${ed.loadError}</div></div>`;
     const d = ed.draft!;
     const ro = !!ed.locked;
-    const kinds = this.meta?.client_kinds ?? ['open-webui', 'openai-sdk', 'opencode', 'curl', 'dashboard', 'other'];
+    const kinds = this.meta?.client_kinds ?? ['open-webui', 'openai-sdk', 'opencode', 'hermes', 'curl', 'dashboard', 'chat-app', 'other'];
     const classes = this.router?.classes ?? [];
     return html`<div style="margin-top:16px" data-editor=${ed.name}>
       <div class="toolbar"><h2 class="panel-title">${ed.name} <span class="muted small num">v${ed.base?.version}</span></h2>

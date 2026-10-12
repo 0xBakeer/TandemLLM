@@ -1005,6 +1005,10 @@ class LiveRegistry:
             "decode_warmup": warmup, "mostly_cached": self._mostly_cached(rec),
             # v3: the newest state line the client was shown (the voice's live line)
             "line": _line_of(rec),
+            # SRV-347 (additive): the conversation the request belongs to (the body's id, else
+            # `x-session-id`; chatd sends `chat-<id>`) and the reasoning cap in force (null: none)
+            "conversation_id": getattr(rec, "conv", None),
+            "thinking_budget": _budget_of(rec),
         }
 
     def _prune(self, now_p: float) -> None:
@@ -1017,6 +1021,16 @@ class LiveRegistry:
         while self._recent and now_p - self._recent[0][0] > RECENT_KEEP_S:
             self._recent.popleft()
             self._recent_raw = None
+
+
+def _budget_of(rec) -> int | None:
+    """The request's reasoning cap from its ThinkBudget (`live_refs`), None when uncapped."""
+    think, _ = act._refs(rec)
+    try:
+        b = int(getattr(think, "budget", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return b or None
 
 
 def _client_cached(rec, cached: int) -> int:

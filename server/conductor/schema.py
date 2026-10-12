@@ -133,7 +133,8 @@ def identity_text() -> str:
     return IDENTITY_NOTE.replace("{model}", model_name())
 
 DECISIONS = ("classify", "effort", "packages", "rules")
-CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other")
+CLIENT_KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "chat-app",
+                "other")
 LOCKED = {"raw": "raw passthrough, byte-identical to the release",
           "bench": "raw passthrough, byte-identical; benchmarks and the paper"}
 ID_RE = r"^[a-z][a-z0-9_-]{0,39}$"
@@ -1128,6 +1129,15 @@ SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router
 # 0.3.30 night pass: with the voice and the shadow both on, their one share of Qwen's time
 # (narrator.Share) at 3 % cost Qwen's decode 3.34 %, at 2.5 % 2.79 %; coding runs both
 SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], live={"share": 0.025})
+# SRV-351 (plan note Chat 7): the Chat tab's agent loop (chatd, client kind `chat-app`) is
+# coding's policy without the state lines: the chat shows the harness's choices from the usage
+# frame, not as text in the answer. Open WebUI's status events go only to QWEN38_STATUS_CLIENTS'
+# kinds, never this one; chatd asks the engine for no titles
+SHIPPED_PROFILES["chat-app"] = copy.deepcopy(SHIPPED_PROFILES["coding"])
+SHIPPED_PROFILES["chat-app"].update(
+    description="The Chat tab's agent loop (chatd): coding's routing, tasks and packages, no "
+                "state lines in the answer.",
+    clients=["chat-app"], ui={"states": "off", "states_channel": "content"})
 del _n
 
 

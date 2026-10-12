@@ -83,6 +83,7 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
+from server import chat_forward, model_card, tokenize_api  # noqa: E402
 from server import memory_api  # noqa: E402
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
@@ -4659,6 +4660,15 @@ def served_name() -> str:
     return COMPOSITE_NAME if STATE.get("conductor") is not None else str(STATE.get("model") or "")
 
 
+def _card_facts() -> dict:
+    """What the loader serves, for the model card (server/model_card.py): the pack, the window,
+    the default output limit, the vision tower, the effort levels' caps."""
+    w = weights_profile()
+    return {"pack": w.get("name") or w.get("format"), "max_len": STATE.get("max_len"),
+            "max_output": STATE.get("default_max_tokens"), "vision": STATE.get("vision") is not None,
+            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True}
+
+
 def _effort_caps() -> dict:
     """The effort levels' reasoning caps a client's effort word maps to: the router document's
     levels when the conductor is loaded (the Routing screen edits them), else their seed."""
@@ -4993,6 +5003,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
                                                      f"SameSite=Strict; Path=/; "
                                                      f"Max-Age={auth_mod.SESSION_S}{secure}"),))
+
+    def _chat(self, method: str) -> bool:
+        """`/v1/chat-app/*`: the Chat tab's service, chatd, behind the dashboard's auth
+        (server/chat_forward.py, SRV-343); False for every other path."""
+        return chat_forward.route(self, method, _auth())
 
     def _send_empty(self, code: int, headers: tuple = ()) -> None:
         try:
@@ -5369,6 +5384,8 @@ class Handler(BaseHTTPRequestHandler):
         self._tandem = None
         if self._strip_session():
             return
+        if self._chat("GET"):
+            return
         raw = self.path.split("?")[0]
         if raw == "/dashboard" or raw.startswith("/dashboard/"):
             # the dashboard's static shell: public, no data in it
@@ -5473,6 +5490,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not STATE["proxy"].authorize(self)[0]:
                     return
                 out["data"] = out["data"] + STATE["proxy"].models(STATE["started"])
+            # SRV-347: the engine model's capability card (server/model_card.py)
+            out["data"] = model_card.annotate(out["data"], _card_facts())
             if STATE.get("deciders") is not None:
                 # beside `data`, so an OpenAI client still sees one chat model (SRV-131)
                 out["decision_models"] = decider_api.decision_models(STATE["deciders"],
@@ -5497,6 +5516,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 card = ({"id": STATE["model"], "object": "model", "created": STATE["started"],
                          "owned_by": "local"} if name == STATE["model"] else None)
+            if card is not None:
+                card = model_card.annotate([card], _card_facts())[0]     # SRV-347
             if card is None and STATE.get("deciders") is not None:
                 card = decider_api.card(STATE["deciders"], name, STATE["started"])
             if card is None and STATE.get("proxy") is not None:
@@ -5520,6 +5541,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(501, f"Unsupported method ('{self.command}')")
 
     def do_DELETE(self):
+        if self._chat("DELETE"):
+            return
         path = self.path.split("?")[0].rstrip("/")
         if path == "/v1/dashboard/session":
             return self._session("DELETE")
@@ -5531,9 +5554,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(404, {"error": {"message": f"no route {path}", "type": "not_found"}})
 
     def do_PUT(self):
+        if self._chat("PUT"):
+            return
         return self._conductor_write("PUT")
 
     def do_PATCH(self):
+        if self._chat("PATCH"):
+            return
         return self._conductor_write("PATCH")       # VIS-48: a session's keep
 
     def _config(self, method: str, path: str, body) -> None:
@@ -5579,6 +5606,8 @@ class Handler(BaseHTTPRequestHandler):
         self._tandem = None
         if self._strip_session():
             return
+        if self._chat("POST"):                      # before the JSON read: uploads are multipart
+            return
         path = self.path.split("?")[0].rstrip("/")
         try:
             body = self._read()
@@ -5593,6 +5622,10 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "invalid_request_error"}})
         if path == "/v1/dashboard/session":
             return self._session("POST", body)
+        if path == "/v1/tokenize":
+            # SRV-347: exact counts with the model's own template (server/tokenize_api.py)
+            return tokenize_api.handle(self, body, lambda b: build_prompt(b, count=True),
+                                       lambda t: len(STATE["tok"](t)["input_ids"]))
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
         if path.startswith("/v1/setup/"):

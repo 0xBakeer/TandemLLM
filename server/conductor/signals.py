@@ -295,6 +295,13 @@ def _is_tool_response(text: str) -> bool:
     return t.startswith("<tool_response>") and t.endswith("</tool_response>")
 
 
+def _compaction_marker(body: dict) -> bool | None:
+    """SRV-351: `tandem.compaction` in the body (chatd sends it on every request); when present
+    the shape guesses below are skipped (server/compaction.py `marker`)."""
+    from server.compaction import marker
+    return marker(body)
+
+
 #: SRV-175: the clients whose compaction request is the bare shape (no tools, no system text, the
 #: history as one long user message). Any other client's long paste with "summarize" in a fresh
 #: chat has that shape too (UT1, 2026-10-06: chatcmpl-6f4facab..., 83,523 characters from an
@@ -332,10 +339,11 @@ def shape(body: dict, skill_names: tuple = (), client_kind: str | None = None) -
         s.last_role == "user" and s.user_index is not None and s.user_index != len(msgs) - 1)
     s.user_hash = (hashlib.sha256(f"{s.user_index}\x00{s.user_text}".encode()).hexdigest()[:24]
                    if s.user_index is not None else None)
-    s.compaction = (client_kind in BARE_COMPACTION_CLIENTS and not s.tools and not s.has_system
-                    and len(msgs) == 1 and s.last_role == "user"
-                    and len(s.user_text) >= COMPACTION_MIN_CHARS) or \
-        compaction_shape(body) is not None
+    said = _compaction_marker(body)
+    s.compaction = said if said is not None else (
+        (client_kind in BARE_COMPACTION_CLIENTS and not s.tools and not s.has_system
+         and len(msgs) == 1 and s.last_role == "user"
+         and len(s.user_text) >= COMPACTION_MIN_CHARS) or compaction_shape(body) is not None)
     # the checker results that arrived since the model last wrote
     s.results = []
     for m in reversed(msgs):

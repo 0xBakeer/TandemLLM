@@ -6,7 +6,7 @@ The app is built against the dashboard API contract in `docs/contract/dashboard-
 
 ## Stack
 
-TypeScript with Lit components (light DOM, one stylesheet), built by Vite. Charts are hand-drawn SVG. Dependencies are pinned, and nothing loads from a CDN or a font service. The build is one `index.html`, one hashed JS file, one CSS file and the Playground as a chunk loaded on first use, all with relative paths. The part every tab loads is about 45 KB gzip, against a 300 KB budget (`npm run test:size`).
+TypeScript with Lit components (light DOM, one stylesheet), built by Vite. Charts are hand-drawn SVG. Dependencies are pinned, and nothing loads from a CDN or a font service. The build is one `index.html`, one hashed JS file, one CSS file and the Playground as a chunk loaded on first use, all with relative paths. The part every tab loads is about 45 KB gzip, against a 400 KB budget (`npm run test:size`; 300 KB before the Chat tab).
 
 ```
 src/app.ts               the shell: session gate, top bar and status pill, rail or bottom tabs, hash routing, theme

@@ -24,7 +24,8 @@ describe('dist/', () => {
     expect(html).toMatch(/href="\.\/assets\//);
     expect(html).not.toMatch(/https?:\/\//);
   });
-  it.skipIf(!present)('total gzip size is under 300 KB', () => {
+  // 405 KB since xterm.js (a chunk that loads only with a terminal) and the PWA (scripts/check-size.mjs)
+  it.skipIf(!present)('total gzip size is under 405 KB', () => {
     let total = 0;
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
@@ -34,6 +35,6 @@ describe('dist/', () => {
       }
     };
     walk(DIST);
-    expect(total).toBeLessThan(300 * 1024);
+    expect(total).toBeLessThan(405 * 1024);
   });
 });

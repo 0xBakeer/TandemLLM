@@ -1476,7 +1476,16 @@ class Router:
         # SRV-243: the packages whose steps the request's tools can carry out; a fallback stands
         # in for one that cannot, the rest stay out and the turn says what its tools are
         listed, core_in, fit_note, stand_in = self._fit(plan, router, packages, policy, row)
-        cands = [p for p in listed if p not in sh.loaded_skills]
+        # SRV-361: the client's pins and blocks (chatd: a chat's skills control)
+        pinned, blocked, unknown = packages_mod.body_packages(body, packages["packages"])
+        if blocked:
+            listed = [p for p in listed if p not in blocked]
+            core_in = [p for p in core_in if p not in blocked]
+            stand_in = [p for p in stand_in if p not in blocked]
+            row["extra"]["package_blocked"] = sorted(blocked)
+        if unknown:
+            row["extra"].setdefault("notes", []).append(f"pin_unknown:{','.join(unknown)}")
+        cands = [p for p in listed if p not in sh.loaded_skills and p not in pinned]
         skipped = [p for p in listed if p in sh.loaded_skills]
         if skipped:
             row["extra"].setdefault("notes", []).append(f"already_loaded:{','.join(skipped)}")
@@ -1543,6 +1552,17 @@ class Router:
                     row["extra"].setdefault("notes", []).append(f"{err}:{chosen}")
                 else:
                     parts.append(("packages", {"kind": "package", "name": chosen, "text": text}))
+        if dec["packages"] != "off":
+            have = {p["name"] for k, p in parts if p.get("kind") == "package"}
+            for name in pinned:
+                if name in have or name in sh.loaded_skills:
+                    continue
+                text, err = self.library.text(packages, name)
+                if text is None:
+                    row["extra"].setdefault("notes", []).append(f"{err}:{name}")
+                else:
+                    parts.append(("packages", {"kind": "package", "name": name, "text": text}))
+                    row["extra"].setdefault("package_pinned", []).append(name)
         if fit_note and dec["packages"] != "off":
             parts.append(("packages", {"kind": "tools", "name": "fit", "text": fit_note}))
         if dec["rules"] != "off" and (policy["rules"] or policy["note"]):

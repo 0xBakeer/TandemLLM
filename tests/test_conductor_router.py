@@ -557,6 +557,43 @@ def test_a_loaded_skill_is_not_injected_again_and_packages_get_a_second_question
     assert "spiral-portrait" not in plan.row["extra"]["package_choice"]["candidates"]
 
 
+def test_a_client_pins_and_blocks_packages():
+    """SRV-361: `tandem.packages` in the body. A pinned package goes in whatever the class picks,
+    a blocked one never does (not even as the class's pick), and a body without the field plans
+    as before."""
+    def rig():
+        cond, fakes = setup(decider=lambda t, o: ("tiny-skill", 0.9) if "none" in o
+                            else ("three_d", 0.9))
+        _, p = cond.store.get("packages")
+        for n in ("tiny-skill", "other-skill", "pinned-skill"):
+            p["packages"][n] = {"title": n, "kind": "skill", "source": "inline",
+                                "description": f"The {n} recipe for a scene.",
+                                "body": f"# {n} body", "max_tokens": 3000, "enabled": True}
+        cond.store.put("packages", None, p, note="pins", author="t")
+        _, r = cond.store.get("router")
+        for c in r["classes"]:
+            if c["id"] == "three_d":
+                c["policy"]["packages"] = ["tiny-skill", "other-skill"]
+        cond.store.put("router", None, r, note="pins", author="t")
+        return cond, fakes
+    msg = [{"role": "user", "content": "Build a voxel island in 3D."}]
+    cond, _ = rig()
+    plan, _, _ = turn(cond, body(msg))
+    names = [x["name"] for x in plan.injected[0]["parts"] if x["kind"] == "package"]
+    assert names == ["tiny-skill"] and "package_pinned" not in plan.row["extra"]
+    cond, _ = rig()
+    plan, _, _ = turn(cond, dict(body(msg), tandem={"packages": {"pin": ["pinned-skill", "gone"]}}))
+    names = [x["name"] for x in plan.injected[0]["parts"] if x["kind"] == "package"]
+    assert names == ["tiny-skill", "pinned-skill"], names
+    assert plan.row["extra"]["package_pinned"] == ["pinned-skill"]
+    assert "pin_unknown:gone" in plan.row["extra"]["notes"]
+    cond, _ = rig()
+    plan, _, _ = turn(cond, dict(body(msg), tandem={"packages": {"block": ["tiny-skill"]}}))
+    names = [x["name"] for x in (plan.injected[0]["parts"] if plan.injected else [])
+             if x["kind"] == "package"]
+    assert "tiny-skill" not in names and plan.row["extra"]["package_blocked"] == ["tiny-skill"]
+
+
 def test_a_general_package_goes_in_first_and_the_skill_is_picked_among_the_rest():
     """2026-10-02: a package marked `general` (the coding package) goes in on every turn of a
     class that lists it, before the task skill; the second question picks among the skills

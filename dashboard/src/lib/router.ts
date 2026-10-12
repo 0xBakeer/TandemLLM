@@ -1,8 +1,9 @@
 // Hash routing: #/usage?client=k:…&range=90d. Reload keeps the tab and its filters. The setup guide
-// has a path below its view: #/setup/<model>/<step> (VIS-78).
+// has a path below its view: #/setup/<model>/<step> (VIS-78); the Chat tab too: #/chat/<id>,
+// #/chat/settings/<section> (VIS-99).
 
-export type View = 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'backends' | 'system' | 'setup';
-export const VIEWS: View[] = ['usage', 'performance', 'dev', 'playground', 'conductor', 'backends', 'system', 'setup'];
+export type View = 'chat' | 'usage' | 'performance' | 'dev' | 'playground' | 'conductor' | 'backends' | 'system' | 'setup';
+export const VIEWS: View[] = ['chat', 'usage', 'performance', 'dev', 'playground', 'conductor', 'backends', 'system', 'setup'];
 
 export interface Route {
   view: View;
@@ -17,7 +18,7 @@ export function parseHash(hash = location.hash): Route {
   const [first, ...rest] = full.split('/');
   const known = (VIEWS as string[]).includes(first);
   const view = known ? (first as View) : 'usage';
-  const path = known && view === 'setup' ? rest.filter(Boolean).map((x) => decodeURIComponent(x)) : [];
+  const path = known && (view === 'setup' || view === 'chat') ? rest.filter(Boolean).map((x) => decodeURIComponent(x)) : [];
   return { view, params: new URLSearchParams(query), path };
 }
 

@@ -1,0 +1,29 @@
+# systemd USER unit for chatd (the Chat tab's service, OPS-103) -- present and NOT INSTALLED, for
+# the reason ops/qwen38-engine.service gives: a user unit dies with the login session unless linger
+# is enabled, which needs root. Until then ops/chatd.sh starts and stops it by hand.
+#
+# Install with:
+#   mkdir -p ~/.config/systemd/user && cp ops/chatd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now chatd
+#
+# Its own unit, never the engine's: restarting the engine leaves chatd and its runs alone (a run
+# waits for the engine and retries for 10 minutes). SIGTERM ends open runs `interrupted`.
+[Unit]
+Description=TandemLLM chatd, the Chat tab's service on 127.0.0.1:8016
+After=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/qwen38-spark-engine
+EnvironmentFile=-%h/.qwen38-spark-engine/secrets.env
+Environment=PYTHONPATH=%h/qwen38-spark-engine TZ=Europe/Berlin
+ExecStart=/usr/bin/python3 -u -m chatd --port 8016 --data %h/.tandemllm/chat
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/qwen38-spark-engine/logs/chatd.log
+StandardError=append:%h/qwen38-spark-engine/logs/chatd.log
+
+[Install]
+WantedBy=default.target

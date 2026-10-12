@@ -17,16 +17,21 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_THINK_TAGS      the reasoning as <think>...</think> inside `content`
     FAKE_MEMORY          a memory block (a user rule) after the answer, in 7-character pieces
     FAKE_TOOL            two tool calls, their arguments streamed in pieces
+    FAKE_CALLS [...]     these calls (JSON list of {name, arguments}, the rest of the line), when
+                         the request offers tools and its last message is not a tool result
+                         (FAKE_CALLS_ALWAYS: after tool results too, for loop guards)
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
     FAKE_SLOW            ten tokens a second
     FAKE_TPS <n>         <n> tokens a second (the parallel load: backends of different speeds)
     FAKE_STALL <s>       stop for <s> seconds after the third token
-    FAKE_DROP            close the connection after five tokens, no [DONE]
+    FAKE_DROP            close the connection after five tokens, no [DONE] (FAKE_DROP_ONCE: only
+                         the first time per text, so a client's retry gets through)
     FAKE_429             429 with Retry-After: 1 (FAKE_429_ONCE: only the first time per text)
     FAKE_503             503 (FAKE_503_ONCE: only the first time per text)
     FAKE_500             500
     FAKE_DEEPSEEK        DeepSeek's usage shape: prompt_cache_hit_tokens, prompt_cache_miss_tokens
     FAKE_LONG <n>        <n> answer tokens (default 24)
+    FAKE_SAY <text>      this answer (the rest of the line, `\\n` a line break)
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
 
 For the harness (P4):
@@ -316,6 +321,10 @@ def make_handler(fake: Fake):
             msgs = body.get("messages") or []
             if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "tool":
                 return [], [f"done{i} " for i in range(6)]
+            m = re.search(r"FAKE_SAY (.+)", text)
+            if m:
+                say = m.group(1).replace("\\n", "\n")
+                return [], [say[i:i + 5] for i in range(0, len(say), 5)]
             if "FAKE_REASONING" in text or "FAKE_EMPTY_ANSWER" in text:
                 reasoning = [f"think{i} " for i in range(6)]
             if "FAKE_LOOP" in text:
@@ -359,8 +368,12 @@ def make_handler(fake: Fake):
                         not body.get("continue_final_message"):
                     special = w
             self._special = special
+            m = re.search(r"FAKE_CALLS (\[.*\])", text)
+            self._calls = json.loads(m.group(1)) if m else None
+            self._n_msgs = len(body.get("messages") or [])
             tools = ("FAKE_TOOL" in text and bool(body.get("tools")) and not last_tool) or \
-                special is not None
+                special is not None or (self._calls is not None and bool(body.get("tools")) and
+                                        (not last_tool or "FAKE_CALLS_ALWAYS" in text))
             n_out = len(reasoning) + len(answer) + (8 if tools else 0)
             model = body.get("model")
             cid = ("chatcmpl-" if chat else "cmpl-") + hashlib.sha1(
@@ -410,6 +423,15 @@ def make_handler(fake: Fake):
             finally:
                 with fake.lock:
                     fake.streams -= 1
+
+        def _drop_now(self, text: str) -> bool:
+            if "FAKE_DROP_ONCE" not in text:
+                return True
+            with fake.lock:
+                k = ("FAKE_DROP", text)
+                first = k not in fake.once
+                fake.once.add(k)
+            return first
 
         def _send_chunk(self, data: bytes):
             self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
@@ -461,7 +483,7 @@ def make_handler(fake: Fake):
                     self._send_chunk(b"data: [DONE]\n\n")
                     self._send_chunk(b"")
                     return
-                if k == 5 and "FAKE_DROP" in text:
+                if k == 5 and "FAKE_DROP" in text and self._drop_now(text):
                     self.wfile.flush()
                     self.close_connection = True
                     self.connection.shutdown(2)
@@ -483,6 +505,15 @@ def make_handler(fake: Fake):
                 for part in parts:
                     self._event(chunk({"tool_calls": [{"index": 0, "function": {
                         "arguments": part}}]}))
+            elif tools and getattr(self, "_calls", None) is not None:
+                for i, call in enumerate(self._calls):
+                    args = json.dumps(call.get("arguments") or {})
+                    self._event(chunk({"tool_calls": [{"index": i, "id": f"call_{i}_{self._n_msgs}",
+                                                       "type": "function", "function": {
+                                                           "name": call["name"], "arguments": ""}}]}))
+                    for k in range(0, len(args), 7):
+                        self._event(chunk({"tool_calls": [{"index": i, "function": {
+                            "arguments": args[k:k + 7]}}]}))
             elif tools:
                 for i, name in enumerate(("read", "write")):
                     self._event(chunk({"tool_calls": [{"index": i, "id": f"call_{i}",
