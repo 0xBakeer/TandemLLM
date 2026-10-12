@@ -2,17 +2,22 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased: Qwen3.8-Flash-Next
+## Unreleased, Qwen3.8-Flash-Next
 
-A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through the same server, caches, ops scripts and setup guide as the 27B. The 27B's text does not change: its modules, flags and disk-tier fingerprint are as in 0.7.2, and every switch added here is off for it.
+A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through the same server, caches, ops scripts and setup guide as the 27B. The 27B's text does not change: its modules, flags and disk-tier fingerprint are as in 0.7.2, and every switch added here is off for it. On Flash-Next, greedy and seeded answers with speculation equal plain decoding token for token.
 
 - Five weight profiles, `flashnext-2.05` to `flashnext-6.05`, and a second tile in the setup guide (`models/qwen3.8-flash-next/model.yaml`). `ops/use-profile.sh` switches between the 27B and Flash-Next one engine at a time, and rolls back across models. The fetcher takes a branch of the repo, checks the hub's sha256, and links the n-gram table that the 4.05, 5.05 and 6.05 packs share.
-- Each pack has its largest window in the registry. The guide's window buttons and the estimate follow it, and a start with a longer `--max-len` is refused. 3.05 holds 262,144 tokens with its n-gram table read cold. Warm, the whole table resident took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. 6.05 fits no window on one DGX Spark.
-- Speculation drafts with the pack's own MTP layer, cut by the shared StairCut. The lookup (the request's text, the corpus, the suffix store) joins the same round as one tree. Sampled requests walk the tree with the 27B's sampler. Every greedy and seeded answer equals plain decode.
-- All cache tiers hold Flash-Next's state (grid 4,096).
-- The shadow reader is not started on Flash-Next: its outputs were validated on the 27B's reasoning only. The conductor, the narrator and the residency planner run as on the 27B.
+- Each pack has its largest window in the registry: 262,144 tokens for 2.05 and 3.05, 212,992 for 4.05. The guide's window buttons and the estimate follow it, and a start with a longer `--max-len` is refused. 3.05 reads its n-gram table cold. Warm, the whole table resident took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. 6.05 fits no window on one DGX Spark.
+- 5.05 does not load yet: its experts use 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. Its card in the guide says so.
+- Speculation drafts with the pack's own MTP layer, cut by the shared StairCut. The lookup (the request's text, the corpus, the suffix store) joins the same round as one tree. Sampled requests walk the tree with the 27B's sampler.
+- StairCut keeps its prices, the plain step's cost and a drafted round's cost per context class, by wall time. A class whose drafts cost more a token than plain steps takes the plain step, and a turn drafts only when the saving pays for the draft head's backlog. While idle, the server captures the graphs a context class lacks, so the first drafted request at a new length no longer pays 3.4 to 5.1 s of captures.
+- All cache tiers hold Flash-Next's state (grid 4,096). A reset keeps the KV rows in place: a short request run between two turns of a long conversation used to zero rows the next turn resumed over. The resident guest stash is on again.
+- The KV pool, side slots and a joint verify pass work on Flash-Next, each answer equal to its single-stream answer. They stay off in its profiles: three requests at once made 48.7 tok/s in total against 47.8, 67.4 and 55.3 alone.
+- On Flash-Next the shadow reader stays off, because its outputs were validated on the 27B's reasoning only. The conductor, the narrator and the residency planner run as on the 27B.
 - `/health` and the dashboard no longer issue CUDA work when they count the engine's state. On Flash-Next, a `/health` poll during a graph capture invalidated the capture and failed the request (seen at the first decode after a 260,800-token prefill).
-- Measured on 3.05 (DGX Spark, one request each): MTP alone at 512 greedy tokens: prose 49, code 85, chat 62, edit 106, copy 102 tok/s. With the lookup: edit 132 and copy 133. Prefill 571 tok/s at 260,800 tokens. Decode at that context 22.5 tok/s, 2.0 tokens a block, with the prompt from the caches. The prefill workspace there is 10.5 GiB.
+- Measured on 3.05 (DGX Spark, one request each): MTP alone at 512 greedy tokens: prose 49, code 85, chat 62, edit 106, copy 102 tok/s. With the lookup: edit 132 and copy 133. The prefill made 571 tok/s at 260,800 tokens, with a workspace of 10.5 GiB there.
+- Measured on 3.05 by context, two greedy requests on one fresh server, the second round against plain decoding: 1k 56.6 and 57.3 against 41.0 and 45.4 tok/s; 32k 34.9 and 55.6 against 33.0 and 42.5; 140k 42.1 and 52.4 against 33.9 and 41.4; at 260,800 tokens the class takes plain turns, 41.0 and 41.0 against 39.6 and 40.5. All 16 texts equal plain decoding.
+- Measured at 260,800 tokens, one request a pack: lowest MemAvailable (less a warm table) 25.5 GiB on 2.05 with its table warm, 31.9 on 3.05 and 17.8 on 4.05 with their tables cold; prefill 585, 571 and 581 tok/s.
 
 ## 0.7.2, 2026-10-11
 
