@@ -21,6 +21,7 @@ are the measurement.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import hashlib
 import json
@@ -83,7 +84,7 @@ from server import laya_api  # noqa: E402
 from server import probe as probe_mod  # noqa: E402
 from server import diskcache as diskcache_mod  # noqa: E402
 from server import library_api  # noqa: E402
-from server import chat_forward, model_card, tokenize_api  # noqa: E402
+from server import cache_peek, chat_forward, model_card, tokenize_api  # noqa: E402
 from server import memory_api  # noqa: E402
 from server import memblock  # noqa: E402
 from server import compaction as compaction_mod  # noqa: E402
@@ -2741,6 +2742,103 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
         STATE["spill_restored"] = info
 
 
+def _peek_ids(body: dict, headers) -> tuple[list[int], str | None]:
+    """SRV-349: the prompt a chat body would be prefilled as, without the engine: rendered on the
+    host, the session's router notes replayed where its next turn carries them; and the session
+    (the body's `session`, else the caches' key a request would use: the body's conversation or
+    `x-session-id`)."""
+    session = body.get("session") if isinstance(body.get("session"), str) else None
+    session = (session or conversation_id(body, headers) or _session_header(headers) or None)
+    ids = build_prompt(body, count="ids")
+    cond = STATE.get("conductor")
+    if cond is not None and session:
+        try:
+            ids = cond.router.replayed_for("c:" + session[:120], ids, STATE["tok"])
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()             # the peek reads the copy without the notes
+    return ids, session
+
+
+def _peek_find(ids: list[int]) -> dict:
+    """`cache_peek.find` over this process's tiers, as `cache.prefill` would ask them for slot 0.
+    Under the engine lock."""
+    res, disk = STATE.get("resident"), STATE.get("disk_cache")
+    if not cache.resident_capable(STATE.get("drafter")):
+        res = disk = None
+    side, pool = None, dict.get(STATE, "pool")
+    if SIDE_CARRY != "off" and pool is not None and res is not None and pool.n >= 2 \
+            and res.chunk > 0:
+        max_len = int(STATE.get("max_len") or 0)
+
+        def side(x):
+            got = _carry_candidate(pool, res, x, max_len)
+            return int(got[1]["at"]) if got is not None else 0
+    return cache_peek.find(ids, res=res, spill=STATE.get("spill") if res is not None else None,
+                           store=STATE.get("state_store"), disk=disk, side=side)
+
+
+def _peek_rate() -> float | None:
+    """The prefill rate a re-read is estimated at: this process's measured one, else the caches'
+    prior (`--disk-cache` / the spill's `prefill_tok_s`)."""
+    r = cache_peek.RATES.rate()
+    if r:
+        return r
+    for name in ("spill", "disk_cache"):
+        t = STATE.get(name)
+        if t is not None and getattr(t, "prefill_tok_s", None):
+            return float(t.prefill_tok_s)
+    return None
+
+
+def _cache_peek(ids: list[int], session: str | None) -> dict | None:
+    """The peek's answer, or None while the engine is busy (a prefill writes the rows it reads)."""
+    if not LOCK.acquire(blocking=False):
+        return None
+    try:
+        got = _peek_find(ids)
+    finally:
+        LOCK.release()
+    return cache_peek.answer(ids, got, session, _peek_rate())
+
+
+def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
+    """SRV-349: the conversation read back from the NVMe while nothing runs (server/cache_peek.py
+    THE PREWARM). None while the engine is busy."""
+    with QUEUE:
+        idle = not WAITERS and INFLIGHT["running"] == 0 and INFLIGHT["waiting"] == 0
+    if not idle or not LOCK.acquire(blocking=False):
+        return None
+    try:
+        got = _peek_find(ids)
+        out = cache_peek.answer(ids, got, session, _peek_rate())
+        sp, res = STATE.get("spill"), STATE.get("resident")
+        why = None
+        if got["tier"] != "nvme_spill" or sp is None or res is None:
+            why = "not_on_nvme"
+        elif (res.valid and res.owner is not None and res.owner != session
+              and time.time() - float(STATE.get("last_request_ts") or 0) < cache_peek.IDLE_S):
+            why = "resident_in_use"
+        elif float(got.get("restore_ms") or 0) > cache_peek.MAX_MS:
+            why = "too_long"
+        if why is not None:
+            return {"prewarmed": False, "why": why, **out}
+        with torch.no_grad():
+            info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,
+                                    replay=True, disk=STATE.get("disk_cache"))
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[spill] prewarm failed: {type(exc).__name__}: {exc}", flush=True)
+        return {"prewarmed": False, "why": "error", "tier": "unknown", "session": session}
+    finally:
+        LOCK.release()
+    if not info:
+        return {"prewarmed": False, "why": "refused", **out}
+    print(f"[spill] prewarm: {session or '-'} read back, {info['tokens']} tokens, "
+          f"{info['blocks_read']} blocks read in {info['ms']:.0f} ms", flush=True)
+    return {"prewarmed": True, "restore": {k: info.get(k) for k in
+                                           ("tokens", "line", "blocks_read", "bytes", "ms")},
+            **out}
+
+
 def spill_drain() -> None:
     """At a planned stop, after the work in flight: the resident conversation and the parked one
     to the NVMe (engine/spill.py), for the next start."""
@@ -4475,6 +4573,82 @@ def _conductor_fields(rec: "usage_mod.RequestRecord") -> None:
             pass                             # a metric must never fail a request
 
 
+#: SRV-349: a head's (system, tools) tokens by its bytes; every turn of a chat sends the same head
+_HEADS: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+#: a package text's tokens by its hash (the harness's package sizes)
+_TEXT_TOKENS: "collections.OrderedDict[str, int]" = collections.OrderedDict()
+
+
+def _head_parts(body: dict, client) -> dict | None:
+    """The tokens of a chat body's system messages and tool schemas as the template renders them
+    (server/tokenize_api.py's differences of renders, over the head alone: the system messages
+    and an empty user turn, with the tools and without; an empty turn alone), remembered by the
+    head's bytes. None for a body that does not render."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return None
+    system = [m for m in msgs if isinstance(m, dict) and m.get("role") in ("system", "developer")]
+    head = {k: v for k, v in body.items() if k not in ("messages", "stream", "stream_options")}
+    try:
+        key = hashlib.sha256(json.dumps([system, head], sort_keys=True, default=str)
+                             .encode()).hexdigest()
+    except (TypeError, ValueError):
+        return None
+    got = _HEADS.get(key)
+    if got is not None:
+        return got
+    empty = [{"role": "user", "content": ""}]
+    base = {k: v for k, v in head.items() if k not in ("tools", "tool_choice")}
+    try:
+        n_bare = int(build_prompt({**base, "messages": system + empty}, client, count=True))
+        n_tools = (int(build_prompt({**head, "messages": system + empty}, client, count=True))
+                   if body.get("tools") else n_bare)
+        n_empty = (int(build_prompt({**base, "messages": empty}, client, count=True))
+                   if system else n_bare)
+    except Exception:                                              # noqa: BLE001
+        return None
+    got = {"system": max(0, n_bare - n_empty), "tools": max(0, n_tools - n_bare)}
+    _HEADS[key] = got
+    while len(_HEADS) > 64:
+        _HEADS.popitem(last=False)
+    return got
+
+
+def _text_tokens(text: str | None) -> int | None:
+    if not text:
+        return None
+    key = hashlib.sha256(text.encode()).hexdigest()
+    n = _TEXT_TOKENS.get(key)
+    if n is None:
+        n = _TEXT_TOKENS[key] = len(STATE["tok"](text, add_special_tokens=False).input_ids)
+        while len(_TEXT_TOKENS) > 256:
+            _TEXT_TOKENS.popitem(last=False)
+    return n
+
+
+def _harness_of(plan) -> dict | None:
+    """SRV-349, `usage.tandem.harness`: the router's class and effort level for this turn and the
+    packages in its prompt (this turn's notes and the replayed ones, `plan.spans`), each with its
+    text's tokens. None for a request no active plan served."""
+    if plan is None or not plan.active or plan.row is None:
+        return None
+    row = plan.row
+    texts: dict = {}
+    notes = list(getattr(plan.session, "notes", None) or ()) if plan.session is not None else []
+    for parts in [getattr(n, "parts", None) for n in notes] + \
+            [i.get("parts") for i in plan.injected]:
+        for p in parts or ():
+            if p.get("kind") == "package" and p.get("text"):
+                texts.setdefault(p.get("name"), p["text"])
+    names = []
+    for span in getattr(plan, "spans", None) or ():
+        for name in span[3]:
+            if name not in names:
+                names.append(name)
+    return {"class": row.get("class_id"), "effort": row.get("effort"),
+            "packages": [{"name": n, "tokens": _text_tokens(texts.get(n))} for n in names]}
+
+
 def _account(rec: "usage_mod.RequestRecord") -> None:
     """Every request that reached a completion route, whatever became of it: one ledger row.
 
@@ -4482,6 +4656,8 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
     with a 400, failed or abandoned. The ledger's `submit` never blocks.
     """
     STATE["last_request_ts"] = rec.ts
+    if not rec.replay:
+        cache_peek.RATES.note(int(rec.forwarded), rec.prompt_ms)    # the peek's estimate
     try:
         metrics.on_record(rec)
     except Exception:                                              # noqa: BLE001
@@ -5003,6 +5179,36 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}={value}; HttpOnly; "
                                                      f"SameSite=Strict; Path=/; "
                                                      f"Max-Age={auth_mod.SESSION_S}{secure}"),))
+
+    def _cache_peek(self, body, prewarm: bool = False) -> None:
+        """`POST /v1/cache/peek` and `/v1/cache/prewarm` (SRV-349, server/cache_peek.py)."""
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list) \
+                or not body["messages"]:
+            return self._json(400, {"error": {"message": "messages must be a non-empty list",
+                                              "type": "invalid_request_error",
+                                              "param": "messages"}})
+        px = STATE.get("proxy")
+        if px is not None and body.get("model"):
+            from proxy import route as proxy_route
+            try:
+                routed = px.route("/v1/chat/completions", body) is not None
+            except proxy_route.NotFound:
+                routed = True
+            if routed:
+                return self._json(404, {"error": {"message": "this model is not the engine's: no "
+                                                             "cache to read", "type": "not_found"}})
+        try:
+            ids, session = _peek_ids(body, self.headers)
+        except Exception as exc:                                   # noqa: BLE001
+            # a body the template cannot render is the client's
+            return self._json(400, {"error": {"message": f"{type(exc).__name__}: "
+                                                         f"{str(exc)[:300]}",
+                                              "type": "invalid_request_error"}})
+        out = _cache_prewarm(ids, session) if prewarm else _cache_peek(ids, session)
+        if out is None:
+            return self._json(409, {"error": {"message": "the engine is serving a request; ask "
+                                                         "again when it is idle", "type": "busy"}})
+        return self._json(200, out)
 
     def _chat(self, method: str) -> bool:
         """`/v1/chat-app/*`: the Chat tab's service, chatd, behind the dashboard's auth
@@ -5626,6 +5832,11 @@ class Handler(BaseHTTPRequestHandler):
             # SRV-347: exact counts with the model's own template (server/tokenize_api.py)
             return tokenize_api.handle(self, body, lambda b: build_prompt(b, count=True),
                                        lambda t: len(STATE["tok"](t)["input_ids"]))
+        if path in ("/v1/cache/peek", "/v1/cache/prewarm"):
+            # SRV-349: where a conversation's rows are, and the NVMe read back while idle
+            if not self._allowed("cache_read"):
+                return
+            return self._cache_peek(body, prewarm=path.endswith("prewarm"))
         if path.startswith("/v1/conductor/"):
             return self._conductor("POST", body)
         if path.startswith("/v1/setup/"):
@@ -6024,6 +6235,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # the caches' session key: the body's conversation, else opencode's x-session-id (OPS-47)
         conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
+        # SRV-349: the prompt's system and tool tokens for `usage.tandem`, rendered here on the
+        # host (before the queue), once per head
+        head_parts = _head_parts(body, client) if chat else None
         # The conductor (server/conductor/): the request's profile, and for `TandemLLM` the
         # turn's class and what that class gets. Here, before the queue: it may ask arbiter or
         # this server's own raw model, and must never do that holding the engine lock. A raw
@@ -6767,6 +6981,9 @@ class Handler(BaseHTTPRequestHandler):
             # usage accounting may decline as `hidden_at_off`)
             rec.note_at = _hidden_positions(hid_at, hid_tail, s1_len, n_prompt,
                                             rec.hidden_prompt, plan, strict=False)
+            if head_parts is not None:
+                rec.parts = dict(head_parts, images=int(mm.image_tokens) if mm is not None else 0)
+                rec.harness = _harness_of(plan)
             if comp is not None:
                 # what the client sent; the tokens the continuation reused count as cached
                 rec.prompt_tokens = rec.prompt_client = comp["client_n"]

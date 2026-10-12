@@ -229,6 +229,10 @@ class RequestRecord:
         self.fallback_from = None
         self.upstream_status = None
         self.user = None
+        # SRV-349: the prompt's head by part ({system, tools, images}, from the renderer) and the
+        # router's choices for it ({class, effort, packages}); `usage.tandem` when `parts` is set
+        self.parts: dict | None = None
+        self.harness: dict | None = None
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -344,9 +348,35 @@ class RequestRecord:
         details = {"cached_tokens": self.client_cached}
         if self.hidden_prompt:
             details["hidden_tokens"] = int(self.hidden_prompt)
-        return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,
-                "prompt_tokens_details": details,
-                "completion_tokens_details": {"reasoning_tokens": int(self.reasoning_tokens)}}
+        out = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c,
+               "prompt_tokens_details": details,
+               "completion_tokens_details": {"reasoning_tokens": int(self.reasoning_tokens)}}
+        tandem = self.tandem()
+        if tandem is not None:
+            out["tandem"] = tandem
+        return out
+
+    def tandem(self) -> dict | None:
+        """SRV-349, the Context panel's split (an extra key: OpenAI clients ignore it). `parts`
+        are the served prompt's: `system`, `tools` and `images` from the renderer, `injected` the
+        tokens the client did not send (`hidden_tokens`: the router's notes, new and replayed, the
+        end anchor's replay), `history` the rest -- so system + tools + history + images is
+        `prompt_tokens` and the five add up to the prompt the engine read, which `cache` splits
+        into what came from a tier (`cached`, the engine's `cache_n`) and what was forwarded
+        (`reread`). `harness`: the router's class, effort level and the packages in the prompt, null
+        for a request no router plan served. None for a request with no rendered chat prompt."""
+        if self.parts is None or self.prompt_tokens is None:
+            return None
+        from server.cache_peek import tier_of
+        system, tools = int(self.parts.get("system") or 0), int(self.parts.get("tools") or 0)
+        images = int(self.parts.get("images") or 0)
+        p = int(self.prompt_tokens)
+        return {"parts": {"system": system, "tools": tools,
+                          "history": max(0, p - system - tools - images),
+                          "injected": int(self.hidden_prompt or 0), "images": images},
+                "harness": self.harness,
+                "cache": {"tier": tier_of(self.cache_source), "source": self.cache_source,
+                          "cached": int(self.cached_tokens), "reread": int(self.forwarded)}}
 
     @property
     def client_cached(self) -> int:

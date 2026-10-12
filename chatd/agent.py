@@ -228,9 +228,11 @@ class AgentMixin:
             ok.append(t)
         return ok
 
-    def tools_for(self, settings: dict, info: dict, cid: str | None = None) -> list:
+    def tools_for(self, settings: dict, info: dict, cid: str | None = None,
+                  listing: bool = True) -> list:
         """The chat's tools, in the fixed order: built-ins, MCP servers by name, then imported
-        Open WebUI toolkits by name (they need the sandbox)."""
+        Open WebUI toolkits by name (they need the sandbox). `listing` False: an MCP server whose
+        tools were never listed is not started for it (the cache peek's body)."""
         if not info.get("tools", True):
             return []
         prefs = self._prefs()
@@ -244,7 +246,7 @@ class AgentMixin:
             return [t for t in out if t.name in PLAN_TOOLS]
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
-            out += mcp.tools_for(settings, cid)
+            out += mcp.tools_for(settings, cid if listing else None)
         owui = getattr(self, "owui", None)
         if owui is not None and self.sandboxes.available():
             out += [t for t in owui.tools_for()
@@ -510,6 +512,23 @@ class AgentMixin:
         return render.system_block(today=today, tools=bool(tools), summary=summary,
                                    skills=skills, prompt=prompt,
                                    plan=PLAN_RULE if settings.get("plan_mode") else None)
+
+    def peek_body(self, conv, settings: dict, branch: list[dict]) -> dict:
+        """The body of the chat's next call as `request_for` builds it (the system block, the
+        tools, the effort, the skills field), over the branch as it is: what the engine's cache
+        peek renders (SRV-349). The head must be the next request's, or the peek finds nothing."""
+        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
+            settings = {**settings, "effort": "high"}
+        info = self.model_info(settings.get("model"))
+        tools = self.tools_for(settings, info, conv.id, listing=False)
+        c = self._compaction_for(conv.id, branch)
+        b = c[1] if c else 0
+        return render.body(settings.get("model") or info.get("id") or "default", settings,
+                           branch[b:], system=self._system(settings, tools, c[0] if c else None),
+                           vision=bool(info.get("vision")), blob=self._blob_of,
+                           tools=[t.openai() for t in tools],
+                           tandem=(self.tandem_field(settings)
+                                   if info.get("backend") == "engine" else None))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""

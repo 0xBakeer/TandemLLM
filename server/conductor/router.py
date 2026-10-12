@@ -744,6 +744,20 @@ class Router:
         return accepted, stages
 
     # ---------------------------------------------------------------- sessions
+    def replayed_for(self, key: str, ids: list[int], tok) -> list[int]:
+        """`ids` with session `key`'s notes replayed where its next turn would carry them (the
+        cache peek, SRV-349): `Plan.replayed_ids` for a session that exists, every decision type
+        taken as on. Nothing is created or changed; an unknown session gives `ids` back."""
+        with self._lock:
+            sess = self._sessions.get(key)
+        if sess is None or not sess.notes:
+            return list(ids)
+        plan = Plan(None)
+        plan.active, plan.session = True, sess
+        plan.router_cfg = self.store.peek("router")[1]
+        plan.decisions = {d: "on" for d in schema.DECISIONS}
+        return plan.replayed_ids(ids, tok)
+
     def session(self, key: str) -> Session:
         with self._lock:
             s = self._sessions.get(key)

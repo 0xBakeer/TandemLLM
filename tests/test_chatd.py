@@ -862,6 +862,41 @@ def test_the_context_report_follows_the_last_answer():
         c.close()
 
 
+def test_the_peek_asks_with_the_next_requests_head_and_the_usage_frame_fills_the_panel():
+    """SRV-349: the usage frame's `tandem` gives the panel the harness's choices and the system and
+    tool tokens; on attach chatd peeks with the body its next request would send -- the same system
+    block and tools, the chat's session -- and prewarms a chat the engine has on the NVMe."""
+    c = Chat()
+    try:
+        c.fake.peek = {"tier": "nvme_spill", "cached_tokens": 40, "reread_tokens": 3,
+                       "reread_eta_ms": 12.5, "tokens": 43}
+        cid = c.new()
+        c.send(cid, "FAKE_TANDEM hi there")
+        s = c.wait_idle(cid)
+        ctx = s["context"]
+        assert ctx["harness"] == {"class": "code_edit", "effort": "xhigh",
+                                  "packages": [{"name": "coding", "tokens": 7}]}, ctx["harness"]
+        parts = {p["kind"]: p["tokens"] for p in ctx["parts"]}
+        assert parts["system"] == 2 and parts["tools"] == 3, parts
+        assert ctx["used"] == sum(p["tokens"] for p in ctx["parts"] if p["kind"] != "reserved")
+        sent = c.last_body()
+        c.wait(lambda: any("session" in b for b in c.fake.bodies), 10)
+        peek = [b for b in c.fake.bodies if "session" in b][-1]
+        assert peek["session"] == f"chat-{cid}" and "stream" not in peek
+        assert peek["messages"][0] == sent["messages"][0] and peek["messages"][0]["role"] == "system", (peek["messages"][:1], sent["messages"][:1])
+        assert [t["function"]["name"] for t in peek["tools"]] == \
+            [t["function"]["name"] for t in sent["tools"]] and peek["tools"]
+        c.wait(lambda: c.fake.prewarms == 1, 10)
+        c.wait(lambda: (c.snap(cid)["context"] or {}).get("cache", {}).get("source") ==
+               "nvme_spill", 10)
+        cache = c.snap(cid)["context"]["cache"]
+        assert cache["warm"] == 40 and cache["cold"] == 3 and cache["cold_eta_ms"] == 12.5, cache
+        assert "hi there" not in json.dumps(peek.get("session")) and \
+            "hi there" not in json.dumps(c.snap(cid)["context"])
+    finally:
+        c.close()
+
+
 def test_run_metrics_and_context_are_ephemeral():
     c = Chat()
     try:

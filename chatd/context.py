@@ -20,10 +20,12 @@ def estimate_tokens(text: str) -> int:
 
 def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int,
            stats: dict | None, run: dict | None, row: dict | None, facts: dict,
-           peek: dict | None, harness: dict | None) -> dict:
+           peek: dict | None, harness: dict | None, split: dict | None = None) -> dict:
     """`model`: the chat's model as `service.model_info` gives it. `branch_tokens`: the branch as
     the next request carries it (the last request's prompt plus its answer, plus what came since).
-    `stats`: the last finished answer's TurnStats; `run`/`row`: the run in flight and its live row."""
+    `stats`: the last finished answer's TurnStats; `run`/`row`: the run in flight and its live row.
+    `split`: the last usage frame's `tandem.parts` (SRV-349): the system prompt's and the tool
+    schemas' tokens as the engine counted them, which come out of the conversation's share."""
     window = int(model.get("max_len") or 0)
     skills = 0
     if row and row.get("hidden_tokens"):
@@ -35,9 +37,12 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     if row and row.get("prompt_tokens"):
         messages = max(0, int(row["prompt_tokens"]) - files_tokens)
     reserved = int(model.get("max_output") or 0)
+    system = int((split or {}).get("system") or 0)
+    tools = int((split or {}).get("tools") or 0)
+    messages = max(0, messages - system - tools)
     parts = [
-        {"kind": "system", "label": "system prompt", "tokens": 0},
-        {"kind": "tools", "label": "tool schemas", "tokens": 0},
+        {"kind": "system", "label": "system prompt", "tokens": system},
+        {"kind": "tools", "label": "tool schemas", "tokens": tools},
         {"kind": "skills", "label": "skills and packages", "tokens": skills},
         {"kind": "files", "label": "files", "tokens": files_tokens},
         {"kind": "messages", "label": "conversation", "tokens": messages},
@@ -71,6 +76,7 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
         "compact_at": int(window * COMPACT_SHARE),
         "cache": cache,
         "harness": harness,
+        "split": split,
         "memory": {"kv_bytes": None, "resident_bytes": None, "sandbox_disk_bytes": None,
                    "available_bytes": mem.get("unified_available_bytes"),
                    "floor_bytes": FLOOR_BYTES if ours else None, "sandbox_bytes": None},

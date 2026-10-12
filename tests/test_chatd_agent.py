@@ -783,7 +783,7 @@ def test_an_empty_message_never_reaches_the_engine():
             assert c.call("POST", f"/conversations/{cid}/queue", body)[0] == 400
         assert c.call("POST", f"/conversations/{cid}/messages",
                       {"client_msg_id": "e4", "text": 5})[0] == 400
-        assert not [b for b in c.fake.bodies if "model" in b]
+        assert not [b for b in c.fake.bodies if "model" in b and "session" not in b]
         assert c.snap(cid)["messages"] == []
         # an empty message stored before this check (an old database): refused before the engine
         um = c.svc._insert_message(cid, None, "user", [{"type": "text", "text": ""}], "done")
@@ -791,7 +791,8 @@ def test_an_empty_message_never_reaches_the_engine():
             c.svc._start_run(c.svc.conv(cid), um["id"], None)
         s = c.wait_idle(cid, 20)
         a = s["messages"][-1]
-        assert a["status"] == "error" and not [b for b in c.fake.bodies if "model" in b]
+        assert a["status"] == "error" and not [b for b in c.fake.bodies
+                                               if "model" in b and "session" not in b]
         # with a file it goes
         att = c.svc.store_blob(cid, "notes.txt", "text/plain", b"one line")
         c.ok("POST", f"/conversations/{cid}/messages", {"client_msg_id": "e5", "text": "",

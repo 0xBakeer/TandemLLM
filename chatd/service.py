@@ -747,8 +747,10 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             self.emit(conv, {"type": "usage.changed", "usage": _usage(branch)})
             settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
             conv.peek = None
-            conv.context = self._context(conv, settings, branch,
-                                         harness=(run.usage or {}).get("tandem", {}) or None)
+            # SRV-349: the usage frame's `tandem` -- the harness's choices and the split by part
+            tandem = (run.usage or {}).get("tandem") or {}
+            conv.context = self._context(conv, settings, branch, harness=tandem.get("harness"),
+                                         split=tandem.get("parts"))
             self._send_context(conv, force=True)
             self.summary_changed(conv, status=self._status(conv, branch), now=None,
                                  updated_at=iso(now_ms()))
@@ -1011,7 +1013,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
 
     # ================================================================== the context report
     def _context(self, conv: Conv, settings: dict, branch: list[dict], *, live_row=None,
-                 run: Run | None = None, harness: dict | None = None) -> dict:
+                 run: Run | None = None, harness: dict | None = None,
+                 split: dict | None = None) -> dict:
         info = self.model_info(settings.get("model"))
         stats = next((m["stats"] for m in reversed(branch)
                       if m["role"] == "assistant" and m.get("stats")), None)
@@ -1022,12 +1025,15 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         tokens = _branch_tokens(branch)
         if harness is None and conv.context is not None:
             harness = conv.context.get("harness")
+        if split is None and conv.context is not None:
+            split = conv.context.get("split")
         peek = conv.peek[1] if conv.peek is not None else None
         out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
                              files_tokens=files, stats=stats,
                              run=run.as_dict() if run is not None else None, row=live_row,
                              facts=self.facts(), peek=peek,
-                             harness=harness if isinstance(harness, dict) else None)
+                             harness=harness if isinstance(harness, dict) else None,
+                             split=split if isinstance(split, dict) else None)
         out["skills"] = self.skills_report(settings)
         return out
 
@@ -1041,11 +1047,10 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         conv.peek = (time.monotonic(), None)
 
         def work():
-            info = self.model_info(settings.get("model"))
-            body = render.body(settings.get("model") or info.get("id") or "default", settings,
-                               branch, vision=bool(info.get("vision")), blob=self._blob_of)
-            req = {"session": render.session_id(conv.id), "messages": body["messages"],
-                   "tools": []}
+            # the next request's body, head and all: its system block and tools are the rows'
+            req = {k: v for k, v in self.peek_body(conv, settings, branch).items()
+                   if k not in ("stream", "stream_options")}
+            req["session"] = render.session_id(conv.id)
             st, obj = self.engine.post_json("/v1/cache/peek", req, timeout=5.0)
             if st in (404, 405):
                 self._no_peek_until = time.monotonic() + 600.0

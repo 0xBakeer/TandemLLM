@@ -13,6 +13,7 @@
 | `GET /metrics` | the metrics token when one is set, else the admin rule | Prometheus metrics ([server/METRICS.md](../server/METRICS.md)) |
 | `GET /v1/cache/stats` | the admin rule | the caches' counters |
 | `POST /v1/cache/clear` | the admin rule; with a password set, only as a bearer header | empty the caches in RAM; `?tier=disk` the disk tier, `?tier=all` both |
+| `POST /v1/cache/peek`, `/v1/cache/prewarm` | the admin rule | a chat body's warm tokens and their tier before it is sent; the conversation read back from the NVMe while the engine is idle ([caches.md](caches.md#peek-and-prewarm)) |
 | `GET /dashboard/` | anyone | the dashboard's static files, which hold no data |
 | `/v1/dashboard/*` | anyone by default; with a password set and `--dashboard-login on`, the admin token or a dashboard session | the dashboard's data ([dashboard.md](dashboard.md)) |
 | `GET /v1/conductor/*` | as `/v1/dashboard/*` | the conductor's config, decisions, sessions and reports (below) |

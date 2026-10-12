@@ -57,8 +57,9 @@ class Chat:
         return self.fake_srv.fake if self.fake_srv is not None else None
 
     def last_body(self) -> dict:
-        """The last completion body the fake engine got (it also records chatd's cache peeks)."""
-        return [b for b in self.fake.bodies if "model" in b][-1]
+        """The last completion body the fake engine got (it also records chatd's cache peeks,
+        whose bodies name the `session`)."""
+        return [b for b in self.fake.bodies if "model" in b and "session" not in b][-1]
 
     def close(self, keep_data: bool = False) -> None:
         self.srv.shutdown()

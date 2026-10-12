@@ -13,6 +13,7 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_NO_USAGE        never any usage
     FAKE_USAGE_FINISH    usage on the finish chunk, unasked (our engine's default placement)
     FAKE_CACHED <n>      usage says <n> cached prompt tokens
+    FAKE_TANDEM          usage carries our engine's `tandem` object (SRV-349: parts, harness)
     FAKE_REASONING       a few `reasoning_content` deltas before the answer
     FAKE_THINK_TAGS      the reasoning as <think>...</think> inside `content`
     FAKE_MEMORY          a memory block (a user rule) after the answer, in 7-character pieces
@@ -138,6 +139,10 @@ class Fake:
         self.once: set = set()
         self.closed_early = 0
         self.bodies: list = []
+        # SRV-349: what POST /v1/cache/peek answers (None: 404, a server without the route) and
+        # how many prewarms came
+        self.peek: dict | None = None
+        self.prewarms = 0
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -243,6 +248,14 @@ def make_handler(fake: Fake):
                 fake.bodies.append(body)
             if not self._authed():
                 return
+            if p in ("/v1/cache/peek", "/v1/cache/prewarm"):
+                if fake.peek is None:
+                    return self._json(404, {"error": {"message": "no route", "type": "not_found"}})
+                if p.endswith("prewarm"):
+                    with fake.lock:
+                        fake.prewarms += 1
+                    return self._json(200, {"prewarmed": True, **fake.peek})
+                return self._json(200, fake.peek)
             text = _last_user(body)
             if text.startswith("Memory pass."):
                 # the memory writer's request (proxy/memwriter.py): steered by the session's
@@ -353,9 +366,18 @@ def make_handler(fake: Fake):
                         "total_tokens": pt + n_out, "prompt_cache_hit_tokens": cached,
                         "prompt_cache_miss_tokens": pt - cached,
                         "completion_tokens_details": {"reasoning_tokens": n_reason}}
-            return {"prompt_tokens": pt, "completion_tokens": n_out, "total_tokens": pt + n_out,
-                    "prompt_tokens_details": {"cached_tokens": cached},
-                    "completion_tokens_details": {"reasoning_tokens": n_reason}}
+            out = {"prompt_tokens": pt, "completion_tokens": n_out, "total_tokens": pt + n_out,
+                   "prompt_tokens_details": {"cached_tokens": cached},
+                   "completion_tokens_details": {"reasoning_tokens": n_reason}}
+            if "FAKE_TANDEM" in text:
+                # our engine's split and the harness's choices (SRV-349)
+                out["tandem"] = {"parts": {"system": 2, "tools": 3, "history": pt - 5,
+                                           "injected": 0, "images": 0},
+                                 "harness": {"class": "code_edit", "effort": "xhigh",
+                                             "packages": [{"name": "coding", "tokens": 7}]},
+                                 "cache": {"tier": "resident", "source": "end",
+                                           "cached": cached, "reread": pt - cached}}
+            return out
 
         def _complete(self, p, body, text):
             chat = p.endswith("chat/completions")
