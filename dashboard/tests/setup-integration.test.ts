@@ -135,9 +135,10 @@ describe('the second model (OPS-97)', () => {
     const ms = new MockSetup();
     const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; recommended: boolean; best_speed: unknown }[];
     expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false]]);
-    expect(tiles[1].best_speed).toBeNull();                       // no measured row yet
+    // its measured row (3.05, the served speculation): the fastest greedy-512 cell, with its pack
+    expect(tiles[1].best_speed).toEqual({ tok_s: 82.69, task: 'code', profile: 'flashnext-3.05' });
     const fn = (await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next')).body as SetupModel;
-    expect(fn.profiles.map((p) => p.max_window)).toEqual([262_144, 262_144, 212_992, 65_536, null]);
+    expect(fn.profiles.map((p) => p.max_window)).toEqual([262_144, 262_144, 208_896, 53_248, null]);
     expect((await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next/current')).body.selection).toEqual({ model: 'qwen3.8-flash-next' });
     const est = (await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id } })).body;
     expect(est.fits).toBe(true);
