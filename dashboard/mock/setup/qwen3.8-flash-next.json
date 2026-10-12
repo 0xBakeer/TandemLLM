@@ -213,10 +213,45 @@
  ],
  "measurements": {
   "build": "0.7.2",
-  "date": "2026-10-11",
-  "method": "Rows are added only from real runs (SPD-65, SPD-99); none yet.",
-  "source": "none yet",
-  "rows": []
+  "date": "2026-10-12",
+  "method": "The ENG-229 A/B's served arm on 3.05: one fresh server, prompts prose / chat / code, one greedy request each, thinking off, up to 512 new tokens, the MTP layer with the lookup in one tree cut by StairCut (QWEN38_FN_LOOKUP=1, as the profiles serve it). One run a cell; caches, the conductor and parallel slots off.",
+  "source": "ENG-229 A/B, 2026-10-12 03:22 (raw data spark ~/fn2/runs/e229-look.json)",
+  "rows": [
+   {
+    "profile": "flashnext-3.05",
+    "build": "0.7.2",
+    "date": "2026-10-12",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 51.07,
+       "min": 51.07,
+       "ms_round": 42.1,
+       "tok_round": 2.15,
+       "n": 1
+      },
+      "chat": {
+       "tok_s": 64.0,
+       "min": 64.0,
+       "ms_round": 38.9,
+       "tok_round": 2.49,
+       "n": 1
+      },
+      "code": {
+       "tok_s": 82.69,
+       "min": 82.69,
+       "ms_round": 42.1,
+       "tok_round": 3.48,
+       "n": 1
+      }
+     }
+    },
+    "ttft_s": {},
+    "lossless": null,
+    "note": null
+   }
+  ]
  },
  "memory": {
   "parts": [

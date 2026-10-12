@@ -194,12 +194,29 @@ profiles:
     gib: 36.36
     policy: cold
     cache_gib: 2.0
+# The measured table: one run a cell on 3.05 (2026-10-12, build 0.7.2 of flashnext-v2), the served
+# speculation (the MTP layer with the lookup in the same tree, StairCut), greedy, thinking off, up to 512
+# new tokens (prose stopped at 421), one request at a time on a fresh server. A cell is
+# [tok/s, tok/s min, ms a round, tokens a round, n]: one run, so min = tok/s and n = 1; ms a round is
+# tokens a round over tok/s. Raw data: spark ~/fn2/runs/e229-look.json (the ENG-229 A/B, its look arm).
 measurements:
   build: 0.7.2
-  date: '2026-10-11'
-  method: Rows are added only from real runs (SPD-65, SPD-99); none yet.
-  source: none yet
-  rows: []
+  date: '2026-10-12'
+  method: >-
+    The ENG-229 A/B's served arm on 3.05: one fresh server, prompts prose / chat / code, one greedy
+    request each, thinking off, up to 512 new tokens, the MTP layer with the lookup in one tree cut by
+    StairCut (QWEN38_FN_LOOKUP=1, as the profiles serve it). One run a cell; caches, the conductor and
+    parallel slots off.
+  source: ENG-229 A/B, 2026-10-12 03:22 (raw data spark ~/fn2/runs/e229-look.json)
+  rows:
+    - profile: flashnext-3.05
+      build: "0.7.2"
+      date: "2026-10-12"
+      comparable: true
+      cells:
+        greedy_512: {prose: [51.07, 51.07, 42.1, 2.15, 1], chat: [64.0, 64.0, 38.9, 2.49, 1], code: [82.69, 82.69, 42.1, 3.48, 1]}
+      ttft_s: {}
+      lossless: null
 memory:
   parts:
   - id: engine
