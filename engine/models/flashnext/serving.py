@@ -48,7 +48,8 @@ from engine.settings import SETTINGS as _S
 MODULES = ("engine/models/flashnext/__init__.py", "engine/models/flashnext/config.py",
            "engine/models/flashnext/engine.py", "engine/models/flashnext/load.py",
            "engine/models/flashnext/mtp.py", "engine/models/flashnext/pack.py",
-           "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py", "engine/settings.py")
+           "engine/models/flashnext/ple.py", "engine/models/flashnext/ref.py",
+           "engine/models/flashnext/vision.py", "engine/settings.py")
 TABLES = ("ops/fn-exl3-tiles.json", "ops/fn-dense-splits.json")
 
 
@@ -183,7 +184,7 @@ class FlashNextServing:
         self.capture_ms = None              # one verify or commit graph's capture, ms (EMA 0.2)
         self._width = 0                     # the last verify block's rows (its commit's key)
         self.picks = None
-        self.mm, self.pos_delta, self.tap = None, 0, None
+        self.tap = None
         self._hidden = None                 # [1, rows, hc H]: the last forward's streams
         self._chain = None                  # a forward_block's rows awaiting their commit
         self.commit_ms = 0.0
@@ -197,6 +198,27 @@ class FlashNextServing:
     @property
     def hidden_post_norm(self) -> torch.Tensor:
         return self._hidden
+
+    @property
+    def mm(self):
+        """VIS-97: the request's images (engine/vision.py `MMContext`), set by the server as on the 27B;
+        kept by the state and the draft heads' states (`FNState.mm`), where the engine reads them."""
+        return self.st.mm
+
+    @mm.setter
+    def mm(self, mm) -> None:
+        for st in self._states():
+            st.mm = mm
+
+    @property
+    def pos_delta(self) -> int:
+        """The rotary offset of the rows after the prompt (position = slot + delta, VIS-97)."""
+        return self.st.delta
+
+    @pos_delta.setter
+    def pos_delta(self, d: int) -> None:
+        for st in self._states():
+            st.delta = int(d)
 
     def price_class(self, n: int) -> int:
         """The draft prices' context class of a round at context length `n` (engine/methods/staircut.py):
@@ -591,6 +613,9 @@ class FlashNextServing:
         self.commit_tree(list(range(int(keep))))
 
     # --- internals -------------------------------------------------------------------------------
+    def _states(self) -> list:
+        return [self.st] + [h.st for h in self.heads.values()]
+
     def _settle_chain(self) -> None:
         if self._chain is not None:
             n, self._chain = self._chain, None
@@ -691,7 +716,8 @@ def serve(a, ctx) -> dict:
     request path is the 27B's. The draft is the MTP chain from graphs cut by StairCut over the hot
     draft head, verified as a tree that a sampled request walks (`det`); the load-time self-check gates
     it. `ctx` is the server's: `keys(path, weights)` (the tokenizer's and the weights' fingerprints),
-    `mark(stage)` (the load ledger), `log(line)`. What it cannot hold yet is in `FlashNextServing.caps`."""
+    `mark(stage)` (the load ledger), `log(line)`, `vision(path, tower_of)` (the server's tower, processor and
+    image caches, with the pack's EXL3 tower: VIS-97). What it cannot hold yet is in `FlashNextServing.caps`."""
     from transformers import AutoTokenizer
 
     from engine.spec import Relax
@@ -704,6 +730,13 @@ def serve(a, ctx) -> dict:
     pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
     eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log,
                                corpus=a.corpus, kv_pool=pool)
+
+    def tower_of(vcfg):
+        from engine.models.flashnext.pack import PackIndex
+        from engine.models.flashnext.vision import load_tower
+        return load_tower(PackIndex.open(a.model, table=False), a.model)
+    ctx.vision(a.model, tower_of)
+    ctx.mark("vision")
     if drafter is not None:
         a.depth = depth
         if drafter.ngram is not None:

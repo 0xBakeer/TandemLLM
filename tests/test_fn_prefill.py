@@ -57,15 +57,17 @@ class _Cfg:
 
 def _eng():
     from engine.models.flashnext.engine import FlashNextEngine
-    return type("E", (), {"cfg": _Cfg(), "device": "cpu", "dtype": torch.bfloat16,
-                          "qsa_class": FlashNextEngine.qsa_class})()
+    return type("E", (), {"cfg": _Cfg(), "device": "cpu", "dtype": torch.bfloat16, "rope_cos": torch.zeros(1),
+                          "rope_sin": torch.zeros(1), "qsa_class": FlashNextEngine.qsa_class,
+                          "_rot": FlashNextEngine._rot})()
 
 
 def test_pre_ctl():
     from engine.models.flashnext.engine import FlashNextEngine
+    from engine.models.flashnext.ref import FNState
     eng = _eng()
     for L0, T in ((0, 1), (0, 7), (5, 300), (1500, 2048), (2045, 9), (3001, 128), (8190, 2048)):
-        P = FlashNextEngine._pre_ctl(eng, L0, T)
+        P = FlashNextEngine._pre_ctl(eng, L0, T, FNState())
         chain = [-1] + list(range(T - 1))
         assert P["csrc"].tolist() == window_src(chain, (3, 2, 1), 3), (L0, T)
         assert P["psrc"].tolist() == window_src(chain, (9, 6, 3), 9), (L0, T)
@@ -81,6 +83,7 @@ def test_pre_ctl():
         assert (b0, b1) == (L0 // 4, (L0 + T) // 4)
         assert P["pool_slots"].tolist() == [[4 * b + k for k in range(4)] for b in range(b0, b1)]
         assert P["pool_pos"].tolist() == [4 * b for b in range(b0, b1)]
+        assert P["rpos"].tolist() == list(range(L0, L0 + T)) and P["cos"] is eng.rope_cos   # a text state
         assert P["cls"] == FlashNextEngine.qsa_class(eng, L0 + T - 1)
     return "chain conv taps = window_src; per-row dense/sparse counts, tails, pool blocks, class"
 

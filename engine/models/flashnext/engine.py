@@ -147,9 +147,10 @@ class FlashNextEngine(FlashNextRef):
         dev = self.device
         b = torch.arange(nb, dtype=torch.int32, device=dev)
         slots = (b[:, None] * 4 + torch.arange(4, dtype=torch.int32, device=dev)).contiguous()
+        cos, sin, off = self._rot(st, 0, nb * 4)
         for li in (layers if layers is not None else c.attention_layers):
             p = self.pre(li) + "self_attn.indexer."
-            SK.qsa_pool(st.ik[li], slots, b * 4, self.W[p + "k_layernorm.weight"], self.rope_cos, self.rope_sin,
+            SK.qsa_pool(st.ik[li], slots, b * 4 + off, self.W[p + "k_layernorm.weight"], cos, sin,
                         c.rms_norm_eps, out=st.pool[li][:nb])
 
     def reset(self, st: FNState) -> None:
@@ -184,6 +185,39 @@ class FlashNextEngine(FlashNextRef):
 
     def rope_at(self, positions: torch.Tensor):
         return self.rope(positions)
+
+    def _rot(self, st: FNState, a: int, b: int):
+        """The rotary rows of cache slots [a, b) of `st` (VIS-97): (cos, sin, off), slot s reads row
+        s + off. A text row reads the 1-D table at its position, slot + delta: 0 before any image, the
+        prompt's `pos3` after one, `st.delta` past the prompt (transformers' `get_rope_index`). A range
+        that holds image rows gets rows of its own: engine/vision.py `mrope_cos_sin` of the three
+        coordinates, on the host as the table is made, so a text row among them is the table's row bit
+        for bit."""
+        mm = st.mm
+        if mm is None:
+            return self.rope_cos, self.rope_sin, st.delta
+        if not any(s.start < b and s.start + s.n > a for s in mm.spans):
+            return self.rope_cos, self.rope_sin, (int(mm.pos3[0, a]) - a if a < mm.n else st.delta)
+        from engine.vision import mrope_axes, mrope_cos_sin
+        c = self.cfg
+        p3 = mm.pos3[:, a:b]
+        if b > mm.n:
+            tail = torch.arange(max(a, mm.n), b) + st.delta
+            p3 = torch.cat([p3, tail.view(1, -1).expand(3, -1)], dim=1)
+        axes = torch.tensor(mrope_axes(c.rotary_dim, list(c.mrope_section)))
+        cos, sin = mrope_cos_sin(p3, self.inv_freq, axes, dtype=self.dtype)
+        return cos.to(self.device), sin.to(self.device), -a
+
+    def _image_rows(self, e: torch.Tensor, st: FNState, L0: int) -> torch.Tensor:
+        """A chunk's embeddings [T, H] at slots L0.. with the images' rows over their placeholders'
+        (transformers' `masked_scatter` of the image features into `inputs_embeds`); an image is encoded
+        when the first chunk that needs it runs (engine/vision.py `MMContext.embeds`)."""
+        mm, T = st.mm, e.shape[0]
+        for s in mm.spans:
+            a, b = max(s.start, L0), min(s.start + s.n, L0 + T)
+            if a < b:
+                e[a - L0:b - L0] = mm.embeds(s.image)[a - s.start:b - s.start].to(e.dtype)
+        return e
 
     def delta_rule(self, q, k, v, g, beta, S):
         if q.shape[1] > 64:
@@ -381,8 +415,11 @@ class FlashNextEngine(FlashNextRef):
         Advances `st` as `forward` does: caches, recurrent and conv states, the pooled indexer keys."""
         tokens = tokens.view(-1).to(self.device)
         T = tokens.shape[0]
-        self._pre = self._pre_ctl(st.length, T)
-        h = self.embed(tokens).repeat(1, self.cfg.hc_count)
+        self._pre = self._pre_ctl(st.length, T, st)
+        e = self.embed(tokens)
+        if st.mm is not None:
+            e = self._image_rows(e, st, st.length)
+        h = e.repeat(1, self.cfg.hc_count)
         n = self.trunk(h, tokens, st, None, pre=True)
         st.length += T
         self._pre = None
@@ -390,11 +427,13 @@ class FlashNextEngine(FlashNextRef):
             return None
         return self.final(n[-1:] if head == "last" else n)
 
-    def _pre_ctl(self, L0: int, T: int) -> dict:
-        """What every layer of a chunk at positions L0..L0+T-1 shares: the positions, the GDN conv and
-        PLE conv taps along the chain (`gdn_pre` / `ple_conv` sources), each row's attention control
-        (`attn_rows`: visible keys, no ancestors, dense flag), and past 2,051 tokens the QSA inputs
-        (`qsa_scores_rows` / `qsa_select`: complete blocks, all in the shared pool; the tail)."""
+    def _pre_ctl(self, L0: int, T: int, st: FNState) -> dict:
+        """What every layer of a chunk of `st` at positions L0..L0+T-1 shares: the positions, their
+        rotary rows (`cos`, `sin` read at `rpos` by the rows and at `pool_pos` by the blocks the chunk
+        completes, `_rot`), the GDN conv and PLE conv taps along the chain (`gdn_pre` / `ple_conv`
+        sources), each row's attention control (`attn_rows`: visible keys, no ancestors, dense flag),
+        and past 2,051 tokens the QSA inputs (`qsa_scores_rows` / `qsa_select`: complete blocks, all in
+        the shared pool; the tail)."""
         from tools import fn_seq_kernels as SK
         c, dev = self.cfg, self.device
         pos = torch.arange(L0, L0 + T, device=dev)
@@ -406,6 +445,8 @@ class FlashNextEngine(FlashNextRef):
         out = {"pos": pos, "csrc": chain((3, 2, 1), c.linear_conv_kernel_dim - 1),
                "psrc": chain((9, 6, 3), (c.ple_conv_kernel_size - 1) * c.ngram_size), "bufs": {}}
         r = c.indexer_compress_ratio if c.has_indexer else 4
+        cos, sin, off = self._rot(st, L0 - L0 % r, L0 + T)
+        out.update(cos=cos, sin=sin, rpos=pos + off)
         nblk = (pos + 1) // r
         dense = (nblk <= SK.TOPK) | (not c.has_indexer)
         ctl = torch.zeros(T, 4, dtype=torch.int32, device=dev)
@@ -419,7 +460,7 @@ class FlashNextEngine(FlashNextRef):
             out.update(nblk=nblk, tail=(r * nblk[:, None] + torch.arange(3, device=dev)[None, :]).to(torch.int32),
                        pool=(L0 // r, (L0 + T) // r), pool_slots=(b[:, None] * r + torch.arange(r, dtype=torch.int32,
                                                                                                device=dev)).contiguous(),
-                       pool_pos=(b * r).contiguous())
+                       pool_pos=(b * r + off).contiguous())
         return out
 
     def _mix_pre(self, n, p):
@@ -464,13 +505,13 @@ class FlashNextEngine(FlashNextRef):
             if iq is None:
                 iq = P["bufs"]["iq"] = torch.empty(x.shape[0], c.indexer_n_heads, c.indexer_head_dim,
                                                    dtype=self.dtype, device=x.device)
-        q = K.attn_prep(qkv, iqk, P["pos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
-                        self.rope_cos, self.rope_sin, st.k[li], st.v[li], st.ik.get(li), c.num_attention_heads,
+        q = K.attn_prep(qkv, iqk, P["rpos"], self.W[p + "q_norm.weight"], self.W[p + "k_norm.weight"],
+                        P["cos"], P["sin"], st.k[li], st.v[li], st.ik.get(li), c.num_attention_heads,
                         c.num_key_value_heads, c.indexer_n_heads * c.indexer_head_dim if c.has_indexer else 0,
-                        c.rms_norm_eps, qln=self.W[ip + "q_layernorm.weight"] if cls else None, iq=iq)
+                        c.rms_norm_eps, slot=P["pos"], qln=self.W[ip + "q_layernorm.weight"] if cls else None, iq=iq)
         if c.has_indexer and P["pool"][1] > P["pool"][0]:
-            SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], self.rope_cos,
-                        self.rope_sin, c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
+            SK.qsa_pool(st.ik[li], P["pool_slots"], P["pool_pos"], self.W[ip + "k_layernorm.weight"], P["cos"],
+                        P["sin"], c.rms_norm_eps, out=st.pool[li][P["pool"][0]:P["pool"][1]])
         if cls:
             sc = PK.qsa_scores_rows(iq, st.pool[li], P["nblk"], cls)
             SK.qsa_select(sc, P["tail"], P["sel"])
@@ -624,10 +665,11 @@ class FlashNextEngine(FlashNextRef):
         rb["copied"].synchronize()             # the image is the previous call's copy source until then
         h, L = rb["h"], st.length
         h["tok"].numpy()[0] = token
-        h["pos"].numpy()[0] = h["slot"].numpy()[0] = L
+        h["pos"].numpy()[0] = L + st.delta
+        h["slot"].numpy()[0] = L
         h["anc"].numpy()[0, 0] = L
         self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0,
-                        np.array([L]), h["anc"].numpy(), 1)
+                        np.array([L]), h["anc"].numpy(), 1, st.delta)
         for li in self.cfg.ple_layers:
             hsh = self.hash[li]
             ctx = self._ple_ctx(st, li)
@@ -636,11 +678,15 @@ class FlashNextEngine(FlashNextRef):
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
 
-    def _stage_qsa(self, h: dict, L: int, own0: int, pos: np.ndarray, anc: np.ndarray, n: int) -> None:
+    def _stage_qsa(self, h: dict, L: int, own0: int, pos: np.ndarray, anc: np.ndarray, n: int,
+                   delta: int = 0) -> None:
         """The attention control of n rows at positions `pos`: positions below L are cache slots,
         from L on the row's ancestor at that depth (`anc`). Rows whose complete blocks fit the budget
         see every position (dense); the others see their selected blocks and their tail (QSA). The
-        row's own blocks start at block own0 (the shared pool holds the blocks before it)."""
+        row's own blocks start at block own0 (the shared pool holds the blocks before it); each is
+        pooled with the rotary row of its first slot + `delta` (the state's, VIS-97: a round's own
+        blocks start at most 3 rows before it, in text after any image -- the chat template ends a
+        prompt with the assistant's header)."""
         from tools import fn_seq_kernels as SK
         c = self.cfg
         r = c.indexer_compress_ratio if c.has_indexer else 4
@@ -656,7 +702,7 @@ class FlashNextEngine(FlashNextRef):
         ai = anc[:n][:, np.clip(q - L, 0, anc.shape[1] - 1)]                         # [n, OWN, 4]
         slots = np.where(q[None] < L, q[None], np.where(q[None] <= pos[:, None, None], ai, 0))
         h["oslot"].numpy()[:n] = slots.reshape(n, -1)
-        h["opos"].numpy()[:n] = r * (own0 + np.arange(SK.OWN))
+        h["opos"].numpy()[:n] = r * (own0 + np.arange(SK.OWN)) + delta
         qc = h["qctl"].numpy()
         qc[:n, 0] = nblk
         qc[:n, 1] = own0
@@ -707,12 +753,13 @@ class FlashNextEngine(FlashNextRef):
             paths.append([i] if p < 0 else paths[p] + [i])
         d = np.asarray(depth, dtype=np.int64)
         h["tok"].numpy()[:] = tokens
-        h["pos"].numpy()[:] = L + d
+        h["pos"].numpy()[:] = L + d + st.delta
         h["slot"].numpy()[:] = L + np.arange(M)
         anc = h["anc"].numpy()
         for i, pa in enumerate(paths):
             anc[i, :len(pa)] = L + np.asarray(pa)
-        self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M)
+        self._stage_qsa(h, L, L // self.cfg.indexer_compress_ratio if self.cfg.has_indexer else 0, L + d, anc, M,
+                        st.delta)
         ctl, _ = SK.tree_ctl(parents)
         h["gctl"].numpy()[:] = ctl
         h["csrc"].numpy()[:] = SK.window_src(parents, (3, 2, 1), 3)
@@ -1016,7 +1063,7 @@ class FlashNextEngine(FlashNextRef):
             b = L // r + np.arange(SK.OWN)
             h32 = cb["h32"].numpy()
             h32[:SK.OWN * 4] = np.clip((r * b)[:, None] + np.arange(r)[None, :], 0, st.cap - 1).reshape(-1)
-            h32[SK.OWN * 4:] = r * b
+            h32[SK.OWN * 4:] = r * b + st.delta
             cb["hpi"].numpy()[:] = np.clip(b, 0, next(iter(st.pool.values())).shape[0] - 1)
             cb["d32"].copy_(cb["h32"], non_blocking=True)
             cb["dpi"].copy_(cb["hpi"], non_blocking=True)
@@ -1306,14 +1353,14 @@ class FlashNextEngine(FlashNextRef):
             pos = p0 + np.arange(M)
             if j == 0:
                 h["tok"].numpy()[:] = nexts
-            h["pos"].numpy()[:] = pos
+            h["pos"].numpy()[:] = pos + st_m.delta
             h["slot"].numpy()[:] = pos
             anc = h["anc"].numpy()
             for i in range(M):
                 anc[i, :i + 1] = p0 + np.arange(i + 1)
             # the feed's rows own the blocks from its first; a draft step's shared pool ends where the
             # feed's committed rows end (the pool is refreshed after the feed)
-            self._stage_qsa(h, p0, (L if j == 0 else L + n) // r, pos, anc, M)
+            self._stage_qsa(h, p0, (L if j == 0 else L + n) // r, pos, anc, M, st_m.delta)
             rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
             rb["copied"].record()
         if c.has_indexer:
@@ -1321,7 +1368,7 @@ class FlashNextEngine(FlashNextRef):
             blk = L // r + np.arange(SK.OWN)
             h32 = b["h32"].numpy()
             h32[:SK.OWN * 4] = np.clip((r * blk)[:, None] + np.arange(r)[None, :], 0, st_m.cap - 1).reshape(-1)
-            h32[SK.OWN * 4:] = r * blk
+            h32[SK.OWN * 4:] = r * blk + st_m.delta
             b["hpi"].numpy()[:] = np.clip(blk, 0, st_m.pool[MTP].shape[0] - 1)
             b["d32"].copy_(b["h32"], non_blocking=True)
             b["dpi"].copy_(b["hpi"], non_blocking=True)
@@ -1420,6 +1467,9 @@ class FlashNextEngine(FlashNextRef):
         holds the last chunk's only)."""
         self.flush()
         path = path or self.prefill_path
+        if path != "kernels" and (st.mm is not None or st.delta):
+            raise NotImplementedError("images on the reference prefill path (QWEN38_FN_PREFILL=ref): the "
+                                      "prefill kernels take them")
         fwd = self.forward_pre if path == "kernels" else self.forward
         chunk = chunk or (PREFILL_CHUNK if path == "kernels" else 2048)
         out = None
@@ -1467,7 +1517,7 @@ class FlashNextEngine(FlashNextRef):
         c = self.cfg
         H, hc, eps = c.hidden_size, c.hc_count, c.rms_norm_eps
         T = next_tokens.numel()
-        self._pre = self._pre_ctl(st_m.length, T)
+        self._pre = self._pre_ctl(st_m.length, T, st_m)
         e = self.rms(self.embed(next_tokens.view(-1)), self.W["mtp.pre_fc_norm_embedding.weight"], eps)
         e = self.lin(e, self.W["mtp.fc_embedding.weight"])
         hs = self.rms(stack, self.W["mtp.pre_fc_norm_hidden.weight"], eps)

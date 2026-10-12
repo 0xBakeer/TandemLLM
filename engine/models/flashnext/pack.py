@@ -154,6 +154,7 @@ class PackIndex:
     table_prefix: str | None
     skipped: list[str] = field(default_factory=list)      # vision keys
     notes: list[str] = field(default_factory=list)
+    vision: dict[str, TensorInfo] = field(default_factory=dict)   # the vision tower's, by "visual.<name>"
 
     @classmethod
     def open(cls, path: str, table: bool = True) -> "PackIndex":
@@ -177,6 +178,7 @@ class PackIndex:
         tensors: dict[str, TensorInfo] = {}
         files: dict[str, int] = {}
         skipped: list[str] = []
+        vision: dict[str, TensorInfo] = {}
         names = sorted(by_file)
         if os.path.isfile(os.path.join(path, PATCH_FILE)):
             names.append(PATCH_FILE)
@@ -199,6 +201,8 @@ class PackIndex:
                 name = canonical(k)
                 if name is None:
                     skipped.append(k)
+                    vname = k[len("model."):] if k.startswith("model.") else k
+                    vision[vname] = TensorInfo(vname, k, fp, t["dtype"], tuple(t["shape"]), start + b0, b1 - b0)
                     continue
                 if name in tensors:
                     raise ValueError(f"{name} is in {tensors[name].file} and {fn}")
@@ -221,7 +225,7 @@ class PackIndex:
             prefix = prefixes[0]
             tab = EXL3NGramTable(tp, prefix)
             files[TABLE_FILE] = os.path.getsize(tp)
-        return cls(path, cfg, tensors, files, tab, prefix, skipped)
+        return cls(path, cfg, tensors, files, tab, prefix, skipped, vision=vision)
 
     # --------------------------------------------------------------------------- checks
     def audit(self, mtp: bool = True) -> list[str]:
@@ -382,8 +386,8 @@ class PackIndex:
 
     # --------------------------------------------------------------------------- reading
     def read(self, name: str, device=None) -> torch.Tensor:
-        """One tensor as stored (a CPU copy, or on `device`)."""
-        t = self.tensors[name]
+        """One tensor as stored (a CPU copy, or on `device`); a vision tensor by its "visual." name."""
+        t = self.tensors[name] if name in self.tensors else self.vision[name]
         arr = np.fromfile(t.file, dtype=np.uint8, count=t.nbytes, offset=t.offset)
         out = torch.from_numpy(arr).view(DT[t.dtype]).reshape(t.shape)
         return out.to(device) if device is not None else out
