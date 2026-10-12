@@ -248,6 +248,16 @@ def _library_read(ctx, a):
                   (f"\n\n## Reference\n\n{ref}" if ref else ""))
 
 
+def _todo_write(ctx, a):
+    items = a.get("items")
+    try:
+        got = ctx.svc.set_todos(ctx.cid, items)
+    except Exception as exc:                                       # noqa: BLE001
+        raise ToolError(str(exc)) from None
+    done = sum(1 for i in got if i["state"] == "done")
+    return Result(f"todo list saved: {len(got)} items, {done} done")
+
+
 BUILTINS = [
     Tool("bash", "Run a shell command in this chat's own Linux sandbox. The working directory is "
          "/workspace (the chat's files, kept across sessions). Python 3, Node, git, ripgrep, jq, "
@@ -288,6 +298,13 @@ BUILTINS = [
          executor=_library_search, needs="library"),
     Tool("library_read", "Read one skill from the library by its name.",
          _obj({"name": _S}, ["name"]), executor=_library_read, needs="library"),
+    Tool("todo_write", "Keep the task's todo list, which the user sees beside the chat: send the "
+         "whole list each time, every item with a state (pending, in_progress, done). Mark an "
+         "item in_progress when you start it and done when it is done.",
+         _obj({"items": {"type": "array", "items": _obj({
+             "id": _S, "text": _S, "state": {"type": "string",
+                                            "enum": ["pending", "in_progress", "done"]}},
+             ["text", "state"])}}, ["items"]), executor=_todo_write),
 ]
 BY_NAME = {t.name: t for t in BUILTINS}
 

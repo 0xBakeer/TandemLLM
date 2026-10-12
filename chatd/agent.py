@@ -15,6 +15,7 @@ from chatd import compaction as comp
 from chatd import egress, render
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
+from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
 from chatd.runs import NUDGE, GuardError
 from chatd.sandbox import Unavailable
 from chatd.store import dumps
@@ -234,8 +235,13 @@ class AgentMixin:
             return []
         prefs = self._prefs()
         enabled = set(settings.get("tools") or [])
+        if cid and (settings.get("plan_mode") or self.todos(cid)):
+            enabled.add("todo_write")
         out = [t for t in self.available_builtins() if t.name in enabled and
                (prefs.get(t.name) is None or prefs[t.name]["enabled"] in (None, 1))]
+        if settings.get("plan_mode"):
+            # SRV-363: the read tools and the todo list, nothing that changes the world
+            return [t for t in out if t.name in PLAN_TOOLS]
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
             out += mcp.tools_for(settings, cid)
@@ -370,6 +376,9 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
+            if tool is None and settings.get("plan_mode") and self.tool(part.get("name") or ""):
+                self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
+                continue
             if tool is None:
                 self._finish_call(run, part, Result(
                     f"The tool {part.get('name')!r} is not available in this chat. Available: "
@@ -499,7 +508,8 @@ class AgentMixin:
         skills = self.skill_index(settings) if hasattr(self, "skill_index") else None
         today = _dt.date.today().isoformat() if tools else None
         return render.system_block(today=today, tools=bool(tools), summary=summary,
-                                   skills=skills, prompt=prompt)
+                                   skills=skills, prompt=prompt,
+                                   plan=PLAN_RULE if settings.get("plan_mode") else None)
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -517,6 +527,8 @@ class AgentMixin:
                 path.append({"role": "assistant", "parts": [dict(p) for p in live["parts"]
                                                              if p.get("step", 1) < run.step or
                                                              run.continue_final]})
+        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
+            settings = {**settings, "effort": "high"}           # a plan turn thinks hard
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id)
         schemas = [t.openai() for t in tools]

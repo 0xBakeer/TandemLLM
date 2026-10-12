@@ -34,6 +34,7 @@ from chatd import context as ctx_mod
 from chatd import render
 from chatd.agent import AgentMixin
 from chatd.panes import PanesMixin
+from chatd.plans import PlansMixin
 from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
 from chatd.engine import Engine, LiveTail
@@ -49,7 +50,7 @@ DEFAULT_SETTINGS = {
     "model": "", "profile": None, "effort": "auto", "thinking": True,
     "tools": [], "packages": [], "packages_blocked": [], "packages_mode": "auto", "mcp": [],
     "prompt_id": None, "policies": {}, "auto_accept_edits": False, "max_steps": 50,
-    "sandbox_network": "on",
+    "sandbox_network": "on", "plan_mode": False,
 }
 EFFORTS = ("auto", "low", "medium", "high", "xhigh")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
@@ -131,7 +132,7 @@ def device_label(ua: str | None) -> str | None:
     return browser or system or "another device"
 
 
-class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
+class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -389,6 +390,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
                 "compactions": self.compactions(cid, branch),
                 "usage": _usage(branch),
                 "queue": self._queue(cid), "ui": json.loads(row["ui"]),
+                "todos": self.todos(cid),
                 "seq": str(conv.last_seq),
             })
         if run is None:
@@ -597,6 +599,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
             self.store.run("UPDATE messages SET status = 'streaming' WHERE id = ?", (mid,))
             self.store.run("UPDATE conversations SET head_id = ? WHERE id = ?", (mid, conv.id))
         else:
+            self.todos_onto(conv.id, user_mid)
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}

@@ -41,6 +41,9 @@ def text_of(parts: list[dict], kind: str = "text") -> str:
 def _user(m: dict, vision: bool, blob=None) -> dict:
     parts = m.get("parts") or []
     text = text_of(parts)
+    todos = text_of(parts, "todos")                 # the open todo list at the run's start
+    if todos:
+        text += "\n\n" + todos
     images = []
     for a in m.get("attachments") or []:
         data = blob(a) if blob is not None else None
@@ -163,7 +166,8 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
 
 
 def system_block(*, today: str | None, tools: bool, summary: str | None = None,
-                 skills: str | None = None, prompt: str | None = None) -> str | None:
+                 skills: str | None = None, prompt: str | None = None,
+                 plan: str | None = None) -> str | None:
     """The system message: the chat's own prompt, then the tool rules, the skill index and the
     summary of compacted turns. None for a plain chat with nothing to say."""
     parts = []
@@ -177,6 +181,8 @@ def system_block(*, today: str | None, tools: bool, summary: str | None = None,
             "you edit it, and prefer edit_file for small changes. Use present to show the user a "
             "page, a file or this run's changes. When the task is done, answer in plain words; do "
             "not call tools you do not need.")
+    if plan:
+        parts.append(plan)
     if skills:
         parts.append("Skills you can read with library_read when a task needs one:\n" + skills)
     if summary:

@@ -54,6 +54,11 @@ ROUTES = [
     ("POST", rf"/conversations/{_ID}/messages/{_ID}/edit", "edit"),
     ("POST", rf"/conversations/{_ID}/branch", "branch"),
     ("PATCH", rf"/conversations/{_ID}/settings", "settings"),
+    # plan mode, the todo list, rewind (SRV-363)
+    ("POST", rf"/conversations/{_ID}/plan/approve", "approve_plan"),
+    ("GET", rf"/conversations/{_ID}/todos", "todos"),
+    ("PUT", rf"/conversations/{_ID}/todos", "put_todos"),
+    ("POST", rf"/conversations/{_ID}/rewind", "rewind"),
     ("GET", r"/events", "global_events"),
     ("POST", r"/attachments", "upload"),
     ("GET", rf"/attachments/{_ID}", "attachment"),
@@ -283,6 +288,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_settings(self, cid):
         self._json(200, self.svc.update_settings(cid, self._body()))
+
+    def r_approve_plan(self, cid):
+        self._json(202, self.svc.approve_plan(cid, self._body(), self.viewer))
+
+    def r_todos(self, cid):
+        self.svc.conv(cid)
+        self._json(200, self.svc.todos(cid))
+
+    def r_put_todos(self, cid):
+        self._json(200, self.svc.set_todos(cid, self._body().get("items")))
+
+    def r_rewind(self, cid):
+        self._json(200, self.svc.rewind(cid, self._body(), self.viewer))
 
     def r_upload(self):
         n = int(self.headers.get("Content-Length") or 0)

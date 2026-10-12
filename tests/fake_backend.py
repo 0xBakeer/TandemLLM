@@ -31,6 +31,7 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_500             500
     FAKE_DEEPSEEK        DeepSeek's usage shape: prompt_cache_hit_tokens, prompt_cache_miss_tokens
     FAKE_LONG <n>        <n> answer tokens (default 24)
+    FAKE_SAY <text>      this answer (the rest of the line, `\\n` a line break)
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
 
 For the harness (P4):
@@ -320,6 +321,10 @@ def make_handler(fake: Fake):
             msgs = body.get("messages") or []
             if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "tool":
                 return [], [f"done{i} " for i in range(6)]
+            m = re.search(r"FAKE_SAY (.+)", text)
+            if m:
+                say = m.group(1).replace("\\n", "\n")
+                return [], [say[i:i + 5] for i in range(0, len(say), 5)]
             if "FAKE_REASONING" in text or "FAKE_EMPTY_ANSWER" in text:
                 reasoning = [f"think{i} " for i in range(6)]
             if "FAKE_LOOP" in text:

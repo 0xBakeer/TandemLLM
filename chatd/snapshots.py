@@ -127,6 +127,31 @@ class Snapshots:
                        f"--- a/{f['path'][11:]}\n+++ b/{f['path'][11:]}\n{f['patch']}"
                        for f in self.diff(cid, run)["files"])
 
+    def restore(self, cid: str, ws: Workspace, run: str, undo_id: str) -> int:
+        """The workspace as it was before `run` (rewind): files made since go, changed ones come
+        back; the state before the rewind is recorded as run `undo_id`. Returns how many files
+        changed. A file too big to record is left as it is."""
+        target = self.load(cid, run, "before")
+        if target is None:
+            raise ValueError("this run has no recorded start")
+        now = self.take(cid, ws, undo_id, "before")
+        n = 0
+        for path in set(now) | set(target):
+            a, b = target.get(path), now.get(path)
+            if a == b or (a or "").startswith("big:") or (b or "").startswith("big:"):
+                continue
+            try:
+                if a is None:
+                    ws.delete(path)
+                else:
+                    with open(self._obj(cid, a), "rb") as fh:
+                        ws.write(path, fh.read())
+                n += 1
+            except (OSError, ValueError):
+                pass
+        self.take(cid, ws, undo_id, "after")
+        return n
+
     def undo(self, cid: str, ws: Workspace, run: str, undo_id: str) -> int:
         """Put the files the run changed back as they were before it; returns how many. The
         state before the undo is recorded as run `undo_id` (before), and after it (after)."""
