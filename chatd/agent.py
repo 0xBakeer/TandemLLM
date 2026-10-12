@@ -208,7 +208,9 @@ class AgentMixin:
         if t is not None:
             return t
         mcp = getattr(self, "mcp", None)
-        return mcp.tool(name) if mcp is not None else None
+        t = mcp.tool(name) if mcp is not None else None
+        owui = getattr(self, "owui", None)
+        return t if t is not None or owui is None else owui.tool(name)
 
     def _prefs(self) -> dict:
         return {r["tool"]: dict(r) for r in self.store.all("SELECT * FROM tool_prefs")}
@@ -226,7 +228,8 @@ class AgentMixin:
         return ok
 
     def tools_for(self, settings: dict, info: dict, cid: str | None = None) -> list:
-        """The chat's tools, in the fixed order: built-ins, then MCP servers by name."""
+        """The chat's tools, in the fixed order: built-ins, MCP servers by name, then imported
+        Open WebUI toolkits by name (they need the sandbox)."""
         if not info.get("tools", True):
             return []
         prefs = self._prefs()
@@ -236,12 +239,17 @@ class AgentMixin:
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
             out += mcp.tools_for(settings, cid)
+        owui = getattr(self, "owui", None)
+        if owui is not None and self.sandboxes.available():
+            out += [t for t in owui.tools_for()
+                    if prefs.get(t.name) is None or prefs[t.name]["enabled"] in (None, 1)]
         return out
 
     def tool_infos(self) -> list[dict]:
         prefs = self._prefs()
         return [self._info(t, prefs) for t in self.available_builtins() + (
-            self.mcp.all_tools() if getattr(self, "mcp", None) else [])]
+            self.mcp.all_tools() if getattr(self, "mcp", None) else []) + (
+            self.owui.all_tools() if getattr(self, "owui", None) else [])]
 
     def _info(self, t, prefs: dict) -> dict:
         p = prefs.get(t.name) or {}

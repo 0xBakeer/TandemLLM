@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         chromium fonts-dejavu-core fonts-liberation procps less vim-tiny unzip zip \
         util-linux iproute2 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir uv \
+    && pip install --no-cache-dir uv pydantic \
     && useradd -m -u 1000 -s /bin/bash agent \
     && mkdir -p /workspace /opt/tandem /run/tandem && chown agent:agent /workspace
 COPY relay.py /opt/tandem/relay.py

@@ -15,6 +15,14 @@ Pins and blocks travel in the body as `tandem.packages` (server/conductor/packag
 chat. A server without the library (another engine, a cloud backend) lists no skills and the
 modes change nothing.
 
+USER SKILLS: a .zip with a SKILL.md folder (`POST /packages/upload`). chatd checks it (one folder,
+no path outside it, no links, size limits, frontmatter `name` and `description`), unpacks it under
+`<data>/skills/<name>/` and installs it through the engine's packages document
+(`PUT /v1/conductor/packages`): that folder in `skill_dirs`, the skill as `skill:<name>` with
+`library: true`, so the library, the router and the lookup drafter's index all see it. A name the
+engine already has from elsewhere is refused; a skill uploaded here again is replaced, and
+`DELETE /packages/<name>` takes it out of the document and off the disk.
+
 PROMPTS are slash commands with a template ({{CLIPBOARD}}, {{selection}}, {{input}} filled on the
 device); a chat's `prompt_id` makes one its system prompt. PRESETS are a model, a prompt, an
 effort, tools, skills and MCP servers; a new chat can start from one, and changing the preset later
@@ -23,14 +31,92 @@ leaves existing chats as they are.
 
 from __future__ import annotations
 
+import email.parser
+import email.policy
+import io
 import json
+import os
 import re
+import shutil
+import stat
 import time
+import zipfile
 
 from chatd.ids import ulid
 
 LIBRARY_TTL_S = 300
 INDEX_MAX = 80
+SKILL_ZIP_MAX = 10 * 1024 * 1024
+SKILL_UNPACKED_MAX = 20 * 1024 * 1024
+SKILL_FILES_MAX = 200
+SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def multipart_file(content_type: str, body: bytes, field: str = "file") -> tuple[str, bytes]:
+    """(file name, bytes) of a multipart form's `field`; ValueError without one."""
+    msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    for part in msg.iter_parts() if msg.is_multipart() else []:
+        if part.get_param("name", header="content-disposition") == field:
+            return os.path.basename(part.get_filename() or ""), part.get_payload(decode=True) or b""
+    raise ValueError(f"send the file as multipart field `{field}`")
+
+
+def frontmatter(text: str) -> dict:
+    """`key: value` lines between the leading `---` lines (quotes dropped); {} without them."""
+    m = re.match(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(\r?\n|\Z)", text, re.S)
+    out = {}
+    for line in (m.group(1).splitlines() if m else []):
+        k, sep, v = line.partition(":")
+        if sep and k.strip() and not k.startswith((" ", "\t")):
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def unpack_skill(data: bytes) -> tuple[dict, dict[str, bytes]]:
+    """(frontmatter, {path inside the skill folder: bytes}) of a skill zip; ValueError says why
+    it is refused."""
+    if len(data) > SKILL_ZIP_MAX:
+        raise ValueError("a skill zip may be at most 10 MB")
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise ValueError("this is not a zip file") from None
+    entries = [i for i in z.infolist() if not i.is_dir()]
+    if len(entries) > SKILL_FILES_MAX:
+        raise ValueError(f"a skill may have at most {SKILL_FILES_MAX} files")
+    if sum(i.file_size for i in entries) > SKILL_UNPACKED_MAX:
+        raise ValueError("a skill may unpack to at most 20 MB")
+    names = [i.filename for i in entries]
+    skill_md = [n for n in names if n == "SKILL.md" or n.endswith("/SKILL.md")]
+    if not skill_md:
+        raise ValueError("no SKILL.md in the zip")
+    root = min(skill_md, key=lambda n: n.count("/"))[:-len("SKILL.md")]
+    if root.count("/") > 1:
+        raise ValueError("SKILL.md must be at the top of the zip or in its one folder")
+    files = {}
+    for i in entries:
+        n = i.filename
+        mode = i.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"{n} is a link; a skill holds plain files only")
+        if n.startswith("/") or "\\" in n or ".." in n.split("/") or not n.startswith(root):
+            raise ValueError(f"{n} is outside the skill's folder")
+        rel = n[len(root):]
+        if not rel or rel.startswith("/"):
+            raise ValueError(f"{n} is outside the skill's folder")
+        files[rel] = z.read(i)
+    try:
+        meta = frontmatter(files["SKILL.md"].decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("SKILL.md is not UTF-8 text") from None
+    name, desc = meta.get("name", ""), meta.get("description", "")
+    if not SKILL_NAME.match(name):
+        raise ValueError("the frontmatter needs a `name` of lower-case letters, digits, `.`, `_` "
+                         "and `-`, at most 64")
+    if not 8 <= len(desc) <= 600:
+        raise ValueError("the frontmatter needs a `description` of 8 to 600 characters")
+    return meta, files
 
 
 class SkillsMixin:
@@ -64,7 +150,9 @@ class SkillsMixin:
         off = self._off()
         return [{"id": s["name"], "name": s["name"], "description": s["description"],
                  "kind": "skill", "version": "", "enabled": s["name"] not in off, "tools": [],
-                 "tokens": s.get("tokens")} for s in self.library()]
+                 "tokens": s.get("tokens"),
+                 "user": os.path.isdir(os.path.join(self.skills_dir, s["name"]))}
+                for s in self.library()]
 
     def set_package(self, pid: str, body: dict) -> dict:
         if not any(s["name"] == pid for s in self.library()):
@@ -94,6 +182,96 @@ class SkillsMixin:
         if pin or block:
             t["packages"] = {"pin": pin, "block": sorted(block)}
         return t
+
+    # ------------------------------------------------------------------ user skills
+    @property
+    def skills_dir(self) -> str:
+        return os.path.join(os.path.abspath(self.data_dir), "skills")
+
+    def _packages_doc(self) -> tuple[int, dict]:
+        try:
+            st, obj = self.engine.request("GET", "/v1/conductor/packages", timeout=10.0)
+        except OSError:
+            st, obj = 0, None
+        if st != 200 or not isinstance(obj, dict) or not isinstance(obj.get("doc"), dict):
+            raise self._api(502, "engine", f"the engine's packages document is not readable "
+                                           f"(HTTP {st}); skills install on our own engine only")
+        return int(obj.get("version") or 0), obj["doc"]
+
+    def _put_packages(self, version: int, doc: dict, note: str) -> None:
+        try:
+            st, obj = self.engine.request("PUT", "/v1/conductor/packages", json.dumps(
+                {"doc": doc, "note": note, "base_version": version}).encode(), timeout=20.0)
+        except OSError:
+            st, obj = 0, None
+        if st != 200:
+            err = (obj or {}).get("error") if isinstance(obj, dict) else None
+            msg = err.get("message") if isinstance(err, dict) else str(err or "")
+            raise self._api(409 if st == 409 else 502, "engine",
+                            f"the engine refused the packages change (HTTP {st}) {msg}".strip())
+        self._lib_cache = None
+
+    def upload_skill(self, content_type: str, body: bytes) -> dict:
+        try:
+            _, data = multipart_file(content_type, body)
+            meta, files = unpack_skill(data)
+        except ValueError as exc:
+            raise self._api(400, "bad_skill", str(exc)) from None
+        name = meta["name"]
+        version, doc = self._packages_doc()
+        target = os.path.join(self.skills_dir, name)
+        ours = os.path.isdir(target)
+        if name in (doc.get("packages") or {}) and not ours:
+            raise self._api(409, "taken", f"the engine already has a package named {name}")
+        dirs = list(doc.get("skill_dirs") or [])
+        if self.skills_dir not in dirs:
+            if len(dirs) >= 8:
+                raise self._api(409, "full", "the packages document has 8 skill folders already")
+            dirs.append(self.skills_dir)
+        tmp = target + ".new"
+        shutil.rmtree(tmp, ignore_errors=True)
+        for rel, blob in files.items():
+            path = os.path.join(tmp, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(blob)
+        old = target + ".old"
+        shutil.rmtree(old, ignore_errors=True)
+        if ours:
+            os.rename(target, old)
+        os.rename(tmp, target)
+        text = files["SKILL.md"].decode("utf-8")
+        pkgs = dict(doc.get("packages") or {})
+        pkgs[name] = {"title": str(meta.get("title") or name)[:80], "kind": "skill",
+                      "source": f"skill:{name}", "description": meta["description"], "body": "",
+                      "max_tokens": min(32768, max(256, len(text) // 2)), "enabled": True,
+                      "library": True}
+        try:
+            self._put_packages(version, {**doc, "skill_dirs": dirs, "packages": pkgs},
+                               f"chat: the user skill {name}")
+        except Exception:
+            shutil.rmtree(target, ignore_errors=True)
+            if ours:
+                os.rename(old, target)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+        self.log(f"[skills] installed {name} ({len(files)} files)")
+        got = next((p for p in self.packages() if p["id"] == name), None)
+        return got or {"id": name, "name": name, "description": meta["description"],
+                       "kind": "skill", "version": "", "enabled": True, "tools": [],
+                       "user": True}
+
+    def delete_skill(self, name: str) -> None:
+        target = os.path.join(self.skills_dir, name)
+        if not SKILL_NAME.match(name) or not os.path.isdir(target):
+            raise self._api(404, "not_found", "no skill of yours by that name; skills that came "
+                                              "with the engine are switched off, not deleted")
+        version, doc = self._packages_doc()
+        pkgs = {k: v for k, v in (doc.get("packages") or {}).items() if k != name}
+        self._put_packages(version, {**doc, "packages": pkgs}, f"chat: removed the user skill "
+                                                                f"{name}")
+        shutil.rmtree(target, ignore_errors=True)
+        self.store.run("DELETE FROM tool_prefs WHERE tool = ?", ("pkg:" + name,))
 
     # ------------------------------------------------------------------ prompts
     def prompts(self) -> list[dict]:

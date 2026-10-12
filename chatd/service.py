@@ -165,7 +165,9 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
         self.snaps = Snapshots(os.path.join(data_dir, "snapshots"))
         self._library: tuple[float, bool] | None = None
         from chatd.mcp import Mcp
+        from chatd.owui import Owui
         self.mcp = Mcp(self, os.path.dirname(os.path.abspath(data_dir)))
+        self.owui = Owui(self)
         self.interrupted_at_start = self._interrupt_leftovers()
         self.ticker = threading.Thread(target=self._tick, name="chatd-ticker", daemon=True)
         self.sweeper = threading.Thread(target=self._sweep, name="chatd-sweeper", daemon=True)
@@ -1170,6 +1172,33 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
         name = os.path.basename(part.get_filename() or "file")[:200]
         mime = part.get_content_type() or "application/octet-stream"
         return self.store_blob(None, name, mime, data)
+
+    def import_owui(self, content_type: str, body: bytes) -> dict:
+        from chatd.skills import multipart_file
+        try:
+            name, data = multipart_file(content_type, body)
+            source = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ApiError(400, "bad_tools_file", "the file is not UTF-8 text") from None
+        except ValueError as exc:
+            raise ApiError(400, "bad_tools_file", str(exc)) from None
+        # a .py file, or Open WebUI's JSON export of its Workspace tools ([{id, name, content}])
+        try:
+            export = json.loads(source) if source.lstrip()[:1] in ("[", "{") else None
+        except ValueError:
+            export = None
+        if export is not None:
+            items = export if isinstance(export, list) else [export]
+            entries = [(str(x.get("id") or x.get("name") or "tools"), x["content"]) for x in items
+                       if isinstance(x, dict) and isinstance(x.get("content"), str)]
+            if not entries:
+                raise ApiError(400, "bad_tools_file", "a JSON export needs entries with `content`")
+        else:
+            entries = [(name, source)]
+        kits = [self.owui.add(n, src) for n, src in entries]
+        names = {t for k in kits for t in k["tools"]}
+        return {"toolkit": kits[0], "toolkits": kits, "valves": kits[0]["valves"],
+                "tools": [i for i in self.tool_infos() if i["id"] in names]}
 
     def attachment(self, att_id: str) -> tuple[str, bytes]:
         r = self.store.one("SELECT * FROM attachments WHERE id = ?", (att_id,))

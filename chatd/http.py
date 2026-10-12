@@ -9,10 +9,9 @@ The forward adds what only the engine server knows: `X-Tandem-Password-Set` and
 the snapshot names the device a run was started on.
 
 Phase 2 routes: tools, packages, MCP, prompts, presets, permissions, compaction, the sandbox, its
-files and terminals, artifacts. On a box with no sandbox runtime, starting a sandbox answers 503
-`sandbox_unavailable` and bash, render_page and the terminals are not offered; the file routes work
-on the chat's workspace folder. Open WebUI tool import and skill uploads answer 501
-`not_available`.
+files and terminals, artifacts, user skills, Open WebUI tools. On a box with no sandbox runtime,
+starting a sandbox answers 503 `sandbox_unavailable` and bash, render_page and the terminals are
+not offered; the file routes work on the chat's workspace folder.
 """
 
 from __future__ import annotations
@@ -58,6 +57,11 @@ ROUTES = [
     ("GET", r"/events", "global_events"),
     ("POST", r"/attachments", "upload"),
     ("GET", rf"/attachments/{_ID}", "attachment"),
+    # Open WebUI tools (SRV-361)
+    ("POST", r"/tools/import/owui", "import_owui"),
+    ("GET", r"/tools/user", "user_tools"),
+    ("PATCH", rf"/tools/user/{_ID}", "patch_user_tools"),
+    ("DELETE", rf"/tools/user/{_ID}", "delete_user_tools"),
     # tools and permissions (SRV-353)
     ("GET", r"/tools", "tools"),
     ("PATCH", rf"/tools/{_ID}", "set_tool"),
@@ -99,8 +103,8 @@ ROUTES = [
     ("POST", r"/presets", "save_preset"),
     ("POST", rf"/presets/{_ID}", "save_preset"),
     ("DELETE", rf"/presets/{_ID}", "delete_preset"),
-    # later: user skill uploads, Open WebUI tool import
-    ("*", r"/(packages/upload|skills/user|tools/import)(/.*)?", "not_available"),
+    ("POST", r"/(?:packages/upload|skills/user)", "upload_skill"),
+    ("DELETE", rf"/(?:packages|skills)/{_ID}", "delete_skill"),
 ]
 _COMPILED = [(m, re.compile(p + "$"), n) for m, p, n in ROUTES]
 
@@ -296,10 +300,33 @@ class Handler(BaseHTTPRequestHandler):
     def r_empty_list(self, *_):
         self._json(200, [])
 
-    def r_not_available(self, *_):
-        self._json(501, {"error": {"type": "not_available",
-                                   "message": "not available yet: user skill uploads and the "
-                                              "Open WebUI tool import come in phase 3"}})
+    def _raw(self, limit: int) -> bytes:
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > limit:
+            raise ApiError(413, "too_large", f"at most {limit // (1024 * 1024)} MB")
+        return self.rfile.read(n) if n else b""
+
+    def r_upload_skill(self):
+        raw = self._raw(11 * 1024 * 1024)
+        self._json(200, self.svc.upload_skill(self.headers.get("Content-Type") or "", raw))
+
+    def r_delete_skill(self, name):
+        self.svc.delete_skill(name)
+        self._send(204, b"")
+
+    def r_import_owui(self):
+        raw = self._raw(2 * 1024 * 1024)
+        self._json(200, self.svc.import_owui(self.headers.get("Content-Type") or "", raw))
+
+    def r_user_tools(self):
+        self._json(200, self.svc.owui.list())
+
+    def r_patch_user_tools(self, tid):
+        self._json(200, self.svc.owui.patch(tid, self._body()))
+
+    def r_delete_user_tools(self, tid):
+        self.svc.owui.remove(tid)
+        self._send(204, b"")
 
     # ---- skills, prompts, presets
     def r_packages(self, *_):
