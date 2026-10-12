@@ -17,8 +17,8 @@
 \texttt{-{}-argloop} & \texttt{on} & the tool-argument loop guard (server/argloop.py): \texttt{on} stops a held tool call whose arguments loop and tells the model on its next turn. One of: on, log, off. \\
 \texttt{-{}-default-\allowbreak{}max-\allowbreak{}tokens} & \texttt{8192; served:\allowbreak{} 32768} & what a request that does not send max\_tokens gets. \\
 \texttt{-{}-reasoning-\allowbreak{}format} & \texttt{tags} & how the reasoning block reaches the client: inside \textless{}think\textgreater{}\textless{}/think\textgreater{} in content (default, and what Open WebUI folds on), as OpenAI-style reasoning\_content deltas, or both. One of: tags, reasoning\_content, both. \\
-\texttt{-{}-drafter} & \texttt{mtp; served:\allowbreak{} lenrouter} & the drafter set. lenrouter, the served one, holds both DFlash2 widths beside the lookup drafter; none decodes one token a step. One of: mtp, router, merged, dflash2, lenrouter, none. \\
-\texttt{-{}-tree} & \texttt{off (a switch); served:\allowbreak{} on} & verify a draft TREE per step instead of a chain, where the drafter builds one; see docs/speculative-decoding.md. \\
+\texttt{-{}-drafter} & \texttt{mtp} & the drafter set. lenrouter, the served one, holds both DFlash2 widths beside the lookup drafter; none decodes one token a step. One of: mtp, router, merged, dflash2, lenrouter, none. \\
+\texttt{-{}-tree} & \texttt{off (a switch)} & verify a draft TREE per step instead of a chain, where the drafter builds one; see docs/speculative-decoding.md. \\
 \texttt{-{}-regenerate} & \texttt{sample (QWEN38\_\allowbreak{}REGENERATE)} & : a regenerate (the same conversation again after it was answered, under a TandemLLM plan; or X-Tandem-Regenerate: 1) samples with a fresh seed; every other request keeps its own sampling (greedy by default). One of: sample, off. \\
 \texttt{-{}-regenerate-\allowbreak{}temperature} & \texttt{0.7 (QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TEMPERATURE)} & a regenerate's temperature (QWEN38\_REGEN\_TEMPERATURE). \\
 \texttt{-{}-regenerate-\allowbreak{}top-\allowbreak{}p} & \texttt{0.95 (QWEN38\_\allowbreak{}REGEN\_\allowbreak{}TOP\_\allowbreak{}P)} & a regenerate's top-p (QWEN38\_REGEN\_TOP\_P). \\
@@ -26,17 +26,17 @@
 \texttt{-{}-sampled-\allowbreak{}tree} & \texttt{none; served:\allowbreak{} det} & let a SAMPLED request keep the tree verify. One of: det, mixed. \\
 \texttt{-{}-budget} & \texttt{16} & nodes per tree, anchor included. \\
 \texttt{-{}-df2-\allowbreak{}temp} & \texttt{1} & the block drafter's temperature for its own proposals. \\
-\texttt{-{}-corpus} & \texttt{none (QWEN38\_\allowbreak{}CORPUS); served:\allowbreak{} (a path)} & the lookup drafter's corpus: a directory of token ids with a suffix array (tools/build\_corpus.py). \\
+\texttt{-{}-corpus} & \texttt{none (QWEN38\_\allowbreak{}CORPUS)} & the lookup drafter's corpus: a directory of token ids with a suffix array (tools/build\_corpus.py). \\
 \texttt{-{}-depth} & \texttt{3} & the drafter's depth for the older chain drafters. \\
 \texttt{-{}-k} & \texttt{0} & verify block size; 0 = the drafter's depth. \\
 \texttt{-{}-draft-\allowbreak{}head} & \texttt{none} & an optional separate head file for the drafter. \\
-\texttt{-{}-nvfp4} & \texttt{none; served:\allowbreak{} (a path)} & the NVFP4 weight files to load, one per target (mlp, gdn, attn); empty means the checkpoint's FP8. \\
+\texttt{-{}-nvfp4} & \texttt{none} & the NVFP4 weight files to load, one per target (mlp, gdn, attn); empty means the checkpoint's FP8. \\
 \texttt{-{}-price-\allowbreak{}table} & \texttt{none (QSE\_\allowbreak{}PRICE\_\allowbreak{}TABLE)} & FILE[:NAME], the routers' verify/draft/rollback prices for this weight set (engine/prices.py); empty = the NVFP4 constants in the code. \\
-\texttt{-{}-fp8-\allowbreak{}head} & \texttt{none; served:\allowbreak{} (a path)} & e4m3 lm\_head from tools/quant\_head.py; halves the head's 2.54 GB in both the verify pass and the block drafter's top-k read. \\
+\texttt{-{}-fp8-\allowbreak{}head} & \texttt{none} & e4m3 lm\_head from tools/quant\_head.py; halves the head's 2.54 GB in both the verify pass and the block drafter's top-k read. \\
 \texttt{-{}-dflash2-\allowbreak{}blocks} & \texttt{1} & chained 8-wide draft blocks; 1 proposes 7 tokens, 2 proposes 14. \\
 \texttt{-{}-dflash2-\allowbreak{}path} & \texttt{greedy} & how the block drafter walks its lattice: the greedy path or Viterbi. One of: greedy, viterbi. \\
-\texttt{-{}-dflash2-\allowbreak{}ckpt} & \texttt{none; served:\allowbreak{} (a path)} & the narrow (block 8) DFlash2 drafter checkpoint. \\
-\texttt{-{}-dflash2-\allowbreak{}ckpt16} & \texttt{none; served:\allowbreak{} (a path)} & the sixteen-wide drafter, for -\kern0pt-drafter lenrouter. \\
+\texttt{-{}-dflash2-\allowbreak{}ckpt} & \texttt{none} & the narrow (block 8) DFlash2 drafter checkpoint. \\
+\texttt{-{}-dflash2-\allowbreak{}ckpt16} & \texttt{none} & the sixteen-wide drafter, for -\kern0pt-drafter lenrouter. \\
 \texttt{-{}-len-\allowbreak{}fixed} & \texttt{0} & pin -\kern0pt-drafter lenrouter to one block width (8 or 16). 0 lets the policy choose, which means -\kern0pt-len-latch: one decision a request. 8 and 16 measure the fixed baselines through the same code. \\
 \texttt{-{}-len-\allowbreak{}latch} & \texttt{on (-{}-no-\allowbreak{}len-\allowbreak{}latch turns it off)} & decide the block width ONCE a request, four wide blocks, up to four narrow probes, then no more switching. \\
 \texttt{-{}-learn-\allowbreak{}cost} & \texttt{on (-{}-no-\allowbreak{}learn-\allowbreak{}cost turns it off)} & the length router learns its verify and draft costs from the blocks it times, across requests (default). -\kern0pt-no-learn-cost keeps the served price table; timings inside a request still size its blocks, so two runs can part at a near tie. \\
@@ -117,6 +117,9 @@
 \texttt{-{}-side-\allowbreak{}precapture} & \texttt{off} & capture a side slot's verify graphs at start (on, about a minute a slot) or at their first use (off: the build takes seconds; each width's first lone round on a side slot pays its capture, a fraction of a second). One of: on, off. \\
 \texttt{-{}-side-\allowbreak{}graphs} & \texttt{on (QSE\_\allowbreak{}SIDE\_\allowbreak{}GRAPHS)} & a side slot's own verify graphs: on (captured as -\kern0pt-side-precapture says; most of a slot's constant bytes) or off (the slot verifies eager when it decodes alone and holds no graph pool; a joint pass is eager either way). One of: on, off. \\
 \texttt{-{}-side-\allowbreak{}slot-\allowbreak{}const-\allowbreak{}gb} & \texttt{0 (QSE\_\allowbreak{}SIDE\_\allowbreak{}SLOT\_\allowbreak{}CONST\_\allowbreak{}GB)} & a side slot's bytes beyond its window's, in the build's estimate; 0 (the default) follows -\kern0pt-side-graphs: 7.5 GiB with it on (6.9 to 7.5 GiB allocated measured for 8,192-token slots, most of it the verify graphs' pools: 121 ... \\
+\texttt{-{}-kv-\allowbreak{}pool} & \texttt{off (QSE\_\allowbreak{}KV\_\allowbreak{}POOL)} & on: every slot's KV window (engine attention KV and the drafters' context KV) is reserved as virtual addresses and its pages are committed as a conversation's rows are written and given back when it ends, from one pool for every ... One of: on, off. \\
+\texttt{-{}-kv-\allowbreak{}hard-\allowbreak{}floor-\allowbreak{}gb} & \texttt{10 (QSE\_\allowbreak{}KV\_\allowbreak{}HARD\_\allowbreak{}FLOOR\_\allowbreak{}GB)} & with -\kern0pt-kv-pool on: a commit never takes MemAvailable under this (GiB); the pool gives back caches and idle conversations first, else the request is not run (admission keeps requests out at -\kern0pt-parallel-floor-gb). \\
+\texttt{-{}-kv-\allowbreak{}margin-\allowbreak{}rows} & \texttt{256 (QSE\_\allowbreak{}KV\_\allowbreak{}MARGIN\_\allowbreak{}ROWS)} & with -\kern0pt-kv-pool on: rows committed past every write (a masked tile's over-read stays on mapped pages). \\
 \texttt{-{}-vision} & \texttt{on} & load the checkpoint's vision tower (0.92 GB bf16) and accept image\_url parts in chat requests; off refuses them with a 400. One of: on, off. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}mb} & \texttt{20} & largest image a request may send or link, after base64 decoding. \\
 \texttt{-{}-image-\allowbreak{}max-\allowbreak{}decode-\allowbreak{}pixels} & \texttt{64000000} & largest canvas an image may declare, checked before its pixels are decoded; the processor then resizes to its own limits. \\
@@ -138,6 +141,7 @@
 \texttt{-{}-trust-\allowbreak{}loopback} & \texttt{on (-{}-no-\allowbreak{}trust-\allowbreak{}loopback turns it off)} & a request from loopback with no X-Forwarded-For / X-Real-IP header (the box's own watchdog, row3, gate, soak) needs no token for /metrics, the full /health and the cache routes once an admin password or metrics token is set. \\
 \texttt{-{}-dashboard-\allowbreak{}login} & \texttt{off (QSE\_\allowbreak{}DASHBOARD\_\allowbreak{}LOGIN)} & on, with an admin password (QSE\_ADMIN\_TOKEN) set: /v1/dashboard/* needs the admin token or a session too (the page has no sign-in screen yet). off, the default: the dashboard's read API answers without a token. One of: on, off. \\
 \texttt{-{}-dashboard-\allowbreak{}dir} & \texttt{none} & where the dashboard's built files are (default: dashboard/dist in this repository); /dashboard/ serves them, or a placeholder when missing. \\
+\texttt{-{}-setup} & \texttt{off (a switch)} & setup mode (docs/setup.md, \texttt{ops/\allowbreak{}start.sh -{}-setup}): no model of Qwen's is loaded; the dashboard, /v1/setup/* and Wren, the setup guide's assistant, alone. \\
 \texttt{-{}-fake-\allowbreak{}engine} & \texttt{off (a switch)} & the e2e: no weights, no GPU, a deterministic CPU token source (server/fake\_engine.py) behind the real handler, auth, ledger, metrics and logs. \\
 \texttt{-{}-fake-\allowbreak{}tps} & \texttt{200} & with -\kern0pt-fake-engine: tokens a second it writes. \\
 \texttt{-{}-fake-\allowbreak{}prefill-\allowbreak{}tps} & \texttt{0} & with -\kern0pt-fake-engine: the prefill rate of a FAKE\_SLOW\_PREFILL prompt (0 = 2,000 tokens a second). \\

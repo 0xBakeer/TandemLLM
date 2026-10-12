@@ -21,7 +21,7 @@ Until an admin password is set, anyone who reaches the port can run the setup, a
 
 ## The model registry
 
-Each model the guide offers is a folder under `models/` with a `model.yaml` ([models/README.md](../models/README.md) lists the fields). `models/qwen3.8-27b/model.yaml` is the one model today. Every number in it says where it comes from:
+Each model the guide offers is a folder under `models/` with a `model.yaml` ([models/README.md](../models/README.md) lists the fields). `models/qwen3.8-27b/model.yaml` and `models/qwen3.8-flash-next/model.yaml` are the two models today. Every number in it says where it comes from:
 
 - The weights and the drafters per profile are the `[memory] load stages` lines of the 0.6.2 runs of 2026-10-10, GiB allocated, one run per EXL3 size. NVFP4's are from the 0.5.0 load of 2026-10-09.
 - The tools' memory is the dashboard's live memory split of the same evening (the reference box on `exl3-6.0` with 4 slots, the narrator, Laya and the shadow reader loaded). The registry's parts add up to that split's 59.34 GiB in use within 0.1 GiB.
@@ -37,9 +37,21 @@ One token of context window costs 106,752 bytes, which is 104.25 KiB or 106.75 k
 
 The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verify graphs, about 7.5 GiB each, only with `QSE_SIDE_GRAPHS=on`; the guide always writes it off, as the reference box runs, and a side slot then costs 1.19 GiB beyond its KV (the load stage `side_slots` took 3.58 GiB for three on 2026-10-10).
 
+### A second model: Flash-Next
+
+`models/qwen3.8-flash-next/model.yaml` gives the models step its second tile. Its five profiles are the EXL3 packs (2.05 to 6.05 bits a weight). Fields the 27B's entry does not use, all optional:
+
+- `hf_revision`: the branch of the repo the pack is on.
+- `max_window`: the largest window the pack holds on the device preset; null when it fits none (6.05). The overview line and the window buttons follow the selected profile (buttons above it are disabled, with the reason), the estimate refuses a longer window (422 `out_of_range`), and the engine refuses one at start.
+- `table`: the pack's n-gram table, its size and policy. Warm adds the table as a fixed part ("n-gram table (page cache, kept warm)"); cold adds its row cache instead.
+- `components_gib`: a tool's memory under this profile, where it differs from the tool's own figure.
+- `memory.per_window_parts`: parts that grow with slot 0's window. Flash-Next's prefill workspace is 42,976 bytes a context token, measured at a 261,549-token prefill on 3.05.
+
+Rows of the measured table and every `max_window` come from runs on the box only.
+
 ## The memory estimate
 
-`server/setup/estimate.py` holds the one formula; `models/estimate-cases.json` pins it with 47 cases, and the dashboard's TypeScript copy must give the same answers.
+`server/setup/estimate.py` holds the one formula; `models/estimate-cases.json` pins it with 58 cases (47 for the 27B, 11 for Flash-Next), and the dashboard's TypeScript copy must give the same answers.
 
 - The parts: the OS and other programs (the device's `reserved_gib`), the weights and the drafters of the profile, the CUDA graphs, the engine's warm-up workspace, the allocator's reserve, 1.19 GiB per side slot, and every tool that is on.
 - The conversations (KV): with the pool, each slot at 32,768 tokens or its window if smaller (`typical_fill_tokens`); without it, every window in full, since it is allocated at load.

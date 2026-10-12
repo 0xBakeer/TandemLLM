@@ -2,6 +2,18 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased: Qwen3.8-Flash-Next
+
+A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through the same server, caches, ops scripts and setup guide as the 27B. The 27B's text does not change: its modules, flags and disk-tier fingerprint are as in 0.7.2, and every switch added here is off for it.
+
+- Five weight profiles, `flashnext-2.05` to `flashnext-6.05`, and a second tile in the setup guide (`models/qwen3.8-flash-next/model.yaml`). `ops/use-profile.sh` switches between the 27B and Flash-Next one engine at a time, and rolls back across models. The fetcher takes a branch of the repo, checks the hub's sha256, and links the n-gram table that the 4.05, 5.05 and 6.05 packs share.
+- Each pack has its largest window in the registry. The guide's window buttons and the estimate follow it, and a start with a longer `--max-len` is refused. 3.05 holds 262,144 tokens with its n-gram table read cold. Warm, the whole table resident took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. 6.05 fits no window on one DGX Spark.
+- Speculation drafts with the pack's own MTP layer, cut by the shared StairCut. The lookup (the request's text, the corpus, the suffix store) joins the same round as one tree. Sampled requests walk the tree with the 27B's sampler. Every greedy and seeded answer equals plain decode.
+- All cache tiers hold Flash-Next's state (grid 4,096).
+- The shadow reader is not started on Flash-Next: its outputs were validated on the 27B's reasoning only. The conductor, the narrator and the residency planner run as on the 27B.
+- `/health` and the dashboard no longer issue CUDA work when they count the engine's state. On Flash-Next, a `/health` poll during a graph capture invalidated the capture and failed the request (seen at the first decode after a 260,800-token prefill).
+- Measured on 3.05 (DGX Spark, one request each): MTP alone at 512 greedy tokens: prose 49, code 85, chat 62, edit 106, copy 102 tok/s. With the lookup: edit 132 and copy 133. Prefill 571 tok/s at 260,800 tokens. Decode at that context 22.5 tok/s, 2.0 tokens a block, with the prompt from the caches. The prefill workspace there is 10.5 GiB.
+
 ## 0.7.2, 2026-10-11
 
 Wren, the setup guide's assistant, answers a question in words again (VIS-91). The text the engine writes does not change: only `server/setup/`, `dashboard/` and the docs changed, and the engine's modules are the same bytes as in 0.7.0, so the disk caches keep their fingerprint.

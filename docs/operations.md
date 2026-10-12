@@ -72,6 +72,20 @@ That includes StairCut's verify prices, `ops/stair-tables-nvfp4.json`, which wer
 - The FP8 profile also reads its own launch table (`QWEN38_FP8_TILES=ops/fp8-tiles.json`) and its router prices (`--price-table ops/prices.json:fp8-plain`).
 - `--fp8-head build` builds the FP8 head at load, without the file.
 
+## Two models: the 27B and Flash-Next
+
+The box serves one model at a time; `ops/active-profile` says which. The 27B's profiles are `nvfp4` and `exl3-<bpw>`; Qwen3.8-Flash-Next's are `flashnext-2.05` to `flashnext-6.05`, one per turboderp EXL3 pack (`ops/profiles/_flashnext.env` and one small file each). The same scripts serve both:
+
+- `ops/use-profile.sh flashnext-3.05` switches as for the 27B: it checks or fetches the pack, stops the engine under the box lock, starts the new profile and runs the smoke; a failed smoke starts the previous profile again, 27B or Flash-Next. The two never run at the same time. A Flash-Next profile names no 27B drafter, draft head or base snapshot (`QSE_ASSETS` is empty), and the MemAvailable a start waits for is the profile's own (`QSE_MEM_NEED_GIB`: 55 to 114 GiB by pack; 80 for the 27B).
+- The pack comes from one branch of `turboderp/Qwen3.8-Flash-Next-exl3` (`QSE_WEIGHTS_REVISION`), pinned to its commit when the download starts. The branch has no checksum list, so `ops/fetch_weights.py` writes the hub's sha256 of every LFS file to `_hub_manifest.json` and checks against it. The 4.05, 5.05 and 6.05 packs share one n-gram table file (same sha256); a pack fetched next to one that has it hard-links the file instead of downloading 39 GB again.
+- `ops/start.sh` passes the profile's `QSE_ENGINE_FLAGS` (`--model <pack> --drafter mtp`) and `--corpus` in place of the 27B's model and drafter flags; with no such key the 27B's command line is the one it was. The server chooses the engine from the checkpoint's config.
+- The page-cache drop after a start (`DROP_PAGE_CACHE=1`) adds the pack (`QSE_PAGE_CACHE_DROP`) and leaves a warm n-gram table in the cache (`QSE_PAGE_CACHE_KEEP`): the engine keeps reading it.
+- The watchdog and the `@reboot` line run `ops/start.sh` of the tree that serves, so a crash or a reboot brings back the active profile, whichever model it is.
+- The status file and page name the profile that is loading (`profile`).
+- A start refuses a `--max-len` above the profile's largest window in its registry entry (`max_window`), naming both numbers, before the minutes of loading.
+
+Each profile sets its engine's ceiling and peak (`MEM_CEILING_GIB`, `MEM_PEAK_GIB`), with the arithmetic in the file: the weights, the runtime, slot 0's KV at 262,144 tokens and the caches, then the prefill workspace on top. The n-gram table is not in them. Warm, it is page cache, which every MemAvailable floor check counts as used (the warm table's resident bytes, read with `cachestat`); cold, it is read past the page cache through a row cache of `QWEN38_FN_TABLE_CACHE_GB` (2) in host memory.
+
 ## Holding the board
 
 Measurements need the board to themselves, and so does anything that loads a second copy of the model. `ops/hold.sh` makes the safe sequence the easy one:

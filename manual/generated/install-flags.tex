@@ -9,6 +9,8 @@
 \texttt{-{}-hf-\allowbreak{}token TOKEN} & a Hugging Face token (or set HF\_TOKEN; a stored 'hf auth login' works too) \\
 \texttt{-{}-no-\allowbreak{}corpus} & skip the lookup corpus (the lookup drafter then copies from the conversation only) \\
 \texttt{-{}-no-\allowbreak{}start} & install and configure, but do not start the engine \\
+\texttt{-{}-setup} & set up in the browser instead: install the code and Wren's model only, then start setup mode (the dashboard's \#/setup page; docs/setup.md); 127.0.0.1 unless -\kern0pt-host says otherwise \\
+\texttt{-{}-force-\allowbreak{}setup} & with -\kern0pt-setup, on a directory that already has a configured engine \\
 \texttt{-{}-systemd} & also install a systemd user unit, tandemllm.service (off by default) \\
 \texttt{-{}-yes,\allowbreak{} -\allowbreak{}y} & non-interactive: answer yes to every question \\
 \texttt{-{}-dry-\allowbreak{}run} & print every step and command, change nothing \\
