@@ -2,7 +2,7 @@
 
 Four-bit weights take a decode step from 26.93~GB to 15.01~GB (\arith), and on this board bytes are time. This chapter covers the formats the engine reads, the quantiser that wrote the published 4-bit set, the gate that decides whether a weight set ships, and what stays at full precision.
 
-The served weights are the published set, \code{0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4} on Hugging Face: every projection in NVFP4, quantised once from Qwen's BF16 release with GPTQ, plus an output head in FP8 (e4m3). The files load over the vendor's FP8 checkpoint, which supplies every tensor the overlays do not replace.
+The served weights are the published set, \code{0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4} on Hugging Face: every projection in NVFP4, quantised once from Qwen's BF16 release with GPTQ, plus an output head in FP8 (e4m3). The files load over the vendor's FP8 checkpoint, which supplies every tensor the overlays do not replace. The second model, Qwen3.8-Flash-Next, is not quantised here: it runs from turboderp's published EXL3 packs, read as they are (Section~\ref{sec:exl3-packs}).
 
 \section{What the checkpoint stores}
 
@@ -100,6 +100,37 @@ Three serving profiles ship (Table~\ref{tab:profiles-env}). The FP8 profile read
 
 Bytes and accepted tokens partly substitute for each other. At one token a step every byte saved is time saved. On a round that commits several tokens the weight read is already spread over them, so the gain from fewer bytes shrinks as acceptance grows.
 
+\section{Flash-Next's EXL3 packs}\label{sec:exl3-packs}\index{EXL3 pack}\index{EXL3}
+
+turboderp publishes Qwen3.8-Flash-Next in five sizes, one branch each of \code{turboderp/Qwen3.8-Flash-Next-exl3}, and the engine reads them as they are: no quantiser of ours runs on them and no format is added. The branch name says what is inside. \code{3.05bpw_h5_ng5} is 3.05 bits a weight on average, the output head at 5 bits and the n-gram table at 5 bits a value. Table~\ref{tab:fn-packs} lists the five with the window each fits. A pack is lossy against the BF16 release by design, and speculation is lossless against the pack that is served (Section~\ref{sec:fn-exact}).
+
+\code{engine/models/flashnext/pack.py} reads every shard header and sorts each tensor into one kind (Table~\ref{tab:exl3-kinds}). An EXL3 projection is four tensors: \code{X.trellis} holds the codes at $K$ bits a weight, \code{X.suh} and \code{X.svh} scale and sign the rotated input and output sides, and \code{X.mul1} is the codebook's multiplier. $K$ is read from each tensor's own shape. On the 3.05 pack the audit counted 303,121 tensors, every routed expert at $K=3$ and the dense projections and the head at $K=5$. By those headers a plain decode token reads about 4.23~GB in all at 1k of context (\arith).
+
+\begin{table}[htbp]
+\centering\small
+\caption{What a Flash-Next pack holds, and how the engine holds it.}\label{tab:exl3-kinds}
+\begin{tabularx}{\linewidth}{@{}L{.1\linewidth}YL{.32\linewidth}@{}}
+\toprule
+\hd{kind} & \hd{what} & \hd{on the device} \\
+\midrule
+\code{expert} & the routed experts' projections, 98~\% of the bytes & EXL3, one image a layer \\
+\code{exl3} & every other coded projection: GDN, attention, the indexer, the shared expert, the MTP layer's, the head & EXL3 \\
+\code{mixer} & the hyper-connection mixers & int8 rows with an fp32 scale a row (fp16 in the pack) \\
+\code{plain} & norms, the router, small projections, conv weights, the embedding & as stored \\
+\code{table} & the n-gram table, its own file & never; read a row at a time \\
+\code{vision} & the vision tower & not loaded \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\code{tools/fn_exl3_xcheck.py} holds our reading against exllamav3's own on the 3.05 pack: the trellis decode equal bit for bit on 16 tensors, the dequantised weight within 0.36~\% of the largest weight (our BF16 rounding of the fp32 rotations), and 4,096 n-gram rows equal bit for bit (\measured).
+
+The mixers are read on every token, so the engine keeps each row as int8 with one fp32 scale (\code{QWEN38_FN_MIX}, \code{int8}); a weight is off by at most the row's largest weight over 254. Against the pack's fp16 mixers on the same kernels, at 1k of context on 3.05, int8 gave a KL of 0.047 on prose, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 and changed the continuation at its first token, so they are not used (\measured, \code{tools/fn_mix_quality.py}). The prefill reads exact fp32 copies of the mixers, the router and the small projections (\code{QWEN38_FN_PREFILL_MM}); with fp16 copies it failed its agreement gate on a 3k-token code prompt.
+
+The n-gram table codes each 160-value row as a ring of trellis codes at 4 to 6 bits a value, with one fp16 scale a row. It is 32.6~GB in the 3.05 pack and never sits in device memory: each token reads 16 rows and decodes them on the device. A profile reads it warm, through the page cache, or cold, with \code{O_DIRECT} through a 2~GiB row cache (\code{QWEN38_FN_TABLE}); Chapter~\ref{ch:flashnext} says which pack uses which and why.
+
+Nobody has measured a pack's quality against the BF16 model. The BF16 release is 360~GB and does not fit the board, so the registry's quality fields are empty. What is measured is our arithmetic against the reference on the same pack: all 48 layers equal the official \code{transformers} layer within BF16 noise (relative error 0.19 to 1.49~\%).
+
 \section{Knobs}
 
 \begin{table}[H]
@@ -116,6 +147,8 @@ Bytes and accepted tokens partly substitute for each other. At one token a step 
 \code{tools/calib_corpus.py --out DIR --eval-chars} & the calibration text and the wider held-out texts \\
 \code{tools/quant_sensitivity.py measure}, \code{mix --keep-gb} & per-piece sensitivity, and a mix that keeps the most sensitive pieces in FP8 \\
 \code{tools/quality_gate.py --plan plan.json} & weight sets against a reference checkpoint \\
+\code{QWEN38_FN_MIX}, \code{QWEN38_FN_TABLE}, \code{QWEN38_FN_PREFILL_MM} & Flash-Next: the mixers' form, the n-gram table's policy, the prefill's weights \\
+\code{tools/fn_exl3_xcheck.py}, \code{tools/fn_mix_quality.py} & Flash-Next: our reading against exllamav3's; a mixer form against the pack's \\
 \bottomrule
 \end{tabularx}
 \end{table}
