@@ -64,8 +64,35 @@ setup guide's sign-in card. A write with `Sec-Fetch-Site: cross-site` is refused
   days; text deltas in the event log are dropped after 7 days (the messages keep their text).
 - chatd's log has ids, counts and times, never message text.
 
-## Not yet (phase 2)
+## The sandbox (phase 2)
 
-Tools, permissions, the sandbox, terminals, files, diffs, MCP servers, prompts and presets: their
-routes answer `not_available` (501) or `sandbox_unavailable` (503) and their lists are empty, so the
-tab shows them as unavailable. Compaction is phase 2 too.
+Each chat's tools run in its own container, `tandem-chat-<id>` from the image `tandem-sandbox:1`
+(build it once: `bash ops/sandbox/build.sh`). chatd speaks the Docker Engine API over a unix socket,
+`QSE_SANDBOX_SOCKET` (default `/var/run/docker.sock`); Podman serves the same API, and
+`ops/sandbox/install.sh` (root once) sets up rootless Podman under the user `tandem-sbx` with its
+nftables rules. Every container is locked down whatever the runtime: uid 1000, no capabilities, a
+read-only root, `--network none`, 4 GiB, 4 CPUs, 512 pids, no GPU. Its internet goes through
+chatd's per-chat proxy, which refuses the LAN and this box (`sandbox_network` per chat: on or off).
+
+The engine comes first. A sandbox starts only when MemAvailable minus its limit stays at 19 GiB or
+more; the guard stops the least recently used idle sandbox under 15 GiB and kills them all under
+12 GiB; an idle sandbox stops after 30 minutes. The files stay. Knobs:
+
+- `QSE_SANDBOX_MIN_START_GB` (0): MemAvailable needed to start one (30 while other work runs memory
+  fits on the box)
+- `QSE_SANDBOX_MAX_RUNNING` (4) and `QSE_SANDBOX_TOTAL_GB` (16): how many run at once, and their
+  limits' sum
+- `QSE_SANDBOX_IMAGE` (`tandem-sandbox:1`)
+
+Export them before `ops/chatd.sh start`. Without a runtime, starting a sandbox answers 503
+`sandbox_unavailable`, bash, render_page and the terminals are not offered, and the file tools work
+on the chat's workspace folder.
+
+MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are called from chatd
+through the same egress rules; their secrets are sealed in the store and never come back in an
+answer.
+
+## Not yet
+
+Importing Open WebUI tools and uploading a skill zip answer `not_available` (501). Uploads of
+attachments are phase 1's.

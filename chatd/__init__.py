@@ -24,9 +24,9 @@ key is QSE_CHAT_FORWARD_KEY, else the file `<data>/forward.key` that chatd makes
 (mode 600) and the engine server reads.
 
 WHAT IT NEVER DOES. It never imports the engine and never logs message text: its log lines carry
-ids, counts and times (the rule SRV-30 set for the engine). Tools, the sandbox, terminals and MCP
-servers are phase 2: their routes answer `not_available` (or `sandbox_unavailable`) as the contract
-says, and the lists they would fill are empty.
+ids, counts and times (the rule SRV-30 set for the engine). The agent loop, the tools, the
+per-chat sandbox, terminals, MCP servers and skills are phase 2 (chatd/agent.py, sandbox.py,
+terminals.py, mcp.py, skills.py; docs/chat.md).
 """
 
 __version__ = "0.1.0"

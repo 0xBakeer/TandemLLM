@@ -8,9 +8,11 @@ The forward adds what only the engine server knows: `X-Tandem-Password-Set` and
 `X-Tandem-Signed-In` (the capabilities' `session`), and passes the browser's User-Agent, from which
 the snapshot names the device a run was started on.
 
-Phase 2 routes (tools, packages, MCP, prompts, presets, permissions, compaction, the sandbox, its
-files and terminals, artifacts) answer as the contract says for a box without them: the lists are
-empty, a write is 501 `not_available`, and every sandbox route is 503 `sandbox_unavailable`.
+Phase 2 routes: tools, packages, MCP, prompts, presets, permissions, compaction, the sandbox, its
+files and terminals, artifacts. On a box with no sandbox runtime, starting a sandbox answers 503
+`sandbox_unavailable` and bash, render_page and the terminals are not offered; the file routes work
+on the chat's workspace folder. Open WebUI tool import and skill uploads answer 501
+`not_available`.
 """
 
 from __future__ import annotations
