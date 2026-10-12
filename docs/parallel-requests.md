@@ -156,13 +156,27 @@ Beside other requests, a request writes what it writes alone up to a near tie. A
 
 ## On Flash-Next
 
-The same flags work on Flash-Next since ENG-241, and its profiles keep them off (`QSE_PARALLEL=1`, the KV pool off).
+The same flags work on Flash-Next since ENG-241, and its profiles turn them on (`QSE_PARALLEL=3`, `QSE_KV_POOL=on` in `ops/profiles/_flashnext.env`, 1d4af64d). On 3.05, on fresh servers, greedy: three requests arriving together took 27.18 s against 27.03 s one after the other, the same total throughput. The first tokens came at 2.2 to 6.1 s instead of up to about 20 s for the last of three, and every answer equalled its single-stream answer. One request alone decoded at 45.78 tok/s with three slots and the pool, against 45.79 with one slot, with the same text. At the profile's default window (262,144) with two 65,536-token side slots, a 260,800-token prompt kept MemAvailable at 31.6 GiB or more (the floor is 15). So the slots buy time to first token for the second and third request, not throughput.
+
+The limits, the serve.env defaults unless the profile sets them:
+
+| setting | value |
+|-|-|
+| sequence slots (`QSE_PARALLEL`) | 3 |
+| side window (`QSE_SIDE_MAX_LEN`) | 65,536, capped by `MAX_LEN` (40,960 on the reference box's :8000) |
+| admission floor (`QSE_PARALLEL_FLOOR_GB`) | 15 GiB |
+| joint verify | up to 32 rows |
+| turn quantum, batch timeout | 50 ms, 2 ms |
+| KV pool | on; hard floor 10 GiB (`QSE_KV_HARD_FLOOR_GB`), margin 256 rows, page 2 MiB |
+| memory ceiling, peak, reserve slack | 66 GiB, 77 GiB, 2 GiB |
+
+A side slot took 0.20 to 0.22 GiB allocated (0.38 to 0.40 GiB of MemAvailable) at load. Not built yet: CUDA graphs for the joint pass, and commits and drafts in one turn a round.
 
 - KV pool (`--kv-pool on`): the K, V and indexer-key buffers of the 12 attention layers and of the MTP layer are reserved as addresses and committed as rows are written. On the server it committed 0.13, 0.91 and 4.01 GiB at 1k, 32k and 140k tokens of a 7.31 GiB window, and the answers equalled plain decode.
 - Side slots: `side_slot` builds a slot over the same engine, with its own state, graphs, MTP head and drafter (StairCut from the same prices, the lookup over slot 0's corpus).
 - Joint verify: `verify_multi` runs several states' blocks in one eager pass. The projections, the experts and the head run once over all rows; the norms, the mixers, the GDN recurrence and attention run per state. In one process the joint pass equalled each state's lone verify bit for bit (3 states, 12 rounds of chains and trees, 15 to 18 rows).
 
-Measured on 3.05 with `--parallel 3 --kv-pool on` (2026-10-12, one run): three different 2,048-token requests of 384 new tokens each decoded at once, each answer equal to its single-stream answer. The server reported 3 decoding at once and ran 150 joint rounds, 106 of three and 44 of two. Together the three finished in 23.6 s by the wall clock, prefill included. Alone they took 10.2, 7.6 and 8.7 s, so one after the other 26.5 s. Beside each other each decoded at 19 to 26 tok/s, against 47.8, 67.4 and 55.3 tok/s alone. Whether parallel slots pay on Flash-Next is not settled by one run, and the joint pass has no timing of its own yet.
+Measured on 3.05 with `--parallel 3 --kv-pool on` (2026-10-12, one run): three different 2,048-token requests of 384 new tokens each decoded at once, each answer equal to its single-stream answer. The server reported 3 decoding at once and ran 150 joint rounds, 106 of three and 44 of two. Together the three finished in 23.6 s by the wall clock, prefill included. Alone they took 10.2, 7.6 and 8.7 s, so one after the other 26.5 s. Beside each other each decoded at 19 to 26 tok/s, against 47.8, 67.4 and 55.3 tok/s alone. That first run predates the like-for-like check above, which timed both orders on fresh servers.
 
 ## Seeing it
 

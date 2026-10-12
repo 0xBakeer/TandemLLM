@@ -10,6 +10,10 @@
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Parent} & in, engine & the request a call of TandemLLM to itself serves; the row becomes client kind internal \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Regenerate} & in, engine & 1 serves the request as a regenerate (sampled, a fresh seed); 0 turns the detection off for it \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Images-\allowbreak{}Left-\allowbreak{}Out} & out, engine & how many earlier images were left out of the prompt \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Forward} & out, engine & to chatd on a \texttt{/\allowbreak{}v1/\allowbreak{}chat-\allowbreak{}app} request: the forward key, the only proof chatd accepts \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Principal} & out, engine & to chatd: who the request is for (owner) \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Password-\allowbreak{}Set} & out, engine & to chatd: 1 when an admin password is set \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Signed-\allowbreak{}In} & out, engine & to chatd: 1 when the request passed the dashboard's rule \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Wait} & out, engine & memory, on a response that waited for memory before its prefill; its stream says so every 15 s \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Backend} & out, proxy & the id of the backend that answered a relayed request \\
 \texttt{X-\allowbreak{}Engine-\allowbreak{}Stop} & out, engine & pattern-stop(\textless{}label\textgreater{}) on a response without a stream that a stop pattern ended \\

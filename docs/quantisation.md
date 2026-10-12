@@ -185,7 +185,7 @@ The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha2
 |-|-|-|
 | `expert` | the routed experts' gate, up and down projections, 98 % of the bytes | EXL3, one image a layer, through the MoE kernels |
 | `exl3` | every other coded projection: GDN, attention, the sparse-attention indexer, the shared expert, the MTP layer's projections, the head | EXL3 |
-| `mixer` | the hyper-connection mixers' projections | fp16 in the pack, int8 rows with an fp32 scale a row on the device |
+| `mixer` | the hyper-connection mixers' projections | fp16 in the pack; on the device int8 with one fp32 scale for each group of 128 weights |
 | `plain` | norms, the router, `in_proj_a` and `in_proj_b`, the n-gram projections, conv weights, the embedding | as stored |
 | `table` | the n-gram table, its own file | never on the device; read a row at a time |
 | `vision` | the vision tower | not loaded |
@@ -196,9 +196,9 @@ An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bit
 
 ### The mixers as int8
 
-The pack stores the mixers in fp16, and every token reads them. The engine keeps each row as int8 with one fp32 scale, so a weight is off by at most the row's largest weight over 254, plus fp32 rounding. `QWEN38_FN_MIX=fp16` keeps the pack's values instead.
+The pack stores the mixers in fp16, and every token reads them. The engine keeps them as int8 with one fp32 scale for each group of 128 weights of a row (gcd(128, K): 128 for the down and inject weights, 64 for the up weights). A weight is then off by at most its group's largest weight over 254, plus fp32 rounding. The kernels sum each 16-weight chunk's products and add them times the chunk's group scale, and the prefill dequantises with the same scales. `QWEN38_FN_MIX=int8rows` keeps one scale a row, the form before ENG-221, for an A/B; `fp16` keeps the pack's values.
 
-`tools/fn_mix_quality.py` measures what that costs against the pack's fp16 mixers, on the same kernels. On 3.05 with 8,192 tokens of prose, int8 gave a KL of 0.047, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 (0.35 in groups of 128) and changed the continuation at its first token, so the mixers stay int8. The code prompt of the same run turned the other way: int8 gave 0.267 (the top token agreed at 90.9 % of positions) against a noise of 0.0038, and int4 in groups of 32 gave 0.040. Nobody has looked into that row yet, and it needs a second run before it decides anything.
+`tools/fn_mix_quality.py` measures what that costs against the pack's fp16 mixers, on the same kernels. On 3.05 with 8,192 tokens, the groups gave a KL of 0.0031 on code and 0.0188 on prose. The arithmetic noise between the reference forward and the kernels is 0.0038 and 0.0255 on the same prompts, so both are inside it. One scale a row gave 0.267 on code and 0.047 on prose: a row whose largest weight is 10 to 420 times its median left its small weights coarse. Int4 gave 0.38 on prose (0.35 in groups of 128) and changed the continuation at its first token, so the mixers stay int8. The groups cost no decode speed (one run each at 1k, rows against groups: prose 41.91 and 41.76, code 42.64 and 43.24, chat 42.24 and 42.21 tok/s) and 0.02 GiB of device memory. Speculation stays lossless with them, and the load-time self-check passes.
 
 ### The n-gram table
 
@@ -224,7 +224,7 @@ Nobody has measured a pack's quality against the BF16 model yet. The BF16 releas
 | knob | what |
 |-|-|
 | `ops/use-profile.sh flashnext-<bpw>` | switch to a pack; fetches the branch when it is missing |
-| `QWEN38_FN_MIX` | `int8` (the default): the mixers as int8 rows; `fp16`: the pack's values |
+| `QWEN38_FN_MIX` | `int8` (the default): int8 with an fp32 scale a group of 128 weights; `int8rows`: one scale a row; `fp16`: the pack's values |
 | `QWEN38_FN_TABLE`, `QWEN38_FN_TABLE_CACHE_GB` | the n-gram table's policy (`warm` or `cold`) and the cold row cache in GiB |
 | `QWEN38_FN_PREFILL_MM` | the prefill's weights for the mixers, router and small projections: `fp32` (the default) |
 | `tools/fn_exl3_xcheck.py` | our reading of a pack against exllamav3's |

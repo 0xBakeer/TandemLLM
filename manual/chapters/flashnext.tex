@@ -159,7 +159,26 @@ Each profile sets its engine's ceiling and peak with the arithmetic in the file:
 
 Behind the server everything is the 27B's code: every route, reasoning formats and budgets, tool calls and grammar masks, penalties, logprobs, seeds, stops, the live view and the usage rows. The conductor and its roles run in front of it; the shadow reader does not, because its outputs were validated on the 27B's reasoning only, and the status says so. The dashboard's system view names the pack and its branch, shows \code{max_len} against the pack's largest window, and reports the table under its policy. Images are not wired to Flash-Next (VIS-97).
 
-Parallel requests work on Flash-Next without changing any answer, and its profiles keep them off. With \code{--parallel 3 --kv-pool on}, three different 2,048-token requests of 384 new tokens decoded at once, each answer equal to its single-stream answer, in 150 joint rounds. Together they finished in 23.6~s by the wall clock, prefill included; alone they took 10.2, 7.6 and 8.7~s, so 26.5~s one after the other. Beside each other each decoded at 19 to 26~tok/s, against 47.8, 67.4 and 55.3 alone (\measured, one run). One run does not settle whether parallel slots pay on Flash-Next.
+Parallel requests work on Flash-Next without changing any answer, and its profiles turn them on: three slots over one engine with the KV pool (\code{QSE_PARALLEL=3}, \code{QSE_KV_POOL=on}). On fresh servers three requests arriving together took 27.18~s against 27.03~s one after the other, the same total throughput, and the first tokens came at 2.2 to 6.1~s instead of up to about 20~s for the last of three. One request alone decodes at 45.78~tok/s with three slots, 45.79 with one (\measured). At a 262,144-token window with two 65,536-token side slots, a 260,800-token prompt kept MemAvailable at 31.6~GiB or more. Table~\ref{tab:fn-parallel} lists the limits.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+setting & value \\
+\midrule
+sequence slots (\code{QSE_PARALLEL}) & 3 \\
+side window (\code{QSE_SIDE_MAX_LEN}) & 65,536, capped by \code{MAX_LEN} \\
+admission floor (\code{QSE_PARALLEL_FLOOR_GB}) & 15~GiB \\
+joint verify & up to 32 rows \\
+turn quantum, batch timeout & 50~ms, 2~ms \\
+KV pool & hard floor 10~GiB, margin 256 rows, page 2~MiB \\
+memory ceiling, peak, reserve slack & 66, 77, 2~GiB \\
+\bottomrule
+\end{tabular}
+\caption[Flash-Next's parallel limits]{Flash-Next's parallel limits in its profiles (ENG-241). A side slot took 0.20 to 0.22~GiB allocated at load.}
+\label{tab:fn-parallel}
+\end{table}
 
 \section{What is not measured}
 

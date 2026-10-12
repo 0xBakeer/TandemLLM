@@ -115,7 +115,7 @@ turboderp publishes Qwen3.8-Flash-Next in five sizes, one branch each of \code{t
 \midrule
 \code{expert} & the routed experts' projections, 98~\% of the bytes & EXL3, one image a layer \\
 \code{exl3} & every other coded projection: GDN, attention, the indexer, the shared expert, the MTP layer's, the head & EXL3 \\
-\code{mixer} & the hyper-connection mixers & int8 rows with an fp32 scale a row (fp16 in the pack) \\
+\code{mixer} & the hyper-connection mixers & int8 with an fp32 scale a group of 128 weights (fp16 in the pack) \\
 \code{plain} & norms, the router, small projections, conv weights, the embedding & as stored \\
 \code{table} & the n-gram table, its own file & never; read a row at a time \\
 \code{vision} & the vision tower & not loaded \\
@@ -125,7 +125,7 @@ turboderp publishes Qwen3.8-Flash-Next in five sizes, one branch each of \code{t
 
 \code{tools/fn_exl3_xcheck.py} holds our reading against exllamav3's own on the 3.05 pack: the trellis decode equal bit for bit on 16 tensors, the dequantised weight within 0.36~\% of the largest weight (our BF16 rounding of the fp32 rotations), and 4,096 n-gram rows equal bit for bit (\measured).
 
-The mixers are read on every token, so the engine keeps each row as int8 with one fp32 scale (\code{QWEN38_FN_MIX}, \code{int8}); a weight is off by at most the row's largest weight over 254. Against the pack's fp16 mixers on the same kernels, with 8,192 tokens of prose on 3.05, int8 gave a KL of 0.047, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 and changed the continuation at its first token, so the mixers stay int8 (\measured, \code{tools/fn_mix_quality.py}). The code prompt of the same run turned the other way, int8 0.267 against int4's 0.040 in groups of 32, beside a noise of 0.0038; that row is not looked into yet and needs a second run. The prefill reads exact fp32 copies of the mixers, the router and the small projections (\code{QWEN38_FN_PREFILL_MM}); with fp16 copies it failed its agreement gate on a 3k-token code prompt.
+The mixers are read on every token, so the engine keeps them as int8 with one fp32 scale for each group of 128 weights of a row (\code{QWEN38_FN_MIX}, \code{int8}; \code{int8rows} is one scale a row, \code{fp16} the pack's values); a weight is off by at most its group's largest weight over 254. Against the pack's fp16 mixers on the same kernels, with 8,192 tokens on 3.05, the groups gave a KL of 0.0031 on code and 0.0188 on prose, inside the arithmetic noise between the reference forward and the kernels (0.0038 and 0.0255). One scale a row gave 0.267 on code and 0.047 on prose, because rows whose largest weight is 10 to 420 times their median left the small weights coarse. Int4 gave 0.38 on prose and changed the continuation at its first token, so the mixers stay int8 (\measured, \code{tools/fn_mix_quality.py}). The groups cost no decode speed and 0.02~GiB. The prefill reads exact fp32 copies of the mixers, the router and the small projections (\code{QWEN38_FN_PREFILL_MM}); with fp16 copies it failed its agreement gate on a 3k-token code prompt.
 
 The n-gram table codes each 160-value row as a ring of trellis codes at 4 to 6 bits a value, with one fp16 scale a row. It is 32.6~GB in the 3.05 pack and never sits in device memory: each token reads 16 rows and decodes them on the device. A profile reads it warm, through the page cache, or cold, with \code{O_DIRECT} through a 2~GiB row cache (\code{QWEN38_FN_TABLE}); Chapter~\ref{ch:flashnext} says which pack uses which and why.
 

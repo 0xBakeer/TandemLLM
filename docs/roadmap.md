@@ -9,7 +9,7 @@ Qwen3.8-Flash-Next is served from turboderp's EXL3 packs through the same server
 - Vision. Flash-Next has its own vision tower (27 layers, EXL3), and the engine does not load it yet (VIS-97).
 - The 5.05 pack codes its experts at 5 and 7 bits; the MoE kernels take 2 to 6 and 8, so it does not load until a 7-bit expert kernel exists.
 - Quality against the BF16 model, per pack. The BF16 release is 360 GB and does not fit the box, so the reference run that gives KL a pack is not done.
-- Parallel requests run on it without changing any answer; whether they pay rests on one run of three ([parallel-requests.md](parallel-requests.md#on-flash-next)).
+- Parallel requests are on in its profiles (three slots). Three requests together take as long as one after the other and only the later first tokens come sooner; CUDA graphs for the joint pass are the next step ([parallel-requests.md](parallel-requests.md#on-flash-next)).
 
 Later, other EXL3 models that fit one box, Qwen3.6-35B-A3B among them.
 
