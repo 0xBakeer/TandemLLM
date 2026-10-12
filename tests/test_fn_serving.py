@@ -326,8 +326,11 @@ def test_walk_and_kv_length():
     # a new sequence in place: the length and the recurrent sections, never the rows (a guest runs from
     # row 0 over a resident conversation whose rows its stash may not hold, engine/cache.py)
     assert fn.resets == 0 and s.st.length == 0 and float(s.st.k[3][0, 1, 0]) == 5.0
+    s.st.S[0].fill_(1.0)
     s.reset()
-    assert fn.resets == 1
+    # ENG-157: a reset is a new sequence too (the cache's cold prefill of a guest calls it), as the
+    # 27B's: the recurrent sections cleared, the rows kept
+    assert fn.resets == 0 and float(s.st.S[0].abs().max()) == 0.0 and float(s.st.k[3][0, 1, 0]) == 5.0
     try:
         s.forward(torch.tensor([1]), start=5)
         raise AssertionError("a forward off the state's length must be refused")

@@ -317,17 +317,17 @@ class FlashNextServing:
         return False                        # no layer-major prefill window (engine/cache.py)
 
     def reset(self) -> None:
-        self._chain = None
-        self.picks = None
-        self.fn.reset(self.st)
+        """A new sequence (`restart`), as the 27B's reset: its KV rows stay."""
+        self.restart()
 
     def restart(self) -> None:
         """A new sequence in the same buffers: the recurrent sections cleared and the length 0, the KV,
         indexer-key and pooled-key rows left in place (nothing reads a row past the length). The
         resident prefix keeps a conversation's rows there while a short request runs from row 0 (a
-        guest, engine/cache.py); `reset` zeroed every row, and the rows the guest's stash did not hold
-        came back as zeros (2026-10-12: a 6,000-token prompt after a 1,000-token guest answered
-        differently from a cold prefill)."""
+        guest, engine/cache.py, whose cold prefill calls `reset`); zeroing every row there lost the
+        rows above the guest's stash (ENG-157, 2026-10-12: rows 2,144-4,095 of a 40,000-token
+        conversation came back as zeros, and a 6,000-token prompt resumed at 4,096 over them answered
+        differently from a cold prefill, 67 of 75 sections wrong)."""
         self._chain = None
         self.picks = None
         fn = self.fn

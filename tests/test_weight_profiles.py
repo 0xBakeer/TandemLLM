@@ -68,8 +68,9 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QWEN38_FN_TABLE"] == table and e["QSE_PAGE_CACHE_DROP"] == d, e
         assert e["QSE_PAGE_CACHE_KEEP"] == ("ngram_embedding.safetensors" if table == "warm" else ""), e
         assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "off", e
-        assert e["QWEN38_FN_LOOKUP"] == "1" and e["RESIDENT_STASH_GB"] == "0", e
-        for k in ("PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG", "MAX_LEN"):
+        assert e["QWEN38_FN_LOOKUP"] == "1", e
+        # the guest stash as serve.env sets it (ENG-157 fixed: it was off on Flash-Next)
+        for k in ("PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG", "MAX_LEN", "RESIDENT_STASH_GB"):
             assert e[k] == base[k], k
     # a 27B profile sets none of them: start.sh's 27B flags and use-profile.sh's 27B assets stay
     e = _env("exl3-4.5")

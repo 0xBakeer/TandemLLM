@@ -47,6 +47,48 @@ def state_of(eng, n):
     return secs, views
 
 
+def diff_sections(a, b) -> list:
+    return [k for k in a if not torch.equal(a[k], b[k])]
+
+
+def run(eng, tok, pack, A, B, C, cold, cs, cv, steps, guest=True, label=""):
+    """A, then (B a guest with `steps` decode steps), then C through the resident prefix; C's logits,
+    sections and views against the cold run's, and the anchor C resumes from against what A left."""
+    res = cache.ResidentPrefix(int(2.5 * GIB), 4096, stash_bytes=GIB, guest_max=8192, pin_bytes=GIB // 4,
+                               park_bytes=GIB // 4, end=True)
+    store = cache.StateStore(2 * GIB, chunk=4096, max_entry_bytes=GIB, per_prefill=1)
+    kw = dict(chunk=4096, resident=res, store=store, checkpoint=True)
+    eng.reset()
+    lg = cache.prefill(eng, None, A, "cuda", reach=len(A) + 120, **kw)[0]
+    decode(eng, lg, len(A), 8)
+    kept = {b: tuple(t.clone() for t in buf) for b, buf in res.anchors.items()}
+    if guest:
+        lg = cache.prefill(eng, None, B, "cuda", reach=len(B) + 120, **kw)[0]
+        print(f"[guest] {label} B a guest: stash {res._stash is not None and (res._stash['start'], res._stash['rows'])}",
+              flush=True)
+        decode(eng, lg, len(B), steps)
+        moved = [b for b in kept if b in res.anchors
+                 and any(not torch.equal(x, y) for x, y in zip(kept[b], res.anchors[b]))]
+        print(f"[guest] {label} anchors changed by the guest: {moved or 'none'} of {sorted(kept)}", flush=True)
+    info = {}
+    warm = cache.prefill(eng, None, C, "cuda", reach=len(C) + 120, info=info, **kw)
+    lw, reused = warm[0], warm[1]
+    ws, wv = state_of(eng, len(C))
+    print(f"[guest] {label} C resumed at {reused} ({info.get('kind')}); logits max diff "
+          f"{float((lw - cold).abs().max()):.4g}, argmax same {int(lw.argmax()) == int(cold.argmax())}", flush=True)
+    bad = diff_sections(cs, ws)
+    print(f"[guest] {label} sections differing: {len(bad)} of {len(cs)} {bad[:12]}", flush=True)
+    for k in cv:
+        d = (cv[k].float() - wv[k].float()).abs()
+        if d.max() > 0:
+            ax = 1 if k.startswith(("k.", "v.")) else 0
+            rows = d.amax(dim=tuple(i for i in range(d.dim()) if i != ax)).nonzero().view(-1)
+            print(f"[guest] {label} view {k}: rows {int(rows[0])}..{int(rows[-1])} differ ({rows.numel()} rows)",
+                  flush=True)
+            break
+    return res, reused
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pack", required=True)
@@ -61,31 +103,23 @@ def main() -> None:
     eng.reset()
     cold = cache.prefill(eng, None, C, "cuda", chunk=4096)[0].clone()
     cs, cv = state_of(eng, len(C))
-    res = cache.ResidentPrefix(int(2.5 * GIB), 4096, stash_bytes=GIB, guest_max=8192, pin_bytes=GIB // 4,
-                               park_bytes=GIB // 4, end=True)
-    store = cache.StateStore(2 * GIB, chunk=4096, max_entry_bytes=GIB, per_prefill=1)
-    kw = dict(chunk=4096, resident=res, store=store, checkpoint=True)
-    eng.reset()
-    lg = cache.prefill(eng, None, A, "cuda", reach=len(A) + 120, **kw)[0]
-    decode(eng, lg, len(A), 8)
-    lg = cache.prefill(eng, None, B, "cuda", reach=len(B) + 120, **kw)[0]
-    print(f"[guest] B a guest: stash {res._stash is not None and (res._stash['start'], res._stash['rows'])}", flush=True)
-    decode(eng, lg, len(B), a.steps)
-    info = {}
-    warm = cache.prefill(eng, None, C, "cuda", reach=len(C) + 120, info=info, **kw)
-    lw, reused = warm[0], warm[1]
-    ws, wv = state_of(eng, len(C))
-    print(f"[guest] C resumed at {reused} ({info.get('kind')}); logits max diff {float((lw - cold).abs().max()):.4g}, "
-          f"argmax same {int(lw.argmax()) == int(cold.argmax())}", flush=True)
-    for k in cs:
-        if not torch.equal(cs[k], ws[k]):
-            print(f"[guest] section {k} differs", flush=True)
-    for k in cv:
-        d = (cv[k].float() - wv[k].float()).abs()
-        if d.max() > 0:
-            ax = 1 if k.startswith(("k.", "v.")) else 0
-            rows = d.amax(dim=tuple(i for i in range(d.dim()) if i != ax)).nonzero().view(-1)
-            print(f"[guest] view {k}: rows {int(rows[0])}..{int(rows[-1])} differ ({rows.numel()} rows)", flush=True)
+    # the state a cold prefill has at each anchor C can resume from
+    at = {}
+    for b in (4096,):
+        eng.reset()
+        cache.prefill(eng, None, C[:b], "cuda", chunk=4096)
+        at[b] = {k: v.clone() for k, v in eng.cache_state().sections().items()}
+    run(eng, tok, pack, A, B, C, cold, cs, cv, a.steps, guest=False, label="no-guest")
+    run(eng, tok, pack, A, B, C, cold, cs, cv, 0, label="guest-0")
+    res, reused = run(eng, tok, pack, A, B, C, cold, cs, cv, a.steps, label=f"guest-{a.steps}")
+    if reused in at:
+        # the anchor's state against the cold prefill's at the same length
+        names = list(eng.cache_state().sections())
+        anc = res.anchors.get(reused)
+        if anc is not None:
+            bad = [n for n, x in zip(names, anc) if not torch.equal(x, at[reused][n])]
+            print(f"[guest] anchor {reused} against a cold prefill to {reused}: {len(bad)} sections differ {bad[:8]}",
+                  flush=True)
 
 
 if __name__ == "__main__":
