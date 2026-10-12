@@ -401,8 +401,25 @@ export interface McpServer {
   schema_tokens?: number;
   enabled_global?: boolean;
   updated_at: string;
+  /** its prompts (slash commands) and resources (attachments), plan note Chat 3 */
+  prompts?: { name: string; description: string; arguments: { name: string; required: boolean }[] }[];
+  resources?: { uri: string; name: string; mime: string | null }[];
 }
-export type McpServerDraft = Omit<McpServer, 'id' | 'status' | 'error' | 'tools' | 'updated_at'>;
+export type McpServerDraft = Omit<McpServer, 'id' | 'status' | 'error' | 'tools' | 'updated_at' | 'prompts' | 'resources'>;
+
+/** the text after an MCP prompt's command as its arguments: `key=value` pairs, the rest to the
+ *  first argument */
+export function promptArgs(text: string, names: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const rest: string[] = [];
+  for (const w of text.split(/\s+/).filter(Boolean)) {
+    const m = /^([A-Za-z_][\w-]*)=(.*)$/.exec(w);
+    if (m && names.includes(m[1])) out[m[1]] = m[2];
+    else rest.push(w);
+  }
+  if (rest.length && names.length && !(names[0] in out)) out[names[0]] = rest.join(' ');
+  return out;
+}
 
 export interface Prompt {
   id: string;
@@ -430,7 +447,8 @@ export interface SlashCommand {
   description: string;
   /** a prompt's id, when the command inserts a saved prompt */
   prompt_id?: string;
-  mcp_prompt?: { server_id: string; name: string };
+  /** an MCP server's prompt: the text typed after the command fills its arguments */
+  mcp_prompt?: { server_id: string; name: string; arguments?: { name: string; required: boolean }[] };
 }
 
 export interface ModelInfo {

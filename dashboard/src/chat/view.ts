@@ -77,6 +77,7 @@ export class QseChat extends LightElement {
   @state() private now = Date.now();
   @state() private tools: ToolInfo[] = [];
   @state() private packages: PackageInfo[] = [];
+  @state() private resources: { server: string; serverName: string; uri: string; name: string }[] = [];
   @state() private prompts: Prompt[] = [];
   @state() private unread = new Set<string>();
   // chrome
@@ -200,6 +201,7 @@ export class QseChat extends LightElement {
     const b = this.backend!;
     void b.tools().then((t) => (this.tools = t)).catch(() => undefined);
     void b.packages().then((p) => (this.packages = p)).catch(() => undefined);
+    void b.mcpServers().then((l) => (this.resources = l.flatMap((m) => (m.resources ?? []).map((r) => ({ server: m.id, serverName: m.name, uri: r.uri, name: r.name }))))).catch(() => undefined);
     void b.prompts().then((p) => (this.prompts = p)).catch(() => undefined);
     this.listPoll = poll(() => this.loadList(), 10_000);
     this.listPoll.start();
@@ -450,6 +452,10 @@ export class QseChat extends LightElement {
       for (const a of attachments) {
         try {
           const f = this.composer?.fileOf(a.id);
+          if (!f && a.url) {
+            atts.push(a);                       // the server has it already (an MCP resource)
+            continue;
+          }
           if (!f) throw new Error('the file is no longer there');
           const up = await this.backend!.uploadAttachment(f);
           atts.push({ ...up, preview: a.preview ?? null });
@@ -743,10 +749,12 @@ export class QseChat extends LightElement {
   }
 
   private renderComposer(c: Conversation | null): TemplateResult {
-    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
+    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .resources=${this.resources} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
       @ch-send=${(e: CustomEvent<{ text: string; attachments: Attachment[] }>) => void this.send(e.detail.text, e.detail.attachments)}
       @ch-stop=${() => c && void this.guard(() => this.backend!.stop(c.id), 'Stop')}
       @ch-draft=${(e: CustomEvent<{ text: string }>) => c && lsSet(LS.draft(c.id), e.detail.text || null)}
+      @ch-mcp-prompt=${(e: CustomEvent<{ serverId: string; name: string; args: Record<string, string> }>) => void this.guard(() => this.backend!.mcpPrompt(e.detail.serverId, e.detail.name, e.detail.args, c?.id ?? null).then((t) => this.composer?.setText(t)), 'MCP prompt')}
+      @ch-mcp-resource=${(e: CustomEvent<{ serverId: string; uri: string }>) => void this.guard(() => this.backend!.mcpResource(e.detail.serverId, e.detail.uri, c?.id ?? null).then((a) => this.composer?.attach(a)), 'MCP resource')}
       @ch-command=${(e: CustomEvent<{ command: string; args: string }>) => void this.command(e.detail.command, e.detail.args)}
       @ch-settings-patch=${(e: CustomEvent<{ patch: Partial<ChatSettings> }>) => (c ? void this.patchSettings(e.detail.patch) : void this.newChat(e.detail.patch))}
       @ch-open-settings=${(e: CustomEvent<{ section: SettingsSection }>) => this.openSettings(e.detail.section)}

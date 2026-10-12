@@ -605,6 +605,13 @@ export class MockChatBackend implements ChatBackend {
     return st.settings;
   }
 
+  async mcpPrompt(_serverId: string, name: string, args: Record<string, string>) {
+    return `${name}: ${Object.entries(args).map(([k, v]) => `${k} ${v}`).join(', ')}`;
+  }
+  async mcpResource(_serverId: string, uri: string): Promise<Attachment> {
+    return { id: localId('att'), name: uri.split('/').pop() || 'resource', kind: 'text', bytes: 0, mime: 'text/plain', url: '' };
+  }
+
   /** the mock plays its chats in this tab, which has their events already */
   subscribeGlobal(): Subscription {
     return { close: () => undefined };

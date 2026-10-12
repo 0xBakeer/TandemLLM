@@ -147,15 +147,46 @@ class Session:
         self.notify("notifications/initialized")
         return r
 
-    def list_tools(self, timeout: float = 30.0) -> list[dict]:
+    def _paged(self, method: str, key: str, need: str, timeout: float) -> list[dict]:
         out, cursor = [], None
         for _ in range(50):
-            r = self.request("tools/list", {"cursor": cursor} if cursor else {}, timeout=timeout)
-            out += [t for t in r.get("tools") or [] if isinstance(t, dict) and t.get("name")]
+            r = self.request(method, {"cursor": cursor} if cursor else {}, timeout=timeout)
+            out += [t for t in r.get(key) or [] if isinstance(t, dict) and t.get(need)]
             cursor = r.get("nextCursor")
             if not cursor:
                 break
         return out
+
+    def list_tools(self, timeout: float = 30.0) -> list[dict]:
+        return self._paged("tools/list", "tools", "name", timeout)
+
+    def offers(self, what: str) -> bool:
+        """Whether the server said it has prompts or resources (its initialize answer)."""
+        return what in ((self.info or {}).get("capabilities") or {})
+
+    def list_prompts(self, timeout: float = 30.0) -> list[dict]:
+        return self._paged("prompts/list", "prompts", "name", timeout) if \
+            self.offers("prompts") else []
+
+    def list_resources(self, timeout: float = 30.0) -> list[dict]:
+        return self._paged("resources/list", "resources", "uri", timeout) if \
+            self.offers("resources") else []
+
+    def get_prompt(self, name: str, args: dict, timeout: float = 30.0) -> str:
+        """The prompt's messages as one text (MCP prompts become slash commands, Chat 3)."""
+        r = self.request("prompts/get", {"name": name, "arguments": args}, timeout=timeout)
+        out = []
+        for m in r.get("messages") or []:
+            c = m.get("content") or {}
+            for part in c if isinstance(c, list) else [c]:
+                if part.get("type") == "text":
+                    out.append(part.get("text") or "")
+                elif part.get("type") == "resource":
+                    out.append((part.get("resource") or {}).get("text") or "")
+        return "\n\n".join(x for x in out if x)
+
+    def read_resource(self, uri: str, timeout: float = 30.0) -> list[dict]:
+        return self.request("resources/read", {"uri": uri}, timeout=timeout).get("contents") or []
 
     def call(self, name: str, args: dict, timeout: float, cancel=None, on_progress=None) -> dict:
         token = ulid()
@@ -398,6 +429,13 @@ class Mcp:
                 "tools": [{"name": t["name"], "description": (t.get("description") or "")[:300]}
                           for t in tools],
                 "tool_allow": allow, "tool_deny": deny,
+                "prompts": [{"name": p["name"], "description": (p.get("description") or "")[:300],
+                             "arguments": [{"name": a.get("name"), "required": bool(a.get("required"))}
+                                           for a in p.get("arguments") or [] if a.get("name")]}
+                            for p in json.loads(r["prompts_json"] or "[]")],
+                "resources": [{"uri": x["uri"], "name": x.get("name") or x["uri"],
+                               "mime": x.get("mimeType")}
+                              for x in json.loads(r["resources_json"] or "[]")][:200],
                 "schema_tokens": sum(len(json.dumps(t)) for t in shown) // 4,
                 "enabled_global": bool(r["enabled_global"]),
                 "timeout_s": r["timeout_s"] or DEFAULT_TIMEOUT_S,
@@ -531,10 +569,36 @@ class Mcp:
         try:
             s = self.session(sid, cid)
             tools = s.list_tools()
+            self.store.run("UPDATE mcp_servers SET prompts_json = ?, resources_json = ? WHERE id = ?",
+                           (json.dumps(s.list_prompts()), json.dumps(s.list_resources()), sid))
             self._status(sid, "connected", None, tools)
         except McpError as exc:
             self._status(sid, "failed", str(exc)[:300])
         return self.public(self._row(sid))
+
+    def prompt_text(self, sid: str, name: str, args: dict, cid: str | None) -> str:
+        from chatd.service import ApiError
+        try:
+            return self.session(sid, cid).get_prompt(name, {k: str(v) for k, v in args.items()})
+        except McpError as exc:
+            raise ApiError(502, "mcp", f"the MCP server answered: {exc}") from None
+
+    def resource(self, sid: str, uri: str, cid: str | None) -> dict:
+        """A resource as an attachment of the chat (text, or bytes from a blob)."""
+        from chatd.service import ApiError
+        try:
+            contents = self.session(sid, cid).read_resource(uri)
+        except McpError as exc:
+            raise ApiError(502, "mcp", f"the MCP server answered: {exc}") from None
+        if not contents:
+            raise ApiError(404, "not_found", "the server sent nothing for that resource")
+        c = contents[0]
+        name = (c.get("uri") or uri).rstrip("/").rsplit("/", 1)[-1][:120] or "resource"
+        if c.get("blob") is not None:
+            data, mime = base64.b64decode(c["blob"]), c.get("mimeType") or "application/octet-stream"
+        else:
+            data, mime = str(c.get("text") or "").encode(), c.get("mimeType") or "text/plain"
+        return self.svc.store_blob(None, name, mime, data)
 
     def restart(self, sid: str) -> dict:
         self.drop(sid)

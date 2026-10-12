@@ -97,6 +97,8 @@ ROUTES = [
     ("POST", rf"/mcp/servers/{_ID}/restart", "mcp_restart"),
     ("PATCH", rf"/mcp/servers/{_ID}", "mcp_patch"),
     ("DELETE", rf"/mcp/servers/{_ID}", "mcp_remove"),
+    ("POST", rf"/mcp/servers/{_ID}/prompts/get", "mcp_prompt"),
+    ("POST", rf"/mcp/servers/{_ID}/resources/read", "mcp_resource"),
     # skills, prompts, presets (SRV-361)
     ("GET", r"/(packages|skills)", "packages"),
     ("PATCH", rf"/(?:packages|skills)/{_ID}", "set_package"),
@@ -288,6 +290,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_settings(self, cid):
         self._json(200, self.svc.update_settings(cid, self._body()))
+
+    def r_mcp_prompt(self, sid):
+        b = self._body()
+        self._json(200, {"text": self.svc.mcp.prompt_text(
+            sid, str(b.get("name") or ""), b.get("arguments") or {}, b.get("conversation_id"))})
+
+    def r_mcp_resource(self, sid):
+        b = self._body()
+        self._json(200, self.svc.mcp.resource(sid, str(b.get("uri") or ""),
+                                              b.get("conversation_id")))
 
     def r_approve_plan(self, cid):
         self._json(202, self.svc.approve_plan(cid, self._body(), self.viewer))

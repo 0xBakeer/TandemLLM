@@ -108,12 +108,15 @@ ALTER TABLE mcp_servers ADD COLUMN error TEXT
 """
 
 # v4 (phases 3 and 4): imported Open WebUI toolkits fill v1's user_tools (`name` is the toolkit's
-# slug, `kind` "owui"; chatd/owui.py), and each chat's todo list (plan mode, SRV-363)
+# slug, `kind` "owui"; chatd/owui.py), MCP servers' prompts and resources, and each chat's todo
+# list (plan mode, SRV-363)
 SCHEMA_V4 = """
 ALTER TABLE user_tools ADD COLUMN title TEXT;
 ALTER TABLE user_tools ADD COLUMN valves_enc BLOB;
 ALTER TABLE user_tools ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE user_tools ADD COLUMN updated INTEGER;
+ALTER TABLE mcp_servers ADD COLUMN prompts_json TEXT;
+ALTER TABLE mcp_servers ADD COLUMN resources_json TEXT;
 CREATE UNIQUE INDEX user_tools_name ON user_tools(name);
 CREATE TABLE todos (
     conversation_id TEXT PRIMARY KEY,

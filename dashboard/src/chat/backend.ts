@@ -101,6 +101,10 @@ export interface ChatBackend {
   removeMcpServer(serverId: string): Promise<void>;
   testMcpServer(draft: McpServerDraft): Promise<{ ok: boolean; message: string; tools: { name: string; description: string }[] }>;
   restartMcpServer(serverId: string): Promise<McpServer>;
+  /** an MCP prompt's text for the composer; a stdio server answers from the chat's sandbox */
+  mcpPrompt(serverId: string, name: string, args: Record<string, string>, convId: string | null): Promise<string>;
+  /** an MCP resource as an attachment, uploaded already */
+  mcpResource(serverId: string, uri: string, convId: string | null): Promise<Attachment>;
   prompts(): Promise<Prompt[]>;
   savePrompt(p: Omit<Prompt, 'id'> & { id?: string }): Promise<Prompt>;
   deletePrompt(promptId: string): Promise<void>;

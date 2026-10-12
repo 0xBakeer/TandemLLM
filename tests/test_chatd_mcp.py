@@ -113,6 +113,19 @@ def test_servers_in_a_chat_with_write_only_secrets():
                                                   "headers": {"Authorization": f"Bearer {SECRET}"}})
         assert good["ok"] and "6 tools" in good["message"]
         c.ok("PATCH", f"/mcp/servers/{s['id']}", {"name": "Fake HTTP"})   # the secret stays
+        # its prompt is a slash command, its resource an attachment (plan note Chat 3)
+        lst = c.ok("GET", "/mcp/servers")[0]
+        assert lst["prompts"] == [{"name": "review", "description": "Review a file.",
+                                   "arguments": [{"name": "file", "required": True}]}]
+        assert lst["resources"][0]["uri"] == "file:///notes/todo.txt"
+        cmd = next(x for x in c.ok("GET", "/capabilities")["commands"]
+                   if x["command"] == "mcp__fake_http__review")
+        assert cmd["mcp_prompt"]["server_id"] == s["id"]
+        assert c.ok("POST", f"/mcp/servers/{s['id']}/prompts/get", {
+            "name": "review", "arguments": {"file": "app.py"}})["text"] == "Review app.py for bugs."
+        att = c.ok("POST", f"/mcp/servers/{s['id']}/resources/read",
+                   {"uri": "file:///notes/todo.txt"})
+        assert att["name"] == "todo.txt" and att["bytes"] == 8
         # the whole fake HTTP server allowed by one rule
         c.svc.add_rule("mcp__fake_http__*", None, "allow", None)
         cid = c.new()

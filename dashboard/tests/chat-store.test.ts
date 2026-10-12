@@ -283,3 +283,13 @@ describe('notifications', () => {
     expect(NOTIFY_WORDS).toEqual({ finished: 'finished', permission: 'waits for permission', error: 'error' });
   });
 });
+
+describe('MCP prompts', () => {
+  it('fill their arguments from the text after the command', async () => {
+    const { promptArgs } = await import('../src/chat/types');
+    expect(promptArgs('app.py', ['file'])).toEqual({ file: 'app.py' });
+    expect(promptArgs('lang=py the main loop', ['topic', 'lang'])).toEqual({ lang: 'py', topic: 'the main loop' });
+    expect(promptArgs('x=1', ['file'])).toEqual({ file: 'x=1' });
+    expect(promptArgs('', ['file'])).toEqual({});
+  });
+});

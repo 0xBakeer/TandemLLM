@@ -306,6 +306,8 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | PATCH / DELETE | `/mcp/servers/{sid}` | `Partial<McpServerDraft>` | `McpServer` / 204 | `removeMcpServer()` | v2 |
 | POST | `/mcp/servers/test` | `McpServerDraft` | `{ok, message, tools}` | `testMcpServer()` | v2 |
 | POST | `/mcp/servers/{sid}/restart` | | `McpServer` | `restartMcpServer()` | v2 |
+| POST | `/mcp/servers/{sid}/prompts/get` | `{name, arguments, conversation_id?}` | `{text}`: the prompt's messages as one text for the composer (an MCP prompt is the slash command `mcp__<server>__<prompt>`, `SlashCommand.mcp_prompt`) | `mcpPrompt()` | v2 |
+| POST | `/mcp/servers/{sid}/resources/read` | `{uri, conversation_id?}` | `Attachment` (stored; it goes into a send's attachments as it is) | `mcpResource()` | v2 |
 | GET / POST / DELETE | `/prompts[/{pid}]` | `Prompt` | | `prompts()`, `savePrompt()`, `deletePrompt()` | v2 |
 | GET / POST / DELETE | `/presets[/{pid}]` | `Preset` | | `presets()`, `savePreset()`, `deletePreset()` | v2 |
 | GET / DELETE | `/permissions/rules[/{rid}]` | | `{id, tool, match?, decision, scope, created_at}[]` | (v0.2) | v2 |

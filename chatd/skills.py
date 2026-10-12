@@ -310,10 +310,18 @@ class SkillsMixin:
         self.store.run("DELETE FROM prompts WHERE id = ?", (pid,))
 
     def commands(self) -> list[dict]:
+        """The slash list: chatd's own, the saved prompts, and every MCP server's prompts (their
+        arguments come from the text typed after the command)."""
+        from chatd.mcp import slug
+        mcp = [{"command": f"mcp__{slug(s['name'])}__{p['name']}"[:64],
+                "description": p["description"] or f"a prompt of {s['name']}",
+                "mcp_prompt": {"server_id": s["id"], "name": p["name"],
+                               "arguments": p["arguments"]}}
+               for s in self.mcp.list() for p in s.get("prompts") or []]
         return [{"command": "clear", "description": "start a new chat"},
                 {"command": "compact", "description": "summarize the older turns now"}] + \
             [{"command": p["command"], "description": p["title"], "prompt_id": p["id"]}
-             for p in self.prompts()]
+             for p in self.prompts()] + mcp
 
     # ------------------------------------------------------------------ presets
     PRESET_KEYS = ("model", "profile", "effort", "thinking", "tools", "prompt_id", "packages",

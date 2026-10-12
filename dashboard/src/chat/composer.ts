@@ -9,7 +9,7 @@ import { bytes } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
-import { EFFORTS, effortWord, localId, toolLabel } from './types';
+import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
@@ -19,6 +19,8 @@ export class QseChatComposer extends LightElement {
   @property({ attribute: false }) caps: Capabilities | null = null;
   @property({ attribute: false }) tools: ToolInfo[] = [];
   @property({ attribute: false }) packages: PackageInfo[] = [];
+  /** MCP resources the user can attach */
+  @property({ attribute: false }) resources: { server: string; serverName: string; uri: string; name: string }[] = [];
   @property({ attribute: false }) prompts: Prompt[] = [];
   @property({ type: Boolean }) running = false;
   @property({ type: Boolean }) disabled = false;
@@ -91,6 +93,12 @@ export class QseChatComposer extends LightElement {
       const [cmd, ...rest] = text.slice(1).split(/\s+/);
       const known = this.caps?.commands.find((c) => c.command === cmd);
       if (known) {
+        if (known.mcp_prompt) {
+          const mp = known.mcp_prompt;
+          this.fire('ch-mcp-prompt', { serverId: mp.server_id, name: mp.name, args: promptArgs(rest.join(' '), (mp.arguments ?? []).map((a) => a.name)) });
+          this.slash = null;
+          return;
+        }
         if (known.prompt_id) {
           const p = this.prompts.find((x) => x.id === known.prompt_id);
           if (p) {
@@ -186,6 +194,11 @@ export class QseChatComposer extends LightElement {
       out.push(att);
     }
     this.files = [...this.files, ...out];
+  }
+
+  /** an attachment the server holds already (an MCP resource) */
+  attach(a: Attachment): void {
+    this.files = [...this.files, a];
   }
 
   /** the view forwards drops and pastes from the whole thread */
@@ -287,6 +300,7 @@ export class QseChatComposer extends LightElement {
       </div>
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}
+        ${this.resources.map((r) => html`<button type="button" class="ch-pop-item" @click=${() => (this.fire('ch-mcp-resource', { serverId: r.server, uri: r.uri }), (this.pop = 'none'))}><span class="ch-pop-name">${icon('file')} ${r.name}</span><span class="ch-pop-desc">attach, from ${r.serverName}</span></button>`)}
       </div>
       ${this.packages.length
         ? html`<div class="ch-pop-group"><div class="ch-pop-title">Skills</div>

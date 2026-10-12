@@ -7,6 +7,7 @@ Tools: `echo {text}` (the text back), `add {a, b}`, `slow {seconds}` (progress n
 0.2 s, then a result; a `notifications/cancelled` for it ends it with no answer), `grow` (adds the
 tool `extra` and sends `notifications/tools/list_changed`), `fail` (isError), `secret_env` (says
 whether FAKE_MCP_TOKEN is set, never its value). tools/list pages two tools at a time (nextCursor).
+One prompt (`review {file}`) and one resource (`file:///notes/todo.txt`).
 `FAKE_MCP_HEADER` (HTTP): the bearer the server wants; a request without it gets 401.
 """
 
@@ -52,7 +53,8 @@ class Server:
             return None
         if method == "initialize":
             return {"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": "2025-06-18", "capabilities": {"tools": {"listChanged": True}},
+                "protocolVersion": "2025-06-18", "capabilities": {"tools": {"listChanged": True},
+                                                                  "prompts": {}, "resources": {}},
                 "serverInfo": {"name": "fake-mcp", "version": "1"}}}
         if method == "ping":
             return {"jsonrpc": "2.0", "id": mid, "result": {}}
@@ -63,6 +65,20 @@ class Server:
             if start + 2 < len(self.tools):
                 res["nextCursor"] = str(start + 2)
             return {"jsonrpc": "2.0", "id": mid, "result": res}
+        if method == "prompts/list":
+            return {"jsonrpc": "2.0", "id": mid, "result": {"prompts": [
+                {"name": "review", "description": "Review a file.",
+                 "arguments": [{"name": "file", "required": True}]}]}}
+        if method == "prompts/get":
+            f = (p.get("arguments") or {}).get("file", "?")
+            return {"jsonrpc": "2.0", "id": mid, "result": {"messages": [
+                {"role": "user", "content": {"type": "text", "text": f"Review {f} for bugs."}}]}}
+        if method == "resources/list":
+            return {"jsonrpc": "2.0", "id": mid, "result": {"resources": [
+                {"uri": "file:///notes/todo.txt", "name": "todo", "mimeType": "text/plain"}]}}
+        if method == "resources/read":
+            return {"jsonrpc": "2.0", "id": mid, "result": {"contents": [
+                {"uri": p.get("uri"), "mimeType": "text/plain", "text": "buy milk"}]}}
         if method == "tools/call":
             name, args = p.get("name"), p.get("arguments") or {}
             self.calls.append((name, args))

@@ -55,6 +55,12 @@ export class RemoteChatBackend implements ChatBackend {
   signOut() {
     return del('/session');
   }
+  async mcpPrompt(serverId: string, name: string, args: Record<string, string>, convId: string | null) {
+    return (await call<{ text: string }>(`/mcp/servers/${enc(serverId)}/prompts/get`, { method: 'POST', body: JSON.stringify({ name, arguments: args, conversation_id: convId }) })).text;
+  }
+  mcpResource(serverId: string, uri: string, convId: string | null) {
+    return call<Attachment>(`/mcp/servers/${enc(serverId)}/resources/read`, { method: 'POST', body: JSON.stringify({ uri, conversation_id: convId }) });
+  }
   approvePlan(id: string, items?: string[]) {
     return call<void>(`/conversations/${enc(id)}/plan/approve`, { method: 'POST', body: JSON.stringify(items ? { items } : {}) });
   }
