@@ -223,6 +223,26 @@ def test_a_class_where_drafts_do_not_pay_takes_the_plain_step():
     return "plain where drafting costs more a token, rows kept; the plain step priced; class 0 untouched"
 
 
+def test_a_draft_cut_to_the_anchor_is_a_drafted_round():
+    """P0 live check (2026-10-12): a round that drafted but whose cut kept the anchor alone takes the
+    plain step after paying for the draft; priced as a plain step it put the plain step at 25.7 ms
+    against 21.6 in a plain turn. It is a drafted round of one token: `spec` learns it, `plain` not."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    head.read = lambda: ([[10 + k, 20 + k] for k in range(3)], [[0.02, 0.01]] * 3)
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel({"0": {"chain": {"1": 20.0, "2": 40.0}}}), siblings=False))
+    prompt = list(range(50))
+    d.reset()
+    d.sync(prompt, _rows(0, 50), 0)
+    assert d.propose_tree(prompt, 8).n_draft == 0                  # drafted, cut to the anchor
+    d.on_plain(21.0)
+    d.observe([100])
+    d.sync([100], _rows(50, 1), 50)
+    d.propose_tree(prompt + [100], 8)
+    assert 0 in d.cut.spec and 0 not in d.cut.plain and d.req["spans"]["anchor"][:1] == [1], d.req["spans"]
+    return "a draft cut to the anchor: a drafted round of one token, not a plain step"
+
+
 def test_the_warm_up_rounds_price_nothing():
     """P0 (2026-10-12): the first request after a start drafted its 1k rounds at 22.4 ms a token
     against 17.8 later (graph captures, first kernel calls) and 1k took the plain step after it. The

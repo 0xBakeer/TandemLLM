@@ -69,6 +69,7 @@ class MTPTreeDrafter:
         self._obs = None                    # what the last round was, to price at the next start
         self._plain = None                  # a plain step was taken: None, or whether it captured
         self._captured = False              # this round's draft captured a graph
+        self._drafted = False               # this round launched a draft
         self._turn = None                   # this request drafts (True), takes plain steps (False), or undecided
         self.answer = 256.0                 # the usual answer length, tokens (EMA 0.2 of the requests')
         self._prime_ms = 0.0                # the last feed's backlog prime, ms
@@ -94,7 +95,8 @@ class MTPTreeDrafter:
     def _req() -> dict:
         return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
                 "prime_ms": 0.0, "prime_rows": 0, "tokens": 0, "turn": None,
-                "spans": {"block": [0, 0.0, 0], "plain": [0, 0.0, 0], "unpriced": [0, 0.0, 0]}}
+                "spans": {"block": [0, 0.0, 0], "anchor": [0, 0.0, 0], "plain": [0, 0.0, 0],
+                          "unpriced": [0, 0.0, 0]}}
 
     WARM_TOKENS = 96        # the server's warm-up decodes this many through the rounds (`warming`)
 
@@ -160,8 +162,11 @@ class MTPTreeDrafter:
         # graph took the capture's time and teaches nothing (its price for that row count would start
         # at ~170 ms and the cut would never ask again)
         if self._plain is not None:
-            # a plain step after a draft that captured a graph carries the capture's time too
-            self._obs = None if self._plain or self._captured else ("plain",)
+            # a plain step after a draft that captured a graph carries the capture's time too; one after
+            # a draft the cut cut to the anchor is a drafted round of one token (2026-10-12: priced as
+            # plain steps, they put the plain step at 25.7 ms against 21.6 in a plain turn)
+            self._obs = (None if self._plain or self._captured else
+                         ("anchor", None, None, 1) if self._drafted else ("plain",))
         elif self.round is not None and self.verify_ms is not None and not self.s.captured:
             self._obs = ("block", list(range(len(tokens))), self.round, len(tokens))
         else:
@@ -174,8 +179,8 @@ class MTPTreeDrafter:
         self.req["verify_rows"] += rows
 
     def on_plain(self, ms: float) -> None:
-        """The loop took a plain step (the cut chose the anchor alone, or the round skipped its draft):
-        its cost prices the plain step of this round's class."""
+        """The loop took a plain step: after a skipped round its cost prices the plain step of this
+        round's class; after a draft the cut chose the anchor alone, it is a drafted round of one token."""
         self.stats["plain"] += 1
         self.req["plain"] += 1
         self._plain = bool(getattr(self.s, "plain_captured", False))   # a capture's time is not the step's
@@ -194,14 +199,16 @@ class MTPTreeDrafter:
             span = self.req["spans"][self._obs[0] if self._obs is not None else "unpriced"]
             span[0] += 1
             span[1] += ms
-            span[2] += self._obs[3] if self._obs is not None and self._obs[0] == "block" else 0
+            span[2] += self._obs[3] if self._obs is not None and self._obs[0] != "plain" else 0
         if self._obs is not None and self._t_prev is not None:
             if self._obs[0] == "plain":
                 self.cut.observe_plain(ms, self._cls_prev)
+            elif self._obs[0] == "anchor":
+                self.cut.observe_spec(ms, self._cls_prev, 1)
             else:
                 self.cut.observe(self._obs[1], ms - self._obs[2], self._obs[2])
                 self.cut.observe_spec(ms, self._cls_prev, self._obs[3])
-        self._obs, self._t_prev, self._captured = None, t0, False
+        self._obs, self._t_prev, self._captured, self._drafted = None, t0, False, False
         self.cls = self.s.price_class(len(context)) if hasattr(self.s, "price_class") else 0
         self._cls_prev = self.cls
         if self._turn is None:
@@ -225,6 +232,7 @@ class MTPTreeDrafter:
         c0 = getattr(self.head, "captures", 0)
         self.head.launch(rows, nexts)
         captured = self._captured = getattr(self.head, "captures", 0) != c0
+        self._drafted = True
         host = time.perf_counter() - t0
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()

@@ -8779,7 +8779,7 @@ def _load(a) -> None:
     led.mark("caches")
     print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
     # one warm request, so the first measured one is not paying for Triton autotuning; a drafter
-    # that prices its rounds (Flash-Next's MTP) decodes WARM_TOKENS through them, learning nothing
+    # that prices its rounds (one with `warming`) decodes WARM_TOKENS through them, learning nothing
     warming = getattr(drafter, "warming", None) if drafter is not None else None
     with torch.no_grad(), (warming() if warming is not None else contextlib.nullcontext()):
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].to(m["device"]),
