@@ -313,6 +313,8 @@ export interface SystemInfo {
     /** the base engine's own name; `model` is TandemLLM when the conductor is configured */
     base_model?: string | null;
     max_len: number | null;
+    /** the weight profile (VIS-95: the pack, its branch and its largest window) */
+    weights?: WeightsInfo | null;
     drafter: string | null;
     tree: boolean;
     reasoning_format: string | null;
@@ -782,6 +784,32 @@ export interface RolesReport {
 // ---- OPS-41: the engine's memory split and the residency planner -------------------------------
 
 /** server/memsplit.py: the resident set in bytes, each part read off the object that holds it. */
+/** /health's and /v1/dashboard/system's `weights` (the weight profile). */
+export interface WeightsInfo {
+  name: string | null;
+  format: string | null;
+  weights: string | null;
+  hf_repo: string | null;
+  /** a branch of the repo (a Flash-Next pack) */
+  hf_revision?: string;
+  drafters: string | null;
+  draft_head: string | null;
+  /** the registry's largest window for the profile; null: it fits none; absent: the profile names none */
+  max_window?: number | null;
+}
+
+/** /health's `cache.resident_files`: files the engine keeps on purpose (Flash-Next's n-gram table, SRV-335). */
+export interface ResidentFile {
+  name: string;
+  path: string;
+  policy: 'warm' | 'cold';
+  file_bytes: number;
+  resident_bytes: number | null;
+  cache_bytes?: number;
+  hits?: number;
+  misses?: number;
+}
+
 export interface MemorySplit {
   allocated: number | null;
   reserved: number | null;
@@ -798,6 +826,8 @@ export interface MemorySplit {
   mem_total?: number | null;
   in_use?: number | null; // MemTotal - MemAvailable
   outside?: number | null; // in_use - allocator reserved - KV pages: the CUDA context, host memory, other programs
+  /** SRV-335: page cache the engine keeps on purpose (the warm n-gram table), counted as used by every floor check */
+  pinned_cache?: number | null;
   load?: { stage: string; allocated: number | null; reserved: number | null; mem_available_drop: number | null; s: number }[];
 }
 

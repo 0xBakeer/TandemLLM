@@ -2,12 +2,39 @@
 // as one bar in load order with the allocator's own share last, and the planner's words for each
 // refusal (2, 3, 4, 5 of OPS-41's Gherkin as the dashboard shows them).
 import { describe, expect, it } from 'vitest';
-import type { MemoryBudget, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyRow } from '../src/api/types';
-import { appliesWords, eventWords, gib, inUseWords, limitValue, roleRows, roleStateWords, pendingWords, rowWords, scaledBar, splitSegments, switchWords, usageShare, usageWords, withEngineLimit } from '../src/lib/residency';
+import type { MemoryBudget, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyRow, ResidentFile } from '../src/api/types';
+import { appliesWords, eventWords, gib, inUseWords, limitValue, roleRows, roleStateWords, pendingWords, rowWords, scaledBar, splitSegments, switchWords, tableWords, usageShare, usageWords, windowWords, withEngineLimit } from '../src/lib/residency';
 
 const G = 1024 ** 3;
 const split: MemorySplit = { allocated: 70 * G, reserved: 72 * G, parts: { kv_pool: 16 * G, weights: 16 * G, drafter_kv: 10 * G, vision: 0 }, other: 28 * G, reserve: 2 * G, mem_available: 31 * G, max_len: 262144, drafter_caches: 2 };
 const row = (over: Partial<ResidencyRow>): ResidencyRow => ({ role: 'decider', allowed: true, reason: null, mem_available_gib: 31, claim_gib: 8.2, basis: 'measured', floor_gib: 15, margin_gib: 6, need_gib: 21, after_gib: 22.8, ...over });
+
+// VIS-95: Flash-Next 3.05 as the live :8000 reported it on 2026-10-12 (/v1/dashboard/system memory.split
+// and caches.resident_files), and a cold 4.05's table as the engine reports a cold policy
+const fnSplit: MemorySplit = { allocated: 53834397184, reserved: 55643734016, parts: { weights: 47550375616, mtp_weights: 962024788, kv_pool: 1163950080, drafter_kv: 96995840, gdn_state: 115662864, state_store: 281009184, resident_prefix: 238346256 }, other: 3426032556, reserve: 1809336832, mem_available: 66243969024, max_len: 40960, drafter_caches: 0, pinned_cache: 10975956992 };
+const warm: ResidentFile = { name: 'ngram_table', path: '/p/3.05/ngram_embedding.safetensors', policy: 'warm', file_bytes: 32640156672, resident_bytes: 9185603584 };
+const cold: ResidentFile = { name: 'ngram_table', path: '/p/4.05/ngram_embedding.safetensors', policy: 'cold', file_bytes: 39040193720, resident_bytes: 0, cache_bytes: 2 * G, hits: 960, misses: 40 };
+
+describe('Flash-Next on the system view (VIS-95)', () => {
+  it('names the draft layer in the split, after the weights', () => {
+    const s = splitSegments(fnSplit);
+    expect(s.map((x) => x.key).slice(0, 3)).toEqual(['weights', 'mtp_weights', 'kv_pool']);
+    expect(s[1].label).toBe('draft layer (MTP)');
+    expect(s.some((x) => x.key === 'pinned_cache')).toBe(false); // page cache, not an allocator part
+  });
+  it('says what the n-gram table holds under either policy', () => {
+    expect(tableWords([warm])).toBe('n-gram table (warm): 8.55 of 30.40 GiB in the page cache, counted as used by every floor check');
+    expect(tableWords([cold])).toBe('n-gram table (cold): read past the page cache through a 2.00 GiB row cache, 96 % hits');
+    expect(tableWords(undefined)).toBe('');
+    expect(tableWords([])).toBe('');
+  });
+  it("puts max_len against the profile's largest window", () => {
+    expect(windowWords(40960, 262144)).toBe("40,960 of 262,144 (the profile's largest)");
+    expect(windowWords(8192, null)).toBe('8,192 (the profile fits no window on this device)');
+    expect(windowWords(262144, undefined)).toBe('262,144'); // the 27B's profiles name no window
+    expect(windowWords(null, 262144)).toBe('—');
+  });
+});
 
 describe('the split bar', () => {
   it('orders the parts as they load, drops the empty ones, ends with other and reserve', () => {

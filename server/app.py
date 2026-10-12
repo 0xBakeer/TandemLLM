@@ -9573,7 +9573,32 @@ def weights_profile() -> dict:
            "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
            "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
     out.update(dict.get(STATE, "weights_info") or {})
+    # VIS-95: a profile on a branch of its repo, and the largest window its registry entry names (a
+    # pack that fits none: null); the 27B's profiles name neither, and their block stays as it was
+    if e.get("QSE_WEIGHTS_REVISION"):
+        out["hf_revision"] = e["QSE_WEIGHTS_REVISION"]
+    mw = _profile_max_window(out["name"])
+    if mw is not False:
+        out["max_window"] = mw
     return out
+
+
+_MAX_WINDOW: dict = {}
+
+
+def _profile_max_window(name: str | None):
+    """The registry's `max_window` of profile `name` (an int, or None for a pack that fits no
+    window), or False when the profile names none or the registry does not read; read once."""
+    if not name:
+        return False
+    if name not in _MAX_WINDOW:
+        try:
+            from server.setup import registry
+            p = next((p for m in registry.load_all()[0].values() for p in m["profiles"] if p["id"] == name), None)
+            _MAX_WINDOW[name] = p["max_window"] if p is not None and "max_window" in p else False
+        except Exception:                                          # noqa: BLE001
+            _MAX_WINDOW[name] = False
+    return _MAX_WINDOW[name]
 
 
 def serve_until_drained(httpd) -> None:

@@ -17,10 +17,10 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
-import type { MemoryLimitRow, MemoryLimits, ResidencyDoc, ResidencyPlan, SystemInfo } from '../api/types';
+import type { MemoryLimitRow, MemoryLimits, ResidencyDoc, ResidencyPlan, ResidentFile, SystemInfo } from '../api/types';
 import { bytes, duration, exact, pct, timeShort, dateTimeShort, ago } from '../lib/format';
 import { poll, type Poller } from '../lib/poll';
-import { appliesWords, eventWords, gib, gibOf, inUseWords, limitValue, roleRows, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
+import { appliesWords, eventWords, gib, gibOf, inUseWords, tableWords, windowWords, limitValue, roleRows, pendingWords, REASON_WORDS, rowWords, scaledBar, switchWords, usageShare, usageWords, withEngineLimit } from '../lib/residency';
 import { LightElement, type Loadable } from '../ui/base';
 import { pushHostSamples, renderHosts, type HostSample } from './hosts';
 import { renderEngines } from './engines';
@@ -121,7 +121,9 @@ export class QseSystem extends LightElement {
             <div><dt>uptime</dt><dd class="num">${duration(d.engine.uptime_s)}</dd></div>
             <div><dt>pid</dt><dd class="num">${d.engine.pid}</dd></div>
             <div><dt>model</dt><dd>${d.engine.model ?? html`<span class="muted">none: the standalone proxy</span>`}${d.engine.base_model && d.engine.base_model !== d.engine.model ? html` <span class="muted small" title="the base engine's name, a hidden alias">(base ${d.engine.base_model})</span>` : nothing}</dd></div>
-            <div><dt>max_len</dt><dd class="num">${exact(d.engine.max_len)}</dd></div>
+            ${d.engine.weights?.name ? html`<div><dt>weights</dt><dd data-weights>${d.engine.weights.name}${d.engine.weights.format ? html` <span class="muted small">${d.engine.weights.format}${d.engine.weights.hf_revision ? `, ${d.engine.weights.hf_revision}` : ''}</span>` : nothing}</dd></div>` : nothing}
+            <div><dt>max_len</dt><dd class="num" data-max-len>${windowWords(d.engine.max_len, d.engine.weights?.max_window)}</dd></div>
+            ${tableWords(((d.caches ?? {}) as { resident_files?: ResidentFile[] }).resident_files) ? html`<div><dt>table</dt><dd class="small" data-table>${tableWords(((d.caches ?? {}) as { resident_files?: ResidentFile[] }).resident_files)}</dd></div>` : nothing}
             <div><dt>drafter</dt><dd>${d.engine.drafter ?? 'none'}${d.engine.tree ? ', tree' : ''}</dd></div>
             <div><dt>flags</dt><dd><span class="num">${flagCount}</span> QWEN38_* set · <a href="#/dev">see the Dev tab</a></dd></div>
           </dl>`,
@@ -274,6 +276,7 @@ export class QseSystem extends LightElement {
               ${segs.map((x) => html`<div data-part-row=${x.key}><dt><span class="split-dot" style="--seg:var(--series-${x.color}, var(--${x.color}))"></span>${x.label}</dt><dd class="num">${gib(x.bytes)}</dd></div>`)}
             </dl>
             <p class="small muted num">allocated ${gib(split.allocated)} · reserved ${gib(split.reserved)} · max_len ${exact(split.max_len)} · ${split.drafter_caches} drafter caches</p>
+            ${split.pinned_cache ? html`<p class="small muted num" data-pinned>beside the allocator: ${gib(split.pinned_cache)} of page cache the engine keeps (the n-gram table), counted as used by every floor check</p>` : nothing}
             ${inUseWords(split) ? html`<p class="small muted num" data-in-use>${inUseWords(split)}</p>` : nothing}
             ${split.load?.length
               ? html`<details class="sec"><summary>Load stages <span class="sec-sub">allocated / taken from MemAvailable, each stage of the start</span></summary>

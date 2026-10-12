@@ -2,7 +2,7 @@
 // residency planner's words. Pure functions; GiB throughout, as the planner and the box's
 // operators count (the floor is 15 GiB of MemAvailable).
 
-import type { RolesReport, RoleRow, MemoryBudget, MemoryEvent, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyReason, ResidencyRow, SessionSwitch } from '../api/types';
+import type { RolesReport, RoleRow, MemoryBudget, MemoryEvent, MemoryLimitRow, MemorySplit, ResidencyDoc, ResidencyReason, ResidencyRow, ResidentFile, SessionSwitch } from '../api/types';
 
 const GIB = 1024 ** 3;
 
@@ -28,6 +28,7 @@ export interface SplitSegment {
 /** The parts in the order they load, then the allocator's own share. */
 const PARTS: [string, string, string][] = [
   ['weights', 'weights', 'cobalt'],
+  ['mtp_weights', 'draft layer (MTP)', 'violet'],
   ['kv_pool', 'KV pool', 'orange'],
   ['gdn_state', 'GDN state', 'aqua'],
   ['drafter_kv', 'drafter caches', 'violet'],
@@ -69,6 +70,27 @@ export function splitSegments(s: MemorySplit | null | undefined): SplitSegment[]
   const total = segs.reduce((a, x) => a + x.bytes, 0) || 1;
   for (const x of segs) x.share = x.bytes / total;
   return segs;
+}
+
+/** VIS-95: the n-gram table a Flash-Next pack keeps beside the weights, in words: warm, "n-gram table
+ *  (warm): 9.19 of 30.40 GiB in the page cache, counted as used by every floor check"; cold, "n-gram
+ *  table (cold): read past the page cache through a 2.00 GiB row cache, 96 % hits". '' for none. */
+export function tableWords(files: ResidentFile[] | null | undefined): string {
+  return (files ?? []).filter((f) => f.name === 'ngram_table').map((f) => {
+    if (f.policy === 'warm') return `n-gram table (warm): ${gib(f.resident_bytes).replace(' GiB', '')} of ${gib(f.file_bytes)} in the page cache, counted as used by every floor check`;
+    const n = (f.hits ?? 0) + (f.misses ?? 0);
+    return `n-gram table (cold): read past the page cache through a ${gib(f.cache_bytes)} row cache${n ? `, ${Math.round((100 * (f.hits ?? 0)) / n)} % hits` : ''}`;
+  }).join(' · ');
+}
+
+/** VIS-95: max_len against the profile's largest window: "40,960 of 262,144 (the profile's largest)";
+ *  a profile that fits none says so; without a registry window, the number alone. */
+export function windowWords(maxLen: number | null | undefined, maxWindow: number | null | undefined): string {
+  const n = (v: number) => v.toLocaleString('en-US');
+  if (maxLen == null) return '—';
+  if (maxWindow === undefined) return n(maxLen);
+  if (maxWindow === null) return `${n(maxLen)} (the profile fits no window on this device)`;
+  return `${n(maxLen)} of ${n(maxWindow)} (the profile's largest)`;
 }
 
 /** "in use 76.1 GiB = allocator 55.2 + KV pages 12.8 + outside 8.1 · KV addresses reserved 104.0 GiB (not memory)"; '' without the pool. */
