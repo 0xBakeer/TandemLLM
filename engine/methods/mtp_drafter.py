@@ -166,9 +166,9 @@ class MTPTreeDrafter:
             # a draft the cut cut to the anchor is a drafted round of one token (2026-10-12: priced as
             # plain steps, they put the plain step at 25.7 ms against 21.6 in a plain turn)
             self._obs = (None if self._plain or self._captured else
-                         ("anchor", None, None, 1) if self._drafted else ("plain",))
+                         ("anchor", None, None, 1, self._prime_ms) if self._drafted else ("plain",))
         elif self.round is not None and self.verify_ms is not None and not self.s.captured:
-            self._obs = ("block", list(range(len(tokens))), self.round, len(tokens))
+            self._obs = ("block", list(range(len(tokens))), self.round, len(tokens), self._prime_ms)
         else:
             self._obs = None
         self._plain, self.round, self.verify_ms = None, None, None
@@ -203,12 +203,17 @@ class MTPTreeDrafter:
         if self._obs is not None and self._t_prev is not None:
             if self._obs[0] == "plain":
                 self.cut.observe_plain(ms, self._cls_prev)
-            elif self._obs[0] == "anchor":
-                self.cut.observe_spec(ms, self._cls_prev, 1)
             else:
-                self.cut.observe(self._obs[1], ms - self._obs[2], self._obs[2])
-                self.cut.observe_spec(ms, self._cls_prev, self._obs[3])
+                # the round's backlog prime is the turn's (`StairCut.turn` weighs it), not the round's:
+                # in the round's price it made a turn's first round at 140k cost 93 ms (2026-10-12)
+                ms -= self._obs[4]
+                if self._obs[0] == "anchor":
+                    self.cut.observe_spec(ms, self._cls_prev, 1)
+                else:
+                    self.cut.observe(self._obs[1], ms - self._obs[2], self._obs[2])
+                    self.cut.observe_spec(ms, self._cls_prev, self._obs[3])
         self._obs, self._t_prev, self._captured, self._drafted = None, t0, False, False
+        self._prime_ms = 0.0
         self.cls = self.s.price_class(len(context)) if hasattr(self.s, "price_class") else 0
         self._cls_prev = self.cls
         if self._turn is None:
@@ -260,9 +265,20 @@ class MTPTreeDrafter:
         at = max(0, n - 1 - unfed)
         if self.head.st.length < at:
             self.head.resume(at)
-        self._turn = self.req["turn"] = bool(self.cut.turn(self.cls, unfed, self.answer))
+        # the graphs this class lacks: captured by the engine while the server is idle, so a turn that
+        # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
+        extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
+        self._turn = self.req["turn"] = bool(self.cut.turn(self.cls, unfed, self.answer, extra))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
+
+    def wants_graphs(self, n: int) -> bool:
+        """Whether drafting can pay at context length `n` at all (no price says a drafted round costs
+        more a token than the plain step there): the server captures a class's graphs while idle only
+        for such a class (260,800 tokens takes the plain step, and its captures would cost memory)."""
+        c = self.s.price_class(n) if hasattr(self.s, "price_class") else 0
+        plain, spec = self.cut.plain_ms(c), self.cut.spec_ms(c)
+        return plain is None or spec is None or spec < plain
 
     def _look(self, context: list[int]) -> tuple | None:
         """The lookup's best continuation and its share of the vote (smoothed as the lookup's own
@@ -327,10 +343,11 @@ class MTPTreeDrafter:
         nexts = [t for q in self.queue for t in q[1]]
         self.queue = []
         n, keep = len(nexts), min(len(nexts), self.depth + 1)
-        self._prime_ms = 0.0
         if n > keep:
             t0 = time.perf_counter()
             self.head.prime(rows[:n - keep], nexts[:n - keep])
+            if rows.is_cuda:
+                torch.cuda.synchronize()    # the prime's own time, not the verify's after it
             self._prime_ms = (time.perf_counter() - t0) * 1e3
             self.req["prime_ms"] += self._prime_ms
             self.req["prime_rows"] += n - keep

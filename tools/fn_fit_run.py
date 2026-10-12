@@ -76,6 +76,8 @@ def main() -> None:
     ap.add_argument("--again", action="store_true",
                     help="send the request a second time after the run: its prompt comes back from the caches, "
                          "so its decode rate is the window's own, without the first round's graph captures")
+    ap.add_argument("--gap", type=float, default=0.0,
+                    help="seconds between the run and --again (the server's idle window: its graph captures)")
     ap.add_argument("--raw", action="store_true", help="X-Tandem: raw (the conductor adds nothing, so the "
                     "second request's prompt is the first's)")
     ap.add_argument("--json")
@@ -124,6 +126,7 @@ def main() -> None:
         res["error"] = {"status": exc.code, "body": exc.read().decode()[:2000]}
     res["wall_s"] = round(time.time() - t0, 1)
     if a.again and "error" not in res:
+        time.sleep(a.gap)
         t1 = time.time()
         r2 = json.loads(urllib.request.urlopen(urllib.request.Request(
             a.url + "/v1/chat/completions", data=json.dumps(body).encode(), headers=headers), timeout=3600).read())

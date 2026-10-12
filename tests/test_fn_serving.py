@@ -240,7 +240,36 @@ def test_a_draft_cut_to_the_anchor_is_a_drafted_round():
     d.sync([100], _rows(50, 1), 50)
     d.propose_tree(prompt + [100], 8)
     assert 0 in d.cut.spec and 0 not in d.cut.plain and d.req["spans"]["anchor"][:1] == [1], d.req["spans"]
-    return "a draft cut to the anchor: a drafted round of one token, not a plain step"
+    # the server's idle captures ask whether drafting can pay at a length (`wants_graphs`)
+    d.cut = StairCut(PriceModel(), siblings=False)                # (the host clock's rounds above took ~0 ms)
+    assert d.wants_graphs(50)
+    d.cut.observe_plain(20.0, 0)
+    for _ in range(40):
+        d.cut.observe_spec(30.0, 0, 1)
+    assert not d.wants_graphs(50)
+    return "a draft cut to the anchor: a drafted round of one token, not a plain step; wants_graphs"
+
+
+def test_a_turns_backlog_prime_is_not_its_first_rounds_price():
+    """P0 (2026-10-12): the first drafted round of a turn at 140k read the turn's backlog into the head
+    (772 rows, 200 ms) and was priced at 93 ms; the turn weighs the prime (`StairCut.turn`), the round's
+    price is its wall time less the prime."""
+    import time as _t
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    head = _StubHead()
+    head.prime = lambda rows, nexts: (_t.sleep(0.08), setattr(head.st, "length", head.st.length + len(nexts)))
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    prompt = list(range(200))
+    d.reset()
+    d.sync(prompt, _rows(0, 200), 0)
+    tree = d.propose_tree(prompt, 8)
+    assert tree.n_draft > 0 and d._prime_ms >= 80.0
+    d.on_verify(tree.n_draft + 1, 1.0)
+    d.observe([10, 11])
+    d.sync([10, 11], _rows(200, 2), 200)
+    d.propose_tree(prompt + [10, 11], 8)
+    assert d.cut.spec[0] < 40.0 and d._prime_ms == 0.0, (d.cut.spec, d._prime_ms)
+    return f"a turn's 80 ms prime left out of its first round's price ({d.cut.spec[0]:.1f} ms a token)"
 
 
 def test_the_warm_up_rounds_price_nothing():
@@ -307,6 +336,70 @@ def test_the_price_classes():
     got = [pc(n) for n in (1000, 2049, 5000, 32_000, 40_000, 140_000, 200_000, 260_800)]
     assert got == [0, 4096, 6144, 32_768, 49_152, 196_608, 262_144, 262_144], got
     return "0, then 4,096 x 2^k and 6,144 x 2^k up to 262,144"
+
+
+def test_idle_captures_take_the_shapes_the_rounds_use():
+    """The capture gap (2026-10-12): a class's verify, commit and MTP graphs, the shapes the rounds so
+    far used (95 % of them), captured one a step while the server is idle, a moved commit over a
+    tree whose path leaves the chain; until then a drafted turn there is charged for them."""
+    from engine.models.flashnext import serving as S
+    fn = _FN()
+    fn.qsa_class = lambda n: 0 if n < 100 else 1024
+    staged, made = [], []
+
+    class VG:
+        def __init__(self, fn_, st, M, cls):
+            self.key = (M, cls)
+
+        def capture(self):
+            made.append(("v",) + self.key)
+
+        def replay(self):
+            made.append(("replay",) + self.key)
+
+    class CG:
+        def __init__(self, fn_, st, key):
+            self.key = key
+
+        def capture(self):
+            made.append(("c",) + self.key)
+
+    fn.stage_rows = lambda toks, parents, st: staged.append(("rows", list(parents)))
+    fn.stage_commit = lambda st, path: staged.append(("commit", list(path)))
+    head = types.SimpleNamespace(depth=1, graphs={(1, 0): 1, (2, 0): 1})
+    head.capture_class = lambda n, cls: head.graphs.__setitem__((n, cls), 1)
+    s = FlashNextServing(fn, 64)
+    s.heads["mtp"] = head
+    assert s.idle_captures() is None and s.capture_cost(500) > 0         # length 0; the prior's shapes owed
+    s.uses = {2: 500, 3: 300, 5: 1, (2, 1, False): 300, (2, 2, False): 200, (3, 2, True): 250, (3, 3, False): 50}
+    s.vgraphs = {(2, 0): 1, (3, 0): 1, (5, 0): 1}
+    s.cgraphs = {k + (0,): 1 for k in s.uses if isinstance(k, tuple)}
+    s.st.length = 500
+    assert s._top(False) == [2, 3]                                       # width 5: 0.1 % of the rounds
+    assert s.capture_cost(50) == 0.0                                      # class 0 has them
+    assert s.capture_cost(500) == 8 * S.CAPTURE_MS                       # 2 widths, 4 commits, 2 feeds
+    real, S.VerifyGraph, S.CommitGraph = (S.VerifyGraph, S.CommitGraph), VG, CG
+    sync, torch.cuda.synchronize = torch.cuda.synchronize, lambda: None
+    try:
+        n = sum(1 for _ in s.idle_captures())
+    finally:
+        S.VerifyGraph, S.CommitGraph = real
+        torch.cuda.synchronize = sync
+    assert n == 8 and made[:2] == [("v", 2, 1024), ("v", 3, 1024)], made
+    assert ("c", 3, 2, True, 1024) in made and ("rows", [-1, 0, 0]) in staged and ("commit", [0, 2]) in staged
+    assert (1, 1024) in head.graphs and (2, 1024) in head.graphs
+    assert s.idle_captures() is None and s.capture_cost(500) == 0.0 and s.capture_ms is not None
+    assert s.st.length == 500
+    # a graph captured ahead uploads at its first replay: that round is not priced, the next one is
+    fn._vcls, s._width = 1024, 2
+    s.commit_tree([0])
+    assert s.captured and (2, 1, False, 1024) not in s._fresh
+    s.captured = False
+    s.st.length = 500
+    s.commit_tree([0])
+    assert not s.captured
+    return ("8 graphs of the 1,024 class (2 widths, 4 commits, a moved one over a tree, 2 feeds); then nothing owed; "
+            "a first replay unpriced")
 
 
 def test_walk_and_kv_length():

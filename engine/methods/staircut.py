@@ -185,7 +185,7 @@ class StairCut:
         self.draft = {}            # context class -> the draft's cost, ms (EMA 0.1)
         self.plain = {}            # context class -> the plain step's cost, ms (EMA 0.1)
         self.spec = {}             # context class -> a drafted round's ms a token, its whole wall time
-        self.rounds = {}           # context class -> [ms, tokens] of a drafted round (EMA 0.1 each)
+        self.rounds = {}           # context class -> [ms, tokens] of a drafted round (EMA `SPEC_EMA` each)
         self.prime = {}            # context class -> the head's ms a backlog row (EMA 0.1)
         self.skipped, self.probe = {}, {}
         self.plain_turns = {}      # context class -> plain turns in a row (`turn`)
@@ -241,6 +241,8 @@ class StairCut:
         d[ctx_class] = ms if ref is None else 0.9 * ref + 0.1 * ms
 
     SEED_TOKENS = 2.0     # the tokens a drafted round of the `spec` prior stands for
+    SPEC_EMA = 0.05       # a drafted round's weight in `spec`: one request's first rounds (the class's
+                          # first replays, the kernels' first calls) moved it past the plain step at 0.1
 
     def observe_spec(self, ms: float, ctx_class: int = 0, tokens: int = 1) -> None:
         """A drafted round's wall time and the tokens it committed. `spec` is the ratio of the two EMAs
@@ -255,16 +257,18 @@ class StairCut:
             m = [prior * self.SEED_TOKENS, self.SEED_TOKENS] if prior is not None else None
         if m is not None and ms / tokens > self.OUTLIER * m[0] / m[1]:
             return
-        m = [ms, float(tokens)] if m is None else [0.9 * m[0] + 0.1 * ms, 0.9 * m[1] + 0.1 * tokens]
+        a = self.SPEC_EMA
+        m = [ms, float(tokens)] if m is None else [(1 - a) * m[0] + a * ms, (1 - a) * m[1] + a * tokens]
         self.rounds[ctx_class], self.spec[ctx_class] = m, m[0] / m[1]
 
     def observe_prime(self, ms_per_row: float, ctx_class: int = 0) -> None:
         self._ema(self.prime, "prime", ms_per_row, ctx_class)
 
-    def turn(self, ctx_class: int, backlog: int, answer: float) -> bool:
+    def turn(self, ctx_class: int, backlog: int, answer: float, extra_ms: float = 0.0) -> bool:
         """Draft this turn? True unless the class has a plain price, a drafted round's price a token
         and a backlog row's price (learned, else the price file's priors), and what the drafts would
-        save over `answer` tokens does not pay for reading `backlog` rows into the head.
+        save over `answer` tokens does not pay for reading `backlog` rows into the head and for
+        `extra_ms` more (the graphs the class lacks, which the engine captures while idle).
 
         A class that takes plain turns measures no drafted round, so what it learned of them ages: each
         plain turn moves it `AGE` of the way back to the price file's prior (with none, it is dropped
@@ -280,12 +284,12 @@ class StairCut:
         if plain is None or spec is None or prime is None:
             return True
         n = self.plain_turns.get(ctx_class, 0)
-        if (plain - spec) * answer > backlog * prime:
+        if (plain - spec) * answer > backlog * prime + extra_ms:
             if n == 0:
                 self.age[ctx_class] = self.AGE              # drafted on from a drafting turn: the full rate
             self.returned[ctx_class], self.plain_turns[ctx_class] = n > 0, 0
             return True
-        if not self.frozen and ctx_class in self.spec:
+        if not self.frozen and ctx_class in self.spec and (plain - spec) * answer <= backlog * prime:
             rate = self.age.get(ctx_class, self.AGE)
             if n == 0 and self.returned.get(ctx_class):
                 rate = self.age[ctx_class] = max(rate / 2, self.AGE / 32)   # the return lost

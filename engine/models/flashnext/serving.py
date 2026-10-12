@@ -38,7 +38,7 @@ from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
-from engine.models.flashnext.engine import DecodeGraph, FlashNextEngine
+from engine.models.flashnext.engine import CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
@@ -173,6 +173,12 @@ class FlashNextServing:
         self.dg = None                      # the decode step's graphs, made on the first decode token
         self.vgraphs: dict = {}
         self.cgraphs: dict = {}
+        # verify width M / commit key (M, n, moved) -> rounds that used it, from a prior of one round
+        # each for chains of 2-6 rows (a class's idle captures need shapes before the first rounds)
+        self.uses: dict = dict(PRIOR_USES)
+        self._fresh: set = set()            # graphs captured while idle and not replayed yet
+        self.capture_ms = None              # one verify or commit graph's capture, ms (EMA 0.2)
+        self._width = 0                     # the last verify block's rows (its commit's key)
         self.picks = None
         self.mm, self.pos_delta, self.tap = None, 0, None
         self._hidden = None                 # [1, rows, hc H]: the last forward's streams
@@ -336,6 +342,90 @@ class FlashNextServing:
             fn._pend_owner = None
         self.st.reset_inplace()
 
+    # --- a context class's graphs, captured while the server is idle -----------------------------
+    #: the shapes a class captures ahead: the verify widths and commit shapes that make up this share
+    #: of the rounds so far, at most this many of each
+    IDLE_SHARE, IDLE_MAX = 0.99, 24
+
+    def _capture_took(self, t0: float) -> None:
+        ms = (time.perf_counter() - t0) * 1e3
+        self.capture_ms = ms if self.capture_ms is None else 0.8 * self.capture_ms + 0.2 * ms
+
+    def _top(self, commits: bool) -> list:
+        keys = sorted(((k, n) for k, n in self.uses.items() if isinstance(k, tuple) == commits),
+                      key=lambda kn: -kn[1])
+        total, out, got = sum(n for _, n in keys), [], 0
+        for k, n in keys:
+            if got >= self.IDLE_SHARE * total or len(out) >= self.IDLE_MAX:
+                break
+            out.append(k)
+            got += n
+        return out
+
+    def _missing(self, cls: int) -> list:
+        """What the class lacks of the shapes the rounds use (`_top`): ("v", M) verify widths,
+        ("c", (M, n, moved)) commits of a captured or missing width, ("m", n) the MTP head's feeds."""
+        widths = self._top(False)
+        out = [("v", M) for M in widths if (M, cls) not in self.vgraphs]
+        out += [("c", k) for k in self._top(True) if k[0] in widths and k + (cls,) not in self.cgraphs
+                and (not k[2] or 2 <= k[1] < k[0])]
+        for head in self.heads.values():
+            out += [("m", n) for n in range(1, head.depth + 2) if (n, cls) not in head.graphs]
+        return out
+
+    def capture_cost(self, n: int) -> float:
+        """What a drafted turn at context length `n` would spend capturing the graphs its class lacks,
+        ms: the first drafted request in each class paid 3.4-5.1 s of captures (P0, 2026-10-12)
+        until the idle captures below took them (`StairCut.turn` weighs it with the backlog)."""
+        miss = self._missing(self.fn.qsa_class(n))
+        return len(miss) * (self.capture_ms if self.capture_ms is not None else CAPTURE_MS)
+
+    def idle_captures(self):
+        """The graphs the class of the state's length lacks, one capture a step (a generator: the
+        server stops between two when a request waits), or None when it lacks none. Every capture
+        leaves the state as it was: a verify writes only rows past the length, a commit's and the
+        MTP chain's warm-ups are undone (engine.py)."""
+        if self.st.length == 0:
+            return None
+        cls = self.fn.qsa_class(self.st.length)
+        miss = self._missing(cls)
+        return self._capture_steps(cls, miss) if miss else None
+
+    @torch.no_grad()
+    def _capture_steps(self, cls: int, miss: list):
+        self._settle_chain()
+        fn, st = self.fn, self.st
+        for kind, key in sorted(miss, key=lambda m: "vcm".index(m[0])):     # widths before their commits
+            t0 = time.perf_counter()
+            if kind == "v":
+                g = VerifyGraph(fn, st, key, cls)
+                g.capture()
+                self.vgraphs[(key, cls)] = g
+                self._fresh.add((key, cls))
+            elif kind == "c":
+                M, n, moved = key
+                vg = self.vgraphs.get((M, cls))
+                if vg is None:
+                    continue
+                parents, path = list(range(-1, M - 1)), list(range(n))
+                if moved:
+                    # the path leaves the chain at its last row: row M - 1, a second child of row n - 2
+                    parents[M - 1], path[-1] = n - 2, M - 1
+                fn.stage_rows([0] * M, parents, st)
+                fn._vcls = cls
+                vg.replay()
+                fn.stage_commit(st, path)
+                g = CommitGraph(fn, st, (M, n, moved, cls))
+                g.capture()
+                self.cgraphs[(M, n, moved, cls)] = g
+                self._fresh.add((M, n, moved, cls))
+            else:
+                for head in self.heads.values():
+                    head.capture_class(key, cls)
+            torch.cuda.synchronize()
+            self._capture_took(t0)
+            yield
+
     @torch.no_grad()
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
         """Rows `ids` at positions start..: one token through the decode step, more through the prefill
@@ -371,8 +461,18 @@ class FlashNextServing:
         toks = [int(t) for t in block.view(-1).tolist()]
         M = len(toks)
         n_graphs = len(self.vgraphs)
+        t0 = time.perf_counter()
         self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs)
         self.captured = len(self.vgraphs) > n_graphs
+        self.uses[M] = self.uses.get(M, 0) + 1
+        self._width = M
+        cls = getattr(self.fn, "_vcls", 0)
+        if (M, cls) in self._fresh:
+            # an idle capture's first replay uploads the graph: not a price either
+            self._fresh.discard((M, cls))
+            self.captured = True
+        if self.captured:
+            self._capture_took(t0)
         rb = self.fn._rb[M]
         self.picks = rb["next"][:M]
         self._hidden = self.fn.rec["stack"][:M].unsqueeze(0)
@@ -386,7 +486,14 @@ class FlashNextServing:
         n_graphs = len(self.cgraphs)
         stack = self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
         self.commit_ms = (time.perf_counter() - t0) * 1e3
-        self.captured |= len(self.cgraphs) > n_graphs
+        if len(self.cgraphs) > n_graphs:
+            self.captured = True
+            self._capture_took(t0)
+        k = (self._width, len(path), any(int(p) != j for j, p in enumerate(path)))
+        self.uses[k] = self.uses.get(k, 0) + 1
+        if k + (getattr(self.fn, "_vcls", 0),) in self._fresh:
+            self._fresh.discard(k + (getattr(self.fn, "_vcls", 0),))
+            self.captured = True
         if path:
             self._h_last.copy_(stack[len(path) - 1:len(path)])
 
@@ -414,6 +521,13 @@ class FlashNextServing:
         if int(start) != self.st.length:
             raise ValueError(f"Flash-Next forward at {start}, the state holds {self.st.length} rows")
 
+
+#: one graph's capture before the server has timed its own, ms (P0, 2026-10-12: 3,391 ms for 9 at the
+#: 32,768 class, 5,121 for 12, 4,981 for 15 at 131,072)
+CAPTURE_MS = 380.0
+#: the shapes a class captures ahead before any round was counted: chain blocks of 2-6 rows, each
+#: path length (one round each, so the server's own rounds outweigh them at once)
+PRIOR_USES = {**{M: 1 for M in range(2, 7)}, **{(M, n, False): 1 for M in range(2, 7) for n in range(1, M + 1)}}
 
 #: the repository root (the hot draft vocabulary is ops/fn-hot-vocab.npy, the price files ops/prices/)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))

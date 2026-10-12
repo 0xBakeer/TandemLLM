@@ -412,6 +412,22 @@ def test_one_slow_request_does_not_keep_a_class_plain():
     return f"a cold first request leaves 1k drafting; a losing class back to drafting after {back} plain turns, after {back2} once its return lost; 260k stays plain; ms a token by sums"
 
 
+def test_a_turn_waits_for_the_graphs_its_class_lacks():
+    """The capture gap (2026-10-12): the first drafted request in a class paid 3.4-5.1 s of graph
+    captures. `turn` weighs the graphs the class lacks (`extra_ms`) with the backlog: a class that
+    would pay them takes the plain turn, and that refusal is no evidence against drafting (nothing
+    ages); once the engine captured them while idle, the class drafts."""
+    sc = StairCut(PriceModel.load(FN_PRICES), siblings=False)
+    for _ in range(40):
+        sc.observe_spec(15.0, 32_768)
+    learned = sc.spec[32_768]
+    assert sc.turn(32_768, 3_324, 256)
+    assert not sc.turn(32_768, 3_324, 256, extra_ms=12 * 380.0)
+    assert sc.spec[32_768] == learned and sc.plain_turns.get(32_768, 0) == 0
+    assert sc.turn(32_768, 3_324, 256, extra_ms=0.0)
+    return "12 missing graphs (4.6 s): a plain turn, nothing aged; captured: drafts"
+
+
 def test_price_model():
     pm = PriceModel.load(FN_PRICES)
     doc = json.load(open(FN_PRICES))

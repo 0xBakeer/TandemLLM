@@ -3138,9 +3138,63 @@ def prepare_once() -> str:
                   f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
 
 
+#: the engine's idle graph captures wait this long after the last request ended (s)
+GRAPHS_IDLE_S = 1.0
+
+
+def graphs_once() -> str:
+    """One look for the graphs the engine's context class lacks (`idle_captures`: an engine's verify,
+    commit and draft graphs of a class its rounds have not used yet), captured in the idle window one
+    at a time, stopping at the first request that waits. The first drafted request in a class paid
+    3.4-5.1 s of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
+    eng = STATE.get("engine")
+    idle = getattr(eng, "idle_captures", None)
+    if idle is None or STATE.get("draining"):
+        return "off"
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
+            return "busy"
+    if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
+        return "recent"
+    wants = getattr(STATE.get("drafter"), "wants_graphs", None)
+    if wants is not None and not wants(int(eng.kv.length)):
+        return "plain"                  # the drafter takes the plain step at this length
+    me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
+    if not _take(me, None):
+        return "busy"
+    t0, n, why = time.perf_counter(), 0, "nothing"
+    try:
+        steps = idle()
+        if steps is None:
+            return why
+        why = "captured"
+        for _ in steps:
+            n += 1
+            if _waiting():
+                why = "stopped"
+                break
+        return why
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        why = "failed"
+        return why
+    finally:
+        with QUEUE:
+            HOLDER["who"] = None
+        LOCK.release()
+        if n:
+            print(f"[graphs] idle captures at {eng.kv.length} tokens: {n} graphs, {why}, "
+                  f"{(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
 def _prepare_loop() -> None:
     while True:
         time.sleep(PREPARE_EVERY_S)
+        try:
+            if graphs_once() in ("captured", "stopped"):
+                continue                # the graphs had the idle moment
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
         try:
             got = prepare_once()
         except Exception:                                          # noqa: BLE001
@@ -9454,7 +9508,9 @@ def _serve(a, led) -> None:
                                min_tokens=a.compaction_min_tokens)
     STATE["prepared"] = compaction_mod.Prepared()
     STATE["last_end_mono"] = time.monotonic()
-    if STATE.get("resident") is not None and not a.fake_engine:
+    if not a.fake_engine:
+        # the summary written ahead and the memory writer (both need the resident prefix), and an
+        # engine's idle graph captures
         threading.Thread(target=_prepare_loop, name="compaction-prepare", daemon=True).start()
     print(f"[compaction] {a.compaction}; prepare {a.compaction_prepare} (idle "
           f"{a.compaction_idle_s:g} s, from {a.compaction_min_tokens} tokens)", flush=True)

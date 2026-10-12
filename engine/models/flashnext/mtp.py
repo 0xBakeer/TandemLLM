@@ -23,6 +23,7 @@ class FlashNextMTPHead:
         self.st = fn.new_mtp_state(cap)
         self.graphs: dict = {}
         self.captures = 0               # graphs captured so far (a round that captured is not a price)
+        self.fresh: set = set()         # graphs captured ahead (`capture_class`) not replayed yet
         self._n = 0
 
     def reset(self) -> None:
@@ -56,6 +57,15 @@ class FlashNextMTPHead:
                 self.graphs[(n, cls)].capture()
                 self.captures += 1
 
+    def capture_class(self, n: int, cls: int) -> None:
+        """The graph of an n-row feed at context class `cls`, ahead of the round that needs it (the
+        server's idle captures, engine/models/flashnext/serving.py); the cache as it was."""
+        if (n, cls) not in self.graphs:
+            g = MTPChainGraph(self.fn, self.st, n, self.depth, cls)
+            g.capture()
+            self.graphs[(n, cls)] = g
+            self.fresh.add((n, cls))
+
     def launch(self, rows: torch.Tensor, nexts: list[int]) -> None:
         """Feed rows [n, hc H] with their next tokens and draft `depth` tokens from the last: the graph
         is launched, not waited for (`read`)."""
@@ -63,6 +73,9 @@ class FlashNextMTPHead:
         n = len(nexts)
         cls = fn.qsa_class(self.st.length + n + self.depth - 1)
         g = self.graphs.get((n, cls))
+        if (n, cls) in self.fresh:
+            self.fresh.discard((n, cls))
+            self.captures += 1          # an idle capture's first replay uploads it: the drafter skips it
         if g is None:
             g = self.graphs[(n, cls)] = MTPChainGraph(fn, self.st, n, self.depth, cls)
             g.capture()
