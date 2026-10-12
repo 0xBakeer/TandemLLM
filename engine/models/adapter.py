@@ -25,6 +25,9 @@ class Capabilities:
     # SRV-339: the shadow reader's outputs (the narrator's thought lines, the router's verdicts) were
     # validated on this model's reasoning; False: the reader is not started and the status says why
     shadow: bool = True
+    # joint verify rounds: the decoding slots' blocks in one pass (`forward_tree_multi`); False: the
+    # slots take turns, a whole round each (ENG-241 step 2, until the multi-sequence kernels)
+    joint_verify: bool = True
 
 
 @dataclass(frozen=True)

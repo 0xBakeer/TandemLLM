@@ -61,7 +61,7 @@ class _FN:
         self._pend_n.zero_()
         self._pend_owner = None
 
-    def new_state(self, cap=None):
+    def new_state(self, cap=None, paged=False):
         cap = cap or 64
         st = FNState(cap=cap)
         st.S[0] = torch.zeros(1, 2, 4, 4)
@@ -70,7 +70,7 @@ class _FN:
         st.k[3], st.v[3], st.ik[3] = torch.zeros(2, cap, 8), torch.zeros(2, cap, 8), torch.zeros(cap, 4)
         return st
 
-    def new_mtp_state(self, cap=None):
+    def new_mtp_state(self, cap=None, pages=None):
         cap = cap or 64
         st = FNState(cap=cap)
         st.k[-1], st.v[-1], st.ik[-1] = torch.zeros(2, cap, 8), torch.zeros(2, cap, 8), torch.zeros(cap, 4)
@@ -312,7 +312,7 @@ def test_a_plain_turn_reads_nothing_and_the_next_resumes_past_it():
     prompt = list(range(5000))
     d.reset()
     d.sync(prompt, _rows(0, 5000), 0)
-    assert d.propose_tree(prompt, 8) is None and d.req["turn"] is False
+    assert d.propose_tree(prompt, 8) is None and d.req["turn"] is False and d.plain_turn
     assert d.queue == [] and d.held is None and head.st.length == 0      # the backlog dropped, nothing read
     d.sync([9], _rows(5000, 1), 5000)
     assert d.held is None                                               # rows of a plain turn are not kept
@@ -370,7 +370,7 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     head.capture_class = lambda n, cls: head.graphs.__setitem__((n, cls), 1)
     s = FlashNextServing(fn, 64)
     s.heads["mtp"] = head
-    assert s.idle_captures() is None and s.capture_cost(500) > 0         # length 0; the prior's shapes owed
+    assert s.capture_cost(500) > 0 and s.capture_cost(0) > 0            # the prior's shapes owed
     s.uses = {2: 500, 3: 300, 5: 1, (2, 1, False): 300, (2, 2, False): 200, (3, 2, True): 250, (3, 3, False): 50}
     s.vgraphs = {(2, 0): 1, (3, 0): 1, (5, 0): 1}
     s.cgraphs = {k + (0,): 1 for k in s.uses if isinstance(k, tuple)}
@@ -400,6 +400,108 @@ def test_idle_captures_take_the_shapes_the_rounds_use():
     assert not s.captured
     return ("8 graphs of the 1,024 class (2 widths, 4 commits, a moved one over a tree, 2 feeds); then nothing owed; "
             "a first replay unpriced")
+
+
+def test_a_capture_saves_only_what_its_warm_up_writes():
+    """ENG-241: a capture's warm-up writes the recurrent sections and rows from the length on; it saved
+    every buffer whole (8 GB at a 262,144-token window), and with the KV pool rows past the committed
+    ones are not mapped. Now the sections whole, `CAPTURE_ROWS` rows from the length, the pooled-key
+    blocks from the length's block; a restore puts back exactly what was there."""
+    from engine.models.flashnext import engine as E
+    fn = _FN()
+    fn.cfg.indexer_compress_ratio = 4
+    st = fn.new_state(400)
+    st.pool[3] = torch.zeros(400 // 4 + 9, 4)
+    for t in [st.S[0], st.conv[0], st.ple_conv[1], st.k[3], st.v[3], st.ik[3], st.pool[3]]:
+        t.copy_(torch.randn_like(t))
+    st.length = 100
+    before = {k: v.clone() for k, v in E._state_tensors(st).items()}
+    saved = E._state_saved(fn, st)
+    rows = {f"k.3": 64, f"v.3": 64, f"ik.3": 64}
+    for t, ax, lo, n, x in saved:
+        name = next(k for k, v in E._state_tensors(st).items() if v is t)
+        assert n == rows.get(name, n) and (name not in rows or lo == 100), (name, lo, n)
+    st.S[0].add_(1.0)
+    st.k[3][:, 100:164].add_(1.0)
+    st.ik[3][120].add_(1.0)
+    st.pool[3][25:30].add_(1.0)
+    E._state_restore(saved)
+    assert all(torch.equal(before[k], v) for k, v in E._state_tensors(st).items())
+    kv = sum(x.numel() for t, ax, lo, n, x in saved if t is st.k[3])
+    return f"the K rows saved: {kv} values of {st.k[3].numel()}; restored exactly"
+
+
+def test_the_pool_commits_rows_before_a_write():
+    """ENG-241: with the KV pool the state's rows are committed before a forward or a verify block
+    writes them (rows plus the pool's margin, one compare when they are)."""
+    fn = _FN()
+    s = FlashNextServing(fn, 64)
+    asked = []
+    s.st.pages = types.SimpleNamespace(rows=0, margin=lambda: 8, on_device=lambda: False,
+                                       ensure=lambda r: (asked.append(r), setattr(s.st.pages, "rows", r + 8)))
+    assert s.kv.pages is s.st.pages
+    s._ensure(10)
+    s._ensure(9)                                    # committed already (10 rows and the margin): no call
+    s._ensure(20)
+    assert asked == [10, 20], asked
+    return "rows 10 then 20 committed; 9 already"
+
+
+def test_a_side_slot_shares_the_weights_and_has_its_own_state():
+    """ENG-241 step 2: a side slot over the same engine (`fn`, the weights once) with its own state,
+    graphs and MTP head; its drafter's StairCut from the same prices (its own learning) and its lookup
+    over slot 0's corpus; its MTP head drafts into its own buffers."""
+    fn = _FN()
+    s0 = FlashNextServing(fn, 64)
+    assert s0.caps.side_slots and s0.caps.joint_verify
+    ng0 = types.SimpleNamespace(corpus=object())
+    d0 = MTPTreeDrafter(s0, s0.add_mtp_head(3), StairCut(PriceModel({"0": {"chain": {"1": 20.0}}}, 2.0),
+                                                         siblings=False), ng0)
+    d0.cut.observe_spec(30.0, 0)
+    real = MTPTreeDrafter.capture_all
+    MTPTreeDrafter.capture_all = lambda self: None
+    try:
+        e2, d2 = s0.side_slot(32, d0)
+    finally:
+        MTPTreeDrafter.capture_all = real
+    assert e2.fn is fn and e2.st is not s0.st and e2.max_len == 32 and e2.vgraphs is not s0.vgraphs
+    assert d2.s is e2 and d2.head is e2.heads["mtp"] and d2.head is not d0.head and d2.depth == 3
+    assert (d0.head.key, d2.head.key) == (0, 1)                    # its own draft buffers
+    assert d2.cut is not d0.cut and d2.cut.prices.table == d0.cut.prices.table and d2.cut.spec == {}
+    assert d2.ngram is not None and d2.ngram.corpus is ng0.corpus
+    per_token, const = s0.side_slot_bytes(32, paged=False)
+    assert per_token > s0.cost().view_bytes_per_token and const > s0.cost().section_bytes
+    assert s0.side_slot_bytes(32, paged=True)[0] == 0
+    return "own state, graphs, head and cut; the same weights, prices and corpus; bytes by window"
+
+
+def test_a_joint_pass_leaves_each_slot_as_its_lone_verify_would():
+    """ENG-241 step 3: `forward_tree_multi` hands every slot's block to the engine's one pass
+    (`verify_multi`) and leaves each slot's logits, picks and streams where its own `forward_tree`
+    leaves them; the commit is each slot's own. Blocks over 32 rows are not batchable."""
+    fn = _FN()
+    seen = []
+
+    def verify_multi(jobs):
+        seen.append([(t, p, st) for t, p, st in jobs])
+        return [(torch.full((len(t), 4), float(i)), torch.arange(len(t)) + 10 * i, torch.zeros(len(t), 3) + i)
+                for i, (t, p, st) in enumerate(jobs)]
+    fn.verify_multi = verify_multi
+    a, b = FlashNextServing(fn, 64), FlashNextServing(fn, 64)
+    a.st.length, b.st.length = 5, 9
+    real = torch.cuda.current_stream
+    torch.cuda.current_stream = lambda: types.SimpleNamespace(synchronize=lambda: None)
+    try:
+        out = FlashNextServing.forward_tree_multi([(a, torch.tensor([7, 8]), [-1, 0], 5),
+                                                    (b, torch.tensor([1, 2, 3]), [-1, 0, 0], 9)])
+    finally:
+        torch.cuda.current_stream = real
+    assert seen == [[([7, 8], [-1, 0], a.st), ([1, 2, 3], [-1, 0, 0], b.st)]]
+    assert out[0].shape == (2, 4) and float(out[1][0, 0]) == 1.0
+    assert a.picks.tolist() == [0, 1] and b.picks.tolist() == [10, 11, 12] and b._hidden.shape == (1, 3, 3)
+    assert a._width == 2 and b._width == 3 and a.stats["verify_blocks"] == 1 and not b.captured
+    assert a.tree_batchable(list(range(-1, 31))) and not a.tree_batchable(list(range(-1, 32)))
+    return "one pass for both slots; each slot's logits, picks and streams its own; 33 rows not batchable"
 
 
 def test_walk_and_kv_length():

@@ -115,6 +115,7 @@ class FNState:
     cap: int = 0        # > 0: KV and indexer keys live in preallocated buffers of `cap` tokens
     pool: dict = field(default_factory=dict)     # attn layer -> [blocks, index_head_dim] pooled QSA keys (engine)
     pool_n: dict = field(default_factory=dict)   # attn layer -> blocks computed
+    pages: object = None  # the KV pool's paged set of k, v and ik (engine/kvpool.py), or None: static buffers
     pool_ratio: int = 4
     record: bool = False  # the row-exact engine keeps the recurrent state after every row of a block
     rows: dict = field(default_factory=dict)   # ("S"|"conv"|"ctx"|"pconv", layer) -> [state after row t]

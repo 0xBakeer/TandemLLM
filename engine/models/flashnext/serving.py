@@ -38,7 +38,7 @@ from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities, CostModel
-from engine.models.flashnext.engine import CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
+from engine.models.flashnext.engine import CAPTURE_ROWS, CommitGraph, DecodeGraph, FlashNextEngine, VerifyGraph
 from engine.models.flashnext.mtp import FlashNextMTPHead
 from engine.models.state import SectionState
 from engine.settings import SETTINGS as _S
@@ -64,10 +64,13 @@ class _KV:
     stay, as the 27B's do); to any other length it keeps the KV rows by length and clamps the pooled
     keys -- the recurrent state is the caller's to restore first (`state.restore`), as on the 27B."""
 
-    pages = None
-
     def __init__(self, serving: "FlashNextServing"):
         self._s = serving
+
+    @property
+    def pages(self):
+        """The KV pool's paged set of the state's rows (the trunk's and the MTP head's), or None."""
+        return self._s.st.pages
 
     @property
     def length(self) -> int:
@@ -159,11 +162,11 @@ class FlashNextServing:
 
     # the caches' grid: the prefill kernels' chunk (FN_PREFILL_CHUNK), so a resumed prefill runs the
     # chunks a cold one runs; side slots: ENG-241; the shadow reader: validated on the 27B's text only
-    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096, shadow=False)
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
-        self.st = fn.new_state(max_len)
+        self.st = fn.new_state(max_len, paged=True)
         c, dev = fn.cfg, fn.device
         self._ctx = {li: torch.full((1, fn.hash[li].context_len), c.eos_token_id, dtype=torch.long, device=dev)
                      for li in c.ple_layers}
@@ -236,8 +239,42 @@ class FlashNextServing:
         """The draft heads this pack carries, by name: its MTP layer ("mtp", made by `add_mtp_head`)."""
         return self.heads
 
+    def side_slot(self, max_len: int, drafter0=None) -> tuple:
+        """ENG-241 step 2: a side slot's engine and drafter over this engine's weights (`fn`, the one
+        copy): its own state (paged as slot 0's when the pool is on), its own graphs and MTP head; the
+        drafter's StairCut from the same price file, its lookup over slot 0's corpus and suffix store
+        (read-only). The slots share the engine's scratch buffers: a slot's work runs on its GPU turn,
+        a call on one state applies another's parked GDN rows first (`FlashNextEngine.settle`), each
+        MTP head drafts into its own buffers, and decoding slots verify their blocks in one pass
+        (`forward_tree_multi`)."""
+        e2 = FlashNextServing(self.fn, max_len)
+        d2 = None
+        if drafter0 is not None:
+            ng = None
+            if drafter0.ngram is not None:
+                from engine.drafters.ngram import NgramDrafter
+                ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16, min_corpus_order=8)
+                ng.corpus = drafter0.ngram.corpus
+            c0 = drafter0.cut
+            d2 = MTPTreeDrafter(e2, e2.add_mtp_head(drafter0.depth),
+                                StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=c0.siblings), ng)
+            d2.capture_all()
+        return e2, d2
+
+    def side_slot_bytes(self, max_len: int, paged: bool) -> tuple:
+        """(bytes a token, constant bytes) a side slot takes before it serves anything: its KV and the
+        MTP head's when the window is not paged; the recurrent sections, and the graphs' pools a slot
+        captures (SIDE_SLOT_CONST, measured)."""
+        cost = self.cost()
+        per_token = 0 if paged else cost.view_bytes_per_token * 13 // 12      # the MTP layer's 13th
+        return per_token, cost.section_bytes + SIDE_SLOT_CONST
+
     def add_mtp_head(self, depth: int) -> FlashNextMTPHead:
-        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len)
+        self.heads["mtp"] = FlashNextMTPHead(self.fn, depth, self.max_len, pages=self.st.pages)
+        # the head's graphs are captured now (`capture_all`): with the KV pool its first rows must be
+        # mapped -- a Triton launch refuses a buffer whose first page is not ("cannot be accessed from
+        # Triton", 2026-10-12)
+        self._ensure(CAPTURE_ROWS)
         return self.heads["mtp"]
 
     def settle(self) -> None:
@@ -382,11 +419,11 @@ class FlashNextServing:
 
     def idle_captures(self):
         """The graphs the class of the state's length lacks, one capture a step (a generator: the
-        server stops between two when a request waits), or None when it lacks none. Every capture
-        leaves the state as it was: a verify writes only rows past the length, a commit's and the
+        server stops between two when a request waits), or None when it lacks none. An empty state
+        (a side slot after its warm-up) captures class 0's: its first drafted turn would pay them, so
+        it would never draft (2026-10-12: 3 requests at once, the side slots drafted nothing). Every
+        capture leaves the state as it was: a verify writes only rows past the length, a commit's and the
         MTP chain's warm-ups are undone (engine.py)."""
-        if self.st.length == 0:
-            return None
         cls = self.fn.qsa_class(self.st.length)
         miss = self._missing(cls)
         return self._capture_steps(cls, miss) if miss else None
@@ -395,6 +432,7 @@ class FlashNextServing:
     def _capture_steps(self, cls: int, miss: list):
         self._settle_chain()
         fn, st = self.fn, self.st
+        self._ensure(st.length + CAPTURE_ROWS)
         for kind, key in sorted(miss, key=lambda m: "vcm".index(m[0])):     # widths before their commits
             t0 = time.perf_counter()
             if kind == "v":
@@ -434,6 +472,7 @@ class FlashNextServing:
         ids = ids.view(-1)
         self._at(start)
         T = ids.numel()
+        self._ensure(start + T)
         if T == 1 and start > 0:
             if self.dg is None:
                 self.dg = DecodeGraph(self.fn, self.st)
@@ -460,6 +499,7 @@ class FlashNextServing:
         self._at(start)
         toks = [int(t) for t in block.view(-1).tolist()]
         M = len(toks)
+        self._ensure(start + M)
         n_graphs = len(self.vgraphs)
         t0 = time.perf_counter()
         self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs)
@@ -479,6 +519,37 @@ class FlashNextServing:
         self.stats["verify_blocks"] += 1
         self.stats["verify_rows"] += M
         return rb["logits"][:M]
+
+    def tree_batchable(self, parents) -> bool:
+        """A block a joint pass may take (`forward_tree_multi`): its rows within the widths whose
+        projections and experts give a row its lone bits (the self-check's, up to 32)."""
+        return len(parents) <= 32
+
+    @staticmethod
+    @torch.no_grad()
+    def forward_tree_multi(items: list) -> list:
+        """ENG-241 step 3: [(serving, block, parents, start)] of sequence slots over one engine, verified
+        in one pass (`FlashNextEngine.verify_multi`: the weights read once); each slot's logits, picks
+        and streams as its `forward_tree` leaves them, and its block committed by its `commit_tree`."""
+        fn = items[0][0].fn
+        jobs = []
+        for s, block, parents, start in items:
+            s._settle_chain()
+            s._at(start)
+            s._ensure(start + block.numel())
+            jobs.append(([int(t) for t in block.view(-1).tolist()], [int(p) for p in parents], s.st))
+        outs = fn.verify_multi(jobs)
+        torch.cuda.current_stream().synchronize()
+        res = []
+        for (s, block, parents, start), (logits, picks, stack) in zip(items, outs):
+            M = block.numel()
+            s.picks, s._hidden = picks, stack.unsqueeze(0)
+            s.captured, s._width = False, M
+            s.uses[M] = s.uses.get(M, 0) + 1
+            s.stats["verify_blocks"] += 1
+            s.stats["verify_rows"] += M
+            res.append(logits)
+        return res
 
     @torch.no_grad()
     def commit_tree(self, path: list[int]) -> None:
@@ -517,6 +588,17 @@ class FlashNextServing:
             n, self._chain = self._chain, None
             self.commit_tree(list(range(n)))
 
+    def _ensure(self, rows: int) -> None:
+        """ENG-241: commit the pages that hold rows [0, rows) and the pool's margin before a write
+        reaches them (one int compare when they are); never inside a graph capture, whose caller
+        committed the rows before it captured."""
+        ps = self.st.pages
+        if ps is None or rows + ps.margin() <= ps.rows:
+            return
+        if ps.on_device() and torch.cuda.is_current_stream_capturing():
+            return
+        ps.ensure(rows)
+
     def _at(self, start: int) -> None:
         if int(start) != self.st.length:
             raise ValueError(f"Flash-Next forward at {start}, the state holds {self.st.length} rows")
@@ -525,6 +607,8 @@ class FlashNextServing:
 #: one graph's capture before the server has timed its own, ms (P0, 2026-10-12: 3,391 ms for 9 at the
 #: 32,768 class, 5,121 for 12, 4,981 for 15 at 131,072)
 CAPTURE_MS = 380.0
+#: a side slot's graph pools and scratch beyond its state, bytes (ENG-241: an estimate until measured)
+SIDE_SLOT_CONST = int(1.5 * (1 << 30))
 #: the shapes a class captures ahead before any round was counted: chain blocks of 2-6 rows, each
 #: path length (one round each, so the server's own rounds outweigh them at once)
 PRIOR_USES = {**{M: 1 for M in range(2, 7)}, **{(M, n, False): 1 for M in range(2, 7) for n in range(1, M + 1)}}
@@ -547,19 +631,24 @@ def prices(pack: str, log=print) -> PriceModel:
 
 
 def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print,
-          corpus: str | None = None):
+          corpus: str | None = None, kv_pool=None):
     """Flash-Next for the server (`serve` below): the pack's weights, the engine in the loop's
     interface, and with `spec` the shared MTP drafter over the pack's MTP head with the hot draft head
     (`FN_DRAFT_HOT` ids of ops/fn-hot-vocab.npy, 0 = the whole vocabulary), its graphs captured and
     StairCut's prior from the price file -- gated by the load-time self-check (a failed check serves
     plain decode); with FN_LOOKUP the lookup over the request's text and `corpus` joins the cut (ENG-229;
     the tokenizer is the 27B's, so its corpus and suffix store read as they are, checked by fingerprint).
-    `mark(stage)` at "weights", "engine", "drafters" (the server's load ledger).
+    `mark(stage)` at "weights", "engine", "drafters" (the server's load ledger). `kv_pool()`: opens the
+    KV pool after the weights, before the state is allocated, as the 27B's builder does (ENG-241: opened
+    before the weights, the self-check's first Triton launch refused a pointer, "cannot be accessed
+    from Triton", 2026-10-12).
     Returns (serving, drafter or None, info)."""
     from engine.models.flashnext.load import load as fn_load
     idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
     mark("weights")
     fn = FlashNextEngine(idx.cfg, W, tables, banks, device="cuda", max_len=max_len)
+    if kv_pool is not None:
+        kv_pool()
     eng = FlashNextServing(fn, max_len)
     mark("engine")
     drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
@@ -604,8 +693,9 @@ def serve(a, ctx) -> dict:
         ctx.log(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp")
     tok = AutoTokenizer.from_pretrained(a.model)
     depth = a.depth if a.depth > 3 else 4
+    pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
     eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log,
-                               corpus=a.corpus)
+                               corpus=a.corpus, kv_pool=pool)
     if drafter is not None:
         a.depth = depth
         if drafter.ngram is not None:

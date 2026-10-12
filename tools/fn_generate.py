@@ -51,9 +51,15 @@ def chat_ids(tok, text: str) -> list[int]:
 
 
 def class_prompt(tok, cls: str, ctx: int) -> list[int]:
+    return chat_ids(tok, class_text(tok, cls, ctx))
+
+
+def class_text(tok, cls: str, ctx: int) -> str:
+    """`class_prompt`'s user message: the request after held-out text of its kind, the templated
+    prompt `ctx` tokens."""
     ask = ASK[cls]
     if ctx <= 0:
-        return chat_ids(tok, ask)
+        return ask
     # the class's own held-out text first; past its end (8k, 32k) the other held-out texts and
     # bench/calib.txt, repeated (tools/exl3_fastrun.py's prefill_text)
     names = [FILL[cls]] + [n for n in ("heldout_prose.txt", "heldout_code.txt", "calib.txt") if n != FILL[cls]]
@@ -68,7 +74,7 @@ def class_prompt(tok, cls: str, ctx: int) -> list[int]:
             lo = mid
         else:
             hi = mid - 1
-    return chat_ids(tok, tok.decode(fid[:lo]) + "\n\n" + ask)
+    return tok.decode(fid[:lo]) + "\n\n" + ask
 
 
 def greedy(eng: FlashNextEngine, ids: list[int], new: int, eos: set, graph_lc: int = 2048):

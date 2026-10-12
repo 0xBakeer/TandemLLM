@@ -1086,7 +1086,9 @@ def _run_round(meet) -> None:
                 r = group[0]
                 outs = [r.eng.forward_tree(r.tokens, r.parents, start=r.start)]
             else:
-                outs = forward_tree_multi([(r.eng, r.tokens, r.parents, r.start) for r in group])
+                # an engine with its own joint pass (ENG-241), else the 27B's
+                multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
+                outs = multi([(r.eng, r.tokens, r.parents, r.start) for r in group])
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
@@ -1206,6 +1208,10 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
         if meet is not None:
             with meet.cv:
                 meet.stats["alone"] += 1
+                # why: the only decoding slot, or the GPU turn not this slot's
+                why = meet.stats.setdefault("alone_why", {})
+                k = "one" if len(pool.decoding()) <= 1 else "turn"
+                why[k] = why.get(k, 0) + 1
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
                               tree=tree if meet.cut == "joint" else None)
@@ -1428,7 +1434,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             if par is not None:
                 # parallel requests: this slot decodes (the round's barrier waits for its blocks
                 # when it is a tree loop), and the GPU is offered to a waiting slot between blocks
-                _par_block(par, tree_mode)
+                # a drafter taking the plain step all turn (`plain_turn`) submits no block: the
+                # round's barrier must not wait for it
+                _par_block(par, tree_mode and not getattr(drafter, "plain_turn", False))
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
                 # A short request waits (server/preempt.py). A block boundary: the
@@ -3143,36 +3151,44 @@ GRAPHS_IDLE_S = 1.0
 
 
 def graphs_once() -> str:
-    """One look for the graphs the engine's context class lacks (`idle_captures`: an engine's verify,
-    commit and draft graphs of a class its rounds have not used yet), captured in the idle window one
-    at a time, stopping at the first request that waits. The first drafted request in a class paid
-    3.4-5.1 s of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
-    eng = STATE.get("engine")
-    idle = getattr(eng, "idle_captures", None)
-    if idle is None or STATE.get("draining"):
+    """One look for the graphs the engines' context classes lack (`idle_captures`: an engine's verify,
+    commit and draft graphs of a class its rounds have not used yet), slot 0's and each side slot's,
+    captured in the idle window one at a time under the engine lock (which holds the GPU turn as slot
+    0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
+    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
+    if STATE.get("draining"):
+        return "off"
+    pool = STATE.get("pool")
+    engines = [(STATE.get("engine"), STATE.get("drafter"))] + (
+        [(s.values.get("engine"), s.values.get("drafter")) for s in pool.side()] if pool is not None else [])
+    engines = [(e, d) for e, d in engines if getattr(e, "idle_captures", None) is not None]
+    if not engines:
         return "off"
     with QUEUE:
         if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
             return "busy"
     if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
         return "recent"
-    wants = getattr(STATE.get("drafter"), "wants_graphs", None)
-    if wants is not None and not wants(int(eng.kv.length)):
-        return "plain"                  # the drafter takes the plain step at this length
+    # a length where the drafter takes the plain step anyway (260,800 tokens) captures nothing
+    engines = [(e, d) for e, d in engines
+               if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
+    if not engines:
+        return "plain"
     me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
     if not _take(me, None):
         return "busy"
     t0, n, why = time.perf_counter(), 0, "nothing"
     try:
-        steps = idle()
-        if steps is None:
-            return why
-        why = "captured"
-        for _ in steps:
-            n += 1
-            if _waiting():
-                why = "stopped"
-                break
+        for e, _ in engines:
+            steps = e.idle_captures()
+            if steps is None:
+                continue
+            why = "captured"
+            for _ in steps:
+                n += 1
+                if _waiting():
+                    why = "stopped"
+                    return why
         return why
     except Exception:                                              # noqa: BLE001
         logbuf.print_exc()
@@ -3183,7 +3199,7 @@ def graphs_once() -> str:
             HOLDER["who"] = None
         LOCK.release()
         if n:
-            print(f"[graphs] idle captures at {eng.kv.length} tokens: {n} graphs, {why}, "
+            print(f"[graphs] idle captures over {len(engines)} engine(s): {n} graphs, {why}, "
                   f"{(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
 
 
@@ -8807,7 +8823,8 @@ def _load(a) -> None:
         STATE["weights_key"] = probe_mod.weights_key(weights)
 
     # what a builder may ask of the server: the keys above, the ledger, the log
-    ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True))
+    ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
+                                kv_pool=lambda: _kv_pool_open(a))
     m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
@@ -8867,6 +8884,20 @@ def _load(a) -> None:
         for x in led.stages()), flush=True)
 
 
+def _kv_pool_open(a) -> None:
+    """SRV-307: the shared KV pool (engine/kvpool.py) with `--kv-pool on`, before the engine
+    allocates its window (a builder asks for it: the 27B's, and any other's through `ctx.kv_pool`)."""
+    if getattr(a, "kv_pool", "off") != "on" or kvpool.POOL is not None:
+        return
+    kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
+                                margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
+                                on_event=_kv_pool_event)
+    kvpool.OWNER = "slot0"
+    if kvpool.Driver.get() is None:
+        print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
+              "only its accounts, every buffer is allocated in full", flush=True)
+
+
 def _build_qwen3_5(a, ctx) -> dict:
     """The 27B (and every `qwen3_5` checkpoint): its weights (NVFP4, FP8 head), the KV pool, the
     engine, the tokenizer, the vision tower and the drafter `--drafter` names. `ctx` as for a
@@ -8881,14 +8912,7 @@ def _build_qwen3_5(a, ctx) -> dict:
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
     ctx.mark("weights")
-    if getattr(a, "kv_pool", "off") == "on":
-        kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
-                                    margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
-                                    on_event=_kv_pool_event)
-        kvpool.OWNER = "slot0"
-        if kvpool.Driver.get() is None:
-            print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
-                  "only its accounts, every buffer is allocated in full", flush=True)
+    _kv_pool_open(a)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     ctx.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
@@ -9205,7 +9229,10 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     ceiling and peak go up by that much, so slot 0's caches are not shed for it."""
     from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
     n = int(a.parallel)
-    if a.drafter not in ("lenrouter", "none"):
+    # ENG-241: an engine that builds its own side slots (`side_slot`: its state, graphs and drafter over
+    # the same weights); else the 27B's, below
+    make = getattr(STATE["engine"], "side_slot", None)
+    if make is None and a.drafter not in ("lenrouter", "none"):
         raise SystemExit(f"[parallel] --parallel {n} is built for --drafter lenrouter (or none), "
                          f"not {a.drafter}")
     L = int(min(a.side_max_len, a.max_len))
@@ -9222,8 +9249,12 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     for i in range(1, n):
         # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a
         # token) and its constant are memory at load
-        need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
-                                    constant=int(_side_const_gb(a) * slots_mod.GiB))
+        if make is not None:
+            per_token, const = STATE["engine"].side_slot_bytes(L, paged)
+            need = slots_mod.slot_bytes(L, per_token=per_token, constant=const)
+        else:
+            need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
+                                        constant=int(_side_const_gb(a) * slots_mod.GiB))
         ok, d = adm.check(need, count=False)
         if not ok:
             print(f"[parallel] slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
@@ -9233,9 +9264,12 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         a1 = torch.cuda.memory_allocated()
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
-        e2 = Qwen38Engine(cfg, w, max_len=L)
-        e2.graphs_off = a.side_graphs == "off"
-        d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
+        if make is not None:
+            e2, d2 = make(L, drafter0)
+        else:
+            e2 = Qwen38Engine(cfg, w, max_len=L)
+            e2.graphs_off = a.side_graphs == "off"
+            d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
         a.depth = depth0
         values = {k: None for k in slots_mod.OVERLAY}
         values.update(engine=e2, drafter=d2, max_len=L)
@@ -9250,11 +9284,13 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         slots.append(slot)
         slots_mod.bind(slot)
         try:
-            with torch.no_grad():
+            warming = getattr(d2, "warming", None) if d2 is not None else None
+            with torch.no_grad(), (warming() if warming is not None else contextlib.nullcontext()):
                 list(_generate_stream(tok("warm up the kernels", return_tensors="pt")
-                                      .input_ids[0].cuda(), 4, set()))
+                                      .input_ids[0].cuda(),
+                                      getattr(d2, "WARM_TOKENS", 4) if warming is not None else 4, set()))
                 _warm_prefill(_generate_stream, tok, res_i)    # FX17: the router's question shape
-                if a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
+                if make is None and a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
                     e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
                                           else range(2, 17))
             values.update({k: None for k in ("last_ctx", "last_prompt_n", "hidden_spans",
@@ -9291,7 +9327,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
     meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3,
                               cut=a.parallel_cut)
-            if a.parallel_batch == "on" else None)
+            if a.parallel_batch == "on" and STATE["engine"].caps.joint_verify else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
         meet.timing = timing

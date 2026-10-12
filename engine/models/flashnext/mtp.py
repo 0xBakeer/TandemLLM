@@ -18,12 +18,15 @@ from engine.models.flashnext.ref import MTP
 
 
 class FlashNextMTPHead:
-    def __init__(self, fn: FlashNextEngine, depth: int, cap: int):
+    def __init__(self, fn: FlashNextEngine, depth: int, cap: int, pages=None):
         self.fn, self.depth = fn, depth
-        self.st = fn.new_mtp_state(cap)
+        self.st = fn.new_mtp_state(cap, pages=pages)
         self.graphs: dict = {}
         self.captures = 0               # graphs captured so far (a round that captured is not a price)
         self.fresh: set = set()         # graphs captured ahead (`capture_class`) not replayed yet
+        # its own chain buffers and staging (FlashNextEngine `_mtp_key`): the engine's first head 0
+        self.key = getattr(fn, "_mtp_heads", 0)
+        fn._mtp_heads = self.key + 1
         self._n = 0
 
     def reset(self) -> None:
@@ -50,6 +53,7 @@ class FlashNextMTPHead:
 
     def capture_all(self) -> None:
         """The graphs of every feed a round can bring (1 .. depth + 1 rows) at the current context class."""
+        self.fn._mtp_key = self.key
         cls = self.fn.qsa_class(self.st.length + self.depth + 1)
         for n in range(1, self.depth + 2):
             if (n, cls) not in self.graphs:
@@ -60,6 +64,7 @@ class FlashNextMTPHead:
     def capture_class(self, n: int, cls: int) -> None:
         """The graph of an n-row feed at context class `cls`, ahead of the round that needs it (the
         server's idle captures, engine/models/flashnext/serving.py); the cache as it was."""
+        self.fn._mtp_key = self.key
         if (n, cls) not in self.graphs:
             g = MTPChainGraph(self.fn, self.st, n, self.depth, cls)
             g.capture()
@@ -69,6 +74,7 @@ class FlashNextMTPHead:
     def launch(self, rows: torch.Tensor, nexts: list[int]) -> None:
         """Feed rows [n, hc H] with their next tokens and draft `depth` tokens from the last: the graph
         is launched, not waited for (`read`)."""
+        self.fn._mtp_key = self.key
         fn = self.fn
         n = len(nexts)
         cls = fn.qsa_class(self.st.length + n + self.depth - 1)
@@ -91,6 +97,7 @@ class FlashNextMTPHead:
     def read(self) -> tuple[list, list]:
         """After `launch`: per depth the (first, second) token and their probabilities; the fed rows
         join the head's cache."""
+        self.fn._mtp_key = self.key
         torch.cuda.current_stream().synchronize()
         self.st.length += self._n
         b = self.fn._mtp_bufs(self.depth)

@@ -272,6 +272,12 @@ class MTPTreeDrafter:
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
 
+    @property
+    def plain_turn(self) -> bool:
+        """This turn takes the plain step throughout (`_start_turn`): a parallel round's barrier does
+        not wait for its blocks (server/app.py `_par_block`)."""
+        return self._turn is False
+
     def wants_graphs(self, n: int) -> bool:
         """Whether drafting can pay at context length `n` at all (no price says a drafted round costs
         more a token than the plain step there): the server captures a class's graphs while idle only
