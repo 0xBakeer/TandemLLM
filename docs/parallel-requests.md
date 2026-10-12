@@ -156,13 +156,13 @@ Beside other requests, a request writes what it writes alone up to a near tie. A
 
 ## On Flash-Next
 
-The same flags work on Flash-Next since ENG-241, and its profiles keep them off (`QSE_PARALLEL=1`, the KV pool off): three requests at once were slower in total than the same three one after the other.
+The same flags work on Flash-Next since ENG-241, and its profiles keep them off (`QSE_PARALLEL=1`, the KV pool off).
 
 - KV pool (`--kv-pool on`): the K, V and indexer-key buffers of the 12 attention layers and of the MTP layer are reserved as addresses and committed as rows are written. On the server it committed 0.13, 0.91 and 4.01 GiB at 1k, 32k and 140k tokens of a 7.31 GiB window, and the answers equalled plain decode.
 - Side slots: `side_slot` builds a slot over the same engine, with its own state, graphs, MTP head and drafter (StairCut from the same prices, the lookup over slot 0's corpus).
 - Joint verify: `verify_multi` runs several states' blocks in one eager pass. The projections, the experts and the head run once over all rows; the norms, the mixers, the GDN recurrence and attention run per state. In one process the joint pass equalled each state's lone verify bit for bit (3 states, 12 rounds of chains and trees, 15 to 18 rows).
 
-Measured on 3.05 with `--parallel 3 --kv-pool on` (2026-10-12, one run): three different 2,048-token requests at once, each answer equal to its single-stream answer. The server reported 3 decoding at once and ran 150 joint rounds, 106 of three and 44 of two. Together the three made 48.7 tok/s. Alone they made 47.8, 67.4 and 55.3 tok/s, so one after the other they would have finished sooner, in 20.6 s against 23.6 s. Why the joint pass costs that much is not measured yet; timing each pass is the next step.
+Measured on 3.05 with `--parallel 3 --kv-pool on` (2026-10-12, one run): three different 2,048-token requests of 384 new tokens each decoded at once, each answer equal to its single-stream answer. The server reported 3 decoding at once and ran 150 joint rounds, 106 of three and 44 of two. Together the three finished in 23.6 s by the wall clock, prefill included. Alone they took 10.2, 7.6 and 8.7 s, so one after the other 26.5 s. Beside each other each decoded at 19 to 26 tok/s, against 47.8, 67.4 and 55.3 tok/s alone. Whether parallel slots pay on Flash-Next is not settled by one run, and the joint pass has no timing of its own yet.
 
 ## Seeing it
 

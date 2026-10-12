@@ -81,7 +81,7 @@ Flash-Next drafts with its own MTP layer and the shared StairCut (`engine/method
 
 With `QWEN38_FN_LOOKUP=1` (the Flash-Next profiles set it, ENG-229) the lookup joins the same round. It reads the request's own text, `--corpus` and the server's suffix store, the same stores as the 27B's lookup, because the tokenizer is the same. Its best continuation enters the cut as one more branch. While its tokens match the head's chain the two share nodes, and a shared node's q is 1 minus the chance that both are wrong. Where they differ, the lookup's chain hangs under the last shared node; where the head's chain ends, it runs on. The cut admits nodes best-first by q, as long as (1 + sum of q) / (V(rows) + draft) rises, up to 32 rows. A round still runs one verify, and the text does not change.
 
-| class (one greedy request of 512 tokens) | MTP alone, tok/s | with the lookup, tok/s | tokens a block, alone and with the lookup |
+| class (one greedy request of up to 512 tokens) | MTP alone, tok/s | with the lookup, tok/s | tokens a block, alone and with the lookup |
 |-|-|-|-|
 | edit | 106 | 132 | 4.6 and 10.4 |
 | copy | 102 | 133 | 4.4 and 11.9 |
@@ -101,14 +101,14 @@ The 3.05 file is provisional (ENG-155). In class 0, rows 2 to 16 are the prices 
 
 ### Never slower than the plain step
 
-At long context a drafted round can cost more a token than the plain step. On the first 260,800-token runs MTP decode made 22.5 tok/s where plain decode made 36.6. StairCut on Flash-Next therefore keeps, per context class, the plain step's cost and a drafted round's cost a token, both by wall time and both starting from the price file:
+At long context a drafted round can cost more a token than the plain step. On the first runs at 260,800 tokens the drafter decoded 22.5 tok/s (the second request of a 3.05 run, its prompt from the caches) and plain decoding 36.6 (one request on a server without a drafter). StairCut on Flash-Next therefore keeps, per context class, the plain step's cost and a drafted round's cost a token, both by wall time and both starting from the price file:
 
 - `skip`: a class whose drafted rounds cost more a token than its plain steps takes the plain step, and drafts one probe round at an interval that doubles while drafting keeps losing (16 rounds, up to 256).
 - `turn`: a turn drafts only when what speculation saves over the expected answer pays for the draft head's backlog, the prompt rows it has not read yet (0.28 ms a row at 260,800 tokens). A turn that does not draft takes the plain step throughout and never reads the backlog.
 - What a class learned of its drafted rounds ages back to the file's prior while its turns take the plain step, so one slow request does not keep a class plain for good.
 - While the server is idle (one second after the last request), it captures the verify, commit and draft graphs the current context class lacks, 25 to 30 graphs in about 4.3 s a class. A drafted turn is charged for graphs its class still lacks. Before this, the first drafted request in a new class paid 3.4 to 5.1 s of captures inside its answer.
 
-Measured on 3.05 on 2026-10-12: one fresh server, two rounds of the same two greedy requests at each length, and plain decode from a `--drafter none` server:
+Measured on 3.05 on 2026-10-12: one fresh server, two rounds at each length of one greedy request and the same request again (its prompt then from the caches), and plain decode from a `--drafter none` server. Each cell is the first request and its repeat:
 
 | context | speculation, round 2, tok/s | plain, tok/s |
 |-|-|-|

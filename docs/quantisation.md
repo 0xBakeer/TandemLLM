@@ -190,7 +190,7 @@ The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha2
 | `table` | the n-gram table, its own file | never on the device; read a row at a time |
 | `vision` | the vision tower | not loaded |
 
-An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bits a weight, and K is read from each tensor's own shape, so a pack that mixes K inside a layer is described as it is. `X.suh` and `X.svh` (fp16) scale and sign the input and output sides, which are rotated, and `X.mul1` is the codebook's multiplier. On the 3.05 pack the header audit counted 303,121 tensors: every routed expert at K 3, the dense projections and the head at K 5. By those headers a plain decode token reads about 4.23 GB in all at 1k of context, with the mixers as int8 (`PackIndex.decode_bytes`).
+An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bits a weight, and K is read from each tensor's own shape, so a pack that mixes K inside a layer is described as it is. `X.suh` and `X.svh` (fp16) scale and sign the input and output sides, which are rotated, and `X.mul1` is the codebook's multiplier. On the 3.05 pack the header audit counted 303,121 tensors: every routed expert at K 3, the dense projections and the head at K 5, except the sparse-attention indexer's projection at K 3 and the MTP layer's projections at K 3 to 5. By those headers a plain decode token reads about 4.23 GB in all at 1k of context, with the mixers as int8 (`PackIndex.decode_bytes`).
 
 `tools/fn_exl3_xcheck.py` holds our reading against exllamav3's own on the 3.05 pack. The trellis decode is equal bit for bit on 16 tensors (experts in layers 0, 11 and 47, GDN, attention, the indexer, a shared expert, a slice of the head). The dequantised weight agrees within 0.36 % of the largest weight, which is our BF16 rounding of the fp32 rotations. 4,096 n-gram rows are equal bit for bit.
 
@@ -198,7 +198,7 @@ An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bit
 
 The pack stores the mixers in fp16, and every token reads them. The engine keeps each row as int8 with one fp32 scale, so a weight is off by at most the row's largest weight over 254, plus fp32 rounding. `QWEN38_FN_MIX=fp16` keeps the pack's values instead.
 
-`tools/fn_mix_quality.py` measures what that costs against the pack's fp16 mixers, on the same kernels. On 3.05 at 1k of context, int8 gave a KL of 0.047 on prose, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 (0.35 in groups of 128), and the continuation changed at its first token, so int4 is not used.
+`tools/fn_mix_quality.py` measures what that costs against the pack's fp16 mixers, on the same kernels. On 3.05 with 8,192 tokens of prose, int8 gave a KL of 0.047, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 (0.35 in groups of 128) and changed the continuation at its first token, so the mixers stay int8. The code prompt of the same run turned the other way: int8 gave 0.267 (the top token agreed at 90.9 % of positions) against a noise of 0.0038, and int4 in groups of 32 gave 0.040. Nobody has looked into that row yet, and it needs a second run before it decides anything.
 
 ### The n-gram table
 
@@ -209,7 +209,7 @@ The table is 32.6 GB in the 3.05 pack, and it never sits in device memory. The e
 - warm: the file mapped and kept in the page cache. MemAvailable counts that page cache as free, so every floor check takes the table's resident bytes off first ([caches.md](caches.md#memory)).
 - cold: the rows read with O_DIRECT through a set-associative row cache of `QWEN38_FN_TABLE_CACHE_GB` (2) in host memory; nothing stays in the page cache.
 
-On 3.05, cold wrote the same greedy text as warm at 1k and 8k and decoded 40.9 tok/s against 42.0 (one run each). 2.05 keeps its table warm. 3.05 reads it cold: with the whole table resident, MemAvailable less the table fell to 8.4 GiB during a 147,456-token request, under the 15 GiB floor. 4.05 and up read it cold because their weights and a warm table do not fit together.
+On 3.05, cold wrote the same greedy text as warm at 1k and 8k and decoded 40.9 tok/s against 42.0 (one run each). 2.05 keeps its table warm. 3.05 reads it cold: with the whole table resident, MemAvailable less the table fell to 8.4 GiB during a 146,400-token request at a 147,456-token window, under the 15 GiB floor. 4.05 and up read it cold because their weights and a warm table do not fit together.
 
 ### Exact weights where the prefill needs them
 

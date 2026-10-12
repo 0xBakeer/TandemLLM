@@ -67,9 +67,9 @@ One request of 260,800 tokens through the server, on each of the three packs tha
 \caption[The packs at a 262,144-token window]{The lowest MemAvailable, less a warm table's resident bytes, during one 260,800-token request at a 262,144-token window, sampled at 10~Hz. \measured, 2026-10-12, one run a pack, conductor on, with 4.6~GiB of other programs on the box.}\label{fig:fn-fit}
 \end{figure}
 
-The run also measured what a long prefill takes: 571~tok/s at 260,800 tokens on 3.05 (585 on 2.05 and 581 on 4.05), and a prefill workspace of 10.47~GiB above the engine, which stops growing at about 140k tokens. Decoding at that length, with the prompt from the caches, 3.05 made 22.5~tok/s with the drafter at 2.0 tokens a block; 2.05 made 27.0 and 4.05 20.5 (\measured, one run each). The 22.5 was slower than plain decoding at that length, and Section~\ref{sec:fn-plain} says what changed.
+The run also measured what a long prefill takes: 571~tok/s for the 260,800-token request on 3.05, 261,549 rows with the conductor's notes (585 on 2.05 and 581 on 4.05), and a prefill workspace of 10.47~GiB above the engine, which stops growing at about 140k tokens. Decoding at that length, with the prompt from the caches, 3.05 made 22.5~tok/s with the drafter at 2.0 tokens a block; 2.05 made 27.0 and 4.05 20.5 (\measured, one run each). A server without a drafter decoded 36.6~tok/s at that length (one request), and Section~\ref{sec:fn-plain} says what changed.
 
-Two packs do not run. 5.05 codes its routed experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8, so its load stops at the expert bank. 6.05 needs about 92~GiB for its weights, which leaves too little under the 15~GiB floor at any window. 3.05 reads its n-gram table cold. Warm, with the whole table resident, MemAvailable less the table fell to 8.4~GiB during a 147,456-token request, under the floor.
+Two packs do not run. 5.05 codes its routed experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8, so its load stops at the expert bank. 6.05 needs about 92~GiB for its weights, which leaves too little under the 15~GiB floor at any window. 3.05 reads its n-gram table cold. Warm, with the whole table resident, MemAvailable less the table fell to 8.4~GiB during a 146,400-token request at a 147,456-token window, under the floor.
 
 \section{Loading}
 
@@ -81,7 +81,7 @@ The self-check\index{self-check} runs at every load. It decodes 32 tokens one at
 
 Every Flash-Next kernel is row-invariant: a row's instruction sequence does not depend on how many rows the call has or where its neighbours sit (Chapter~\ref{ch:kernels}). The MoE expert kernel (\code{tools/fn_kernels.py}) gives each (row, expert) pair its own work, rotates the pair's input with that expert's scales, and sums each row's slices in a fixed order; unselected experts are never read. At one row it moves 186~GB/s, 21.7~MB a layer in 0.117~ms (\measured). One decode token is one replay of a CUDA graph, about 21.8~ms at 1k of context (\measured).
 
-A prompt runs through other kernels (\code{tools/fn_prefill_kernels.py}): a chunk of 4,096 rows sorts its (row, expert) pairs by expert and runs one matrix product over each expert's rows. On 3.05 the prefill made 1,185, 1,243 and 1,161~tok/s at 2k, 8k and 32k tokens (\measured). The prefill and the decode path differ by BF16 rounding. Teacher-forced on prose and code at 1k to 8k tokens, their top tokens agreed at 96.2 to 98.1~\% of positions. The gate the prefill passed asks that it agree with the decode path at least as well as the decode path agrees with the reference forward, less one point.
+A prompt runs through other kernels (\code{tools/fn_prefill_kernels.py}): a chunk of 4,096 rows sorts its (row, expert) pairs by expert and runs one matrix product over each expert's rows. On 3.05 the prefill made 1,185, 1,243 and 1,161~tok/s at 2k, 8k and 32k tokens (\measured). The prefill and the decode path differ by BF16 rounding. Teacher-forced on prose and code at 3k and 8k tokens, their top tokens agreed at 96.2 to 98.1~\% of positions (\measured). The gate the prefill passed asks that it agree with the decode path at least as well as the decode path agrees with the reference forward, less one point.
 
 \section{Speculation}\label{sec:fn-spec}
 
@@ -89,7 +89,7 @@ The MTP layer is the drafter. Each round it drafts a chain of 4 tokens with its 
 
 \begin{table}[htbp]
 \centering\small
-\caption[Flash-Next through the server, MTP alone and with the lookup]{One greedy request of 512 tokens a class through the server on 3.05, MTP alone and with the lookup. Every text equalled plain decoding, which made 41.5 to 45.7~tok/s. \measured, 2026-10-12, one request each.}\label{tab:fn-lookup}
+\caption[Flash-Next through the server, MTP alone and with the lookup]{One greedy request of up to 512 tokens a class (prose stopped at 421) through the server on 3.05, MTP alone and with the lookup. Every text equalled plain decoding, which made 41.5 to 45.7~tok/s. \measured, 2026-10-12, one request each.}\label{tab:fn-lookup}
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
 \hd{class} & \hd{MTP, tok/s} & \hd{with lookup} & \hd{tokens a block} & \hd{with lookup} \\
@@ -103,13 +103,13 @@ code & 84.9 & 82.7 & 3.43 & 3.48 \\
 \end{tabular}
 \end{table}
 
-Copies gain less in speed than in tokens a block because a verify costs more with every row on this model. Each row routes to its own experts, and a block reads the union: 19 experts a layer at 2 rows, 30 at 4, 74 at 16 (\measured). The learned prices were 27.8~ms for 2 rows, 38.6 for 5, 52.2 for 10 and 68.8 for 16 at about 1k of context.
+Copies gain less in speed than in tokens a block because a verify costs more with every row on this model. Each row routes to its own experts, and a block reads the union: about 19 experts a layer at 2 rows, 26 to 33 at 4 and 72 to 82 at 16, across prose, code and chat at 1k and 8k (\measured). The learned prices were 27.8~ms for 2 rows, 38.6 for 5, 52.2 for 10 and 68.8 for 16 at about 1k of context.
 
 Sampled requests take the same tree (\code{--sampled-tree det}): at each node the target draws its own token with the 27B's sampler, keyed by seed and position. At temperature 0.7, \code{top_p} 0.9, \code{top_k} 20 and \code{min_p} 0.05 on 3.05, every seeded answer was the same with and without speculation, each seed repeated, and two unseeded draws differed (\measured, one run each). Speculation made 43.1 and 40.2~tok/s on prose after 1k and 8k tokens of held-out text, 76.2 and 73.6 on code and 59.0 and 60.8 on chat, against 38.4 to 41.7 plain.
 
 \section{Never slower than the plain step}\label{sec:fn-plain}
 
-A drafted round at long context can cost more a token than the plain step: on the first 260,800-token runs the drafter made 22.5~tok/s where plain decoding made 36.6. StairCut on Flash-Next therefore prices every round by its wall time per context class. The class is 0 while the sparse attention is still dense, and above that the next of $4{,}096 \cdot 2^k$ and $6{,}144 \cdot 2^k$ at or above the context, up to 262,144. Per class it keeps the plain step's cost and a drafted round's cost a token, both starting from the price file (\code{ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json}, provisional).
+A drafted round at long context can cost more a token than the plain step: on the first runs at 260,800 tokens the drafter decoded 22.5~tok/s and a server without one 36.6. StairCut on Flash-Next therefore prices every round by its wall time per context class. The class is 0 while the sparse attention is still dense, and above that the next of $4{,}096 \cdot 2^k$ and $6{,}144 \cdot 2^k$ at or above the context, up to 262,144. Per class it keeps the plain step's cost and a drafted round's cost a token, both starting from the price file (\code{ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json}, provisional).
 
 \begin{itemize}
 \item A class whose drafted rounds cost more a token than its plain steps takes the plain step, and drafts one probe round at an interval that doubles while drafting keeps losing (16 rounds, up to 256).
@@ -120,7 +120,7 @@ A drafted round at long context can cost more a token than the plain step: on th
 
 \begin{table}[htbp]
 \centering\small
-\caption[Speculation and the plain step by context]{Two greedy requests a length on one fresh 3.05 server, the second round, and the same requests on a server with no drafter. \measured, 2026-10-12. All 16 texts equalled plain decoding.}\label{tab:fn-p0}
+\caption[Speculation and the plain step by context]{One greedy request a length and the same request again (its prompt from the caches), the second round on one fresh 3.05 server, and the same pair on a server with no drafter. \measured, 2026-10-12. All 16 texts equalled plain decoding.}\label{tab:fn-p0}
 \begin{tabular}{@{}lll@{}}
 \toprule
 \hd{context} & \hd{speculation, tok/s} & \hd{plain, tok/s} \\
@@ -137,7 +137,7 @@ With the idle captures in place, the first request at a new length took the plai
 
 \section{Exactness}\label{sec:fn-exact}
 
-On the 27B a batched verify can round a near tie the other way (Chapter~\ref{ch:exactness}). On Flash-Next it cannot: its verify kernels give every row the decode step's bits, and the load-time self-check proves it on the device before speculation turns on. \code{tools/fn_server_check.py --compare} runs 21 requests against a \code{--drafter none} server and a \code{--drafter mtp} server (greedy, thinking, streaming, every \code{tool_choice} mode, JSON, penalties with \code{logit_bias}, logprobs, seeds, a stop string): the answers and tool calls were the same, and the largest logprob difference was 0.0. The one exception is a think budget at low effort, which closes at the first block boundary past the cap, so the two runs close the reasoning block a few tokens apart (1,049 and 1,052 reasoning tokens) and differ after it.
+On the 27B a batched verify can round a near tie the other way (Chapter~\ref{ch:exactness}). On Flash-Next it cannot: its verify kernels give every row the decode step's bits, and the load-time self-check proves it on the device before speculation turns on. \code{tools/fn_server_check.py --compare} sends 20 requests to a \code{--drafter none} server and a \code{--drafter mtp} server (greedy, thinking, streaming, every \code{tool_choice} mode, JSON, penalties with \code{logit_bias}, logprobs, seeds, a stop string): 19 gave the same answers and tool calls, and the largest logprob difference was 0.0. The 20th is a think budget at low effort, which closes at the first block boundary past the cap, so the two runs close the reasoning block a few tokens apart (1,049 and 1,052 reasoning tokens) and differ after it.
 
 Two places hold the 27B's rule instead. The prefill and the decode path differ by BF16 rounding, so a conversation resumed from an end anchor, a state the decode kernels wrote, is held to the greedy gate and not to bit equality (Section~\ref{sec:fn-caches}). And the weights themselves differ from the BF16 release by design; how much is not measured.
 
@@ -159,7 +159,7 @@ Each profile sets its engine's ceiling and peak with the arithmetic in the file:
 
 Behind the server everything is the 27B's code: every route, reasoning formats and budgets, tool calls and grammar masks, penalties, logprobs, seeds, stops, the live view and the usage rows. The conductor and its roles run in front of it; the shadow reader does not, because its outputs were validated on the 27B's reasoning only, and the status says so. The dashboard's system view names the pack and its branch, shows \code{max_len} against the pack's largest window, and reports the table under its policy. Images are not wired to Flash-Next (VIS-97).
 
-Parallel requests work on Flash-Next and are lossless, and its profiles keep them off. With \code{--parallel 3 --kv-pool on}, three different 2,048-token requests decoded at once, each answer equal to its single-stream answer, in 150 joint rounds. Together they made 48.7~tok/s; alone the same three made 47.8, 67.4 and 55.3, so one after the other they finished sooner (\measured, one run). Why a joint pass costs that much is not measured yet.
+Parallel requests work on Flash-Next without changing any answer, and its profiles keep them off. With \code{--parallel 3 --kv-pool on}, three different 2,048-token requests of 384 new tokens decoded at once, each answer equal to its single-stream answer, in 150 joint rounds. Together they finished in 23.6~s by the wall clock, prefill included; alone they took 10.2, 7.6 and 8.7~s, so 26.5~s one after the other. Beside each other each decoded at 19 to 26~tok/s, against 47.8, 67.4 and 55.3 alone (\measured, one run). One run does not settle whether parallel slots pay on Flash-Next.
 
 \section{What is not measured}
 
@@ -168,5 +168,5 @@ Parallel requests work on Flash-Next and are lossless, and its profiles keep the
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}. The rates in this chapter are single requests, mostly one run each.
 \item A sweep of StairCut's prices. The price file is provisional: class 0 holds online-learned prices, and the other classes single requests.
 \item The 5.05 pack, which needs a 7-bit expert kernel; the 6.05 pack, which needs more than one board; and Flash-Next's own vision tower.
-\item Why three parallel requests are slower together than one after the other.
+\item Whether parallel requests pay on Flash-Next: one run of three, and no timing of the joint pass on its own.
 \end{itemize}
