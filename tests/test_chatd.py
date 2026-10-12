@@ -85,7 +85,13 @@ def test_chatd_answers_the_forward_only():
         assert st == 200 and obj["password_set"] is True and obj["signed_in"] is False
         conn = socket.create_connection(("127.0.0.1", c.port))      # /health needs no key
         conn.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        assert b'"status": "ok"' in conn.recv(4096)
+        raw = b""
+        while True:                      # the head and the body may come in two segments
+            got = conn.recv(4096)
+            if not got:
+                break
+            raw += got
+        assert b'"status": "ok"' in raw, raw
         conn.close()
     finally:
         c.close()
