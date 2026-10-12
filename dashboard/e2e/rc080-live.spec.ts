@@ -14,6 +14,8 @@
 import { expect, test, type APIRequestContext, type Browser, type Page } from '@playwright/test';
 
 const SHOTS = process.env.PW_SHOTS ?? 'e2e-live-shots';
+// the engine's slots: Flash-Next's three by default, PW_SLOTS=4 for the 27B's box values
+const SLOTS = process.env.PW_SLOTS ?? '3';
 const DESKTOP = { width: 1440, height: 900 };
 const LONG = 'Write a story of about 900 words about a lighthouse keeper who learns to repair clocks. Plain prose in paragraphs: no headings, no lists, no Markdown.';
 
@@ -117,7 +119,7 @@ test('two chats stream at once and the engine decodes them together', async ({ b
   await a.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-a.png` });
   await b.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-b.png` });
   // the Parallel tab shows the engine's slots while it has requests in flight
-  await expect(c.page.locator('.par-slots')).toHaveAttribute('data-slots', '3', { timeout: 30_000 });
+  await expect(c.page.locator('.par-slots')).toHaveAttribute('data-slots', SLOTS, { timeout: 30_000 });
   await c.page.screenshot({ path: `${SHOTS}/rc080-3-parallel-slots.png` });
   await c.ctx.close();
   await a.page.locator('.ch-stop').click();

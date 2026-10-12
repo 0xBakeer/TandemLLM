@@ -146,20 +146,45 @@ def test_the_prewarm_yields_to_requests_and_to_another_conversation_in_use():
                 assert app._cache_prewarm(list(nxt), "A") is None
             finally:
                 app.INFLIGHT[key] -= 1
-        # the engine lock held (a request between its prefill and its last token): peek and
-        # prewarm answer None, the route's 409
+        # the engine lock held by a request (between its prefill and its last token): peek and
+        # prewarm answer None at once, the route's 409
         held, done = threading.Event(), threading.Event()
 
-        def hold():
+        def hold(s=5):
             with app.LOCK:
                 held.set()
-                done.wait(5)
+                done.wait(s)
+        th = threading.Thread(target=hold)
+        th.start()
+        held.wait(5)
+        app.INFLIGHT["running"] += 1
+        t0 = time.monotonic()
+        try:
+            assert _peek(nxt, "A") is None
+            assert time.monotonic() - t0 < 0.5, "no wait while a request runs"
+        finally:
+            app.INFLIGHT["running"] -= 1
+            done.set()
+            th.join()
+        # held by the engine's idle work (no request): they wait for it (live: the idle graph
+        # captures right after a turn, 1,354 ms), and answer None past PEEK_IDLE_WAIT_S
+        held.clear(); done.clear()
+        th = threading.Thread(target=hold, args=(0.3,))
+        th.start()
+        held.wait(5)
+        p = _peek(nxt, "A")
+        th.join()
+        assert p is not None and p["tier"] in cache_peek.ORDER + ("none",), p
+        held.clear(); done.clear()
+        real_wait = app.PEEK_IDLE_WAIT_S
+        app.PEEK_IDLE_WAIT_S = 0.2
         th = threading.Thread(target=hold)
         th.start()
         held.wait(5)
         try:
             assert _peek(nxt, "A") is None and app._cache_prewarm(list(nxt), "A") is None
         finally:
+            app.PEEK_IDLE_WAIT_S = real_wait
             done.set()
             th.join()
         # B used the rows a moment ago: they stay
@@ -177,7 +202,7 @@ def test_the_prewarm_yields_to_requests_and_to_another_conversation_in_use():
             cache_peek.MAX_MS = real
         assert app._cache_prewarm(list(nxt), "A")["prewarmed"] is True
         t.close()
-        return "busy, locked, in use, too long: nothing read; idle: read back"
+        return "busy, locked, in use, too long: nothing read; idle work waited for; idle: read back"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -446,10 +471,12 @@ def test_through_the_handler_the_parts_add_up_and_the_peek_matches_the_send():
     th = threading.Thread(target=hold)
     th.start()
     held.wait(5)
+    app.INFLIGHT["running"] += 1
     try:
         st, busy = _post("/v1/cache/peek", dict(body2, session="chat-1"))
         assert st == 409 and busy["error"]["type"] == "busy", busy
     finally:
+        app.INFLIGHT["running"] -= 1
         done.set()
         th.join()
     return (f"parts {tp} add up to {u['prompt_tokens']}; peek {p['tier']} {p['cached_tokens']} = "

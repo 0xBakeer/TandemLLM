@@ -2808,9 +2808,23 @@ def _peek_rate() -> float | None:
     return None
 
 
+#: with no request running or waiting, a peek or a prewarm waits this long for the engine lock (s):
+#: its holder is then the engine's own idle work (graph captures, prepares), which ends or stops
+PEEK_IDLE_WAIT_S = 3.0
+
+
+def _lock_when_idle() -> bool:
+    """The engine lock for a peek or a prewarm: at once while a request runs or waits (None, the
+    route's 409), else after the engine's idle work (live: right after a turn the idle graph
+    captures held it 1,354 ms and four peeks in a row answered 409)."""
+    with QUEUE:
+        busy = bool(WAITERS) or INFLIGHT["waiting"] > 0 or INFLIGHT["running"] > 0
+    return LOCK.acquire(blocking=False) if busy else LOCK.acquire(timeout=PEEK_IDLE_WAIT_S)
+
+
 def _cache_peek(ids: list[int], session: str | None) -> dict | None:
     """The peek's answer, or None while the engine is busy (a prefill writes the rows it reads)."""
-    if not LOCK.acquire(blocking=False):
+    if not _lock_when_idle():
         return None
     try:
         got = _peek_find(ids)
@@ -2831,7 +2845,7 @@ def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
     THE PREWARM). None while the engine is busy."""
     with QUEUE:
         idle = not WAITERS and INFLIGHT["running"] == 0 and INFLIGHT["waiting"] == 0
-    if not idle or not LOCK.acquire(blocking=False):
+    if not idle or not _lock_when_idle():
         return None
     try:
         got = _peek_find(ids)
