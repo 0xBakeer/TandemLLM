@@ -45,7 +45,7 @@ test('chat running with the terminal pane, desktop dark', async ({ page }) => {
   await open(page, 'dark', '#/chat/c_sync');
   await page.locator('.ch-now').waitFor();
   // the seeded layout has the terminal open; wait for the pane and some output
-  await page.locator('qse-chat-panes .ch-term-line').first().waitFor({ timeout: 10_000 });
+  await page.locator('qse-chat-panes .xterm-rows').first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(3000);
   await shot(page, 'running-terminal-desktop-dark');
 });
@@ -171,7 +171,7 @@ test('chat phone: empty, drawer, context sheet, panes sheet, permission, setting
   // the context sheet is the full width on a phone: its close button is the way out
   await page.getByRole('button', { name: 'Close the context panel' }).click();
   await page.getByRole('button', { name: 'Panes', exact: true }).click();
-  await page.locator('qse-chat-panes .ch-term-line').first().waitFor({ timeout: 10_000 });
+  await page.locator('qse-chat-panes .xterm-rows').first().waitFor({ timeout: 10_000 });
   await page.waitForTimeout(800);
   await shot(page, 'panes-phone-dark');
   await page.locator('qse-chat-panes').getByRole('button', { name: 'Close panes' }).click();

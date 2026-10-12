@@ -1919,69 +1919,42 @@ qse-chat-panes {
 .ch-term-screen {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  padding: 6px 4px 4px 10px;
+  overflow: hidden;
+}
+.ch-xterm {
+  width: 100%;
+  height: 100%;
+}
+.ch-xterm .xterm-viewport {
+  background: var(--bg-inset) !important;
+}
+.ch-term-wait {
   padding: 8px 10px;
   font-family: var(--font-mono);
   font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--log-info);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-.ch-term-line {
-  min-height: 1.45em;
-}
-.ch-term-cursor {
-  display: inline-block;
-  width: 0.6em;
-  height: 1.1em;
-  vertical-align: -0.2em;
-  background: var(--orange-hi);
-  animation: pulse 1s steps(2) infinite;
 }
 .ch-term-foot {
   padding: 4px 10px;
   border-top: 1px solid var(--rule);
 }
-.tc-b {
-  font-weight: 700;
+/* the phone's key row (Chat 8): the keys an on-screen keyboard lacks */
+.ch-term-keys {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--rule);
+  overflow-x: auto;
+  flex: none;
 }
-.tc-d {
-  opacity: 0.6;
+.ch-term-keys .btn {
+  min-width: 44px;
+  min-height: 44px;
+  font-family: var(--font-mono);
 }
-.tc-0 {
-  color: #5c6773;
-}
-.tc-1,
-.tc-9 {
-  color: var(--err);
-}
-.tc-2,
-.tc-10 {
-  color: var(--ok);
-}
-.tc-3,
-.tc-11 {
-  color: var(--warn-ink);
-}
-.tc-4,
-.tc-12 {
+.ch-term-keys .btn.is-on {
+  background: var(--cobalt-wash);
   color: var(--cobalt-hi);
-}
-.tc-5,
-.tc-13 {
-  color: var(--series-violet);
-}
-.tc-6,
-.tc-14 {
-  color: var(--series-aqua);
-}
-.tc-7,
-.tc-15 {
-  color: var(--ink);
-}
-.tc-8 {
-  color: var(--ink-3);
 }
 
 /* preview */
@@ -2802,7 +2775,6 @@ qse-chat-panes {
 @media (prefers-reduced-motion: reduce) {
   .ch-md.is-streaming > :last-child::after,
   .ch-call-out.is-streaming::after,
-  .ch-term-cursor,
   .ch-mark-running .ch-mark-dot,
   .is-running .ch-call-dot,
   .ch-attach.is-warn .ch-attach-dot,

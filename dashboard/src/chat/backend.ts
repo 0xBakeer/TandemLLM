@@ -104,7 +104,8 @@ export interface ChatBackend {
   /** an artifact the model produced (an html preview, a diff, an image) */
   /** `url`: a same-origin address the preview loads in its sandboxed iframe (the server's files) */
   artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string; url?: string }>;
-  terminal(id: string, session: string, onData: (data: string) => void): TerminalSession;
+  /** PTY bytes as they come (the mock sends text) */
+  terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession;
 }
 
 export type BackendChoice = { backend: ChatBackend; reason: 'forced' | 'probed' | 'fallback' };

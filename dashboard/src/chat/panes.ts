@@ -1,6 +1,7 @@
 // <qse-chat-panes>: the sub-windows beside or below the thread. A tab strip (the open panes, a
-// plus menu, the dock toggle, close), and one pane at a time: Terminal (the screen in terminal.ts,
-// an input line, attached to the sandbox's shell or a tool call's output), Preview (a sandboxed
+// plus menu, the dock toggle, close), and one pane at a time: Terminal (xterm.js, loaded on
+// demand from xterm-pane.ts, attached to the sandbox's shell or a tool call's output; on a phone a
+// key row with Esc, Tab, Ctrl and the arrows), Preview (a sandboxed
 // iframe for an html or svg artifact, with a 390 px and a 1200 px width), Files (the sandbox's tree
 // and a viewer), Diff (unified, coloured), Markdown and Image. On a phone the view wraps this in a
 // full-screen sheet.
@@ -13,7 +14,8 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { LightElement } from '../ui/base';
 import { copyButton, icon } from '../ui/bits';
 import type { ChatBackend, TerminalSession } from './backend';
-import { diffCounts, parseDiff, TerminalScreen, type DiffRow } from './terminal';
+import { diffCounts, parseDiff, type DiffRow } from './terminal';
+import type { XtermHandle } from './xterm-pane';
 import { paneIcon, paneWord } from './thread';
 import type { Conversation, PaneKind, PaneRef, SandboxFile } from './types';
 import './context-panel';
@@ -39,17 +41,31 @@ export class QseChatPanes extends LightElement {
   @state() private files = new Map<string, SandboxFile[]>();
   @state() private file: { path: string; content: string; mime: string; bytes: number; etag?: string } | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
-  @state() private termTick = 0;
+  @state() private ctrlArmed = false;
   @state() private editText = '';
   @state() private editNote: { ok: boolean; text: string } | null = null;
   private loadingFile = false;
   /** for the context pane */
   @property({ attribute: false }) conv: Conversation | null = null;
-  private screens = new Map<string, { screen: TerminalScreen; session: TerminalSession | null }>();
-  private termLine = '';
+  /** one per terminal pane: its session, and its xterm once loaded (data before that waits) */
+  private screens = new Map<string, TermEntry>();
+  private resizeObs: ResizeObserver | null = null;
+  private onTheme = () => {
+    for (const e of this.screens.values()) e.term?.setTheme();
+  };
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener('qse-theme', this.onTheme);
+  }
 
   disconnectedCallback(): void {
-    for (const s of this.screens.values()) s.session?.close();
+    window.removeEventListener('qse-theme', this.onTheme);
+    this.resizeObs?.disconnect();
+    for (const s of this.screens.values()) {
+      s.session?.close();
+      s.term?.dispose();
+    }
     this.screens.clear();
     super.disconnectedCallback();
   }
@@ -68,8 +84,7 @@ export class QseChatPanes extends LightElement {
       if (p.ref && p.ref.startsWith('/') && this.file?.path !== p.ref && changed.has('active')) void this.openFile(p.ref);
     } else if (p.kind === 'terminal') {
       this.ensureTerminal(p);
-      const el = this.querySelector<HTMLElement>('.ch-term-screen');
-      if (el) el.scrollTop = el.scrollHeight;
+      this.placeTerminal(p);
     }
   }
 
@@ -104,13 +119,61 @@ export class QseChatPanes extends LightElement {
 
   private ensureTerminal(p: OpenPane): void {
     if (this.screens.has(p.id)) return;
-    const screen = new TerminalScreen();
-    const entry = { screen, session: null as TerminalSession | null };
+    const readOnly = !!p.ref && p.ref !== 'shell';
+    const entry: TermEntry = { session: null, term: null, pending: [], readOnly, loading: false };
     this.screens.set(p.id, entry);
     entry.session = this.backend!.terminal(this.convId!, p.ref || 'shell', (data) => {
-      screen.feed(data);
-      this.termTick++;
+      if (entry.term) entry.term.write(data);
+      else entry.pending.push(data);
     });
+  }
+
+  /** xterm's element into the pane's screen box (loading xterm.js the first time) */
+  private placeTerminal(p: OpenPane): void {
+    const host = this.querySelector<HTMLElement>(`.ch-term-screen[data-pane="${p.id}"]`);
+    const entry = this.screens.get(p.id);
+    if (!host || !entry) return;
+    if (!entry.term) {
+      if (entry.loading) return;
+      entry.loading = true;
+      void import('./xterm-pane').then(({ mountXterm }) => {
+        entry.term = mountXterm({
+          readOnly: entry.readOnly,
+          onInput: (d) => entry.session?.write(d),
+          onResize: (cols, rows) => entry.session?.resize(cols, rows),
+        });
+        entry.term.el.addEventListener('ch-ctrl-used', () => (this.ctrlArmed = false));
+        for (const d of entry.pending.splice(0)) entry.term.write(d);
+        this.requestUpdate();
+      });
+      return;
+    }
+    if (entry.term.el.parentElement !== host) {
+      host.replaceChildren(entry.term.el);
+      entry.term.fit();
+      if (!entry.readOnly && !this.sheet) entry.term.focus();
+    }
+    if (!this.resizeObs) this.resizeObs = new ResizeObserver(() => this.fitActive());
+    this.resizeObs.disconnect();
+    this.resizeObs.observe(host);
+  }
+
+  private fitActive(): void {
+    const p = this.panes.find((x) => x.id === this.active);
+    if (p?.kind === 'terminal') this.screens.get(p.id)?.term?.fit();
+  }
+
+  /** the phone's key row: what each key sends to the shell */
+  private sendKey(p: OpenPane, key: string): void {
+    const e = this.screens.get(p.id);
+    if (!e?.session) return;
+    if (key === 'ctrl') {
+      this.ctrlArmed = !this.ctrlArmed;
+      e.term?.armCtrl(this.ctrlArmed);
+      return;
+    }
+    e.session.write(TERM_KEYS[key] ?? key);
+    e.term?.focus();
   }
 
   // ---- render ---------------------------------------------------------------------------------
@@ -187,29 +250,15 @@ export class QseChatPanes extends LightElement {
 
   private renderTerminal(p: OpenPane): TemplateResult {
     const entry = this.screens.get(p.id);
-    const screen = entry?.screen;
     const shell = !p.ref || p.ref === 'shell';
-    void this.termTick;
-    return html`<div class="ch-term" @click=${() => this.querySelector<HTMLInputElement>('.ch-term-input')?.focus()}>
-      <div class="ch-term-screen" aria-live="off" aria-label="terminal">
-        ${screen
-          ? screen.lines.map((l, i) => html`<div class="ch-term-line">${l.runs.map((r) => html`<span class=${`${r.fg != null ? `tc-${r.fg}` : ''} ${r.bold ? 'tc-b' : ''} ${r.dim ? 'tc-d' : ''}`}>${r.text}</span>`)}${i === screen.lines.length - 1 ? html`<span class="ch-term-cursor" aria-hidden="true"></span>` : nothing}</div>`)
-          : html`<div class="ch-term-line muted">connecting to the sandbox</div>`}
-      </div>
-      ${shell ? html`<input class="ch-term-input sr-only" aria-label="terminal input" autocomplete="off" @keydown=${(e: KeyboardEvent) => this.onTermKey(e, p)} />` : html`<div class="ch-term-foot muted small">a tool call's output; the shell tab takes input</div>`}
+    return html`<div class="ch-term" @click=${() => entry?.term?.focus()}>
+      ${entry?.term ? nothing : html`<div class="ch-term-wait muted">connecting to the sandbox</div>`}
+      <div class="ch-term-screen" data-pane=${p.id} aria-label="terminal"></div>
+      ${shell && this.sheet
+        ? html`<div class="ch-term-keys" role="toolbar" aria-label="terminal keys">${TERM_KEY_ROW.map(([k, label]) => html`<button type="button" class="btn btn-ghost btn-sm ${k === 'ctrl' && this.ctrlArmed ? 'is-on' : ''}" aria-pressed=${k === 'ctrl' ? this.ctrlArmed : nothing} aria-label=${label} @click=${(e: Event) => (e.stopPropagation(), this.sendKey(p, k))}>${KEY_FACE[k] ?? k}</button>`)}</div>`
+        : nothing}
+      ${shell ? nothing : html`<div class="ch-term-foot muted small">a tool call's output; the shell tab takes input</div>`}
     </div>`;
-  }
-
-  private onTermKey(e: KeyboardEvent, p: OpenPane): void {
-    const s = this.screens.get(p.id)?.session;
-    if (!s) return;
-    if (e.key === 'Enter') s.write('\r');
-    else if (e.key === 'Backspace') s.write('\x7f');
-    else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) s.write(e.key);
-    else if (e.key === 'l' && e.ctrlKey) s.write('clear\r');
-    else return;
-    e.preventDefault();
-    this.termLine = '';
   }
 
   private renderPreview(p: OpenPane): TemplateResult {
@@ -334,3 +383,27 @@ export function defaultPane(k: PaneKind): PaneRef {
       return { kind: 'markdown', ref: 'md:meal-plan', title: 'Markdown' };
   }
 }
+
+interface TermEntry {
+  session: TerminalSession | null;
+  term: XtermHandle | null;
+  /** bytes that came before xterm.js loaded */
+  pending: (string | Uint8Array)[];
+  readOnly: boolean;
+  loading: boolean;
+}
+
+/** Chat 8: the keys a phone keyboard lacks */
+const TERM_KEY_ROW: [string, string][] = [
+  ['esc', 'Escape'],
+  ['tab', 'Tab'],
+  ['ctrl', 'Control: the next key is sent with Ctrl'],
+  ['left', 'Left arrow'],
+  ['up', 'Up arrow'],
+  ['down', 'Down arrow'],
+  ['right', 'Right arrow'],
+  ['|', 'Pipe'],
+  ['~', 'Tilde'],
+];
+const KEY_FACE: Record<string, string> = { esc: 'Esc', tab: 'Tab', ctrl: 'Ctrl', left: '←', up: '↑', down: '↓', right: '→' };
+const TERM_KEYS: Record<string, string> = { esc: '\x1b', tab: '\t', left: '\x1b[D', up: '\x1b[A', down: '\x1b[B', right: '\x1b[C' };

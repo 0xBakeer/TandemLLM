@@ -213,13 +213,13 @@ export class RemoteChatBackend implements ChatBackend {
     return call<{ kind: string; content: string; mime: string; title: string; url?: string }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
   }
 
-  terminal(id: string, session: string, onData: (data: string) => void): TerminalSession {
+  terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const base = apiBase() ? apiBase().replace(/^http/, 'ws') : `${proto}//${location.host}`;
     const ws = new WebSocket(`${base}${PREFIX}/conversations/${enc(id)}/terminals/${enc(session)}/ws`);
     ws.binaryType = 'arraybuffer';
-    const dec = new TextDecoder();
-    ws.onmessage = (e) => onData(typeof e.data === 'string' ? e.data : dec.decode(e.data as ArrayBuffer));
+    // bytes go to xterm as they are: a UTF-8 character split across two frames stays whole
+    ws.onmessage = (e) => onData(typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer));
     ws.onclose = () => onData('\r\n\x1b[2m[the terminal closed]\x1b[0m\r\n');
     const enc8 = new TextEncoder();
     return {
