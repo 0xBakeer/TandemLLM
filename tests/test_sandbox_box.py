@@ -8,7 +8,8 @@ Checks: the lockdown (uid 1000, no capabilities, read-only root, no network, the
 devices); the LAN, this box and the engine unreachable while the public internet works through
 chatd's proxy; a 5 GiB allocation dies at the 4 GiB limit; the pids limit stops a fork storm;
 render_page's Chromium writes a screenshot and reports a console error; a PTY; the port relay;
-a second runtime adopts the running container; stop.
+a second runtime adopts the running container; stop. Then every built-in tool through chatd's loop
+(the fake model asks, the real sandbox and workspace answer; SRV-353).
 """
 
 from __future__ import annotations
@@ -146,6 +147,68 @@ def test_the_sandbox_on_this_box():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_every_builtin_through_chatd_in_a_real_sandbox():
+    if not ON:
+        print("skipped: set QSE_SANDBOX_BOX=1 on the box")
+        return
+    avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
+    assert avail >= 30, f"MemAvailable {avail:.1f} GiB: wait for 30"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from chatd_util import Chat
+
+    def calls(*c):
+        return "FAKE_CALLS " + json.dumps([{"name": n, "arguments": a} for n, a in c])
+
+    c = Chat()
+    sb = c.svc.sandboxes
+    sb.min_start_gb, sb.max_running = 30, 1
+    cid = None
+    try:
+        assert sb.available(), "no sandbox runtime on this box"
+        names = [t["id"] for t in c.ok("GET", "/tools")]
+        for n in names:
+            c.svc.add_rule(n, None, "allow", None)
+        cid = c.new()
+        page = ("<html><body><h1 id=t>box</h1><script>console.error('box-console-check');"
+                "</script></body></html>")
+        c.send(cid, calls(("write_file", {"path": "site/index.html", "content": page}),
+                          ("write_file", {"path": "notes.md", "content": "alpha\nbeta\n"}),
+                          ("bash", {"command": "id -u && ls /workspace/site && uname -m"})))
+        first = c.wait_idle(cid, 180)["messages"][-1]
+        c.send(cid, calls(("read_file", {"path": "notes.md"}),
+                          ("glob", {"pattern": "**/*.html"}),
+                          ("grep", {"pattern": "beta"}),
+                          ("edit_file", {"path": "notes.md", "old": "beta", "new": "gamma"}),
+                          ("web_fetch", {"url": "https://example.com/"}),
+                          ("render_page", {"path": "site/index.html"}),
+                          ("present", {"kind": "preview", "path": "site/index.html"})))
+        second = c.wait_idle(cid, 240)["messages"][-1]
+        got = {}
+        for m in (first, second):
+            for p in m["parts"]:
+                if p["type"] == "tool_call":
+                    got[p["name"]] = p
+        for n, p in got.items():
+            print(f"  {n:12s} {p['status']:7s} {(p.get('output') or {}).get('content', '')[:90]!r}")
+        out = {n: (p.get("output") or {}).get("content", "") for n, p in got.items()}
+        assert all(p["status"] == "done" for p in got.values()), {n: p["status"]
+                                                                  for n, p in got.items()}
+        assert "1000" in out["bash"] and "index.html" in out["bash"] and "aarch64" in out["bash"]
+        assert "alpha" in out["read_file"] and "site/index.html" in out["glob"]
+        assert "notes.md" in out["grep"] and "documentation examples" in out["web_fetch"]
+        assert "box-console-check" in out["render_page"]
+        f = c.ok("GET", f"/conversations/{cid}/sandbox/file?path=/workspace/notes.md")
+        assert "gamma" in json.dumps(f) and "beta" not in json.dumps(f)
+        lib = [n for n in ("library_search", "library_read") if n in names]
+        print(f"every built-in ran; library tools offered: {lib or 'none (no /v1/library)'}")
+    finally:
+        if cid:
+            c.call("POST", f"/conversations/{cid}/sandbox/stop")
+            sb.remove(cid, files=True)
+        c.close()
+
+
 if __name__ == "__main__":
     test_the_sandbox_on_this_box()
+    test_every_builtin_through_chatd_in_a_real_sandbox()
     print("ok")
