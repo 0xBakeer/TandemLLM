@@ -2,7 +2,28 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased, Qwen3.8-Flash-Next
+## 0.8.0-rc1, 2026-10-12
+
+The first release candidate of 0.8: a second model, Qwen3.8-Flash-Next, the Chat tab with chatd, its own chat service, and the cache peek and prewarm the Chat tab's Context panel reads. The box serves it from branch `rc-0.8.0` (Flash-Next 3.05, a 262,144-token window, three slots). The 27B's text does not change: its v2 disk-tier fingerprint is the same as 0.7.2's (`9ac3d8a94c8a9199`).
+
+### The Chat tab
+
+- A Chat tab in the dashboard (`#/chat`) and chatd, the service behind it (`python -m chatd` on 127.0.0.1:8016, reached through the engine's `/v1/chat-app/*`). A run belongs to the server: it goes on when the browser closes, and another device attaches mid-run and catches up from the last event it saw (docs/chat.md).
+- Tools in a sandbox per chat (a locked-down container, no LAN, a memory guard that gives way to the engine), permission prompts on every device, the terminal, preview, files and diff panes, MCP servers, Open WebUI tool imports, pinned and blocked skills, plan mode with a todo list and Rewind, the PWA and local notifications.
+- The model card in `/v1/models` (SRV-347): what a model can do, read from `models/<id>/card.json`, and what the process serves (its window, its pack, the vision tower). `POST /v1/tokenize` counts a chat body's tokens by part.
+
+### The cache peek and prewarm (SRV-349)
+
+- `POST /v1/cache/peek` says where a chat's rows are before it is sent (resident, the RAM park, a snapshot, the NVMe spill, the disk tier, none), how many tokens are warm and the re-read's estimate; `POST /v1/cache/prewarm` reads a chat back from the NVMe while the engine is idle. Live on the RC the peek named the tier and line of the next request in every case tried (resident, none, nvme_spill), and a prewarmed chat's next turn resumed at its end anchor.
+- The usage frame carries `tandem`: the prompt by part (system, tools, history, the router's notes, images), the router's choices for the turn (`harness`), and the cache tier the prompt came from.
+
+### Found by the RC's live checks
+
+- A restart could leave the engine unusable on Flash-Next: the spill's restore at startup told the MTP drafter its cache was valid before reading any row back, the drafter read pages the KV pool had released, and the GPU faulted (`illegal memory access`). Every request after it failed. The rows are now committed before a drafter resumes, and it resumes again over the restored rows (the spill, the disk tier and a side slot's carry).
+- Every short request the side lane took on Flash-Next failed (`'FlashNextCacheState' object has no attribute 'primed'`): the lane lends the engine with the 27B's pending commit in mind. The lane is off for an engine whose capabilities say it cannot be lent; such a request waits or takes an idle side slot.
+- Flash-Next had no model card, so the Chat tab saw no thinking and no images on it, and sent an attached image as a file. It has its card now.
+
+### Qwen3.8-Flash-Next
 
 A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through the same server, caches, ops scripts and setup guide as the 27B. The 27B's text does not change: its modules, flags and disk-tier fingerprint are as in 0.7.2, and every switch added here is off for it. On Flash-Next, greedy and seeded answers with speculation equal plain decoding token for token.
 
