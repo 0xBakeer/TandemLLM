@@ -63,7 +63,7 @@ def test_the_daily_backup_keeps_seven():
     kept = sorted(os.listdir(out))
     assert len(kept) == 7 and kept[0] == "chat-20261003.sqlite3", kept
     assert sqlite3.connect(os.path.join(out, kept[-1])).execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "2"
 
 
 # ------------------------------------------------------------------ the forward key
@@ -283,7 +283,7 @@ def test_a_queued_message_goes_in_after_the_answer():
         s = c.snap(cid)
         assert [m["role"] for m in s["messages"]] == ["user", "assistant", "user", "assistant"]
         assert text_of(s["messages"][2]) == "second" and s["queue"] == []
-        sent = c.last_body()["messages"]
+        sent = [m for m in c.last_body()["messages"] if m["role"] != "system"]
         assert [m["role"] for m in sent] == ["user", "assistant", "user"]
         assert sent[-1]["content"] == "second"
     finally:
@@ -315,7 +315,7 @@ def test_send_now_stops_the_answer_keeps_its_text_and_sends_the_queued_one():
         first = s["messages"][1]
         assert first["status"] == "stopped" and text_of(first)
         assert text_of(s["messages"][2]) == "steer"
-        sent = c.last_body()["messages"]
+        sent = [m for m in c.last_body()["messages"] if m["role"] != "system"]
         assert sent[1]["role"] == "assistant" and sent[1]["content"] == text_of(first)
         assert sent[-1] == {"role": "user", "content": "steer"}
     finally:
@@ -567,18 +567,21 @@ def test_the_request_is_byte_stable_across_calls_and_restarts():
         run_row = c.svc.store.one("SELECT id FROM runs ORDER BY started DESC LIMIT 1")
 
         def bytes_now(svc):
-            class R:
-                pass
-            r = R()
-            r.conv = svc.conv(cid)
-            r.id = run_row[0]
-            r.continue_final = False
-            r.user_message_id = svc.snapshot(cid)["messages"][2]["id"]
-            return svc.request_for(r)
+            from chatd.runs import Run
+            conv = svc.conv(cid)
+            snap = svc.snapshot(cid)
+            r = Run(svc, conv, user_message_id=snap["messages"][2]["id"],
+                    message_id=snap["messages"][3]["id"], max_steps=50, started_by=None)
+            r.id, r.step = run_row[0], 1
+            saved, conv.live = conv.live, None
+            try:
+                return svc.request_for(r)
+            finally:
+                conv.live = saved
         b1, h1 = bytes_now(c.svc)
         b2, h2 = bytes_now(c.svc)
         assert b1 == b2 and h1 == h2
-        assert json.loads(b1)["messages"][1]["reasoning_content"] == "".join(
+        assert json.loads(b1)["messages"][2]["reasoning_content"] == "".join(
             f"think{i} " for i in range(6))
     finally:
         c.close(keep_data=True)
@@ -674,23 +677,24 @@ def test_the_list_search_folders_and_delete():
         c.close()
 
 
-def test_phase_two_routes_say_not_available():
+def test_routes_without_a_sandbox_and_what_comes_later():
+    """On a box without the sandbox image: the tools that need it are not offered, the sandbox
+    routes say why, terminals list nothing; MCP, skills, prompts and presets are later."""
     c = Chat()
     try:
         cid = c.new()
-        for p in ("/tools", "/packages", "/mcp/servers", "/prompts", "/presets"):
+        names = [t["id"] for t in c.ok("GET", "/tools")]
+        assert names[:3] == ["read_file", "write_file", "edit_file"] and "bash" not in names
+        for p in ("/packages", "/mcp/servers", "/prompts", "/presets"):
             assert c.ok("GET", p) == []
         assert c.ok("GET", f"/conversations/{cid}/terminals") == []
-        st, obj, _ = c.call("POST", f"/conversations/{cid}/compact")
-        assert st == 501 and obj["error"]["type"] == "not_available"
-        st, obj, _ = c.call("PATCH", "/tools/bash", {"enabled": False})
-        assert st == 501
-        st, obj, _ = c.call("GET", f"/conversations/{cid}/sandbox")
+        st, obj, _ = c.call("POST", f"/conversations/{cid}/sandbox/start")
         assert st == 503 and obj["error"]["type"] == "sandbox_unavailable"
-        st, obj, _ = c.call("POST", f"/conversations/{cid}/terminals")
-        assert st == 503
+        st, obj, _ = c.call("POST", f"/conversations/{cid}/compact")
+        assert st == 202
         snap = c.snap(cid)
-        assert snap["sandbox"]["state"] == "stopped" and snap["compactions"] == []
+        assert snap["sandbox"]["state"] == "error" and "not installed" in snap["sandbox"]["error"]
+        assert snap["compactions"] == []
         assert c.ok("GET", "/capabilities")["session"]["sandbox"] == "not_installed"
     finally:
         c.close()
@@ -728,7 +732,7 @@ def test_attachments_upload_and_go_to_the_model():
              {"client_msg_id": "a1", "text": "read it", "attachments": [att["id"]]})
         s = c.wait_idle(cid)
         assert s["messages"][0]["attachments"][0]["id"] == att["id"]
-        assert "line two" in c.last_body()["messages"][0]["content"]
+        assert "line two" in c.last_body()["messages"][-1]["content"]
         st, _, _ = c.call("POST", f"/conversations/{cid}/messages",
                           {"client_msg_id": "a2", "text": "x", "attachments": ["nope"]})
         assert st == 400

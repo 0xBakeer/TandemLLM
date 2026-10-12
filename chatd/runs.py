@@ -1,30 +1,42 @@
-"""One run: the model call that answers one user message, on its own thread (SRV-345).
+"""One run: the agent loop that answers one user message, on its own thread (SRV-345, SRV-351).
 
 A run belongs to chatd, not to a browser: its thread holds the stream to the engine, so the engine
-never sees a client leave when a tab closes. Phase 1 has no tools, so a run is one model call
-(the agent loop of SRV-351 makes it 1 to 50). States: queued (waiting for one of the
+never sees a client leave when a tab closes. States: queued (waiting for one of the
 QSE_CHAT_MAX_RUNS slots, or for the engine), running, completed, cancelled, failed, interrupted.
 
+THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
+1. the request: the system block, the tools in fixed order, the branch, the run's earlier steps
+   with their tool results, the tail. Before it the context guard (chatd/compaction.py) may
+   compact the conversation, and caps `max_tokens` to what the window has left;
+2. the stream: thinking and text into parts, tool calls into `tool_call` parts as they are
+   written; every part carries its `step`, which is how the next request is rebuilt;
+3. a step that ends with tool calls: each is checked against the permission rules (a prompt
+   waits as long as it must), read-only calls run in parallel (at most 4), writes and commands in
+   order, and the results go back to the model in the next step. A message queued meanwhile (a
+   steer) ends the run here, and the next run carries it: the model reads it right after the
+   results;
+4. a step without calls ends the run: `stop` completes it, `length` gets one continuation, an
+   empty turn one retry with a hidden nudge (a second empty turn is an error the user sees).
+Limits: `max_steps` model calls (50; the run ends `interrupted` with a notice and Continue goes
+on), the same call with the same arguments three times in a row ends the run with a notice.
+
 WHAT STREAMS. `reasoning_content` (or `reasoning`) deltas go to a thinking part; `content` goes to a
-text part, and a `<think>...</think>` block inside it (an engine with `--reasoning-format tag`, or
-any server that leaves the tags in) goes to a thinking part too. A part opens with `part.added` and
-grows with `part.delta`; the deltas are coalesced to one event per part every 50 ms by the
-service's ticker (a 10,000-token answer is about 400 events, not 10,000 rows).
+text part, and a `<think>...</think>` block inside it goes to a thinking part too. Parts are
+coalesced to one event per part every 50 ms by the service's ticker.
 
 STOP, SEND NOW, CANCEL. `stop(mode)` closes the socket to the engine (the engine books the request
-`abandoned` and frees its slot within one block); the text so far stays, the message ends
-`stopped`. `now` is Send now (the queue drains right after), `cancel` an edit, a regenerate or a
-delete taking over (no drain), `shutdown` chatd stopping (the run ends `interrupted`).
+`abandoned` and frees its slot within one block) and signals a running tool to end; the text so far
+stays, the message ends `stopped`, a tool that was running ends `cancelled`.
 
 RETRY AND CONTINUE. A refused or failed call (connection refused, 429, 5xx, a stream that drops
 without a finish) is retried with backoff 1, 2, 4 ... 60 s for QSE_CHAT_RETRY_S (10 minutes), then
-the run ends `interrupted`. A retry after text came continues the answer: the partial text goes back
-as the last assistant message with `continue_final_message`. A 4xx is not retried: the run fails
-with the engine's message.
+the run ends `interrupted`. A retry after text came continues the answer with
+`continue_final_message`. A 4xx is not retried: the run fails with the engine's message.
 """
 
 from __future__ import annotations
 
+import collections
 import re
 import threading
 import time
@@ -38,6 +50,11 @@ FLUSH_S = 0.05
 WARMUP_TOKENS = 50            # decode rates skip the first 50 tokens (the dashboard's NOW rule)
 _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
+NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
+
+
+class GuardError(Exception):
+    """The request cannot fit the model's window even after a compaction."""
 
 
 class Run:
@@ -58,6 +75,7 @@ class Run:
         self.step = 0
         self.queue_position: int | None = None
         self.prefill: dict | None = None
+        self.tool: dict | None = None
         self.request_id: str | None = None
         self.stop_mode: str | None = None
         self.call = None
@@ -66,7 +84,8 @@ class Run:
         # the parts as they stream (the conversation's lock guards these and `pending`)
         self.open_kind: str | None = None
         self.open_index: int | None = None
-        self.pending = ""
+        self.pend: dict = {}                   # (part index or call id, field) -> text to flush
+        self.out_sent: dict[str, int] = {}     # call id -> output characters sent in events
         self.last_flush = 0.0
         self.think_started: float | None = None
         self.in_tag = False
@@ -84,6 +103,22 @@ class Run:
                               "thinking_budget": None}
         self.tps_history: list = []
         self.error: str | None = None
+        self.notice: str | None = None         # why the run ended early (step cap, a loop)
+        # the loop
+        self.cancel = threading.Event()        # a running tool ends on it
+        self.step_parts: list[int] = []        # this step's tool_call part indexes, in order
+        self.tc_parts: dict[int, int] = {}     # this step's tool_calls[].index -> part index
+        self.length_continued = False
+        self.empty_retries = 0
+        self.nudge = False
+        self.recent_calls: collections.deque = collections.deque(maxlen=3)
+        self.request_chars = 0
+        self.request_est = 0
+        self.compacted = False
+        self.resume_same_step = False          # Continue of a cut text goes on in its own step
+        self.acc = {"completion": 0, "reasoning": 0}
+        self.snapshotted = False
+        self.waiting: dict[str, dict] = {}     # call id -> {"event", "answer"} while a prompt waits
 
     # ------------------------------------------------------------------ the contract's Run
     def as_dict(self, viewer: str | None = None) -> dict:
@@ -93,7 +128,7 @@ class Run:
             "started_at": iso(self.started_ms), "started_by": by,
             "phase": self.phase, "now": self.now, "step": self.step, "max_steps": self.max_steps,
             "queue_position": self.queue_position,
-            "tool": None, "prefill": self.prefill,
+            "tool": self.tool, "prefill": self.prefill,
             "decode_tps": self.metrics["decode_tps"],
             "tokens_per_round": self.metrics["tokens_per_round"],
             "acceptance": self.metrics["acceptance"],
@@ -112,6 +147,9 @@ class Run:
         if self.stop_mode is None:
             self.stop_mode = mode
         self.wake.set()
+        self.cancel.set()
+        for w in list(self.waiting.values()):
+            w["event"].set()
         call = self.call
         if call is not None:
             call.close()
@@ -133,6 +171,11 @@ class Run:
                 ev["queue_position"] = self.queue_position
             elif phase != "queued":
                 self.queue_position = None
+            if "tool" in extra:
+                self.tool = extra["tool"]
+                ev["tool"] = self.tool
+            elif phase not in ("tool", "permission"):
+                self.tool = None
             if phase != "prefill":
                 self.prefill = None
             self.svc.emit(self.conv, ev, run_id=self.id)
@@ -158,12 +201,54 @@ class Run:
                 return self._stopped()
             self.set_phase("queued", "Waiting for a free run slot")
         self.state = "running"
-        deadline = time.monotonic() + self.svc.retry_window_s
-        backoff = 1.0
         while True:
             if self.stop_mode:
                 return self._stopped()
-            body, headers = self.svc.request_for(self)
+            if self.step >= self.max_steps:
+                self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
+                               f"Continue goes on from here.")
+                return "interrupted"
+            outcome = self._call()
+            if outcome != "completed":
+                return outcome
+            if self.step_parts:
+                if self.svc.run_tools(self, list(self.step_parts)) == "cancelled":
+                    return self._stopped()
+                if self.notice:                     # the same call three times in a row
+                    return "completed"
+                if self.svc.queued(self.conv):      # a steer: the next run carries it
+                    return "completed"
+                continue
+            if self.finish_reason == "length" and not self.length_continued:
+                self.length_continued, self.continue_final = True, True
+                continue
+            if self.svc.step_empty(self):
+                if self.empty_retries == 0:
+                    self.empty_retries, self.nudge = 1, True
+                    continue
+                self.error = "The model answered with nothing, twice."
+                return "failed"
+            return "completed"
+
+    def _call(self) -> str:
+        """One model call with its retries: completed, failed, interrupted or cancelled."""
+        deadline = time.monotonic() + self.svc.retry_window_s
+        backoff = 1.0
+        if self.resume_same_step:
+            self.resume_same_step = False
+        else:
+            self.step += 1
+        self.step_parts, self.tc_parts = [], {}
+        self.finish_reason, self.usage = None, None
+        while True:
+            if self.stop_mode:
+                return self._stopped()
+            try:
+                body, headers = self.svc.request_for(self)
+            except GuardError as exc:
+                self.error = str(exc)
+                return "failed"
+            self.nudge = False
             self.set_phase("queued", "Sending to the engine")
             try:
                 self.t_sent = time.monotonic()
@@ -184,11 +269,11 @@ class Run:
             if self.stop_mode:                       # Stop came while the call opened
                 self.call.close()
                 return self._stopped()
-            self.step = max(1, self.step)
             self.set_phase("prefill", "Reading the prompt")
             outcome = self._consume()
             self.call = None
             if outcome in ("completed", "failed"):
+                self.continue_final = False
                 return outcome
             if self.stop_mode:
                 return self._stopped()
@@ -197,13 +282,14 @@ class Run:
                 self.error = "the engine stream ended early"
                 return "interrupted"
             self.svc.flush(self)
-            self.continue_final = True
+            if self.step_parts:                      # a half-written call is not continued
+                self.svc.drop_step(self)
+            else:
+                self.continue_final = True
             self.set_phase("queued", f"The engine stream ended early, retry in {int(backoff)} s")
             self.wake.wait(backoff)
             backoff = min(BACKOFF_MAX_S, backoff * 2)
 
-    def _stopped(self) -> str:
-        return "interrupted" if self.stop_mode == "shutdown" else "cancelled"
 
     def _consume(self) -> str:
         finished = False
@@ -228,9 +314,15 @@ class Run:
             if self.request_id is None and obj.get("id"):
                 self.request_id = str(obj["id"])
             if isinstance(obj.get("usage"), dict):
-                self.usage = {"usage": obj["usage"], "timings": obj.get("timings") or {},
+                u = obj["usage"]
+                self.usage = {"usage": u, "timings": obj.get("timings") or {},
                               "metrics": obj.get("metrics") or {},
-                              "tandem": (obj["usage"].get("tandem") or obj.get("tandem"))}
+                              "tandem": (u.get("tandem") or obj.get("tandem"))}
+                self.acc["completion"] += int(u.get("completion_tokens") or 0)
+                self.acc["reasoning"] += int((u.get("completion_tokens_details") or {})
+                                             .get("reasoning_tokens") or 0)
+                self.svc.learn_ratio(self.conv, int(u.get("prompt_tokens") or 0),
+                                     self.request_chars)
             for ch in obj.get("choices") or []:
                 if not isinstance(ch, dict):
                     continue
@@ -241,6 +333,9 @@ class Run:
                 c = d.get("content")
                 if isinstance(c, str) and c:
                     self._content(c)
+                for tc in d.get("tool_calls") or []:
+                    if isinstance(tc, dict):
+                        self._tool_delta(tc)
                 if ch.get("finish_reason"):
                     self.finish_reason = str(ch["finish_reason"])
                     finished = True
@@ -256,7 +351,37 @@ class Run:
             self.carry = ""
         return "completed" if finished or self.usage is not None else "broken"
 
+    def _stopped(self) -> str:
+        return "interrupted" if self.stop_mode == "shutdown" else "cancelled"
+
+
     # ------------------------------------------------------------------ the parts
+    def _tool_delta(self, tc: dict) -> None:
+        """A tool call as the model writes it: the part opens with its name, then its
+        arguments grow (`part.delta` field `input`)."""
+        idx = int(tc.get("index") or 0)
+        fn = tc.get("function") or {}
+        if idx not in self.tc_parts:
+            if self.carry:
+                self._add("thinking" if self.in_tag else "text", self.carry)
+                self.carry = ""
+            if self.phase not in ("writing", "finishing"):
+                self.set_phase("writing", f"Calling {fn.get('name') or 'a tool'}")
+            k = self.svc.add_call(self, str(tc.get("id") or f"call_{ulid()[-12:]}"),
+                                  str(fn.get("name") or ""))
+            self.tc_parts[idx] = k
+            self.step_parts.append(k)
+        k = self.tc_parts[idx]
+        if fn.get("name") and not self.svc.call_part(self, k).get("name"):
+            self.svc.call_part(self, k)["name"] = str(fn["name"])
+        args = fn.get("arguments")
+        if isinstance(args, str) and args:
+            if self.t_first is None:
+                self.t_first = time.monotonic()
+            self.tokens += 1
+            self.marks.append((time.monotonic(), self.tokens))
+            self.svc.append_input(self, k, args)
+
     def _content(self, text: str) -> None:
         """Content with `<think>` tags split into thinking and text; a tag cut across two chunks
         waits in `carry` until it is whole."""
@@ -344,8 +469,11 @@ class Run:
             "decode_tps": t.get("predicted_per_second") or None,
             "total_ms": total,
             "prompt_tokens": int(u.get("prompt_tokens") or 0),
-            "completion_tokens": int(u.get("completion_tokens") or self.tokens),
-            "reasoning_tokens": int(ctd.get("reasoning_tokens") or self.thinking_tokens),
+            "completion_tokens": int(self.acc["completion"] or u.get("completion_tokens") or
+                                     self.tokens),
+            "reasoning_tokens": int(self.acc["reasoning"] or ctd.get("reasoning_tokens") or
+                                    self.thinking_tokens),
+            "steps": self.step,
             "cached_tokens": int(ptd.get("cached_tokens") or 0),
             "tokens_per_round": t.get("tokens_per_block") or spec.get("mean_acceptance_length"),
             "acceptance": spec.get("draft_acceptance_rate"),

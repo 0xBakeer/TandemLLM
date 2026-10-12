@@ -80,8 +80,21 @@ CREATE TABLE terminals (id TEXT PRIMARY KEY, conversation_id TEXT, title TEXT, o
                         created INTEGER, closed INTEGER);
 """
 
+# v2 (phase 2): compactions, the global tool switches, and each sandbox's last use
+SCHEMA_V2 = """
+CREATE TABLE compactions (
+  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, boundary_id TEXT NOT NULL,
+  summary TEXT NOT NULL, before_tokens INTEGER, after_tokens INTEGER, created INTEGER NOT NULL,
+  duration_ms INTEGER, run_id TEXT
+);
+CREATE INDEX compactions_conv ON compactions(conversation_id, created);
+CREATE TABLE tool_prefs (tool TEXT PRIMARY KEY, enabled INTEGER, policy TEXT);
+CREATE TABLE sandboxes (conversation_id TEXT PRIMARY KEY, created INTEGER, last_used INTEGER,
+                        removed INTEGER);
+"""
+
 # version n: the SQL that takes a file from n-1 to n
-MIGRATIONS: dict[int, str] = {1: SCHEMA_V1}
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2}
 BACKUPS_KEPT = 7
 
 

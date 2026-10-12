@@ -38,52 +38,114 @@ def text_of(parts: list[dict], kind: str = "text") -> str:
     return "".join(p.get("text") or "" for p in parts if p.get("type") == kind)
 
 
-def message(m: dict, vision: bool, blob=None) -> dict | None:
-    """One branch message as an OpenAI message; None for what the model does not see."""
-    role = m.get("role")
+def _user(m: dict, vision: bool, blob=None) -> dict:
     parts = m.get("parts") or []
-    if role == "user":
-        text = text_of(parts)
+    text = text_of(parts)
+    images = []
+    for a in m.get("attachments") or []:
+        data = blob(a) if blob is not None else None
+        if data is None:
+            continue
+        if a.get("kind") == "image":
+            if vision:
+                images.append({"type": "image_url", "image_url": {
+                    "url": f"data:{a.get('mime') or 'image/png'};base64,"
+                           + base64.b64encode(data).decode()}})
+        elif a.get("kind") == "text":
+            body = data.decode("utf-8", "replace")
+            text += f"\n\n```{a.get('name') or 'file'}\n{body}\n```"
+    if images:
+        return {"role": "user", "content": [{"type": "text", "text": text}, *images]}
+    return {"role": "user", "content": text}
+
+
+def steps(parts: list[dict]) -> list[list[dict]]:
+    """An assistant message's parts by model call (`step`); parts from before phase 2 are one."""
+    out: dict[int, list[dict]] = {}
+    for p in parts:
+        out.setdefault(int(p.get("step") or 1), []).append(p)
+    return [out[k] for k in sorted(out)]
+
+
+def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True) -> list[dict]:
+    """One assistant message as the model saw it: per step its text, reasoning and tool calls,
+    then one `tool` message per call with the result the model read, then the images of those
+    results (vision models only)."""
+    out: list[dict] = []
+    for group in steps(m.get("parts") or []):
+        text = text_of(group)
+        thinking = text_of(group, "thinking") if keep_reasoning else ""
+        calls = [p for p in group if p.get("type") == "tool_call"]
+        if not text and not thinking and not calls:
+            continue
+        msg: dict = {"role": "assistant", "content": text}
+        if thinking:
+            msg["reasoning_content"] = thinking
+        if calls:
+            msg["tool_calls"] = [{"id": c["id"], "type": "function",
+                                  "function": {"name": c.get("name") or "",
+                                               "arguments": c.get("input") or "{}"}}
+                                 for c in calls]
+        out.append(msg)
         images = []
-        for a in m.get("attachments") or []:
-            data = blob(a) if blob is not None else None
-            if data is None:
-                continue
-            if a.get("kind") == "image":
-                if vision:
+        for c in calls:
+            out.append({"role": "tool", "tool_call_id": c["id"], "content": result_text(c)})
+            for a in ((c.get("output") or {}).get("images") or []) if vision else []:
+                data = blob(a) if blob is not None else None
+                if data:
                     images.append({"type": "image_url", "image_url": {
                         "url": f"data:{a.get('mime') or 'image/png'};base64,"
                                + base64.b64encode(data).decode()}})
-            elif a.get("kind") == "text":
-                body = data.decode("utf-8", "replace")
-                text += f"\n\n```{a.get('name') or 'file'}\n{body}\n```"
         if images:
-            return {"role": "user", "content": [{"type": "text", "text": text}, *images]}
-        return {"role": "user", "content": text}
-    if role == "assistant":
-        text = text_of(parts)
-        thinking = text_of(parts, "thinking")
-        if not text and not thinking:
-            return None
-        out = {"role": "assistant", "content": text}
-        if thinking:
-            out["reasoning_content"] = thinking
-        return out
-    return None
+            out.append({"role": "user", "content": [
+                {"type": "text", "text": "The images the tool calls above returned."}, *images]})
+    return out
+
+
+def result_text(c: dict) -> str:
+    """What the model reads for one call: the saved model text, else the visible output, else the
+    call's state in words (every call gets an answer, or the next request is invalid)."""
+    if c.get("model_content"):
+        return c["model_content"]
+    out = c.get("output") or {}
+    if out.get("content"):
+        return out["content"]
+    st = c.get("status")
+    if st == "denied":
+        return "The user denied this call."
+    if st in ("cancelled", "running", "asking"):
+        return "The call was stopped before it finished."
+    return "(no output)"
+
+
+def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True) -> list[dict]:
+    """One branch message as OpenAI messages; [] for what the model does not see (notices)."""
+    if m.get("role") == "user":
+        return [_user(m, vision, blob)]
+    if m.get("role") == "assistant":
+        return _assistant(m, vision, blob, keep_reasoning)
+    return []
 
 
 def body(model: str, settings: dict, branch: list[dict], *, system: str | None = None,
          vision: bool = False, blob=None, continue_final: bool = False,
-         max_tokens: int | None = None) -> dict:
+         max_tokens: int | None = None, tools: list[dict] | None = None,
+         keep_reasoning_from: int = 0, nudge: str | None = None,
+         tandem: dict | None = None) -> dict:
+    """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
+    context guard drops it before that); `nudge`: a hidden last user line (the empty-turn retry)."""
     msgs: list[dict] = []
     if system:
         msgs.append({"role": "system", "content": system})
-    for m in branch:
-        x = message(m, vision, blob)
-        if x is not None:
-            msgs.append(x)
+    for i, m in enumerate(branch):
+        msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from))
+    if nudge:
+        msgs.append({"role": "user", "content": nudge})
     out: dict = {"model": model, "messages": msgs, "stream": True,
                  "stream_options": {"include_usage": True}}
+    if tools:
+        out["tools"] = tools
+        out["parallel_tool_calls"] = True
     effort = settings.get("effort") or "auto"
     if not settings.get("thinking", True):
         out["chat_template_kwargs"] = {"enable_thinking": False}
@@ -91,10 +153,36 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
         out["reasoning_effort"] = effort
     if max_tokens:
         out["max_tokens"] = int(max_tokens)
-    if continue_final and msgs and msgs[-1]["role"] == "assistant":
+    if continue_final and msgs and msgs[-1]["role"] == "assistant" and \
+            not msgs[-1].get("tool_calls"):
         out["continue_final_message"] = True
         out["add_generation_prompt"] = False
+    if tandem:
+        out["tandem"] = tandem
     return out
+
+
+def system_block(*, today: str | None, tools: bool, summary: str | None = None,
+                 skills: str | None = None, prompt: str | None = None) -> str | None:
+    """The system message: the chat's own prompt, then the tool rules, the skill index and the
+    summary of compacted turns. None for a plain chat with nothing to say."""
+    parts = []
+    if prompt:
+        parts.append(prompt.strip())
+    if tools:
+        parts.append(
+            f"You are the assistant in TandemLLM's chat{f'. Today is {today}' if today else ''}. "
+            "You can use tools. Files live in /workspace, this chat's own Linux sandbox; the "
+            "internet is reachable through a proxy, the local network is not. Read a file before "
+            "you edit it, and prefer edit_file for small changes. Use present to show the user a "
+            "page, a file or this run's changes. When the task is done, answer in plain words; do "
+            "not call tools you do not need.")
+    if skills:
+        parts.append("Skills you can read with library_read when a task needs one:\n" + skills)
+    if summary:
+        parts.append("Summary of the earlier part of this conversation (the messages before it "
+                     "were compacted):\n" + summary.strip())
+    return "\n\n".join(parts) if parts else None
 
 
 def encode(obj: dict) -> bytes:

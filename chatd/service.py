@@ -32,7 +32,13 @@ import time
 
 from chatd import context as ctx_mod
 from chatd import render
+from chatd.agent import AgentMixin
+from chatd.panes import PanesMixin
+from chatd.terminals import TerminalsMixin
 from chatd.engine import Engine, LiveTail
+from chatd.sandbox import Sandboxes
+from chatd.snapshots import Snapshots
+from chatd.workspace import Workspace
 from chatd.events import RESET_BEHIND, Fanout, Subscriber, as_json
 from chatd.ids import iso, now_ms, ulid
 from chatd.runs import FLUSH_S, Run
@@ -42,7 +48,7 @@ DEFAULT_SETTINGS = {
     "model": "", "profile": None, "effort": "auto", "thinking": True,
     "tools": [], "packages": [], "packages_blocked": [], "packages_mode": "auto", "mcp": [],
     "prompt_id": None, "policies": {}, "auto_accept_edits": False, "max_steps": 50,
-    "sandbox_network": "off",
+    "sandbox_network": "on",
 }
 EFFORTS = ("auto", "low", "medium", "high", "xhigh")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
@@ -56,13 +62,6 @@ METRICS_S = 1.0
 CONTEXT_RUN_S = 1.0
 CONTEXT_IDLE_S = 10.0
 PEEK_TTL_S = 30.0
-# the sandbox of phase 2: not installed (SRV-355); the snapshot says so in its own words
-SANDBOX_NONE = {"state": "stopped", "image": "", "cwd": "/workspace", "cpus": 0, "memory_bytes": 0,
-                "memory_limit_bytes": 0, "disk_bytes": 0, "disk_limit_bytes": 0, "network": "off",
-                "allowlist": [], "uptime_s": 0, "error": "the sandbox is not installed yet",
-                "stopped_reason": None, "ports": []}
-
-
 class ApiError(Exception):
     def __init__(self, status: int, kind: str, message: str, extra: dict | None = None):
         super().__init__(message)
@@ -86,6 +85,7 @@ class Conv:
         self.context: dict | None = None
         self.context_sent_at = 0.0
         self.peek: tuple[float, dict | None] | None = None
+        self.tok_ratio: float | None = None       # tokens per request character, learned
 
 
 class Slots:
@@ -130,10 +130,11 @@ def device_label(ua: str | None) -> str | None:
     return browser or system or "another device"
 
 
-class Service:
+class Service(AgentMixin, PanesMixin, TerminalsMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
-                 log=None, store: Store | None = None, engine: Engine | None = None):
+                 log=None, store: Store | None = None, engine: Engine | None = None,
+                 sandboxes: Sandboxes | None = None):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         self.blobs = os.path.join(data_dir, "blobs")
@@ -157,6 +158,12 @@ class Service:
         self._no_peek_until = 0.0
         self.live = LiveTail(self.engine, self._runs_on)
         self.stopping = threading.Event()
+        self.sandboxes = sandboxes or Sandboxes(data_dir, log=self.log,
+                                                on_change=self._sandbox_changed,
+                                                network_mode=self._network_mode)
+        self.snaps = Snapshots(os.path.join(data_dir, "snapshots"))
+        self._library: tuple[float, bool] | None = None
+        self.mcp = None
         self.interrupted_at_start = self._interrupt_leftovers()
         self.ticker = threading.Thread(target=self._tick, name="chatd-ticker", daemon=True)
         self.sweeper = threading.Thread(target=self._sweep, name="chatd-sweeper", daemon=True)
@@ -164,9 +171,60 @@ class Service:
     def start(self) -> None:
         self.ticker.start()
         self.sweeper.start()
+        n = self.sandboxes.adopt()
+        if n:
+            self.log(f"[sandbox] {n} running sandbox(es) adopted")
+        threading.Thread(target=self.sandboxes.guard, name="chatd-sandbox-guard",
+                         daemon=True).start()
+        if self.mcp is not None:
+            self.mcp.start()
 
     def log(self, line: str) -> None:
         self._log(line)
+
+    # ================================================================== sandbox glue
+    def workspace(self, cid: str) -> Workspace:
+        ws = Workspace(self.sandboxes.paths(cid)[0])
+        ws.ensure()
+        return ws
+
+    def _network_mode(self, cid: str) -> str:
+        r = self.store.one("SELECT settings FROM conversations WHERE id = ?", (cid,))
+        s = json.loads(r["settings"]) if r else {}
+        return "off" if s.get("sandbox_network") == "off" else "on"
+
+    def _sandbox_changed(self, cid: str, status: dict) -> None:
+        try:
+            conv = self.conv(cid)
+        except ApiError:
+            return
+        self.emit(conv, {"type": "sandbox.changed", "sandbox": status})
+
+    def library_available(self) -> bool:
+        if self._library is None or time.monotonic() - self._library[0] > 300:
+            st, _ = self.engine.get_json("/v1/library", timeout=3.0)
+            self._library = (time.monotonic(), st == 200)
+        return self._library[1]
+
+    def store_blob(self, cid: str | None, name: str, mime: str, data: bytes) -> dict:
+        """Bytes into the blob store and an attachment row; the Attachment."""
+        sha = hashlib.sha256(data).hexdigest()
+        path = os.path.join(self.blobs, sha[:2], sha)
+        if not os.path.exists(path):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + f".tmp{secrets.token_hex(4)}"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        kind = ("image" if mime.startswith("image/") else "pdf" if mime == "application/pdf"
+                else "text" if mime.startswith("text/") or name.lower().endswith(
+                    (".md", ".txt", ".py", ".ts", ".js", ".json", ".yaml", ".yml", ".toml",
+                     ".csv")) else "file")
+        att_id = ulid()
+        tokens = ctx_mod.estimate_tokens(data.decode("utf-8", "replace")) if kind == "text" else None
+        self.store.run("INSERT INTO attachments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (att_id, cid, name, kind, mime, len(data), sha, tokens, now_ms()))
+        return _attachment(att_id, name, kind, mime, len(data), tokens)
 
     # ================================================================== conversations: state
     def conv(self, cid: str) -> Conv:
@@ -323,7 +381,8 @@ class Service:
             out.update({
                 "messages": [self._wire_message(m, kids) for m in branch],
                 "head_id": row["head_id"], "settings": settings, "run": run,
-                "context": conv.context, "sandbox": dict(SANDBOX_NONE), "compactions": [],
+                "context": conv.context, "sandbox": self.sandboxes.status(cid),
+                "compactions": self.compactions(cid, branch),
                 "usage": _usage(branch),
                 "queue": self._queue(cid), "ui": json.loads(row["ui"]),
                 "seq": str(conv.last_seq),
@@ -538,6 +597,13 @@ class Service:
         run = Run(self, conv, user_message_id=user_mid, message_id=mid,
                   max_steps=int(settings.get("max_steps") or 50), started_by=viewer,
                   continue_final=bool(continue_mid))
+        if continue_mid and conv.live["parts"]:
+            last = conv.live["parts"][-1]
+            run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])
+            # a cut text goes on in its own step; after tool results the next call is a new step
+            run.continue_final = last.get("type") in ("text", "thinking")
+            run.resume_same_step = run.continue_final
+            run.max_steps = run.step + int(settings.get("max_steps") or 50)
         self.store.run("UPDATE messages SET run_id = ? WHERE id = ?", (run.id, mid))
         self.store.run("INSERT INTO runs (id, conversation_id, user_message_id, "
                        "assistant_message_id, state, max_steps, model, started, started_by) "
@@ -570,61 +636,6 @@ class Service:
         b = levels.get(eff)
         return int(b) if b else None
 
-    def request_for(self, run: Run) -> tuple[bytes, dict]:
-        """The body and headers of a run's next call: the branch up to the run's user message,
-        plus the partial answer when it continues."""
-        conv = run.conv
-        with conv.lock:
-            row = self._row(conv.id)
-            settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
-            msgs = self._messages(conv.id)
-            path = [msgs[m] for m in self._path(msgs, run.user_message_id)]
-            if run.continue_final and conv.live is not None and render.text_of(conv.live["parts"]):
-                path.append({"role": "assistant", "parts": conv.live["parts"]})
-            else:
-                run.continue_final = False
-        info = self.model_info(settings.get("model"))
-        model = settings.get("model") or info.get("id") or "default"
-        body = render.body(model, settings, path, vision=bool(info.get("vision")),
-                           blob=self._blob_of, continue_final=run.continue_final)
-        self.store.run("UPDATE runs SET request = ?, state = 'running' WHERE id = ?",
-                       (dumps({"messages": len(body["messages"]),
-                               "continue": run.continue_final}), run.id))
-        return render.encode(body), render.headers(conv.id, settings)
-
-    # ---- the parts as they stream (called from the run's thread)
-    def append(self, run: Run, kind: str, text: str) -> None:
-        conv = run.conv
-        with conv.lock:
-            if run.open_kind != kind:
-                self.flush(run)
-                if run.open_kind == "thinking":
-                    self.close_thinking(run)
-                part = ({"type": "thinking", "text": "", "tokens": None, "done": False}
-                        if kind == "thinking" else {"type": "text", "text": ""})
-                conv.live["parts"].append(part)
-                run.open_kind, run.open_index = kind, len(conv.live["parts"]) - 1
-                if kind == "thinking":
-                    run.think_started = time.monotonic()
-                self.emit(conv, {"type": "part.added", "message_id": run.message_id,
-                                 "part": dict(part)}, run_id=run.id)
-            run.pending += text
-            if time.monotonic() - run.last_flush >= FLUSH_S:
-                self.flush(run)
-
-    def flush(self, run: Run) -> None:
-        conv = run.conv
-        with conv.lock:
-            run.last_flush = time.monotonic()
-            if not run.pending or run.open_index is None or conv.live is None:
-                return
-            delta, run.pending = run.pending, ""
-            part = conv.live["parts"][run.open_index]
-            part["text"] = (part.get("text") or "") + delta
-            self.emit(conv, {"type": "part.delta", "message_id": run.message_id,
-                             "index": run.open_index, "delta": delta, "field": "text"},
-                      run_id=run.id)
-
     def close_thinking(self, run: Run, tokens: int | None = None) -> None:
         conv = run.conv
         with conv.lock:
@@ -646,10 +657,20 @@ class Service:
                            (dumps(conv.live["parts"]), conv.live["status"], conv.live["id"]))
             conv.persisted_at = time.monotonic()
 
+    def learn_ratio(self, conv: Conv, prompt_tokens: int, request_chars: int) -> None:
+        r = __import__("chatd.compaction", fromlist=["learn"]).learn(prompt_tokens, request_chars)
+        if r is not None:
+            conv.tok_ratio = r
+
     def finish_run(self, run: Run, outcome: str) -> None:
         """The run's end: the message's final parts, status and figures; `run.done` (or
         `run.error`); then the queue and the title."""
         conv = run.conv
+        if run.snapshotted:
+            try:
+                self.snaps.take(conv.id, self.workspace(conv.id), run.id, "after")
+            except OSError:
+                pass
         status = {"completed": "done", "cancelled": "stopped", "interrupted": "interrupted",
                   "failed": "error"}[outcome]
         finish = run.finish_reason or {"done": "stop", "stopped": "stopped",
@@ -676,6 +697,19 @@ class Service:
                               run_id=run.id)
             run.state = outcome
             if conv.live is not None and conv.live["id"] == run.message_id:
+                for p in conv.live["parts"]:            # a call the stop cut short
+                    if p.get("type") == "tool_call" and p.get("status") in ("running", "asking"):
+                        p["status"], p["ended_at"], p["permission"] = "cancelled", iso(now_ms()), \
+                            None
+                        self.emit(conv, {"type": "tool.done", "message_id": run.message_id,
+                                         "call_id": p["id"], "status": "cancelled",
+                                         "is_error": False}, run_id=run.id)
+                if run.notice and status != "error":
+                    note = {"type": "error", "message": run.notice, "retryable": False,
+                            "step": run.step}
+                    conv.live["parts"].append(note)
+                    self.emit(conv, {"type": "part.added", "message_id": run.message_id,
+                                     "part": note}, run_id=run.id)
                 conv.live["status"] = status
                 if status == "error":
                     conv.live["parts"].append({"type": "error", "message": run.error or "failed",
@@ -883,6 +917,11 @@ class Service:
             slow = time.monotonic() - last_slow >= METRICS_S
             if slow:
                 last_slow = time.monotonic()
+            if slow:
+                try:
+                    self.close_idle_terminals()
+                except Exception as exc:                            # noqa: BLE001
+                    self.log(f"[tick] terminals {type(exc).__name__}")
             for conv in convs:
                 run = conv.run
                 try:
@@ -1045,7 +1084,9 @@ class Service:
         self._refresh()
         caps = {k: v for k, v in self._caps[1].items() if not k.startswith("_")}
         caps["session"] = {"password_set": password_set, "signed_in": signed_in,
-                           "sandbox": "not_installed"}
+                           "sandbox": "ready" if self.sandboxes.available() else "not_installed"}
+        caps["defaults"] = {**caps["defaults"],
+                            "tools": [t.name for t in self.available_builtins()]}
         return caps
 
     def _build_caps(self, facts: dict) -> dict:
@@ -1102,6 +1143,7 @@ class Service:
                 "backend": m.get("backend") or "engine",
                 "max_output": m.get("_max_output"),
                 "vision": (m.get("capabilities") or {}).get("vision", False),
+                "tools": (m.get("capabilities") or {}).get("tools", True),
                 "effort_budgets": m.get("_effort_budgets") or {}}
 
     # ================================================================== attachments
@@ -1122,23 +1164,7 @@ class Service:
             raise ApiError(413, "too_large", "an attachment may be at most 50 MB")
         name = os.path.basename(part.get_filename() or "file")[:200]
         mime = part.get_content_type() or "application/octet-stream"
-        kind = ("image" if mime.startswith("image/") else "pdf" if mime == "application/pdf"
-                else "text" if mime.startswith("text/") or name.lower().endswith(
-                    (".md", ".txt", ".py", ".ts", ".js", ".json", ".yaml", ".yml", ".toml",
-                     ".csv")) else "file")
-        sha = hashlib.sha256(data).hexdigest()
-        path = os.path.join(self.blobs, sha[:2], sha)
-        if not os.path.exists(path):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + f".tmp{secrets.token_hex(4)}"
-            with open(tmp, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, path)
-        att_id = ulid()
-        tokens = ctx_mod.estimate_tokens(data.decode("utf-8", "replace")) if kind == "text" else None
-        self.store.run("INSERT INTO attachments VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)",
-                       (att_id, name, kind, mime, len(data), sha, tokens, now_ms()))
-        return _attachment(att_id, name, kind, mime, len(data), tokens)
+        return self.store_blob(None, name, mime, data)
 
     def attachment(self, att_id: str) -> tuple[str, bytes]:
         r = self.store.one("SELECT * FROM attachments WHERE id = ?", (att_id,))
@@ -1304,6 +1330,7 @@ class Service:
     def shutdown(self) -> None:
         """chatd stops: every run ends `interrupted` (Continue resumes it after the restart)."""
         self.stopping.set()
+        self.sandboxes.stopping.set()
         with self.convs_lock:
             runs = [c.run for c in self.convs.values() if c.run is not None and c.run.active]
         for r in runs:

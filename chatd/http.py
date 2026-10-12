@@ -55,13 +55,32 @@ ROUTES = [
     ("GET", r"/events", "global_events"),
     ("POST", r"/attachments", "upload"),
     ("GET", rf"/attachments/{_ID}", "attachment"),
-    # phase 2: empty lists, writes not available
-    ("GET", r"/(tools|packages|mcp/servers|prompts|presets|permissions/rules)", "empty_list"),
-    ("GET", rf"/conversations/{_ID}/terminals", "empty_list_c"),
-    ("*", rf"/conversations/{_ID}/(sandbox|terminals)(/.*)?", "sandbox"),
-    ("*", r"/(tools|packages|mcp|prompts|presets|permissions)(/.*)?", "not_available"),
-    ("POST", rf"/conversations/{_ID}/(compact|permissions/{_ID})", "not_available"),
-    ("GET", rf"/conversations/{_ID}/artifacts/{_ID}", "no_artifact"),
+    # tools and permissions (SRV-353)
+    ("GET", r"/tools", "tools"),
+    ("PATCH", rf"/tools/{_ID}", "set_tool"),
+    ("GET", r"/permissions/rules", "rules"),
+    ("DELETE", rf"/permissions/rules/{_ID}", "delete_rule"),
+    ("POST", rf"/conversations/{_ID}/permissions/{_ID}", "permission"),
+    ("POST", rf"/conversations/{_ID}/compact", "compact"),
+    # the sandbox and the panes (SRV-355, SRV-357)
+    ("GET", rf"/conversations/{_ID}/sandbox", "sandbox"),
+    ("POST", rf"/conversations/{_ID}/sandbox/(start|stop|reset)", "sandbox_action"),
+    ("GET", rf"/conversations/{_ID}/sandbox/files", "files"),
+    ("GET", rf"/conversations/{_ID}/sandbox/file", "file"),
+    ("PUT", rf"/conversations/{_ID}/sandbox/file", "put_file"),
+    ("DELETE", rf"/conversations/{_ID}/sandbox/file", "delete_file"),
+    ("POST", rf"/conversations/{_ID}/sandbox/upload", "upload_files"),
+    ("GET", rf"/conversations/{_ID}/sandbox/diff", "diff"),
+    ("POST", rf"/conversations/{_ID}/sandbox/undo", "undo"),
+    ("GET", rf"/conversations/{_ID}/sandbox/view/(.+)", "view"),
+    ("*", rf"/conversations/{_ID}/sandbox/ports/(\d+)(/.*)?", "port"),
+    ("GET", rf"/conversations/{_ID}/terminals", "terminals"),
+    ("POST", rf"/conversations/{_ID}/terminals", "new_terminal"),
+    ("GET", rf"/conversations/{_ID}/terminals/([^/]+)/ws", "terminal_ws"),
+    ("GET", rf"/conversations/{_ID}/artifacts/([^/]+)", "artifact"),
+    # phase 3 here: empty lists, writes not available
+    ("GET", r"/(packages|mcp/servers|prompts|presets)", "empty_list"),
+    ("*", r"/(packages|mcp|prompts|presets)(/.*)?", "not_available"),
 ]
 _COMPILED = [(m, re.compile(p + "$"), n) for m, p, n in ROUTES]
 
@@ -255,22 +274,99 @@ class Handler(BaseHTTPRequestHandler):
     def r_empty_list(self, *_):
         self._json(200, [])
 
-    def r_empty_list_c(self, cid):
-        self.svc.conv(cid)
-        self._json(200, [])
-
-    def r_sandbox(self, *_):
-        self._json(503, {"error": {"type": "sandbox_unavailable",
-                                   "message": "the sandbox is not installed on this box yet "
-                                              "(phase 2)"}})
-
     def r_not_available(self, *_):
         self._json(501, {"error": {"type": "not_available",
-                                   "message": "not available yet: tools, permissions, MCP, "
-                                              "prompts, presets and compaction come in phase 2"}})
+                                   "message": "not available yet: MCP servers, skills, prompts "
+                                              "and presets come later in phase 2"}})
 
-    def r_no_artifact(self, *_):
-        self._json(404, {"error": {"type": "not_found", "message": "no such artifact"}})
+    # ---- tools and permissions
+    def r_tools(self):
+        self._json(200, self.svc.tool_infos())
+
+    def r_set_tool(self, name):
+        self._json(200, self.svc.set_tool(name, self._body()))
+
+    def r_rules(self):
+        self._json(200, self.svc.rules())
+
+    def r_delete_rule(self, rid):
+        self.svc.delete_rule(rid)
+        self._empty(204)
+
+    def r_permission(self, cid, call_id):
+        self.svc.answer_permission(cid, call_id, self._body())
+        self._empty(204)
+
+    def r_compact(self, cid):
+        self.svc.compact_now(cid)
+        self._json(202, {})
+
+    # ---- the sandbox and the panes
+    def r_sandbox(self, cid):
+        self._json(200, self.svc.sandbox_status(cid))
+
+    def r_sandbox_action(self, cid, action):
+        self._json(200, self.svc.sandbox_action(cid, action))
+
+    def r_files(self, cid):
+        self._json(200, self.svc.files(cid, self.query.get("path") or "/workspace"))
+
+    def r_file(self, cid):
+        meta, data = self.svc.file(cid, self.query.get("path") or "")
+        if self.query.get("raw") in ("1", "true"):
+            return self._send(200, data, meta["mime"], (("X-Content-Type-Options", "nosniff"),
+                                                        ("Content-Disposition", "attachment")))
+        if "content" not in meta:
+            meta["content"] = None
+        self._json(200, meta)
+
+    def r_put_file(self, cid):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_UPLOAD:
+            raise ApiError(413, "too_large", "a file may be at most 50 MB")
+        data = self.rfile.read(n) if n else b""
+        self.svc.put_file(cid, self.query.get("path") or "", data,
+                          self.headers.get("If-Match") or None)
+        self._empty(204)
+
+    def r_delete_file(self, cid):
+        self.svc.delete_file(cid, self.query.get("path") or "")
+        self._empty(204)
+
+    def r_upload_files(self, cid):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > MAX_UPLOAD * 4:
+            raise ApiError(413, "too_large", "the upload is too large")
+        raw = self.rfile.read(n) if n else b""
+        self._json(200, self.svc.upload_files(cid, self.query.get("dir") or "/workspace",
+                                              self.headers.get("Content-Type") or "", raw))
+
+    def r_diff(self, cid):
+        self._json(200, self.svc.diff(cid, self.query.get("run_id")))
+
+    def r_undo(self, cid):
+        self._json(202, self.svc.undo(cid, str(self._body().get("run_id") or "")))
+
+    def r_view(self, cid, path):
+        from chatd.panes import PREVIEW_CSP
+        meta, data = self.svc.file(cid, path)
+        self._send(200, data, meta["mime"], (("Content-Security-Policy", PREVIEW_CSP),
+                                              ("X-Content-Type-Options", "nosniff")))
+
+    def r_artifact(self, cid, ref):
+        self._json(200, self.svc.artifact(cid, ref))
+
+    def r_port(self, cid, port, rest):
+        self.svc.proxy_port(self, cid, int(port), rest or "/")
+
+    def r_terminals(self, cid):
+        self._json(200, self.svc.terminals_list(cid))
+
+    def r_new_terminal(self, cid):
+        self._json(200, self.svc.terminal_open(cid, str(self._body().get("session") or "")))
+
+    def r_terminal_ws(self, cid, session):
+        self.svc.terminal_ws(self, cid, session)
 
     # ------------------------------------------------------------------ SSE
     def _after(self) -> int | None:
