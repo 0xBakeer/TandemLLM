@@ -5,10 +5,13 @@
 # others from their file sizes, 2026-10-11); disk_gb: the pack with its n-gram table (3.05 measured,
 # the others from the repository's file sizes; 4.05, 5.05 and 6.05 share one table file). table: the
 # n-gram table beside the weights, warm in the page cache or read past it (ENG-239). max_window: the
-# largest window that fits the Spark preset (SRV-337; 6.05 fits none). No drafters: the draft layer is
-# in the pack. Rows of the measured table come from real runs only (SPD-65, SPD-99). The small models
-# (narrator, Laya, the shadow reader) are off by default: with 3.05's warm table they and a 262,144 window
-# do not fit together; switched on, the estimate shows the window that is left.
+# largest window that fits the Spark preset (SRV-337; 6.05 fits none): 3.05's is confirmed by a run
+# (SPD-99, 2026-10-12: cold table, a 260,800-token prompt, MemAvailable never under 31.9 GiB), the others
+# are the estimate's until their packs are run. 3.05 reads its table cold: warm, the whole table resident
+# took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. No drafters: the
+# draft layer is in the pack. Rows of the measured table come from real runs only (SPD-65, SPD-99). The
+# small models (narrator, Laya, the shadow reader) are off by default; switched on, the estimate shows
+# the window that is left.
 schema: 1
 id: qwen3.8-flash-next
 name: Qwen3.8-Flash-Next
@@ -109,8 +112,8 @@ profiles:
   max_window: 262144
   table:
     gib: 30.4
-    policy: warm
-    cache_gib: 0.0
+    policy: cold
+    cache_gib: 2.0
 - id: flashnext-4.05
   label: EXL3 4.05 bpw (turboderp)
   format: exl3
@@ -157,7 +160,7 @@ profiles:
   assets_required: []
   note: On the edge of the Spark budget, with the table cold.
   hf_revision: 5.05bpw_h6_ng6
-  max_window: 262144
+  max_window: 180224
   table:
     gib: 36.36
     policy: cold
@@ -210,11 +213,12 @@ memory:
   - Flash-Next caches note, 2026-10-12 (bytes a token 29,952 stored, 31,040 a slot)
   - tools/fn_memory_check.py on 3.05, 2026-10-12 (prefill workspace 2.51 GiB at 8k, 2.40 GiB at 32k)
   per_window_parts:
-  - id: prefill_scores
-    label: Prefill score buffer (sparse attention)
-    bytes_per_token: 9216
+  - id: prefill_workspace
+    label: Prefill workspace (sparse-attention scores, a chunk's activations)
+    bytes_per_token: 42976
     kind: reserve
-    source: tools/fn_prefill_kernels.py, the QSA score rows of a 4,096-row chunk
+    source: measured 2026-10-12 on 3.05 (SPD-99), 10.47 GiB above the engine at a 261,549-token prefill, the
+      memory policy's line through zero
 components:
 - id: conductor
   label: Conductor

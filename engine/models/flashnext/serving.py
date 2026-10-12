@@ -123,6 +123,15 @@ class FlashNextCacheState(SectionState):
                 buf.fill_(s.cfg.eos_token_id)
             else:
                 buf.copy_(ctx.view(1, -1))
+        return self.buffers()
+
+    def buffers(self) -> dict:
+        """The sections' buffers as they are, without bringing the PLE context up to date: for what
+        only counts their bytes (`cost`, `memory_parts`), which other threads call -- /health and the
+        dashboard -- and which must issue no CUDA work: inside a graph capture (CUDA's global mode) a
+        copy from another thread invalidates the capture and fails the request (2026-10-12, the MTP
+        chain's capture at the 262,144-token class while /health was polled)."""
+        s, st = self.s, self.s.st
         out = {}
         for li in sorted(st.S):
             out[f"gdn.S.{li}"] = st.S[li]
@@ -149,8 +158,8 @@ class FlashNextServing:
     """`FlashNextEngine` with one state and its graphs, in the server's engine interface."""
 
     # the caches' grid: the prefill kernels' chunk (FN_PREFILL_CHUNK), so a resumed prefill runs the
-    # chunks a cold one runs; side slots: ENG-241
-    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096)
+    # chunks a cold one runs; side slots: ENG-241; the shadow reader: validated on the 27B's text only
+    caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096, shadow=False)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len
@@ -182,16 +191,16 @@ class FlashNextServing:
     def cost(self) -> CostModel:
         """What a state snapshot holds: its sections whole (the recurrent, conv and PLE ones) and the
         cache rows a token adds (K, V and the indexer key of every attention layer, bf16)."""
-        sec = {k: t.numel() * t.element_size() for k, t in self.state.sections().items()}
+        sec = {k: t.numel() * t.element_size() for k, t in self.state.buffers().items()}
         c = self.cfg
         per_tok = len(c.attention_layers) * (c.num_key_value_heads * c.head_dim * 2
                                              + (c.indexer_head_dim if c.has_indexer else 0)) * 2
-        # the prefill workspace, measured 2026-10-12 on 3.05 (tools/fn_memory_check.py): 2.51 GiB at 8k
-        # and 2.40 GiB at 32k -- the 4,096-row chunk's activations, flat in the context -- so a floor of
-        # 2.75 GiB; the line is the QSA score buffer's bound (9,216 bytes a context token) twice, 4.5 GiB at
-        # 262,144, until the memory policy has observed peaks above 65,536 tokens
+        # the prefill workspace, measured 2026-10-12 on 3.05: 2.51 GiB at 8k and 2.40 GiB at 32k
+        # (tools/fn_memory_check.py; the 4,096-row chunk's activations, flat there), so a floor of 2.75
+        # GiB, and 10.47 GiB above the engine at a 261,549-token prefill (SPD-99), 42,976 bytes a context
+        # token on a line through zero -- the memory policy's own figure once it observed that peak
         return CostModel(section_bytes=sum(sec.values()), view_bytes_per_token=per_tok,
-                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=2 * 9216,
+                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=42976,
                          parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
                                 "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
 
@@ -253,7 +262,7 @@ class FlashNextServing:
         if head is not None:
             mtp_kv = nb(head.st.k, head.st.v, head.st.ik, head.st.pool)
         return {**self._weights, "kv_pool": nb(st.k, st.v, st.ik, st.pool), "drafter_kv": mtp_kv,
-                "gdn_state": sum(int(t.numel() * t.element_size()) for t in self.state.sections().values())}
+                "gdn_state": sum(int(t.numel() * t.element_size()) for t in self.state.buffers().values())}
 
     def resident_files(self) -> list:
         """The n-gram table: its policy, its file and page-cache bytes, the cold cache's counts."""

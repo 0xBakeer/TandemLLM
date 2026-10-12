@@ -137,11 +137,11 @@ describe('the second model (OPS-97)', () => {
     expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false]]);
     expect(tiles[1].best_speed).toBeNull();                       // no measured row yet
     const fn = (await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next')).body as SetupModel;
-    expect(fn.profiles.map((p) => p.max_window)).toEqual([262_144, 262_144, 262_144, 262_144, null]);
+    expect(fn.profiles.map((p) => p.max_window)).toEqual([262_144, 262_144, 262_144, 180_224, null]);
     expect((await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next/current')).body.selection).toEqual({ model: 'qwen3.8-flash-next' });
     const est = (await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id } })).body;
     expect(est.fits).toBe(true);
-    expect(est.parts.some((p: { label: string }) => p.label.startsWith('n-gram table'))).toBe(true);
+    expect(est.parts.some((p: { label: string }) => p.label.startsWith('n-gram row cache'))).toBe(true); // 3.05 reads its table cold (SPD-99)
     const over = await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id, profile: 'flashnext-6.05' } });
     expect(over.body.fits).toBe(false);
     expect(over.body.notes[0]).toContain('does not fit');

@@ -22,6 +22,9 @@ class Capabilities:
     caches: bool                # the prefix, session, resident and disk caches and the KV pool
     side_slots: bool            # `--parallel` side slots over the same weights
     anchor_grid: int | None = None   # the caches' grid (restore points, chunk files); None: --prefix-chunk
+    # SRV-339: the shadow reader's outputs (the narrator's thought lines, the router's verdicts) were
+    # validated on this model's reasoning; False: the reader is not started and the status says why
+    shadow: bool = True
 
 
 @dataclass(frozen=True)

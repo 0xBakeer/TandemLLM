@@ -115,8 +115,8 @@
    "max_window": 262144,
    "table": {
     "gib": 30.4,
-    "policy": "warm",
-    "cache_gib": 0.0
+    "policy": "cold",
+    "cache_gib": 2.0
    }
   },
   {
@@ -172,7 +172,7 @@
    "assets_required": [],
    "note": "On the edge of the Spark budget, with the table cold.",
    "hf_revision": "5.05bpw_h6_ng6",
-   "max_window": 262144,
+   "max_window": 180224,
    "table": {
     "gib": 36.36,
     "policy": "cold",
@@ -239,11 +239,11 @@
   ],
   "per_window_parts": [
    {
-    "id": "prefill_scores",
-    "label": "Prefill score buffer (sparse attention)",
-    "bytes_per_token": 9216,
+    "id": "prefill_workspace",
+    "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
+    "bytes_per_token": 42976,
     "kind": "reserve",
-    "source": "tools/fn_prefill_kernels.py, the QSA score rows of a 4,096-row chunk"
+    "source": "measured 2026-10-12 on 3.05 (SPD-99), 10.47 GiB above the engine at a 261,549-token prefill, the memory policy's line through zero"
    }
   ]
  },

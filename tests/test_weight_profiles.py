@@ -55,7 +55,7 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
     (start.sh), it needs no 27B asset, keeps a warm table out of the page-cache drop, and leaves the
     shared values alone."""
     base = _env(None)
-    for bpw, table in (("2.05", "warm"), ("3.05", "warm"), ("4.05", "cold"), ("5.05", "cold"), ("6.05", "cold")):
+    for bpw, table in (("2.05", "warm"), ("3.05", "cold"), ("4.05", "cold"), ("5.05", "cold"), ("6.05", "cold")):
         e = _env(f"flashnext-{bpw}", {"QWEN38_EXL3": "/leak", "QWEN38_DRAFT_EXL3": "/leak"})
         d = f"~/flashnext-packs/{bpw}"
         assert e["QSE_WEIGHTS"] == f"flashnext-{bpw}" and e["QSE_WEIGHTS_DIR"] == d, e

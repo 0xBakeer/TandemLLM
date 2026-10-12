@@ -177,6 +177,21 @@ def test_the_lookup_joins_the_mtp_round():
     return "the copy and the head's chain in one tree; primed, observed, reset; no match: the head alone"
 
 
+def test_counting_the_state_issues_no_copy():
+    """2026-10-12: /health and the dashboard (other threads) count the state's bytes through `cost()`;
+    inside a graph capture a copy from another thread invalidates the capture, so counting reads the
+    buffers as they are, and only `sections()` (the caches, on the engine's thread) brings the PLE
+    context up to date."""
+    fn = _FN()
+    s = FlashNextServing(fn, 64)
+    s.st.ple_ctx = {1: torch.tensor([7, 8])}
+    before = s._ctx[1].clone()
+    s.cost()
+    assert torch.equal(s._ctx[1], before)
+    assert s.state.sections()["ple.ctx.1"].tolist() == [[7, 8]]
+    return "cost() leaves the buffers alone; sections() refreshes the PLE context"
+
+
 def test_walk_and_kv_length():
     fn = _FN()
     s = FlashNextServing(fn, 64)
