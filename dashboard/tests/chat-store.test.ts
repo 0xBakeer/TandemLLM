@@ -1,6 +1,6 @@
 // the chat reducer: a run's events in order, a tool call's life, a catch-up replay equals the
 // live path, and the attachment state machine's words.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { adopt, applyEvent, applyEvents, firstLine, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
 import { attachLabel, initialAttachment, onEvent, onStreamState, onTick, LOST_AFTER_MS } from '../src/chat/connection';
 import type { ChatEvent, Conversation, Run, StampedEvent, TurnStats } from '../src/chat/types';
@@ -162,6 +162,10 @@ describe('the chat reducer', () => {
   });
 
   it('a snapshot that arrives after some of the stream: the events past its seq go on top, the rest are not applied twice', () => {
+    // a tool's started_at and ended_at come from the clock: one fixed instant for both reductions
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-12T10:00:00Z'));
+    onTestFinished(() => vi.useRealTimers());
     const stamped: StampedEvent[] = TURN.map((event, i) => ({ id: String(i + 1), event }));
     const full = applyEvents(conv(), TURN);
     // the server's snapshot at seq 6 (the thinking part streamed), while the device already had 1..10
