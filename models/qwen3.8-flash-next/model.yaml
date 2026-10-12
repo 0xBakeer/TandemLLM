@@ -1,0 +1,577 @@
+# Qwen3.8-Flash-Next in TandemLLM: the setup guide's registry entry (docs/setup.md, OPS-97). Schema 1.
+#
+# turboderp's EXL3 packs, one profile each (ops/profiles/flashnext-<bpw>.env). weights_gib: the weights
+# with the draft layer and the int8 mixers on the device (3.05 measured: load stage `weights`; the
+# others from their file sizes, 2026-10-11); disk_gb: the pack with its n-gram table (3.05 measured,
+# the others from the repository's file sizes; 4.05, 5.05 and 6.05 share one table file). table: the
+# n-gram table beside the weights, warm in the page cache or read past it (ENG-239). max_window: the
+# largest window that fits the Spark preset (SRV-337; 6.05 fits none). No drafters: the draft layer is
+# in the pack. Rows of the measured table come from real runs only (SPD-65, SPD-99). The small models
+# (narrator, Laya, the shadow reader) are off by default: with 3.05's warm table they and a 262,144 window
+# do not fit together; switched on, the estimate shows the window that is left.
+schema: 1
+id: qwen3.8-flash-next
+name: Qwen3.8-Flash-Next
+family: Qwen3.8
+params: ~124B, ~3B active a token
+recommended: false
+pitch: A mixture-of-experts model that reads only a few experts a token, in turboderp's EXL3 packs, with its own
+  draft layer.
+architecture: 48 layers (36 Gated DeltaNet, 12 sparse-attention), each a mixture of 512 experts of which 10 and
+  a shared one run a token (about 121B of the parameters), four hyper-connection streams, a hashed n-gram embedding
+  (PLE) and one multi-token-prediction layer that drafts for speculation.
+license: The model's license is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.
+icon: null
+links:
+- label: EXL3 packs
+  url: https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3
+devices:
+- id: dgx-spark
+  label: NVIDIA DGX Spark (128 GB unified memory)
+  total_gib: 121.63
+  reserved_gib: 10.0
+  note: The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB.
+assets:
+- id: qwen3.5-2b
+  label: Qwen3.5-2B (the narrator, and Wren)
+  path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: Qwen/Qwen3.5-2B
+  source: Public on Hugging Face; install.sh --setup downloads it for Wren.
+- id: qwen3.5-0.8b
+  label: Qwen3.5-0.8B (the shadow reader)
+  path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b/config.json
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: Qwen/Qwen3.5-0.8B
+  source: Public on Hugging Face.
+- id: laya
+  label: Laya decision models
+  path: ${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: convaiinnovations/laya
+  source: On Hugging Face, read with the token.
+quality_source: not measured (ENG-159)
+profiles:
+- id: flashnext-2.05
+  label: EXL3 2.05 bpw (turboderp)
+  format: exl3
+  bpw: 2.05
+  disk_gb: 61.5
+  weights_gib: 32.83
+  drafters_gib: 0.0
+  hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+  hf_private: false
+  recommended: false
+  badges:
+  - smallest
+  quality:
+    kl_vs_bf16: null
+    top1_pct: null
+    ppl: null
+    date: '2026-10-11'
+    source: 'not measured: the BF16 reference run (ENG-159) is deferred'
+  assets_required: []
+  note: The smallest pack; its n-gram table stays warm in the page cache.
+  hf_revision: 2.05bpw_h4_ng4
+  max_window: 262144
+  table:
+    gib: 24.44
+    policy: warm
+    cache_gib: 0.0
+- id: flashnext-3.05
+  label: EXL3 3.05 bpw (turboderp)
+  format: exl3
+  bpw: 3.05
+  disk_gb: 85.1
+  weights_gib: 47.63
+  drafters_gib: 0.0
+  hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+  hf_private: false
+  recommended: true
+  badges:
+  - recommended
+  quality:
+    kl_vs_bf16: null
+    top1_pct: null
+    ppl: null
+    date: '2026-10-11'
+    source: 'not measured: the BF16 reference run (ENG-159) is deferred'
+  assets_required: []
+  note: 'The default profile (decided 2026-10-11): the pack the fork''s numbers are measured on. Disk size measured
+    on the reference box.'
+  hf_revision: 3.05bpw_h5_ng5
+  max_window: 262144
+  table:
+    gib: 30.4
+    policy: warm
+    cache_gib: 0.0
+- id: flashnext-4.05
+  label: EXL3 4.05 bpw (turboderp)
+  format: exl3
+  bpw: 4.05
+  disk_gb: 106.1
+  weights_gib: 62.45
+  drafters_gib: 0.0
+  hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+  hf_private: false
+  recommended: false
+  badges:
+  - higher quality
+  quality:
+    kl_vs_bf16: null
+    top1_pct: null
+    ppl: null
+    date: '2026-10-11'
+    source: 'not measured: the BF16 reference run (ENG-159) is deferred'
+  assets_required: []
+  note: 'Its table is read past the page cache (cold): weights and a warm table do not fit together.'
+  hf_revision: 4.05bpw_h6_ng6
+  max_window: 262144
+  table:
+    gib: 36.36
+    policy: cold
+    cache_gib: 2.0
+- id: flashnext-5.05
+  label: EXL3 5.05 bpw (turboderp)
+  format: exl3
+  bpw: 5.05
+  disk_gb: 121.9
+  weights_gib: 77.14
+  drafters_gib: 0.0
+  hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: null
+    top1_pct: null
+    ppl: null
+    date: '2026-10-11'
+    source: 'not measured: the BF16 reference run (ENG-159) is deferred'
+  assets_required: []
+  note: On the edge of the Spark budget, with the table cold.
+  hf_revision: 5.05bpw_h6_ng6
+  max_window: 262144
+  table:
+    gib: 36.36
+    policy: cold
+    cache_gib: 2.0
+- id: flashnext-6.05
+  label: EXL3 6.05 bpw (turboderp)
+  format: exl3
+  bpw: 6.05
+  disk_gb: 137.7
+  weights_gib: 91.85
+  drafters_gib: 0.0
+  hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: null
+    top1_pct: null
+    ppl: null
+    date: '2026-10-11'
+    source: 'not measured: the BF16 reference run (ENG-159) is deferred'
+  assets_required: []
+  note: Does not fit one DGX Spark at any window.
+  hf_revision: 6.05bpw_h6_ng6
+  max_window: null
+  table:
+    gib: 36.36
+    policy: cold
+    cache_gib: 2.0
+measurements:
+  build: 0.7.2
+  date: '2026-10-11'
+  method: Rows are added only from real runs (SPD-65, SPD-99); none yet.
+  source: none yet
+  rows: []
+memory:
+  parts:
+  - id: engine
+    label: Engine state, the draft layer's buffers, graphs and warm-up
+    gib: 1.85
+    kind: fixed
+    source: 'parity note 2026-10-11: load stages engine 1.21, drafters 0.34, warm-up 0.06 GiB on 3.05, rounded up
+      for the verify graphs'
+  - id: allocator
+    label: Allocator reserve
+    gib: 2.3
+    kind: reserve
+    source: parity note 2026-10-11
+  sources:
+  - Flash-Next caches note, 2026-10-12 (bytes a token 29,952 stored, 31,040 a slot)
+  - tools/fn_memory_check.py on 3.05, 2026-10-12 (prefill workspace 2.51 GiB at 8k, 2.40 GiB at 32k)
+  per_window_parts:
+  - id: prefill_scores
+    label: Prefill score buffer (sparse attention)
+    bytes_per_token: 9216
+    kind: reserve
+    source: tools/fn_prefill_kernels.py, the QSA score rows of a 4,096-row chunk
+components:
+- id: conductor
+  label: Conductor
+  group: features
+  what: Gives each request the right instructions and helper packages, and watches long sessions so they do not
+    get stuck.
+  default: true
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.1
+  depends_on: []
+  conflicts: []
+  knobs:
+    CONDUCTOR:
+      'on': 'on'
+      'off': raw
+    QSE_CONDUCTOR_CONFIG:
+      'on': ${HOME}/.qwen38-spark-engine/conductor
+      'off': 'off'
+  assets: []
+  docs: docs/server.md
+  note: Off, clients talk to the raw engine and the small models below have nothing to do.
+- id: narrator
+  label: Narrator
+  group: roles
+  what: A small model that writes short status lines while the big model thinks, so you can see what it is doing.
+  default: false
+  required: false
+  memory_gib: 3.6
+  memory_max_gib: null
+  elastic: true
+  disk_gb: 4.3
+  depends_on:
+  - conductor
+  conflicts: []
+  knobs:
+    QWEN38_NARRATOR_MODEL:
+      'on': qwen3.5-2b
+      'off': ''
+    QWEN38_NARRATOR_DIR:
+      'on': ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b
+      'off': ''
+  assets:
+  - qwen3.5-2b
+  docs: docs/server.md
+  note: Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and
+    loads again later.
+- id: laya
+  label: Laya decision models
+  group: roles
+  what: Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in
+    milliseconds.
+  default: false
+  required: false
+  memory_gib: 1.6
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 2.3
+  depends_on:
+  - conductor
+  conflicts: []
+  knobs:
+    QWEN38_DECIDER_MODELS:
+      'on': laya-english,laya-multilingual,laya-typed-decisions
+      'off': ''
+  assets:
+  - laya
+  docs: docs/server.md
+  note: Without them the big model answers those questions itself, which costs a turn each time.
+- id: shadow
+  label: Shadow reader
+  group: roles
+  what: A small model that reads along with each session when the box is idle, so later questions about it are answered
+    fast.
+  default: false
+  required: false
+  memory_gib: 1.52
+  memory_max_gib: 5.52
+  elastic: true
+  disk_gb: 1.7
+  depends_on:
+  - conductor
+  conflicts: []
+  knobs:
+    QWEN38_SHADOW_MODEL:
+      'on': qwen3.5-0.8b
+      'off': ''
+  assets:
+  - qwen3.5-0.8b
+  docs: docs/shadow-reader.md
+  note: Qwen3.5-0.8B (1.52 GiB in the live memory split) and up to 4 GiB of session states (QWEN38_SHADOW_GB). The
+    first to unload when memory runs short.
+- id: prompt_cache
+  label: Conversation cache
+  group: caches
+  what: Keeps the conversation the model is in, so the next turn starts where the last one ended instead of reading
+    everything again.
+  default: true
+  required: false
+  memory_gib: 0.43
+  memory_max_gib: 11.5
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    RESIDENT_GB:
+      'on': '2.5'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: The resident prefix with its anchors every 4,096 tokens (Flash-Next's prefill chunk), the end anchor, the
+    pin and the park; an anchor is 110.3 MiB.
+- id: state_store
+  label: State store
+  group: caches
+  what: Saves the model's state after short chats, so the same start a second time costs nothing.
+  default: true
+  required: false
+  memory_gib: 0.49
+  memory_max_gib: 2.0
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    CACHE_GB:
+      'on': '2'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: null
+- id: response_cache
+  label: Response cache
+  group: caches
+  what: Answers an identical greedy request again from memory, without running the model.
+  default: false
+  required: false
+  memory_gib: 0.25
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    RESPONSE_CACHE:
+      'on': 'on'
+      'off': 'off'
+  assets: []
+  docs: docs/caches.md
+  note: Off on the reference box. Useful for scripts that send the same request many times; never for a benchmark.
+- id: disk_tier
+  label: Disk cache
+  group: disk
+  what: Keeps the start of long prompts on the SSD, so a long agent session or a returning chat starts in seconds.
+  default: true
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 16.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    QSE_DISK_CACHE:
+      'on': null
+      'off': 'off'
+  assets: []
+  docs: docs/caches.md
+  note: A folder of its own per profile (the profile file names it); a file of another fingerprint is swept.
+- id: nvme_spill
+  label: Session spill
+  group: disk
+  what: Moves a paused conversation to the SSD instead of dropping it, and brings it back on its next turn.
+  default: true
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 64.0
+  depends_on:
+  - disk_tier
+  conflicts: []
+  knobs:
+    SESSION_SPILL:
+      'on': 'on'
+      'off': 'off'
+  assets: []
+  docs: docs/caches.md
+  note: Compressed, up to SESSION_SPILL_GB (64 GB), inside the disk cache's folder.
+- id: proxy
+  label: Other backends
+  group: features
+  what: Lets the dashboard send some model names to other servers or cloud APIs, beside this engine.
+  default: false
+  required: false
+  memory_gib: 0.0
+  memory_max_gib: null
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    QSE_BACKENDS:
+      'on': ${HOME}/.qwen38-spark-engine/backends/config.sqlite3
+      'off': ''
+  assets: []
+  docs: docs/proxy.md
+  note: You add the backends later, on the Backends screen.
+parallelism:
+  slots:
+    min: 1
+    max: 1
+    default: 1
+  window:
+    min: 8192
+    max: 262144
+    default: 262144
+    step: 4096
+  side_window:
+    min: 8192
+    max: 262144
+    default: 262144
+    step: 4096
+  kv_pool:
+    default: false
+  floor_gb:
+    min: 10
+    max: 40
+    default: 15
+  kv_hard_floor_gb: 10
+  kv_bytes_per_token: 31040
+  typical_fill_tokens: 32768
+  side_slot_const_gib: 0.0
+  knobs:
+    slots: QSE_PARALLEL
+    window: MAX_LEN
+    side_window: QSE_SIDE_MAX_LEN
+    kv_pool: QSE_KV_POOL
+    floor_gb: QSE_PARALLEL_FLOOR_GB
+  fixed: {}
+methods:
+- id: reasoning_effort
+  label: Thinking effort
+  what: How long the model may think before it answers, when a client does not say.
+  type: enum
+  options:
+  - value: low
+    label: low
+  - value: medium
+    label: medium
+  - value: xhigh
+    label: extra high
+  default: medium
+  recommended: medium
+  knob: REASONING_EFFORT
+  docs: docs/server.md
+- id: default_max_tokens
+  label: Default answer length
+  what: The longest answer, in tokens, when a client does not set max_tokens.
+  type: int
+  min: 1024
+  max: 262144
+  default: 32768
+  recommended: 32768
+  knob: DEFAULT_MAX_TOKENS
+  docs: docs/server.md
+- id: request_timeout
+  label: Request time limit
+  what: Seconds one request may run before the engine stops it.
+  type: int
+  min: 60
+  max: 14400
+  default: 3600
+  recommended: 3600
+  knob: REQUEST_TIMEOUT
+  docs: docs/server.md
+- id: max_queue
+  label: Queue length
+  what: How many requests may wait for a free slot before new ones are turned away.
+  type: int
+  min: 1
+  max: 64
+  default: 8
+  recommended: 8
+  knob: MAX_QUEUE
+  docs: docs/server.md
+- id: queue_timeout
+  label: Queue wait
+  what: Seconds a request may wait in the queue before it gets an error.
+  type: int
+  min: 10
+  max: 3600
+  default: 240
+  recommended: 240
+  knob: QUEUE_TIMEOUT
+  docs: docs/server.md
+advanced:
+- id: port
+  label: Port
+  what: The port the API and the dashboard answer on.
+  type: int
+  min: 1024
+  max: 65535
+  default: 8000
+  recommended: 8000
+  knob: PORT
+  docs: docs/operations.md
+- id: host
+  label: Listen on
+  what: The whole network, or only this machine.
+  type: enum
+  options:
+  - value: 0.0.0.0
+    label: the whole network
+  - value: 127.0.0.1
+    label: this machine only
+  default: 0.0.0.0
+  recommended: 0.0.0.0
+  knob: HOST
+  docs: docs/operations.md
+- id: served_model
+  label: Raw engine name
+  what: The model name of the raw engine. With the conductor on, clients see TandemLLM and this name is a hidden
+    alias.
+  type: string
+  pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$
+  default: qwen38-spark-engine
+  recommended: qwen38-spark-engine
+  knob: SERVED_MODEL
+  docs: docs/server.md
+- id: dashboard_login
+  label: Dashboard login
+  what: With an admin password set, on makes the dashboard ask for it too.
+  type: enum
+  options:
+  - value: 'off'
+    label: 'off'
+  - value: 'on'
+    label: 'on'
+  default: 'off'
+  recommended: 'off'
+  knob: QSE_DASHBOARD_LOGIN
+  docs: docs/server.md
+- id: admin_password
+  label: Admin password
+  what: Without one, anyone who reaches the port can change the setup. Generate writes a random one into secrets.env
+    on the box; read it there with cat.
+  type: enum
+  options:
+  - value: keep
+    label: keep as it is
+  - value: generate
+    label: generate one
+  default: keep
+  recommended: keep
+  knob: null
+  docs: docs/operations.md

@@ -994,6 +994,14 @@ export interface SetupProfile {
   hf_private: boolean;
   /** 1.0+: SetupAsset ids the profile needs besides its own weights */
   assets_required: string[];
+  /** SRV-337: the repository branch of the weights */
+  hf_revision?: string | null;
+  /** SRV-337: the largest window that fits the device preset (null: none fits; absent: the model's max) */
+  max_window?: number | null;
+  /** SRV-337: a lookup table beside the weights, warm in the page cache or read past it through a row cache */
+  table?: { gib: number; policy: 'warm' | 'cold'; cache_gib: number } | null;
+  /** SRV-337: a tool's memory under this profile, by component id */
+  components_gib?: Record<string, number>;
 }
 
 /** 1.0+: a file a profile or a tool needs besides the profile's weights. */
@@ -1138,7 +1146,12 @@ export interface SetupModel {
   advanced: SetupField[];
   devices: SetupDevicePreset[];
   /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
-  memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
+  memory: {
+    parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[];
+    sources: string[];
+    /** SRV-337: parts that grow with slot 0's window (bytes a token) */
+    per_window_parts?: { id: string; label: string; bytes_per_token: number; kind: 'fixed' | 'reserve'; source: string }[];
+  };
   /** 1.0+: the tile's recommended badge */
   recommended: boolean;
   /** 1.0+ */

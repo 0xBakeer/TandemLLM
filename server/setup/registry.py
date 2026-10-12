@@ -72,11 +72,23 @@ _QUALITY = _obj({"kl_vs_bf16": {"type": ["number", "null"]}, "top1_pct": {"type"
 _ASSET = _obj({"id": _ID, "label": _STR, "path": _STR, "also": {"type": "array", "items": _STR},
                "fetchable": {"type": "boolean"}, "protected": {"type": "boolean"},
                "hf_repo": _NOTE, "source": _STR})
+_PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "drafters_gib", "hf_repo",
+                     "hf_private", "recommended", "badges", "quality", "assets_required", "note")
+# SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
+# that fits the device preset (null: none fits), a lookup table beside the weights (warm: in the page
+# cache; cold: read past it through a row cache), a tool's memory under this profile
 _PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4"]},
                  "bpw": {"type": ["number", "null"]}, "disk_gb": _NUM0, "weights_gib": _NUM0,
                  "drafters_gib": _NUM0, "hf_repo": _STR, "hf_private": {"type": "boolean"},
                  "recommended": {"type": "boolean"}, "badges": {"type": "array", "items": _STR},
-                 "quality": _QUALITY, "assets_required": _IDS, "note": _NOTE})
+                 "quality": _QUALITY, "assets_required": _IDS, "note": _NOTE,
+                 "hf_revision": _NOTE,
+                 "max_window": {"type": ["integer", "null"], "minimum": 0},
+                 "table": {"type": ["object", "null"],
+                           "properties": {"gib": _NUM0, "policy": {"enum": ["warm", "cold"]}, "cache_gib": _NUM0},
+                           "required": ["gib", "policy", "cache_gib"], "additionalProperties": False},
+                 "components_gib": {"type": "object", "additionalProperties": _NUM0}},
+                required=_PROFILE_REQUIRED)
 _LOSSLESS = _obj({"identical": {"type": "integer", "minimum": 0},
                   "near_tie": {"type": "integer", "minimum": 0},
                   "other": {"type": "integer", "minimum": 0},
@@ -125,7 +137,14 @@ SCHEMA = _obj({
                               "items": _obj({"id": _ID, "label": _STR, "gib": _NUM0,
                                              "kind": {"enum": ["fixed", "reserve"]},
                                              "source": _STR})},
-                    "sources": {"type": "array", "items": _STR}}),
+                    "sources": {"type": "array", "items": _STR},
+                    # SRV-337: parts that grow with the window (slot 0's), e.g. a prefill's score buffer
+                    "per_window_parts": {"type": "array",
+                                         "items": _obj({"id": _ID, "label": _STR,
+                                                        "bytes_per_token": {"type": "integer", "minimum": 0},
+                                                        "kind": {"enum": ["fixed", "reserve"]},
+                                                        "source": _STR})}},
+                   required=("parts", "sources")),
     "components": {"type": "array", "items": _COMPONENT},
     "parallelism": _obj({"slots": _RANGE, "window": _SRANGE, "side_window": _SRANGE,
                          "kv_pool": _obj({"default": {"type": "boolean"}}),
@@ -365,6 +384,24 @@ def recommended_profile(m: dict) -> dict:
 
 def profile(m: dict, pid: str) -> dict | None:
     return next((p for p in m["profiles"] if p["id"] == pid), None)
+
+
+def window_refusal(profile_id: str, max_len: int, models: dict[str, dict] | None = None) -> str | None:
+    """SRV-335: why a start of `profile_id` with `max_len` must not load, or None. A profile whose entry
+    names its largest window on the device (`max_window`) refuses a longer one, and null means it fits
+    no window there; a profile without the key (the 27B's) or in no entry is never refused here."""
+    for m in (models if models is not None else load_all()[0]).values():
+        p = profile(m, profile_id)
+        if p is None or "max_window" not in p:
+            continue
+        dev, mw = m["devices"][0]["label"], p["max_window"]
+        if mw is None:
+            return f"{profile_id} fits no window on the {dev} (models/{m['id']}/model.yaml: max_window null)"
+        if max_len > mw:
+            return (f"--max-len {max_len:,} is above {profile_id}'s largest window, {mw:,} on the {dev} "
+                    f"(models/{m['id']}/model.yaml)")
+        return None
+    return None
 
 
 def component(m: dict, cid: str) -> dict | None:

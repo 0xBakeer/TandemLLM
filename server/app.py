@@ -8519,6 +8519,7 @@ def main() -> None:
     # and the conductor's policy: a file that does not validate stops the start here too
     STATE["conductor_policy"] = _conductor_policy(a)
     _limits_at_start(a)
+    _window_at_start(a)
     if a.fake_engine:
         from server import fake_engine
         fake_engine.load(sys.modules[__name__], a)
@@ -8566,6 +8567,23 @@ def _limits_at_start(a) -> None:
                 print(f"[memory] the dashboard's limit: {line}", flush=True)
         except Exception as exc:                                   # noqa: BLE001
             print(f"[memory] the residency document's limits were not read: {exc}", flush=True)
+
+
+def _window_at_start(a) -> None:
+    """SRV-335: a --max-len above the served profile's largest window (QSE_WEIGHTS, its registry
+    entry's `max_window`) stops the start here, before the minutes of loading, naming both numbers.
+    The 27B's profiles name no such window; a registry that does not load is said and passed."""
+    name = os.environ.get("QSE_WEIGHTS")
+    if not name:
+        return
+    try:
+        from server.setup import registry
+        why = registry.window_refusal(name, a.max_len)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[server] the model registry was not read ({exc}); --max-len is not checked", flush=True)
+        return
+    if why:
+        raise SystemExit(f"[server] REFUSING to load: {why}")
 
 
 def _conductor_policy(a) -> "conductor.Policy | None":

@@ -57,6 +57,7 @@
   "devices": [
    {
     "id": "dgx-spark",
+    "label": "NVIDIA DGX Spark (128 GB unified memory)",
     "total_gib": 121.63,
     "reserved_gib": 10.0
    }
@@ -268,6 +269,262 @@
     "QSE_SIDE_SLOT_CONST_GB": "1.5",
     "QSE_KV_HARD_FLOOR_GB": "10",
     "QSE_BARRIER_IDLE_OWNER": "on"
+   }
+  }
+ },
+ "models": {
+  "qwen3.8-flash-next": {
+   "id": "qwen3.8-flash-next",
+   "profiles": [
+    {
+     "id": "flashnext-2.05",
+     "label": "EXL3 2.05 bpw (turboderp)",
+     "weights_gib": 32.83,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 262144,
+     "table": {
+      "gib": 24.44,
+      "policy": "warm",
+      "cache_gib": 0.0
+     }
+    },
+    {
+     "id": "flashnext-3.05",
+     "label": "EXL3 3.05 bpw (turboderp)",
+     "weights_gib": 47.63,
+     "drafters_gib": 0.0,
+     "recommended": true,
+     "max_window": 262144,
+     "table": {
+      "gib": 30.4,
+      "policy": "warm",
+      "cache_gib": 0.0
+     }
+    },
+    {
+     "id": "flashnext-4.05",
+     "label": "EXL3 4.05 bpw (turboderp)",
+     "weights_gib": 62.45,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 262144,
+     "table": {
+      "gib": 36.36,
+      "policy": "cold",
+      "cache_gib": 2.0
+     }
+    },
+    {
+     "id": "flashnext-5.05",
+     "label": "EXL3 5.05 bpw (turboderp)",
+     "weights_gib": 77.14,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": 262144,
+     "table": {
+      "gib": 36.36,
+      "policy": "cold",
+      "cache_gib": 2.0
+     }
+    },
+    {
+     "id": "flashnext-6.05",
+     "label": "EXL3 6.05 bpw (turboderp)",
+     "weights_gib": 91.85,
+     "drafters_gib": 0.0,
+     "recommended": false,
+     "max_window": null,
+     "table": {
+      "gib": 36.36,
+      "policy": "cold",
+      "cache_gib": 2.0
+     }
+    }
+   ],
+   "devices": [
+    {
+     "id": "dgx-spark",
+     "label": "NVIDIA DGX Spark (128 GB unified memory)",
+     "total_gib": 121.63,
+     "reserved_gib": 10.0
+    }
+   ],
+   "memory": {
+    "parts": [
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gib": 1.85,
+      "kind": "fixed",
+      "source": "parity note 2026-10-11: load stages engine 1.21, drafters 0.34, warm-up 0.06 GiB on 3.05, rounded up for the verify graphs"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gib": 2.3,
+      "kind": "reserve",
+      "source": "parity note 2026-10-11"
+     }
+    ],
+    "per_window_parts": [
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "bytes_per_token": 9216,
+      "kind": "reserve",
+      "source": "tools/fn_prefill_kernels.py, the QSA score rows of a 4,096-row chunk"
+     }
+    ]
+   },
+   "components": [
+    {
+     "id": "conductor",
+     "label": "Conductor",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "narrator",
+     "label": "Narrator",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 3.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "laya",
+     "label": "Laya decision models",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.6,
+     "memory_max_gib": null
+    },
+    {
+     "id": "shadow",
+     "label": "Shadow reader",
+     "default": false,
+     "required": false,
+     "depends_on": [
+      "conductor"
+     ],
+     "conflicts": [],
+     "memory_gib": 1.52,
+     "memory_max_gib": 5.52
+    },
+    {
+     "id": "prompt_cache",
+     "label": "Conversation cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.43,
+     "memory_max_gib": 11.5
+    },
+    {
+     "id": "state_store",
+     "label": "State store",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.49,
+     "memory_max_gib": 2.0
+    },
+    {
+     "id": "response_cache",
+     "label": "Response cache",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.25,
+     "memory_max_gib": null
+    },
+    {
+     "id": "disk_tier",
+     "label": "Disk cache",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "nvme_spill",
+     "label": "Session spill",
+     "default": true,
+     "required": false,
+     "depends_on": [
+      "disk_tier"
+     ],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    },
+    {
+     "id": "proxy",
+     "label": "Other backends",
+     "default": false,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.0,
+     "memory_max_gib": null
+    }
+   ],
+   "parallelism": {
+    "slots": {
+     "min": 1,
+     "max": 1,
+     "default": 1
+    },
+    "window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 262144,
+     "step": 4096
+    },
+    "side_window": {
+     "min": 8192,
+     "max": 262144,
+     "default": 262144,
+     "step": 4096
+    },
+    "kv_pool": {
+     "default": false
+    },
+    "floor_gb": {
+     "min": 10,
+     "max": 40,
+     "default": 15
+    },
+    "kv_hard_floor_gb": 10,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "side_slot_const_gib": 0.0,
+    "knobs": {
+     "slots": "QSE_PARALLEL",
+     "window": "MAX_LEN",
+     "side_window": "QSE_SIDE_MAX_LEN",
+     "kv_pool": "QSE_KV_POOL",
+     "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+    },
+    "fixed": {}
    }
   }
  },
@@ -5215,6 +5472,873 @@
    "error": {
     "status": 422,
     "code": "unknown_field"
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-2.05, window 131,072",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-2.05",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 77.25,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.05 bpw (turboderp))",
+      "gb": 32.83,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram table (page cache, kept warm)",
+      "gb": 24.44,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 1.12,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.79,
+      "kind": "kv",
+      "worst_gb": 3.79
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.79,
+    "room_gb": 33.16,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-2.05, window 262,144",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-2.05",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 82.17,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 2.05 bpw (turboderp))",
+      "gb": 32.83,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram table (page cache, kept warm)",
+      "gb": 24.44,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 2.25,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 7.58
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.58,
+    "room_gb": 32.04,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-3.05, window 131,072",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-3.05",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 98.01,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram table (page cache, kept warm)",
+      "gb": 30.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 1.12,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.79,
+      "kind": "kv",
+      "worst_gb": 3.79
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.79,
+    "room_gb": 12.4,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-3.05, window 262,144",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-3.05",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 102.93,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 3.05 bpw (turboderp))",
+      "gb": 47.63,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram table (page cache, kept warm)",
+      "gb": 30.4,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 2.25,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 7.58
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.58,
+    "room_gb": 11.28,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-4.05, window 131,072",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-4.05",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 84.43,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.05 bpw (turboderp))",
+      "gb": 62.45,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 1.12,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.79,
+      "kind": "kv",
+      "worst_gb": 3.79
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.79,
+    "room_gb": 25.98,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-4.05, window 262,144",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-4.05",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 89.35,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 4.05 bpw (turboderp))",
+      "gb": 62.45,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 2.25,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 7.58
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.58,
+    "room_gb": 24.86,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-5.05, window 131,072",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-5.05",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 99.12,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 5.05 bpw (turboderp))",
+      "gb": 77.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 1.12,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.79,
+      "kind": "kv",
+      "worst_gb": 3.79
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.79,
+    "room_gb": 11.3,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-5.05, window 262,144",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-5.05",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 104.04,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 5.05 bpw (turboderp))",
+      "gb": 77.14,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 2.25,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 7.58
+     }
+    ],
+    "fits": true,
+    "fits_worst": true,
+    "context_tokens_fit": 262144,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.58,
+    "room_gb": 10.17,
+    "notes": [
+     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-6.05, window 131,072",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-6.05",
+    "window": 131072
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 113.83,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 6.05 bpw (turboderp))",
+      "gb": 91.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 1.12,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 3.79,
+      "kind": "kv",
+      "worst_gb": 3.79
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 0,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 3.79,
+    "room_gb": -3.41,
+    "notes": [
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 3.41 GiB over the budget before any context.",
+     "Over the budget by 7.20 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, The OS and other programs 10.00 GiB, Conversations (KV), every window at load 3.79 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next flashnext-6.05, window 262,144",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "profile": "flashnext-6.05",
+    "window": 262144
+   },
+   "expect": {
+    "contract_version": "1.0",
+    "total_gb": 118.75,
+    "available_gb": null,
+    "device_gb": 121.63,
+    "floor_gb": 15.0,
+    "budget_gb": 106.63,
+    "parts": [
+     {
+      "id": "os",
+      "label": "The OS and other programs",
+      "gb": 10.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "weights",
+      "label": "Weights (EXL3 6.05 bpw (turboderp))",
+      "gb": 91.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "engine",
+      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
+      "gb": 1.85,
+      "kind": "fixed"
+     },
+     {
+      "id": "allocator",
+      "label": "Allocator reserve",
+      "gb": 2.3,
+      "kind": "reserve"
+     },
+     {
+      "id": "table",
+      "label": "n-gram row cache (the table read past the page cache)",
+      "gb": 2.0,
+      "kind": "fixed"
+     },
+     {
+      "id": "prefill_scores",
+      "label": "Prefill score buffer (sparse attention)",
+      "gb": 2.25,
+      "kind": "reserve"
+     },
+     {
+      "id": "prompt_cache",
+      "label": "Conversation cache",
+      "gb": 0.43,
+      "kind": "reserve",
+      "worst_gb": 11.5
+     },
+     {
+      "id": "state_store",
+      "label": "State store",
+      "gb": 0.49,
+      "kind": "reserve",
+      "worst_gb": 2.0
+     },
+     {
+      "id": "kv",
+      "label": "Conversations (KV), every window at load",
+      "gb": 7.58,
+      "kind": "kv",
+      "worst_gb": 7.58
+     }
+    ],
+    "fits": false,
+    "fits_worst": false,
+    "context_tokens_fit": 0,
+    "kv_bytes_per_token": 31040,
+    "typical_fill_tokens": 32768,
+    "kv_worst_gb": 7.58,
+    "room_gb": -4.54,
+    "notes": [
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 4.54 GiB over the budget before any context.",
+     "Over the budget by 12.12 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, The OS and other programs 10.00 GiB, Conversations (KV), every window at load 7.58 GiB.",
+     "Turn the shared KV pool on: without it every window takes its memory at load.",
+     "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
+    ]
+   }
+  },
+  {
+   "name": "Flash-Next refused: two slots",
+   "selection": {
+    "model": "qwen3.8-flash-next",
+    "slots": 2
+   },
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
    }
   }
  ]

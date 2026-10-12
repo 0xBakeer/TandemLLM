@@ -80,6 +80,21 @@ def test_the_split_reports_the_pinned_cache():
     return "pinned_cache 30 GiB beside the engine's parts"
 
 
+def test_a_max_len_above_the_profiles_window_is_refused():
+    """SRV-335 (4): the start refuses a --max-len above the profile's max_window, naming both numbers;
+    6.05 (null) fits none; the 27B's profiles and unknown names are never refused."""
+    from server.setup import registry
+    models, errors = registry.load_all()
+    assert errors == [], errors
+    assert registry.window_refusal("flashnext-3.05", 262_144, models) is None
+    why = registry.window_refusal("flashnext-3.05", 262_145, models)
+    assert "262,145" in why and "262,144" in why and "flashnext-3.05" in why, why
+    assert "fits no window" in registry.window_refusal("flashnext-6.05", 8_192, models)
+    assert registry.window_refusal("exl3-4.5", 1 << 20, models) is None
+    assert registry.window_refusal("no-such-profile", 1 << 20, models) is None
+    return why
+
+
 def test_pinned_is_read_once_a_second():
     calls = []
     eng = _Eng([{"policy": "warm", "resident_bytes": GIB}])

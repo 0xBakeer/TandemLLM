@@ -7,7 +7,8 @@ reverse proxy's fallback: a JSON 503 saying "vLLM cold start takes ~5 min", on a
 
   THE STATUS FILE. ops/start.sh, ops/stop.sh and ops/hold.sh write what they do to
   `logs/engine-status.json` (`QSE_STATUS_FILE`): `{state, since, reason, expected_s, version,
-  starts: [{at, s}]}`. `state` is `stopping`, `held` (a hold runs a command with the service
+  profile, starts: [{at, s}]}` (`profile`: the weight profile the scripts start, QSE_WEIGHTS from
+  serve.env, so a page during a load says which model is coming, OPS-99). `state` is `stopping`, `held` (a hold runs a command with the service
   stopped; its reason is the hold file's first line), `starting`, `up`, `failed` or `down`. A start
   records how long it took; the last five are the estimate for the next one.
 
@@ -119,8 +120,8 @@ def write(state: str, *, reason: str | None = None, expected_s: float | None = N
     if state == "up":
         models = models if models is not None else engine_models()
     out = {"state": state, "since": int(now), "reason": (reason or "")[:200] or None,
-           "expected_s": expected_s, "version": version, "starts": starts,
-           "models": models or keep_models}
+           "expected_s": expected_s, "version": version, "profile": os.environ.get("QSE_WEIGHTS") or None,
+           "starts": starts, "models": models or keep_models}
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
     tmp = f"{p}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
@@ -153,7 +154,7 @@ def facts(d: dict, now: float, answering: bool | None = None, seen_down: float |
             "since_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since)) if since else None,
             "reason": d.get("reason"), "left_s": round(left) if left is not None else None,
             "typical_start_s": round(typical_start(d)), "version": d.get("version"),
-            "retry_after_s": retry}
+            "profile": d.get("profile"), "retry_after_s": retry}
 
 
 def _mins(s: float) -> str:
@@ -189,7 +190,8 @@ dl{{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:16px 0 0;fon
 <h1><span class="dot"></span><span id="what">TandemLLM is {words}</span></h1>
 <p id="why">{why}</p>
 <dl><dt>since</dt><dd id="since" data-ts="{since}">{since_text}</dd>
-<dt>back in</dt><dd id="left">{left}</dd><dt>version</dt><dd>{version}</dd></dl>
+<dt>back in</dt><dd id="left">{left}</dd><dt>version</dt><dd>{version}</dd>
+<dt>weights</dt><dd id="profile">{profile}</dd></dl>
 <p class="muted" id="poll">This page checks every 5 s and opens the dashboard when the engine answers.</p>
 </main><script>
 const loc=(s)=>s?new Date(s*1000).toLocaleTimeString([], {{hour:'2-digit',minute:'2-digit'}}):'—';
@@ -212,7 +214,8 @@ def page(f: dict) -> str:
     return PAGE.format(state=html.escape(f["state"]), words=html.escape(f["words"]),
                        why=html.escape(f.get("reason") or ""), since=int(f.get("since") or 0),
                        since_text=html.escape(since_text), left=html.escape(left),
-                       version=html.escape(str(f.get("version") or "—")))
+                       version=html.escape(str(f.get("version") or "—")),
+                       profile=html.escape(str(f.get("profile") or "—")))
 
 
 def engine_answers(url: str, timeout: float = 1.0) -> bool:

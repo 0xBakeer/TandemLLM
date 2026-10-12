@@ -12,6 +12,8 @@ import { estimate, SelectionError } from '../src/setup/estimate';
 const path = fileURLToPath(new URL('../../models/estimate-cases.json', import.meta.url));
 const fixture = JSON.parse(readFileSync(path, 'utf8')) as {
   model: SetupModel;
+  /** SRV-337: other models' formula payloads, by id (a case's selection names its model) */
+  models?: Record<string, SetupModel>;
   cases: { name: string; selection: Record<string, unknown>; expect?: Record<string, unknown>; error?: { status: number; code: string } }[];
 };
 
@@ -39,12 +41,13 @@ describe('the estimate fixture (models/estimate-cases.json)', () => {
     expect(fixture.cases.filter((c) => c.expect).length).toBeGreaterThan(10);
     expect(fixture.cases.filter((c) => c.error).length).toBeGreaterThan(0);
   });
+  const modelOf = (sel: Record<string, unknown>) => fixture.models?.[sel.model as string] ?? fixture.model;
   for (const c of fixture.cases) {
     it(c.name, () => {
       if (c.error) {
         let err: unknown = null;
         try {
-          estimate(fixture.model, c.selection as never);
+          estimate(modelOf(c.selection), c.selection as never);
         } catch (e) {
           err = e;
         }
@@ -52,7 +55,23 @@ describe('the estimate fixture (models/estimate-cases.json)', () => {
         expect({ status: (err as SelectionError).status, code: (err as SelectionError).code }).toEqual(c.error);
         return;
       }
-      close(estimate(fixture.model, c.selection as never), c.expect, 'estimate');
+      close(estimate(modelOf(c.selection), c.selection as never), c.expect, 'estimate');
     });
   }
+  it("refuses a window above a profile's largest, and caps the context at it", () => {
+    const fn = structuredClone(fixture.models?.['qwen3.8-flash-next']) as SetupModel;
+    expect(fn, 'the Flash-Next payload').toBeTruthy();
+    const p = fn.profiles.find((x) => x.id === 'flashnext-3.05');
+    if (!p) throw new Error('flashnext-3.05 missing');
+    p.max_window = 131_072;
+    let err: unknown = null;
+    try {
+      estimate(fn, { model: fn.id, profile: 'flashnext-3.05', window: 262_144 } as never);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SelectionError);
+    expect((err as SelectionError).status).toBe(422);
+    expect(estimate(fn, { model: fn.id, profile: 'flashnext-3.05', window: 131_072 } as never).context_tokens_fit).toBe(131_072);
+  });
 });

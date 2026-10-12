@@ -88,7 +88,8 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
     return fb;
   };
   out.slots = num(s.slots, par.slots.min, par.slots.max, true, S.slots, d.slots);
-  out.window = num(s.window, par.window.min, par.window.max, true, S.window, d.window);
+  const wmax = windowMax(m, out.profile);
+  out.window = num(s.window, par.window.min, wmax, true, S.window, Math.min(d.window, wmax));
   out.side_window = num(s.side_window, par.side_window.min, par.side_window.max, true, S.sideWindow, d.side_window ?? d.window);
   out.floor_gb = num(s.floor_gb, par.floor_gb.min, par.floor_gb.max, false, S.floor, d.floor_gb);
   if (typeof s.kv_pool === 'boolean') out.kv_pool = s.kv_pool;
@@ -131,11 +132,19 @@ function visit(v: SetupStepId[], step: SetupStepId): SetupStepId[] {
   return v.includes(step) ? v : [...v, step];
 }
 
-/** Snap a window to the model's step and range; the note says when it moved. */
-export function clampWindow(m: SetupModel, key: 'window' | 'side_window', n: number): { value: number; clamped: boolean } {
+/** The longest window a profile takes: the model's, or the profile's max_window where that is shorter
+ * (SRV-337: a Flash-Next pack on the Spark). A profile that fits no window (null) keeps the model's
+ * range; its estimate says it does not fit. */
+export function windowMax(m: SetupModel, profile: string): number {
+  const mw = m.profiles.find((p) => p.id === profile)?.max_window;
+  return typeof mw === 'number' ? Math.min(m.parallelism.window.max, mw) : m.parallelism.window.max;
+}
+
+/** Snap a window to the model's step and range (and `max`, the profile's largest); the note says when it moved. */
+export function clampWindow(m: SetupModel, key: 'window' | 'side_window', n: number, max = m.parallelism[key].max): { value: number; clamped: boolean } {
   const r = m.parallelism[key];
   let v = Math.round(n / r.step) * r.step;
-  v = Math.min(r.max, Math.max(r.min, v));
+  v = Math.min(r.max, max, Math.max(r.min, v));
   return { value: v, clamped: v !== n };
 }
 
@@ -184,9 +193,13 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
   if (!m || !st.selection) return st;
   const sel = st.selection;
   switch (a.type) {
-    case 'profile':
+    case 'profile': {
       if (!m.profiles.some((p) => p.id === a.id)) return st;
-      return done({ selection: { ...sel, profile: a.id } });
+      // a profile with a shorter largest window takes the window down with it, and the side window
+      const max = windowMax(m, a.id);
+      if (sel.window <= max) return done({ selection: { ...sel, profile: a.id } });
+      return done({ selection: { ...sel, profile: a.id, window: max, side_window: Math.min(sel.side_window ?? sel.window, max) }, notice: S.windowClamped(max) });
+    }
     case 'component': {
       const r = toggleComponent(m, sel.components, a.id, a.on);
       if (!r.ok) return { ...st, notice: r.error };
@@ -199,7 +212,7 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
       if (a.key === 'kv_pool') return typeof a.value === 'boolean' ? done({ selection: { ...sel, kv_pool: a.value } }) : st;
       if (typeof a.value !== 'number' || !Number.isFinite(a.value)) return st;
       if (a.key === 'window' || a.key === 'side_window') {
-        const { value, clamped } = clampWindow(m, a.key, a.value);
+        const { value, clamped } = clampWindow(m, a.key, a.value, a.key === 'window' ? windowMax(m, sel.profile) : undefined);
         const next = { ...sel, [a.key]: value };
         // a side window longer than slot 0's makes no sense: it follows the main window down
         if (a.key === 'window' && (next.side_window ?? value) > value) next.side_window = value;

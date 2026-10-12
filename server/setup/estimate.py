@@ -16,6 +16,8 @@ them on the reference box:
     os          the device preset's reserved_gib (what runs outside the engine's allocator)
     weights     the profile's weights_gib            drafters   the profile's drafters_gib
     graphs, engine, allocator                         the registry's memory parts
+    table       a profile's lookup table: warm, its size (the page cache); cold, its row cache (SRV-337)
+    per window  the registry's per-window parts: bytes a token x the window (a prefill's score buffer)
     side_slots  (slots - 1) x side_slot_const_gib     (their verify graphs off)
     a tool      its memory_gib, for every tool that is on (worst_gb: its memory_max_gib)
     kv          KV pool on: (min(window, fill) + (slots - 1) x min(side_window, fill)) x bytes a token,
@@ -26,7 +28,8 @@ them on the reference box:
     budget      = device total - floor                (what may be used with MemAvailable at the floor)
     total       = the sum of the parts                fits       = total <= budget
     room        = budget - every part but the KV      fits_worst = room >= worst KV
-    context_tokens_fit = floor(room / bytes a token), over all slots (0 when room < 0)
+    context_tokens_fit = floor(room / bytes a token), over all slots (0 when room < 0), at most the
+                 profile's max_window a slot; a profile with none fits no window
 
 Rounded to 0.01 at the output only; `fits` compares the rounded figures, so a total equal to the
 budget to the cent fits. The live MemAvailable (`available_gb`) is information beside it, never part
@@ -121,6 +124,10 @@ def check(m: dict, body) -> dict:
                     p["slots"]["max"])
     window = _on_step("window", _int_in("window", body.get("window", p["window"]["default"]),
                                         p["window"]["min"], p["window"]["max"]), p["window"]["step"])
+    mw = registry.profile(m, pid).get("max_window")
+    if mw and window > mw:
+        raise SelectionError(422, "out_of_range", f"window: {window:,} is above {pid}'s largest window, {mw:,}",
+                             [{"field": "window", "reason": f"at most {mw} with {pid}"}])
     side = body.get("side_window")
     side = window if side is None else side
     side = _on_step("side_window", _int_in("side_window", side, p["side_window"]["min"],
@@ -185,13 +192,23 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
     for part in m["memory"]["parts"]:
         parts.append({"id": part["id"], "label": part["label"], "gb": part["gib"],
                       "kind": part["kind"]})
+    table = prof.get("table")
+    if table:
+        warm = table["policy"] == "warm"
+        parts.append({"id": "table", "label": "n-gram table (page cache, kept warm)" if warm else
+                      "n-gram row cache (the table read past the page cache)",
+                      "gb": table["gib"] if warm else table["cache_gib"], "kind": "fixed"})
+    for part in m["memory"].get("per_window_parts") or []:
+        parts.append({"id": part["id"], "label": part["label"], "gb": part["bytes_per_token"] * window / GIB,
+                      "kind": part["kind"]})
     if slots > 1:
         parts.append({"id": "side_slots", "label": f"{slots - 1} more slot(s), beyond their KV",
                       "gb": (slots - 1) * p["side_slot_const_gib"], "kind": "fixed"})
     for c in m["components"]:
         if not sel["components"][c["id"]]:
             continue
-        gb = prof["drafters_gib"] if c["id"] == "drafters" else c["memory_gib"]
+        gb = (prof.get("components_gib") or {}).get(
+            c["id"], prof["drafters_gib"] if c["id"] == "drafters" else c["memory_gib"])
         if gb <= 0 and c["memory_max_gib"] is None:
             continue
         part = {"id": c["id"], "label": c["label"], "gb": gb, "kind": "fixed"}
@@ -213,7 +230,15 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
     fits = _r(total) <= _r(budget)
     fits_worst = _r(room) >= _r(kv_worst)
     ctx = max(0, math.floor(room * GIB / kvb))
+    mw = prof.get("max_window", 0)
+    if mw is None:
+        ctx = 0
+    elif mw:
+        ctx = min(ctx, mw * slots)
     notes = []
+    if mw is None:
+        notes.append(f"{prof['label']} does not fit {dev['label']} at any window: it is "
+                     f"{_r(max(0.0, fixed - budget)):.2f} GiB over the budget before any context.")
     if not fits:
         big = sorted(parts, key=lambda x: -x["gb"])[:3]
         notes.append(f"Over the budget by {_r(total - budget):.2f} GiB. The largest parts: "

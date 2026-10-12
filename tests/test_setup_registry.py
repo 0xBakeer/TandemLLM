@@ -28,8 +28,8 @@ The test matrix:
      refused, and numbers keep their range                  test_field_values
  11  the KV bytes a token are the server's (server/slots.py) and the units add up: 104.25 KiB,
      26.06 GiB = 27.98 GB at 262,144 tokens                 test_kv_units
- 12  the dashboard mock's copy (dashboard/mock/setup/qwen3.8-27b.json) is what
-     GET /v1/setup/models/qwen3.8-27b answers, key for key   test_the_mock_copy
+ 12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next) are what
+     GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
 
 Run: python tests/test_setup_registry.py
 """
@@ -143,26 +143,29 @@ def test_every_knob_is_registered():
 
 
 def _profile_env(name: str) -> dict:
-    """What ops/profiles/<name>.env sets for the registry's fields, through bash (the _exl3 template
-    included)."""
+    """What ops/profiles/<name>.env sets for the registry's fields, through bash (the _exl3 and
+    _flashnext templates included)."""
     out = subprocess.run(["bash", "-c", 'REPO="$1"; HOME=/h; set -a; . "$1/ops/profiles/$2.env"; '
-                          'echo "$QSE_WEIGHTS_HF|$QSE_WEIGHTS_GB"', "-", ROOT, name],
-                         capture_output=True, text=True, check=True).stdout.strip()
-    hf, gb = out.split("|")
-    return {"hf": hf, "gb": float(gb)}
+                          'echo "$QSE_WEIGHTS_HF|$QSE_WEIGHTS_GB|$QSE_WEIGHTS_REVISION|$QWEN38_FN_TABLE"',
+                          "-", ROOT, name], capture_output=True, text=True, check=True).stdout.strip()
+    hf, gb, rev, table = out.split("|")
+    return {"hf": hf, "gb": float(gb), "revision": rev or None, "table": table or None}
 
 
 def test_profiles_match_ops():
     models, errors = registry.load_all()
     assert errors == [], errors
     assert registry.unlisted_profiles(models) == []
-    m = models["qwen3.8-27b"]
-    for p in m["profiles"]:
-        f = os.path.join(ROOT, "ops", "profiles", p["id"] + ".env")
-        assert os.path.isfile(f), f
-        env = _profile_env(p["id"])
-        assert env["hf"] == p["hf_repo"], (p["id"], env)
-        assert env["gb"] == p["disk_gb"], (p["id"], env)
+    for m in models.values():
+        for p in m["profiles"]:
+            f = os.path.join(ROOT, "ops", "profiles", p["id"] + ".env")
+            assert os.path.isfile(f), f
+            env = _profile_env(p["id"])
+            assert env["hf"] == p["hf_repo"], (p["id"], env)
+            assert env["gb"] == p["disk_gb"], (p["id"], env)
+            # OPS-97: a pack on a branch of its repo, its n-gram table's policy (none for the 27B)
+            assert env["revision"] == p.get("hf_revision"), (p["id"], env)
+            assert env["table"] == (p.get("table") or {}).get("policy"), (p["id"], env)
     with tempfile.TemporaryDirectory() as d:
         shutil.copytree(os.path.join(ROOT, "ops", "profiles"), os.path.join(d, "ops", "profiles"))
         with open(os.path.join(d, "ops", "profiles", "exl3-9.9.env"), "w") as fh:
@@ -344,13 +347,18 @@ def test_the_mock_copy():
     """The page's e2e and unit tests run on the mock's copy of the registry entry; a model.yaml
     change that does not reach it would test the page against a model the server does not serve.
     Write it again with: python tests/test_setup_registry.py --write-mock"""
-    m = registry.get("qwen3.8-27b")
-    with open(MOCK_COPY) as fh:
-        assert json.load(fh) == _served(m), (f"{MOCK_COPY} is not the registry's payload; run "
-                                             f"python tests/test_setup_registry.py --write-mock")
+    for mid in MOCKED:
+        with open(_mock_copy(mid)) as fh:
+            assert json.load(fh) == _served(registry.get(mid)), (
+                f"{_mock_copy(mid)} is not the registry's payload; run python tests/test_setup_registry.py --write-mock")
 
 
-MOCK_COPY = os.path.join(ROOT, "dashboard", "mock", "setup", "qwen3.8-27b.json")
+# the 27B and, for the models step's second tile and a pack's largest window, Flash-Next (OPS-97)
+MOCKED = ("qwen3.8-27b", "qwen3.8-flash-next")
+
+
+def _mock_copy(mid: str) -> str:
+    return os.path.join(ROOT, "dashboard", "mock", "setup", mid + ".json")
 
 
 def _served(m: dict) -> dict:
@@ -361,10 +369,11 @@ def _served(m: dict) -> dict:
 
 if __name__ == "__main__":
     if "--write-mock" in sys.argv:
-        with open(MOCK_COPY, "w") as fh:
-            json.dump(_served(registry.get("qwen3.8-27b")), fh, indent=1, ensure_ascii=False)
-            fh.write("\n")
-        print(f"wrote {MOCK_COPY}")
+        for mid in MOCKED:
+            with open(_mock_copy(mid), "w") as fh:
+                json.dump(_served(registry.get(mid)), fh, indent=1, ensure_ascii=False)
+                fh.write("\n")
+            print(f"wrote {_mock_copy(mid)}")
         sys.exit(0)
     passed = 0
     for name, fn in sorted(globals().items()):

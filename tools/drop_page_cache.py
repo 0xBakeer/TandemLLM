@@ -36,7 +36,15 @@ def default_paths() -> list[Path]:
     for k in ("QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EXL3"):
         if os.environ.get(k):
             out.append(Path(os.environ[k]))
+    # OPS-99: a profile of another model names its own (a Flash-Next pack's directory)
+    out += [Path(p) for p in os.environ.get("QSE_PAGE_CACHE_DROP", "").split(":") if p]
     return out
+
+
+def kept() -> set[str]:
+    """File names whose page cache stays (QSE_PAGE_CACHE_KEEP): a Flash-Next pack's warm n-gram table,
+    which the engine keeps reading through the page cache (ENG-239)."""
+    return set(os.environ.get("QSE_PAGE_CACHE_KEEP", "").split())
 
 
 def _files(paths) -> list[str]:
@@ -62,7 +70,8 @@ def cached_gb(meminfo: str | None = None) -> float:
 def drop(paths=None, advise=None) -> dict:
     """Fadvise(DONTNEED) every file under `paths`; returns the file count and their bytes."""
     advise = advise or (lambda fd: os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED))
-    files = _files(default_paths() if paths is None else paths)
+    keep = kept()
+    files = [f for f in _files(default_paths() if paths is None else paths) if os.path.basename(f) not in keep]
     n, size, failed = 0, 0, 0
     for f in files:
         try:
