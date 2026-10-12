@@ -22,6 +22,7 @@ class FlashNextMTPHead:
         self.fn, self.depth = fn, depth
         self.st = fn.new_mtp_state(cap)
         self.graphs: dict = {}
+        self.captures = 0               # graphs captured so far (a round that captured is not a price)
         self._n = 0
 
     def reset(self) -> None:
@@ -53,6 +54,7 @@ class FlashNextMTPHead:
             if (n, cls) not in self.graphs:
                 self.graphs[(n, cls)] = MTPChainGraph(self.fn, self.st, n, self.depth, cls)
                 self.graphs[(n, cls)].capture()
+                self.captures += 1
 
     def launch(self, rows: torch.Tensor, nexts: list[int]) -> None:
         """Feed rows [n, hc H] with their next tokens and draft `depth` tokens from the last: the graph
@@ -64,6 +66,7 @@ class FlashNextMTPHead:
         if g is None:
             g = self.graphs[(n, cls)] = MTPChainGraph(fn, self.st, n, self.depth, cls)
             g.capture()
+            self.captures += 1          # this round's draft time is the capture's (the drafter skips it)
         b = fn._mtp_bufs(self.depth)
         b["stack"][:n].copy_(rows)
         t0 = time.perf_counter()

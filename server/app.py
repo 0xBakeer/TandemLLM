@@ -21,6 +21,7 @@ are the measurement.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import re
@@ -1616,6 +1617,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # return more than it was handed. Cap on rows here, where the forward is paid.
                 draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
+                # a drafter that prices its rounds against the plain step learns its cost here
+                on_plain = getattr(drafter, "on_plain", None) if drafter is not None else None
+                t_plain = time.perf_counter() if on_plain is not None else 0.0
                 logits = eng.forward(h2d([tok], torch.long, prompt.device), start=pos,
                                      last_only=True)
                 # Bring a position-indexed drafter current, as engine/spec.py's loop does.
@@ -1633,6 +1637,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     pen.apply_single(logits[0, -1])
                 tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
+                if on_plain is not None:
+                    on_plain((time.perf_counter() - t_plain) * 1e3)
                 if probe is not None and tok in eos:
                     probe.finish(eng, drafter, slice(0, 1), n_out)
                 fin = (_sp2(sup, think, ctx, start, n_out, eng.max_len - pos, end=tok)
@@ -8772,10 +8778,12 @@ def _load(a) -> None:
     _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], **m["serving"], **caches)
     led.mark("caches")
     print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
-    # one warm request, so the first measured one is not paying for Triton autotuning
-    with torch.no_grad():
+    # one warm request, so the first measured one is not paying for Triton autotuning; a drafter
+    # that prices its rounds (Flash-Next's MTP) decodes WARM_TOKENS through them, learning nothing
+    warming = getattr(drafter, "warming", None) if drafter is not None else None
+    with torch.no_grad(), (warming() if warming is not None else contextlib.nullcontext()):
         list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].to(m["device"]),
-                             4, set()))
+                             getattr(drafter, "WARM_TOKENS", 4) if warming is not None else 4, set()))
         # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
         # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
         # first two chats queued 24 s behind the router's cold questions)

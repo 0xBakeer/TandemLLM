@@ -147,7 +147,9 @@ class _OldStairCut:
             elif ("spine", k) not in on:
                 self._learn("sib", prob[k][1], ("sib", k) in on)
         verify = round_ms
-        self.V[rows] = verify if rows not in self.V else 0.9 * self.V[rows] + 0.1 * verify
+        # since P0 (2026-10-12) a count's first sample moves it from where the prior put it
+        start = self.V.get(rows, self.prior(rows) + self.delta)
+        self.V[rows] = 0.9 * start + 0.1 * verify
         self.delta = 0.9 * self.delta + 0.1 * (verify - self.prior(rows))
         self.draft_ms = draft_ms if self.draft_ms is None else 0.9 * self.draft_ms + 0.1 * draft_ms
 
@@ -258,7 +260,7 @@ def test_staircut():
     sc3 = _new(True)
     for _ in range(80):
         sc3.cut(1, tok, [[0.99, 0.0]] * 5)
-        sc3.last = (sc3.last[0], sc3.last[1], 2)
+        sc3.last = (sc3.last[0], sc3.last[1], 2, sc3.last[3])
         sc3.observe([0, 1], 40.0, 2.0)               # every 2-row block cost 40 ms: a long context
     delta = sc3.prices.learned()[1]
     assert delta > 8.0 and sc3.prices.price(5) > sc3.prices.prior(5) + 8.0
@@ -304,6 +306,110 @@ def test_the_lookup_joins_the_cut_in_one_tree():
     assert sc.cal.q("look", 0.95) < 0.3 < before
     return (f"agreeing 2 then 10 own: {len(toks)} rows, the copy under the shared node; past the spine's end; "
             f"unsure: anchor only; the lookup's bin learned")
+
+
+def test_context_classes_and_the_plain_step():
+    """The P0 of 2026-10-12: at 260,800 tokens MTP rounds ran 22.5 tok/s against 36.6 for plain decode.
+    Prices and costs are kept per context class; a class whose drafted rounds cost more a token than its
+    plain steps (by wall time; the price file's priors until learned) takes the plain step, drafting one
+    probe round in an interval that doubles while drafting loses; class 0 cuts as before."""
+    tok = [[10 + k, 20 + k] for k in range(4)]
+    prob = [[0.6, 0.1]] * 4
+    sc = _new(False)
+    short = sc.cut(1, tok, prob, ctx_class=0)
+    assert len(short[0]) > 1 and not sc.skip(0)                    # no prices for the modes: draft
+    for _ in range(30):
+        sc.observe_plain(25.0, 262_144)
+        sc.observe_spec(30.0, 262_144)                             # drafting costs more a token
+    skips = [sc.skip(262_144) for _ in range(StairCut.PROBE + 2 * StairCut.PROBE)]
+    assert skips == ([True] * (StairCut.PROBE - 1) + [False] + [True] * (2 * StairCut.PROBE - 1) + [False]), skips
+    assert sc.probe[262_144] == 4 * StairCut.PROBE
+    # class 0 is untouched by what 256k learned
+    assert sc.cut(1, tok, prob, ctx_class=0) == short and not sc.skip(0)
+    # a stall far over the price is not learned
+    sc.observe_plain(400.0, 262_144)
+    assert abs(sc.plain[262_144] - 25.0) < 1e-6
+    # drafting wins again: the class drafts, its probe interval starts over
+    for _ in range(40):
+        sc.observe_spec(18.0, 262_144)
+    assert not sc.skip(262_144) and sc.probe[262_144] == StairCut.PROBE
+    return "256k: plain while drafting loses, a probe in 16 then 32; class 0 as before; drafting wins again"
+
+
+def test_a_turn_drafts_only_when_the_saving_pays_for_the_backlog():
+    """P0: at 260,800 tokens a drafted round cost as much a token as the plain step, so reading the
+    turn's backlog into the head (0.28 ms a row) made speculation slower; with Flash-Next's price file the
+    turn takes the plain step there, drafts at 140k after a short backlog and not after a whole cold
+    prompt, and drafts wherever the class has no priors (the 27B's)."""
+    sc = StairCut(PriceModel.load(FN_PRICES), siblings=False)
+    assert not sc.turn(262_144, 2_748, 256)                      # no saving at all
+    assert sc.turn(196_608, 2_748, 256)                          # (24.2 - 19.7) x 256 > 2,748 x 0.15
+    assert not sc.turn(196_608, 139_000, 256)                    # a cold 140k prompt does not pay
+    assert sc.turn(0, 1_000, 256) and sc.turn(32_768, 3_324, 256)
+    assert _new(False).turn(262_144, 10 ** 6, 1)                 # no priors: as before
+    # what the turns learn moves the decision
+    for _ in range(40):
+        sc.observe_spec(15.0, 262_144)
+    assert sc.turn(262_144, 2_748, 256)
+    return "260k plain, 140k drafts after a short backlog, a cold 140k prompt plain, no priors: drafts"
+
+
+def test_one_slow_request_does_not_keep_a_class_plain():
+    """P0 verify of 2026-10-12: the server's first request (1k) drafted its rounds at 2-3 times their
+    steady cost; seeded on those, class 0 priced drafting above the plain step and took the plain step on
+    every later turn (45.8 tok/s where drafting had made 56). A first sample now moves a learned cost
+    from its prior as a later one does, a stall over 4 times the price is not learned, and what a class
+    learned of its drafted rounds ages back to the prior while its turns are plain."""
+    sc = StairCut(PriceModel.load(FN_PRICES), siblings=False)
+    sc.observe_spec(54.0, 0)                                     # the cold first request's rounds
+    sc.observe_plain(22.0, 0)
+    assert sc.spec[0] < sc.plain[0] and sc.turn(0, 1_000, 112) and not sc.skip(0)
+    p2 = sc.prices.price(2, "chain", 0)
+    sc.prices.observe(2, 400.0, "chain", 0)                     # a stall: not learned
+    sc.prices.observe(2, 70.0, "chain", 0)                      # a slow first sample: a tenth of it
+    assert sc.prices.price(2, "chain", 0) < p2 + 6.0, (p2, sc.prices.price(2, "chain", 0))
+    # rounds that really cost more: the class turns plain, and what it learned ages back to the prior
+    for _ in range(40):
+        sc.observe_spec(30.0, 0)
+
+    def plain_turns_to_return():
+        n = 0
+        while not sc.turn(0, 1_000, 112):
+            n += 1
+            assert n < 400
+        return n
+    back = plain_turns_to_return()
+    assert 2 <= back <= 8 and sc.plain_turns[0] == 0, back
+    # the return loses again (its rounds cost 30 ms a token): the next return takes about twice as long
+    for _ in range(40):
+        sc.observe_spec(30.0, 0)
+    back2 = plain_turns_to_return()
+    assert sc.age[0] == StairCut.AGE / 2 and back2 > back + 2, (back, back2)
+    # two drafting turns in a row: the full rate again
+    for _ in range(40):
+        sc.observe_spec(15.0, 0)
+    assert sc.turn(0, 1_000, 112) and sc.turn(0, 1_000, 112) and sc.age[0] == StairCut.AGE
+    # 260k's prior says drafting loses: it stays plain and pays no backlog to find out
+    for _ in range(40):
+        sc.observe_spec(30.0, 262_144)
+    assert not any(sc.turn(262_144, 2_748, 112) for _ in range(30))
+    assert abs(sc.spec[262_144] - sc.prices.prior(1, "spec", 262_144)) < 0.1
+    # no prior (a model without a price file): forgotten after FORGET plain turns, then drafts
+    bare = _new(False)
+    bare.observe_plain(22.0, 0)
+    bare.prime[0] = 0.02
+    for _ in range(10):
+        bare.observe_spec(30.0, 0)
+    turns = [bare.turn(0, 1_000, 112) for _ in range(StairCut.FORGET + 1)]
+    assert turns == [False] * StairCut.FORGET + [True] and 0 not in bare.spec, turns
+    # a drafted round's cost a token is the ratio of the rounds' ms and tokens, not the mean of each
+    # round's own ratio: one token in 37 ms and four in 45 make 16.4 ms a token, not 24.1
+    r = _new(False)
+    for _ in range(60):
+        r.observe_spec(37.0, 0, 1)
+        r.observe_spec(45.0, 0, 4)
+    assert abs(r.spec[0] - 82.0 / 5.0) < 1.0, r.spec[0]
+    return f"a cold first request leaves 1k drafting; a losing class back to drafting after {back} plain turns, after {back2} once its return lost; 260k stays plain; ms a token by sums"
 
 
 def test_price_model():

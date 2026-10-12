@@ -60,9 +60,9 @@ def manifest() -> Manifest:
 
 class _KV:
     """The `kv` the server reads: the length of the sequence the state holds (a pending chain commit
-    lands first), its capacity. Setting it to zero is a reset; to any other length it keeps the KV
-    rows by length and clamps the pooled keys -- the recurrent state is the caller's to restore first
-    (`state.restore`), as on the 27B."""
+    lands first), its capacity. Setting it to zero starts a new sequence in place (`restart`: the rows
+    stay, as the 27B's do); to any other length it keeps the KV rows by length and clamps the pooled
+    keys -- the recurrent state is the caller's to restore first (`state.restore`), as on the 27B."""
 
     pages = None
 
@@ -78,7 +78,7 @@ class _KV:
     def length(self, v: int) -> None:
         v = int(v)
         if v == 0:
-            self._s.reset()
+            self._s.restart()
             return
         if not 0 < v <= self.max_len:
             raise ValueError(f"Flash-Next's state cannot hold {v} rows (capacity {self.max_len})")
@@ -179,6 +179,7 @@ class FlashNextServing:
         self._chain = None                  # a forward_block's rows awaiting their commit
         self.commit_ms = 0.0
         self.captured = False               # the last block captured a verify or commit graph
+        self.plain_captured = False         # the last plain step captured its decode graph
         self.heads: dict = {}               # draft heads by name (`draft_heads`)
         self._weights = None                # the weights' bytes by part (`memory_parts`), once
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
@@ -187,6 +188,19 @@ class FlashNextServing:
     @property
     def hidden_post_norm(self) -> torch.Tensor:
         return self._hidden
+
+    def price_class(self, n: int) -> int:
+        """The draft prices' context class of a round at context length `n` (engine/methods/staircut.py):
+        0 while the sparse attention is dense, else the next of 4,096 x 2^k and 6,144 x 2^k at or above
+        n, up to 262,144. A verify's score rows grow with the context itself, not only with the sparse
+        attention's class: on the P0 runs a block cost about 41 ms at 140,000 tokens and 53 at 260,800,
+        both in the 262,144 class."""
+        if not self.fn.qsa_class(n):
+            return 0
+        c = 4096
+        while c < n and c < 262_144:
+            c = c * 3 // 2 if (c & (c - 1)) == 0 else c * 4 // 3
+        return min(c, 262_144)
 
     def cost(self) -> CostModel:
         """What a state snapshot holds: its sections whole (the recurrent, conv and PLE ones) and the
@@ -307,6 +321,21 @@ class FlashNextServing:
         self.picks = None
         self.fn.reset(self.st)
 
+    def restart(self) -> None:
+        """A new sequence in the same buffers: the recurrent sections cleared and the length 0, the KV,
+        indexer-key and pooled-key rows left in place (nothing reads a row past the length). The
+        resident prefix keeps a conversation's rows there while a short request runs from row 0 (a
+        guest, engine/cache.py); `reset` zeroed every row, and the rows the guest's stash did not hold
+        came back as zeros (2026-10-12: a 6,000-token prompt after a 1,000-token guest answered
+        differently from a cold prefill)."""
+        self._chain = None
+        self.picks = None
+        fn = self.fn
+        if fn._pend_owner is self.st:
+            fn._pend_n.zero_()
+            fn._pend_owner = None
+        self.st.reset_inplace()
+
     @torch.no_grad()
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
         """Rows `ids` at positions start..: one token through the decode step, more through the prefill
@@ -319,7 +348,9 @@ class FlashNextServing:
             if self.dg is None:
                 self.dg = DecodeGraph(self.fn, self.st)
             cls = self.fn.qsa_class(start)
+            n0 = self.dg.captures
             lg = self.dg(int(ids[0]))
+            self.plain_captured = self.dg.captures != n0       # this step's time is a capture's
             self._hidden = self.dg.stacks[cls].view(1, 1, -1)
             self._h_last.copy_(self._hidden[0, -1:])
             self.stats["decode_steps"] += 1

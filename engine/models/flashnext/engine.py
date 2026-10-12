@@ -1332,6 +1332,7 @@ class DecodeGraph:
         self.graphs: dict = {}
         self.stacks: dict = {}                 # class -> the graph's streams output [1, hc H]
         self.graph = None
+        self.captures = 0                      # classes captured lazily by a step
 
     def capture(self, cls: int | None = None) -> None:
         eng, st = self.eng, self.st
@@ -1365,6 +1366,7 @@ class DecodeGraph:
         cls = self.eng.qsa_class(self.st.length)
         if cls not in self.graphs:
             self.capture(cls)
+            self.captures += 1              # this step's time is the capture's (a price skips it)
         self.graph = self.graphs[cls]
 
     @torch.no_grad()

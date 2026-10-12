@@ -1159,11 +1159,15 @@ class ResidentPrefix:
             return
         self._stash = None
         s, r = st["start"], st["rows"]
+        # how far the guest wrote, read BEFORE the rows go back: an engine whose length lands a pending
+        # commit when read (Flash-Next's chain block) writes the guest's last rows then, and after the
+        # copy that write went over the resident's restored rows (2026-10-12: a guest after a guest
+        # answered differently from a cold prefill)
+        reach = int(eng.kv.length) + GUEST_SLACK_ROWS
         for (t, ax), buf in zip(st["views"], self._stash_bufs):
             _kvp.ensure_for(t, s + r)         # SRV-307
             t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
         self.stats["stash_restored"] += 1
-        reach = int(eng.kv.length) + GUEST_SLACK_ROWS
         if reach > s + r and self.valid > s + r:
             # the guest wrote past what was saved: the rows beyond it are not the resident's any
             # more, and neither is any anchor above them

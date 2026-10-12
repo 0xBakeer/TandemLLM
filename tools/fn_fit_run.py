@@ -76,8 +76,11 @@ def main() -> None:
     ap.add_argument("--again", action="store_true",
                     help="send the request a second time after the run: its prompt comes back from the caches, "
                          "so its decode rate is the window's own, without the first round's graph captures")
+    ap.add_argument("--raw", action="store_true", help="X-Tandem: raw (the conductor adds nothing, so the "
+                    "second request's prompt is the first's)")
     ap.add_argument("--json")
     a = ap.parse_args()
+    headers = {"Content-Type": "application/json", **({"X-Tandem": "raw"} if a.raw else {})}
     text, n = prompt(os.path.expanduser(a.pack), a.tokens)
     if a.prewarm_table:
         with open(os.path.join(os.path.expanduser(a.pack), "ngram_embedding.safetensors"), "rb") as f:
@@ -112,8 +115,7 @@ def main() -> None:
     body = {"model": "TandemLLM", "max_tokens": a.new, "temperature": 0, "messages": [{"role": "user", "content": text}],
             "chat_template_kwargs": {"enable_thinking": False}}
     t0 = time.time()
-    req = urllib.request.Request(a.url + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(a.url + "/v1/chat/completions", data=json.dumps(body).encode(), headers=headers)
     try:
         r = json.loads(urllib.request.urlopen(req, timeout=3600).read())
         res["answer"] = r["choices"][0]["message"].get("content")
@@ -124,8 +126,7 @@ def main() -> None:
     if a.again and "error" not in res:
         t1 = time.time()
         r2 = json.loads(urllib.request.urlopen(urllib.request.Request(
-            a.url + "/v1/chat/completions", data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"}), timeout=3600).read())
+            a.url + "/v1/chat/completions", data=json.dumps(body).encode(), headers=headers), timeout=3600).read())
         res["again"] = {"wall_s": round(time.time() - t1, 1), "timings": r2.get("timings"),
                         "answer": r2["choices"][0]["message"].get("content"),
                         "same_answer": r2["choices"][0]["message"].get("content") == res.get("answer")}

@@ -192,6 +192,103 @@ def test_counting_the_state_issues_no_copy():
     return "cost() leaves the buffers alone; sections() refreshes the PLE context"
 
 
+def test_a_class_where_drafts_do_not_pay_takes_the_plain_step():
+    """P0 (2026-10-12): the drafter reads the engine's `price_class`, prices its rounds by wall time (a
+    plain step's span, a drafted round's span a token), and where drafting costs more a token than the
+    plain step it returns no draft, keeping the rows for the next round that drafts."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 262_144 if n > 100 else 0)
+    head = _StubHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False))
+    long = list(range(200))
+    d.reset()
+    d.sync(long, _rows(0, len(long)), 0)
+    assert d.propose_tree(long, 8).n_draft > 0                    # no prices for the modes: draft
+    for _ in range(30):
+        d.cut.observe_plain(25.0, 262_144)
+        d.cut.observe_spec(30.0, 262_144)
+    d.sync([500], _rows(len(long), 1), len(long))
+    assert d.propose_tree(long + [500], 8) is None and d.stats["skipped"] == 1
+    assert d.queue and d.held is None                              # the skipped round's rows wait
+    d.on_plain(0.0)
+    d.observe([500])
+    d.sync([501], _rows(len(long) + 1, 1), len(long) + 1)
+    d.propose_tree(long + [500, 501], 8)
+    assert 262_144 in d.cut.plain and d.stats["plain"] == 1       # the plain step priced at the next start
+    sp = d.req["spans"]                                            # the report's spans: what priced the time
+    assert sp["plain"][0] == 1 and sp["unpriced"][0] == 1 and "spans=" in d.report(), sp
+    short = list(range(50))
+    d.reset()
+    d.sync(short, _rows(0, 50), 0)
+    assert d.propose_tree(short, 8).n_draft > 0 and d.cls == 0     # another class drafts as before
+    return "plain where drafting costs more a token, rows kept; the plain step priced; class 0 untouched"
+
+
+def test_the_warm_up_rounds_price_nothing():
+    """P0 (2026-10-12): the first request after a start drafted its 1k rounds at 22.4 ms a token
+    against 17.8 later (graph captures, first kernel calls) and 1k took the plain step after it. The
+    server's warm-up now decodes `WARM_TOKENS` through the rounds inside `warming`: the cut learns
+    nothing, keeps no turn or probe state, and the usual answer length stays."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 0)
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False))
+    prompt = list(range(50))
+    with d.warming():
+        assert d.cut.frozen
+        d.reset()
+        d.sync(prompt, _rows(0, 50), 0)
+        for i in range(4):
+            d.propose_tree(prompt + [100 + j for j in range(i)], 8)
+            d.on_verify(3, 500.0)
+            d.observe([100 + i])
+            d.sync([100 + i], _rows(50 + i, 1), 50 + i)
+            d.cut.observe_plain(400.0, 0)
+            d.cut.observe_spec(900.0, 0, 1)
+            d.cut.skip(0)
+    assert not d.cut.frozen and d.cut.plain == {} and d.cut.spec == {} and d.cut.prices.V == {}
+    assert d.cut.skipped == {} and d.cut.plain_turns == {} and d.answer == 256.0 and d.req["tokens"] == 0
+    assert d.cut.draft == {}
+    return f"{MTPTreeDrafter.WARM_TOKENS} warm-up tokens through the rounds: nothing priced, no state kept"
+
+
+def test_a_plain_turn_reads_nothing_and_the_next_resumes_past_it():
+    """P0: a turn whose saving does not pay for its backlog takes the plain step throughout, drops the
+    backlog and reads no row; the next turn that drafts puts the head at the first row it has not read
+    (rows it skipped stay unread: they change a draft, never the text)."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0, price_class=lambda n: 262_144)
+    head = _StubHead()
+    resumed = []
+    head.resume = lambda n: (resumed.append(n), setattr(head.st, "length", n))
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel({"262144": {"chain": {"1": 60.0, "2": 70.0},
+                                                                    "plain": {"1": 24.7}, "spec": {"1": 25.4},
+                                                                    "prime": {"1": 0.28}}}), siblings=False))
+    prompt = list(range(5000))
+    d.reset()
+    d.sync(prompt, _rows(0, 5000), 0)
+    assert d.propose_tree(prompt, 8) is None and d.req["turn"] is False
+    assert d.queue == [] and d.held is None and head.st.length == 0      # the backlog dropped, nothing read
+    d.sync([9], _rows(5000, 1), 5000)
+    assert d.held is None                                               # rows of a plain turn are not kept
+    assert d.propose_tree(prompt + [9], 8) is None and d.stats["skipped"] == 2
+    # the next request: drafting pays now (learned), the head resumes past the rows it skipped
+    for _ in range(40):
+        d.cut.observe_spec(10.0, 262_144)
+    d.reset()
+    nxt = prompt + [9, 10, 11]
+    d.sync([10, 11], _rows(5001, 2), 5001)
+    tree = d.propose_tree(nxt, 8)
+    assert resumed == [len(nxt) - 1 - 2] and tree is not None and d.req["turn"] is True, (resumed, tree)
+    return "a plain turn drops and skips; the next drafting turn resumes the head at 5,001"
+
+
+def test_the_price_classes():
+    """Dense contexts are class 0; past that the classes run 4,096, 6,144, 8,192, 12,288 ... 262,144 (a
+    verify's cost grows with the context inside the sparse attention's own classes)."""
+    s = types.SimpleNamespace(fn=types.SimpleNamespace(qsa_class=lambda n: 0 if n <= 2048 else 1024))
+    pc = lambda n: FlashNextServing.price_class(s, n)
+    got = [pc(n) for n in (1000, 2049, 5000, 32_000, 40_000, 140_000, 200_000, 260_800)]
+    assert got == [0, 4096, 6144, 32_768, 49_152, 196_608, 262_144, 262_144], got
+    return "0, then 4,096 x 2^k and 6,144 x 2^k up to 262,144"
+
+
 def test_walk_and_kv_length():
     fn = _FN()
     s = FlashNextServing(fn, 64)
@@ -204,8 +301,13 @@ def test_walk_and_kv_length():
     s.st.pool_n = {3: 5}
     s.kv.length = 2
     assert s.st.length == 2 and s.st.pool_n[3] == 0
+    s.st.k[3][:, 1] = 5.0                              # a row in place (a resident conversation's)
     s.kv.length = 0
-    assert fn.resets == 1 and s.st.length == 0
+    # a new sequence in place: the length and the recurrent sections, never the rows (a guest runs from
+    # row 0 over a resident conversation whose rows its stash may not hold, engine/cache.py)
+    assert fn.resets == 0 and s.st.length == 0 and float(s.st.k[3][0, 1, 0]) == 5.0
+    s.reset()
+    assert fn.resets == 1
     try:
         s.forward(torch.tensor([1]), start=5)
         raise AssertionError("a forward off the state's length must be refused")

@@ -4,7 +4,10 @@ The loop syncs the rows it committed (`sync(tokens, streams, pos)`); a row's MTP
 streams with the token after it, known when the next row arrives or, for the last row, when the next
 proposal names its anchor. The backlog goes into the head's cache in one call (`head.prime`) except
 the last `depth` + 1 rows, which ride the round's own feed (`head.launch`); the round's draft is cut by
-StairCut (engine/methods/staircut.py), which learns from the verify the loop timed (`on_verify`).
+StairCut (engine/methods/staircut.py), which learns what each round cost: the wall time from this
+round's start to the next's (the draft, the verify, the commit, the stream and the loop's own work,
+less the draft), and for a plain step the same span -- what the round really took, so the cut weighs
+a block against the plain step on one clock. A round that captured a graph teaches nothing.
 
 What it asks of the head (Flash-Next's: engine/models/flashnext/mtp.py): `depth`, `reset()`,
 `prime(rows, nexts)`, `capture_all()`, `launch(rows, nexts)` (asynchronous), `read()` -> per depth
@@ -17,6 +20,15 @@ suffix store, which the server hands to it through `add_store`) adds its best co
 round's cut (ENG-229): the head and the lookup in one tree, one verify. It is asked while the draft
 runs, as deep as its match allows.
 
+Context classes: the engine's `price_class(n)` (absent: one class) names the class of a round whose
+context is n tokens; the cut prices it there, the plain steps the loop takes are priced there
+(`on_plain`), and where the cut keeps choosing the anchor alone the round takes the plain step with no
+draft at all (`StairCut.skip`). A turn's first round weighs the backlog the head has not read against
+what drafting would save over an answer of the usual length (`StairCut.turn`); a turn that does not
+draft drops its rows (the head reads nothing this turn), and the next one that drafts resumes the
+head at its own position past the rows it skipped -- rows it never read change a draft, never the
+text.
+
 The caches (ENG-157) keep the head's cache with the engine's rows: `kv_views` (the resident prefix,
 the disk tier, the spill), `state_snapshot` / `state_restore` (the state store) and `state_resume(n)`
 (a resume in place). After a resume at n the head holds rows below n - 1 and the row at n - 1 waits for
@@ -26,6 +38,7 @@ it is stale; it changes a draft, never the text (the verify decides).
 
 from __future__ import annotations
 
+import contextlib
 import time
 
 import torch
@@ -48,19 +61,63 @@ class MTPTreeDrafter:
         self.queue: list = []               # (streams, next tokens) not fed yet
         self.round = None                   # the draft ms of the block awaiting its verify
         self.verify_ms = None
-        self.stats = {"rounds": 0, "draft_ms": 0.0, "fed_rows": 0, "looked": 0}
+        self.stats = {"rounds": 0, "draft_ms": 0.0, "fed_rows": 0, "looked": 0, "skipped": 0, "plain": 0}
+        self.req = self._req()              # this request's own counts (the verbose report)
+        self.cls = 0                        # the context class of the last round
+        self._t_prev = None                 # the last round's start (perf_counter)
+        self._cls_prev = 0
+        self._obs = None                    # what the last round was, to price at the next start
+        self._plain = None                  # a plain step was taken: None, or whether it captured
+        self._captured = False              # this round's draft captured a graph
+        self._turn = None                   # this request drafts (True), takes plain steps (False), or undecided
+        self.answer = 256.0                 # the usual answer length, tokens (EMA 0.2 of the requests')
+        self._prime_ms = 0.0                # the last feed's backlog prime, ms
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
         c = self.cut
-        V, delta = c.prices.learned(c.kind)
-        return (f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} looked={self.stats['looked']} "
+        V, delta = c.prices.learned(c.kind, self.cls)
+        q = self.req
+        return (f"mtp request: turn={q['turn']} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
+                f"draft_ms={q['draft_ms']:.0f} verify_ms={q['verify_ms']:.0f} ({q['verify_rows']} rows) "
+                f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows) "
+                f"spans={ {k: [n, round(ms), t] for k, (n, ms, t) in q['spans'].items()} } "
+                f"spec_ms={c.spec_ms(self.cls) if c.spec_ms(self.cls) is None else round(c.spec_ms(self.cls), 2)} | "
+                f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} looked={self.stats['looked']} "
+                f"skipped={self.stats['skipped']} plain={self.stats['plain']} class={self.cls} "
+                f"plain_ms={round(c.plain[self.cls], 2) if self.cls in c.plain else None} "
                 f"draft_ms={c.draft_ms if c.draft_ms is None else round(c.draft_ms, 2)} delta={round(delta, 2)} "
                 f"V={ {r: round(v, 1) for r, v in sorted(V.items())} } "
                 f"spine_cal={[round(c.cal.q('spine', (b + 0.5) / 10), 2) for b in range(10)]}")
 
+    @staticmethod
+    def _req() -> dict:
+        return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
+                "prime_ms": 0.0, "prime_rows": 0, "tokens": 0, "turn": None,
+                "spans": {"block": [0, 0.0, 0], "plain": [0, 0.0, 0], "unpriced": [0, 0.0, 0]}}
+
+    WARM_TOKENS = 96        # the server's warm-up decodes this many through the rounds (`warming`)
+
     def capture_all(self) -> None:
         self.head.capture_all()
+
+    @contextlib.contextmanager
+    def warming(self):
+        """The server's warm-up runs inside: the cut learns nothing (`StairCut.frozen`) and keeps no
+        turn or probe state, the usual answer length stays. The first request after a start drafted its
+        1k rounds at 22.4 ms a token against 17.8 later (2026-10-12: the class's verify and commit
+        graphs captured in it, and the kernels' first calls); priced on that request, 1k took the plain
+        step for its next turns. The warm-up's own rounds pay for those instead."""
+        cut, answer, frozen = self.cut, self.answer, self.cut.frozen
+        cut.frozen = True
+        try:
+            yield
+        finally:
+            cut.frozen = frozen
+            for d in (cut.skipped, cut.probe, cut.plain_turns, cut.age, cut.returned):
+                d.clear()
+            self.reset()
+            self.answer = answer
 
     # --- the loop's drafter interface -------------------------------------------------------------
     def reset(self) -> None:
@@ -69,6 +126,11 @@ class MTPTreeDrafter:
             self.ngram.reset()
         self.pending = None
         self.held, self.queue, self.round, self.verify_ms = None, [], None, None
+        self._t_prev, self._obs, self._plain = None, None, None
+        if self.req["tokens"]:
+            self.answer = 0.8 * self.answer + 0.2 * max(32, self.req["tokens"])
+        self.req = self._req()
+        self._turn = None
 
     def prime(self, tokens: list[int]) -> None:
         # the prompt's rows come through `sync`; the lookup indexes its tokens
@@ -79,6 +141,8 @@ class MTPTreeDrafter:
         pass                                # the draft is the greedy tree; a sampled walk draws on it
 
     def sync(self, tokens: list[int], streams: torch.Tensor, pos: int, rows=None) -> None:
+        if self._turn is False:
+            return                          # a plain turn: the head reads nothing (`_start_turn`)
         toks = [int(t) for t in tokens]
         h = streams.reshape(len(toks), -1)
         if h.shape[0] <= 64:
@@ -91,14 +155,30 @@ class MTPTreeDrafter:
     def observe(self, tokens: list[int]) -> None:
         if self.ngram is not None:
             self.ngram.observe(tokens)
-        # a round that captured a graph took the capture's time: StairCut learns nothing from it
-        # (its price for that row count would start at ~170 ms and the cut would never ask again)
-        if self.round is not None and self.verify_ms is not None and not self.s.captured:
-            self.cut.observe(list(range(len(tokens))), self.verify_ms + self.s.commit_ms, self.round)
-        self.round, self.verify_ms = None, None
+        self.req["tokens"] += len(tokens)
+        # priced at the next round's start, by the wall time between the two; a round that captured a
+        # graph took the capture's time and teaches nothing (its price for that row count would start
+        # at ~170 ms and the cut would never ask again)
+        if self._plain is not None:
+            # a plain step after a draft that captured a graph carries the capture's time too
+            self._obs = None if self._plain or self._captured else ("plain",)
+        elif self.round is not None and self.verify_ms is not None and not self.s.captured:
+            self._obs = ("block", list(range(len(tokens))), self.round, len(tokens))
+        else:
+            self._obs = None
+        self._plain, self.round, self.verify_ms = None, None, None
 
     def on_verify(self, rows: int, ms: float) -> None:
         self.verify_ms = ms
+        self.req["verify_ms"] += ms
+        self.req["verify_rows"] += rows
+
+    def on_plain(self, ms: float) -> None:
+        """The loop took a plain step (the cut chose the anchor alone, or the round skipped its draft):
+        its cost prices the plain step of this round's class."""
+        self.stats["plain"] += 1
+        self.req["plain"] += 1
+        self._plain = bool(getattr(self.s, "plain_captured", False))   # a capture's time is not the step's
 
     def propose_tree(self, context: list[int], k: int) -> DraftTree | None:
         return run_steps(self.propose_tree_steps(context, k))
@@ -107,24 +187,74 @@ class MTPTreeDrafter:
         """The block for the round anchored at context[-1]: the backlog fed, the draft launched (the
         generator stops there so the loop streams the last block meanwhile), the cut."""
         t0 = time.perf_counter()
+        if self._t_prev is not None:
+            ms = (t0 - self._t_prev) * 1e3
+            self.req["wall_ms"] += ms
+            # the request's spans by what priced them: drafted rounds, plain steps, unpriced (a capture)
+            span = self.req["spans"][self._obs[0] if self._obs is not None else "unpriced"]
+            span[0] += 1
+            span[1] += ms
+            span[2] += self._obs[3] if self._obs is not None and self._obs[0] == "block" else 0
+        if self._obs is not None and self._t_prev is not None:
+            if self._obs[0] == "plain":
+                self.cut.observe_plain(ms, self._cls_prev)
+            else:
+                self.cut.observe(self._obs[1], ms - self._obs[2], self._obs[2])
+                self.cut.observe_spec(ms, self._cls_prev, self._obs[3])
+        self._obs, self._t_prev, self._captured = None, t0, False
+        self.cls = self.s.price_class(len(context)) if hasattr(self.s, "price_class") else 0
+        self._cls_prev = self.cls
+        if self._turn is None:
+            self._start_turn(len(context))
+        if self._turn is False:
+            self.stats["skipped"] += 1
+            return None
+        if self.cut.skip(self.cls):
+            # no draft this round: the rows wait in the queue for the next one that drafts
+            if self.held is not None:
+                ht, hs = self.held
+                self.queue.append((hs, ht[1:] + [int(context[-1])]))
+                self.held = None
+            self.round = None
+            self.stats["skipped"] += 1
+            return None
         if not self._feed(int(context[-1])) or k < 1:
             return None
         rows, nexts = self.pending
         self.pending = None
+        c0 = getattr(self.head, "captures", 0)
         self.head.launch(rows, nexts)
+        captured = self._captured = getattr(self.head, "captures", 0) != c0
         host = time.perf_counter() - t0
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()
         look = self._look(context)
         tok, prob = self.head.read()
-        toks, parents = self.cut.cut(int(context[-1]), tok, prob, look)
+        toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
         tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
-        self.round = (host + time.perf_counter() - t1) * 1e3
+        # less the backlog's prime (rows a skipped round left: owed whether this round drafts or not);
+        # a round whose draft captured a graph teaches nothing (its time is the capture's)
+        ms = (host + time.perf_counter() - t1) * 1e3 - self._prime_ms
+        self.round = None if captured else ms
         self.stats["rounds"] += 1
-        self.stats["draft_ms"] += self.round
+        self.stats["draft_ms"] += ms
+        self.req["rounds"] += 1
+        self.req["draft_ms"] += ms
         return tree
+
+    def _start_turn(self, n: int) -> None:
+        """The turn's first round (context n tokens): the head is put at the position of the first row
+        it has not read (past rows a plain turn skipped), then StairCut decides whether the turn drafts;
+        a plain turn drops the backlog."""
+        unfed = sum(len(q[1]) for q in self.queue) + (len(self.held[0]) if self.held is not None else 0)
+        at = max(0, n - 1 - unfed)
+        if self.head.st.length < at:
+            self.head.resume(at)
+        self._turn = self.req["turn"] = bool(self.cut.turn(self.cls, unfed, self.answer))
+        if not self._turn:
+            self.held, self.queue, self.pending = None, [], None
 
     def _look(self, context: list[int]) -> tuple | None:
         """The lookup's best continuation and its share of the vote (smoothed as the lookup's own
@@ -149,6 +279,7 @@ class MTPTreeDrafter:
         n = int(n)
         self.head.resume(max(0, n - 1))
         self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self._t_prev, self._obs, self._plain = None, None, None
         self.held = ([0], self.s.last_streams().clone()) if n > 0 else None
 
     def state_snapshot(self) -> dict:
@@ -163,6 +294,7 @@ class MTPTreeDrafter:
             t.narrow(ax, 0, L).copy_(x)
         self.head.resume(L)
         self.pending, self.queue, self.round, self.verify_ms = None, [], None, None
+        self._t_prev, self._obs, self._plain = None, None, None
         self.held = ([0], self.s.last_streams().clone())
 
     # --- internals -------------------------------------------------------------------------------
@@ -187,8 +319,15 @@ class MTPTreeDrafter:
         nexts = [t for q in self.queue for t in q[1]]
         self.queue = []
         n, keep = len(nexts), min(len(nexts), self.depth + 1)
+        self._prime_ms = 0.0
         if n > keep:
+            t0 = time.perf_counter()
             self.head.prime(rows[:n - keep], nexts[:n - keep])
+            self._prime_ms = (time.perf_counter() - t0) * 1e3
+            self.req["prime_ms"] += self._prime_ms
+            self.req["prime_rows"] += n - keep
+            if n - keep >= 64:
+                self.cut.observe_prime(self._prime_ms / (n - keep), self.cls)
         self.pending = (rows[n - keep:], nexts[n - keep:])
         self.stats["fed_rows"] += n
         return True

@@ -166,6 +166,48 @@ def test_the_resident_prefix_resumes_a_new_model_exactly():
     return "anchors of 2 sections on the grid; turn 2 resumed at 96, equal to a cold run"
 
 
+class _LandingKV:
+    """A length whose read lands a pending block first, as Flash-Next's does (its chain commit): the
+    rows it writes are the guest's last block."""
+
+    def __init__(self, eng, max_len):
+        self.eng, self._len, self.max_len, self.pages, self.pending = eng, 0, max_len, None, None
+
+    @property
+    def length(self):
+        if self.pending is not None:
+            p, n = self.pending
+            self.pending = None
+            self.eng.va[:, p:p + n] = 9.0                    # the block's rows, written now
+            self._len = p + n
+        return self._len
+
+    @length.setter
+    def length(self, v):
+        self._len = int(v)
+
+
+def test_a_guest_whose_last_block_lands_late_leaves_the_resident_rows_intact():
+    """2026-10-12 (P0 follow-up): settle_guest put the resident's rows back and then read the engine's
+    length; on an engine whose length lands a pending block when read (Flash-Next), that block's rows
+    went over the restored ones, and the next turn answered differently from a cold prefill. The length
+    is read before the rows go back."""
+    eng, res = Toy(), cache.ResidentPrefix(BIG, CH, stash_bytes=BIG)
+    eng.kv = _LandingKV(eng, 512)
+    turn1 = tokens(100, seed=3)
+    cache.prefill(eng, None, turn1, "cpu", chunk=CH, resident=res)
+    guest = tokens(20, seed=9)
+    cache.prefill(eng, None, guest, "cpu", chunk=CH, resident=res)
+    assert res._stash is not None                            # a guest: the resident's rows were stashed
+    eng.kv.pending = (20, 4)                                 # its last block, not landed yet
+    turn2 = turn1 + tokens(30, seed=4)
+    lg, reused, _ = cache.prefill(eng, None, turn2, "cpu", chunk=CH, resident=res)
+    assert reused == 96, reused
+    ref, ref_lg = _cold(turn2)
+    _same(eng, ref, len(turn2), lg, ref_lg)
+    return "the guest's late block landed before the restore; turn 2 equal to a cold run"
+
+
 def _tier(d):
     return disk_cache.DiskTier(d, chunk=CH, fingerprint="toy", settings={"admit_after": 1, "budget_gb": 1},
                                free_bytes=lambda p: 10 ** 15, head_anchors=2, min_tokens=CH).open()
