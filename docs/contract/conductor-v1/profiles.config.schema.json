@@ -24,6 +24,7 @@
           "hermes",
           "curl",
           "dashboard",
+          "chat-app",
           "other"
         ]
       },

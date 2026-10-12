@@ -1773,6 +1773,7 @@
    "hermes",
    "curl",
    "dashboard",
+   "chat-app",
    "other"
   ],
   "state_kinds": [
@@ -3639,6 +3640,7 @@
         "hermes",
         "curl",
         "dashboard",
+        "chat-app",
         "other"
        ]
       },
