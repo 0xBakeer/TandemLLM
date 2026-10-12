@@ -15,6 +15,8 @@ export default defineConfig({
   outputDir: 'e2e-chat-live-artifacts',
   use: {
     ...devices['Desktop Chrome'],
+    // the full Chromium in its new headless mode: the headless shell denies notifications (VIS-110)
+    channel: 'chromium',
     baseURL: process.env.PW_BASE ?? 'http://127.0.0.1:4180/dashboard/',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
