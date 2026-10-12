@@ -5,7 +5,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /chat-live\.spec\.ts$/,
+  testMatch: /chat-live2?\.spec\.ts$/,
   timeout: 10 * 60_000,
   expect: { timeout: 15_000 },
   fullyParallel: false,

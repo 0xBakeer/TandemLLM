@@ -736,7 +736,9 @@ export class MockChatBackend implements ChatBackend {
     FILES[path] = content;
   }
   async artifact(_id: string, ref: string) {
-    const a = ARTIFACTS[ref];
+    // the server's default refs, as the mock's seeded artifacts
+    const alias: Record<string, string> = { 'diff:': 'diff:worker', 'file:/workspace/index.html': 'preview:shop-page' };
+    const a = ARTIFACTS[alias[ref] ?? ref];
     if (!a) throw new Error(`no artifact ${ref}`);
     return a;
   }

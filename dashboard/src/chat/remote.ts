@@ -210,7 +210,7 @@ export class RemoteChatBackend implements ChatBackend {
     await call<void>(`/conversations/${enc(id)}/sandbox/file?path=${encodeURIComponent(path)}`, { method: 'PUT', body: content, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...(etag ? { 'If-Match': etag } : {}) } });
   }
   artifact(id: string, ref: string) {
-    return call<{ kind: string; content: string; mime: string; title: string }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
+    return call<{ kind: string; content: string; mime: string; title: string; url?: string }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
   }
 
   terminal(id: string, session: string, onData: (data: string) => void): TerminalSession {

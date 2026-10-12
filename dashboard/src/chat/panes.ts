@@ -35,7 +35,7 @@ export class QseChatPanes extends LightElement {
   @property({ type: String }) convId: string | null = null;
   @property({ type: Boolean }) sheet = false;
   @state() private plus = false;
-  @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string }>();
+  @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string; url?: string }>();
   @state() private files = new Map<string, SandboxFile[]>();
   @state() private file: { path: string; content: string; mime: string; bytes: number; etag?: string } | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
@@ -64,13 +64,18 @@ export class QseChatPanes extends LightElement {
     if (p.kind === 'preview' || p.kind === 'diff' || p.kind === 'markdown' || p.kind === 'image') {
       if (!p.inline && !this.artifacts.has(p.ref)) void this.loadArtifact(p.ref);
     } else if (p.kind === 'files') {
-      if (!this.files.has('/work/sync')) void this.loadDir('/work/sync');
+      if (!this.files.has(this.root)) void this.loadDir(this.root);
       if (p.ref && p.ref.startsWith('/') && this.file?.path !== p.ref && changed.has('active')) void this.openFile(p.ref);
     } else if (p.kind === 'terminal') {
       this.ensureTerminal(p);
       const el = this.querySelector<HTMLElement>('.ch-term-screen');
       if (el) el.scrollTop = el.scrollHeight;
     }
+  }
+
+  /** the sandbox's working directory (the server's /workspace; the mock's seeded project) */
+  private get root(): string {
+    return this.conv?.sandbox?.cwd || '/work/sync';
   }
 
   private async loadArtifact(ref: string): Promise<void> {
@@ -212,6 +217,9 @@ export class QseChatPanes extends LightElement {
     if (!a) return html`<p class="muted small ch-pane-empty">loading</p>`;
     if (a.kind === 'error') return html`<p class="ch-pane-empty err-ink">${a.content}</p>`;
     const doc = a.mime === 'image/svg+xml' ? `<!doctype html><html><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#fff">${a.content}</body></html>` : a.content;
+    // a file or a port in the sandbox loads by its address, so its own scripts and styles load too;
+    // the iframe never gets allow-same-origin (CONTRACT section 5)
+    const url = 'url' in a ? a.url : undefined;
     const w = this.previewWidth === 'phone' ? 390 : this.previewWidth === 'desktop' ? 1200 : null;
     return html`<div class="ch-preview">
       <div class="ch-pane-bar">
@@ -222,21 +230,28 @@ export class QseChatPanes extends LightElement {
         </div>
         <button type="button" class="btn btn-ghost btn-sm" title="Reload" aria-label="Reload" @click=${() => {
           const f = this.querySelector<HTMLIFrameElement>('.ch-preview iframe');
-          if (f) f.srcdoc = f.srcdoc;
+          if (f && url) f.src = url;
+          else if (f) f.srcdoc = f.srcdoc;
         }}>${icon('refresh')}</button>
         <button type="button" class="btn btn-ghost btn-sm" title="Open in a new tab" aria-label="Open in a new tab" @click=${() => {
-          const url = URL.createObjectURL(new Blob([doc], { type: 'text/html' }));
-          window.open(url, '_blank', 'noopener');
-          setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          if (url) {
+            window.open(url, '_blank', 'noopener');
+            return;
+          }
+          const blob = URL.createObjectURL(new Blob([doc], { type: 'text/html' }));
+          window.open(blob, '_blank', 'noopener');
+          setTimeout(() => URL.revokeObjectURL(blob), 10_000);
         }}>${icon('external')}</button>
       </div>
-      <div class="ch-preview-frame ${w ? 'is-sized' : ''}"><iframe title=${a.title} sandbox="allow-scripts" referrerpolicy="no-referrer" .srcdoc=${doc} style=${w ? `width:${w}px` : ''}></iframe></div>
+      <div class="ch-preview-frame ${w ? 'is-sized' : ''}">${url
+        ? html`<iframe title=${a.title} sandbox="allow-scripts allow-forms allow-popups allow-modals" referrerpolicy="no-referrer" src=${url} style=${w ? `width:${w}px` : ''}></iframe>`
+        : html`<iframe title=${a.title} sandbox="allow-scripts" referrerpolicy="no-referrer" .srcdoc=${doc} style=${w ? `width:${w}px` : ''}></iframe>`}</div>
     </div>`;
   }
 
   private renderFiles(p: OpenPane): TemplateResult {
     void p;
-    const root = '/work/sync';
+    const root = this.root;
     const tree = (dir: string, depth: number): TemplateResult[] => {
       const list = this.files.get(dir);
       if (!list) return [html`<li class="muted small" style="padding-left:${depth * 14 + 8}px">loading</li>`];
@@ -302,9 +317,9 @@ export function defaultPane(k: PaneKind): PaneRef {
     case 'files':
       return { kind: 'files', ref: '', title: 'Files' };
     case 'preview':
-      return { kind: 'preview', ref: 'preview:shop-page', title: 'Preview' };
+      return { kind: 'preview', ref: 'file:/workspace/index.html', title: 'Preview' };
     case 'diff':
-      return { kind: 'diff', ref: 'diff:worker', title: 'Diff' };
+      return { kind: 'diff', ref: 'diff:', title: 'Diff' };
     case 'image':
       return { kind: 'image', ref: 'image:acceptance', title: 'Image' };
     case 'plan':

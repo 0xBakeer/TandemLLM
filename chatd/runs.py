@@ -117,6 +117,7 @@ class Run:
         self.compacted = False
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
+        self.step_usage: list[dict] = []       # per model call: prompt, cached, cache source
         self.snapshotted = False
         self.waiting: dict[str, dict] = {}     # call id -> {"event", "answer"} while a prompt waits
 
@@ -318,6 +319,13 @@ class Run:
                 self.usage = {"usage": u, "timings": obj.get("timings") or {},
                               "metrics": obj.get("metrics") or {},
                               "tandem": (u.get("tandem") or obj.get("tandem"))}
+                t = obj.get("timings") or {}
+                self.step_usage.append({"step": self.step,
+                                        "prompt_tokens": int(u.get("prompt_tokens") or 0),
+                                        "cached_tokens": int((u.get("prompt_tokens_details") or {})
+                                                             .get("cached_tokens") or 0),
+                                        "cache_source": t.get("cache_source"),
+                                        "ttft_ms": t.get("ttft_ms")})
                 self.acc["completion"] += int(u.get("completion_tokens") or 0)
                 self.acc["reasoning"] += int((u.get("completion_tokens_details") or {})
                                              .get("reasoning_tokens") or 0)
@@ -474,6 +482,7 @@ class Run:
             "reasoning_tokens": int(self.acc["reasoning"] or ctd.get("reasoning_tokens") or
                                     self.thinking_tokens),
             "steps": self.step,
+            "step_usage": self.step_usage[-50:],
             "cached_tokens": int(ptd.get("cached_tokens") or 0),
             "tokens_per_round": t.get("tokens_per_block") or spec.get("mean_acceptance_length"),
             "acceptance": spec.get("draft_acceptance_rate"),

@@ -102,7 +102,8 @@ export interface ChatBackend {
   /** PUT with If-Match; a changed file throws */
   writeFile(id: string, path: string, content: string, etag?: string): Promise<void>;
   /** an artifact the model produced (an html preview, a diff, an image) */
-  artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string }>;
+  /** `url`: a same-origin address the preview loads in its sandboxed iframe (the server's files) */
+  artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string; url?: string }>;
   terminal(id: string, session: string, onData: (data: string) => void): TerminalSession;
 }
 
