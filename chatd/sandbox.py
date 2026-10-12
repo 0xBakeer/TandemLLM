@@ -305,10 +305,13 @@ class Sandboxes:
             self._changed(b)
             try:
                 b.container = self._start(cid)
-            except Unavailable as exc:
+                # a fresh workspace is a git repository, for the agent's own history
+                self.run(cid, ["bash", "-lc", "[ -d .git ] || git init -q . 2>/dev/null; true"],
+                         timeout=20)
+            except (Unavailable, OSError) as exc:
                 b.state, b.error = "error", str(exc)
                 self._changed(b)
-                raise
+                raise Unavailable(str(exc)) from None
             b.state, b.stopped_reason = "running", None
             b.started = b.last_used = self.clock()
             self._proxy(b)
@@ -363,9 +366,6 @@ class Sandboxes:
         st, info = self.engine.call("POST", f"/containers/{container}/start")
         if st not in (204, 304):
             raise Unavailable(f"the sandbox did not start ({st})")
-        # a fresh workspace is a git repository, for the agent's own history
-        self.run(container, ["bash", "-lc", "[ -d .git ] || git init -q -b main . 2>/dev/null || "
-                             "true"], timeout=20)
         return container
 
     # ------------------------------------------------------------------ stop, reset
@@ -431,8 +431,7 @@ class Sandboxes:
     def run(self, container_or_cid: str, cmd: list[str], *, timeout: float = 600,
             on_output=None, cancel: threading.Event | None = None) -> tuple[int, bool]:
         """Run `cmd` to its end; (exit code, timed out). Output goes to `on_output(text)`."""
-        cid = next((c for c, b in self.boxes.items() if b.container == container_or_cid),
-                   container_or_cid)
+        cid = container_or_cid
         b = self.box(cid)
         b.busy += 1
         b.last_used = self.clock()
