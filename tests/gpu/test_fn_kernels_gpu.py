@@ -41,11 +41,13 @@ def _x(M, K_, seed, scale=1.0):
 
 def test_gemv_reference_and_rows():
     out = []
-    for N, Kk, kind in ((324, 10240, "int8"), (513, 2560, "fp16"), (96, 2560, "fp16"), (10240, 2560, "fp16")):
+    for N, Kk, kind in ((324, 10240, "int8"), (324, 10240, "int8g"), (513, 2560, "fp16"), (96, 2560, "fp16"),
+                        (10240, 2560, "fp16")):
         g = torch.Generator(device=DEV).manual_seed(N)
         w16 = (torch.randn(N, Kk, generator=g, device=DEV) * 0.02).half()
-        w = Int8Rows.of(w16) if kind == "int8" else w16
-        wf = w.dequant() if kind == "int8" else w16.float()
+        # int8g: a scale a group of 128 weights (ENG-221, the served mixers)
+        w = Int8Rows.of(w16) if kind == "int8" else Int8Rows.of(w16, 128) if kind == "int8g" else w16
+        wf = w.dequant() if kind != "fp16" else w16.float()
         x = _x(32, Kk, 1)
         y = K.gemv(x, w)
         ref = x.float() @ wf.T
@@ -60,11 +62,11 @@ def test_gemv_reference_and_rows():
 
 def test_mix_up_reference_and_rows():
     R, HC = 320, 4
-    for kind in ("int8", "fp16"):
+    for kind in ("int8", "int8g", "fp16"):
         g = torch.Generator(device=DEV).manual_seed(5)
         w16 = (torch.randn(HC * H, R, generator=g, device=DEV) * 0.05).half()
-        w = Int8Rows.of(w16) if kind == "int8" else w16
-        wf = w.dequant() if kind == "int8" else w16.float()
+        w = Int8Rows.of(w16) if kind == "int8" else Int8Rows.of(w16, 64) if kind == "int8g" else w16
+        wf = w.dequant() if kind != "fp16" else w16.float()
         d = torch.randn(32, R, generator=g, device=DEV) * 2
         n = _x(32, HC * H, 6)
         x = K.mix_up(d, n, w, HC)

@@ -483,15 +483,17 @@ MM = _S.get("FN_PREFILL_MM")
 
 
 def mm_rows(x: torch.Tensor, w) -> torch.Tensor:
-    """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 rows with an fp32 scale
-    (`pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
+    """x [M, K] bf16 @ W^T -> fp32 [M, N] on the library GEMM: W int8 with fp32 scales (a row's or a
+    group's, `pack.Int8Rows`) or fp16 [N, K]. `MM` fp32: the weights exact in fp32, fp32 sums; fp16: int8 rows
     dequantised to fp16 (q s in fp32, rounded once), x rounded to fp16, the tensor cores."""
     if MM == "fp32":
-        wf = w.q.float() * w.s.view(-1, 1) if hasattr(w, "q") else w.float()
+        wf = w.dequant() if hasattr(w, "q") else w.float()
         return x.float() @ wf.T
     if hasattr(w, "q"):
+        N = w.q.shape[0]
+        sc = w.s.view(N, -1, 1)                          # a scale a row, or a group of the row's weights
         wf = torch.empty(w.q.shape, dtype=torch.float16, device=w.q.device)
-        torch.mul(w.q, w.s.view(-1, 1), out=wf)
+        torch.mul(w.q.view(N, sc.shape[1], -1), sc, out=wf.view(N, sc.shape[1], -1))
     else:
         wf = w if w.dtype == torch.float16 else w.half()
     return X._mm_fp32(x.half(), wf.T)

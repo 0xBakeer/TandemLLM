@@ -302,18 +302,31 @@ def test_int8_mixers_bound_and_fp16_flag():
     w = (torch.randn(320, 1024, generator=G) * 0.05).half()
     w[3] = 0
     w[7, 11] = 3.0                                            # an outlier row
-    q = P.mixer_weight(w, "int8")
+    q = P.mixer_weight(w, "int8rows")
     deq = q.dequant()
     err = (deq - w.float()).abs()
     bound = w.float().abs().amax(1, keepdim=True) / 254 + w.float().abs() * 2 ** -22
     assert (err <= bound).all()
-    assert deq[3].abs().max() == 0 and q.nbytes == 320 * 1024 + 320 * 4
+    assert deq[3].abs().max() == 0 and q.nbytes == 320 * 1024 + 320 * 4 and q.group is None
     rel = (err.max(1).values / w.float().abs().amax(1).clamp_min(1e-30)).max().item()
     assert P.mixer_weight(w, "fp16") is w
     x = torch.randn(2, 1024, generator=G).bfloat16()
     assert torch.equal(q.matmul(x), (x.float() @ deq.T).bfloat16())
-    _raises(lambda: P.mixer_weight(w, "int4"), "int8 or fp16")
-    return f"|w - q s| <= max|row| / 254 (worst relative {rel:.4f}); fp16 flag returns the pack's tensor"
+    _raises(lambda: P.mixer_weight(w, "int4"), "int8, int8rows or fp16")
+    # ENG-221, the default: a scale a group of 128 weights; the outlier row's other weights keep their
+    # resolution (their groups' scales, not the outlier's)
+    g = P.mixer_weight(w, "int8")
+    dg = g.dequant()
+    assert g.group == 128 and g.s.shape == (320, 8) and g.nbytes == 320 * 1024 + 320 * 8 * 4
+    eg = (dg - w.float()).abs().view(320, 8, 128)
+    gbound = w.float().abs().view(320, 8, 128).amax(2, keepdim=True) / 254 + w.float().abs().view(320, 8, 128) * 2 ** -22
+    assert (eg <= gbound).all() and dg[3].abs().max() == 0
+    row7 = (dg[7, 128:] - w.float()[7, 128:]).abs().max().item()
+    assert row7 < (deq[7, 128:] - w.float()[7, 128:]).abs().max().item() / 10
+    assert torch.equal(g.matmul(x), (x.float() @ dg.T).bfloat16())
+    assert P.mixer_weight(w[:, :320].contiguous(), "int8").group == 64        # the up weights' K: gcd(128, 320)
+    return (f"rows: |w - q s| <= max|row| / 254 (worst relative {rel:.4f}); groups of 128: bound a group, the "
+            f"outlier row's other weights 10x finer; fp16 flag returns the pack's tensor")
 
 
 def test_bad_hash_names_the_file():

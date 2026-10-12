@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections import Counter, defaultdict
@@ -339,8 +340,10 @@ class PackIndex:
                 else:
                     parts["attn_proj"] += t.nbytes
             elif t.kind == "mixer":
-                rows = t.shape[0]
-                parts["mixers"] += (t.nbytes // 2 * mixer_bytes + (4 * rows if mixer_bytes == 1 else 0))
+                rows, cols = t.shape[0], t.shape[-1]
+                # int8: an fp32 scale a group of gcd(MIX_GROUP, K) weights of a row (`mixer_weight`)
+                groups = cols // math.gcd(MIX_GROUP, cols)
+                parts["mixers"] += (t.nbytes // 2 * mixer_bytes + (4 * rows * groups if mixer_bytes == 1 else 0))
             elif n == "embed_tokens.weight":
                 parts["embed_row"] += t.shape[1] * DSIZE[t.dtype]
             elif n.endswith("mlp.gate.weight") or n.endswith("shared_expert_gate.weight"):
@@ -393,25 +396,33 @@ class PackIndex:
 
 
 # ------------------------------------------------------------------------------ int8 mixers
-#: the served mixer width: int8 rows with an fp32 scale (default), or the pack's fp16
+#: the served mixer width: int8 with an fp32 scale a group of MIX_GROUP weights (default), int8 with
+#: one scale a row (`int8rows`, as served until 2026-10-12), or the pack's fp16
 MIX = _S.get("FN_MIX")
+#: ENG-221: a row's largest weight is 10 to 420 times its median, so one scale a row left its small
+#: weights coarse: on code (8,192 tokens) KL 0.267 against the fp16 mixers, 0.0031 with a scale a
+#: group of 128 (the reference noise 0.0038); the loss sat in the down|inject weights of layers 0-11
+MIX_GROUP = 128
 
 
-def quant_int8_rows(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """w [N, K] (fp16) -> (q int8 [N, K], scale fp32 [N]), q = round(w / s), s = max|w_row| / 127.
-    Error bound: |w - q s| <= s / 2 = max|w_row| / 254 for every element, plus the fp32 rounding of
-    the product q s (<= 2^-22 |w|); an all-zero row has s = 0 and is exact. Deterministic (round half
-    to even)."""
-    wf = w.float()
-    s = wf.abs().amax(dim=1) / 127.0
+def quant_int8_rows(w: torch.Tensor, group: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """w [N, K] (fp16) -> (q int8 [N, K], scale fp32 [N] or, with `group` G, [N, K / G]), q = round(w / s),
+    s = max|w| / 127 over the row (or the group of G weights). Error bound: |w - q s| <= s / 2 for every
+    element, plus the fp32 rounding of the product q s (<= 2^-22 |w|); an all-zero row (group) has
+    s = 0 and is exact. Deterministic (round half to even)."""
+    N, K = w.shape
+    G = group or K
+    wf = w.float().view(N, K // G, G)
+    s = wf.abs().amax(dim=2) / 127.0
     safe = torch.where(s > 0, s, torch.ones_like(s))
-    q = torch.round(wf / safe[:, None]).clamp_(-127, 127).to(torch.int8)
-    return q, s
+    q = torch.round(wf / safe[..., None]).clamp_(-127, 127).to(torch.int8).view(N, K)
+    return q, (s.view(N) if group is None else s.contiguous())
 
 
 class Int8Rows:
-    """A mixer projection stored as int8 rows with an fp32 scale a row (engine orientation [N, K]).
-    `dequant()` is the weight the kernels multiply by: q * s in fp32."""
+    """A mixer projection stored as int8 with fp32 scales (engine orientation [N, K]): one scale a row
+    (`s` [N]) or one a group of `group` weights (`s` [N, K / group]). `dequant()` is the weight the
+    kernels multiply by: q * s in fp32."""
 
     __slots__ = ("q", "s")
 
@@ -419,12 +430,16 @@ class Int8Rows:
         self.q, self.s = q, s
 
     @classmethod
-    def of(cls, w: torch.Tensor) -> "Int8Rows":
-        return cls(*quant_int8_rows(w))
+    def of(cls, w: torch.Tensor, group: int | None = None) -> "Int8Rows":
+        return cls(*quant_int8_rows(w, group))
 
     @property
     def shape(self):
         return tuple(self.q.shape)
+
+    @property
+    def group(self) -> int | None:
+        return None if self.s.dim() == 1 else self.q.shape[1] // self.s.shape[1]
 
     @property
     def nbytes(self) -> int:
@@ -434,7 +449,10 @@ class Int8Rows:
         return Int8Rows(self.q.to(device), self.s.to(device))
 
     def dequant(self, dtype=torch.float32) -> torch.Tensor:
-        return (self.q.float() * self.s[:, None]).to(dtype)
+        if self.s.dim() == 1:
+            return (self.q.float() * self.s[:, None]).to(dtype)
+        N, K = self.q.shape
+        return (self.q.float().view(N, self.s.shape[1], -1) * self.s[..., None]).view(N, K).to(dtype)
 
     def matmul(self, x: torch.Tensor) -> torch.Tensor:
         """x [..., K] -> [..., N] in x's dtype: fp32 products of x and the dequantised weight."""
@@ -442,14 +460,17 @@ class Int8Rows:
 
 
 def mixer_weight(w: torch.Tensor, mode: str | None = None):
-    """The served form of a pack mixer weight: Int8Rows (QWEN38_FN_MIX=int8, the default) or the
-    fp16 tensor itself (QWEN38_FN_MIX=fp16)."""
+    """The served form of a pack mixer weight: int8 with a scale a group of gcd(MIX_GROUP, K) weights (the
+    down|inject weights' K is 10,240, groups of 128; the up weights' 320, groups of 64; QWEN38_FN_MIX=int8,
+    the default), int8 with one scale a row (`int8rows`), or the fp16 tensor itself (`fp16`)."""
     mode = mode or MIX
     if mode == "fp16":
         return w
+    if mode == "int8rows":
+        return Int8Rows.of(w)
     if mode != "int8":
-        raise ValueError(f"QWEN38_FN_MIX={mode!r}: int8 or fp16")
-    return Int8Rows.of(w)
+        raise ValueError(f"QWEN38_FN_MIX={mode!r}: int8, int8rows or fp16")
+    return Int8Rows.of(w, math.gcd(MIX_GROUP, w.shape[1]))
 
 
 # ------------------------------------------------------------------------------ shared tables

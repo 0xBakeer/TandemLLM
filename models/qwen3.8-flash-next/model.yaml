@@ -1,8 +1,9 @@
 # Qwen3.8-Flash-Next in TandemLLM: the setup guide's registry entry (docs/setup.md, OPS-97). Schema 1.
 #
 # turboderp's EXL3 packs, one profile each (ops/profiles/flashnext-<bpw>.env). weights_gib: the weights
-# with the draft layer and the int8 mixers on the device (3.05 measured: load stage `weights`; the
-# others from their file sizes, 2026-10-11); disk_gb: the pack with its n-gram table (3.05 measured,
+# with the draft layer and the int8 mixers on the device (3.05 measured: load stage `weights`, 2026-10-12
+# with the mixers' scale a group of 128 weights; the others from their file sizes, 2026-10-11, plus the
+# group scales' 0.02 GiB); disk_gb: the pack with its n-gram table (3.05 measured,
 # the others from the repository's file sizes; 4.05, 5.05 and 6.05 share one table file). table: the
 # n-gram table beside the weights, warm in the page cache or read past it (ENG-239). max_window: the
 # largest window that fits the Spark preset (SRV-337), from the estimate below calibrated on the SPD-99
@@ -67,7 +68,7 @@ profiles:
   format: exl3
   bpw: 2.05
   disk_gb: 61.5
-  weights_gib: 32.83
+  weights_gib: 32.85
   drafters_gib: 0.0
   hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
   hf_private: false
@@ -93,7 +94,7 @@ profiles:
   format: exl3
   bpw: 3.05
   disk_gb: 85.1
-  weights_gib: 47.63
+  weights_gib: 47.87
   drafters_gib: 0.0
   hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
   hf_private: false
@@ -120,7 +121,7 @@ profiles:
   format: exl3
   bpw: 4.05
   disk_gb: 106.1
-  weights_gib: 62.45
+  weights_gib: 62.47
   drafters_gib: 0.0
   hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
   hf_private: false
@@ -146,7 +147,7 @@ profiles:
   format: exl3
   bpw: 5.05
   disk_gb: 121.9
-  weights_gib: 77.14
+  weights_gib: 77.16
   drafters_gib: 0.0
   hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
   hf_private: false
@@ -172,7 +173,7 @@ profiles:
   format: exl3
   bpw: 6.05
   disk_gb: 137.7
-  weights_gib: 91.85
+  weights_gib: 91.87
   drafters_gib: 0.0
   hf_repo: turboderp/Qwen3.8-Flash-Next-exl3
   hf_private: false
