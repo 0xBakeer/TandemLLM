@@ -12,14 +12,16 @@ import { icon } from '../ui/bits';
 import type { ChatBackend } from './backend';
 import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, ToolInfo, ToolPolicy, UserToolkit } from './types';
 import { EFFORTS, effortWord, valveValues } from './types';
+import { NOTIFY_WORDS, notifyPrefs, notifyState, setNotifyPrefs, type NotifyKind } from './notify';
 
-export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'prompts' | 'sandbox';
+export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'prompts' | 'sandbox' | 'device';
 export const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'tools', label: 'Tools' },
   { id: 'packages', label: 'Skills and packages' },
   { id: 'mcp', label: 'MCP servers' },
   { id: 'prompts', label: 'Prompts and presets' },
   { id: 'sandbox', label: 'Sandbox' },
+  { id: 'device', label: 'This device' },
 ];
 
 @customElement('qse-chat-settings')
@@ -99,6 +101,8 @@ export class QseChatSettings extends LightElement {
         return this.renderPrompts();
       case 'sandbox':
         return this.renderSandbox();
+      case 'device':
+        return this.renderDevice();
     }
   }
 
@@ -365,6 +369,23 @@ export class QseChatSettings extends LightElement {
             : html`<button type="button" class="btn" @click=${() => (this.editPreset = { name: '', effort: 'high', thinking: true, tools: [] })}>${icon('plus')} New preset</button>`}
         </section>
       </div>`;
+  }
+
+  // ---- this device: notifications and the installed app (VIS-109) ------------------------------
+
+  private renderDevice(): TemplateResult {
+    const st = notifyState();
+    const prefs = notifyPrefs();
+    const installed = matchMedia('(display-mode: standalone)').matches;
+    return html`<h3 class="ch-settings-h">This device</h3>
+      <p class="ch-settings-lead">Notifications stay on this box: the dashboard shows them itself, no push service carries them. They name the chat and what happened, never what was written.</p>
+      <div class="ch-add-row" data-notify=${st}>
+        <span class="ch-mark ch-mark-${st === 'granted' ? 'running' : 'idle'}"><span class="ch-mark-dot" aria-hidden="true"></span>${st === 'granted' ? 'notifications on' : st === 'denied' ? 'blocked in the browser settings' : st === 'unsupported' ? 'not available here' : 'not asked yet'}</span>
+        ${st === 'default' ? html`<button type="button" class="btn btn-primary btn-sm" @click=${async () => (await Notification.requestPermission(), this.requestUpdate())}>Allow notifications</button>` : nothing}
+      </div>
+      ${st === 'unsupported' ? html`<p class="ch-settings-note">This browser offers no notifications on this page: on an iPhone, add the dashboard to the home screen and open it from there; elsewhere, open it over https.</p>` : nothing}
+      <fieldset class="ch-fieldset"><legend>notify when a chat</legend>${(Object.keys(NOTIFY_WORDS) as NotifyKind[]).map((k) => html`<label class="ch-check"><input type="checkbox" .checked=${prefs[k]} ?disabled=${st !== 'granted'} @change=${(e: Event) => (setNotifyPrefs({ ...notifyPrefs(), [k]: (e.target as HTMLInputElement).checked }), this.requestUpdate())} /><span>${NOTIFY_WORDS[k]}</span></label>`)}</fieldset>
+      <p class="ch-settings-note">${installed ? 'Running as the installed app.' : 'Add the dashboard to the home screen (Share, then Add to Home Screen; or the install button in the address bar) for a full-screen app with its own badge.'} The badge counts the chats that wait for you or have an unread answer.</p>`;
   }
 
   // ---- sandbox --------------------------------------------------------------------------------

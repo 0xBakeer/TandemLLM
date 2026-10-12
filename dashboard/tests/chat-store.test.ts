@@ -271,3 +271,15 @@ describe('plan mode', () => {
     expect(c.todos).toEqual([{ id: 't1', text: 'a', state: 'in_progress' }]);
   });
 });
+
+describe('notifications', () => {
+  it('say what happened, never what was written', async () => {
+    const { notifyKind, NOTIFY_WORDS } = await import('../src/chat/notify');
+    expect(notifyKind({ type: 'run.done', status: 'done' })).toBe('finished');
+    expect(notifyKind({ type: 'run.done', status: 'error' })).toBe('error');
+    expect(notifyKind({ type: 'run.done', status: 'stopped' })).toBe(null);
+    expect(notifyKind({ type: 'tool.asking' })).toBe('permission');
+    expect(notifyKind({ type: 'conversation.updated' })).toBe(null);
+    expect(NOTIFY_WORDS).toEqual({ finished: 'finished', permission: 'waits for permission', error: 'error' });
+  });
+});

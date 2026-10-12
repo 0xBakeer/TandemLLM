@@ -52,6 +52,8 @@ export interface ChatBackend {
   createFolder(name: string): Promise<Folder>;
   /** the live stream of one conversation; `lastEventId` resumes with a catch-up */
   subscribe(id: string, lastEventId: string | null, h: StreamHandler): Subscription;
+  /** the list-level stream: run.done and tool.asking of every chat (notifications, the badge) */
+  subscribeGlobal(onEvent: (ev: { type: string; conversation_id?: string; status?: string }) => void): Subscription;
 
   // the turn
   send(id: string, msg: SendOptions): Promise<void>;

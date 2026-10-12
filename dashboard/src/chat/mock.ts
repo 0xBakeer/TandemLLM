@@ -603,6 +603,11 @@ export class MockChatBackend implements ChatBackend {
     return st.settings;
   }
 
+  /** the mock plays its chats in this tab, which has their events already */
+  subscribeGlobal(): Subscription {
+    return { close: () => undefined };
+  }
+
   async approvePlan(id: string, items?: string[]): Promise<void> {
     const st = this.get(id);
     const last = this.materialize(st).filter((m) => m.role === 'assistant').pop();

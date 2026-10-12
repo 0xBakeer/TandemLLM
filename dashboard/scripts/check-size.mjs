@@ -1,5 +1,7 @@
-// Prints the gzip size of every file in dist/ and fails above the 400 KB budget (300 KB before the
-// Chat tab, VIS-99, which is its own chunk of about 40 KB gzip plus the mock it loads on demand).
+// Prints the gzip size of every file in dist/ and fails above the budget: 300 KB before the Chat
+// tab, 400 KB with it (VIS-99: its own chunk of about 40 KB gzip plus the mock it loads on
+// demand), 405 KB since the terminal pane runs xterm.js (VIS-105, 2026-10-12: an 81 KB chunk that
+// loads only when a terminal opens) and the PWA's worker and notifications (VIS-109).
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -18,8 +20,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 400 KB)`);
-if (total > 400 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 405 KB)`);
+if (total > 405 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

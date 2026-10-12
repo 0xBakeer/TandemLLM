@@ -25,6 +25,7 @@ import './settings';
 import { pickBackend, VersionConflict, type ChatBackend, type Subscription } from './backend';
 import { attachLabel, initialAttachment, onEvent as attachEvent, onStreamState, onTick, type Attachment as Attach } from './connection';
 import { adopt, applyEvent, messageText } from './store';
+import { badge, notify, notifyKind } from './notify';
 import type { QseChatComposer } from './composer';
 import { defaultPane, type OpenPane, type Dock } from './panes';
 import type { SettingsSection } from './settings';
@@ -93,6 +94,8 @@ export class QseChat extends LightElement {
   private sub: Subscription | null = null;
   private tick: ReturnType<typeof setInterval> | null = null;
   private listPoll: Poller | null = null;
+  private globalSub: Subscription | null = null;
+  private listSoon: ReturnType<typeof setTimeout> | null = null;
   private mq768 = matchMedia('(max-width: 768px)');
   private mq1180 = matchMedia('(max-width: 1180px)');
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -123,6 +126,7 @@ export class QseChat extends LightElement {
     document.removeEventListener('click', this.onDocClick);
     window.removeEventListener('qse-signed-in', this.onSignedIn);
     this.sub?.close();
+    this.globalSub?.close();
     this.listPoll?.stop();
     if (this.tick) clearInterval(this.tick);
     super.disconnectedCallback();
@@ -130,6 +134,19 @@ export class QseChat extends LightElement {
 
   updated(changed: Map<string, unknown>): void {
     if ((changed.has('path') || changed.has('params')) && this.backend) void this.openFromRoute();
+    if (changed.has('list') || changed.has('unread')) badge(this.list.filter((x) => x.status === 'waiting' || x.unread || this.unread.has(x.id)).length);
+  }
+
+  /** the list-level stream: a run ended or asks somewhere; notify this device, refresh the list */
+  private onGlobal(ev: { type: string; conversation_id?: string; status?: string }): void {
+    const id = ev.conversation_id;
+    const kind = notifyKind(ev);
+    if (id && kind) void notify(kind, { id, title: this.list.find((x) => x.id === id)?.title ?? 'A chat' }, id === this.conv?.id);
+    if (!this.listSoon && (kind || ev.type.startsWith('conversation.')))
+      this.listSoon = setTimeout(() => {
+        this.listSoon = null;
+        void this.loadList();
+      }, 400);
   }
 
   private onMedia = () => {
@@ -184,6 +201,8 @@ export class QseChat extends LightElement {
     void b.prompts().then((p) => (this.prompts = p)).catch(() => undefined);
     this.listPoll = poll(() => this.loadList(), 10_000);
     this.listPoll.start();
+    this.globalSub?.close();
+    this.globalSub = b.subscribeGlobal((ev) => this.onGlobal(ev));
     await this.loadList();
     await this.openFromRoute();
   }

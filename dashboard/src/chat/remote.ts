@@ -134,6 +134,22 @@ export class RemoteChatBackend implements ChatBackend {
     return { close: () => stream.close() };
   }
 
+  subscribeGlobal(onEvent: (ev: { type: string; conversation_id?: string; status?: string }) => void): Subscription {
+    const stream = new ResumableStream({
+      url: (last) => `${apiBase()}${PREFIX}/events${last ? `?after=${encodeURIComponent(last)}` : ''}`,
+      onEvent: (ev) => {
+        try {
+          const data = JSON.parse(ev.data) as { type?: string };
+          onEvent({ ...data, type: ev.event && ev.event !== 'message' ? ev.event : (data.type ?? '') });
+        } catch {
+          /* not an event */
+        }
+      },
+    });
+    stream.start();
+    return { close: () => stream.close() };
+  }
+
   async send(id: string, msg: SendOptions) {
     await post(`/conversations/${enc(id)}/messages`, { client_msg_id: msg.client_msg_id, text: msg.text, attachments: msg.attachments?.map((a) => a.id) ?? [] });
   }
