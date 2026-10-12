@@ -105,10 +105,22 @@ def _fold(s: str) -> str:
     return " ".join(s.split())
 
 
+def marker(body: dict) -> bool | None:
+    """SRV-351: the client's own word, `tandem: {"compaction": true|false}`. True: a compaction
+    (chatd sends its real history and one instruction turn, already a continuation of what the
+    engine holds); False: not one, whatever its shape; None: not said, the shape decides."""
+    t = body.get("tandem")
+    v = t.get("compaction") if isinstance(t, dict) else None
+    return v if isinstance(v, bool) else None
+
+
 def split(body: dict) -> dict | None:
     """A compaction request's parts: `system` (its system text), `instructions` (the user text
     after the history), `guard` (the first and last user lines of the history, folded) and
-    `history_chars`. None when the request has not that shape."""
+    `history_chars`. None when the request has not that shape, or when it says what it is
+    (`marker`): a marked request is never rewritten."""
+    if marker(body) is not None:
+        return None
     msgs = [m for m in (body.get("messages") or []) if isinstance(m, dict)]
     if body.get("tools") or len(msgs) != 2 or msgs[0].get("role") != "system" \
             or msgs[1].get("role") != "user":
