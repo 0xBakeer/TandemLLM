@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from chatd import __version__
 from chatd.events import HEARTBEAT, HEARTBEAT_S, control, frame
+from chatd.mcp import McpError
 from chatd.service import ApiError, Service, device_label
 
 PREFIX = "/v1/chat-app"
@@ -78,9 +79,16 @@ ROUTES = [
     ("POST", rf"/conversations/{_ID}/terminals", "new_terminal"),
     ("GET", rf"/conversations/{_ID}/terminals/([^/]+)/ws", "terminal_ws"),
     ("GET", rf"/conversations/{_ID}/artifacts/([^/]+)", "artifact"),
-    # phase 3 here: empty lists, writes not available
-    ("GET", r"/(packages|mcp/servers|prompts|presets)", "empty_list"),
-    ("*", r"/(packages|mcp|prompts|presets)(/.*)?", "not_available"),
+    # MCP servers (SRV-359)
+    ("GET", r"/mcp/servers", "mcp_list"),
+    ("POST", r"/mcp/servers/test", "mcp_test"),
+    ("POST", r"/mcp/servers", "mcp_add"),
+    ("POST", rf"/mcp/servers/{_ID}/restart", "mcp_restart"),
+    ("PATCH", rf"/mcp/servers/{_ID}", "mcp_patch"),
+    ("DELETE", rf"/mcp/servers/{_ID}", "mcp_remove"),
+    # later here: empty lists, writes not available
+    ("GET", r"/(packages|prompts|presets)", "empty_list"),
+    ("*", r"/(packages|prompts|presets)(/.*)?", "not_available"),
 ]
 _COMPILED = [(m, re.compile(p + "$"), n) for m, p, n in ROUTES]
 
@@ -168,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                                                          for g in hit.groups()])
                 except ApiError as exc:
                     return self._json(exc.status, exc.body())
+                except McpError as exc:
+                    return self._json(400, {"error": {"type": "mcp", "message": str(exc)}})
                 except (BrokenPipeError, ConnectionResetError):
                     self.close_connection = True
                     return
@@ -278,6 +288,27 @@ class Handler(BaseHTTPRequestHandler):
         self._json(501, {"error": {"type": "not_available",
                                    "message": "not available yet: MCP servers, skills, prompts "
                                               "and presets come later in phase 2"}})
+
+    # ---- MCP servers
+    def r_mcp_list(self):
+        self._json(200, self.svc.mcp.list())
+
+    def r_mcp_test(self):
+        body = self._body()
+        self._json(200, self.svc.mcp.test(body, body.get("conversation_id")))
+
+    def r_mcp_add(self):
+        self._json(200, self.svc.mcp.add(self._body()))
+
+    def r_mcp_restart(self, sid):
+        self._json(200, self.svc.mcp.restart(sid))
+
+    def r_mcp_patch(self, sid):
+        self._json(200, self.svc.mcp.patch(sid, self._body()))
+
+    def r_mcp_remove(self, sid):
+        self.svc.mcp.remove(sid)
+        self._empty(204)
 
     # ---- tools and permissions
     def r_tools(self):

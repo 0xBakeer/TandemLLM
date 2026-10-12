@@ -225,7 +225,7 @@ class AgentMixin:
             ok.append(t)
         return ok
 
-    def tools_for(self, settings: dict, info: dict) -> list:
+    def tools_for(self, settings: dict, info: dict, cid: str | None = None) -> list:
         """The chat's tools, in the fixed order: built-ins, then MCP servers by name."""
         if not info.get("tools", True):
             return []
@@ -235,7 +235,7 @@ class AgentMixin:
                (prefs.get(t.name) is None or prefs[t.name]["enabled"] in (None, 1))]
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
-            out += mcp.tools_for(settings)
+            out += mcp.tools_for(settings, cid)
         return out
 
     def tool_infos(self) -> list[dict]:
@@ -353,7 +353,7 @@ class AgentMixin:
             settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
             parts = [conv.live["parts"][k] for k in idxs]
         info = self.model_info(settings.get("model"))
-        enabled = {t.name: t for t in self.tools_for(settings, info)}
+        enabled = {t.name: t for t in self.tools_for(settings, info, conv.id)}
         jobs = []
         for part in parts:
             tool = enabled.get(part.get("name") or "")
@@ -510,7 +510,7 @@ class AgentMixin:
                                                              if p.get("step", 1) < run.step or
                                                              run.continue_final]})
         info = self.model_info(settings.get("model"))
-        tools = self.tools_for(settings, info)
+        tools = self.tools_for(settings, info, conv.id)
         schemas = [t.openai() for t in tools]
         model = settings.get("model") or info.get("id") or "default"
         window = int(info.get("max_len") or 0)

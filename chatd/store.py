@@ -93,8 +93,22 @@ CREATE TABLE sandboxes (conversation_id TEXT PRIMARY KEY, created INTEGER, last_
                         removed INTEGER);
 """
 
+# v3: MCP servers' arguments, headers (encrypted), the names of their secret keys, a timeout,
+# the last tool list and the state (chatd/mcp.py)
+SCHEMA_V3 = """
+ALTER TABLE mcp_servers ADD COLUMN args TEXT;
+ALTER TABLE mcp_servers ADD COLUMN headers_enc BLOB;
+ALTER TABLE mcp_servers ADD COLUMN env_keys TEXT;
+ALTER TABLE mcp_servers ADD COLUMN header_keys TEXT;
+ALTER TABLE mcp_servers ADD COLUMN timeout_s REAL;
+ALTER TABLE mcp_servers ADD COLUMN tools_json TEXT;
+ALTER TABLE mcp_servers ADD COLUMN updated INTEGER;
+ALTER TABLE mcp_servers ADD COLUMN status TEXT;
+ALTER TABLE mcp_servers ADD COLUMN error TEXT
+"""
+
 # version n: the SQL that takes a file from n-1 to n
-MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2}
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3}
 BACKUPS_KEPT = 7
 
 

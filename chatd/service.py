@@ -163,7 +163,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin):
                                                 network_mode=self._network_mode)
         self.snaps = Snapshots(os.path.join(data_dir, "snapshots"))
         self._library: tuple[float, bool] | None = None
-        self.mcp = None
+        from chatd.mcp import Mcp
+        self.mcp = Mcp(self, os.path.dirname(os.path.abspath(data_dir)))
         self.interrupted_at_start = self._interrupt_leftovers()
         self.ticker = threading.Thread(target=self._tick, name="chatd-ticker", daemon=True)
         self.sweeper = threading.Thread(target=self._sweep, name="chatd-sweeper", daemon=True)
