@@ -1,12 +1,10 @@
 \chapter{Roadmap}\label{ch:roadmap}
 
-Today the engine serves one main model (Qwen3.8-27B) with small models beside it, it is measured on one board (the DGX Spark, Section~\ref{sec:test-env}), and it decodes up to four requests at once. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
+Today the engine serves two main models, one at a time (Qwen3.8-27B and Qwen3.8-Flash-Next), with small models beside them, it is measured on one board (the DGX Spark, Section~\ref{sec:test-env}), and it decodes up to four requests at once. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
 
-\section{A mixture-of-experts model}
+\section{A mixture-of-experts model, and what is left}
 
-The first new model is Qwen3.8-Flash-Next, a mixture-of-experts hybrid of the same family, in its published NVFP4 form. It needs expert routing inside the verify: a tree of 16 nodes can route each node to different experts, so a verify reads the union of the experts its nodes chose, its cost depends on the text, and the router has to price that. It needs the experts as W4A16 NVFP4, the rest of the weights in MXFP8, and a large per-layer embedding table kept memory-mapped rather than resident. Its built-in prediction head would be the first drafter.
-
-By the byte math it fits: about 71.3~GiB resident without the embedding table, which stays on disk, and a bandwidth floor of about 38 tok/s at 273~GB/s (\arith, from the checkpoint headers). It never shares the board with the 27B engine, because the two together do not fit. After it, Qwen3.6-35B-A3B in its standard NVFP4 export, to check that the stack works on a checkpoint the authors did not quantise.
+Qwen3.8-Flash-Next is served (Chapter~\ref{ch:flashnext}), from turboderp's EXL3 packs and not from the NVFP4 checkpoint this chapter once planned. Four parts are open. Its vision tower is not loaded yet. The 5.05 pack codes its experts at 5 and 7 bits, and the MoE kernels take 2 to 6 and 8. No pack's quality against the BF16 model is measured, because the 360~GB release does not fit the board. And parallel requests run on it without loss but are slower in total than one after the other. After it, other EXL3 models that fit one board, Qwen3.6-35B-A3B among them.
 
 \section{Parallel requests}
 

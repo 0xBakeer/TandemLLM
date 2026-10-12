@@ -14,7 +14,7 @@ One dashboard watches this engine and the others. It reads the metrics pages of 
 
 Requests run in parallel. With \code{--parallel 4} the engine decodes up to four requests in the same rounds (Section~\ref{sec:parallel-requests}), and the proxy relays any number of requests to other backends at once.
 
-TandemLLM is not tied to one model. Today Qwen3.8-27B is its main model. The small models are Qwen3.5 and Laya checkpoints, the proxy serves any model behind an OpenAI-compatible API, and Chapter~\ref{ch:adding-model} lists the seams where the next main model plugs in.
+TandemLLM is not tied to one model. Its main model is Qwen3.8-27B, and a second, Qwen3.8-Flash-Next, runs on the same board in its place (Chapter~\ref{ch:flashnext}). The small models are Qwen3.5 and Laya checkpoints, the proxy serves any model behind an OpenAI-compatible API, and Chapter~\ref{ch:adding-model} lists the seams where a main model plugs in.
 
 \section{The test environment}\label{sec:test-env}\index{test environment}\index{DGX Spark}\index{GB10}
 
@@ -42,7 +42,7 @@ TandemLLM is several programs that share one repository and one release number.
 
 \begin{description}[style=nextline]
 \item[The engine] \code{engine/}, \code{tools/} (kernels) and \code{server/app.py}: the model, its kernels, the drafters and routers, the caches, and an OpenAI-compatible HTTP server built on Python's standard library. It needs a CUDA GPU (measured on the DGX Spark only), PyTorch, Triton and the weights. The small models run on its own code: the Qwen3.5 narrator and shadow reader on its Qwen forward, Laya's decision models in the same process.
-\item[The conductor] \code{server/conductor/}: a harness in front of the model. It classifies each turn, sets the thinking effort, adds hidden notes and skills, watches the generation for loops and broken tool calls, keeps memory notes and shows the client what it does. It is off unless a configuration directory is given.
+\item[The conductor] \code{server/conductor/}: a layer in front of the model. It classifies each turn, sets the thinking effort, adds hidden notes and skills, watches the generation for loops and broken tool calls, keeps memory notes and shows the client what it does. It is off unless a configuration directory is given.
 \item[The dashboard] \code{dashboard/}: a web page the server serves at \code{/dashboard/}. It shows what each request is doing now, a year of usage, the log, a playground, the conductor's settings, the backends and the machine.
 \item[The proxy] \code{proxy/}: the same dashboard in front of other OpenAI-compatible engines and cloud APIs, routed by model id. It installs with \code{pip} and needs no GPU.
 \item[The plugins] \code{plugins/}: two small packages that run inside vLLM and SGLang and report each request's queue, prefill and decode times to the proxy.
@@ -54,7 +54,7 @@ TandemLLM is several programs that share one repository and one release number.
 The roadmap (Chapter~\ref{ch:roadmap}) widens each of these, one step at a time.
 
 \begin{itemize}
-\item Models: Qwen3.8-27B is the one main model the engine serves, a hybrid of 48 Gated DeltaNet layers and 16 attention layers; Chapter~\ref{ch:architecture} explains why much of the engine follows that mix. Beside it run the two fine-tuned DFlash2 drafters, the lookup drafter and, when you turn them on, Laya, the narrator and the shadow reader. Behind the proxy, any model a backend serves.
+\item Models: Qwen3.8-27B is the main model the engine serves, a hybrid of 48 Gated DeltaNet layers and 16 attention layers; Chapter~\ref{ch:architecture} explains why much of the engine follows that mix. Qwen3.8-Flash-Next, a mixture of experts on the same hybrid, is the second, served from turboderp's EXL3 packs one model at a time (Chapter~\ref{ch:flashnext}). Beside it run the two fine-tuned DFlash2 drafters, the lookup drafter and, when you turn them on, Laya, the narrator and the shadow reader. Behind the proxy, any model a backend serves.
 \item Hardware: the DGX Spark is the only board with measured kernels and prices (Section~\ref{sec:test-env}). Other CUDA GPUs are best effort.
 \item Requests: \code{--parallel N} gives the engine N sequences, and requests that decode at the same time share one draft pass and one verify pass a round (Section~\ref{sec:parallel-requests}). The shipped profile keeps one sequence, and the measurements go up to four. With one sequence a request that finds the engine busy waits in a bounded queue, and a short request is served at a safe point inside the running one (the side lane, Section~\ref{sec:side-lane}). The proxy relays any number of requests to other backends at once (Chapter~\ref{ch:harness-proxy}).
 \end{itemize}
