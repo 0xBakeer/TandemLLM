@@ -113,18 +113,25 @@ template <> struct WVec<__half> {
 // the full sums (fixed xor tree)
 // U chunks a pass: their weight loads are issued together (more bytes in flight a lane); each
 // lane still adds its chunks in K order, so the sums are the one-chunk loop's bit for bit
+// GS (int8 with a scale a group of G weights, G a multiple of VEC): a chunk's products summed on their
+// own, then added times its group's scale (one FMA a chunk); null: the row's scale is the caller's,
+// after the sums
 template <typename TW, int LPR, int MC, int U = 4>
 __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bfloat16* __restrict__ X,
-                                        int ldx, int m0, int mc, int K, int sl, float* acc) {
+                                        int ldx, int m0, int mc, int K, int sl, float* acc,
+                                        const float* __restrict__ GS = nullptr, int G = 0) {
     constexpr int VEC = WVec<TW>::VEC;
     constexpr int STEP = LPR * VEC;
 #pragma unroll
     for (int m = 0; m < MC; ++m) acc[m] = 0.f;
     for (int k0 = sl * VEC; k0 < K; k0 += U * STEP) {
-        float w[U][VEC];
+        float w[U][VEC], gs[U];
 #pragma unroll
         for (int u = 0; u < U; ++u)
-            if (k0 + u * STEP < K) WVec<TW>::load(wr + k0 + u * STEP, w[u]);
+            if (k0 + u * STEP < K) {
+                WVec<TW>::load(wr + k0 + u * STEP, w[u]);
+                gs[u] = GS ? GS[(k0 + u * STEP) / G] : 1.0f;
+            }
 #pragma unroll
         for (int m = 0; m < MC; ++m) {
             if (m < mc) {
@@ -136,8 +143,15 @@ __device__ __forceinline__ void row_dot(const TW* __restrict__ wr, const __nv_bf
                         float x[VEC];
                         load_x8(X + (size_t)(m0 + m) * ldx + k, x);
                         if (VEC == 16) load_x8(X + (size_t)(m0 + m) * ldx + k + 8, x + 8);
+                        if (GS) {
+                            float t = 0.f;
 #pragma unroll
-                        for (int e = 0; e < VEC; ++e) s = fmaf(x[e], w[u][e], s);
+                            for (int e = 0; e < VEC; ++e) t = fmaf(x[e], w[u][e], t);
+                            s = fmaf(gs[u], t, s);
+                        } else {
+#pragma unroll
+                            for (int e = 0; e < VEC; ++e) s = fmaf(x[e], w[u][e], s);
+                        }
                     }
                 }
                 acc[m] = s;
@@ -156,7 +170,7 @@ __device__ __forceinline__ void store_out(__nv_bfloat16* y, float v) { *y = __fl
 template <typename TW, int LPR, int MC, typename TY>
 __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
         const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy,
-        int M, int N, int K) {
+        int M, int N, int K, int G) {
     constexpr int RPW = 32 / LPR;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int sub = lane / LPR, sl = lane % LPR;
@@ -171,9 +185,9 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
     for (int m0 = 0; m0 < M; m0 += MC) {
         const int mc = min(MC, M - m0);
         float acc[MC];
-        row_dot<TW, LPR, MC>(wr, X, ldx, m0, mc, live ? K : 0, sl, acc);
+        row_dot<TW, LPR, MC>(wr, X, ldx, m0, mc, live ? K : 0, sl, acc, G ? S + (size_t)(live ? n : 0) * (K / G) : nullptr, G);
         if (live && sl == 0) {
-            const float sc = S ? S[n] : 1.0f;
+            const float sc = S && !G ? S[n] : 1.0f;
 #pragma unroll
             for (int m = 0; m < MC; ++m) if (m < mc) store_out(Y + (size_t)(m0 + m) * ldy + n, acc[m] * sc);
         }
@@ -185,7 +199,7 @@ __global__ void __launch_bounds__(256) gemv_kernel(const __nv_bfloat16* __restri
 // order; KS is a function of the weight's shape, so a row's bits do not depend on M.
 template <typename TW, int MC, typename TY>
 __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
-        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K) {
+        const TW* __restrict__ W, const float* __restrict__ S, TY* __restrict__ Y, int ldy, int M, int N, int K, int G) {
     __shared__ float red[8][MC];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, ks = blockDim.x >> 5;
     const int n = blockIdx.x, kc = K / ks, k0 = warp * kc;
@@ -197,7 +211,7 @@ __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __
     for (int m0 = 0; m0 < M; m0 += MC) {
         const int mc = min(MC, M - m0);
         float acc[MC];
-        row_dot<TW, 32, MC>(wr, X + k0, ldx, m0, mc, kc, lane, acc);
+        row_dot<TW, 32, MC>(wr, X + k0, ldx, m0, mc, kc, lane, acc, G ? S + (size_t)n * (K / G) + k0 / G : nullptr, G);
         if (lane == 0)
 #pragma unroll
             for (int m = 0; m < MC; ++m) red[warp][m] = acc[m];
@@ -205,7 +219,7 @@ __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __
         if (threadIdx.x < mc) {
             float t = red[0][threadIdx.x];
             for (int w = 1; w < ks; ++w) t += red[w][threadIdx.x];
-            store_out(Y + (size_t)(m0 + threadIdx.x) * ldy + n, t * (S ? S[n] : 1.0f));
+            store_out(Y + (size_t)(m0 + threadIdx.x) * ldy + n, t * (S && !G ? S[n] : 1.0f));
         }
         __syncthreads();
     }
@@ -218,7 +232,7 @@ __global__ void __launch_bounds__(256) gemv_split_kernel(const __nv_bfloat16* __
 template <typename TW, int MC>
 __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D, int ldd,
         const __nv_bfloat16* __restrict__ Nn, int ldn, const TW* __restrict__ W, const float* __restrict__ S,
-        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc) {
+        __nv_bfloat16* __restrict__ Xo, int ldxo, int M, int H, int R, float inv_hc, int G) {
     extern __shared__ __nv_bfloat16 a_s[];                 // [M, R]
     {
         const int j0 = blockIdx.x * 8 + (threadIdx.x >> 5), s0 = (threadIdx.x & 31) >> 3, l0 = threadIdx.x & 7;
@@ -239,11 +253,11 @@ __global__ void __launch_bounds__(256) mix_up_kernel(const float* __restrict__ D
     if (j >= H) return;
     const int n = s * H + j;
     const TW* wr = W + (size_t)n * R;
-    const float sc = S ? S[n] : 1.0f;
+    const float sc = S && !G ? S[n] : 1.0f;
     for (int m0 = 0; m0 < M; m0 += MC) {
         const int mc = min(MC, M - m0);
         float acc[MC];
-        row_dot<TW, 8, MC>(wr, a_s, R, m0, mc, R, sl, acc);
+        row_dot<TW, 8, MC>(wr, a_s, R, m0, mc, R, sl, acc, G ? S + (size_t)n * (R / G) : nullptr, G);
 #pragma unroll
         for (int m = 0; m < MC; ++m) {
             float p = 0.f;
@@ -1238,7 +1252,7 @@ static int gemv_warps(int N, int LPR) {
         dim3((N + gemv_warps(N, LPR) * (32 / LPR) - 1) / (gemv_warps(N, LPR) * (32 / LPR))),       \
         dim3(32 * gemv_warps(N, LPR)), 0, st,                                                      \
         (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0), (const TW*)w.data_ptr(),             \
-        s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K)
+        s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G)
 
 // K slices of a gemv_split launch for a weight of N rows and K columns (1: gemv_kernel): as many warps
 // as the board holds at once (48 SMs x 64) while a slice keeps at least 256 columns
@@ -1251,12 +1265,13 @@ static int gemv_split_ks(int N, int K, int vec) {
 
 template <typename TW, typename TY>
 static void gemv_dispatch(const torch::Tensor& x, const torch::Tensor& w, const float* s_ptr,
-                          torch::Tensor& y, int M, int N, int K, cudaStream_t st) {
-    const int ks = g_gemv_split ? gemv_split_ks(N, K, WVec<TW>::VEC) : 1;
+                          torch::Tensor& y, int M, int N, int K, cudaStream_t st, int G = 0) {
+    int ks = g_gemv_split ? gemv_split_ks(N, K, WVec<TW>::VEC) : 1;
+    while (G && ks > 1 && (K / ks) % G) ks /= 2;           // a slice holds whole scale groups
     if (ks > 1) {
         auto kern = M == 1 ? gemv_split_kernel<TW, 1, TY> : gemv_split_kernel<TW, 8, TY>;
         launch(kern, dim3(N), dim3(32 * ks), 0, st, (const __nv_bfloat16*)x.data_ptr(), (int)x.stride(0),
-               (const TW*)w.data_ptr(), s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K);
+               (const TW*)w.data_ptr(), s_ptr, (TY*)y.data_ptr(), (int)y.stride(0), M, N, K, G);
         return;
     }
     const int lpr = lpr_for(K);
@@ -1277,11 +1292,15 @@ void fn_gemv(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> s, t
     TORCH_CHECK(w.size(1) == K && y.size(0) == M && y.size(1) == N, "shapes");
     const bool f32 = y.dtype() == torch::kFloat;
     if (w.dtype() == torch::kInt8) {
-        TORCH_CHECK(s.has_value() && s->dtype() == torch::kFloat && s->numel() == N, "int8 rows need fp32 scales [N]");
+        // fp32 scales: one a row [N], or one a group of G weights [N, K / G] (G a multiple of 16)
+        TORCH_CHECK(s.has_value() && s->dtype() == torch::kFloat && s->is_contiguous() && s->numel() % N == 0,
+                    "int8 rows need fp32 scales [N] or [N, K / G]");
         TORCH_CHECK(K % 16 == 0, "K % 16");
+        const int ng = s->numel() / N, G = ng == 1 ? 0 : K / ng;
+        TORCH_CHECK(!G || (K % ng == 0 && G % 16 == 0), "scale groups: K / groups a multiple of 16");
         const float* sp = (const float*)s->data_ptr();
-        if (f32) gemv_dispatch<int8_t, float>(x, w, sp, y, M, N, K, st);
-        else gemv_dispatch<int8_t, __nv_bfloat16>(x, w, sp, y, M, N, K, st);
+        if (f32) gemv_dispatch<int8_t, float>(x, w, sp, y, M, N, K, st, G);
+        else gemv_dispatch<int8_t, __nv_bfloat16>(x, w, sp, y, M, N, K, st, G);
     } else {
         TORCH_CHECK(w.dtype() == torch::kHalf && K % 8 == 0, "w int8 or fp16, K % 8");
         if (f32) gemv_dispatch<__half, float>(x, w, nullptr, y, M, N, K, st);
@@ -1376,17 +1395,19 @@ void fn_mix_up(torch::Tensor d, torch::Tensor n, torch::Tensor w, c10::optional<
     dim3 grid((H + 7) / 8);
     const float inv = 1.0f / (float)hc;
     if (w.dtype() == torch::kInt8) {
-        TORCH_CHECK(s.has_value() && s->numel() == 4 * H && R % 16 == 0, "int8 scales, R % 16");
+        TORCH_CHECK(s.has_value() && s->is_contiguous() && s->numel() % (4 * H) == 0 && R % 16 == 0, "int8 scales, R % 16");
+        const int ng = s->numel() / (4 * H), G = ng == 1 ? 0 : R / ng;
+        TORCH_CHECK(!G || (R % ng == 0 && G % 16 == 0), "scale groups: R / groups a multiple of 16");
         auto k = M == 1 ? mix_up_kernel<int8_t, 1> : mix_up_kernel<int8_t, 8>;
         launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const int8_t*)w.data_ptr(), (const float*)s->data_ptr(),
-            (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv);
+            (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, G);
     } else {
         TORCH_CHECK(w.dtype() == torch::kHalf && R % 8 == 0, "fp16 up weight, R % 8");
         auto k = M == 1 ? mix_up_kernel<__half, 1> : mix_up_kernel<__half, 8>;
         launch(k, grid, dim3(256), smem, st, (const float*)d.data_ptr(), (int)d.stride(0), (const __nv_bfloat16*)n.data_ptr(),
             (int)n.stride(0), (const __half*)w.data_ptr(), (const float*)nullptr,
-            (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv);
+            (__nv_bfloat16*)x.data_ptr(), (int)x.stride(0), M, H, R, inv, 0);
     }
 }
 

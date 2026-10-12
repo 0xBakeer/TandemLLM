@@ -279,7 +279,7 @@
     {
      "id": "flashnext-2.05",
      "label": "EXL3 2.05 bpw (turboderp)",
-     "weights_gib": 32.83,
+     "weights_gib": 32.85,
      "drafters_gib": 0.0,
      "recommended": false,
      "max_window": 262144,
@@ -292,7 +292,7 @@
     {
      "id": "flashnext-3.05",
      "label": "EXL3 3.05 bpw (turboderp)",
-     "weights_gib": 47.63,
+     "weights_gib": 47.87,
      "drafters_gib": 0.0,
      "recommended": true,
      "max_window": 262144,
@@ -305,7 +305,7 @@
     {
      "id": "flashnext-4.05",
      "label": "EXL3 4.05 bpw (turboderp)",
-     "weights_gib": 62.45,
+     "weights_gib": 62.47,
      "drafters_gib": 0.0,
      "recommended": false,
      "max_window": 212992,
@@ -318,7 +318,7 @@
     {
      "id": "flashnext-5.05",
      "label": "EXL3 5.05 bpw (turboderp)",
-     "weights_gib": 77.14,
+     "weights_gib": 77.16,
      "drafters_gib": 0.0,
      "recommended": false,
      "max_window": 65536,
@@ -331,7 +331,7 @@
     {
      "id": "flashnext-6.05",
      "label": "EXL3 6.05 bpw (turboderp)",
-     "weights_gib": 91.85,
+     "weights_gib": 91.87,
      "drafters_gib": 0.0,
      "recommended": false,
      "max_window": null,
@@ -5491,7 +5491,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 93.22,
+    "total_gb": 93.24,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5506,7 +5506,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 2.05 bpw (turboderp))",
-      "gb": 32.83,
+      "gb": 32.85,
       "kind": "fixed"
      },
      {
@@ -5567,7 +5567,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 17.2,
+    "room_gb": 17.18,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5582,7 +5582,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 102.13,
+    "total_gb": 102.15,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5597,7 +5597,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 2.05 bpw (turboderp))",
-      "gb": 32.83,
+      "gb": 32.85,
       "kind": "fixed"
      },
      {
@@ -5658,7 +5658,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 12.08,
+    "room_gb": 12.06,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5673,7 +5673,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 85.58,
+    "total_gb": 85.82,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5688,7 +5688,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 3.05 bpw (turboderp))",
-      "gb": 47.63,
+      "gb": 47.87,
       "kind": "fixed"
      },
      {
@@ -5749,7 +5749,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 24.84,
+    "room_gb": 24.6,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5764,7 +5764,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 94.49,
+    "total_gb": 94.73,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5779,7 +5779,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 3.05 bpw (turboderp))",
-      "gb": 47.63,
+      "gb": 47.87,
       "kind": "fixed"
      },
      {
@@ -5840,7 +5840,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 19.72,
+    "room_gb": 19.48,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5855,7 +5855,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 100.4,
+    "total_gb": 100.42,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5870,7 +5870,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 4.05 bpw (turboderp))",
-      "gb": 62.45,
+      "gb": 62.47,
       "kind": "fixed"
      },
      {
@@ -5931,7 +5931,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 10.02,
+    "room_gb": 10.0,
     "notes": [
      "About 212,992 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5982,7 +5982,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 129.8,
+    "total_gb": 129.82,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5997,7 +5997,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 6.05 bpw (turboderp))",
-      "gb": 91.85,
+      "gb": 91.87,
       "kind": "fixed"
      },
      {
@@ -6058,10 +6058,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": -19.38,
+    "room_gb": -19.4,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.38 GiB over the budget before any context.",
-     "Over the budget by 23.17 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.40 GiB over the budget before any context.",
+     "Over the budget by 23.19 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
@@ -6076,7 +6076,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 138.71,
+    "total_gb": 138.73,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6091,7 +6091,7 @@
      {
       "id": "weights",
       "label": "Weights (EXL3 6.05 bpw (turboderp))",
-      "gb": 91.85,
+      "gb": 91.87,
       "kind": "fixed"
      },
      {
@@ -6152,10 +6152,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": -24.5,
+    "room_gb": -24.52,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.50 GiB over the budget before any context.",
-     "Over the budget by 32.08 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.52 GiB over the budget before any context.",
+     "Over the budget by 32.10 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
