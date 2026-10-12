@@ -34,6 +34,7 @@ from chatd import context as ctx_mod
 from chatd import render
 from chatd.agent import AgentMixin
 from chatd.panes import PanesMixin
+from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
 from chatd.engine import Engine, LiveTail
 from chatd.sandbox import Sandboxes
@@ -130,7 +131,7 @@ def device_label(ua: str | None) -> str | None:
     return browser or system or "another device"
 
 
-class Service(AgentMixin, PanesMixin, TerminalsMixin):
+class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -422,7 +423,9 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin):
 
     def create(self, body: dict, viewer: str | None = None) -> dict:
         caps = self.capabilities()
-        settings = {**caps["defaults"], **_clean_settings(body.get("settings") or {})}
+        settings = {**caps["defaults"],
+                    **_clean_settings(self.preset_settings(body.get("preset_id"))),
+                    **_clean_settings(body.get("settings") or {})}
         cid = ulid()
         t = now_ms()
         self.store.run("INSERT INTO conversations (id, title, created, updated, model, settings, "
@@ -1088,6 +1091,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin):
                            "sandbox": "ready" if self.sandboxes.available() else "not_installed"}
         caps["defaults"] = {**caps["defaults"],
                             "tools": [t.name for t in self.available_builtins()]}
+        caps["commands"] = self.commands()
         return caps
 
     def _build_caps(self, facts: dict) -> dict:

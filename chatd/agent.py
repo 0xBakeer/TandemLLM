@@ -555,14 +555,6 @@ class AgentMixin:
                         run.step, run.id))
         return render.encode(body), render.headers(conv.id, settings)
 
-    def tandem_field(self, settings: dict) -> dict:
-        """What our engine reads from the body (SRV-351 marker; SRV-361 pins and blocks)."""
-        t: dict = {"compaction": False}
-        pin, block = settings.get("packages") or [], settings.get("packages_blocked") or []
-        if pin or block:
-            t["packages"] = {"pin": list(pin), "block": list(block)}
-        return t
-
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False) -> bool:
         """Summarize everything before the last two user turns (chatd/compaction.py)."""

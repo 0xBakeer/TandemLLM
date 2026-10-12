@@ -86,9 +86,19 @@ ROUTES = [
     ("POST", rf"/mcp/servers/{_ID}/restart", "mcp_restart"),
     ("PATCH", rf"/mcp/servers/{_ID}", "mcp_patch"),
     ("DELETE", rf"/mcp/servers/{_ID}", "mcp_remove"),
-    # later here: empty lists, writes not available
-    ("GET", r"/(packages|prompts|presets)", "empty_list"),
-    ("*", r"/(packages|prompts|presets)(/.*)?", "not_available"),
+    # skills, prompts, presets (SRV-361)
+    ("GET", r"/(packages|skills)", "packages"),
+    ("PATCH", rf"/(?:packages|skills)/{_ID}", "set_package"),
+    ("GET", r"/prompts", "prompts"),
+    ("POST", r"/prompts", "save_prompt"),
+    ("POST", rf"/prompts/{_ID}", "save_prompt"),
+    ("DELETE", rf"/prompts/{_ID}", "delete_prompt"),
+    ("GET", r"/presets", "presets"),
+    ("POST", r"/presets", "save_preset"),
+    ("POST", rf"/presets/{_ID}", "save_preset"),
+    ("DELETE", rf"/presets/{_ID}", "delete_preset"),
+    # later: user skill uploads, Open WebUI tool import
+    ("*", r"/(packages/upload|skills/user|tools/import)(/.*)?", "not_available"),
 ]
 _COMPILED = [(m, re.compile(p + "$"), n) for m, p, n in ROUTES]
 
@@ -286,8 +296,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_not_available(self, *_):
         self._json(501, {"error": {"type": "not_available",
-                                   "message": "not available yet: MCP servers, skills, prompts "
-                                              "and presets come later in phase 2"}})
+                                   "message": "not available yet: user skill uploads and the "
+                                              "Open WebUI tool import come in phase 3"}})
+
+    # ---- skills, prompts, presets
+    def r_packages(self, *_):
+        self._json(200, self.svc.packages())
+
+    def r_set_package(self, pid):
+        self._json(200, self.svc.set_package(pid, self._body()))
+
+    def r_prompts(self):
+        self._json(200, self.svc.prompts())
+
+    def r_save_prompt(self, pid=None):
+        self._json(200, self.svc.save_prompt(pid, self._body()))
+
+    def r_delete_prompt(self, pid):
+        self.svc.delete_prompt(pid)
+        self._empty(204)
+
+    def r_presets(self):
+        self._json(200, self.svc.presets())
+
+    def r_save_preset(self, pid=None):
+        self._json(200, self.svc.save_preset(pid, self._body()))
+
+    def r_delete_preset(self, pid):
+        self.svc.delete_preset(pid)
+        self._empty(204)
 
     # ---- MCP servers
     def r_mcp_list(self):
