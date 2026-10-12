@@ -195,6 +195,13 @@ def test_a_parked_session_peeks_as_ram_park_and_comes_back_from_the_park():
     _, pre, _ = turn(nxt, 8, session="A")
     assert p["tier"] == "ram_park" and pre["kind"] in ("park", "end", "resident"), (p, pre)
     assert pre["reused"] == p["cached_tokens"], (p, pre)
+    # the usage frame names the tier the rows came back from, as the peek does (live: the peek said
+    # ram_park and the send said resident, the anchor kind after the swap)
+    assert pre.get("via") == "park", pre
+    r = RequestRecord("r", "chat", False)
+    r.prompt_tokens, r.parts = len(nxt), {"system": 0, "tools": 0, "images": 0}
+    r.absorb_prefill(pre)
+    assert r.usage()["tandem"]["cache"]["tier"] == "ram_park", r.usage()["tandem"]["cache"]
     return f"ram_park at {p['cached_tokens']}; the next request reused {pre['reused']} ({pre['kind']})"
 
 

@@ -772,6 +772,9 @@ class SessionSpill:
         state = state_now(eng)
         offs, anc_payload = dc._sections([dc._nb(t) for t in state])
         anc_size = ALIGN + anc_payload
+        if stop is not None and stop():
+            self._count("refused", "yielded")
+            return None
         if self.guard is not None and not self.guard.allow("spill", reason, n):
             self._count("refused", "write_budget")
             self._event("refused", why="write_budget", tokens=n, reason=reason)
@@ -990,7 +993,9 @@ class SessionSpill:
             self._write_manifest(path, man)
             tm["manifest"] = (time.perf_counter() - q) * 1e3
         except _Yielded:
-            shutil.rmtree(path, ignore_errors=True)
+            # its files go on another thread: a request is waiting for the engine
+            threading.Thread(target=shutil.rmtree, args=(path,), kwargs={"ignore_errors": True},
+                             name="spill-yield-rm", daemon=True).start()
             self._count("refused", "yielded")
             self._event("yielded", what="save", tokens=n, reason=reason)
             return None

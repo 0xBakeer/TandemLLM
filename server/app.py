@@ -1387,6 +1387,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             STATE["last_prefill"]["spill"] = spilled
         if carried:
             STATE["last_prefill"]["side"] = carried
+        if reused and where.get("via"):
+            STATE["last_prefill"]["via"] = where["via"]   # the park or the pin (usage.tandem.cache)
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)

@@ -233,6 +233,8 @@ class RequestRecord:
         # router's choices for it ({class, effort, packages}); `usage.tandem` when `parts` is set
         self.parts: dict | None = None
         self.harness: dict | None = None
+        # the park or the pin the rows came back from before the prefill resumed (None: in place)
+        self.cache_via: str | None = None
 
     # ----------------------------------------------------------------- filling it in
     def track(self, source):
@@ -263,6 +265,7 @@ class RequestRecord:
         self.prompt_n = int(info.get("forwarded") or 0)
         if self.cached_tokens:
             self.cache_source = str(info.get("kind") or "prefix")
+            self.cache_via = info.get("via")
         if self.prompt_client is not None:
             self.cached_tokens = max(0, int(self.prompt_client) - self.prompt_n)
             self.cache_source = "continuation"
@@ -375,7 +378,8 @@ class RequestRecord:
                           "history": max(0, p - system - tools - images),
                           "injected": int(self.hidden_prompt or 0), "images": images},
                 "harness": self.harness,
-                "cache": {"tier": tier_of(self.cache_source), "source": self.cache_source,
+                "cache": {"tier": tier_of(self.cache_via or self.cache_source),
+                          "source": self.cache_source,
                           "cached": int(self.cached_tokens), "reread": int(self.forwarded)}}
 
     @property

@@ -2424,6 +2424,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         res.stats["misses"] += 1
     if info is not None:
         info["kind"] = kind
+        info["via"] = via                  # the park or the pin the rows came back from, or None
         # what the live view needs to turn the chunk hook's `done` into progress and a
         # rate -- once per prefill, before the loop; the loop itself gains nothing
         info["start"], info["chunk"], info["t0"] = start, int(chunk), time.perf_counter()
