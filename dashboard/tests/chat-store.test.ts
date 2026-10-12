@@ -243,3 +243,17 @@ describe('the compaction divider', () => {
     expect(dividerWords(cp)).toBe('Earlier messages summarized: 214K to 18K tokens, 1.2 s');
   });
 });
+
+describe('Open WebUI valves', () => {
+  it('sends what was typed, in the valve types', async () => {
+    const { valveValues } = await import('../src/chat/types');
+    const kit = { valves: [
+      { name: 'API_KEY', type: 'string', default: '', description: '', secret: true, value: '', set: false },
+      { name: 'TIMEOUT', type: 'integer', default: 10, description: '', secret: false, value: 10, set: true },
+      { name: 'DEBUG', type: 'boolean', default: false, description: '', secret: false, value: false, set: false },
+    ] };
+    expect(valveValues(kit, { API_KEY: 'k', TIMEOUT: '30', DEBUG: 'yes' })).toEqual({ API_KEY: 'k', TIMEOUT: 30, DEBUG: true });
+    expect(valveValues(kit, { TIMEOUT: '' })).toEqual({ TIMEOUT: null });
+    expect(valveValues(kit, {})).toEqual({});
+  });
+});

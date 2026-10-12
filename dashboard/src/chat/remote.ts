@@ -5,7 +5,7 @@
 import { apiBase } from '../api/client';
 import { ResumableStream } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, ToolInfo, ToolPolicy } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit } from './types';
 
 const PREFIX = '/v1/chat-app';
 
@@ -55,10 +55,27 @@ export class RemoteChatBackend implements ChatBackend {
   signOut() {
     return del('/session');
   }
+  uploadSkill(file: File) {
+    return call<PackageInfo>('/packages/upload', { method: 'POST', body: form(file) });
+  }
+  removeSkill(pkgId: string) {
+    return call<void>(`/packages/${enc(pkgId)}`, { method: 'DELETE' });
+  }
+  importOwui(file: File) {
+    return call<{ toolkits: UserToolkit[]; tools: ToolInfo[] }>('/tools/import/owui', { method: 'POST', body: form(file) });
+  }
+  userToolkits() {
+    return call<UserToolkit[]>('/tools/user');
+  }
+  patchUserToolkit(id: string, patch: { enabled?: boolean; valves?: Record<string, unknown> }) {
+    return call<UserToolkit>(`/tools/user/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(patch) });
+  }
+  removeUserToolkit(id: string) {
+    return call<void>(`/tools/user/${enc(id)}`, { method: 'DELETE' });
+  }
+
   async uploadAttachment(file: File) {
-    const fd = new FormData();
-    fd.append('file', file, file.name);
-    return call<Attachment>('/attachments', { method: 'POST', body: fd });
+    return call<Attachment>('/attachments', { method: 'POST', body: form(file) });
   }
 
   listConversations() {
@@ -228,6 +245,12 @@ export class RemoteChatBackend implements ChatBackend {
       close: () => ws.close(),
     };
   }
+}
+
+function form(file: File): FormData {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  return fd;
 }
 
 function enc(s: string): string {

@@ -1807,6 +1807,28 @@ qse-chat-context {
   color: var(--cobalt-hi);
 }
 
+/* settings: Open WebUI tools and skill uploads (SRV-361) */
+.ch-settings-h4 {
+  margin-top: 24px;
+}
+.ch-file-btn {
+  position: relative;
+  align-self: flex-start;
+  cursor: pointer;
+}
+.ch-file-btn:focus-within {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+.ch-file-btn.is-busy {
+  cursor: progress;
+  opacity: 0.7;
+}
+.ch-valves {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 /* ---- the panes ---------------------------------------------------------------------------------- */
 qse-chat-panes {
   background: var(--bg-2);
@@ -2396,16 +2418,19 @@ qse-chat-panes {
   background: var(--bg-2);
 }
 .ch-add-mcp h4,
-.ch-two h4 {
+.ch-two h4,
+.ch-settings-h4 {
   font-size: var(--fs-md);
   font-weight: 600;
 }
 .ch-add-mcp .field,
+.ch-valves .field,
 .ch-edit-form .field {
   display: flex;
   justify-content: space-between;
 }
 .ch-add-mcp .field input,
+.ch-valves .field input,
 .ch-edit-form .field input,
 .ch-edit-form .field select {
   flex: 1;

@@ -8,7 +8,7 @@ import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, TOOLS, contextFor, iso, sandboxFor } from './mock-data';
 import { applyEvent } from './store';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TurnStats } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TurnStats, UserToolkit } from './types';
 import { localId } from './types';
 
 // ---- the branch tree --------------------------------------------------------------------------
@@ -158,6 +158,7 @@ export class MockChatBackend implements ChatBackend {
   ];
   private toolList: ToolInfo[] = TOOLS.map((t) => ({ ...t }));
   private pkgs: PackageInfo[] = PACKAGES.map((p) => ({ ...p }));
+  private kits: UserToolkit[] = [];
   private mcp: McpServer[] = MCP.map((m) => ({ ...m }));
   private promptList: Prompt[] = PROMPTS.map((p) => ({ ...p }));
   private presetList: Preset[] = PRESETS.map((p) => ({ ...p }));
@@ -628,6 +629,39 @@ export class MockChatBackend implements ChatBackend {
     if (!p) throw new Error(`no package ${pkgId}`);
     p.enabled = enabled;
     return { ...p };
+  }
+  // the mock reads no file: an upload or an import gives a fixed answer named after the file
+  async uploadSkill(file: File) {
+    const name = file.name.replace(/\.zip$/i, '').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-');
+    const p: PackageInfo = { id: name, name, description: `A skill uploaded from ${file.name}.`, kind: 'skill', version: '', enabled: true, tools: [], user: true };
+    this.pkgs = [...this.pkgs.filter((x) => x.id !== name), p];
+    return { ...p };
+  }
+  async removeSkill(pkgId: string) {
+    this.pkgs = this.pkgs.filter((x) => x.id !== pkgId);
+  }
+  async importOwui(file: File) {
+    const slug = file.name.replace(/\.(py|json)$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    const kit: UserToolkit = { id: localId('kit'), slug, title: file.name, description: 'Imported from Open WebUI.', version: '', requirements: [], enabled: true, tools: [`owui__${slug}__run`], valves: [{ name: 'API_KEY', type: 'string', default: '', description: 'the service key', secret: true, value: '', set: false }], created_at: new Date().toISOString() };
+    this.kits = [...this.kits, kit];
+    const tool: ToolInfo = { id: kit.tools[0], name: kit.tools[0], description: `${file.name}, an Open WebUI tool`, source: { kind: 'user', id: kit.id }, enabled: true, policy: 'ask', risk: 'exec' };
+    this.toolList = [...this.toolList, tool];
+    return { toolkits: [kit], tools: [tool] };
+  }
+  async userToolkits() {
+    return this.kits.map((k) => ({ ...k }));
+  }
+  async patchUserToolkit(id: string, patch: { enabled?: boolean; valves?: Record<string, unknown> }) {
+    const k = this.kits.find((x) => x.id === id);
+    if (!k) throw new Error(`no toolkit ${id}`);
+    if (patch.enabled != null) k.enabled = patch.enabled;
+    for (const v of k.valves) if (patch.valves && v.name in patch.valves && patch.valves[v.name] !== '') (v.set = true), (v.value = v.secret ? '' : patch.valves[v.name]);
+    return { ...k };
+  }
+  async removeUserToolkit(id: string) {
+    const k = this.kits.find((x) => x.id === id);
+    this.kits = this.kits.filter((x) => x.id !== id);
+    this.toolList = this.toolList.filter((t) => !k?.tools.includes(t.id));
   }
   async mcpServers() {
     return this.mcp.map((m) => ({ ...m }));

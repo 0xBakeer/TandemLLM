@@ -1,7 +1,8 @@
 // <qse-chat-settings>: the settings page in the thread's column, with a sub-navigation on the
 // left (tabs on a phone). Tools (source, on or off, the policy: ask, always, never), skills and
-// packages, MCP servers (status, tools, add stdio or HTTP with a Test button, restart, remove),
-// prompts and presets (Open WebUI style), and this chat's sandbox (state, limits, network, reset).
+// packages (upload a SKILL.md zip, remove your own), MCP servers (status, tools, add stdio or HTTP
+// with a Test button, restart, remove), Open WebUI tools (import a Tools file, its valves), prompts
+// and presets (Open WebUI style), and this chat's sandbox (state, limits, network, reset).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -9,8 +10,8 @@ import { bytes, duration } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { ChatBackend } from './backend';
-import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, ToolInfo, ToolPolicy } from './types';
-import { EFFORTS, effortWord } from './types';
+import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import { EFFORTS, effortWord, valveValues } from './types';
 
 export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'prompts' | 'sandbox';
 export const SECTIONS: { id: SettingsSection; label: string }[] = [
@@ -29,6 +30,10 @@ export class QseChatSettings extends LightElement {
   @property({ type: String }) section: SettingsSection = 'tools';
   @state() private tools: ToolInfo[] = [];
   @state() private pkgs: PackageInfo[] = [];
+  @state() private kits: UserToolkit[] = [];
+  /** typed valve values per toolkit, sent on Save */
+  @state() private valveDraft: Record<string, Record<string, string>> = {};
+  @state() private busy: string | null = null;
   @state() private mcp: McpServer[] = [];
   @state() private prompts: Prompt[] = [];
   @state() private presets: Preset[] = [];
@@ -48,7 +53,8 @@ export class QseChatSettings extends LightElement {
 
   private async load(): Promise<void> {
     const b = this.backend!;
-    const [tools, pkgs, mcp, prompts, presets] = await Promise.all([b.tools(), b.packages(), b.mcpServers(), b.prompts(), b.presets()]);
+    const [tools, pkgs, mcp, prompts, presets, kits] = await Promise.all([b.tools(), b.packages(), b.mcpServers(), b.prompts(), b.presets(), b.userToolkits().catch(() => [])]);
+    this.kits = kits;
     this.tools = tools;
     this.pkgs = pkgs;
     this.mcp = mcp;
@@ -115,7 +121,75 @@ export class QseChatSettings extends LightElement {
           </li>`,
         )}
       </ul>
-      <p class="ch-settings-note">ask: a prompt in the chat each time. always: runs without asking. never: the model sees the tool and the call is refused with a note.</p>`;
+      <p class="ch-settings-note">ask: a prompt in the chat each time. always: runs without asking. never: the model sees the tool and the call is refused with a note.</p>
+      ${this.renderKits()}`;
+  }
+
+  /** a file picker behind a button; `run` gets the file */
+  private pick(accept: string, label: string, run: (f: File) => Promise<void>): TemplateResult {
+    return html`<label class="btn ch-file-btn ${this.busy === label ? 'is-busy' : ''}">${this.busy === label ? html`<span class="pulse"></span>` : icon('plus')} ${label}<input type="file" class="sr-only" accept=${accept} ?disabled=${!!this.busy} @change=${async (e: Event) => {
+      const input = e.target as HTMLInputElement;
+      const f = input.files?.[0];
+      input.value = '';
+      if (!f) return;
+      this.busy = label;
+      try {
+        await run(f);
+      } catch (err) {
+        this.say((err as Error).message);
+      } finally {
+        this.busy = null;
+      }
+    }} /></label>`;
+  }
+
+  // ---- Open WebUI tools (D9: Tools files only; filters, pipes and actions are not imported) ---
+
+  private renderKits(): TemplateResult {
+    return html`<h4 class="ch-settings-h4">Open WebUI tools</h4>
+      <p class="ch-settings-lead">Import a Tools file from Open WebUI's Workspace (the .py, or the JSON export). Its methods become tools that run in the chat's sandbox; its valves are settings here.</p>
+      <ul class="ch-mcp-list">${this.kits.map((k) => this.renderKit(k))}</ul>
+      ${this.pick('.py,.json,text/x-python,application/json', 'Import a tools file', async (f) => {
+        const r = await this.backend!.importOwui(f);
+        this.kits = [...this.kits, ...r.toolkits];
+        this.tools = await this.backend!.tools();
+        this.say(`Imported ${r.toolkits.map((k) => k.title).join(', ')}: ${r.tools.length} tool${r.tools.length === 1 ? '' : 's'}.`);
+      })}`;
+  }
+
+  private renderKit(k: UserToolkit): TemplateResult {
+    const draft = this.valveDraft[k.id] ?? {};
+    return html`<li class="ch-mcp ch-kit" data-kit=${k.id}>
+      <div class="ch-mcp-row">
+        <label class="switch"><input type="checkbox" .checked=${k.enabled} @change=${async (e: Event) => {
+          const r = await this.backend!.patchUserToolkit(k.id, { enabled: (e.target as HTMLInputElement).checked });
+          this.kits = this.kits.map((x) => (x.id === k.id ? r : x));
+        }} /><span class="sr-only">${k.title} on</span></label>
+        <span class="ch-mcp-name">${k.title}</span><span class="tag">Open WebUI</span>${k.version ? html`<span class="num muted small">v${k.version}</span>` : nothing}
+        <span class="grow"></span>
+        <span class="muted small">${k.tools.length} tool${k.tools.length === 1 ? '' : 's'}</span>
+        <button type="button" class="btn btn-ghost btn-sm ch-danger" aria-label=${`Remove ${k.title}`} @click=${async () => {
+          if (!confirm(`Remove the tools "${k.title}"?`)) return;
+          await this.backend!.removeUserToolkit(k.id);
+          this.kits = this.kits.filter((x) => x.id !== k.id);
+          this.tools = this.tools.filter((t) => !k.tools.includes(t.id));
+        }}>${icon('trash')}</button>
+      </div>
+      ${k.description ? html`<p class="muted small">${k.description}</p>` : nothing}
+      ${k.requirements.length ? html`<p class="small">installs in the sandbox: ${k.requirements.map((r) => html`<code>${r}</code> `)}</p>` : nothing}
+      ${k.valves.length
+        ? html`<form class="ch-valves" @submit=${async (e: Event) => {
+            e.preventDefault();
+            const r = await this.backend!.patchUserToolkit(k.id, { valves: valveValues(k, draft) });
+            this.kits = this.kits.map((x) => (x.id === k.id ? r : x));
+            this.valveDraft = { ...this.valveDraft, [k.id]: {} };
+            this.say(`Saved the valves of ${k.title}.`);
+          }}>
+            ${k.valves.map((v) => html`<label class="field"><span>${v.name}${v.description ? html` <span class="muted">${v.description}</span>` : nothing}</span><input type=${v.secret ? 'password' : 'text'} autocomplete="off" placeholder=${v.secret ? (v.set ? 'stored; type to replace' : 'not set') : String(v.default ?? '')} .value=${draft[v.name] ?? (v.secret ? '' : String(v.value ?? ''))} @input=${(e: Event) => (this.valveDraft = { ...this.valveDraft, [k.id]: { ...draft, [v.name]: (e.target as HTMLInputElement).value } })} /></label>`)}
+            <div class="ch-add-row"><span class="grow"></span><button type="submit" class="btn btn-sm btn-primary" ?disabled=${!Object.keys(draft).length}>Save valves</button></div>
+          </form>`
+        : nothing}
+    </li>`;
   }
 
   private async setTool(id: string, patch: { enabled?: boolean; policy?: ToolPolicy }): Promise<void> {
@@ -135,10 +209,23 @@ export class QseChatSettings extends LightElement {
               const r = await this.backend!.setPackage(p.id, (e.target as HTMLInputElement).checked);
               this.pkgs = this.pkgs.map((x) => (x.id === p.id ? r : x));
             }} /><span class="sr-only">${p.name} on</span></label>
-            <div class="ch-pkg-main"><span class="ch-pkg-name">${p.name}</span><span class="tag">${p.kind}</span><span class="num muted small">v${p.version}</span><span class="ch-pkg-desc">${p.description}</span>${p.tools.length ? html`<span class="ch-pkg-tools">${p.tools.map((t) => html`<code>${t}</code>`)}</span>` : nothing}</div>
+            <div class="ch-pkg-main"><span class="ch-pkg-name">${p.name}</span><span class="tag">${p.user ? 'yours' : p.kind}</span>${p.version ? html`<span class="num muted small">v${p.version}</span>` : nothing}<span class="ch-pkg-desc">${p.description}</span>${p.tools.length ? html`<span class="ch-pkg-tools">${p.tools.map((t) => html`<code>${t}</code>`)}</span>` : nothing}</div>
+            ${p.user
+              ? html`<button type="button" class="btn btn-ghost btn-sm ch-danger" aria-label=${`Remove ${p.name}`} @click=${async () => {
+                  if (!confirm(`Remove your skill "${p.name}" from the engine's library?`)) return;
+                  await this.backend!.removeSkill(p.id);
+                  this.pkgs = this.pkgs.filter((x) => x.id !== p.id);
+                }}>${icon('trash')}</button>`
+              : nothing}
           </li>`,
         )}
-      </ul>`;
+      </ul>
+      ${this.pick('.zip,application/zip', 'Upload a skill', async (f) => {
+        const p = await this.backend!.uploadSkill(f);
+        this.pkgs = [...this.pkgs.filter((x) => x.id !== p.id), p];
+        this.say(`Installed the skill ${p.name}.`);
+      })}
+      <p class="ch-settings-note">A skill is a folder with a SKILL.md (frontmatter <code>name</code> and <code>description</code>), as a .zip. It goes into the engine's library, so the harness and the model's library search find it.</p>`;
   }
 
   // ---- mcp ------------------------------------------------------------------------------------
@@ -320,8 +407,9 @@ export class QseChatSettings extends LightElement {
 }
 
 function sourceWord(t: ToolInfo): string {
-  return t.source.kind === 'builtin' ? 'built in' : t.source.kind === 'package' ? `package ${t.source.id}` : `MCP ${t.source.id}`;
+  return t.source.kind === 'builtin' ? 'built in' : t.source.kind === 'package' ? `package ${t.source.id}` : t.source.kind === 'user' ? 'Open WebUI tool' : `MCP ${t.source.id}`;
 }
+
 
 function parseKv(text: string, sep = '='): Record<string, string> {
   const out: Record<string, string> = {};

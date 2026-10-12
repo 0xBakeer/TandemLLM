@@ -198,7 +198,8 @@ interface ToolInfo {
   risk?: 'read' | 'write' | 'exec' | 'network';  // v0.2
   schema_tokens?: number;                        // v0.2: what its schema costs in every request
 }
-interface PackageInfo { id: string; name: string; description: string; kind: 'skill' | 'package'; version: string; enabled: boolean; tools: string[]; tokens?: number }
+interface PackageInfo { id: string; name: string; description: string; kind: 'skill' | 'package'; version: string; enabled: boolean; tools: string[]; tokens?: number; user?: boolean }   // user: uploaded through /packages/upload
+interface UserToolkit { id: string; slug: string; title: string; description: string; version: string; requirements: string[]; enabled: boolean; tools: string[]; valves: {name, type, default, description, secret, value, set}[]; created_at: string }
 type McpStatus = 'connected' | 'starting' | 'failed' | 'stopped';
 interface McpServer {
   id: string; name: string; transport: 'stdio' | 'http';
@@ -292,9 +293,12 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/attachments` | multipart `file` (max 50 MB) | `Attachment` | (v0.2) | MVP |
 | GET | `/attachments/{att}` | | bytes | | MVP |
 | GET | `/tools` / PATCH `/tools/{tool}` | `{enabled?, policy?}` | `ToolInfo[]` / `ToolInfo` | `tools()`, `setTool()` | v2 |
-| POST | `/tools/import/owui` | multipart `.py` | `{tools: ToolInfo[], valves: object}` | (v0.2) | v2 |
+| POST | `/tools/import/owui` | multipart `file`: a Tools `.py` or Open WebUI's JSON export | `{toolkit: UserToolkit, toolkits: UserToolkit[], tools: ToolInfo[], valves}`; 400 `bad_tools_file` (a filter, pipe or action; no `class Tools`) | `importOwui()` | v2 |
+| GET | `/tools/user` | | `UserToolkit[]` (a secret valve's value is `""`, `set` says whether one is stored) | `userToolkits()` | v2 |
+| PATCH / DELETE | `/tools/user/{tid}` | `{enabled?, valves?: {NAME: value}}` (an empty secret keeps the stored one) | `UserToolkit` / 204 | `patchUserToolkit()`, `removeUserToolkit()` | v2 |
 | GET | `/packages` / PATCH `/packages/{pkg}` | `{enabled}` | `PackageInfo[]` / `PackageInfo` | `packages()`, `setPackage()` | v2 |
-| POST | `/packages/upload` | multipart `.zip` with a SKILL.md folder | `PackageInfo` | (v0.2) | v2 |
+| POST | `/packages/upload` | multipart `file`: a `.zip` with a SKILL.md folder | `PackageInfo` (`user: true`); 400 `bad_skill` with the reason, 409 when the engine has the name from elsewhere | `uploadSkill()` | v2 |
+| DELETE | `/packages/{pkg}` | | 204; 404 for a package that came with the engine (switch those off instead) | `removeSkill()` | v2 |
 | GET / POST | `/mcp/servers` | `McpServerDraft` | `McpServer[]` / `McpServer` | `mcpServers()`, `addMcpServer()` | v2 |
 | PATCH / DELETE | `/mcp/servers/{sid}` | `Partial<McpServerDraft>` | `McpServer` / 204 | `removeMcpServer()` | v2 |
 | POST | `/mcp/servers/test` | `McpServerDraft` | `{ok, message, tools}` | `testMcpServer()` | v2 |

@@ -3,7 +3,7 @@
 // backend. pickBackend() probes the server once and falls back to the mock with a badge.
 
 import { apiBase } from '../api/client';
-import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy } from './types';
+import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit } from './types';
 import type { StreamState } from '../lib/sse';
 
 export interface Subscription {
@@ -82,6 +82,14 @@ export interface ChatBackend {
   setTool(toolId: string, patch: { enabled?: boolean; policy?: ToolPolicy }): Promise<ToolInfo>;
   packages(): Promise<PackageInfo[]>;
   setPackage(pkgId: string, enabled: boolean): Promise<PackageInfo>;
+  /** a .zip with a SKILL.md folder, installed into the engine's library */
+  uploadSkill(file: File): Promise<PackageInfo>;
+  removeSkill(pkgId: string): Promise<void>;
+  /** an Open WebUI Tools .py (or its JSON export) */
+  importOwui(file: File): Promise<{ toolkits: UserToolkit[]; tools: ToolInfo[] }>;
+  userToolkits(): Promise<UserToolkit[]>;
+  patchUserToolkit(id: string, patch: { enabled?: boolean; valves?: Record<string, unknown> }): Promise<UserToolkit>;
+  removeUserToolkit(id: string): Promise<void>;
   mcpServers(): Promise<McpServer[]>;
   addMcpServer(draft: McpServerDraft): Promise<McpServer>;
   removeMcpServer(serverId: string): Promise<void>;

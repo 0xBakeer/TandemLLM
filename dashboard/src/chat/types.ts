@@ -346,6 +346,23 @@ export interface PackageInfo {
   enabled: boolean;
   tools: string[];
   tokens?: number;
+  /** uploaded here (a SKILL.md zip): it can be removed */
+  user?: boolean;
+}
+
+/** an imported Open WebUI Tools file (SRV-361): its tools are `owui__<slug>__<method>` */
+export interface UserToolkit {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  version: string;
+  requirements: string[];
+  enabled: boolean;
+  tools: string[];
+  /** a secret valve's value comes back empty; `set` says whether one is stored */
+  valves: { name: string; type: string; default: unknown; description: string; secret: boolean; value: unknown; set: boolean }[];
+  created_at: string;
 }
 
 export type McpStatus = 'connected' | 'starting' | 'failed' | 'stopped';
@@ -519,4 +536,15 @@ export function effortWord(e: EffortChoice): string {
 export function toolLabel(name: string): string {
   const m = /^mcp__([^_]+(?:_[^_]+)*)__(.+)$/.exec(name);
   return m ? `${m[1]}: ${m[2]}` : name;
+}
+
+/** the typed valve values in their types (a number valve sends a number) */
+export function valveValues(k: Pick<UserToolkit, 'valves'>, draft: Record<string, string>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const v of k.valves) {
+    if (!(v.name in draft)) continue;
+    const t = draft[v.name];
+    out[v.name] = v.type === 'integer' || v.type === 'number' ? (t.trim() === '' ? null : Number(t)) : v.type === 'boolean' ? /^(true|1|yes|on)$/i.test(t.trim()) : t;
+  }
+  return out;
 }
