@@ -390,12 +390,15 @@ def prices(pack: str, log=print) -> PriceModel:
                            log=log)
 
 
-def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print):
+def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=lambda stage: None, log=print,
+          corpus: str | None = None):
     """Flash-Next for the server (`serve` below): the pack's weights, the engine in the loop's
     interface, and with `spec` the shared MTP drafter over the pack's MTP head with the hot draft head
     (`FN_DRAFT_HOT` ids of ops/fn-hot-vocab.npy, 0 = the whole vocabulary), its graphs captured and
     StairCut's prior from the price file -- gated by the load-time self-check (a failed check serves
-    plain decode). `mark(stage)` at "weights", "engine", "drafters" (the server's load ledger).
+    plain decode); with FN_LOOKUP the lookup over the request's text and `corpus` joins the cut (ENG-229;
+    the tokenizer is the 27B's, so its corpus and suffix store read as they are, checked by fingerprint).
+    `mark(stage)` at "weights", "engine", "drafters" (the server's load ledger).
     Returns (serving, drafter or None, info)."""
     from engine.models.flashnext.load import load as fn_load
     idx, W, banks, tables, timing = fn_load(pack, "cuda", mtp=spec)
@@ -411,7 +414,15 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 4, mark=
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         check = fn.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
         if check["ok"]:
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False))
+            ngram = None
+            if _S.get("FN_LOOKUP") == "1":
+                from engine.drafters.ngram import NgramDrafter
+                from engine.tokfp import fingerprint
+                ngram = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(pack), min_order=3,
+                                     max_depth=16, min_corpus_order=8)
+                log(f"[server] Flash-Next lookup in the cut: corpus "
+                    f"{(corpus or 'none') if ngram.corpus is not None else 'none'}")
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram)
             drafter.capture_all()
         else:
             log("[server] Flash-Next self-check FAILED: speculation off, plain decode only")
@@ -437,11 +448,17 @@ def serve(a, ctx) -> dict:
         ctx.log(f"[server] Flash-Next drafts with its own MTP layer: --drafter {a.drafter} taken as mtp")
     tok = AutoTokenizer.from_pretrained(a.model)
     depth = a.depth if a.depth > 3 else 4
-    eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log)
+    eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log,
+                               corpus=a.corpus)
     if drafter is not None:
         a.depth = depth
+        if drafter.ngram is not None:
+            # the loop hands a round k rows past the anchor: the lookup's copy may run past the head's
+            # depth, up to what the cut admits
+            a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
     describe = (f"Flash-Next {a.model}: load {info['load'].get('total_s')} s, drafter "
-                f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}, "
+                f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}"
+                f"{' + lookup' if getattr(drafter, 'ngram', None) is not None else ''}, "
                 f"max_len {a.max_len:,},")
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,

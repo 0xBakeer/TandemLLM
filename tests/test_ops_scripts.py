@@ -413,8 +413,9 @@ def test_a_profile_of_another_model_replaces_the_27b_model_flags():
     argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
     assert argv[argv.index("--model") + 1] == "/p/flashnext-packs/3.05" and argv.count("--drafter") == 1, argv
     assert argv[argv.index("--drafter") + 1] == "mtp", argv
-    for gone in ("--nvfp4", "--fp8-head", "--dflash2-ckpt", "--tree", "--corpus", "--len-fixed", "--len-latch"):
+    for gone in ("--nvfp4", "--fp8-head", "--dflash2-ckpt", "--tree", "--len-fixed", "--len-latch"):
         assert gone not in argv, (gone, argv)
+    assert argv[argv.index("--corpus") + 1] == "x", argv          # the lookup's corpus (ENG-229)
     for kept in ("--served-model", "--max-len", "--cache-budget-gb", "--conductor", "--disk-cache"):
         assert kept in argv, (kept, argv)
     r, marks = _start_with_fake_engine("0", "")

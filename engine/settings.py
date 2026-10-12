@@ -327,6 +327,9 @@ KNOBS: dict[str, tuple] = {
     # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
     # (int8 rows; 0 = the full EXL3 head)
     'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),
+    # ENG-229: the lookup (the request's text, --corpus and the server's suffix store) in the MTP round's
+    # cut, one tree with the head's chain; 0 = the head alone
+    'FN_LOOKUP': ('0', 'engine/models/flashnext/serving.py'),
 }
 
 

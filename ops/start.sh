@@ -181,9 +181,10 @@ case "${SAMPLED_TREE:-}" in
     mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
 esac
 # OPS-99: a profile of another model names its own model and drafter flags (QSE_ENGINE_FLAGS; a
-# Flash-Next pack: --model <pack> --drafter mtp) in place of the 27B's; unset, the 27B's, in their places
+# Flash-Next pack: --model <pack> --drafter mtp) in place of the 27B's, with the lookup's corpus (the
+# tokenizer's, shared; ENG-229); unset, the 27B's, in their places
 if [ -n "${QSE_ENGINE_FLAGS:-}" ]; then
-    MODEL_HEAD=($QSE_ENGINE_FLAGS); MODEL_TAIL=()
+    MODEL_HEAD=($QSE_ENGINE_FLAGS --corpus "$CORPUS"); MODEL_TAIL=()
 else
     MODEL_HEAD=(--drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG --dflash2-path greedy)
     MODEL_TAIL=(--tree --budget "$BUDGET" --corpus "$CORPUS"

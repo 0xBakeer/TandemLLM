@@ -185,7 +185,9 @@ def _replay(rounds, siblings: bool) -> int:
         a.observe(path, ms(len(ta)), dms)
         b.observe(path, ms(len(tb)), dms)
     assert a.V == b.prices.V[("chain", 0)] and abs(a.delta - b.prices.delta[("chain", 0)]) == 0.0
-    assert a.cal == b.cal.cal and a.draft_ms == b.draft_ms
+    # the lookup's bins (ENG-229) stay at their prior without a lookup
+    assert a.cal == {k: b.cal.cal[k] for k in a.cal} and a.draft_ms == b.draft_ms
+    assert b.cal.cal["look"] == ProbDeciles().cal["look"]
     return len(rounds)
 
 
@@ -258,6 +260,45 @@ def test_staircut():
     toks, par = sc3.cut(1, tok, [[0.99, 0.0]] * 5)
     assert 20 not in toks, toks                       # a sibling of q 0 is never bought
     return "confident chain kept, unsure dropped, a paying sibling first, calibration learned, prices monotone"
+
+
+def test_the_lookup_joins_the_cut_in_one_tree():
+    """ENG-229: the lookup's continuation shares the spine while their tokens agree (a shared node is
+    likelier: either being right), leaves it where they differ, and runs on past the spine's end; the
+    block is one tree in DFS pre-order, admitted best-first within max_rows; a merged round teaches the
+    lookup's bin; without a lookup the cut is the head's alone."""
+    tok = [[10 + k, 20 + k] for k in range(4)]
+    sc = _new(False)
+    base = sc.cut(1, tok, [[0.5, 0.1]] * 4)
+    # a copy the lookup is sure of, agreeing on 2 tokens, then 10 of its own: it is bought
+    look = [10, 11, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99]
+    toks, par = sc.cut(1, tok, [[0.5, 0.1]] * 4, (look, 0.97))
+    DraftTree(tokens=toks, parents=par).check()
+    assert all(p < i for i, p in enumerate(par) if i), par
+    assert toks[:3] == [1, 10, 11] and 90 in toks and len(toks) > len(base[0]), (toks, par)
+    assert par[toks.index(90)] == toks.index(11)                       # under the last shared node
+    assert toks.index(90) < toks.index(12) if 12 in toks else True     # the lookup's branch first
+    assert len(toks) <= sc.max_rows
+    # the target writes the copy: the walk goes down the lookup's branch
+    depth = [0]
+    for p in par[1:]:
+        depth.append(depth[p] + 1)
+    path, new = accept_tree(DraftTree(tokens=toks, parents=par), [look[d] if d < len(look) else 7 for d in depth])
+    assert new == look[:len(new)] and len(new) > 3, new
+    # the lookup past the spine's end
+    toks2, par2 = sc.cut(1, tok, [[0.99, 0.0]] * 4, ([10, 11, 12, 13, 50, 51, 52], 0.97))
+    assert toks2[:5] == [1, 10, 11, 12, 13] and toks2[5:] == [50, 51, 52] and par2[5] == 4, (toks2, par2)
+    # an unsure lookup on an unsure spine buys nothing past what pays
+    toks3, _ = sc.cut(1, tok, [[0.05, 0.0]] * 4, ([30, 31, 32], 0.05))
+    assert toks3 == [1], toks3
+    # learning: a lookup that is never taken pulls its bin down
+    before = sc.cal.q("look", 0.95)
+    for _ in range(60):
+        sc.cut(1, tok, [[0.5, 0.1]] * 4, ([90, 91, 92], 0.95))
+        sc.observe([0], 30.0, 2.0)
+    assert sc.cal.q("look", 0.95) < 0.3 < before
+    return (f"agreeing 2 then 10 own: {len(toks)} rows, the copy under the shared node; past the spine's end; "
+            f"unsure: anchor only; the lookup's bin learned")
 
 
 def test_price_model():

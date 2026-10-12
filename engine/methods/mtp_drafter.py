@@ -12,6 +12,11 @@ the top-2 tokens and their probabilities, `views()` and `resume(n)`. Of the engi
 last block captured a verify or commit graph), `commit_ms` and `last_streams()` (the last committed
 row's streams, a section of its cache state).
 
+A lookup source (`ngram`, engine/drafters/ngram.py: the request's own text, the corpus and the server's
+suffix store, which the server hands to it through `add_store`) adds its best continuation to the
+round's cut (ENG-229): the head and the lookup in one tree, one verify. It is asked while the draft
+runs, as deep as its match allows.
+
 The caches (ENG-157) keep the head's cache with the engine's rows: `kv_views` (the resident prefix,
 the disk tier, the spill), `state_snapshot` / `state_restore` (the state store) and `state_resume(n)`
 (a resume in place). After a resume at n the head holds rows below n - 1 and the row at n - 1 waits for
@@ -35,20 +40,21 @@ class MTPTreeDrafter:
     last_q = None
     wants_rows = False
 
-    def __init__(self, eng, head, cut: StairCut):
+    def __init__(self, eng, head, cut: StairCut, ngram=None, look_depth: int = 16):
         self.s, self.head, self.cut, self.depth = eng, head, cut, head.depth
+        self.ngram, self.look_depth = ngram, look_depth
         self.pending = None                 # (streams, next tokens) of the round's own feed
         self.held = None                    # (tokens, streams) of the last rows synced
         self.queue: list = []               # (streams, next tokens) not fed yet
         self.round = None                   # the draft ms of the block awaiting its verify
         self.verify_ms = None
-        self.stats = {"rounds": 0, "draft_ms": 0.0, "fed_rows": 0}
+        self.stats = {"rounds": 0, "draft_ms": 0.0, "fed_rows": 0, "looked": 0}
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
         c = self.cut
         V, delta = c.prices.learned(c.kind)
-        return (f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} "
+        return (f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} looked={self.stats['looked']} "
                 f"draft_ms={c.draft_ms if c.draft_ms is None else round(c.draft_ms, 2)} delta={round(delta, 2)} "
                 f"V={ {r: round(v, 1) for r, v in sorted(V.items())} } "
                 f"spine_cal={[round(c.cal.q('spine', (b + 0.5) / 10), 2) for b in range(10)]}")
@@ -59,11 +65,15 @@ class MTPTreeDrafter:
     # --- the loop's drafter interface -------------------------------------------------------------
     def reset(self) -> None:
         self.head.reset()
+        if self.ngram is not None:
+            self.ngram.reset()
         self.pending = None
         self.held, self.queue, self.round, self.verify_ms = None, [], None, None
 
     def prime(self, tokens: list[int]) -> None:
-        pass                                # the prompt's rows come through `sync`
+        # the prompt's rows come through `sync`; the lookup indexes its tokens
+        if self.ngram is not None:
+            self.ngram.prime(tokens)
 
     def set_sampling(self, sampler) -> None:
         pass                                # the draft is the greedy tree; a sampled walk draws on it
@@ -79,6 +89,8 @@ class MTPTreeDrafter:
         self.held = (toks, h)
 
     def observe(self, tokens: list[int]) -> None:
+        if self.ngram is not None:
+            self.ngram.observe(tokens)
         # a round that captured a graph took the capture's time: StairCut learns nothing from it
         # (its price for that row count would start at ~170 ms and the cut would never ask again)
         if self.round is not None and self.verify_ms is not None and not self.s.captured:
@@ -103,8 +115,9 @@ class MTPTreeDrafter:
         host = time.perf_counter() - t0
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()
+        look = self._look(context)
         tok, prob = self.head.read()
-        toks, parents = self.cut.cut(int(context[-1]), tok, prob)
+        toks, parents = self.cut.cut(int(context[-1]), tok, prob, look)
         tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
@@ -112,6 +125,18 @@ class MTPTreeDrafter:
         self.stats["rounds"] += 1
         self.stats["draft_ms"] += self.round
         return tree
+
+    def _look(self, context: list[int]) -> tuple | None:
+        """The lookup's best continuation and its share of the vote (smoothed as the lookup's own
+        tree is), or None when nothing matches."""
+        if self.ngram is None:
+            return None
+        _, cands = self.ngram.candidates(context, self.look_depth)
+        if not cands:
+            return None
+        self.stats["looked"] += 1
+        total = sum(w for _, w in cands)
+        return cands[0][0], cands[0][1] / (total + self.ngram.alpha)
 
     # --- the caches (ENG-157) -------------------------------------------------------------------
     def kv_views(self) -> list:

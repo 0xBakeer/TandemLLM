@@ -126,6 +126,57 @@ def test_drafter_pairs_rows_with_their_next_token():
     return "prompt chunks, forced phrase, decode steps: each row with its next token; backlog primed in order"
 
 
+class _StubHead:
+    """An MTP head that always drafts tokens 10 + k (p 0.5) and 20 + k (p 0.1) at depth k."""
+
+    depth = 3
+
+    def __init__(self):
+        self.st = types.SimpleNamespace(length=0)
+
+    def reset(self):
+        self.st.length = 0
+
+    def prime(self, rows, nexts):
+        self.st.length += len(nexts)
+
+    def launch(self, rows, nexts):
+        self.st.length += len(nexts)
+
+    def read(self):
+        return [[10 + k, 20 + k] for k in range(self.depth)], [[0.5, 0.1]] * self.depth
+
+
+def test_the_lookup_joins_the_mtp_round():
+    """ENG-229: with a lookup the round's tree carries the head's chain and the lookup's copy of the
+    request's own text (one verify); the lookup is primed with the prompt, follows what is committed
+    and is reset with the drafter; without a match the round is the head's alone."""
+    from engine.drafters.ngram import NgramDrafter
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16)
+    d = MTPTreeDrafter(eng, _StubHead(), StairCut(PriceModel(), siblings=False), ng)
+    text = [500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 600, 601]
+    prompt = text + [700] + text[:4]                    # the request repeats its own text
+    d.reset()
+    d.prime(prompt)
+    d.sync(prompt, _rows(0, len(prompt)), 0)
+    tree = d.propose_tree(prompt, 32)
+    tree.check()
+    copy = text[4:] + [700] + text[:4]                 # what followed the last match, the lookup's draft
+    assert tree.tokens[1:1 + len(copy)] == copy and tree.parents[1:1 + len(copy)] == list(range(len(copy))), tree.tokens
+    assert tree.tokens[1 + len(copy):] == [10, 11, 12] and tree.parents[1 + len(copy)] == 0  # the head's chain
+    assert d.stats["looked"] == 1
+    d.observe([504, 505])                               # committed: the lookup's index follows
+    assert ng.local.lookup(prompt + [504, 505], 3)[0] >= 3
+    d.reset()
+    assert ng.local.lookup(prompt, 3) == (0, [])
+    d.prime([1, 2, 3, 4])
+    d.sync([1, 2, 3, 4], _rows(0, 4), 0)
+    tree = d.propose_tree([1, 2, 3, 4], 32)
+    assert tree.tokens == [4, 10, 11, 12] and d.stats["looked"] == 1, tree.tokens
+    return "the copy and the head's chain in one tree; primed, observed, reset; no match: the head alone"
+
+
 def test_walk_and_kv_length():
     fn = _FN()
     s = FlashNextServing(fn, 64)

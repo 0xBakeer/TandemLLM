@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EXL3", "QWEN38_SAMPLE_NUCLEUS",
         "QSE_DISK_CACHE", "NV", "HEAD", "QSE_WEIGHTS_HF", "PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG",
         "QSE_WEIGHTS_DIR", "QSE_WEIGHTS_REVISION", "QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
-        "QWEN38_FN_TABLE", "QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP", "VISION", "MAX_LEN")
+        "QWEN38_FN_TABLE", "QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP", "VISION", "MAX_LEN", "QWEN38_FN_LOOKUP")
 
 
 def _env(profile: str | None, extra: dict | None = None) -> dict:
@@ -67,6 +67,7 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QWEN38_FN_TABLE"] == table and e["QSE_PAGE_CACHE_DROP"] == d, e
         assert e["QSE_PAGE_CACHE_KEEP"] == ("ngram_embedding.safetensors" if table == "warm" else ""), e
         assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "off", e
+        assert e["QWEN38_FN_LOOKUP"] == "1", e
         for k in ("PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG", "MAX_LEN"):
             assert e[k] == base[k], k
     # a 27B profile sets none of them: start.sh's 27B flags and use-profile.sh's 27B assets stay

@@ -12,8 +12,11 @@ cut moves speed and never text.
 
 Strategies: `StairCut.cut` is `chain_siblings` -- a spine (the head's greedy chain) and, with
 `siblings`, one leaf a depth (the head's second token there, a child of the spine node above it) --
-moved here from Flash-Next's package as it was. The 27B's best-first admission over any tree
-(engine/router.py) joins as a second strategy in ENG-257.
+moved here from Flash-Next's package as it was. With a lookup continuation (`look`, ENG-229) the
+round is one tree of both sources -- the spine, and the lookup's chain where it leaves the spine (or
+runs on past its end) -- admitted best-first by q; where the two agree, a spine node's q is that of
+either being right. The 27B's best-first admission over any tree (engine/router.py) joins as a
+further strategy in ENG-257.
 """
 
 from __future__ import annotations
@@ -119,7 +122,7 @@ class ProbDeciles:
     `prior_n` rounds a bin), learns from every verified round, and halves old evidence past `cap`
     rounds a bin, so it follows the text."""
 
-    def __init__(self, kinds=("spine", "sib"), prior_n: float = 4.0, cap: float = 400.0):
+    def __init__(self, kinds=("spine", "sib", "look"), prior_n: float = 4.0, cap: float = 400.0):
         self.prior_n, self.cap = prior_n, cap
         self.cal = {k: [[0.0, 0.0] for _ in range(10)] for k in kinds}
 
@@ -150,9 +153,12 @@ class StairCut:
         self.last = None
         self.frozen = False
 
-    def cut(self, anchor: int, tok: list, prob: list) -> tuple[list[int], list[int]]:
-        """tok / prob: per depth the (first, second) draft token and its probability. Returns the
-        block in DFS pre-order: (tokens, parents), row 0 the anchor."""
+    def cut(self, anchor: int, tok: list, prob: list, look: tuple | None = None) -> tuple[list[int], list[int]]:
+        """tok / prob: per depth the (first, second) draft token and its probability; `look`: a lookup
+        continuation (tokens, confidence) or None. Returns the block in DFS pre-order: (tokens,
+        parents), row 0 the anchor."""
+        if look is not None and look[0]:
+            return self._merged(anchor, tok, prob, list(look[0]), float(look[1]))
         D = len(tok)
         q = self.cal.q
         reach, spine_q, sib_q = 1.0, [], []
@@ -202,10 +208,74 @@ class StairCut:
         self.last = (kind, prob, len(tokens))
         return tokens, parents
 
+    def _merged(self, anchor: int, tok: list, prob: list, look: list, conf: float) -> tuple[list[int], list[int]]:
+        """ENG-229: the spine and the lookup's chain in one block. The lookup shares the spine's nodes
+        while its tokens are the spine's (j of them; a shared node's q is 1 - both wrong), then leaves
+        it under the spine node at depth j (or runs on past the spine's end): its first own node is
+        taken when the spine's is not and the lookup is right, each next one when the lookup is right
+        again. Nodes are admitted in order of q -- a parent's q is never below its child's, so a node
+        comes after its parent -- for as long as (1 + sum q) / (V(rows) + draft) rises."""
+        q = self.cal.q
+        pl = q("look", conf)
+        D = len(tok)
+        j = 0
+        while j < min(D, len(look)) and look[j] == tok[j][0]:
+            j += 1
+        # node: [token, parent node (-1: the anchor), q, (kind, k), depth]
+        nodes, reach, up = [], 1.0, -1
+        for k in range(D):
+            c1 = q("spine", prob[k][0])
+            c = 1.0 - (1.0 - c1) * (1.0 - pl) if k < j else c1
+            nodes.append([tok[k][0], up, reach * c, ("spine", k) if k >= j else ("both", k), k])
+            if k == j and j < len(look):
+                lq = reach * (1.0 - c1) * pl           # the lookup's own token where the spine's is wrong
+            reach *= c
+            up = len(nodes) - 1
+        if j == D and j < len(look):
+            lq = reach * pl                             # the lookup runs on past the spine's end
+        if j < len(look):
+            lup = j - 1                                 # the spine node above (-1: the anchor)
+            for i, t in enumerate(look[j:]):
+                nodes.append([t, lup, lq, ("look", j + i), j + i])
+                lup, lq = len(nodes) - 1, lq * pl
+        order = sorted(range(len(nodes)), key=lambda i: (-nodes[i][2], nodes[i][4]))
+        draft = self.draft_ms or 0.0
+        price = self.prices.prices(self.max_rows, self.kind)
+        best, gain, taken, kept = (1.0 / (price[1] + draft), 0), 1.0, set(), []
+        for i in order:
+            if len(kept) + 2 > self.max_rows:
+                break
+            if nodes[i][1] >= 0 and nodes[i][1] not in taken:
+                continue
+            taken.add(i)
+            kept.append(i)
+            gain += nodes[i][2]
+            score = gain / (price[len(kept) + 1] + draft)
+            if score > best[0]:
+                best = (score, len(kept))
+        keep = set(kept[:best[1]])
+        tokens, parents, kind = [anchor], [-1], [None]
+        row: dict = {}
+
+        def emit(par: int, prow: int) -> None:
+            # the lookup's branch before the spine's continuation, as `chain_siblings` puts a sibling
+            for i in sorted((i for i in keep if nodes[i][1] == par), key=lambda i: nodes[i][3][0] != "look"):
+                tokens.append(nodes[i][0])
+                parents.append(prow)
+                kind.append(nodes[i][3])
+                row[i] = len(tokens) - 1
+                emit(i, row[i])
+        emit(-1, 0)
+        self.last = ("merged", kind, prob, len(tokens), conf, parents)
+        return tokens, parents
+
     def observe(self, path: list[int], round_ms: float, draft_ms: float) -> None:
         """The last block's accepted path (its rows), what its verify and commit cost and what the draft
         cost: the calibration learns from every node the walk reached, the prices from the round."""
         if self.frozen:
+            return
+        if self.last[0] == "merged":
+            self._observe_merged(path, round_ms, draft_ms)
             return
         kind, prob, rows = self.last
         on = {kind[r] for r in path[1:]}
@@ -217,5 +287,22 @@ class StairCut:
                 self.cal.learn("spine", prob[k][0], ("spine", k) in on)
             elif ("spine", k) not in on:
                 self.cal.learn("sib", prob[k][1], ("sib", k) in on)
+        self.prices.observe(rows, round_ms, self.kind)
+        self.draft_ms = draft_ms if self.draft_ms is None else 0.9 * self.draft_ms + 0.1 * draft_ms
+
+    def _observe_merged(self, path: list[int], round_ms: float, draft_ms: float) -> None:
+        """A merged block: a node the walk reached (its parent on the path) teaches its source -- a
+        spine node the spine's bin, a lookup node the lookup's, a shared node both."""
+        _, kind, prob, rows, conf, parents = self.last
+        on = set(path)
+        for r in range(1, rows):
+            if parents[r] not in on:
+                continue
+            t, k = kind[r]
+            hit = r in on
+            if t in ("spine", "both"):
+                self.cal.learn("spine", prob[k][0], hit)
+            if t in ("look", "both"):
+                self.cal.learn("look", conf, hit)
         self.prices.observe(rows, round_ms, self.kind)
         self.draft_ms = draft_ms if self.draft_ms is None else 0.9 * self.draft_ms + 0.1 * draft_ms
