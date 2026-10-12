@@ -545,6 +545,239 @@ __global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __re
     }
 }
 
+// ENG-241: the experts by group. A pair's CTA above streams and decodes its expert's trellis tiles
+// for one row; when several rows of a block (or of a joint pass) take the same expert, a group of up
+// to MOE_GR of them shares one CTA: the tiles are decoded once and multiplied into every row of the
+// group, each row in its own lane group of the mma's A operand (row 0 above: lanes g == 0). A row's
+// sums are the same products in the same order, its K slices the same warps', its warp partials
+// added in the same warp order, so a row's bits do not depend on its group (the load-time self-check
+// compares them with the decode step's).
+#define MOE_GR 8
+
+// groups G [P][2 + MOE_GR] (expert, rows, the pairs), NG [1]: the pairs in launch order (ORDER, or 0..P-1),
+// a group the run of one expert, split every MOE_GR pairs. One thread; P is at most a few hundred.
+__global__ void moe_groups_kernel(const int* __restrict__ IDS, const int* __restrict__ ORDER, int P,
+        int* __restrict__ G, int* __restrict__ NG) {
+    pdl_wait();
+    pdl_trigger();
+    if (threadIdx.x != 0) return;
+    int ng = 0, cur = -1;
+    int* g = G;
+    for (int i = 0; i < P; ++i) {
+        const int p = ORDER ? ORDER[i] : i;
+        const int e = IDS[p];
+        if (ng == 0 || e != cur || g[1] == MOE_GR) {
+            g = G + (size_t)ng * (2 + MOE_GR);
+            g[0] = e; g[1] = 0;
+            ++ng; cur = e;
+        }
+        g[2 + g[1]] = p;
+        g[1] += 1;
+    }
+    NG[0] = ng;
+}
+
+// RowGemm over the rows of a group: row r of XH [MOE_GR][Kin] (fp16, shared) in lane group g == r.
+// RED [WARPS][MOE_GR][128] may overlay XH: every warp is past its reads before any writes.
+template <int KB, int ST, int WARPS>
+struct RowGemmG : RowGemm<KB, ST, WARPS> {
+    using B = RowGemm<KB, ST, WARPS>;
+    __device__ __forceinline__ RowGemmG(const uint32_t* T_, int ldt_, int cb, int Kin, uint32_t* stage_all)
+        : B(T_, ldt_, cb, Kin, stage_all) {}
+    __device__ __forceinline__ void run_rows(const __half* __restrict__ xh, int Kin, int R, float* __restrict__ red) {
+        const int g = this->lane >> 2, t = this->lane & 3;
+        float acc[B::NTW][2][4];
+#pragma unroll
+        for (int j = 0; j < B::NTW; ++j)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+        const bool live = g < R;
+        for (int kt = this->k0; kt < this->k1; ++kt) {
+            const int i = kt - this->k0;
+            this->issue(kt + ST - 1, (i + ST - 1) % ST);
+            cp_wait<ST - 1>();
+            __syncwarp();
+            const uint32_t* buf = this->stage + (i % ST) * B::SW;
+            const uint32_t* xw = reinterpret_cast<const uint32_t*>(xh + (size_t)(live ? g : 0) * Kin + kt * 16);
+            const uint32_t a0 = live ? xw[t] : 0u, a2 = live ? xw[t + 4] : 0u;
+#pragma unroll
+            for (int j = 0; j < B::NTW; ++j) {
+                FragB f0, f1;
+                dq_tile<KB>(buf + j * B::TW, this->lane * 8, f0, f1);
+                mma(acc[j][0], a0, 0u, a2, 0u, f0.r[0], f0.r[1]);
+                mma(acc[j][1], a0, 0u, a2, 0u, f1.r[0], f1.r[1]);
+            }
+            __syncwarp();
+        }
+        cp_wait<0>();
+        __syncthreads();                               // every warp is done with XH
+        if (live) {
+#pragma unroll
+            for (int j = 0; j < B::NTW; ++j)
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int col = j * 16 + h * 8 + 2 * t;
+                    red[((size_t)this->warp * MOE_GR + g) * 128 + col] = acc[j][h][0];
+                    red[((size_t)this->warp * MOE_GR + g) * 128 + col + 1] = acc[j][h][1];
+                }
+        }
+        __syncthreads();
+    }
+};
+
+// row r's four columns of a lane: the warp partials in warp order, then the output rotation (red_rot's)
+template <int WARPS>
+__device__ __forceinline__ void red_rot_row(const float* red, int r, int lane, float& v0, float& v1, float& v2, float& v3) {
+    const int c = 4 * lane;
+    const float* q = red + (size_t)r * 128;
+    v0 = q[c]; v1 = q[c + 1]; v2 = q[c + 2]; v3 = q[c + 3];
+#pragma unroll
+    for (int w = 1; w < WARPS; ++w) {
+        const float* qw = q + (size_t)w * MOE_GR * 128;
+        v0 += qw[c]; v1 += qw[c + 1]; v2 += qw[c + 2]; v3 += qw[c + 3];
+    }
+    wht128(v0, v1, v2, v3, lane);
+}
+
+template <int KB, int MOE_ST, int WARPS>
+__device__ __forceinline__ void moe_gu_group_body(const __nv_bfloat16* __restrict__ X, int ldx, int S,
+        const int* __restrict__ grp, int mat, int cb, MoEArgs a, __nv_bfloat16* __restrict__ Y, int H, int I,
+        uint32_t* smem) {
+    const int e = grp[0], R = grp[1];
+    __half* xh = reinterpret_cast<__half*>(smem);                          // [MOE_GR][H]
+    float* red = reinterpret_cast<float*>(smem);                           // over xh, after the sums
+    uint32_t* stages = smem + (size_t)MOE_GR * H / 2;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    RowGemmG<KB, MOE_ST, WARPS> rg(a.tr[e * 3 + mat], I / 16, cb, H, stages);
+    rg.issue_first();
+    const __half* suh = a.su[e * 3 + mat];
+    for (int r = 0; r < R; ++r) {
+        const int m = grp[2 + r] / S;
+        for (int blk = warp; blk * 128 < H; blk += WARPS) {
+            const int k = blk * 128 + 4 * lane;
+            const uint2 xr = *reinterpret_cast<const uint2*>(X + (size_t)m * ldx + k);
+            const uint2 sr = *reinterpret_cast<const uint2*>(suh + k);
+            float v0 = __uint_as_float(xr.x << 16), v1 = __uint_as_float(xr.x & 0xffff0000u);
+            float v2 = __uint_as_float(xr.y << 16), v3 = __uint_as_float(xr.y & 0xffff0000u);
+            const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+            v0 *= __low2float(s01); v1 *= __high2float(s01); v2 *= __low2float(s23); v3 *= __high2float(s23);
+            wht128(v0, v1, v2, v3, lane);
+            __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+            __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+            *reinterpret_cast<uint2*>(xh + (size_t)r * H + k) = o;
+        }
+    }
+    __syncthreads();
+    rg.run_rows(xh, H, R, red);
+    const int n = cb * 128 + 4 * lane;
+    const __half* svh = a.sv[e * 3 + mat];
+    const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+    for (int r = warp; r < R; r += WARPS) {
+        float v0, v1, v2, v3;
+        red_rot_row<WARPS>(red, r, lane, v0, v1, v2, v3);
+        __nv_bfloat162 o01 = __floats2bfloat162_rn(v0 * RSQRT128 * __low2float(s01), v1 * RSQRT128 * __high2float(s01));
+        __nv_bfloat162 o23 = __floats2bfloat162_rn(v2 * RSQRT128 * __low2float(s23), v3 * RSQRT128 * __high2float(s23));
+        uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+        *reinterpret_cast<uint2*>(Y + ((size_t)grp[2 + r] * 2 + mat) * I + n) = o;
+    }
+}
+
+// grid (2 * I/128, P): blockIdx.y -> group y (past NG: nothing); Y [P, 2, I] bf16
+template <int ST, int WARPS>
+__global__ void __launch_bounds__(256) moe_gu_group_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const int* __restrict__ G, const int* __restrict__ NG, int S, MoEArgs a,
+        __nv_bfloat16* __restrict__ Y, int H, int I) {
+    extern __shared__ uint32_t smem[];
+    pdl_wait();                                        // the groups, the mixer's x
+    pdl_trigger();
+    if ((int)blockIdx.y >= NG[0]) return;
+    const int* grp = G + (size_t)blockIdx.y * (2 + MOE_GR);
+    const int mat = blockIdx.x & 1, cb = blockIdx.x >> 1;
+    switch (a.kb[grp[0] * 3 + mat]) {
+        case 2: moe_gu_group_body<2, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 3: moe_gu_group_body<3, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 4: moe_gu_group_body<4, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 5: moe_gu_group_body<5, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 6: moe_gu_group_body<6, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 8: moe_gu_group_body<8, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        default: break;
+    }
+}
+
+template <int KB, int MOE_ST, int WARPS>
+__device__ __forceinline__ void moe_down_group_body(const __nv_bfloat16* __restrict__ YGU, const int* __restrict__ grp,
+        int cb, MoEArgs a, float* __restrict__ YD, int H, int I, uint32_t* smem) {
+    const int e = grp[0], R = grp[1];
+    __half* xh = reinterpret_cast<__half*>(smem);                          // [MOE_GR][I]
+    float* red = reinterpret_cast<float*>(smem + (size_t)MOE_GR * I / 2);   // [WARPS][MOE_GR][128]
+    uint32_t* stages = smem + (size_t)MOE_GR * I / 2 + (size_t)WARPS * MOE_GR * 128;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    RowGemmG<KB, MOE_ST, WARPS> rg(a.tr[e * 3 + 2], H / 16, cb, I, stages);
+    rg.issue_first();
+    const __half* suh = a.su[e * 3 + 2];
+    for (int r = 0; r < R; ++r) {
+        const __nv_bfloat16* yg = YGU + (size_t)grp[2 + r] * 2 * I;
+        const __nv_bfloat16* yu = yg + I;
+        for (int blk = warp; blk * 128 < I; blk += WARPS) {
+            const int k = blk * 128 + 4 * lane;
+            const uint2 gr = *reinterpret_cast<const uint2*>(yg + k);
+            const uint2 ur = *reinterpret_cast<const uint2*>(yu + k);
+            const uint2 sr = *reinterpret_cast<const uint2*>(suh + k);
+            float gv[4] = {bf_lo(gr.x), bf_hi(gr.x), bf_lo(gr.y), bf_hi(gr.y)};
+            float uv[4] = {bf_lo(ur.x), bf_hi(ur.x), bf_lo(ur.y), bf_hi(ur.y)};
+            float v[4];
+#pragma unroll
+            for (int q = 0; q < 4; ++q) v[q] = bfr(bfr(gv[q] / (1.0f + ::expf(-gv[q]))) * uv[q]);
+            const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+            float v0 = v[0] * __low2float(s01), v1 = v[1] * __high2float(s01);
+            float v2 = v[2] * __low2float(s23), v3 = v[3] * __high2float(s23);
+            wht128(v0, v1, v2, v3, lane);
+            __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+            __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+            uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+            *reinterpret_cast<uint2*>(xh + (size_t)r * I + k) = o;
+        }
+    }
+    __syncthreads();
+    rg.run_rows(xh, I, R, red);
+    const int n = cb * 128 + 4 * lane;
+    const __half* svh = a.sv[e * 3 + 2];
+    const uint2 sv = *reinterpret_cast<const uint2*>(svh + n);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+    for (int r = warp; r < R; r += WARPS) {
+        float v0, v1, v2, v3;
+        red_rot_row<WARPS>(red, r, lane, v0, v1, v2, v3);
+        *reinterpret_cast<float4*>(YD + (size_t)grp[2 + r] * H + n) = make_float4(
+            v0 * RSQRT128 * __low2float(s01), v1 * RSQRT128 * __high2float(s01),
+            v2 * RSQRT128 * __low2float(s23), v3 * RSQRT128 * __high2float(s23));
+    }
+}
+
+// grid (H/128, P): blockIdx.y -> group y; YD [P, H] fp32
+template <int ST, int WARPS>
+__global__ void __launch_bounds__(256) moe_down_group_kernel(const __nv_bfloat16* __restrict__ YGU,
+        const int* __restrict__ G, const int* __restrict__ NG, MoEArgs a, float* __restrict__ YD, int H, int I) {
+    extern __shared__ uint32_t smem[];
+    pdl_wait();
+    pdl_trigger();
+    if ((int)blockIdx.y >= NG[0]) return;
+    const int* grp = G + (size_t)blockIdx.y * (2 + MOE_GR);
+    const int cb = blockIdx.x;
+    switch (a.kb[grp[0] * 3 + 2]) {
+        case 2: moe_down_group_body<2, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 3: moe_down_group_body<3, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 4: moe_down_group_body<4, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 5: moe_down_group_body<5, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 6: moe_down_group_body<6, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 8: moe_down_group_body<8, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        default: break;
+    }
+}
+
 // grid (H/256, M), 256 threads: out[m, c] = bf16(sum over slots in ascending expert id of w * y)
 __global__ void __launch_bounds__(256) moe_combine_kernel(const float* __restrict__ YD,
         const int* __restrict__ IDS, const float* __restrict__ WTS, int S, __nv_bfloat16* __restrict__ OUT,
@@ -1232,6 +1465,53 @@ void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torc
         (float*)yd.data_ptr(), H, I);
 }
 
+// the grouped experts' shared memory: the group's rows (fp16) and, for down, the warp partials beside
+// them (gate|up lays them over the rows), then the stages
+static size_t moe_group_smem(int kin, int kbmax, bool red_apart) {
+    const size_t rows = (size_t)MOE_GR * kin * 2, red = (size_t)g_moe_warps * MOE_GR * 128 * 4;
+    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st * 8 * 8 * kbmax * 4;
+}
+
+void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng) {
+    const at::cuda::OptionalCUDAGuard guard(ids.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = ids.numel();
+    TORCH_CHECK(ids.dtype() == torch::kInt && (order.numel() == P || order.numel() == 0), "ids/order int32");
+    TORCH_CHECK(g.dtype() == torch::kInt && g.size(0) >= P && g.size(1) == 2 + MOE_GR && ng.numel() == 1, "groups");
+    launch(moe_groups_kernel, dim3(1), dim3(32), 0, st, (const int*)ids.data_ptr(),
+        order.numel() ? (const int*)order.data_ptr() : (const int*)nullptr, P, (int*)g.data_ptr(), (int*)ng.data_ptr());
+}
+
+void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t S, torch::Tensor tr, torch::Tensor kb,
+                     torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax) {
+    const at::cuda::OptionalCUDAGuard guard(x.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int H = x.size(1), P = y.size(0), I = y.size(2);
+    TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, H]");
+    TORCH_CHECK(y.dtype() == torch::kBFloat16 && y.is_contiguous() && y.size(1) == 2, "y bf16 [P, 2, I]");
+    const size_t smem = moe_group_smem(H, (int)kbmax, false);
+    auto kern = MOE_PICK(moe_gu_group_kernel);
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+    TORCH_CHECK(smem <= 96 * 1024, "grouped gate|up shared memory");
+    launch(kern, dim3(2 * (I / 128), P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)x.data_ptr(),
+        (int)x.stride(0), (const int*)g.data_ptr(), (const int*)ng.data_ptr(), (int)S, moe_args(tr, kb, su, sv),
+        (__nv_bfloat16*)y.data_ptr(), H, I);
+}
+
+void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, torch::Tensor tr, torch::Tensor kb,
+                       torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax) {
+    const at::cuda::OptionalCUDAGuard guard(ygu.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    const int P = ygu.size(0), I = ygu.size(2), H = yd.size(1);
+    TORCH_CHECK(yd.dtype() == torch::kFloat && yd.is_contiguous() && yd.size(0) == P, "yd fp32 [P, H]");
+    const size_t smem = moe_group_smem(I, (int)kbmax, true);
+    auto kern = MOE_PICK(moe_down_group_kernel);
+    cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+    TORCH_CHECK(smem <= 96 * 1024, "grouped down shared memory");
+    launch(kern, dim3(H / 128, P), dim3(32 * g_moe_warps), smem, st, (const __nv_bfloat16*)ygu.data_ptr(),
+        (const int*)g.data_ptr(), (const int*)ng.data_ptr(), moe_args(tr, kb, su, sv), (float*)yd.data_ptr(), H, I);
+}
+
 void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out) {
     const at::cuda::OptionalCUDAGuard guard(yd.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
@@ -1255,6 +1535,11 @@ _CPP = (
     "void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torch::Tensor tr, "
     "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);\n"
     "void fn_moe_combine(torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, torch::Tensor out);\n"
+    "void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng);\n"
+    "void fn_moe_gu_group(torch::Tensor x, torch::Tensor g, torch::Tensor ng, int64_t S, torch::Tensor tr, "
+    "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor y, int64_t kbmax);\n"
+    "void fn_moe_down_group(torch::Tensor ygu, torch::Tensor g, torch::Tensor ng, torch::Tensor tr, "
+    "torch::Tensor kb, torch::Tensor su, torch::Tensor sv, torch::Tensor yd, int64_t kbmax);\n"
     "void fn_hc_norm(torch::Tensor x, torch::Tensor w, torch::Tensor y, int64_t G, double eps);\n"
     "void fn_inject_norm(torch::Tensor h0, torch::Tensor out, torch::Tensor d, int64_t R, "
     "c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);\n"
@@ -1287,7 +1572,8 @@ def _module():
         tag = hashlib.sha1((_CPP + src).encode()).hexdigest()[:10]
         _MOD = load_inline(name=f"fn_kernels_{tag}", cpp_sources=[_CPP], cuda_sources=[src],
                            functions=["fn_gemv", "fn_mix_up", "fn_router", "fn_moe_gu", "fn_moe_down",
-                                      "fn_moe_combine", "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
+                                      "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
+                                      "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                       "fn_set_pdl", "fn_set_gemv_split", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
                                       "fn_gate_mul", "fn_dense", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
@@ -1519,9 +1805,24 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
     ygu = torch.empty(M * S, 2, bank.I, dtype=torch.bfloat16, device=x.device)
     yd = torch.empty(M * S, bank.H, dtype=torch.float32, device=x.device)
     flat = ids.reshape(-1)
+    if MOE_GROUP and M > 1:
+        # ENG-241: the pairs of one expert in groups of MOE_GR, its tiles decoded once a group (a
+        # row's bits are its own: the self-check compares them with the decode step's single row)
+        g = torch.empty(M * S, 2 + MOE_GR, dtype=torch.int32, device=x.device)
+        ng = torch.empty(1, dtype=torch.int32, device=x.device)
+        mod.fn_moe_groups(flat, order, g, ng)
+        mod.fn_moe_gu_group(x, g, ng, S, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
+        mod.fn_moe_down_group(ygu, g, ng, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
+        return yd
     mod.fn_moe_gu(x, flat, order, bank.tr, bank.kb, bank.su, bank.sv, ygu, bank.ks[-1])
     mod.fn_moe_down(ygu, flat, order, bank.tr, bank.kb, bank.su, bank.sv, yd, bank.ks[-1])
     return yd
+
+
+#: ENG-241: a block's pairs of one expert share a CTA, up to MOE_GR of them (False: a CTA a pair,
+#: the A/B of tools/fn_moe_group_check.py)
+MOE_GROUP = False
+MOE_GR = 8
 
 
 def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
