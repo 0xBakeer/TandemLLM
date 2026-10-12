@@ -53,8 +53,12 @@ def main() -> None:
     ap.add_argument("--rounds", type=int, default=12)
     ap.add_argument("--block", type=int, default=5)
     ap.add_argument("--timing", type=int, default=0)
+    ap.add_argument("--moe-group", action="store_true", help="the grouped expert kernels (tools/fn_kernels.py MOE_GROUP)")
     ap.add_argument("--json")
     a = ap.parse_args()
+    if a.moe_group:
+        from tools import fn_kernels
+        fn_kernels.MOE_GROUP = True
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.pack)
     lens = [int(x) for x in a.tokens.split(",")]

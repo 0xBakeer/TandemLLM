@@ -4,7 +4,10 @@
         --tokens 1000,3000,6000 --new 256 --json out.json
 
 Each prompt (held-out text of that many tokens, X-Tandem: raw, greedy) is sent alone first -- its
-answer is the single-stream truth -- and then all of them at once, one thread each. While they run,
+answer is the single-stream truth -- and then all of them at once, one thread each (`--mode` runs
+one of the two; a like-for-like comparison runs each mode on a fresh server, the same requests, and
+`--compare` checks the answers against the other run). Each mode reports its wall time from the first
+send to the last answer, the total tokens a second over it, and each request's time to first token. While they run,
 the server's own report (`/health` `parallel`: slots busy, slots decoding) is read every 50 ms: the
 largest number of slots decoding at the same moment is the concurrency the server really ran, not
 what it was configured for. Recorded: each answer against its single-stream one, each request's
@@ -34,7 +37,8 @@ def ask(url: str, text: str, new: int) -> dict:
     r = json.loads(urllib.request.urlopen(req, timeout=3600).read())
     t = r.get("timings") or {}
     return {"answer": r["choices"][0]["message"].get("content"), "wall_s": round(time.time() - t0, 2),
-            "tok_s": t.get("predicted_per_second"), "n": t.get("predicted_n"), "draft_n": t.get("draft_n")}
+            "ttft_ms": t.get("ttft_ms"), "tok_s": t.get("predicted_per_second"), "n": t.get("predicted_n"),
+            "draft_n": t.get("draft_n"), "t_send": t0, "t_end": time.time()}
 
 
 def health(url: str) -> dict:
@@ -53,6 +57,9 @@ def main() -> None:
                     "--ctx tokens (tools/fn_generate.py), in place of --tokens: prompts that share nothing")
     ap.add_argument("--ctx", type=int, default=2048)
     ap.add_argument("--new", type=int, default=256)
+    ap.add_argument("--mode", default="both", choices=("both", "alone", "together"),
+                    help="alone: one after the other; together: all at once; both: alone, then together")
+    ap.add_argument("--compare", help="another run's JSON whose answers each answer must equal")
     ap.add_argument("--json")
     a = ap.parse_args()
     pack = os.path.expanduser(a.pack)
@@ -66,45 +73,63 @@ def main() -> None:
         names = a.tokens.split(",")
         texts = [prompt(pack, int(n))[0] for n in names]
     par = health(a.url).get("parallel") or {}
-    print(f"[slots] server reports {par.get('n')} slots: "
+    print(f"[slots] server reports {par.get('n') or 1} slots: "
           f"{[(s.get('index'), s.get('window')) for s in par.get('slots') or []]}", flush=True)
-    alone = [ask(a.url, t, a.new) for t in texts]
-    together: list = [None] * len(texts)
+    out = {"slots": par.get("n") or 1}
+    if a.mode in ("both", "alone"):
+        alone = [ask(a.url, t, a.new) for t in texts]
+        out["alone"] = summary(names, alone)
+    if a.mode in ("both", "together"):
+        together: list = [None] * len(texts)
 
-    def one(i):
-        together[i] = ask(a.url, texts[i], a.new)
-    seen = {"decoding": 0, "running": 0}
-    done = threading.Event()
+        def one(i):
+            together[i] = ask(a.url, texts[i], a.new)
+        seen = {"decoding": 0, "running": 0}
+        done = threading.Event()
 
-    def watch():
-        while not done.is_set():
-            p = health(a.url).get("parallel") or {}
-            dec = p.get("decoding") or []
-            seen["decoding"] = max(seen["decoding"], len(dec) if isinstance(dec, list) else int(dec))
-            seen["running"] = max(seen["running"], int(p.get("running") or 0))
-            time.sleep(0.05)
-    w = threading.Thread(target=watch)
-    w.start()
-    th = [threading.Thread(target=one, args=(i,)) for i in range(len(texts))]
-    t0 = time.time()
-    for t in th:
-        t.start()
-    for t in th:
-        t.join()
-    done.set()
-    w.join()
-    wall = time.time() - t0
-    rows = [{"prompt": n, "equal": x["answer"] == y["answer"], "alone_tok_s": x["tok_s"], "together_tok_s": y["tok_s"],
-             "draft_n": [x["draft_n"], y["draft_n"]], "n": y["n"]}
-            for n, x, y in zip(names, alone, together)]
-    meet = (health(a.url).get("parallel") or {}).get("meeting") or {}
-    out = {"slots": par.get("n"), "max_decoding_at_once": seen["decoding"], "max_running_at_once": seen["running"],
-           "joint_rounds": meet.get("joint_rounds"), "rounds": meet.get("rounds"), "joint_hist": meet.get("joint_hist"),
-           "together_wall_s": round(wall, 2), "total_tok_s": round(sum(r["n"] or 0 for r in rows) / wall, 1),
-           "requests": rows}
-    print(f"[slots] {json.dumps(out)}", flush=True)
+        def watch():
+            while not done.is_set():
+                p = health(a.url).get("parallel") or {}
+                dec = p.get("decoding") or []
+                seen["decoding"] = max(seen["decoding"], len(dec) if isinstance(dec, list) else int(dec))
+                seen["running"] = max(seen["running"], int(p.get("running") or 0))
+                time.sleep(0.05)
+        w = threading.Thread(target=watch)
+        w.start()
+        th = [threading.Thread(target=one, args=(i,)) for i in range(len(texts))]
+        for t in th:
+            t.start()
+        for t in th:
+            t.join()
+        done.set()
+        w.join()
+        meet = (health(a.url).get("parallel") or {}).get("meeting") or {}
+        out["together"] = {**summary(names, together), "max_decoding_at_once": seen["decoding"],
+                           "max_running_at_once": seen["running"], "joint_rounds": meet.get("joint_rounds"),
+                           "rounds": meet.get("rounds"), "joint_hist": meet.get("joint_hist")}
+    ref = json.load(open(a.compare)) if a.compare else None
+    for mode in ("alone", "together"):
+        if mode in out and ref is not None:
+            truth = {r["prompt"]: r["answer"] for r in (ref.get("alone") or ref.get("together"))["requests"]}
+            for r in out[mode]["requests"]:
+                r["equal_to_ref"] = r["answer"] == truth.get(r["prompt"])
+    if "alone" in out and "together" in out:
+        for x, y in zip(out["alone"]["requests"], out["together"]["requests"]):
+            y["equal_to_alone"] = x["answer"] == y["answer"]
+    brief = {m: {k: v for k, v in out[m].items() if k != "requests"} | {"requests": [
+        {k: v for k, v in r.items() if k not in ("answer", "t_send", "t_end")} for r in out[m]["requests"]]}
+        for m in ("alone", "together") if m in out}
+    print(f"[slots] {json.dumps(brief)}", flush=True)
     if a.json:
-        json.dump({**out, "alone": alone, "together": together}, open(a.json, "w"), indent=1)
+        json.dump(out, open(a.json, "w"), indent=1)
+
+
+def summary(names: list, rs: list) -> dict:
+    """One mode's run: the wall time from the first send to the last answer, the tokens a second over
+    it, and each request as it went."""
+    wall = max(r["t_end"] for r in rs) - min(r["t_send"] for r in rs)
+    return {"wall_s": round(wall, 2), "total_tok_s": round(sum(r["n"] or 0 for r in rs) / wall, 1),
+            "requests": [{"prompt": n, **r} for n, r in zip(names, rs)]}
 
 
 if __name__ == "__main__":

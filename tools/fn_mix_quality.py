@@ -1,6 +1,8 @@
 """Quality of the hyper-connection mixers' weight forms against the pack's own fp16 mixers (ENG-221 byte
-cuts, Fable 5.1's P2.4): int8 rows (what decode serves today) and int4 with a scale a group of G weights,
-as fake-quantised fp16 weights on the same kernels, so only the weight values differ.
+cuts, Fable 5.1's P2.4): int8 rows (what decode serves today), int8 or int4 with a scale a group of G
+weights (`int8g128`, `int4g32`), as fake-quantised fp16 weights on the same kernels, so only the weight
+values differ; `form@scope` quantises only some mixers (`@down`, `@up`, `@L0-11`) to find where a
+loss comes from.
 
     PYTHONPATH=<repo>:~/fn-ref/site python tools/fn_mix_quality.py --pack ~/fn2/packs/3.05 \
         --ctx 8192 --classes prose,code --variants int8,int4g32,int4g128 --json out.json
@@ -32,14 +34,27 @@ from tools.fn_prefill_check import head_logits  # noqa: E402
 
 
 def fake(w: torch.Tensor, form: str) -> torch.Tensor:
-    """The fp16 weight w [N, K] after a round trip through `form`."""
+    """The fp16 weight w [N, K] after a round trip through `form`: int8 (one scale a row, as served),
+    int8gG (int8 with a scale a group of G weights) or int4gG."""
     if form == "int8":
         return Int8Rows.of(w).dequant().half()
     N, K = w.shape
-    G = math.gcd(int(form[len("int4g"):]), K)          # the up projection's K is 320: g128 -> 64
+    bits, G = form.split("g")
+    G = math.gcd(int(G), K)                             # the up projection's K is 320: g128 -> 64
+    lim = 127.0 if bits == "int8" else 7.0
     g = w.float().view(N, K // G, G)
-    s = g.abs().amax(-1, keepdim=True).clamp_min(1e-30) / 7.0
-    return (torch.round(g / s).clamp(-8, 7) * s).view(N, K).half()
+    s = g.abs().amax(-1, keepdim=True).clamp_min(1e-30) / lim
+    return (torch.round(g / s).clamp(-lim - (bits != "int8"), lim) * s).view(N, K).half()
+
+
+def in_scope(key: str, scope: str | None) -> bool:
+    """A variant's mixers: all (None), `down` (the down|inject weights), `up`, or `L<a>-<b>` (layers a..b)."""
+    if scope is None:
+        return True
+    if scope in ("down", "up"):
+        return key.endswith(".down_inject") == (scope == "down")
+    a, b = (int(x) for x in scope[1:].split("-"))
+    return key.startswith("layers.") and a <= int(key.split(".")[1]) <= b
 
 
 @torch.no_grad()
@@ -112,8 +127,10 @@ def main() -> None:
         base = run(eng, ids, a.new, eos)
         row = {"class": c, "prompt_tokens": len(ids), "ref": compare(eng, base, run(eng, ids, a.new, eos, ref=True))}
         for v in a.variants.split(","):
+            form, scope = (v.split("@") + [None])[:2]
             for k in keys:
-                W[k].copy_(fake(orig[k], v))
+                if in_scope(k, scope):
+                    W[k].copy_(fake(orig[k], form))
             row[v] = compare(eng, base, run(eng, ids, a.new, eos))
             for k in keys:
                 W[k].copy_(orig[k])
