@@ -2664,8 +2664,7 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             # slot 0's conversation leaves first (its rows and its drafter's), as the spill's
             # restore saves the resident one before it reads (engine/spill.py `maybe_restore`)
             how = res.vacate(eng, drafter, session if session is not None else rec.get("owner"))
-            if drafter is not None and hasattr(drafter, "state_resume"):
-                drafter.state_resume(e)    # builds a draft cache that does not exist yet
+            cache.drafter_resume(eng, drafter, e)   # builds a draft cache that does not exist yet
             v0 = cache._kv_views(eng, drafter)
             if (spill_mod._layout(v0) != spill_mod._layout(v1)
                     or e > min(t.shape[ax] for t, ax in v0)):
@@ -2675,6 +2674,8 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
                 kvpool.ensure_for(t, e)                         # SRV-307
                 t.narrow(ax, 0, e).copy_(u.narrow(ax, 0, e))
             res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")
+            if drafter is not None and hasattr(drafter, "state_resume"):
+                drafter.state_resume(e)    # again, over the rows carried in (`cache.drafter_resume`)
             pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"]})
             if pair is not None:
                 # FX16: with a resident prefix on the side slot the state at the end is its end

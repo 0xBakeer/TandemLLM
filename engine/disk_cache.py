@@ -1277,11 +1277,10 @@ class DiskTier:
         before the failure hold the prompt's own bytes, so the caller resumes from the rows in
         place or starts cold."""
         import torch
-        from engine.cache import _kv_views
+        from engine.cache import _kv_views, drafter_resume
         C, L = self.chunk, hit.L
         t0 = time.perf_counter()
-        if drafter is not None and hasattr(drafter, "state_resume"):
-            drafter.state_resume(L)            # builds a draft cache that does not exist yet
+        drafter_resume(eng, drafter, L)        # builds a draft cache that does not exist yet
         views = _kv_views(eng, drafter)
         secs, payload = self._chunk_layout(views)
         for _, meta in hit.chain:
@@ -1365,6 +1364,8 @@ class DiskTier:
         finally:
             self._give_anchor_slot(slot)
         eng.resume_at(L)
+        if drafter is not None and hasattr(drafter, "state_resume"):
+            drafter.state_resume(L)            # again, over the rows read back (`drafter_resume`)
         s = time.perf_counter() - t0
         now = self.clock()
         with self.lock:

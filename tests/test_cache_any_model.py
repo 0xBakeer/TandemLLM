@@ -285,6 +285,52 @@ def test_the_session_spill_round_trips_a_new_model():
     return f"rows and the newest anchors back in place, bit for bit; 302 sections, 153 views: block headers {h} bytes"
 
 
+def test_a_drafter_resumes_over_committed_rows_and_again_over_the_restored_ones():
+    """rc-0.8.0 live (2026-10-12): the spill's restore at startup told Flash-Next's MTP drafter its
+    cache was valid before any row was read back; its resume pools indexer keys from those rows, which
+    were pages the KV pool had released, and the GPU faulted. The rows a drafter reads are committed
+    before it resumes (`cache.drafter_resume`), and it resumes again once the rows are in, so what it
+    builds is the restored rows' -- for the spill, the disk tier and a side slot's carry alike."""
+    calls = []
+    real = cache._kvp.ensure_for
+
+    class Drafter:
+        def __init__(self, eng):
+            self.eng = eng
+
+        def kv_views(self):
+            return []
+
+        def state_resume(self, n):
+            # what a resume reads: the restored rows of view `b` are there or not yet
+            calls.append(("resume", int(n), bool(self.eng.vb[:n].abs().sum() > 0)))
+
+    d = tempfile.mkdtemp(prefix="toy-resume-")
+    try:
+        cache._kvp.ensure_for = lambda t, rows: (calls.append(("ensure", int(rows))), real(t, rows))[1]
+        t = _tier(d)
+        sp = spill.SessionSpill(os.path.join(d, "sessions"), chunk=CH, fingerprint="toy", tier=t,
+                                settings={"budget_gb": 1.0, "min_tokens": 64, "drain_min_tokens": CH},
+                                free_bytes=lambda p: 10 ** 15, floor_bytes=0).open()
+        eng, res = Toy(), cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, end=True)
+        cache.prefill(eng, None, tokens(130, seed=7), "cpu", chunk=CH, resident=res)
+        info = sp.save_resident(res, eng, None, "evict")
+        res.clear()
+        for _, v, _ in eng.cache_state().views():
+            v.zero_()
+        calls.clear()
+        assert sp.restore(res, eng, Drafter(eng), sp.entries[info["eid"]]) is not None, sp.stats
+        resumes = [c for c in calls if c[0] == "resume"]
+        first = calls.index(resumes[0])
+        assert ("ensure", 130) in calls[:first], calls[:first + 1]
+        assert resumes[0][2] is False and resumes[-1] == ("resume", 130, True), resumes
+        t.close()
+    finally:
+        cache._kvp.ensure_for = real
+        shutil.rmtree(d, ignore_errors=True)
+    return "the rows committed before the drafter resumes; it resumes again over the rows read back"
+
+
 def test_a_27b_anchor_file_of_format_1_is_still_read():
     from test_cache import fresh
     from test_disk_cache import Pos, exact, run, tier

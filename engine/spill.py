@@ -1143,15 +1143,14 @@ class SessionSpill:
         its end anchor, its line and its session). None, with the resident prefix cut below the
         first row written, when a file fails its check or a buffer is refused."""
         import torch
-        from engine.cache import _kv_views, state_now
+        from engine.cache import _kv_views, drafter_resume, state_now
         t0 = time.perf_counter()
         man = e.man
         n, C = e.valid, self.chunk
         state = state_now(eng)
         if man["state"] != [[str(t.dtype), list(t.shape)] for t in state]:
             return self._failed(e, "layout", res, None)
-        if drafter is not None and hasattr(drafter, "state_resume"):
-            drafter.state_resume(n)            # builds a draft cache that does not exist yet
+        drafter_resume(eng, drafter, n)        # builds a draft cache that does not exist yet
         views = _kv_views(eng, drafter)
         if _layout(views) != man["layout"] or n > min(t.shape[ax] for t, ax in views):
             return self._failed(e, "layout", res, None)
@@ -1249,6 +1248,8 @@ class SessionSpill:
         except Exception as exc:                                   # noqa: BLE001
             self._event("failed", what="restore", error=f"{type(exc).__name__}: {exc}"[:200])
             return self._failed(e, "error", res, low)
+        if drafter is not None and hasattr(drafter, "state_resume"):
+            drafter.state_resume(n)            # again, over the rows read back (`drafter_resume`)
         if res.end is not None and self.on_adopt is not None and man.get("extra"):
             try:
                 self.on_adopt(res, man["extra"])

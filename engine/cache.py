@@ -180,6 +180,19 @@ def model_views(eng) -> list:
     return [(t, ax) for _, t, ax in eng.cache_state().views()]
 
 
+def drafter_resume(eng, drafter, n: int) -> None:
+    """`drafter.state_resume(n)` with rows [0, n) of the engine's paged set committed first. A drafter
+    may read those rows as it resumes (Flash-Next's MTP head pools its indexer keys from them), and
+    before a restore has written them they may be pages the KV pool released: on rc-0.8.0 the spill's
+    restore at startup read them and the GPU faulted (an illegal memory access). A restore calls the
+    drafter's `state_resume` again once its rows are in, so what it built is the restored rows'."""
+    if drafter is None or not hasattr(drafter, "state_resume"):
+        return
+    for t, _ in model_views(eng):
+        _kvp.ensure_for(t, n)
+    drafter.state_resume(n)
+
+
 # --------------------------------------------------------------------------- the state snapshot
 class StateSnapshot:
     """Everything the engine and its drafter need to be back at token `length`.
