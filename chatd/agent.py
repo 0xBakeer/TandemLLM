@@ -529,6 +529,12 @@ class AgentMixin:
                                                              run.continue_final]})
         if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
             settings = {**settings, "effort": "high"}           # a plan turn thinks hard
+        user = next((m for m in reversed(path) if m.get("role") == "user"), None)
+        if user is not None and not render.text_of(user.get("parts") or []).strip() and \
+                not user.get("attachments"):
+            # never a turn with an empty user message (the 2026-10-12 empty request)
+            raise GuardError("The message is empty: nothing was sent to the model. Write the "
+                             "message again, or attach a file.")
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id)
         schemas = [t.openai() for t in tools]

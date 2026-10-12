@@ -54,7 +54,8 @@ NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
 
 
 class GuardError(Exception):
-    """The request cannot fit the model's window even after a compaction."""
+    """The request cannot go: it does not fit the window even after a compaction, or its user
+    message is empty."""
 
 
 class Run:

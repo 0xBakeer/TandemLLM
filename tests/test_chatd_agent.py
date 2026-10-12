@@ -768,6 +768,40 @@ def test_present_opens_a_pane_on_every_device():
         c.close()
 
 
+def test_an_empty_message_never_reaches_the_engine():
+    """2026-10-12: a client sent `content` instead of `text`; chatd took it as an empty message
+    and the engine got a user turn with nothing in it (and answered something unrelated)."""
+    c = Chat()
+    try:
+        cid = c.new()
+        st, err, _ = c.call("POST", f"/conversations/{cid}/messages",
+                            {"client_msg_id": "e1", "content": "Say hello in three words."})
+        assert st == 400 and err["error"]["type"] == "empty_message"
+        assert "`text`, not `content`" in err["error"]["message"]
+        for body in ({"client_msg_id": "e2", "text": "   "}, {"client_msg_id": "e3"}):
+            assert c.call("POST", f"/conversations/{cid}/messages", body)[0] == 400
+            assert c.call("POST", f"/conversations/{cid}/queue", body)[0] == 400
+        assert c.call("POST", f"/conversations/{cid}/messages",
+                      {"client_msg_id": "e4", "text": 5})[0] == 400
+        assert not [b for b in c.fake.bodies if "model" in b]
+        assert c.snap(cid)["messages"] == []
+        # an empty message stored before this check (an old database): refused before the engine
+        um = c.svc._insert_message(cid, None, "user", [{"type": "text", "text": ""}], "done")
+        with c.svc.conv(cid).lock:
+            c.svc._start_run(c.svc.conv(cid), um["id"], None)
+        s = c.wait_idle(cid, 20)
+        a = s["messages"][-1]
+        assert a["status"] == "error" and not [b for b in c.fake.bodies if "model" in b]
+        # with a file it goes
+        att = c.svc.store_blob(cid, "notes.txt", "text/plain", b"one line")
+        c.ok("POST", f"/conversations/{cid}/messages", {"client_msg_id": "e5", "text": "",
+                                                        "attachments": [att["id"]]})
+        c.wait_idle(cid, 20)
+        assert "one line" in requests(c)[-1]["messages"][-1]["content"]
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------------- the port preview
 class RelayBoxes(FakeBoxes):
     """`relay.py connect PORT` played on the host: the exec's stdin goes raw to 127.0.0.1:PORT,

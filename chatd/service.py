@@ -525,7 +525,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
     # ================================================================== the turn
     def send(self, cid: str, body: dict, viewer: str | None = None) -> dict:
         cmid = _client_id(body)
-        text = str(body.get("text") or "")
+        text = _text(body, bool(body.get("attachments")))
         conv = self.conv(cid)
         with conv.lock:
             dup = self._dup(cid, cmid)
@@ -780,7 +780,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             dup = self._dup(cid, cmid)
             if dup is not None:
                 return dup.get("queued") or dup
-            q = self._enqueue(conv, cmid, str(body.get("text") or ""))
+            q = self._enqueue(conv, cmid, _text(body, False))
             idle = conv.run is None or not conv.run.active
         if idle:
             self._drain(conv, viewer)
@@ -874,6 +874,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
 
     def edit(self, cid: str, mid: str, body: dict, viewer: str | None = None) -> dict:
         cmid = _client_id(body)
+        text = _text(body, False)
         conv = self.conv(cid)
         with conv.lock:
             dup = self._dup(cid, cmid)
@@ -885,7 +886,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             if m is None or m["role"] != "user":
                 raise ApiError(404, "not_found", "no such user message")
             um = self._insert_message(cid, m["parent_id"], "user",
-                                      [{"type": "text", "text": str(body.get("text") or "")}],
+                                      [{"type": "text", "text": text}],
                                       "done", client_msg_id=cmid, attachments=m.get("attachments"))
             self.emit(conv, {"type": "branch.changed", "head_id": um["id"]})
             msgs = self._messages(cid)
@@ -1388,6 +1389,19 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
 _SUMMARY_KEYS = ("id", "title", "created_at", "updated_at", "pinned", "archived", "folder_id",
                  "status", "preview", "model", "profile", "turns", "now", "version", "unread")
 _SETTINGS_KEYS = set(DEFAULT_SETTINGS)
+
+
+def _text(body: dict, attachments: bool) -> str:
+    """A message's text. An empty one goes nowhere unless files ride with it: the model would get
+    a user turn with nothing in it (2026-10-12, a client that sent `content` instead of `text`)."""
+    text = body.get("text")
+    if text is not None and not isinstance(text, str):
+        raise ApiError(400, "bad_request", "text must be a string")
+    text = text or ""
+    if not text.strip() and not attachments:
+        hint = " (the field is `text`, not `content`)" if body.get("content") else ""
+        raise ApiError(400, "empty_message", f"a message needs text or an attachment{hint}")
+    return text
 
 
 def _client_id(body: dict) -> str:
