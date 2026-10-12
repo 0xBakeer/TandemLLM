@@ -17,16 +17,27 @@ which position i's 16-bit state is the window ending at ring bit (i + 1) K - 1 (
 exllamav3's own decoder (`ngram_codec.dequant_rows`) computes the same fp32 value; its CUDA kernel
 rounds it to fp16 before use. Here it is rounded once, to the compute dtype.
 
-The table is 32.6 GB in the 3.05 pack and is never resident: `EXL3NGramTable` maps the file and
-gathers the packed rows a step needs (page faults for a few rows, parallel pread for a prompt's
-thousands), and `decode_rows` turns packed rows into values on any device with fixed-shape torch
-ops, so the graph step can take the 16 packed rows of a token as its input.
+The table is 32.6 GB in the 3.05 pack and is never in device memory: `EXL3NGramTable` reads the
+packed rows a step needs and `decode_rows` turns them into values on any device with fixed-shape
+torch ops, so the graph step can take the 16 packed rows of a token as its input. Where the rows come
+from is the table's policy (ENG-239, `QWEN38_FN_TABLE`):
+
+  warm   the file mapped and read through the page cache (page faults for a few rows, parallel
+         pread for a prompt's thousands), warmed at load; MemAvailable counts that page cache as
+         free, so its resident bytes are reported (`resident_bytes`, the kernel's cachestat or
+         mincore) and every floor check takes them off (SRV-335)
+  cold   `DirectRows`: the 4 KiB blocks holding the rows read with O_DIRECT into an aligned buffer,
+         past the page cache, through a set-associative hot-row cache of `QWEN38_FN_TABLE_CACHE_GB`
+         with CLOCK eviction; the file's page cache is dropped at open. Packs whose weights and
+         table do not fit together (4.05 and up) need it.
 """
 
 from __future__ import annotations
 
+import ctypes
 import json
 import math
+import mmap
 import os
 import struct
 from concurrent.futures import ThreadPoolExecutor
@@ -246,6 +257,169 @@ class DenseTable:
         return self.weight[ids.to(self.weight.device)].to(dtype)
 
 
+BLOCK = 4096
+
+
+class DirectRows:
+    """Packed rows of a table file read with O_DIRECT, past the page cache, through a hot-row cache.
+
+    A row of `row_bytes` at `offset + id * row_bytes` sits in one or two 4 KiB blocks; a miss reads
+    those blocks into an aligned buffer (in parallel for a prompt's thousands) and copies the row out.
+    The cache is set-associative (`WAYS` rows a set, the set picked by a multiplicative hash of the id)
+    with a reference bit a row and CLOCK eviction within the set: a hit sets the bit, a miss takes the
+    first way whose bit is clear, and clears the set's bits when none is. A filesystem that refuses
+    O_DIRECT gets buffered reads and the file's page cache dropped after every miss batch (`direct`
+    False, said once by the caller)."""
+
+    WAYS = 4
+    THREADS = 16
+
+    def __init__(self, path: str, offset: int, row_bytes: int, rows: int, cache_bytes: int):
+        self.path, self.offset, self.row_bytes, self.rows = path, int(offset), int(row_bytes), int(rows)
+        self.words = self.row_bytes // 2
+        try:
+            self.fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
+            self.direct = hasattr(os, "O_DIRECT")
+        except OSError:
+            self.fd = os.open(path, os.O_RDONLY)
+            self.direct = False
+        self._drop()
+        self.sets = max(1, int(cache_bytes) // (self.row_bytes * self.WAYS))
+        self.keys = np.full((self.sets, self.WAYS), -1, dtype=np.int64)
+        self.vals = np.zeros((self.sets, self.WAYS, self.words), dtype=np.int16)
+        self.ref = np.zeros((self.sets, self.WAYS), dtype=bool)
+        self.stats = {"hits": 0, "misses": 0, "blocks_read": 0}
+        self._buf = None
+        self._pool = ThreadPoolExecutor(self.THREADS)
+
+    @property
+    def cache_bytes(self) -> int:
+        return self.vals.nbytes + self.keys.nbytes + self.ref.nbytes
+
+    def _drop(self) -> None:
+        try:
+            os.posix_fadvise(self.fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+
+    def _set_of(self, ids: np.ndarray) -> np.ndarray:
+        h = (ids.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)) >> np.uint64(17)
+        return (h % np.uint64(self.sets)).astype(np.int64)
+
+    def rows_of(self, ids: np.ndarray) -> np.ndarray:
+        """ids (unique or not, int64) -> packed rows int16 [n, words]."""
+        ids = np.asarray(ids, dtype=np.int64).reshape(-1)
+        uniq, inv = np.unique(ids, return_inverse=True)
+        sets = self._set_of(uniq)
+        hit = self.keys[sets] == uniq[:, None]
+        has = hit.any(1)
+        way = hit.argmax(1)
+        out = np.empty((uniq.size, self.words), dtype=np.int16)
+        h = np.nonzero(has)[0]
+        out[h] = self.vals[sets[h], way[h]]
+        self.ref[sets[h], way[h]] = True
+        m = np.nonzero(~has)[0]
+        self.stats["hits"] += int(h.size)
+        self.stats["misses"] += int(m.size)
+        if m.size:
+            got = self._read(uniq[m])
+            out[m] = got
+            self._insert(sets[m], uniq[m], got)
+        return out[inv]
+
+    def _insert(self, ms: np.ndarray, ids: np.ndarray, rows: np.ndarray) -> None:
+        """New rows into their sets: the k-th miss of a set in this batch takes the set's k-th way
+        whose bit is clear; past those the hand has gone round -- the set's bits are cleared and the
+        ways are taken from the first."""
+        order = np.argsort(ms, kind="stable")
+        ms, ids, rows = ms[order], ids[order], rows[order]
+        first = np.r_[0, np.nonzero(np.diff(ms))[0] + 1]
+        rank = np.arange(ms.size) - np.repeat(first, np.diff(np.r_[first, ms.size]))
+        free = ~self.ref[ms]
+        nfree = free.sum(1)
+        cs = np.cumsum(free, 1)
+        way = np.where(rank < nfree, (cs >= (rank + 1)[:, None]).argmax(1), (rank - nfree) % self.WAYS)
+        over = rank >= nfree
+        if over.any():
+            self.ref[ms[over]] = False              # the hand went round the set: every bit cleared
+        self.keys[ms, way] = ids
+        self.vals[ms, way] = rows
+        self.ref[ms, way] = True
+
+    def _read(self, ids: np.ndarray) -> np.ndarray:
+        """The rows `ids` from the file: each row's block run (one or two 4 KiB blocks) read whole."""
+        start = self.offset + ids * self.row_bytes
+        b0 = start // BLOCK * BLOCK
+        span = 2 * BLOCK                                 # a row of at most 4 KiB spans at most two blocks
+        need = ids.size * span
+        if self._buf is None or len(self._buf) < need:
+            self._buf = mmap.mmap(-1, max(need, 64 * span))
+        buf, fd = self._buf, self.fd
+        size = os.fstat(fd).st_size
+
+        def work(lo: int, hi: int) -> None:
+            for i in range(lo, hi):
+                n = min(span, -(-(size - int(b0[i])) // BLOCK) * BLOCK)
+                os.preadv(fd, [memoryview(buf)[i * span:i * span + n]], int(b0[i]))
+        step = max(1, -(-ids.size // self.THREADS))
+        if ids.size <= 4:
+            work(0, ids.size)
+        else:
+            list(self._pool.map(lambda a: work(a, min(a + step, ids.size)), range(0, ids.size, step)))
+        self.stats["blocks_read"] += int(ids.size)
+        raw = np.frombuffer(buf, dtype=np.uint8, count=need).reshape(ids.size, span)
+        rel = (start - b0)[:, None] + np.arange(self.row_bytes)[None, :]
+        rows = np.take_along_axis(raw, rel, axis=1).copy().view(np.int16)
+        if not self.direct:
+            self._drop()
+        return rows
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False)
+        os.close(self.fd)
+
+
+class _CacheStat(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_uint64) for n in ("nr_cache", "nr_dirty", "nr_writeback", "nr_evicted",
+                                                "nr_recently_evicted")]
+
+
+_SYS_CACHESTAT = 451                                       # the generic syscall table (arm64, x86_64)
+
+
+def page_cache_bytes(path: str, offset: int, length: int) -> int | None:
+    """The bytes of [offset, offset + length) of `path` in the page cache: the kernel's cachestat
+    (Linux 6.5+), else mincore over a fresh mapping; None where neither exists (a Mac)."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return None
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        rng = (ctypes.c_uint64 * 2)(offset, length)
+        cs = _CacheStat()
+        if hasattr(libc, "syscall") and libc.syscall(_SYS_CACHESTAT, fd, ctypes.byref(rng), ctypes.byref(cs), 0) == 0:
+            return int(cs.nr_cache) * mmap.PAGESIZE
+        if not hasattr(libc, "mincore"):
+            return None
+        a0 = offset // mmap.PAGESIZE * mmap.PAGESIZE
+        n = offset + length - a0
+        libc.mmap.restype = ctypes.c_void_p
+        libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+        addr = libc.mmap(None, n, mmap.PROT_READ, mmap.MAP_SHARED, fd, a0)
+        if addr in (None, ctypes.c_void_p(-1).value):
+            return None
+        try:
+            vec = (ctypes.c_ubyte * (-(-n // mmap.PAGESIZE)))()
+            if libc.mincore(ctypes.c_void_p(addr), ctypes.c_size_t(n), vec) != 0:
+                return None
+            return int(np.frombuffer(vec, dtype=np.uint8).__and__(1).sum()) * mmap.PAGESIZE
+        finally:
+            libc.munmap(ctypes.c_void_p(addr), ctypes.c_size_t(n))
+    finally:
+        os.close(fd)
+
+
 class EXL3NGramTable:
     """The packed table of one PLE module, read in place from its safetensors file.
 
@@ -296,6 +470,7 @@ class EXL3NGramTable:
         self.map = np.memmap(path, dtype=np.int16, mode="r", offset=self.offset,
                              shape=(self.rows, self.words))
         self._fd = None
+        self.direct: DirectRows | None = None   # the cold policy's reader (`set_policy`)
         self.bias = self._aux("head_bias").to(torch.float16)
         self.offsets = self._aux("head_offsets").long()
         self.sizes = self._aux("head_vocab_sizes").long()
@@ -337,11 +512,46 @@ class EXL3NGramTable:
         offs = self.offsets.to(ids.device)
         return (torch.searchsorted(offs, ids.long(), right=True) - 1).clamp(0, offs.numel() - 1)
 
+    def set_policy(self, policy: str, cache_bytes: int = 2 << 30) -> None:
+        """`warm` (the page cache, the default) or `cold` (`DirectRows`, ENG-239)."""
+        if policy not in ("warm", "cold"):
+            raise ValueError(f"n-gram table policy {policy!r}: warm or cold")
+        if self.direct is not None:
+            self.direct.close()
+            self.direct = None
+        if policy == "cold":
+            self.direct = DirectRows(self.path, self.offset, self.row_bytes, self.rows, cache_bytes)
+
+    @property
+    def policy(self) -> str:
+        return "cold" if self.direct is not None else "warm"
+
+    def rows_of(self, ids: np.ndarray) -> np.ndarray:
+        """Packed rows int16 [n, words] of the int64 ids, through the table's policy (the engine's
+        decode and prefill read this)."""
+        if self.direct is not None:
+            return self.direct.rows_of(ids)
+        return np.asarray(self.map[ids])
+
+    def resident_bytes(self) -> int | None:
+        """The table's bytes in the page cache now (None: the platform cannot say)."""
+        return page_cache_bytes(self.path, self.offset, self.rows * self.row_bytes)
+
+    def report(self) -> dict:
+        """What the table holds of the machine's memory, for /health and the floor checks."""
+        out = {"name": "ngram_table", "path": self.path, "policy": self.policy, "file_bytes": self.file_bytes,
+               "resident_bytes": self.resident_bytes()}
+        if self.direct is not None:
+            out.update(cache_bytes=self.direct.cache_bytes, direct=self.direct.direct, **self.direct.stats)
+        return out
+
     def gather_packed(self, ids: torch.Tensor) -> torch.Tensor:
         """ids (any shape) -> packed rows int16 [n, words] in id order, on the CPU."""
         flat = ids.reshape(-1).cpu().numpy().astype(np.int64)
         if flat.size and (flat.min() < 0 or flat.max() >= self.rows):
             raise IndexError("PLE row id out of range")
+        if self.direct is not None:
+            return torch.from_numpy(self.direct.rows_of(flat))
         uniq, inv = np.unique(flat, return_inverse=True)
         if uniq.size < self.PARALLEL_FROM:
             rows = np.asarray(self.map[uniq])
@@ -385,7 +595,7 @@ class EXL3NGramTable:
 
     @property
     def nbytes(self) -> int:
-        return 0    # nothing resident
+        return 0    # nothing in device memory (the page cache: `resident_bytes`)
 
     @property
     def file_bytes(self) -> int:

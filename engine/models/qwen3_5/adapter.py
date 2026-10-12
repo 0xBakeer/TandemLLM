@@ -73,6 +73,25 @@ def precapture(eng, drafter) -> int | None:
                                   if getattr(drafter, "calc", False) else range(2, 17))
 
 
+def memory_parts(eng) -> dict:
+    """The dashboard's memory split of the 27B (server/memsplit.py): its weights, the KV cache's
+    tensors held in the allocator (pages of the shared pool are counted by the pool), the GDN state."""
+    from engine import kvpool
+    w, kv, st = getattr(eng, "w", None), getattr(eng, "kv", None), getattr(eng, "state", None)
+
+    def nb(*ts):
+        return sum(int(t.numel() * t.element_size()) for t in ts if t is not None)
+    return {"weights": getattr(w, "bytes_fp8", 0) + getattr(w, "bytes_other", 0),
+            "kv_pool": nb(*(t for t in (getattr(kv, k, None) for k in ("k", "v", "ks", "vs"))
+                            if t is not None and not kvpool.paged(t))),
+            "gdn_state": nb(*(getattr(st, k, None) for k in ("S", "conv", "_spare")))}
+
+
+def resident_files(eng) -> list:
+    """Files the engine keeps in the page cache on purpose: none (its weights are in device memory)."""
+    return []
+
+
 def manifest(eng=None) -> Manifest:
     return Manifest(arch="qwen3_5", modules=MODULES)
 
@@ -84,6 +103,8 @@ Qwen38Engine.cache_state = cache_state
 Qwen38Engine.resume_at = resume_at
 Qwen38Engine.settle = settle
 Qwen38Engine.manifest = manifest
+Qwen38Engine.resident_files = resident_files
+Qwen38Engine.memory_parts = memory_parts
 Qwen38Engine.precapture = precapture
 
 __all__ = ["Qwen38Engine", "cache_state", "cost", "discard_pending", "manifest", "precapture", "resume_at",

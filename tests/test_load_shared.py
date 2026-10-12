@@ -58,6 +58,13 @@ class _Eng:
         self.asked.append(drafter)
         return None if not self.caps.caches else 3
 
+    def cost(self):
+        from engine.models.adapter import CostModel
+        return CostModel(section_bytes=0, view_bytes_per_token=0, workspace_floor=3 << 30, workspace_per_token=100)
+
+    def resident_files(self):
+        return []
+
 
 def _run(caps, argv, serving, registry_builder: bool):
     eng, calls, lines, seen = _Eng(caps), [], [], {}
@@ -113,6 +120,7 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
                                           registry_builder=False)
     assert st["prefix_cache"] and st["session_cache"] and st["state_store"] is not None
     assert st["mem"] is not None and st["resident"] is None and st["sampled_tree"] == "off"
+    assert (st["mem"].ws_floor, st["mem"].ws_per_token) == (3 << 30, 100)   # the engine's own workspace
     assert st["prefix_chunk"] > 0 and "weights_info" not in written
     assert len(calls) == 1 and calls[0][1:3] == ("cfg", "w") and eng.asked == [None]
     assert any(x.startswith("[cache] session=on") for x in lines)

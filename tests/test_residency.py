@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -190,6 +191,7 @@ def test_split_reads_every_part_off_its_owner():
         w=types.SimpleNamespace(bytes_fp8=12 << 30, bytes_other=3 << 30),
         kv=types.SimpleNamespace(k=_T(8 << 30, 1), v=_T(8 << 30, 1), ks=None, vs=None),
         state=types.SimpleNamespace(S=_T(100, 4), conv=_T(50), _spare=None))
+    _the_27b_verbs(eng)
     res = types.SimpleNamespace(report=lambda: {"bytes": 4 << 30})
     state = {"engine": eng, "drafter": router, "vision": types.SimpleNamespace(nbytes=920_000_000),
              "state_store": types.SimpleNamespace(bytes=1 << 30), "resident": res,
@@ -204,6 +206,14 @@ def test_split_reads_every_part_off_its_owner():
     # and validates as the System view's `memory.split`
     from tools import contract_check
     assert contract_check.validate(json.loads(json.dumps(out)), _split_schema()) == []
+
+
+def _the_27b_verbs(eng):
+    """The 27B adapter's split verbs on a stand-in engine (engine/models/qwen3_5/adapter.py)."""
+    from engine.models.qwen3_5 import adapter
+    eng.memory_parts = types.MethodType(adapter.memory_parts, eng)
+    eng.resident_files = types.MethodType(adapter.resident_files, eng)
+    return eng
 
 
 def _split_schema():

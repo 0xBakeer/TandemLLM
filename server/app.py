@@ -3878,7 +3878,7 @@ def _roles_headroom() -> int | None:
                 return int(d["after"])
         except Exception:                                          # noqa: BLE001
             pass
-    return kvpool._meminfo_avail()
+    return memsplit.counted_available()
 
 
 def _roles_start(a) -> None:
@@ -3896,7 +3896,7 @@ def _roles_start(a) -> None:
             torch.cuda.empty_cache()
 
     floor = float(getattr(a, "parallel_floor_gb", 15.0) or 15.0)
-    rm = rolemem.build(STATE, floor_gib=floor, meminfo=kvpool._meminfo_avail,
+    rm = rolemem.build(STATE, floor_gib=floor, meminfo=memsplit.counted_available,
                        headroom=_roles_headroom, idle=_roles_idle, empty=empty, journal=journal,
                        log=lambda m: print(m, flush=True))
     STATE["role_mem"] = rm
@@ -7716,6 +7716,7 @@ def cache_stats() -> dict:
                          "embed_cache": ic.report() if ic is not None else None}
     if eng is not None:
         out["snapshot_cost"] = eng.cost().snapshot_cost()   # the model's adapter (engine/models/adapter.py)
+        out["resident_files"] = eng.resident_files()        # page cache the engine keeps (ENG-239)
     return out
 
 
@@ -8731,6 +8732,7 @@ def _load(a) -> None:
     ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True))
     m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
+    memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
     gen_cfg = os.path.join(m["path"], "generation_config.json")
     cfg_eos = None
     if os.path.isfile(gen_cfg):
@@ -8740,7 +8742,7 @@ def _load(a) -> None:
     if eng.caps.caches:
         if eng.caps.anchor_grid:
             a.prefix_chunk = int(eng.caps.anchor_grid)     # the model's own grid (its prefill chunk)
-        caches = _load_caches(a, tok, drafter, rcache)
+        caches = _load_caches(a, eng, tok, drafter, rcache)
     else:
         if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
             print("[cache] prefix, session, resident and disk caches and the KV pool are not built for "
@@ -8801,7 +8803,7 @@ def _build_qwen3_5(a, ctx) -> dict:
     ctx.mark("weights")
     if getattr(a, "kv_pool", "off") == "on":
         kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
-                                    margin_rows=int(a.kv_margin_rows),
+                                    margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
                                     on_event=_kv_pool_event)
         kvpool.OWNER = "slot0"
         if kvpool.Driver.get() is None:
@@ -8870,7 +8872,7 @@ def _build_qwen3_5(a, ctx) -> dict:
             "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax}}
 
 
-def _load_caches(a, tok, drafter, rcache) -> dict:
+def _load_caches(a, eng, tok, drafter, rcache) -> dict:
     """The serving-time caches (engine/cache.py) of an engine that can hold them (`eng.caps.caches`):
     the memory policy, the state store, the resident prefix and its end anchor, the suffix store.
     Returns their entries of the request-path state."""
@@ -8889,9 +8891,12 @@ def _load_caches(a, tok, drafter, rcache) -> dict:
     # declared peak during a prefill, the reserve it may keep -- and each cache under its own cap
     # (the pin is its own, no longer paid out of the store's budget)
     gib = 1 << 30
+    cost = eng.cost()                      # a model's own prefill workspace (SRV-335), else the 27B's
     mem = STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
                                       int(a.reserve_slack_gib * gib),
                                       exclude=lambda: memlimits.role_exclude(STATE),
+                                      ws_floor=cost.workspace_floor or cache.WORKSPACE_FLOOR,
+                                      ws_per_token=cost.workspace_per_token or cache.WORKSPACE_PER_TOKEN,
                                       on_event=_memory_event)
     # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
@@ -9125,7 +9130,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                          f"not {a.drafter}")
     L = int(min(a.side_max_len, a.max_len))
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
-    adm = slots_mod.Admission(floor, growth=_par_growth, room=_par_room,
+    adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]

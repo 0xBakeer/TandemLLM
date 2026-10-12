@@ -31,6 +31,10 @@ class CostModel:
     section_bytes: int              # the fixed state a snapshot copies whole
     view_bytes_per_token: int       # the position-indexed buffers a snapshot slices, a token
     parts: dict = field(default_factory=dict)   # section bytes by kind ("recurrent", "conv", ...)
+    # a prefill's transient above what the engine held (the memory policy's `workspace`: the larger
+    # of the floor and a line through zero); None: engine/cache.py's figures, measured on the 27B
+    workspace_floor: int | None = None
+    workspace_per_token: int | None = None
 
     def snapshot_cost(self) -> dict:
         """The dashboard's `cache.snapshot_cost` row (contract 1.3 keys)."""

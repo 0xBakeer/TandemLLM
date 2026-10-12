@@ -307,6 +307,14 @@
                 "integer",
                 "null"
               ]
+            },
+            "pinned_cache": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "SRV-335: page cache the engine keeps on purpose (Flash-Next's warm n-gram table), free to the kernel and counted off by every floor check"
             }
           },
           "required": [

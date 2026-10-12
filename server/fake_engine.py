@@ -186,6 +186,12 @@ class FakeEngine:
     def discard_pending(self) -> None:
         pass
 
+    def resident_files(self) -> list:
+        return []
+
+    def memory_parts(self) -> dict:
+        return {}
+
 
 def _call(name: str, user: str) -> str:
     return (f"<tool_call>\n<function={name}>\n<parameter=query>\n{user[:40]}\n"

@@ -90,6 +90,20 @@ class _KV:
         return self._s.max_len
 
 
+def _tensors(obj) -> list:
+    """The tensors an object of the weight dict holds: itself, or its attributes (an EXL3 block, an
+    int8 row set, an expert bank's kept images)."""
+    if torch.is_tensor(obj):
+        return [obj]
+    out = []
+    for v in vars(obj).values() if hasattr(obj, "__dict__") else ():
+        if torch.is_tensor(v):
+            out.append(v)
+        elif isinstance(v, (list, tuple)):
+            out += [x for x in v if torch.is_tensor(x)]
+    return out
+
+
 class FlashNextCacheState(SectionState):
     """What the caches keep of a Flash-Next sequence (engine/models/state.py, ENG-157). Sections: the
     GDN states and conv tails, the PLE conv state and its token context (a fixed buffer, the end-of-
@@ -157,6 +171,7 @@ class FlashNextServing:
         self.commit_ms = 0.0
         self.captured = False               # the last block captured a verify or commit graph
         self.heads: dict = {}               # draft heads by name (`draft_heads`)
+        self._weights = None                # the weights' bytes by part (`memory_parts`), once
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
@@ -171,7 +186,12 @@ class FlashNextServing:
         c = self.cfg
         per_tok = len(c.attention_layers) * (c.num_key_value_heads * c.head_dim * 2
                                              + (c.indexer_head_dim if c.has_indexer else 0)) * 2
+        # the prefill workspace, measured 2026-10-12 on 3.05 (tools/fn_memory_check.py): 2.51 GiB at 8k
+        # and 2.40 GiB at 32k -- the 4,096-row chunk's activations, flat in the context -- so a floor of
+        # 2.75 GiB; the line is the QSA score buffer's bound (9,216 bytes a context token) twice, 4.5 GiB at
+        # 262,144, until the memory policy has observed peaks above 65,536 tokens
         return CostModel(section_bytes=sum(sec.values()), view_bytes_per_token=per_tok,
+                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=2 * 9216,
                          parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
                                 "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
 
@@ -208,6 +228,36 @@ class FlashNextServing:
         self.kv.length = n
         if n > 0:
             self.fn.build_pool(self.st)
+
+    def memory_parts(self) -> dict:
+        """The dashboard's memory split (server/memsplit.py): the trunk's and the MTP layer's weights
+        (each storage once), the trunk's KV, indexer keys and pooled keys, the drafter's MTP KV, the
+        recurrent sections."""
+        if self._weights is None:
+            seen, by = set(), {"weights": 0, "mtp_weights": 0}
+            items = [(k, v) for k, v in self.fn.W.items()] + [(f"bank.{li}", b) for li, b in self.fn.banks.items()]
+            for name, obj in items:
+                part = "mtp_weights" if name.startswith("mtp.") or name == "bank.-1" else "weights"
+                for t in _tensors(obj):
+                    s = t.untyped_storage()
+                    if s.data_ptr() not in seen:
+                        seen.add(s.data_ptr())
+                        by[part] += s.nbytes()
+            self._weights = by
+        st = self.st
+
+        def nb(*ds):
+            return sum(int(t.numel() * t.element_size()) for d in ds for t in d.values())
+        head = self.heads.get("mtp")
+        mtp_kv = 0
+        if head is not None:
+            mtp_kv = nb(head.st.k, head.st.v, head.st.ik, head.st.pool)
+        return {**self._weights, "kv_pool": nb(st.k, st.v, st.ik, st.pool), "drafter_kv": mtp_kv,
+                "gdn_state": sum(int(t.numel() * t.element_size()) for t in self.state.sections().values())}
+
+    def resident_files(self) -> list:
+        """The n-gram table: its policy, its file and page-cache bytes, the cold cache's counts."""
+        return [t.report() for t in {id(t): t for t in self.fn.tables.values()}.values()]
 
     def last_streams(self) -> torch.Tensor:
         """The last committed row's streams [1, hc H] (`mtp.h_last`)."""

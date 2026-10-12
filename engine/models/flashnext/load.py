@@ -39,6 +39,11 @@ DROP_SHARD_CACHE = _S.get("FN_DROP_SHARD_CACHE") == "1"
 #: read the n-gram table into the page cache at load (asynchronously; QWEN38_FN_WARM_TABLE=0: rows
 #: come from the NVMe on first use)
 WARM_TABLE = _S.get("FN_WARM_TABLE") == "1"
+#: where the n-gram table's rows come from (ENG-239): warm = the page cache (warmed at load when
+#: QWEN38_FN_WARM_TABLE=1, counted by the floor checks), cold = O_DIRECT reads through a hot-row cache of
+#: QWEN38_FN_TABLE_CACHE_GB, never the page cache (packs whose weights and table do not fit together)
+TABLE = (_S.get("FN_TABLE") or "warm").strip().lower()
+TABLE_CACHE_GB = float(_S.get("FN_TABLE_CACHE_GB") or 2)
 
 
 def _region_image(idx: PackIndex, names: list[str]) -> tuple[np.ndarray, dict[str, tuple[int, int]]]:
@@ -220,9 +225,14 @@ def load(path: str, device="cuda", mix: str | None = None, log=print, layers=Non
     if DROP_SHARD_CACHE:
         timing["shard_cache_dropped_gb"] = round(drop_cache([os.path.join(idx.path, f) for f in idx.files
                                                              if f != TABLE_FILE]) / 1e9, 1)
-    if idx.table is not None and WARM_TABLE:
+    if idx.table is not None:
+        idx.table.set_policy(TABLE, int(TABLE_CACHE_GB * (1 << 30)))
+        if TABLE == "cold" and not idx.table.direct.direct and log:
+            log(f"[fn-load] {idx.table.path}: no O_DIRECT on this filesystem: buffered reads, the page cache dropped after each")
+    if idx.table is not None and WARM_TABLE and TABLE == "warm":
         idx.table.warm()
-    timing["table_warm"] = bool(idx.table is not None and WARM_TABLE)
+    timing["table_warm"] = bool(idx.table is not None and WARM_TABLE and TABLE == "warm")
+    timing["table_policy"] = TABLE
     if first is not None:
         idx.cfg = dataclasses.replace(c, num_hidden_layers=first, layer_types=c.layer_types[:first])
     timing["total_s"] = round(time.time() - t0, 2)

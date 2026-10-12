@@ -514,7 +514,7 @@ class FlashNextEngine(FlashNextRef):
         T = h.shape[0]
         tab, pd = self.tables[li], self._ple_dev()
         ids = self.ple_ids(tokens, li, st).reshape(-1).numpy()
-        packed = torch.from_numpy(np.asarray(tab.map[ids])).to(self.device)
+        packed = torch.from_numpy(tab.rows_of(ids)).to(self.device)
         heads = torch.from_numpy(np.searchsorted(tab.offsets_np, ids, side="right") - 1).to(self.device)
         emb = decode_rows(packed, heads, pd["bias"], tab.K, pd["codebook"]).to(self.dtype).reshape(T, -1)
         key = K.hc_norm(PK.mm_rows(emb, self.W[p + "key_proj.weight"]).to(self.dtype), self.W[p + "norm_key.weight"], H, eps)
@@ -670,7 +670,7 @@ class FlashNextEngine(FlashNextRef):
     def _ple_fill(self, h: dict, row: int, li: int, ids: list[int]) -> None:
         tab = self.tables[li]
         nh = self.cfg.ngram_heads
-        h["packed"].numpy()[row * nh:(row + 1) * nh] = tab.map[ids]
+        h["packed"].numpy()[row * nh:(row + 1) * nh] = tab.rows_of(np.asarray(ids, dtype=np.int64))
         h["heads"].numpy()[row * nh:(row + 1) * nh] = np.searchsorted(tab.offsets_np, ids, side="right") - 1
 
     def stage_rows(self, tokens: list[int], parents: list[int], st: FNState) -> None:

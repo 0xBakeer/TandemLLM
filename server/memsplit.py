@@ -26,6 +26,46 @@ import time
 GIB = float(1 << 30)
 
 
+#: () -> bytes the engine keeps in the page cache on purpose (a model's warm lookup table, ENG-239):
+#: MemAvailable counts them free, every floor check takes them off (SRV-335); set by the server at load
+PINNED = None
+_pinned_cache = [0.0, 0]
+
+
+def pinned() -> int:
+    """The engine's pinned page cache now (read at most once a second)."""
+    if PINNED is None:
+        return 0
+    now = time.monotonic()
+    if now - _pinned_cache[0] >= 1.0:
+        try:
+            _pinned_cache[1] = int(PINNED() or 0)
+        except Exception:                                          # noqa: BLE001
+            _pinned_cache[1] = 0
+        _pinned_cache[0] = now
+    return _pinned_cache[1]
+
+
+def pinned_of(eng) -> int:
+    """What `eng.resident_files()` keeps warm in the page cache, in bytes."""
+    return sum(int(f.get("resident_bytes") or 0) for f in eng.resident_files() if f.get("policy") == "warm")
+
+
+def counted_available() -> int | None:
+    """MemAvailable less the engine's pinned page cache: what every floor check counts."""
+    ma = mem_available()
+    return None if ma is None else max(0, ma - pinned())
+
+
+def counted_meminfo() -> dict | None:
+    """`/proc/meminfo` in bytes (server/slots.py `read_meminfo`) with MemAvailable counted."""
+    from server.slots import read_meminfo
+    mi = read_meminfo()
+    if mi is not None and "MemAvailable" in mi:
+        mi = dict(mi, MemAvailable=max(0, mi["MemAvailable"] - pinned()))
+    return mi
+
+
 def mem_available() -> int | None:
     """MemAvailable in bytes, None where /proc does not exist."""
     try:
@@ -188,12 +228,11 @@ def split(state: dict, probe=None, avail=mem_available, total=mem_total, pool=No
         return _nbytes(*(t for t in ts if t is not None and not kvpool.paged(t)))
 
     eng = state.get("engine")
-    w = getattr(eng, "w", None)
-    put("weights", getattr(w, "bytes_fp8", 0) + getattr(w, "bytes_other", 0))
-    kv = getattr(eng, "kv", None)
-    put("kv_pool", static(*(getattr(kv, k, None) for k in ("k", "v", "ks", "vs"))))
-    st = getattr(eng, "state", None)
-    put("gdn_state", _nbytes(*(getattr(st, k, None) for k in ("S", "conv", "_spare"))))
+    if eng is not None:
+        # the engine's own parts, from its adapter: weights, its KV and recurrent state (the 27B's in
+        # engine/models/qwen3_5/adapter.py; another model names its own, e.g. a draft layer's weights)
+        for name, n in eng.memory_parts().items():
+            put(name, n)
     caches = drafter_caches(state.get("drafter"))
     put("drafter_kv", sum(static(d._ck, getattr(d, "_cv", None)) for d in caches))
     put("vision", getattr(state.get("vision"), "nbytes", 0))
@@ -222,7 +261,10 @@ def split(state: dict, probe=None, avail=mem_available, total=mem_total, pool=No
            "mem_available": ma, "mem_total": mt, "in_use": in_use,
            "outside": (in_use - (reserved or 0) - vmm) if in_use is not None
            and reserved is not None else None,
-           "max_len": state.get("max_len"), "drafter_caches": len(caches)}
+           "max_len": state.get("max_len"), "drafter_caches": len(caches),
+           # page cache the engine keeps on purpose (a model's warm lookup table): free to the
+           # kernel, counted off by every floor check (SRV-335)
+           "pinned_cache": pinned_of(eng) if eng is not None else 0}
     led = state.get("load_ledger")
     if led is not None:
         out["load"] = led.stages()
