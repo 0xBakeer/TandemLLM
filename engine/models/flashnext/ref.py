@@ -119,6 +119,11 @@ class FNState:
     pool_ratio: int = 4
     record: bool = False  # the row-exact engine keeps the recurrent state after every row of a block
     rows: dict = field(default_factory=dict)   # ("S"|"conv"|"ctx"|"pconv", layer) -> [state after row t]
+    # VIS-97: the request's images (engine/vision.py MMContext: their rows, the prompt's three-axis
+    # rotary coordinates) and the rotary offset of the rows after the prompt (position = slot + delta);
+    # the server sets both per request (FlashNextServing `mm`, `pos_delta`)
+    mm: object = None
+    delta: int = 0
 
     def reset_inplace(self) -> None:
         """A fresh sequence in the SAME tensors (a captured decode graph holds them)."""
@@ -139,7 +144,8 @@ class FNState:
     def clone(self) -> "FNState":
         c = lambda d: {k: v.clone() for k, v in d.items()}   # noqa: E731
         return FNState(self.length, c(self.k), c(self.v), c(self.ik), c(self.conv), c(self.S),
-                       c(self.ple_ctx), c(self.ple_conv), self.cap, c(self.pool), dict(self.pool_n), self.pool_ratio)
+                       c(self.ple_ctx), c(self.ple_conv), self.cap, c(self.pool), dict(self.pool_n),
+                       pool_ratio=self.pool_ratio, mm=self.mm, delta=self.delta)
 
 
 class FNModelState(SectionState):

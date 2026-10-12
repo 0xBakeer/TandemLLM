@@ -9077,9 +9077,11 @@ def _load(a) -> None:
         # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
         STATE["weights_key"] = probe_mod.weights_key(weights)
 
-    # what a builder may ask of the server: the keys above, the ledger, the log
+    # what a builder may ask of the server: the keys above, the ledger, the log, the KV pool, the
+    # vision tower with its processor and caches (`_load_vision`, a builder's own tower)
     ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
-                                kv_pool=lambda: _kv_pool_open(a))
+                                kv_pool=lambda: _kv_pool_open(a),
+                                vision=lambda path, tower_of=None: _load_vision(a, path, tower_of))
     m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
@@ -9175,7 +9177,7 @@ def _build_qwen3_5(a, ctx) -> dict:
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
     ctx.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
-    _load_vision(a, cfg)
+    _load_vision(a, cfg.path)
     ctx.mark("vision")
     drafter = None
     if a.drafter == "mtp":
@@ -9623,18 +9625,23 @@ def _gib(b) -> str:
     return "-" if b is None else f"{b / (1 << 30):.2f}"
 
 
-def _load_vision(a, cfg) -> None:
-    """The checkpoint's vision tower (bf16, as stored), its image processor and the
-    embedding cache -- when the checkpoint has a tower and `--vision on`."""
+def _load_vision(a, path: str, tower_of=None) -> None:
+    """The checkpoint's vision tower (bf16, as stored; or `tower_of(vision config)`, the tower a
+    model's builder makes in its own weight format, VIS-97), its image processor and the embedding
+    cache -- when the checkpoint has a tower and `--vision on`."""
     from engine.vision import EmbedCache, VisionTower, load_vision_config
-    vcfg = load_vision_config(cfg.path) if getattr(a, "vision", "on") == "on" else None
+    vcfg = load_vision_config(path) if getattr(a, "vision", "on") == "on" else None
     if vcfg is None:
         print("[vision] off" + (" (the checkpoint has no vision tower)"
                                 if getattr(a, "vision", "on") == "on" else ""), flush=True)
         return
     t0 = time.time()
-    tower = VisionTower.from_checkpoint(cfg.path, vcfg, device="cuda")
-    pre = images_mod.Preprocessor(cfg.path, vcfg.spatial_merge_size,
+    tower = (tower_of(vcfg) if tower_of is not None
+             else VisionTower.from_checkpoint(path, vcfg, device="cuda"))
+    if tower is None:
+        print("[vision] off (the checkpoint has no vision tower)", flush=True)
+        return
+    pre = images_mod.Preprocessor(path, vcfg.spatial_merge_size,
                                   max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
                                   backend=getattr(a, "image_backend", "torchvision"))
     STATE.update(vision=tower, image_pre=pre,
@@ -9652,7 +9659,7 @@ def _load_vision(a, cfg) -> None:
         m = vcfg.spatial_merge_size * 2
         tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
     tower.stats.update(images=0, patches=0, ms=0.0)
-    print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB bf16, {vcfg.depth} blocks, "
+    print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB, {vcfg.depth} blocks, "
           f"{len(tower.t)} tensors; processor {type(pre.proc).__name__} "
           f"({pre.backend} backend, pinned); "
           f"loaded in {time.time() - t0:.1f}s", flush=True)

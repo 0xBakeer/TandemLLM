@@ -101,6 +101,8 @@ class FlashNextConfig:
     eos_token_id: int                       # the text config's eos: the PLE hash resets on it
     mtp_num_hidden_layers: int = 0
     eos_token_ids: list[int] = field(default_factory=list)   # generation stop ids
+    # the three-axis rotary of image rows (VIS-97; interleaved, engine/vision.py `mrope_axes`)
+    mrope_section: list[int] = field(default_factory=lambda: [11, 11, 10])
 
     # --- derived ---
     @property
@@ -218,6 +220,7 @@ def config_from_dict(raw: dict, path: str = "", gen: dict | None = None) -> Flas
         eos_token_id=int(eos),
         mtp_num_hidden_layers=t.get("mtp_num_hidden_layers", mtp.get("num_hidden_layers", 0)),
         eos_token_ids=gen_eos or [int(eos)],
+        mrope_section=list(rope.get("mrope_section", [11, 11, 10])),
     )
     validate(cfg, t)
     return cfg

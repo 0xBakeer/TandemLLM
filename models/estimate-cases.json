@@ -308,7 +308,7 @@
      "weights_gib": 62.47,
      "drafters_gib": 0.0,
      "recommended": false,
-     "max_window": 212992,
+     "max_window": 208896,
      "table": {
       "gib": 36.36,
       "policy": "cold",
@@ -321,7 +321,7 @@
      "weights_gib": 77.16,
      "drafters_gib": 0.0,
      "recommended": false,
-     "max_window": 65536,
+     "max_window": 53248,
      "table": {
       "gib": 36.36,
       "policy": "cold",
@@ -431,6 +431,16 @@
      "conflicts": [],
      "memory_gib": 1.52,
      "memory_max_gib": 5.52
+    },
+    {
+     "id": "vision",
+     "label": "Vision",
+     "default": true,
+     "required": false,
+     "depends_on": [],
+     "conflicts": [],
+     "memory_gib": 0.31,
+     "memory_max_gib": 0.81
     },
     {
      "id": "prompt_cache",
@@ -5491,7 +5501,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 93.24,
+    "total_gb": 93.55,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5540,6 +5550,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -5567,7 +5584,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 17.18,
+    "room_gb": 16.87,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5582,7 +5599,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 102.15,
+    "total_gb": 102.46,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5631,6 +5648,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -5658,7 +5682,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 12.06,
+    "room_gb": 11.75,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5673,7 +5697,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 85.82,
+    "total_gb": 86.13,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5722,6 +5746,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -5749,7 +5780,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 24.6,
+    "room_gb": 24.29,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5764,7 +5795,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 94.73,
+    "total_gb": 95.04,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5813,6 +5844,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -5840,7 +5878,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 19.48,
+    "room_gb": 19.17,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5855,7 +5893,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 100.42,
+    "total_gb": 100.73,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5904,6 +5942,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -5927,13 +5972,13 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 212992,
+    "context_tokens_fit": 208896,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 10.0,
+    "room_gb": 9.69,
     "notes": [
-     "About 212,992 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+     "About 208,896 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
    }
   },
@@ -5982,7 +6027,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 129.82,
+    "total_gb": 130.13,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6031,6 +6076,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -6058,10 +6110,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": -19.4,
+    "room_gb": -19.71,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.40 GiB over the budget before any context.",
-     "Over the budget by 23.19 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.71 GiB over the budget before any context.",
+     "Over the budget by 23.50 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
@@ -6076,7 +6128,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 138.73,
+    "total_gb": 139.04,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6125,6 +6177,13 @@
       "kind": "fixed"
      },
      {
+      "id": "vision",
+      "label": "Vision",
+      "gb": 0.31,
+      "kind": "reserve",
+      "worst_gb": 0.81
+     },
+     {
       "id": "prompt_cache",
       "label": "Conversation cache",
       "gb": 0.43,
@@ -6152,10 +6211,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": -24.52,
+    "room_gb": -24.83,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.52 GiB over the budget before any context.",
-     "Over the budget by 32.10 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.83 GiB over the budget before any context.",
+     "Over the budget by 32.41 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.87 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]

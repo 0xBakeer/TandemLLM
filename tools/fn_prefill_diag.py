@@ -51,7 +51,7 @@ def main() -> None:
     h_in = [eng.embed(ids).repeat(1, c.hc_count)] + trace[:-1]
     B = eng.new_state(eng.max_len)
     R = eng.new_state(eng.max_len)
-    eng._pre = eng._pre_ctl(0, T)
+    eng._pre = eng._pre_ctl(0, T, B)
     rows = []
     want = [int(x) for x in a.layers.split(",")] if a.layers else range(c.num_hidden_layers)
     for li in want:
