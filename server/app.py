@@ -4630,13 +4630,13 @@ def _harness_of(plan) -> dict | None:
     """SRV-349, `usage.tandem.harness`: the router's class and effort level for this turn and the
     packages in its prompt (this turn's notes and the replayed ones, `plan.spans`), each with its
     text's tokens. None for a request no active plan served."""
-    if plan is None or not plan.active or plan.row is None:
+    if plan is None or not getattr(plan, "active", False) or getattr(plan, "row", None) is None:
         return None
     row = plan.row
     texts: dict = {}
-    notes = list(getattr(plan.session, "notes", None) or ()) if plan.session is not None else []
+    notes = list(getattr(getattr(plan, "session", None), "notes", None) or ())
     for parts in [getattr(n, "parts", None) for n in notes] + \
-            [i.get("parts") for i in plan.injected]:
+            [i.get("parts") for i in getattr(plan, "injected", None) or ()]:
         for p in parts or ():
             if p.get("kind") == "package" and p.get("text"):
                 texts.setdefault(p.get("name"), p["text"])
@@ -6983,7 +6983,10 @@ class Handler(BaseHTTPRequestHandler):
                                             rec.hidden_prompt, plan, strict=False)
             if head_parts is not None:
                 rec.parts = dict(head_parts, images=int(mm.image_tokens) if mm is not None else 0)
-                rec.harness = _harness_of(plan)
+                try:
+                    rec.harness = _harness_of(plan)
+                except Exception:                                  # noqa: BLE001
+                    logbuf.print_exc()       # a usage figure must never fail a request
             if comp is not None:
                 # what the client sent; the tokens the continuation reused count as cached
                 rec.prompt_tokens = rec.prompt_client = comp["client_n"]
