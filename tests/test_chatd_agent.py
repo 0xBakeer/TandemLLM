@@ -768,5 +768,111 @@ def test_present_opens_a_pane_on_every_device():
         c.close()
 
 
+# ---------------------------------------------------------------------- the port preview
+class RelayBoxes(FakeBoxes):
+    """`relay.py connect PORT` played on the host: the exec's stdin goes raw to 127.0.0.1:PORT,
+    its answer comes back in the attach stream's 8-byte frames, as the real relay's does."""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.relays = 0
+
+    def open_exec(self, cid, cmd, *, tty=False, stdin=False, env=None, workdir="/workspace"):
+        if "/opt/tandem/relay.py" not in cmd:
+            return super().open_exec(cid, cmd, tty=tty, stdin=stdin, env=env, workdir=workdir)
+        a, b = socket.socketpair()
+        srv = socket.create_connection(("127.0.0.1", int(cmd[-1])))
+        self.relays += 1
+
+        def up():
+            try:
+                while True:
+                    d = b.recv(65536)
+                    if not d:
+                        break
+                    srv.sendall(d)
+                srv.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+        def down():
+            while True:
+                d = srv.recv(65536)
+                if not d:
+                    break
+                b.sendall(bytes([1, 0, 0, 0]) + len(d).to_bytes(4, "big") + d)
+            b.close()
+            self.relays -= 1
+        threading.Thread(target=up, daemon=True).start()
+        threading.Thread(target=down, daemon=True).start()
+        return "exec-relay", a, b""
+
+    def exit_code(self, exec_id):
+        return False, 0, None
+
+
+def app_server():
+    """A dev server in the sandbox: a page with root-relative links, and a WebSocket echo."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from chatd.terminals import WsConn, ws_accept
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if ws_accept(self):
+                ws = WsConn(self)
+                while True:
+                    m = ws.recv()
+                    if m is None:
+                        return
+                    ws.send(m[0], b"echo:" + m[1])
+            body = b'<script src="/app.js"></script><a href="/about">about</a>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Set-Cookie", "x=1")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def test_the_port_preview_proxies_pages_and_websockets():
+    c = Chat()
+    c.svc.sandboxes = RelayBoxes(c.data)
+    c.svc.sandboxes.on_change = c.svc._sandbox_changed
+    c.svc.sandboxes.network_mode = c.svc._network_mode
+    app = app_server()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        base = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}"
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/")
+        assert st == 503                                   # the sandbox is not running
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/")
+        body = body.decode()
+        assert st == 200 and f'src="{base}/app.js"' in body and f'href="{base}/about"' in body
+        assert "frame-ancestors 'self'" in h["Content-Security-Policy"] and "Set-Cookie" not in h
+        sock = ws_open(c.port, base + "/socket")
+        ws_send(sock, b"hello", op=1)
+        assert ws_recv(sock) == b"echo:hello"
+        ws_send(sock, b"\x00\x01binary", op=2)
+        assert ws_recv(sock) == b"echo:\x00\x01binary"
+        sock.close()
+        # the browser gone, the relay ends
+        c.wait(lambda: c.svc.sandboxes.relays == 0, 10)
+    finally:
+        app.shutdown()
+        c.close()
+
+
 if __name__ == "__main__":
     run_all(globals())

@@ -479,6 +479,16 @@ class Sandboxes:
                 return
             time.sleep(2)
 
+    def end_exec(self, exec_id: str) -> None:
+        """TERM to an exec's own process (not its group) when it still runs."""
+        running, _, pid = self.exit_code(exec_id)
+        if running and pid:
+            import signal
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     # ------------------------------------------------------------------ the guard
     def guard_once(self) -> str | None:
         """One look: what it did, for the tests and the log."""

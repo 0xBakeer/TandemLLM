@@ -317,6 +317,8 @@ class TerminalsMixin:
                                                           "or ask the agent to start the server")
         q = handler.path.split("?", 1)
         path = (rest or "/") + (f"?{q[1]}" if len(q) > 1 else "")
+        if (handler.headers.get("Upgrade") or "").lower() == "websocket":
+            return self._proxy_ws(handler, cid, port, path)
         n = int(handler.headers.get("Content-Length") or 0)
         body = handler.rfile.read(n) if n else b""
         lines = [f"{handler.command} {path} HTTP/1.1", f"Host: 127.0.0.1:{port}",
@@ -356,8 +358,7 @@ class TerminalsMixin:
                 ctype = v.strip()
                 continue
             keep.append((k.strip(), v.strip()))
-        if any(k.lower() == "transfer-encoding" for k, _ in []) or b"transfer-encoding: chunked" \
-                in hdrs.lower():
+        if b"transfer-encoding: chunked" in hdrs.lower():
             payload = _dechunk(payload)
         if ctype.startswith("text/html"):
             prefix = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}/"
@@ -365,6 +366,59 @@ class TerminalsMixin:
                              lambda m: m.group(1) + b"=" + m.group(2) + prefix.encode(), payload)
         handler._send(status, payload, ctype, tuple(keep) + (
             ("Content-Security-Policy", PREVIEW_CSP), ("X-Content-Type-Options", "nosniff")))
+
+    def _proxy_ws(self, handler, cid: str, port: int, path: str) -> None:
+        """A WebSocket from the preview to a server in the sandbox (a dev server's live reload, an
+        app's socket): the upgrade goes to it through the relay, its 101 comes back as it is, then
+        bytes both ways until either side closes. When the browser closes its side the relay's
+        stdin closes (it then closes its side to the server); a relay still there 5 s later is
+        ended."""
+        lines = [f"GET {path} HTTP/1.1", f"Host: 127.0.0.1:{port}", "Upgrade: websocket",
+                 "Connection: Upgrade"]
+        for k, v in handler.headers.items():
+            kl = k.lower()
+            if kl.startswith("sec-websocket-") or kl in ("origin", "user-agent", "accept-language"):
+                lines.append(f"{k}: {v}")
+        box = self.sandboxes.box(cid)
+        exec_id, sock, first = self.sandboxes.open_exec(
+            cid, ["python3", "/opt/tandem/relay.py", "connect", str(port)], stdin=True)
+        box.busy += 1
+        handler.close_connection = True
+        out = handler.wfile
+
+        def down(stream: int, data: bytes) -> None:
+            if stream == 1:
+                out.write(data)
+                out.flush()
+
+        def up() -> None:
+            try:
+                while True:
+                    data = handler.rfile.read1(65536)
+                    if not data:
+                        break
+                    sock.sendall(data)
+                    self.sandboxes.touch(cid)
+            except OSError:
+                pass
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            time.sleep(5)
+            self.sandboxes.end_exec(exec_id)
+        try:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            threading.Thread(target=up, daemon=True).start()
+            demux(sock, first, down)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            box.busy -= 1
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def _dechunk(data: bytes) -> bytes:

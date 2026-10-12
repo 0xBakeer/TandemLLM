@@ -79,6 +79,7 @@ def connect(port):
                 if not d:
                     break
                 s.sendall(d)
+            s.shutdown(socket.SHUT_WR)
         except OSError:
             pass
     threading.Thread(target=up, daemon=True).start()
