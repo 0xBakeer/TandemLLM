@@ -331,6 +331,54 @@ def test_a_drafter_resumes_over_committed_rows_and_again_over_the_restored_ones(
     return "the rows committed before the drafter resumes; it resumes again over the rows read back"
 
 
+def test_a_prewarm_yields_between_blocks_and_keeps_what_it_did_not_finish():
+    """SRV-349 (rc-0.8.0): a request that arrives during a prewarm waits at most one block. The
+    restore stops between two blocks when `stop()` says so: the entry stays on the NVMe, the rows
+    read so far are cut back, and a later restore reads it whole. The save before it (the resident
+    conversation written first) stops the same way: its incomplete entry goes, the conversation in
+    RAM stays as it was."""
+    d = tempfile.mkdtemp(prefix="toy-yield-")
+    try:
+        t = _tier(d)
+        sp = spill.SessionSpill(os.path.join(d, "sessions"), chunk=CH, fingerprint="toy", tier=t,
+                                settings={"budget_gb": 1.0, "min_tokens": 64, "drain_min_tokens": CH},
+                                free_bytes=lambda p: 10 ** 15, floor_bytes=0).open()
+        eng, res = Toy(), cache.ResidentPrefix(BIG, CH, stash_bytes=BIG, end=True)
+        ids = tokens(130, seed=7)
+        cache.prefill(eng, None, ids, "cpu", chunk=CH, resident=res)
+        info = sp.save_resident(res, eng, None, "evict")
+        e = sp.entries[info["eid"]]
+        res.clear()
+        for _, v, _ in eng.cache_state().views():
+            v.zero_()
+
+        def after(k):
+            n = [0]
+
+            def stop():
+                n[0] += 1
+                return n[0] > k
+            return stop
+        assert sp.restore(res, eng, None, e, stop=after(2)) is None
+        assert info["eid"] in sp.entries and sp.stats["failed"].get("yielded") == 1, sp.stats["failed"]
+        assert res.valid < 130, res.valid
+        got = sp.restore(res, eng, None, e)
+        assert got is not None and res.valid == 130
+        ref = Toy()
+        cache.prefill(ref, None, ids, "cpu", chunk=CH)
+        for (_, a, ax), (_, b, _) in zip(eng.cache_state().views(), ref.cache_state().views()):
+            assert torch.equal(a.narrow(ax, 0, 130), b.narrow(ax, 0, 130))
+        # the save: a new conversation in RAM, its write stopped after one block
+        res.owner = "B"
+        assert sp.save_resident(res, eng, None, "switch", stop=after(1)) is None
+        assert sp.stats["refused"].get("yielded") == 1 and res.valid == 130
+        assert len(sp.entries) == 1, "the incomplete entry went; the first one stays"
+        t.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    return "restore stopped after 2 blocks (entry kept, rows cut), read whole later; a save stopped after 1"
+
+
 def test_a_27b_anchor_file_of_format_1_is_still_read():
     from test_cache import fresh
     from test_disk_cache import Pos, exact, run, tier

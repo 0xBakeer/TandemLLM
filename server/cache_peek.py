@@ -39,8 +39,9 @@ it is worth keeping) -- so the send that follows resumes at the end anchor. It d
 the engine is busy, the tier is another one (RAM needs no prewarm; the disk tier reads its rows
 during the prefill, and only where that is cheaper than the prefill), another conversation used the
 resident rows in the last `IDLE_S` seconds, or the read would take longer than `MAX_MS`. A request
-that arrives during a prewarm waits for that one restore (`MAX_MS` at most): the restore is one call
-into engine/spill.py, which has no yield point between its blocks.
+that arrives during a prewarm waits at most one block: the save of the conversation in place and the
+restore both stop between blocks when a request waits (engine/spill.py `stop`); the entry stays on
+the NVMe and the conversation in place stays in RAM.
 """
 
 from __future__ import annotations

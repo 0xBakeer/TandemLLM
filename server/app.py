@@ -2811,6 +2811,11 @@ def _cache_peek(ids: list[int], session: str | None) -> dict | None:
     return cache_peek.answer(ids, got, session, _peek_rate())
 
 
+def _request_waiting() -> bool:
+    """A request waits for the engine (the prewarm's yield, SRV-349)."""
+    return bool(WAITERS) or INFLIGHT["waiting"] > 0
+
+
 def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
     """SRV-349: the conversation read back from the NVMe while nothing runs (server/cache_peek.py
     THE PREWARM). None while the engine is busy."""
@@ -2833,15 +2838,17 @@ def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
         if why is not None:
             return {"prewarmed": False, "why": why, **out}
         with torch.no_grad():
+            # a request that arrives meanwhile waits at most one block: the save and the restore
+            # stop between blocks when one is waiting (engine/spill.py `stop`)
             info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,
-                                    replay=True, disk=STATE.get("disk_cache"))
+                                    replay=True, disk=STATE.get("disk_cache"), stop=_request_waiting)
     except Exception as exc:                                       # noqa: BLE001
         print(f"[spill] prewarm failed: {type(exc).__name__}: {exc}", flush=True)
         return {"prewarmed": False, "why": "error", "tier": "unknown", "session": session}
     finally:
         LOCK.release()
     if not info:
-        return {"prewarmed": False, "why": "refused", **out}
+        return {"prewarmed": False, "why": "yielded" if _request_waiting() else "refused", **out}
     print(f"[spill] prewarm: {session or '-'} read back, {info['tokens']} tokens, "
           f"{info['blocks_read']} blocks read in {info['ms']:.0f} ms", flush=True)
     return {"prewarmed": True, "restore": {k: info.get(k) for k in

@@ -250,6 +250,10 @@ def codec_ok() -> bool:
         return False
 
 
+class _Yielded(Exception):
+    """A prewarm's save or restore stopped between two blocks: a request is waiting (`stop`)."""
+
+
 class _Shim:
     """What `ResidentPrefix.replay` reads, for an entry: its end anchor, its rows' tokens, the
     server's whitespace tokens."""
@@ -681,8 +685,10 @@ class SessionSpill:
         h = hashlib.sha256(f"{owner}|{self.clock()}|{tokens[:64]}".encode()).hexdigest()
         return h[:16]
 
-    def save_resident(self, res, eng, drafter, reason: str) -> dict | None:
-        """The resident conversation: rows [0, valid), the end anchor and the newest anchors."""
+    def save_resident(self, res, eng, drafter, reason: str, stop=None) -> dict | None:
+        """The resident conversation: rows [0, valid), the end anchor and the newest anchors.
+        `stop()`: checked between blocks; true, the save stops there and its incomplete entry
+        goes (a prewarm yielding to a request; the conversation stays in RAM)."""
         if res.valid <= 0 or res._stash is not None:
             return None
         n = int(res.valid)
@@ -701,7 +707,7 @@ class SessionSpill:
         return self._save(eng, drafter, tokens=res.tokens[:n], n=n, rows_from=None,
                           anchors=anchors, end=end, taint=res.taint, owner=res.owner,
                           reason=reason, extra=self._extra(res) if end is not None else None,
-                          resident=True)
+                          resident=True, stop=stop)
 
     def save_park(self, res, eng, drafter, reason: str) -> dict | None:
         """The parked conversation: its head is the rows in place (the resident prompt shares it),
@@ -753,7 +759,7 @@ class SessionSpill:
             return None
 
     def _save(self, eng, drafter, *, tokens, n, rows_from, anchors, end, taint, owner, reason,
-              extra, resident) -> dict | None:
+              extra, resident, stop=None) -> dict | None:
         import torch
         from engine.cache import _kv_views, state_now
         t0 = time.perf_counter()
@@ -820,6 +826,8 @@ class SessionSpill:
                 try:
                     bufs = None
                     for b in range(0, n, C):
+                        if stop is not None and stop():
+                            raise _Yielded()
                         r = min(C, n - b)
                         fname = f"r{b:07d}.blk"
                         pieces = None if rows_from is None else [rows_from(i, b, r)
@@ -936,6 +944,8 @@ class SessionSpill:
                     files.append(old_files["end.anc"])
                     nbytes += anc_size
                 for fname, b, anc in pairs:
+                    if stop is not None and stop():
+                        raise _Yielded()
                     sums = [state_sums(x) for x in anc]
                     of = old_files.get(fname)
                     if (of is not None and of["b"] == b and of["sums"] == sums
@@ -979,6 +989,11 @@ class SessionSpill:
                    "extra": extra if carried is None else old.man.get("extra")}
             self._write_manifest(path, man)
             tm["manifest"] = (time.perf_counter() - q) * 1e3
+        except _Yielded:
+            shutil.rmtree(path, ignore_errors=True)
+            self._count("refused", "yielded")
+            self._event("yielded", what="save", tokens=n, reason=reason)
+            return None
         except Exception as exc:                                   # noqa: BLE001
             shutil.rmtree(path, ignore_errors=True)
             self._count("failed", "save")
@@ -1086,7 +1101,7 @@ class SessionSpill:
         return best
 
     def maybe_restore(self, res, eng, drafter, keys, max_len: int, replay: bool = False,
-                      disk=None, mm_ok: bool = False) -> dict | None:
+                      disk=None, mm_ok: bool = False, stop=None) -> dict | None:
         """Serve `keys` from an entry when one beats the caches in RAM: the resident conversation
         written first when it is worth keeping, then the entry's rows read in place. With
         `replay` (the server's call before its replay), when no entry does: the parked
@@ -1116,10 +1131,12 @@ class SessionSpill:
             # resident conversation is then not written (`refused.room`), the one asked for is read
             self._keep.add(e.eid)
             try:
-                self.save_resident(res, eng, drafter, "switch")
+                self.save_resident(res, eng, drafter, "switch", stop=stop)
             finally:
                 self._keep.discard(e.eid)
-        return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here)
+            if stop is not None and stop():
+                return None                    # a request came: the rows in place stay as they are
+        return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here, stop=stop)
 
     def _unserved(self, m: dict) -> None:
         """A long prompt no entry served although one shares a long head with it: one line, so a
@@ -1138,7 +1155,7 @@ class SessionSpill:
             del self.events[:-30]
 
     def restore(self, res, eng, drafter, e: Entry, disk=None, line: int = 0,
-                here: int = 0) -> dict | None:
+                here: int = 0, stop=None) -> dict | None:
         """Read entry `e` into the engine's buffers and make it the resident prompt (its anchors,
         its end anchor, its line and its session). None, with the resident prefix cut below the
         first row written, when a file fails its check or a buffer is refused."""
@@ -1186,6 +1203,10 @@ class SessionSpill:
                     submit(0)
                     submit(1)
                     for j, bl in enumerate(todo):
+                        if stop is not None and stop():
+                            # a prewarm yields: the rows read so far are cut back, the entry stays
+                            _cancel(futs)
+                            return self._failed(e, "yielded", res, low)
                         b, r = int(bl["b"]), int(bl["rows"])
                         buf = bufs[j % 2]
                         try:
@@ -1227,6 +1248,8 @@ class SessionSpill:
                 abuf = self._anchor_buf(eng)
                 offs, anc_payload = dc._sections([dc._nb(t) for t in state])
                 for f in man["anchor_files"]:
+                    if stop is not None and stop():
+                        return self._failed(e, "yielded", res, low)
                     p = os.path.join(e.path, f["file"])
                     try:
                         nread += dc.read_into(p, int(f.get("hdr", ALIGN)), abuf.view(0, anc_payload))
