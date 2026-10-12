@@ -208,7 +208,62 @@ def test_every_builtin_through_chatd_in_a_real_sandbox():
         c.close()
 
 
+HUMANIZE = '''"""
+title: Big numbers
+requirements: humanize
+"""
+from pydantic import BaseModel
+
+
+class Tools:
+    class Valves(BaseModel):
+        SEP: str = ","
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    async def commas(self, n: int, __event_emitter__=None) -> str:
+        """Write a number with thousands separators."""
+        import humanize
+        return humanize.intcomma(n).replace(",", self.valves.SEP)
+'''
+
+
+def test_an_open_webui_tool_runs_in_a_real_sandbox():
+    """SRV-361: an imported Tools file's method in the chat's sandbox, its requirement installed
+    with pip through chatd's proxy, pydantic there, a valve applied."""
+    if not ON:
+        print("skipped: set QSE_SANDBOX_BOX=1 on the box")
+        return
+    avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
+    assert avail >= 30, f"MemAvailable {avail:.1f} GiB: wait for 30"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from chatd_util import Chat
+
+    c = Chat()
+    sb = c.svc.sandboxes
+    sb.min_start_gb, sb.max_running = 30, 1
+    cid = None
+    try:
+        kit = c.svc.owui.add("big.py", HUMANIZE)
+        c.svc.owui.patch(kit["id"], {"valves": {"SEP": "."}})
+        c.svc.add_rule("owui__big_numbers__*", None, "allow", None)
+        cid = c.new()
+        c.send(cid, "FAKE_CALLS " + json.dumps([{"name": "owui__big_numbers__commas",
+                                                  "arguments": {"n": 1234567}}]))
+        m = c.wait_idle(cid, 300)["messages"][-1]
+        call = next(p for p in m["parts"] if p["type"] == "tool_call")
+        print("  owui call:", call["status"], repr((call.get("output") or {}).get("content"))[:200])
+        assert call["status"] == "done" and call["output"]["content"] == "1.234.567"
+    finally:
+        if cid:
+            c.call("POST", f"/conversations/{cid}/sandbox/stop")
+            sb.remove(cid, files=True)
+        c.close()
+
+
 if __name__ == "__main__":
     test_the_sandbox_on_this_box()
     test_every_builtin_through_chatd_in_a_real_sandbox()
+    test_an_open_webui_tool_runs_in_a_real_sandbox()
     print("ok")
