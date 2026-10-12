@@ -62,6 +62,23 @@ def test_a_model_with_no_card_gets_the_loader_and_safe_defaults():
                                  "effort_levels": []}
 
 
+def test_the_flashnext_card_covers_its_packs():
+    """rc-0.8.0 live: without a card.json the served Flash-Next pack got the safe defaults (no thinking,
+    no vision), and the Chat tab sent an attached image as a file the model could only open with bash.
+    Its card: thinking with the effort levels, tools, structured output, and images once the tower is
+    loaded (VIS-97); the window the pack's `max_len`."""
+    for pack in ("flashnext-2.05", "flashnext-3.05", "flashnext-4.05"):
+        c = model_card.card(_facts(pack=pack, max_len=40960))
+        assert c["model"] == "qwen3.8-flash-next" and c["label"] == "Qwen3.8-Flash-Next", c
+        caps = c["capabilities"]
+        assert caps["thinking"] and caps["tools"] and caps["vision"] and caps["structured"], caps
+        assert caps["effort_levels"] == ["off", "low", "medium", "high", "xhigh"]
+        assert c["context_length"] == 40960
+    assert model_card.card(_facts(pack="flashnext-3.05", vision=False))["capabilities"]["vision"] is False
+    assert model_card.card(_facts(pack="exl3-4.5"))["model"] == "qwen3.8-27b"
+    return "the Flash-Next packs get their card; images only with the tower loaded"
+
+
 def test_annotate_leaves_proxy_models_their_own_card():
     entries = [{"id": "TandemLLM", "object": "model"},
                {"id": "openai/gpt", "tandem": {"backend": "openai", "context_length": 128000}}]
