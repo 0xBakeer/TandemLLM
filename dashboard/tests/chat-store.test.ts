@@ -165,7 +165,9 @@ describe('the chat reducer', () => {
     // a tool's started_at and ended_at come from the clock: one fixed instant for both reductions
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-12T10:00:00Z'));
-    onTestFinished(() => vi.useRealTimers());
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const stamped: StampedEvent[] = TURN.map((event, i) => ({ id: String(i + 1), event }));
     const full = applyEvents(conv(), TURN);
     // the server's snapshot at seq 6 (the thinking part streamed), while the device already had 1..10
@@ -295,5 +297,16 @@ describe('MCP prompts', () => {
     expect(promptArgs('lang=py the main loop', ['topic', 'lang'])).toEqual({ lang: 'py', topic: 'the main loop' });
     expect(promptArgs('x=1', ['file'])).toEqual({ file: 'x=1' });
     expect(promptArgs('', ['file'])).toEqual({});
+  });
+});
+
+describe('a tool card head', () => {
+  it('shows the main argument, and a list as its size', async () => {
+    const { argsSummary } = await import('../src/chat/store');
+    const call = (input: string) => ({ type: 'tool_call' as const, id: 'c', name: 'x', input, status: 'done' as const, output: null, started_at: null, ended_at: null });
+    expect(argsSummary(call('{"command": "ls -la\\nmore"}'))).toBe('ls -la');
+    expect(argsSummary(call('{"items": [{"text": "a"}, {"text": "b"}, {"text": "c"}]}'))).toBe('3 items');
+    expect(argsSummary(call('{"opts": {"a": 1}}'))).toBe('1 field');
+    expect(argsSummary(call('not json'))).toBe('not json');
   });
 });

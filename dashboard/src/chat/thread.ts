@@ -15,7 +15,7 @@ import { copyButton, icon } from '../ui/bits';
 import type { QseWrenFigure } from '../setup/figure';
 import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
-import { dividersByMessage, dividerWords, messageText } from './store';
+import { argsSummary, dividersByMessage, dividerWords, messageText } from './store';
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
@@ -325,16 +325,6 @@ export function agoWords(sec: number): string {
 }
 
 /** the one argument that names the call: the command, the path, the query */
-export function argsSummary(t: ToolCallPart): string {
-  try {
-    const o = JSON.parse(t.input) as Record<string, unknown>;
-    const v = o.command ?? o.path ?? o.query ?? o.url ?? Object.values(o)[0];
-    return v == null ? '' : String(v).split('\n')[0].slice(0, 90);
-  } catch {
-    return t.input.replace(/\s+/g, ' ').slice(0, 90);
-  }
-}
-
 export function prettyJson(s: string): string {
   try {
     return JSON.stringify(JSON.parse(s), null, 2);

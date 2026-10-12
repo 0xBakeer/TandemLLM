@@ -17,7 +17,8 @@ because it keeps the last two user turns whole.
 
 REWIND (`POST .../rewind {message_id}`) on a user message: the run that is on stops first, the
 workspace goes back to the `before` snapshot of the first run after that message (the runs
-recorded since stay recorded), and the head moves to the message's parent, so the user can send a
+recorded since stay recorded), the todo list goes back to what that message's run started with
+(its `todos` part keeps the items; no part: no open list then), and the head moves to the message's parent, so the user can send a
 new version; the old branch stays in the tree and the branch pager shows it once a new message
 sits beside it. The answer carries the message's text for the composer.
 """
@@ -97,7 +98,7 @@ class PlansMixin:
         m = self._messages(cid).get(user_mid)
         if m is None or any(p.get("type") == "todos" for p in m["parts"]):
             return
-        parts = m["parts"] + [{"type": "todos", "text": todo_text(items)}]
+        parts = m["parts"] + [{"type": "todos", "text": todo_text(items), "items": items}]
         self.store.run("UPDATE messages SET parts = ? WHERE id = ?", (json.dumps(parts), user_mid))
 
     # ------------------------------------------------------------------ plan mode
@@ -149,6 +150,10 @@ class PlansMixin:
                            (m["parent_id"], cid))
             self.emit(conv, {"type": "branch.changed", "head_id": m["parent_id"]})
             conv.context = None
+            # the todo list as that message's run found it (none open then: an empty list)
+            before = next((p.get("items") for p in m["parts"] if p.get("type") == "todos"), None)
+        if later:
+            self.set_todos(cid, before if isinstance(before, list) else [])
         self.log(f"[rewind] {cid} to before {m['id']}: {len(later)} run(s), {files} file(s)")
         from chatd.render import text_of
         return {"conversation": self.snapshot(cid, viewer), "text": text_of(m["parts"]),

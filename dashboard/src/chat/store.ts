@@ -183,3 +183,17 @@ export function dividerWords(cp: Compaction): string {
   const t = cp.duration_ms != null ? `, ${cp.duration_ms < 10_000 ? fixed(cp.duration_ms / 1000, 1) : Math.round(cp.duration_ms / 1000)} s` : '';
   return `Earlier messages summarized: ${compact(cp.before_tokens)} to ${compact(cp.after_tokens)} tokens${t}`;
 }
+
+/** the one-line head of a tool card: its main argument */
+export function argsSummary(t: ToolCallPart): string {
+  try {
+    const o = JSON.parse(t.input) as Record<string, unknown>;
+    const v = o.command ?? o.path ?? o.query ?? o.url ?? Object.values(o)[0];
+    // a list (todo_write's items) or an object reads as its size, not as "[object Object]"
+    if (Array.isArray(v)) return `${v.length} item${v.length === 1 ? '' : 's'}`;
+    if (v && typeof v === 'object') return `${Object.keys(v).length} field${Object.keys(v).length === 1 ? '' : 's'}`;
+    return v == null ? '' : String(v).split('\n')[0].slice(0, 90);
+  } catch {
+    return t.input.replace(/\s+/g, ' ').slice(0, 90);
+  }
+}

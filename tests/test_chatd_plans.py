@@ -107,6 +107,11 @@ def test_todo_write_keeps_the_list_and_it_survives_compaction():
         assert sum(1 for p in users[-1]["parts"] if p["type"] == "todos") == 1
         st, err, _ = c.call("PUT", f"/conversations/{cid}/todos", {"items": [{"text": ""}]})
         assert st == 400
+        # rewinding to the last message brings back the list its run started with
+        c.ok("PUT", f"/conversations/{cid}/todos", {"items": [{"text": "a", "state": "done"}]})
+        r = c.ok("POST", f"/conversations/{cid}/rewind", {"message_id": users[-1]["id"]})
+        assert [t["state"] for t in r["conversation"]["todos"]] == ["done", "done", "pending",
+                                                                    "in_progress"]
     finally:
         c.close()
 
@@ -139,6 +144,7 @@ def test_rewind_restores_the_files_and_moves_the_head():
         assert [m["parts"][0]["text"] for m in conv["messages"] if m["role"] == "user"] == \
             ["first"]
         assert len(c.svc._messages(cid)) == n_before             # nothing deleted
+        assert r["conversation"]["todos"] == []                 # no open list back then
         # a new version of the second message: the old branch is one pager step away
         c.send(cid, "second, again")
         s = c.wait_idle(cid, 20)
