@@ -192,7 +192,7 @@ export interface ClientDim {
 }
 
 /** `internal` (VIS-60): TandemLLM's own calls to itself (the router's question); left out of every view unless asked */
-export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'hermes' | 'curl' | 'dashboard' | 'other' | 'internal';
+export type ClientKind = 'open-webui' | 'openai-sdk' | 'opencode' | 'hermes' | 'curl' | 'dashboard' | 'chat-app' | 'other' | 'internal';
 
 export interface TopDay {
   date: string;

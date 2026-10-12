@@ -1283,8 +1283,11 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin):
                               f"{user[:600]}\nAssistant: {answer[:400]}\n-----\nReply with a "
                               "title for this chat of at most six words, and nothing else."}]}
         st, obj = self.engine.post_json("/v1/chat/completions", body,
+                                        # raw: no routing, no packages, no state lines; a short
+                                        # thinking-off call the engine serves on its side lane
                                         {"x-session-id": f"chat-title-{cid}",
-                                         "X-QSE-Client": "dashboard"}, timeout=60.0)
+                                         "X-QSE-Client": "chat-app", "X-Tandem": "raw"},
+                                        timeout=60.0)
         if st != 200 or not isinstance(obj, dict):
             return
         try:

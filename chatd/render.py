@@ -190,9 +190,9 @@ def encode(obj: dict) -> bytes:
 
 
 def headers(conversation_id: str, settings: dict) -> dict:
-    """The call's headers, also fixed: the session id, the client kind (the dashboard's: the
-    conductor maps it to its chat profile), and a profile only when the chat named one."""
-    h = {"x-session-id": session_id(conversation_id), "X-QSE-Client": "dashboard"}
+    """The call's headers, also fixed: the session id, the client kind (`chat-app`: the conductor
+    maps it to its chat-app profile, SRV-351), and a profile only when the chat named one."""
+    h = {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app"}
     if settings.get("profile"):
         h["X-Tandem-Profile"] = str(settings["profile"])
     return h

@@ -194,8 +194,8 @@ CREATE INDEX IF NOT EXISTS requests_dim_ts ON requests(model, client_id, ts_ms);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
-KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "other",
-         "internal")
+KINDS = ("open-webui", "openai-sdk", "opencode", "hermes", "curl", "dashboard", "chat-app",
+         "other", "internal")
 # VIS-60: TandemLLM's own calls to its own port (the router's question to the engine,
 # `tandem-conductor/1`; `tandem-engine/...`, `tandem-proxy/...`) are `internal`: the dashboard
 # leaves them out of the Usage totals, the request counter, the filters and the Requests list
@@ -268,6 +268,8 @@ def client_of(headers, body: dict | None = None) -> tuple[str, str]:
     from_dashboard = "/dashboard/" in referer.split("?")[0] if referer else False
     if ua.startswith(INTERNAL_UA):
         kind = "internal"
+    elif get("X-QSE-Client").strip().lower() == "chat-app":
+        kind = "chat-app"                          # chatd, the Chat tab's agent loop (SRV-351)
     elif (get("X-QSE-Client").strip().lower() == "dashboard" or "qse-dashboard" in ua
             or from_dashboard):
         kind = "dashboard"

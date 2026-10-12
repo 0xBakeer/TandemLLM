@@ -26,7 +26,9 @@ import threading
 import time
 import urllib.parse
 
-USER_AGENT = "chatd/0.1"     # never `tandem-...`: the ledger counts those as internal calls
+# never `tandem-...`: the ledger counts those as internal calls. `qse-dashboard` in it: an engine
+# older than the `chat-app` client kind counts chatd as the dashboard (its chat profile)
+USER_AGENT = "chatd/0.1 (qse-dashboard)"
 CONNECT_TIMEOUT_S = 10.0
 READ_TIMEOUT_S = 900.0       # a 158k prefill is about 3.5 minutes of silence
 

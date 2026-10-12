@@ -94,7 +94,7 @@ def test_the_profile_each_kind_gets():
     from server.conductor import shipped
     shipped.install(store)               # a new box's documents (ops/start.sh: shipped)
     want = {"opencode": "coding", "hermes": "hermes", "openai-sdk": "general", "curl": "general",
-            "other": "general", "open-webui": "chat", "dashboard": "chat"}
+            "other": "general", "open-webui": "chat", "dashboard": "chat", "chat-app": "chat-app"}
     for k, prof in want.items():
         res = router_mod.resolve(store, "TandemLLM", "qwen38-spark-engine", {}, k)
         assert (res.profile, res.source) == (prof, "client" if prof != "general" else "default"), \
@@ -107,6 +107,22 @@ def test_the_profile_each_kind_gets():
     assert store.get("profiles", "coding")[1]["ui"]["states_channel"] == "inline"
     assert store.get("profiles", "general")[1]["ui"] == {"states": "on",
                                                          "states_channel": "reasoning"}
+
+
+def test_chatd_is_the_chat_app_and_gets_codings_policy_without_state_lines():
+    from chatd import engine, render
+    h = dict(render.headers("C1", {}), **{"User-Agent": engine.USER_AGENT})
+    assert ledger.client_of(h)[1] == "chat-app"
+    # an engine older than the kind reads chatd as the dashboard: its chat profile, as before
+    assert "qse-dashboard" in engine.USER_AGENT.lower()
+    assert not engine.USER_AGENT.lower().startswith(ledger.INTERNAL_UA)
+    app, coding = schema.SHIPPED_PROFILES["chat-app"], schema.SHIPPED_PROFILES["coding"]
+    assert app["clients"] == ["chat-app"] and app["ui"]["states"] == "off"
+    same = {k: v for k, v in app.items() if k not in ("description", "clients", "ui")}
+    assert same == {k: v for k, v in coding.items() if k not in ("description", "clients", "ui")}
+    assert not schema.check("profiles", app, name="chat-app", router=schema.SHIPPED_ROUTER,
+                            packages=schema.SHIPPED_PACKAGES, profiles=schema.SHIPPED_PROFILES)
+    assert "chat-app" in ledger.KINDS and "chat-app" in schema.CLIENT_KINDS
 
 
 if __name__ == "__main__":

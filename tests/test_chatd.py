@@ -604,7 +604,7 @@ def test_render_effort_and_thinking_switches():
     assert off["chat_template_kwargs"] == {"enable_thinking": False}
     assert "reasoning_effort" not in off
     h = render.headers("C1", {"profile": None})
-    assert h == {"x-session-id": "chat-C1", "X-QSE-Client": "dashboard"}
+    assert h == {"x-session-id": "chat-C1", "X-QSE-Client": "chat-app"}
     assert render.headers("C1", {"profile": "coding"})["X-Tandem-Profile"] == "coding"
 
 
