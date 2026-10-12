@@ -23,6 +23,10 @@ The test matrix:
      pool on and off, over and at the budget, and the refusals; each equals what the code computes
      now, and its model is the registry's payload       test_the_fixture
   8  the estimate is pure and fast: under 20 ms a call (median)   test_time
+  9  SRV-337, Flash-Next's packs: a warm table is a fixed part, a cold one its row cache; the prefill's
+     score buffer grows with the window; the context that fits is capped at the profile's largest
+     window; 6.05 fits no window and says by how much; a window above a profile's largest is a 422;
+     the fixture holds a case per pack at 131,072 and 262,144     test_flash_next_packs
 
 Run: python tests/test_setup_estimate.py            (--write regenerates the fixture)
 """
@@ -47,6 +51,10 @@ GIB = 1 << 30
 
 def _m() -> dict:
     return registry.get("qwen3.8-27b")
+
+
+def _fn() -> dict:
+    return registry.get("qwen3.8-flash-next")
 
 
 def _est(**kw) -> dict:
@@ -220,9 +228,17 @@ def _cases() -> list[dict]:
     case("refused: the narrator without the conductor", components={"conductor": False})
     case("refused: an unknown profile", profile="exl3-9.9")
     case("refused: an unknown key", cmd="reboot")
+    f = _fn()
+    for p in f["profiles"]:
+        for w in (131_072, 262_144):
+            out.append({"name": f"Flash-Next {p['id']}, window {w:,}",
+                        "selection": {"model": f["id"], "profile": p["id"], "window": w}})
+    out.append({"name": "Flash-Next refused: two slots", "selection": {"model": f["id"], "slots": 2}})
+    models = {m["id"]: m, f["id"]: f}
     for c in out:
+        mm = models[c["selection"].get("model", m["id"])] if c["selection"].get("model") in models else m
         try:
-            c["expect"] = E.estimate(m, E.check(m, c["selection"]))
+            c["expect"] = E.estimate(mm, E.check(mm, c["selection"]))
         except E.SelectionError as exc:
             c["error"] = {"status": exc.status, "code": exc.code}
     return out
@@ -231,7 +247,7 @@ def _cases() -> list[dict]:
 # the parts of the model payload (GET /v1/setup/models/{id}) the formula and the check read
 FORMULA_KEYS = {"id": None,
                 "profiles": ("id", "label", "weights_gib", "drafters_gib", "recommended"),
-                "devices": ("id", "total_gib", "reserved_gib"), "memory": None,
+                "devices": ("id", "label", "total_gib", "reserved_gib"), "memory": None,
                 "components": ("id", "label", "default", "required", "depends_on", "conflicts",
                                "memory_gib", "memory_max_gib"),
                 "parallelism": None}
@@ -242,7 +258,12 @@ def _formula_model(m: dict) -> dict:
     for k, keep in FORMULA_KEYS.items():
         v = json.loads(json.dumps(m[k]))
         out[k] = [{f: x[f] for f in keep} for x in v] if keep else v
-    out["memory"] = {"parts": out["memory"]["parts"]}
+    # SRV-337's profile keys, where a profile has them (a 27B profile has none)
+    for x, src in zip(out["profiles"], m["profiles"]):
+        x.update({k: src[k] for k in ("max_window", "table", "components_gib") if k in src})
+    out["memory"] = {"parts": out["memory"]["parts"],
+                     **({"per_window_parts": m["memory"]["per_window_parts"]}
+                        if m["memory"].get("per_window_parts") else {})}
     return out
 
 
@@ -255,7 +276,7 @@ def _fixture() -> dict:
                      "every `error` case with that status and code. `model` is the part of the "
                      "model payload (GET /v1/setup/models/{id}) the formula reads. Regenerate with "
                      "python tests/test_setup_estimate.py --write after a registry change.",
-            "model": _formula_model(m), "cases": _cases()}
+            "model": _formula_model(m), "models": {_fn()["id"]: _formula_model(_fn())}, "cases": _cases()}
 
 
 def test_the_fixture():
@@ -263,11 +284,12 @@ def test_the_fixture():
         fx = json.load(fh)
     want = _fixture()
     assert fx["model"] == want["model"], "the registry moved: python tests/test_setup_estimate.py --write"
+    assert fx["models"] == want["models"], "the registry moved: python tests/test_setup_estimate.py --write"
     assert len(fx["cases"]) >= 30, len(fx["cases"])
     for got, new in zip(fx["cases"], want["cases"]):
         assert got == new, (got["name"], got, new)
     assert len(fx["cases"]) == len(want["cases"])
-    sels = [c["selection"] for c in fx["cases"]]
+    sels = [c["selection"] for c in fx["cases"] if c["selection"].get("model") == fx["model"]["id"]]
     assert {s.get("profile", "exl3-4.5") for s in sels} >= {p["id"] for p in fx["model"]["profiles"]}
     assert {s.get("slots", 4) for s in sels} >= {1, 2, 3, 4}
     assert {s.get("window") for s in sels} >= {8192, 32_768, 65_536, 131_072, 262_144}
@@ -278,6 +300,38 @@ def test_the_fixture():
     assert any(not e["fits"] for e in exp) and any(e["total_gb"] == e["budget_gb"] and e["fits"]
                                                     for e in exp)
     assert sum("error" in c for c in fx["cases"]) >= 5
+
+
+def test_flash_next_packs():
+    f = _fn()
+
+    def est(**kw):
+        return E.estimate(f, E.check(f, dict({"model": f["id"]}, **kw)))
+    e = est(profile="flashnext-3.05", window=262_144)
+    parts = {x["id"]: x for x in e["parts"]}
+    # SPD-99: 3.05 reads its table cold (the row cache), and its prefill workspace was measured at 256k
+    assert parts["table"]["gb"] == 2.0 and "row cache" in parts["table"]["label"]
+    assert parts["prefill_workspace"]["gb"] == 10.5                    # stops growing at about 140k
+    assert parts["window_buffers"]["gb"] == round(32230 * 262_144 / GIB, 2)
+    assert parts["prefill_workspace"]["kind"] == "reserve"
+    assert e["fits"] and e["context_tokens_fit"] == 262_144, (e["context_tokens_fit"], e["room_gb"])
+    warm = {x["id"]: x for x in est(profile="flashnext-2.05", window=262_144)["parts"]}
+    assert warm["table"]["gb"] == 24.44 and "kept warm" in warm["table"]["label"]
+    cold = {x["id"]: x for x in est(profile="flashnext-4.05", window=131_072)["parts"]}
+    assert cold["table"]["gb"] == 2.0 and "row cache" in cold["table"]["label"]
+    six = est(profile="flashnext-6.05", window=8192)
+    assert not six["fits"] and six["context_tokens_fit"] == 0
+    assert any("at any window" in n and "GiB over the budget before any context" in n for n in six["notes"]), six["notes"]
+    g = copy.deepcopy(f)
+    registry.profile(g, "flashnext-3.05")["max_window"] = 131_072
+    try:
+        E.check(g, {"model": f["id"], "profile": "flashnext-3.05", "window": 262_144})
+        raise AssertionError("a window above the profile's largest must be refused")
+    except E.SelectionError as exc:
+        assert (exc.status, exc.code) == (422, "out_of_range"), exc.body()
+    capped = E.estimate(g, E.check(g, {"model": f["id"], "profile": "flashnext-3.05", "window": 131_072}))
+    assert capped["context_tokens_fit"] == 131_072
+    return "warm table and score buffer as parts; 3.05 fits 262,144; 6.05 fits none; a profile's window caps and refuses"
 
 
 def test_time():

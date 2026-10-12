@@ -114,6 +114,23 @@ def _cell(m: dict, pid: str, mode: str, task: str):
     return None
 
 
+def _pack_words(m: dict, p: dict) -> str:
+    """OPS-101: a pack's largest window on the device and its n-gram table (where its profile has them); the
+    27B's profiles have neither and say nothing more."""
+    out = ""
+    dev = m["devices"][0]["label"] if m.get("devices") else "this device"
+    if "max_window" in p:
+        out += (f" On the {dev} it does not fit at any window: its weights alone leave too little memory."
+                if p["max_window"] is None else
+                f" The longest conversation it holds on the {dev}: {p['max_window']:,} tokens (its largest window).")
+    t = p.get("table")
+    if t:
+        out += (f" Its n-gram table ({t['gib']:g} GiB) stays warm in the page cache, which counts as used memory."
+                if t["policy"] == "warm" else
+                f" Its n-gram table ({t['gib']:g} GiB) is read past the page cache through a {t['cache_gib']:g} GiB row cache.")
+    return out
+
+
 def model_sections(m: dict) -> list[dict]:
     """The registry entry in words: what Wren quotes when it explains a choice on the page."""
     path = f"models/{m['id']}/model.yaml"
@@ -134,7 +151,7 @@ def model_sections(m: dict) -> list[dict]:
                             f"same top token {q['top1_pct']} % of the time, perplexity {q['ppl']}. "
                             f"Speed: {speed or 'not measured on this build'}. "
                             f"{'Recommended. ' if p['recommended'] else ''}"
-                            f"{', '.join(p['badges'])}. {p['note'] or ''}"})
+                            f"{', '.join(p['badges'])}. {p['note'] or ''}{_pack_words(m, p)}"})
     for c in m["components"]:
         deps = ", ".join(c["depends_on"])
         mem = f"{c['memory_gib']:g} GiB of memory" + (

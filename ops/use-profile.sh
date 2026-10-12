@@ -15,6 +15,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME="${1:-}"; MODE="${2:-switch}"
 # the profile's view of serve.env, without switching
 pv() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; echo \"\${$1:-}\""; }
+# whether the profile sets a key at all (an empty value included)
+pvset() { QSE_PROFILE_OVERRIDE="$NAME" bash -c "set -a; . '$HERE/serve.env'; [ -n \"\${$1+x}\" ]"; }
 # the active-profile file and the profiles are the ones serve.env reads, under its REPO: this folder's
 # parent on a checkout, the source tree on an install.sh box (whose serve.env sits in DIR/run/ops)
 REPO_DIR="$(pv REPO)"; REPO_DIR="${REPO_DIR:-$(dirname "$HERE")}"
@@ -22,7 +24,8 @@ ACTIVE="$REPO_DIR/ops/active-profile"
 PROFILES="$REPO_DIR/ops/profiles"
 SMOKE_URL="${SMOKE_URL:-https://ai-api.khaled.de/v1}"
 SMOKE_MODEL="${SMOKE_MODEL:-TandemLLM}"   # the served raw name when the conductor is off (the setup guide)
-MEM_NEED_GB="${MEM_NEED_GB:-80}"        # MemAvailable before a start (serve8011's guard; the stack takes ~70)
+MEM_NEED_GB="${MEM_NEED_GB:-}"          # MemAvailable before a start: the profile's QSE_MEM_NEED_GIB, else 80
+                                        # (serve8011's guard; the 27B stack takes ~70)
 DISK_MARGIN_GB="${DISK_MARGIN_GB:-60}"  # free disk left after a download (disk tier + spill grow into it)
 BOX_LOCK="${BOX_LOCK:-$HOME/.qwen38-box.flock}"
 say() { echo "[use-profile $(date +%H:%M:%S)] $*"; }
@@ -32,36 +35,45 @@ if [ "$NAME" = "--list" ]; then
     for f in "$PROFILES"/[!_]*.env; do
         n="$(basename "$f" .env)"
         d="$(QSE_PROFILE_OVERRIDE=$n bash -c "set -a; . '$HERE/serve.env'; echo \"\$QSE_WEIGHTS_DIR\"")"
-        printf '%-10s %-3s %s %s\n' "$n" "$([ "$n" = "$CUR" ] && echo '*')" "$d" "$([ -e "$d" ] && echo '(on disk)' || echo '(not on disk: fetched on switch)')"
+        printf '%-16s %-3s %s %s\n' "$n" "$([ "$n" = "$CUR" ] && echo '*')" "$d" "$([ -e "$d" ] && echo '(on disk)' || echo '(not on disk: fetched on switch)')"
     done
     exit 0
 fi
 [ -n "$NAME" ] && [ -f "$PROFILES/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$PROFILES" | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
 
 WDIR="$(pv QSE_WEIGHTS_DIR)"; HF="$(pv QSE_WEIGHTS_HF)"; GB="$(pv QSE_WEIGHTS_GB)"; FILES="$(pv QSE_WEIGHTS_FILES)"
+REV="$(pv QSE_WEIGHTS_REVISION)"; ALSO="$(pv QSE_WEIGHTS_ALSO)"
+[ -n "$MEM_NEED_GB" ] || MEM_NEED_GB="$(pv QSE_MEM_NEED_GIB)"; MEM_NEED_GB="${MEM_NEED_GB:-80}"
 PY="$(pv PY)"; PORT="$(pv PORT)"
 DRAFT="$(pv QWEN38_DRAFT_EXL3)"; DHEAD="$(pv QWEN38_DRAFT_HEAD_EXL3)"; C8="$(pv CKPT8)"; C16="$(pv CKPT16)"
 
 # 1. files: the target's weights (fetched when missing), the drafters and the draft head (never fetched:
-#    they live on this box only), the base snapshot every profile reads
+#    they live on this box only), the base snapshot every 27B profile reads; a profile that sets
+#    QSE_ASSETS names its own (Flash-Next: none, its pack holds its draft layer)
 weights_ok() {
     [ -d "$WDIR" ] || return 1
     if [ -n "$FILES" ]; then for f in $FILES; do [ -s "$WDIR/$f" ] || return 1; done; return 0; fi
     [ -s "$WDIR/config.json" ] && [ -s "$WDIR/model.safetensors.index.json" ] || return 1
+    for f in $ALSO; do [ -s "$WDIR/$f" ] || return 1; done
     "$PY" -c "import json,os,sys; d=sys.argv[1]; m=json.load(open(os.path.join(d,'model.safetensors.index.json')))['weight_map']; sys.exit(0 if all(os.path.isfile(os.path.join(d,f)) for f in set(m.values())) else 1)" "$WDIR"
 }
 MISSING=""
-for p in ${DRAFT:+$DRAFT/ft-b8-v2.safetensors $DRAFT/ft-b16.safetensors} ${DHEAD:+$DHEAD/model.safetensors} \
-         ${DRAFT:-$C8 $C16}; do [ -e "$p" ] || MISSING="$MISSING $p"; done
-ls -d "$HOME"/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/* >/dev/null 2>&1 || MISSING="$MISSING (the Qwen3.8-27B-FP8 base snapshot)"
+if pvset QSE_ASSETS; then
+    for p in $(pv QSE_ASSETS); do [ -e "$p" ] || MISSING="$MISSING $p"; done
+else
+    for p in ${DRAFT:+$DRAFT/ft-b8-v2.safetensors $DRAFT/ft-b16.safetensors} ${DHEAD:+$DHEAD/model.safetensors} \
+             ${DRAFT:-$C8 $C16}; do [ -e "$p" ] || MISSING="$MISSING $p"; done
+    ls -d "$HOME"/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/* >/dev/null 2>&1 || MISSING="$MISSING (the Qwen3.8-27B-FP8 base snapshot)"
+fi
 [ -z "$MISSING" ] || { say "REFUSING: $NAME needs files that are not on this box and have no download:$MISSING"; exit 3; }
 if ! weights_ok; then
-    FREE=$(df -BG --output=avail "$(dirname "$WDIR")" | tail -1 | tr -dc 0-9)
+    PARENT="$(dirname "$WDIR")"; while [ ! -d "$PARENT" ]; do PARENT="$(dirname "$PARENT")"; done
+    FREE=$(df -BG --output=avail "$PARENT" | tail -1 | tr -dc 0-9)
     NEED=$(awk -v g="$GB" -v m="$DISK_MARGIN_GB" 'BEGIN{printf "%d", g + m + 0.999}')
-    say "$WDIR is not complete: fetch $HF (~${GB} GB), free ${FREE} GB, need ${NEED} GB (margin ${DISK_MARGIN_GB})"
+    say "$WDIR is not complete: fetch $HF${REV:+@$REV} (~${GB} GB), free ${FREE} GB, need ${NEED} GB (margin ${DISK_MARGIN_GB})"
     [ "$MODE" = "--dry-run" ] && { say "dry run: would fetch"; } || {
         [ "$FREE" -ge "$NEED" ] || { say "REFUSING the download: ${FREE} GB free < ${NEED} GB"; exit 4; }
-        "$PY" "$HERE/fetch_weights.py" "$HF" "$WDIR" $FILES || { say "download/verify FAILED"; exit 5; }
+        "$PY" "$HERE/fetch_weights.py" ${REV:+--revision "$REV"} "$HF" "$WDIR" $FILES || { say "download/verify FAILED"; exit 5; }
         weights_ok || { say "the download is not a complete set"; exit 5; }
     }
 else

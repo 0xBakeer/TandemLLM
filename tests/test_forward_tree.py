@@ -33,7 +33,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import TextConfig  # noqa: E402
-from engine.model import Qwen38Engine  # noqa: E402
+from engine.models.qwen3_5.adapter import Qwen38Engine  # noqa: E402  (the served class: its cold verbs)
 from engine.tree import DraftTree  # noqa: E402
 
 DEV = "cpu"

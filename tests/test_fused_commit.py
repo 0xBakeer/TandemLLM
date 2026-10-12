@@ -183,7 +183,7 @@ def _tree_then(flag: bool, after: str, seed: int = 8):
             elif after == "chain":
                 out = eng.forward_block(torch.tensor(TOKS), start=pos)
             elif after == "snapshot":
-                out = cache.capture(eng).S
+                out = cache.capture(eng).state[0]
             elif after == "reset":
                 eng.reset()
                 out = torch.tensor(float(eng._pend is None))
@@ -220,7 +220,7 @@ def test_reset_and_restore_drop_a_pending_commit():
         assert eng._pend is not None
         cache.restore(eng, snap)
         assert eng._pend is None, "a restored state must not get the old commit applied"
-        assert torch.equal(eng.state.S, snap.S)
+        assert torch.equal(eng.state.S, snap.state[0])
     finally:
         M.FUSED_COMMIT, M.COMMIT_IN_VERIFY = False, False
     return "reset and cache.restore drop it"

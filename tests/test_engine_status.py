@@ -58,7 +58,19 @@ def test_the_file_and_the_estimate():
     assert f["state"] == "held" and f["words"] == "stopped for maintenance"
     assert f["left_s"] == 600 + 250 - 60 and f["reason"] == "deploy 0.3.41-test"
     assert "vLLM" not in ES.message(f) and "back in about 13 min" in ES.message(f), ES.message(f)
-    return "5 starts kept, median 250 s; a hold's time left = its budget + a start"
+    # OPS-99: the profile the scripts start (serve.env's QSE_WEIGHTS) is in the file, the facts and the page
+    old = os.environ.get("QSE_WEIGHTS")
+    os.environ["QSE_WEIGHTS"] = "flashnext-3.05"
+    try:
+        ES.write("starting", reason="loading the model", p=p, now=t0 + 200)
+    finally:
+        if old is None:
+            os.environ.pop("QSE_WEIGHTS", None)
+        else:
+            os.environ["QSE_WEIGHTS"] = old
+    f = ES.facts(ES.read(p), t0 + 210)
+    assert f["profile"] == "flashnext-3.05" and 'id="profile">flashnext-3.05<' in ES.page(f), f
+    return "5 starts kept, median 250 s; a hold's time left = its budget + a start; the profile named"
 
 
 def _get(url, accept=None):

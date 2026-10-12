@@ -349,9 +349,10 @@ def test_the_split_counts_committed_pages():
     assert kvpool.paged(k.tensor) and kvpool.paged(d.tensor)
     kinds = pool.by_kind()
     assert kinds["engine_kv"] == k.committed_bytes() > 0 and kinds["drafter_kv"] == d.committed_bytes()
-    eng = types.SimpleNamespace(w=types.SimpleNamespace(bytes_fp8=10 * GIB, bytes_other=0),
-                                kv=types.SimpleNamespace(k=k.tensor, v=None),
-                                state=None)
+    from test_residency import _the_27b_verbs
+    eng = _the_27b_verbs(types.SimpleNamespace(w=types.SimpleNamespace(bytes_fp8=10 * GIB, bytes_other=0),
+                                               kv=types.SimpleNamespace(k=k.tensor, v=None),
+                                               state=None))
     drafter = types.SimpleNamespace(_ck=d.tensor, _cv=None)
     state = {"engine": eng, "drafter": drafter}
     out = memsplit.split(state, probe=lambda: (12 * GIB, 13 * GIB), avail=lambda: 100 * GIB,
@@ -370,8 +371,8 @@ def test_the_split_counts_committed_pages():
            + out["reserve"] + vmm + out["outside"])
     assert bar == out["in_use"], (bar, out["in_use"])
     # without the pool: a static tensor is counted by its size, as before
-    static = memsplit.split({"engine": types.SimpleNamespace(
-        w=None, kv=types.SimpleNamespace(k=torch.zeros(4, 4)), state=None)},
+    static = memsplit.split({"engine": _the_27b_verbs(types.SimpleNamespace(
+        w=None, kv=types.SimpleNamespace(k=torch.zeros(4, 4)), state=None))},
         probe=lambda: (GIB, GIB), avail=lambda: None, total=lambda: None, pool=None)
     assert static["parts"]["kv_pool"] == 64 and static["vmm_parts"] == []
     assert static["kv_committed"] is None

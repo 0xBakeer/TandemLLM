@@ -138,33 +138,73 @@ class _PrefixHashMemo:
 _hash_memo = _PrefixHashMemo()
 
 
+# --------------------------------------------------------------------------- the model's state
+# Every tier reads and writes a sequence through the engine's adapter (ENG-157, engine/models/
+# adapter.py): `eng.cache_state()` -- its recurrent sections by name and its position-indexed views
+# (engine/models/state.py) --, `eng.resume_at(n)` after the state was written, `eng.settle()` before
+# it is read, `eng.cost()` for the bytes. A kept state is the sections' tensors in the state's order
+# (for the 27B: S, conv), so the tiers hold any model's.
+
+def state_now(eng) -> tuple:
+    """The engine's live sections, in order (read every time: a buffer may have been swapped)."""
+    return tuple(eng.cache_state().sections().values())
+
+
+def state_clone(eng) -> tuple:
+    return tuple(t.clone() for t in state_now(eng))
+
+
+def state_empty(eng) -> tuple:
+    return tuple(torch.empty_like(t) for t in state_now(eng))
+
+
+def state_save(dst: tuple, eng) -> None:
+    """The live sections into `dst` (buffers of `state_empty`'s shapes)."""
+    for d, t in zip(dst, state_now(eng)):
+        d.copy_(t)
+
+
+def state_load(eng, src: tuple) -> None:
+    """A kept state into the live sections (in place: captured graphs keep their tensors)."""
+    for t, x in zip(state_now(eng), src):
+        t.copy_(x)
+
+
+def state_copy(dst: tuple, src: tuple) -> None:
+    for d, x in zip(dst, src):
+        d.copy_(x)
+
+
+def model_views(eng) -> list:
+    """The engine's position-indexed buffers as (tensor, axis)."""
+    return [(t, ax) for _, t, ax in eng.cache_state().views()]
+
+
 # --------------------------------------------------------------------------- the state snapshot
 class StateSnapshot:
     """Everything the engine and its drafter need to be back at token `length`.
 
-    The KV is sliced to `length` before it is cloned, because the buffer is `max_len` long and
-    cloning all of it would cost the same for a 100-token prefix as for an 8,000-token one. The
-    recurrent state is not sliceable -- it is a fixed [48, 1, H, Dk, Dv] fp32 tensor and it is the
-    bulk of a snapshot on any prompt shorter than a few thousand tokens.
+    The views are sliced to `length` before they are cloned, because a buffer is `max_len` long
+    and cloning all of it would cost the same for a 100-token prefix as for an 8,000-token one. The
+    recurrent sections are not sliceable -- the 27B's are a fixed [48, 1, H, Dk, Dv] fp32 tensor and
+    its conv tails -- and they are the bulk of a snapshot on any prompt shorter than a few thousand
+    tokens. `parts`: the engine's section bytes by kind (`CostModel.parts`).
     """
 
-    __slots__ = ("length", "k", "v", "S", "conv", "drafter", "ks", "vs", "_bytes")
+    __slots__ = ("length", "views", "state", "drafter", "_parts", "_bytes")
 
-    def __init__(self, length: int, k, v, S, conv, drafter=None, ks=None, vs=None):
+    def __init__(self, length: int, views: tuple, state: tuple, drafter=None, parts: dict | None = None):
         self.length = int(length)
-        self.k, self.v, self.S, self.conv, self.drafter = k, v, S, conv, drafter
-        # the e4m3 cache's scales (QWEN38_KV_FP8); None for a bf16 cache
-        self.ks, self.vs = ks, vs
-        self._bytes = (_nbytes(k) + _nbytes(v) + _nbytes(S) + _nbytes(conv)
-                       + _nbytes(ks) + _nbytes(vs) + _tree_bytes(drafter))
+        self.views, self.state, self.drafter = tuple(views), tuple(state), drafter
+        self._parts = dict(parts or {})
+        self._bytes = sum(_nbytes(x) for x in self.views + self.state) + _tree_bytes(drafter)
 
     @property
     def nbytes(self) -> int:
         return self._bytes
 
     def parts(self) -> dict:
-        return {"kv": _nbytes(self.k) + _nbytes(self.v), "recurrent": _nbytes(self.S),
-                "conv": _nbytes(self.conv), "drafter": _tree_bytes(self.drafter)}
+        return {"kv": sum(_nbytes(x) for x in self.views), **self._parts, "drafter": _tree_bytes(self.drafter)}
 
 
 def _nbytes(x) -> int:
@@ -201,14 +241,15 @@ def _drafter_bytes_per_token(drafter) -> int:
 
 def _snapshot_estimate(eng, length: int, drafter=None) -> int:
     """Bytes `capture` will clone at this length, WITHOUT cloning. The recurrent state is fixed;
-    the KV is per token; the drafter's cache adds its own per-token figure WHEN it is
-    snapshottable."""
-    per_token = 2 * len(eng.cfg.attention_layers) * eng.cfg.num_key_value_heads * eng.cfg.head_dim * 2
+    the views are per token (`eng.cost()`); the drafter's cache adds its own per-token figure WHEN
+    it is snapshottable."""
+    cost = eng.cost()
+    per_token = cost.view_bytes_per_token
     if _snapshottable(drafter):
         per_token += _drafter_bytes_per_token(drafter)
     # A conservative bound, not an exact figure: state and KV get their own margins, because the
     # point is "definitely not bigger than the cap", not "exactly this".
-    return 2 * eng.state.nbytes + int(1.25 * per_token * length)
+    return 2 * cost.section_bytes + int(1.25 * per_token * length)
 
 
 def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
@@ -221,40 +262,21 @@ def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
     """
     if max_bytes and _snapshot_estimate(eng, eng.kv.length, drafter) > max_bytes:
         return None
-    settle = getattr(eng, "_settle", None)
-    if settle is not None:
-        settle()                      # a chain accepted in full whose walked state is not in yet
+    eng.settle()                      # a chain accepted in full whose walked state is not in yet
     n = eng.kv.length
-    return StateSnapshot(
-        n,
-        eng.kv.k[:, :, :, :n, :].clone(),
-        eng.kv.v[:, :, :, :n, :].clone(),
-        eng.state.S.clone(),
-        eng.state.conv.clone(),
-        drafter.state_snapshot() if _snapshottable(drafter) else None,
-        eng.kv.ks[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
-        eng.kv.vs[..., :n].clone() if getattr(eng.kv, "fp8", False) else None,
-    )
+    return StateSnapshot(n, tuple(t.narrow(ax, 0, n).clone() for t, ax in model_views(eng)),
+                         state_clone(eng), drafter.state_snapshot() if _snapshottable(drafter) else None,
+                         eng.cost().parts)
 
 
 def restore(eng, snap: StateSnapshot, drafter=None) -> None:
     """Put `snap` back. After this the engine is exactly where `capture` was called."""
     n = snap.length
-    _kvp.ensure_for(eng.kv.k, n)      # SRV-307: the rows must exist before they are written
-    eng.kv.k[:, :, :, :n, :].copy_(snap.k)
-    eng.kv.v[:, :, :, :n, :].copy_(snap.v)
-    if snap.ks is not None:
-        eng.kv.ks[..., :n].copy_(snap.ks)
-        eng.kv.vs[..., :n].copy_(snap.vs)
-    eng.state.S.copy_(snap.S)
-    eng.state.conv.copy_(snap.conv)
-    eng._pending_walk = False
-    eng._pend = None                  # a commit pending on the state just overwritten
-    eng.kv.length = n
-    eng.state.primed = n > 0
-    eng._trace = None
-    eng.tree = None
-    eng.trace = None
+    for (t, ax), x in zip(model_views(eng), snap.views):
+        _kvp.ensure_for(t, n)         # SRV-307: the rows must exist before they are written
+        t.narrow(ax, 0, n).copy_(x)
+    state_load(eng, snap.state)
+    eng.resume_at(n)
     if snap.drafter is not None and _snapshottable(drafter):
         drafter.state_restore(snap.drafter)
 
@@ -362,7 +384,7 @@ class Budget:
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
                  ws_floor: int = WORKSPACE_FLOOR, ws_per_token: int = WORKSPACE_PER_TOKEN,
-                 on_event=None):
+                 ws_cap: int | None = None, on_event=None):
         self.ceiling = int(ceiling_bytes)
         self.peak = int(peak_bytes)
         self.slack = int(slack_bytes)
@@ -379,6 +401,7 @@ class Budget:
         self.exclude = exclude
         self.ws_floor = int(ws_floor)
         self.ws_per_token = int(ws_per_token)
+        self.ws_cap = int(ws_cap) if ws_cap is not None else None
         self.on_event = on_event
         self.shedders: dict = {}
         self.ws_now = 0                    # the running prefill's workspace, until it is done
@@ -424,7 +447,9 @@ class Budget:
         return max(0, alloc - xa), max(0, res - xr)
 
     def workspace(self, n: int) -> int:
-        return max(self.ws_floor, self.ws_per_token * int(n))
+        w = max(self.ws_floor, self.ws_per_token * int(n))
+        # a model whose workspace stops growing (its adapter's `workspace_cap`; the 27B's: none)
+        return min(w, self.ws_cap) if self.ws_cap is not None else w
 
     def _event(self, kind: str, **kw) -> dict:
         ev = dict(kind=kind, ts=round(time.time(), 3), **kw)
@@ -589,6 +614,10 @@ class Budget:
             return
         self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
                                   "estimate": self.workspace(n)}
+        if self.ws_cap is not None and workspace > self.ws_cap:
+            self._event("estimate_raised", n=int(n), workspace=int(workspace), cap=int(workspace),
+                        was_cap=self.ws_cap)
+            self.ws_cap = int(workspace)
         per = int(workspace / n)
         if per > self.ws_per_token:
             self._event("estimate_raised", n=int(n), workspace=int(workspace),
@@ -858,12 +887,11 @@ class Borrow:
         self.attrs = {a: getattr(eng, a, None) for a in _BORROW_ATTRS if hasattr(eng, a)}
         self.views = _kv_views(eng, None)
         self.saved = [t.narrow(ax, 0, self.rows).clone() for t, ax in self.views]
-        self.S = eng.state.S.clone()
-        self.conv = eng.state.conv.clone()
+        self.state = state_clone(eng)
         scratch = getattr(eng, "_scratch_S", None)
         self.scratch = (scratch.clone() if scratch is not None and self.attrs.get("_pending_walk")
                         else None)
-        self.nbytes = (sum(_nbytes(x) for x in self.saved) + _nbytes(self.S) + _nbytes(self.conv)
+        self.nbytes = (sum(_nbytes(x) for x in self.saved) + sum(_nbytes(x) for x in self.state)
                        + _nbytes(self.scratch))
         # the guest starts clean: no images, no taps for the drafter, no pending commit or walk
         eng.mm, eng.pos_delta, eng.tap = None, 0, None
@@ -876,15 +904,14 @@ class Borrow:
         for (t, ax), buf in zip(self.views, self.saved):
             _kvp.ensure_for(t, self.rows)     # SRV-307
             t.narrow(ax, 0, self.rows).copy_(buf)
-        eng.state.S.copy_(self.S)
-        eng.state.conv.copy_(self.conv)
+        state_load(eng, self.state)
         if self.scratch is not None:
             eng._scratch_S.copy_(self.scratch)
         for a, v in self.attrs.items():
             setattr(eng, a, v)
         eng.kv.length = self.length
         eng.state.primed = self.primed
-        self.saved, self.S, self.conv, self.scratch = [], None, None, None
+        self.saved, self.state, self.scratch = [], None, None
 
 
 def resident_capable(drafter) -> bool:
@@ -906,10 +933,9 @@ def resident_capable(drafter) -> bool:
 
 
 def _kv_views(eng, drafter) -> list:
-    """Every position-indexed buffer a guest request can overwrite, as (tensor, axis)."""
-    views = [(eng.kv.k, 3), (eng.kv.v, 3)]
-    if getattr(eng.kv, "fp8", False):
-        views += [(eng.kv.ks, 3), (eng.kv.vs, 3)]
+    """Every position-indexed buffer a guest request can overwrite, as (tensor, axis): the engine's
+    views and its drafter's."""
+    views = model_views(eng)
     fn = getattr(drafter, "kv_views", None) if drafter is not None else None
     if fn is not None:
         views += [(t, ax) for t, ax in fn() if t is not None]
@@ -986,7 +1012,7 @@ class ResidentPrefix:
     2026-10-08: `parks 4, park_hits 0`; chat B, 36,841 tokens parked at 12:14:30, came back at
     12:15:01 with 12,288 cached from the disk and 16,370 re-read, 23.7 s). So when the rows up to
     the end of the last generation fit the park, they are parked whole, and the end anchor goes
-    with them: its line, hidden spans and mark, its (S, conv) buffers (moved, not copied: they
+    with them: its line, hidden spans and mark, its state buffers (moved, not copied: they
     take one of the `park_anchors` places), and the end alignment's regions. A copy that continues
     the parked conversation to its end -- every token, the hidden spans put back, or aligned by
     the server's end alignment -- is offered the end (`park_offer`), and the server brings the
@@ -1058,7 +1084,7 @@ class ResidentPrefix:
         self.park_anchors: dict[int, tuple] = {}
         self._park_bufs: list | None = None
         self._park_views: list | None = None
-        # the parked conversation's end anchor (`_park`): the `end` dict with its own (S, conv)
+        # the parked conversation's end anchor (`_park`): the `end` dict with its own state
         # as "pair", and the end alignment's regions as they were at park time
         self.park_end: dict | None = None
         self.park_regions: list = []
@@ -1070,7 +1096,7 @@ class ResidentPrefix:
         self.park_align = None
         self.owner: str | None = None      # the session (x-session-id) the rows belong to
         # the end of the last generation (`keep_end`): its line `at`, the hidden spans below it
-        # and the drafter's mark; its (S, conv) in `_end_bufs`, allocated once and reused
+        # and the drafter's mark; its state in `_end_bufs`, allocated once and reused
         self.end_on = bool(end)
         self.end: dict | None = None
         self._end_bufs: tuple | None = None
@@ -1133,11 +1159,15 @@ class ResidentPrefix:
             return
         self._stash = None
         s, r = st["start"], st["rows"]
+        # how far the guest wrote, read BEFORE the rows go back: an engine whose length lands a pending
+        # commit when read (Flash-Next's chain block) writes the guest's last rows then, and after the
+        # copy that write went over the resident's restored rows (2026-10-12: a guest after a guest
+        # answered differently from a cold prefill)
+        reach = int(eng.kv.length) + GUEST_SLACK_ROWS
         for (t, ax), buf in zip(st["views"], self._stash_bufs):
             _kvp.ensure_for(t, s + r)         # SRV-307
             t.narrow(ax, s, r).copy_(buf.narrow(ax, 0, r))
         self.stats["stash_restored"] += 1
-        reach = int(eng.kv.length) + GUEST_SLACK_ROWS
         if reach > s + r and self.valid > s + r:
             # the guest wrote past what was saved: the rows beyond it are not the resident's any
             # more, and neither is any anchor above them
@@ -1150,16 +1180,8 @@ class ResidentPrefix:
 
     def resume(self, eng, drafter, b: int) -> None:
         """Bring the engine to `b` from the rows in place and the anchor at `b`."""
-        S, conv = self.anchors[b]
-        eng.state.S.copy_(S)
-        eng.state.conv.copy_(conv)
-        eng._pending_walk = False
-        eng._pend = None
-        eng.kv.length = b
-        eng.state.primed = b > 0
-        eng._trace = None
-        eng.tree = None
-        eng.trace = None
+        state_load(eng, self.anchors[b])
+        eng.resume_at(b)
         if drafter is not None and hasattr(drafter, "state_resume"):
             drafter.state_resume(b)
         self.stats["hits"] += 1
@@ -1192,22 +1214,17 @@ class ResidentPrefix:
             # the last block forwarded rows past the committed tokens: its pending commit is cut
             # back to them, as `--session-trim` cuts the session snapshot's; a state that has
             # absorbed them has no key
-            trim = getattr(eng, "trim_pending", None)
-            if trim is None or not trim(len(tokens)):
+            if not eng.trim_pending(len(tokens)):
                 self.stats["end_ahead"] += 1
                 return "ahead"
             e = len(tokens)
         if self._end_bufs is None:
-            if self.mem is not None and not self.mem.admit("end", eng.state.nbytes):
+            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
                 self.stats["end_refused"] += 1
                 return "memory"
-            self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
-        settle = getattr(eng, "_settle", None)
-        if settle is not None:
-            settle()                       # a walked state or a pending commit, as `capture`
-        S, conv = self._end_bufs
-        S.copy_(eng.state.S)
-        conv.copy_(eng.state.conv)
+            self._end_bufs = state_empty(eng)
+        eng.settle()                       # a walked state or a pending commit, as `capture`
+        state_save(self._end_bufs, eng)
         mark = getattr(drafter, "end_mark", None) if drafter is not None else None
         spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
         self.end = {"at": e, "hidden": [(p, h) for p, h in spans if h and p + len(h) <= e],
@@ -1236,16 +1253,8 @@ class ResidentPrefix:
         in place. The drafter picks up there too; one that keeps a mark (the length router's
         released arm) inherits it, as a session snapshot's restore does."""
         e = self.end["at"]
-        S, conv = self._end_bufs
-        eng.state.S.copy_(S)
-        eng.state.conv.copy_(conv)
-        eng._pending_walk = False
-        eng._pend = None
-        eng.kv.length = e
-        eng.state.primed = e > 0
-        eng._trace = None
-        eng.tree = None
-        eng.trace = None
+        state_load(eng, self._end_bufs)
+        eng.resume_at(e)
         if drafter is not None:
             fn = getattr(drafter, "resume_end", None)
             if fn is not None:
@@ -1369,7 +1378,7 @@ class ResidentPrefix:
             return 0
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
-        ab = self._anchor_bytes or eng.state.nbytes
+        ab = self._anchor_bytes or eng.cost().section_bytes
         return max(0, (self.park_budget - self.park_anchor_max * ab) // max(1, per_row))
 
     def _spill(self, eng, drafter, reason: str) -> bool:
@@ -1436,10 +1445,10 @@ class ResidentPrefix:
         if not self.end_on or int(end["at"]) != self.valid:
             return None
         if self._end_bufs is None:
-            if self.mem is not None and not self.mem.admit("end", eng.state.nbytes):
+            if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
                 self.stats["end_refused"] += 1
                 return None
-            self._end_bufs = (torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
+            self._end_bufs = state_empty(eng)
         self.end = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                     "mark": end.get("mark")}
         if end.get("served_hidden"):
@@ -1460,7 +1469,7 @@ class ResidentPrefix:
         if not self.capturing or b in self.anchors:
             return
         if not self._anchor_bytes:
-            self._anchor_bytes = eng.state.nbytes
+            self._anchor_bytes = eng.cost().section_bytes
         cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
         if len(self.anchors) >= cap:
             self._evict_one()
@@ -1472,20 +1481,19 @@ class ResidentPrefix:
                 return
             self._evict_one()
         if self._free:
-            S, conv = self._free.pop()
-            S.copy_(eng.state.S)
-            conv.copy_(eng.state.conv)
+            buf = self._free.pop()
+            state_save(buf, eng)
         else:
-            S, conv = eng.state.S.clone(), eng.state.conv.clone()
+            buf = state_clone(eng)
             self._allocated += 1
-        self.anchors[b] = (S, conv)
+        self.anchors[b] = buf
         self.stats["anchors_taken"] += 1
 
     def _buffers(self, eng) -> tuple | None:
-        """A free (S, conv) pair for the next anchor, evicting one if the budget is full; None
+        """A free state buffer for the next anchor, evicting one if the budget is full; None
         when the memory budget refuses a new one and no anchor is left to evict."""
         if not self._anchor_bytes:
-            self._anchor_bytes = eng.state.nbytes
+            self._anchor_bytes = eng.cost().section_bytes
         cap = max(self.tail + 1, self.budget // max(1, self._anchor_bytes))
         if len(self.anchors) >= cap:
             self._evict_one()
@@ -1498,7 +1506,7 @@ class ResidentPrefix:
         if self._free:
             return self._free.pop()
         self._allocated += 1
-        return torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv)
+        return state_empty(eng)
 
     def head_line(self, b: int) -> bool:
         """With a pin: one of the `pin_anchor_max` anchors every `4 * chunk` tokens at the head of
@@ -1587,7 +1595,7 @@ class ResidentPrefix:
         when it is longer than the `keep` rows the next prefill leaves in place."""
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
-        ab = self._anchor_bytes or eng.state.nbytes
+        ab = self._anchor_bytes or eng.cost().section_bytes
         heads = sorted(b for b in self.anchors if b <= self.valid)
         best = 0
         for j, b in enumerate(heads):
@@ -1628,13 +1636,9 @@ class ResidentPrefix:
         self._pin_spare += list(self.pin_anchors.values())
         self.pin_anchors = {}
         for b in keep_b:
-            if self._pin_spare:
-                S, conv = self._pin_spare.pop()
-            else:
-                S, conv = torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv)
-            S.copy_(self.anchors[b][0])
-            conv.copy_(self.anchors[b][1])
-            self.pin_anchors[b] = (S, conv)
+            buf = self._pin_spare.pop() if self._pin_spare else state_empty(eng)
+            state_copy(buf, self.anchors[b])
+            self.pin_anchors[b] = buf
         self._pin_spare = []               # what an earlier, longer head needed is not kept
         self.pin_tokens = list(self.tokens[:best])
         self.pin_rows = best
@@ -1679,11 +1683,10 @@ class ResidentPrefix:
         for (t, ax), buf in zip(views, self._pin_bufs):
             _kvp.ensure_for(t, r)             # SRV-307
             t.narrow(ax, 0, r).copy_(buf.narrow(ax, 0, r))
-        for b, (S0, c0) in sorted(self.pin_anchors.items()):
-            S, conv = self._buffers(eng)
-            S.copy_(S0)
-            conv.copy_(c0)
-            self.anchors[b] = (S, conv)
+        for b, kept in sorted(self.pin_anchors.items()):
+            buf = self._buffers(eng)
+            state_copy(buf, kept)
+            self.anchors[b] = buf
         self.tokens = list(self.pin_tokens)
         self.valid = r
         self.taint = self.pin_taint
@@ -1708,7 +1711,7 @@ class ResidentPrefix:
         any, is given up."""
         views = _kv_views(eng, drafter)
         per_row = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
-        ab = self._anchor_bytes or eng.state.nbytes
+        ab = self._anchor_bytes or eng.cost().section_bytes
         cap_rows = max(0, (self.park_budget - self.park_anchor_max * ab) // max(1, per_row))
         end = self._end_to_park(keep, cap_rows)
         if end is not None:
@@ -1775,7 +1778,7 @@ class ResidentPrefix:
     @staticmethod
     def _parked_end(end: dict, pair: tuple) -> dict:
         """The end anchor as the park keeps it: `end`'s line, spans, mark (and the image offset,
-        the served notes), with its (S, conv) buffers."""
+        the served notes), with its state buffers."""
         out = {"at": int(end["at"]), "hidden": [(int(p), list(h)) for p, h in end["hidden"]],
                "mark": end.get("mark"), "pair": pair}
         for k in ("delta", "mm"):
@@ -1997,8 +2000,7 @@ class ResidentPrefix:
             self._end_bufs, pair = pair, None
         got = self.adopt_end(eng, pe)
         if got is not None and pair is not None:
-            got[0].copy_(pair[0])
-            got[1].copy_(pair[1])
+            state_copy(got, pair)
         if pair is not None:
             self._free.append(pair)
             self._allocated += 1
@@ -2441,8 +2443,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                 # chunk-major prefill takes.
                 bufs = None
                 if lines:
-                    bufs = [(torch.empty_like(eng.state.S), torch.empty_like(eng.state.conv))
-                            for _ in plan]
+                    bufs = [state_empty(eng) for _ in plan]
                 toks = [torch.tensor(ids[a:a + t], device=device, dtype=torch.long)
                         for a, t in plan]
                 logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
@@ -2452,14 +2453,12 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                     # (rows a, end, the host's clock once the window's forwards were issued)
                     info["window"] = (plan[0][0], plan[-1][0] + plan[-1][1], time.perf_counter())
                 if bufs is not None:
-                    bufs[-1][0].copy_(eng.state.S)
-                    bufs[-1][1].copy_(eng.state.conv)
+                    state_save(bufs[-1], eng)
                 end = plan[-1][0] + plan[-1][1]
                 for c, (a, t) in enumerate(plan):
                     last = c == len(plan) - 1
                     if bufs is not None:
-                        eng.state.S.copy_(bufs[c][0])
-                        eng.state.conv.copy_(bufs[c][1])
+                        state_load(eng, bufs[c])
                     eng.kv.length = a + t
                     eng.replay_taps(taps[c])
                     if drafter is not None and hasattr(drafter, "sync"):

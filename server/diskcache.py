@@ -128,12 +128,14 @@ def start(state, a, journal=None):
     # spill leaves them out: a deploy that changes only them keeps the tier's heads (0.3.22's swept
     # 49 GB for a change in engine/cache.py alone)
     from engine import spill as spill_mod
+    from engine.methods import manifest as mf
     extra = fingerprint_extra(a)
-    fp = dc.fingerprint(here, extra, skip=spill_mod.NOT_ARITHMETIC)
-    # FX15: the first start under this formula adopts the files of the one before it on this
+    # fingerprint v3 (ENG-243): what the model's adapter says its rows depend on
+    fp = mf.fingerprint(here, eng.manifest(), extra)
+    # the first start under this formula adopts the files of the one before it (v2, FX15) on this
     # same tree (`dc.equivalents`); the record in the directory says so from then on
-    also = dc.equivalents(root, fp, dc.fingerprint_legacy(here, extra,
-                                                          skip=spill_mod.NOT_ARITHMETIC))
+    also = dc.equivalents(root, fp, dc.fingerprint(here, extra, skip=spill_mod.NOT_ARITHMETIC),
+                          formula=mf.FORMULA)
     state["disk_cache_fp_also"] = also
     tok = state.get("tok")
 
@@ -200,8 +202,9 @@ def start_spill(state, a, tier, journal=None):
     if tier is None or res is None or getattr(a, "session_spill", "on") == "off":
         print("[spill] off", flush=True)
         return None
+    from engine.methods import manifest as mf
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    fp = sp.fingerprint(here, fingerprint_extra(a))
+    fp = mf.fingerprint(here, state.get("engine").manifest(), fingerprint_extra(a))
     # the tier's record (`dc.equivalents`): the same fingerprints, as the files are the same rows
     also = tuple(state.get("disk_cache_fp_also") or ()) if fp == getattr(tier, "fp", None) else ()
 

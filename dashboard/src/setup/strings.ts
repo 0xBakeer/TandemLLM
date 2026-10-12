@@ -168,6 +168,8 @@ export const S = {
   floor: 'Memory kept free',
   floorWhat: 'The engine stops taking new memory when less than this is free, so the box stays responsive.',
   windowClamped: (n: number) => `Set to ${tokens(n)} tokens, the nearest length this model supports.`,
+  windowAboveProfile: (label: string, max: number) => `${label} holds at most ${tokens(max)} tokens on this machine.`,
+  windowNone: (label: string) => `${label} does not fit this machine at any length.`,
   fitsUnit: 'tokens of conversation fit, over all chats.',
   fitsPerSlot: (n: number, slots: number) => (slots > 1 ? `That is about ${tokens(n)} tokens for each of ${slots} chats if all are long at once.` : `One chat can grow to about ${tokens(n)} tokens.`),
   worstCase: (gb: number, fits: boolean) => (fits ? `Even with every chat at its full window (${gib(gb)}), it fits.` : `Every chat at its full window would need ${gib(gb)}. The engine pauses or parks a chat before that happens.`),

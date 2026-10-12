@@ -716,6 +716,48 @@
           },
           "type": "array"
         },
+        "per_window_parts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bytes_per_token": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "fixed",
+                  "reserve"
+                ]
+              },
+              "label": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "max_gib": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "source": {
+                "maxLength": 2000,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "label",
+              "bytes_per_token",
+              "kind",
+              "source"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "sources": {
           "items": {
             "maxLength": 2000,
@@ -1049,6 +1091,13 @@
               "null"
             ]
           },
+          "components_gib": {
+            "additionalProperties": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "type": "object"
+          },
           "disk_gb": {
             "minimum": 0,
             "type": "number"
@@ -1070,6 +1119,13 @@
             "maxLength": 2000,
             "type": "string"
           },
+          "hf_revision": {
+            "maxLength": 2000,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
             "type": "string"
@@ -1077,6 +1133,13 @@
           "label": {
             "maxLength": 2000,
             "type": "string"
+          },
+          "max_window": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "note": {
             "maxLength": 2000,
@@ -1126,6 +1189,34 @@
           },
           "recommended": {
             "type": "boolean"
+          },
+          "table": {
+            "additionalProperties": false,
+            "properties": {
+              "cache_gib": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "gib": {
+                "minimum": 0,
+                "type": "number"
+              },
+              "policy": {
+                "enum": [
+                  "warm",
+                  "cold"
+                ]
+              }
+            },
+            "required": [
+              "gib",
+              "policy",
+              "cache_gib"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "weights_gib": {
             "minimum": 0,

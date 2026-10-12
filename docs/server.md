@@ -212,6 +212,33 @@ Limits of phase A: side slots are text only; the side lane serves only slot 0's 
 
 Timing (`QSE_PARALLEL_TIMING=1`, for measurements: every joint pass is synchronized and timed): `/health`'s `parallel.meeting` carries, per number of slots decoding, a slot's round (`round_ms`, submit to submit), its draft (`draft_ms`), its work after the verify (`post_ms`), the verify as it sees it (`verify_wait_ms`) and the joint pass's GPU time by blocks (`pass_ms`), and its tokens a round (`accept`: `joint<N>` or `alone`). `tools/parallel_bench.py` reads them per window.
 
+## Qwen3.8-Flash-Next (SRV-87)
+
+`--model <an EXL3 pack of Qwen3.8-Flash-Next>` serves Flash-Next through this same server: the model is
+chosen by the checkpoint's own config (`engine/models`, `qwen4_exp`), and `server/app.py`'s loop drives
+it through an adapter in the 27B's engine interface (`engine/models/flashnext/serving.py`). Every route,
+the reasoning split and the think budget, tool calls and grammar masks, penalties and `logit_bias`,
+logprobs, seeds, stop strings and pattern stops, the live view and the usage rows are this server's own
+code. Speculation is the pack's MTP layer as a tree drafter (StairCut over a 4-deep chain, the hot
+draft head `QWEN38_FN_DRAFT_HOT`), gated by the load-time self-check; a sampled request walks the
+greedy tree (`--sampled-tree det` is implied). A verified row is the decode step's row bit for bit, so
+greedy and seeded answers are the plain-decode answers token for token (`tools/fn_server_check.py
+--compare` of a `--drafter none` and a `--drafter mtp` server). The caches are the 27B's (ENG-157): the
+resident prefix with its end anchor, pin and park, the state store, the disk tier and the session spill,
+on Flash-Next's grid of 4,096 tokens (its prefill chunk, `caps.anchor_grid`); a disk tier and a spill
+need a folder of their own per profile, since a file of another fingerprint is swept. Not yet on
+Flash-Next: the KV pool, images, side slots (ENG-241, VIS-97); the server says so at load.
+
+The server holds no model branches for it (ENG-E8): one loader serves both models (`_load`, SRV-341;
+the model's builder brings its weights, engine, tokenizer and drafter, and the engine's `caps` say what
+it cannot hold yet -- for Flash-Next the side slots, turned off with a log line), the walk down a verified block is `engine/methods/walk.py` for both models, and
+what the dashboard and the caches ask of an engine goes through the adapter's verbs -- `cost()` (the
+snapshot bytes, `cache.snapshot_cost` on `/health`), `settle()`, `discard_pending()`, `trim_pending(n)`;
+the 27B's are installed on its class by `engine/models/qwen3_5/adapter.py`, so `engine/model.py` keeps its bytes.
+The Flash-Next package builds its own engine and drafter for the loader (`serving.serve`, named by its
+registry entry: the pack, the hot draft head, the self-check), and `/health`'s `weights` names the pack,
+its MTP drafter, the load time and the self-check.
+
 ## Images
 
 A user, assistant or tool message may carry `{"type": "image_url", "image_url": {"url": ...}}` parts, where the URL is `https://` or `data:image/...;base64,`. The server fetches and decodes them before the request queues and runs the checkpoint's own image processor (`preprocessor_config.json`: 16-pixel patches, 2 × 2 merge, 65,536 to 16,777,216 pixels). The chat template writes one placeholder per image and the server expands it to one prompt row per merged patch: a 640 × 480 image is 300 rows, and those rows count as prompt tokens in `usage`. The vision tower (27 blocks, 0.92 GB, BF16 as the checkpoint stores it) runs inside the prefill, when the first chunk that holds the image runs; the live view reads "Encoding image 1 of 2" while it does.

@@ -80,7 +80,7 @@
           ]
         },
         "weights": {
-          "description": "the weight profile (ops/profiles/<name>.env): name, format, weights, hf_repo, drafters, draft_head, sample_nucleus; optional",
+          "description": "the weight profile (ops/profiles/<name>.env): name, format, weights, hf_repo, drafters, draft_head, sample_nucleus; hf_revision (a branch of the repo) and max_window (the registry's largest window for the profile, null when it fits none; VIS-95) only where the profile has them; optional",
           "type": [
             "object",
             "null"
@@ -307,6 +307,14 @@
                 "integer",
                 "null"
               ]
+            },
+            "pinned_cache": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "SRV-335: page cache the engine keeps on purpose (Flash-Next's warm n-gram table), free to the kernel and counted off by every floor check"
             }
           },
           "required": [

@@ -108,6 +108,25 @@ def test_over_the_ceiling_the_reserve_goes_first_then_the_caches_cheapest_first(
     assert fa.res <= 70 * GIB
 
 
+def test_a_capped_workspace_stops_growing_and_a_larger_prefill_raises_the_cap():
+    """SPD-99: Flash-Next's prefill workspace grows to about 140k tokens and then stops (10.46 GiB at
+    147,149, 10.47 at 261,549): the adapter gives a cap, the estimate stops there, a long prefill that
+    took more raises it; without a cap (the 27B) the line goes on as before."""
+    fa = FakeAlloc(50)
+    m = budget(fa, peak=90, ws_floor=int(2.75 * GIB), ws_per_token=76309, ws_cap=int(10.75 * GIB))
+    assert m.workspace(8192) == int(2.75 * GIB)
+    assert abs(m.workspace(65_536) - 76309 * 65_536) == 0
+    assert m.workspace(262_144) == int(10.75 * GIB)
+    m.mark()
+    fa.take(int(11.5 * GIB))                           # a prefill that took 11.5 GiB above the engine
+    fa.give(int(11.5 * GIB))
+    m.prefilled(200_000)
+    assert m.ws_cap == int(11.5 * GIB) and any(e["kind"] == "estimate_raised" and "cap" in e for e in m.events)
+    plain = budget(FakeAlloc(50))
+    assert plain.ws_cap is None and plain.workspace(262_144) == cache.WORKSPACE_PER_TOKEN * 262_144
+    return "the floor, the line, the cap; a larger prefill raises it; no cap for the 27B"
+
+
 def test_a_long_prefill_sheds_store_anchors_stash_park_pin_in_that_order_until_it_fits():
     fa = FakeAlloc(70)
     m = budget(fa)

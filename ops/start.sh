@@ -180,6 +180,17 @@ case "${SAMPLED_TREE:-}" in
     1|det) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=det" ;;
     mixed) SAMPLE_FLAGS="$SAMPLE_FLAGS --sampled-tree=mixed" ;;
 esac
+# OPS-99: a profile of another model names its own model and drafter flags (QSE_ENGINE_FLAGS; a
+# Flash-Next pack: --model <pack> --drafter mtp) in place of the 27B's, with the lookup's corpus (the
+# tokenizer's, shared; ENG-229); unset, the 27B's, in their places
+if [ -n "${QSE_ENGINE_FLAGS:-}" ]; then
+    MODEL_HEAD=($QSE_ENGINE_FLAGS --corpus "$CORPUS"); MODEL_TAIL=()
+else
+    MODEL_HEAD=(--drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG --dflash2-path greedy)
+    MODEL_TAIL=(--tree --budget "$BUDGET" --corpus "$CORPUS"
+                --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16"
+                --nvfp4 "$NV" --fp8-head "$HEAD")
+fi
 # The engine inherits stdin/stdout/stderr and nothing else. Holds run as
 # `flock ~/.qwen38-box.flock bash ops/hold.sh ...`, and flock hands its lock descriptor to the
 # command unless told `-o`: it came down through hold.sh and this script into the restarted engine,
@@ -193,11 +204,9 @@ setsid nohup "$PY" -u server/app.py \
     --host "$HOST" --port "$PORT" --served-model "$SERVED_MODEL" \
     --max-len "$MAX_LEN" --default-max-tokens "$DEFAULT_MAX_TOKENS" \
     --reasoning-format "$REASONING_FORMAT" --reasoning-effort "$REASONING_EFFORT" \
-    --drafter lenrouter --len-fixed "$LEN_FIXED" $LATCH_FLAG $DROP_FLAG --dflash2-path greedy \
+    "${MODEL_HEAD[@]}" \
     $PEN_FLAGS $SAMPLE_FLAGS $LIVE_FLAG $CONDUCTOR_FLAGS \
-    --tree --budget "$BUDGET" --corpus "$CORPUS" \
-    --dflash2-ckpt "$CKPT8" --dflash2-ckpt16 "$CKPT16" \
-    --nvfp4 "$NV" --fp8-head "$HEAD" --cache-budget-gb "$CACHE_GB" $MEM_FLAGS \
+    ${MODEL_TAIL[@]+"${MODEL_TAIL[@]}"} --cache-budget-gb "$CACHE_GB" $MEM_FLAGS \
     --request-timeout "$REQUEST_TIMEOUT" --max-queue "$MAX_QUEUE" \
     --queue-timeout "$QUEUE_TIMEOUT" --verbose \
     --usage-ledger "${QSE_USAGE_LEDGER:-off}" \

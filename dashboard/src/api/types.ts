@@ -313,6 +313,8 @@ export interface SystemInfo {
     /** the base engine's own name; `model` is TandemLLM when the conductor is configured */
     base_model?: string | null;
     max_len: number | null;
+    /** the weight profile (VIS-95: the pack, its branch and its largest window) */
+    weights?: WeightsInfo | null;
     drafter: string | null;
     tree: boolean;
     reasoning_format: string | null;
@@ -782,6 +784,32 @@ export interface RolesReport {
 // ---- OPS-41: the engine's memory split and the residency planner -------------------------------
 
 /** server/memsplit.py: the resident set in bytes, each part read off the object that holds it. */
+/** /health's and /v1/dashboard/system's `weights` (the weight profile). */
+export interface WeightsInfo {
+  name: string | null;
+  format: string | null;
+  weights: string | null;
+  hf_repo: string | null;
+  /** a branch of the repo (a Flash-Next pack) */
+  hf_revision?: string;
+  drafters: string | null;
+  draft_head: string | null;
+  /** the registry's largest window for the profile; null: it fits none; absent: the profile names none */
+  max_window?: number | null;
+}
+
+/** /health's `cache.resident_files`: files the engine keeps on purpose (Flash-Next's n-gram table, SRV-335). */
+export interface ResidentFile {
+  name: string;
+  path: string;
+  policy: 'warm' | 'cold';
+  file_bytes: number;
+  resident_bytes: number | null;
+  cache_bytes?: number;
+  hits?: number;
+  misses?: number;
+}
+
 export interface MemorySplit {
   allocated: number | null;
   reserved: number | null;
@@ -798,6 +826,8 @@ export interface MemorySplit {
   mem_total?: number | null;
   in_use?: number | null; // MemTotal - MemAvailable
   outside?: number | null; // in_use - allocator reserved - KV pages: the CUDA context, host memory, other programs
+  /** SRV-335: page cache the engine keeps on purpose (the warm n-gram table), counted as used by every floor check */
+  pinned_cache?: number | null;
   load?: { stage: string; allocated: number | null; reserved: number | null; mem_available_drop: number | null; s: number }[];
 }
 
@@ -994,6 +1024,14 @@ export interface SetupProfile {
   hf_private: boolean;
   /** 1.0+: SetupAsset ids the profile needs besides its own weights */
   assets_required: string[];
+  /** SRV-337: the repository branch of the weights */
+  hf_revision?: string | null;
+  /** SRV-337: the largest window that fits the device preset (null: none fits; absent: the model's max) */
+  max_window?: number | null;
+  /** SRV-337: a lookup table beside the weights, warm in the page cache or read past it through a row cache */
+  table?: { gib: number; policy: 'warm' | 'cold'; cache_gib: number } | null;
+  /** SRV-337: a tool's memory under this profile, by component id */
+  components_gib?: Record<string, number>;
 }
 
 /** 1.0+: a file a profile or a tool needs besides the profile's weights. */
@@ -1138,7 +1176,12 @@ export interface SetupModel {
   advanced: SetupField[];
   devices: SetupDevicePreset[];
   /** the engine's fixed parts the estimate adds (drafters, graphs, ...), with their sources */
-  memory: { parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[]; sources: string[] };
+  memory: {
+    parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[];
+    sources: string[];
+    /** SRV-337: parts that grow with slot 0's window (bytes a token) */
+    per_window_parts?: { id: string; label: string; bytes_per_token: number; max_gib?: number; kind: 'fixed' | 'reserve'; source: string }[];
+  };
   /** 1.0+: the tile's recommended badge */
   recommended: boolean;
   /** 1.0+ */

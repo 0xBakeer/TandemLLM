@@ -825,7 +825,7 @@ def _shadow(cond, method: str, what: str, body: dict):
     if what == "status" and method == "GET":
         return 200, sh_mod.status(cond.state), None
     if svc is None:
-        raise ApiError(404, "not_found", sh_mod.OFF_WHY)
+        raise ApiError(404, "not_found", cond.state.get("shadow_refused") or sh_mod.OFF_WHY)
     if what == "ask" and method == "POST":
         key, question, choices = body.get("session"), body.get("question"), body.get("choices")
         if not isinstance(key, str) or not key:

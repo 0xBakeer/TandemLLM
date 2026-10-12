@@ -75,6 +75,20 @@ The router releases the narrow drafter at the first round. With the node count c
 
 On the benchmark row with the published NVFP4 set, StairCut reaches 49.89 tok/s against 47.13 for the fixed block 8 and 44.80 for the fixed block 16. On the teacher-forced bench of 25 workloads it averages 90.45 tok/s against 59.31 and 81.95 ([measurement.md](measurement.md)).
 
+## StairCut on Flash-Next, and the shared price files
+
+Flash-Next drafts with its own MTP layer and the shared StairCut (`engine/methods/staircut.py`, ENG-245): each round the MTP head drafts a chain of 4 with its top-2 tokens a depth (`engine/models/flashnext/mtp.py`, one captured graph), and the cut keeps the chain's prefix (and, with `siblings`, second-choice leaves) that maximises (1 + sum of q) / (V(rows) + draft). q comes from `ProbDeciles`: the head's probability mapped to the measured acceptance per tenth of probability, starting from the probability itself and learned from every verified round. The drafter that drives it in the server loop is written once for any model's MTP head (`engine/methods/mtp_drafter.py`).
+
+With `QWEN38_FN_LOOKUP=1` (the Flash-Next profiles set it, ENG-229) the lookup joins the same round. It reads the request's own text, `--corpus` and the server's suffix store, the same stores as the 27B's lookup, because the tokenizer is the same. Its best continuation enters the cut as one more branch. While its tokens match the head's chain the two share nodes, and a shared node's q is 1 minus the chance that both are wrong. Where they differ, the lookup's chain hangs under the last shared node; where the head's chain ends, it runs on. The cut admits nodes best-first by q, as long as (1 + sum of q) / (V(rows) + draft) rises, up to 32 rows. There is still one verify a round, and the text does not change. A/B on 3.05 (2026-10-12, one greedy request of 512 tokens a class, every text equal to plain decode): edit 106 → 132 tok/s (4.6 → 10.4 tokens a block), copy 102 → 133 (4.4 → 11.9), prose 49 → 51, chat 62 → 64, code 85 → 83. The gain on copies is smaller than the gain in tokens a block, because a verify of 16 rows costs about 69 ms against 28 ms for 2 rows on this MoE.
+
+V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/<profile>.<device>.json` -- Flash-Next 3.05 on the DGX Spark is `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json` -- in the format of the 27B's stair tables:
+
+    {"<context class>": {"<kind>": {"<rows>": ms, ...}, ...}, ..., "step_ms": 3.7, "measured": "how and when"}
+
+`kind` is `chain` or `tree`; the context class is the model's (the 27B's tables key it by context length, Flash-Next's one class is 0). A class not in the file takes the nearest lower one, rows between two measured counts interpolate, rows past the last add `step_ms` a row (else the last two counts' slope). The model follows the live prices online (EMA 0.1 a count, the unmeasured counts shifted by the learned offset), and a price never falls with more rows. A profile without a file for its device logs the missing path once and starts every count at the same 1 ms, so the cut drafts to the full depth until the first rounds price it; the text does not change either way. The device is `dgx-spark` for the GB10, else the GPU's name in lower case (`engine/methods/device.py`).
+
+The 3.05 file is provisional (ENG-155). Rows 2 to 16 are the prices the cut learned online on the ENG-229 A/B server (about 1k of context, 600 rounds): 27.8 ms for 2 rows, 38.6 for 5, 52.2 for 10, 68.8 for 16. Row 1 is the bench of 2026-10-11. No sweep at 8k and 32k has been run, so a long context starts from these and moves them by the learned offset.
+
 ## The length router (StairCut off)
 
 Before StairCut, the served profile picked the block width once per request. With the StairCut flags off, `engine/lenrouter.py` still does, so a `serve.env` without them behaves as before.

@@ -70,6 +70,33 @@ def test_the_exl3_weights_join_the_defaults_when_set():
                 os.environ[k] = v
 
 
+def test_a_profile_adds_its_pack_and_keeps_its_warm_table():
+    """OPS-99: QSE_PAGE_CACHE_DROP joins the defaults; a file QSE_PAGE_CACHE_KEEP names (a Flash-Next
+    pack's warm n-gram table) is never advised."""
+    keys = ("QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP")
+    old = {k: os.environ.get(k) for k in keys}
+    d = tempfile.mkdtemp(prefix="dropcache-")
+    for n in ("model-00001-of-00002.safetensors", "ngram_embedding.safetensors", "config.json"):
+        open(os.path.join(d, n), "wb").write(b"z" * 100)
+    try:
+        for k in keys:
+            os.environ.pop(k, None)
+        base = [str(p) for p in default_paths()]
+        os.environ["QSE_PAGE_CACHE_DROP"] = d
+        assert [str(p) for p in default_paths()] == base + [d]
+        assert drop([d], advise=lambda fd: None)["files"] == 3
+        os.environ["QSE_PAGE_CACHE_KEEP"] = "ngram_embedding.safetensors"
+        seen = []
+        r = drop([d], advise=lambda fd: seen.append(fd))
+        assert r["files"] == 2 and len(seen) == 2, r
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_cached_is_read_in_gb():
     assert abs(cached_gb("MemTotal: 1 kB\nCached:  1048576 kB\n") - 1048576 * 1024 / 1e9) < 1e-9
 

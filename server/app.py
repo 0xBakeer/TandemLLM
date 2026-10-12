@@ -21,6 +21,7 @@ are the measurement.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import re
@@ -32,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -42,6 +44,7 @@ from engine import cache  # noqa: E402
 from engine import kvpool  # noqa: E402  (SRV-307 the shared KV pool)
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
+from engine.methods import walk  # noqa: E402  (ENG-E8 the walk every model's blocks take)
 from engine.spec import Relax, ThinkBudget  # noqa: E402
 from engine.penalty import PatternStop, PenaltySpec, PenaltyState  # noqa: E402
 from engine.sample import Sampler  # noqa: E402
@@ -1083,7 +1086,9 @@ def _run_round(meet) -> None:
                 r = group[0]
                 outs = [r.eng.forward_tree(r.tokens, r.parents, start=r.start)]
             else:
-                outs = forward_tree_multi([(r.eng, r.tokens, r.parents, r.start) for r in group])
+                # an engine with its own joint pass (ENG-241), else the 27B's
+                multi = getattr(group[0].eng, "forward_tree_multi", None) or forward_tree_multi
+                outs = multi([(r.eng, r.tokens, r.parents, r.start) for r in group])
             err = None
         except BaseException as exc:                                    # noqa: BLE001
             outs, err = [None] * len(group), exc
@@ -1203,6 +1208,10 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
         if meet is not None:
             with meet.cv:
                 meet.stats["alone"] += 1
+                # why: the only decoding slot, or the GPU turn not this slot's
+                why = meet.stats.setdefault("alone_why", {})
+                k = "one" if len(pool.decoding()) <= 1 else "turn"
+                why[k] = why.get(k, 0) + 1
         return eng.forward_tree(block, parents, start=pos), None, tree
     req = slots_mod.VerifyReq(i, eng, block, parents, pos, batchable=eng.tree_batchable(parents),
                               tree=tree if meet.cut == "joint" else None)
@@ -1425,7 +1434,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             if par is not None:
                 # parallel requests: this slot decodes (the round's barrier waits for its blocks
                 # when it is a tree loop), and the GPU is offered to a waiting slot between blocks
-                _par_block(par, tree_mode)
+                # a drafter taking the plain step all turn (`plain_turn`) submits no block: the
+                # round's barrier must not wait for it
+                _par_block(par, tree_mode and not getattr(drafter, "plain_turn", False))
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
                 # A short request waits (server/preempt.py). A block boundary: the
@@ -1491,7 +1502,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                         # logits after it, so then the loop takes it
                         picks_d = eng.picks if eng.picks is not None and pen is None else None
                         picks_t = (picks_d if picks_d is not None else lg.argmax(-1)).tolist()
-                        path, new = eng.accept_tree(tree, picks_t)
+                        path, new = walk.accept_tree(tree, picks_t)
                     accepted = len(path) - 1
                     if par is not None:
                         # tokens a round on this slot: in a joint pass (by blocks in it) or alone
@@ -1614,6 +1625,9 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # return more than it was handed. Cap on rows here, where the forward is paid.
                 draft = draft[:max(0, eng.max_len - pos - 1)]
             if not draft:
+                # a drafter that prices its rounds against the plain step learns its cost here
+                on_plain = getattr(drafter, "on_plain", None) if drafter is not None else None
+                t_plain = time.perf_counter() if on_plain is not None else 0.0
                 logits = eng.forward(h2d([tok], torch.long, prompt.device), start=pos,
                                      last_only=True)
                 # Bring a position-indexed drafter current, as engine/spec.py's loop does.
@@ -1631,6 +1645,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     pen.apply_single(logits[0, -1])
                 tok = sampler(logits[0, -1], index=len(ctx)) if sampler is not None and sampler.on \
                     else int(logits[0, -1].argmax())
+                if on_plain is not None:
+                    on_plain((time.perf_counter() - t_plain) * 1e3)
                 if probe is not None and tok in eos:
                     probe.finish(eng, drafter, slice(0, 1), n_out)
                 fin = (_sp2(sup, think, ctx, start, n_out, eng.max_len - pos, end=tok)
@@ -1884,10 +1900,8 @@ def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> 
     from engine.model import h2d
     if pos + len(ids) >= eng.max_len:
         raise incontext_mod.ContextError("no_room")
-    settle = getattr(eng, "_settle", None)
-    if settle is not None:
-        settle()                      # as `cache.capture`: a walked state that is not in yet
-    saved, length = eng.state.clone(), eng.kv.length
+    eng.settle()                      # as `cache.capture`: a walked state that is not in yet
+    saved, length = cache.state_clone(eng), eng.kv.length
     tap, eng.tap = getattr(eng, "tap", None), None      # the probe's prefill tap reads no question
     try:
         with torch.no_grad():
@@ -1896,10 +1910,8 @@ def _ask_in_place(eng, pos: int, device, ids: list[int], letters: list[int]) -> 
             return [float(x) for x in row[torch.tensor(letters, device=row.device)].tolist()]
     finally:
         eng.tap = tap
-        eng.state.restore(saved)
-        eng.kv.length = length
-        eng._pending_walk = False
-        eng._pend = None
+        cache.state_load(eng, saved)
+        eng.resume_at(length)
 
 
 def _force_close(eng, drafter, think, ctx, pos, device, pen=None, pstop=None, sampler=None,
@@ -2325,8 +2337,7 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
         # the puts succeeded none was ever served.
         n_c = len(committed)
         if STATE.get("session_trim") and eng.kv.length > n_c:
-            trim = getattr(eng, "trim_pending", None)
-            if trim is not None and trim(n_c):
+            if eng.trim_pending(n_c):
                 if drafter is not None and hasattr(drafter, "state_resume"):
                     drafter.state_resume(n_c)
                 store.stats["session_trimmed"] = store.stats.get("session_trimmed", 0) + 1
@@ -2506,13 +2517,10 @@ def _side_keep_end(committed, hidden, served_hidden, conv_id) -> str:
         # and its end must not keep the next guest off the side slot (`Pool.take_side`)
         return "short"
     if e > n_c:
-        trim = getattr(eng, "trim_pending", None)
-        if trim is None or not trim(n_c):
+        if not eng.trim_pending(n_c):
             return "ahead"
         e = n_c
-    settle = getattr(eng, "_settle", None)
-    if settle is not None:
-        settle()
+    eng.settle()
     mark = getattr(drafter, "end_mark", None) if drafter is not None else None
     spans = sorted((int(p), [int(t) for t in h]) for p, h in hidden)
     slot.carry = {"gen": slot.gen, "t": time.monotonic(), "at": e,
@@ -2640,12 +2648,13 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             return None
         e = int(rec["at"])
         v1 = cache._kv_views(seng, sdrafter)
-        if (e > min(t.shape[ax] for t, ax in v1) or seng.state.S.shape != eng.state.S.shape
-                or seng.state.conv.shape != eng.state.conv.shape
+        st0, st1 = cache.state_now(eng), cache.state_now(seng)
+        cuda = any(t.is_cuda for t in st0)
+        if (e > min(t.shape[ax] for t, ax in v1) or [t.shape for t in st1] != [t.shape for t in st0]
                 or len(v1) != len(cache._kv_views(eng, drafter))):
             return None
         with torch.no_grad():
-            if eng.state.S.is_cuda:
+            if cuda:
                 torch.cuda.synchronize()
             disk = STATE.get("disk_cache")
             if disk is not None:
@@ -2674,18 +2683,16 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
                 if (rec.get("resident") and bufs is not None
                         and getattr(side_res, "end", None) is not None
                         and int(side_res.end["at"]) == e):
-                    pair[0].copy_(bufs[0])
-                    pair[1].copy_(bufs[1])
+                    cache.state_copy(pair, bufs)
                 else:
-                    pair[0].copy_(seng.state.S)
-                    pair[1].copy_(seng.state.conv)
+                    cache.state_save(pair, seng)
                 res.end["served_hidden"] = list(rec.get("served_hidden") or ())
                 al = STATE.get("end_align")
                 if al is not None:
                     # FX16: the side slot's own regions when it kept them (every generation of
                     # the conversation served there), else the last one's
                     al.adopt(res, list(rec.get("regions") or ()) or [(int(rec["n_prompt"]), e)])
-            if eng.state.S.is_cuda:
+            if cuda:
                 torch.cuda.synchronize()
         slot.carry = None
         side_res = sv.get("resident")
@@ -3139,9 +3146,71 @@ def prepare_once() -> str:
                   f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
 
 
+#: the engine's idle graph captures wait this long after the last request ended (s)
+GRAPHS_IDLE_S = 1.0
+
+
+def graphs_once() -> str:
+    """One look for the graphs the engines' context classes lack (`idle_captures`: an engine's verify,
+    commit and draft graphs of a class its rounds have not used yet), slot 0's and each side slot's,
+    captured in the idle window one at a time under the engine lock (which holds the GPU turn as slot
+    0), stopping at the first request that waits. The first drafted request in a class paid 3.4-5.1 s
+    of captures (P0, 2026-10-12); the drafter now waits for them (`capture_cost`)."""
+    if STATE.get("draining"):
+        return "off"
+    pool = STATE.get("pool")
+    engines = [(STATE.get("engine"), STATE.get("drafter"))] + (
+        [(s.values.get("engine"), s.values.get("drafter")) for s in pool.side()] if pool is not None else [])
+    engines = [(e, d) for e, d in engines if getattr(e, "idle_captures", None) is not None]
+    if not engines:
+        return "off"
+    with QUEUE:
+        if INFLIGHT["waiting"] or INFLIGHT["running"] or WAITERS:
+            return "busy"
+    if time.monotonic() - float(STATE.get("last_end_mono") or 0.0) < GRAPHS_IDLE_S:
+        return "recent"
+    # a length where the drafter takes the plain step anyway (260,800 tokens) captures nothing
+    engines = [(e, d) for e, d in engines
+               if getattr(d, "wants_graphs", None) is None or d.wants_graphs(int(e.kv.length))]
+    if not engines:
+        return "plain"
+    me = {"rank": RANK_PREP, "t": time.monotonic(), "side": None}
+    if not _take(me, None):
+        return "busy"
+    t0, n, why = time.perf_counter(), 0, "nothing"
+    try:
+        for e, _ in engines:
+            steps = e.idle_captures()
+            if steps is None:
+                continue
+            why = "captured"
+            for _ in steps:
+                n += 1
+                if _waiting():
+                    why = "stopped"
+                    return why
+        return why
+    except Exception:                                              # noqa: BLE001
+        logbuf.print_exc()
+        why = "failed"
+        return why
+    finally:
+        with QUEUE:
+            HOLDER["who"] = None
+        LOCK.release()
+        if n:
+            print(f"[graphs] idle captures over {len(engines)} engine(s): {n} graphs, {why}, "
+                  f"{(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
+
+
 def _prepare_loop() -> None:
     while True:
         time.sleep(PREPARE_EVERY_S)
+        try:
+            if graphs_once() in ("captured", "stopped"):
+                continue                # the graphs had the idle moment
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
         try:
             got = prepare_once()
         except Exception:                                          # noqa: BLE001
@@ -3885,7 +3954,7 @@ def _roles_headroom() -> int | None:
                 return int(d["after"])
         except Exception:                                          # noqa: BLE001
             pass
-    return kvpool._meminfo_avail()
+    return memsplit.counted_available()
 
 
 def _roles_start(a) -> None:
@@ -3903,7 +3972,7 @@ def _roles_start(a) -> None:
             torch.cuda.empty_cache()
 
     floor = float(getattr(a, "parallel_floor_gb", 15.0) or 15.0)
-    rm = rolemem.build(STATE, floor_gib=floor, meminfo=kvpool._meminfo_avail,
+    rm = rolemem.build(STATE, floor_gib=floor, meminfo=memsplit.counted_available,
                        headroom=_roles_headroom, idle=_roles_idle, empty=empty, journal=journal,
                        log=lambda m: print(m, flush=True))
     STATE["role_mem"] = rm
@@ -7722,13 +7791,8 @@ def cache_stats() -> dict:
         out["vision"] = {"tower_bytes": tower.nbytes, **tower.stats,
                          "embed_cache": ic.report() if ic is not None else None}
     if eng is not None:
-        cfg = eng.cfg
-        kv_per_token = (len(cfg.attention_layers) * cfg.num_key_value_heads * cfg.head_dim * 2 * 2)
-        out["snapshot_cost"] = {
-            "recurrent_bytes": eng.state.S.numel() * 4,
-            "conv_bytes": eng.state.conv.numel() * eng.state.conv.element_size(),
-            "kv_bytes_per_token": kv_per_token,
-        }
+        out["snapshot_cost"] = eng.cost().snapshot_cost()   # the model's adapter (engine/models/adapter.py)
+        out["resident_files"] = eng.resident_files()        # page cache the engine keeps (ENG-239)
     return out
 
 
@@ -8531,6 +8595,7 @@ def main() -> None:
     # and the conductor's policy: a file that does not validate stops the start here too
     STATE["conductor_policy"] = _conductor_policy(a)
     _limits_at_start(a)
+    _window_at_start(a)
     if a.fake_engine:
         from server import fake_engine
         fake_engine.load(sys.modules[__name__], a)
@@ -8578,6 +8643,23 @@ def _limits_at_start(a) -> None:
                 print(f"[memory] the dashboard's limit: {line}", flush=True)
         except Exception as exc:                                   # noqa: BLE001
             print(f"[memory] the residency document's limits were not read: {exc}", flush=True)
+
+
+def _window_at_start(a) -> None:
+    """SRV-335: a --max-len above the served profile's largest window (QSE_WEIGHTS, its registry
+    entry's `max_window`) stops the start here, before the minutes of loading, naming both numbers.
+    The 27B's profiles name no such window; a registry that does not load is said and passed."""
+    name = os.environ.get("QSE_WEIGHTS")
+    if not name:
+        return
+    try:
+        from server.setup import registry
+        why = registry.window_refusal(name, a.max_len)
+    except Exception as exc:                                       # noqa: BLE001
+        print(f"[server] the model registry was not read ({exc}); --max-len is not checked", flush=True)
+        return
+    if why:
+        raise SystemExit(f"[server] REFUSING to load: {why}")
 
 
 def _conductor_policy(a) -> "conductor.Policy | None":
@@ -8678,14 +8760,49 @@ def _make_lenrouter(a, eng, max_len: int, corpus_from=None):
     return drafter
 
 
+def _arch_of(model: str | None):
+    """The registered architecture of `--model` (engine/models `REGISTRY`); the 27B's when `--model`
+    names no checkpoint directory (the 27B's snapshot is resolved later)."""
+    from engine.models import REGISTRY, architecture
+    if not model or not os.path.isfile(os.path.join(model, "config.json")):
+        return REGISTRY["qwen3_5"]
+    with open(os.path.join(model, "config.json")) as f:
+        return architecture(json.load(f))
+
+
+def _serving_state(a, eng, tok, drafter, cfg_eos, rcache, **model) -> None:
+    """The STATE the request path reads, for every model's loader (SRV-341): the server's own knobs
+    from `a`, and in `model` what the loader built -- the tree and sampled-tree mode, the accept rule,
+    the device, the caches (or None/False where the model has none yet) and any model-specific record."""
+    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth,
+                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
+                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
+                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
+                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
+                 draining=False,
+                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
+                 reasoning_effort=a.reasoning_effort,
+                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
+                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
+                                     a.frequency_penalty, a.no_repeat_ngram),
+                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
+                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
+                               if a.pattern_stop else None),
+                 argloop=a.argloop,
+                 prefill_heartbeat=float(a.prefill_heartbeat_s),
+                 response_cache=rcache, suffix_scope=a.suffix_store_scope,
+                 usage_default=(a.usage_default == "on"), **model)
+
+
 def _load(a) -> None:
-    """The real engine: weights, drafters, caches, the warm-up and the verify graphs."""
+    """The real engine: weights, drafters, caches, the warm-up and the verify graphs (SRV-341, one
+    loader for every model). The model's own part -- its weights, engine, tokenizer and drafter --
+    comes from the builder its registry entry names (`Arch.serve`, chosen by the checkpoint's config;
+    the 27B's is the server's own, `_build_qwen3_5`); what the engine cannot hold yet its adapter's
+    capabilities say (`eng.caps`: the caches, the KV pool and side slots), and the rest is every
+    model's."""
     if _S.get("BLOCKING_SYNC") == "1":
         _blocking_sync()
-    from engine.config import load_config
-    from engine.loader import Weights
-    from engine.model import Qwen38Engine
-    from transformers import AutoTokenizer
     t0 = time.time()
     # the price table first: a bad file must stop the start before minutes of weight loading
     from engine import prices as _prices
@@ -8695,31 +8812,112 @@ def _load(a) -> None:
     if _pname:
         STATE["price_table"] = _pname
         print(f"[prices] {_pname}: " + ", ".join(f"{k}={v}" for k, v in _pentry.items()))
-    cfg = load_config(a.model)
     from engine.tokfp import fingerprint as _tok_fp
-    STATE["tokenizer_sha"] = _tok_fp(cfg.path)      # the suffix stores check it
-    # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
-    STATE["weights_key"] = probe_mod.weights_key([cfg.path, a.nvfp4, a.fp8_head])
     # OPS-41: the allocator and MemAvailable after each stage, the residency planner's split
     led = STATE["load_ledger"] = memsplit.LoadLedger()
     led.mark("start")
+
+    def keys(path, weights) -> None:
+        STATE["tokenizer_sha"] = _tok_fp(path)      # the suffix stores check it
+        # ENG-181: the probe snapshots and a probe file carry it; a probe refuses other weights
+        STATE["weights_key"] = probe_mod.weights_key(weights)
+
+    # what a builder may ask of the server: the keys above, the ledger, the log
+    ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
+                                kv_pool=lambda: _kv_pool_open(a))
+    m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
+    eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
+    memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
+    gen_cfg = os.path.join(m["path"], "generation_config.json")
+    cfg_eos = None
+    if os.path.isfile(gen_cfg):
+        cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
+              if a.response_cache else None)
+    if eng.caps.caches:
+        if eng.caps.anchor_grid:
+            a.prefix_chunk = int(eng.caps.anchor_grid)     # the model's own grid (its prefill chunk)
+        caches = _load_caches(a, eng, tok, drafter, rcache)
+    else:
+        if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
+            print("[cache] prefix, session, resident and disk caches and the KV pool are not built for "
+                  "this model yet (ENG-157): all off", flush=True)
+        caches = {"state_store": None, "session_cache": False, "prefix_cache": False, "session_trim": False,
+                  "resident": None, "prefix_chunk": 0, "suffix_store": None}
+    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
+                         if a.prompt_token_cache > 0 else None)
+    _serving_state(a, eng, tok, drafter, cfg_eos, rcache, device=m["device"], **m["serving"], **caches)
+    led.mark("caches")
+    print(f"[server] {m['describe']} loaded in {time.time() - t0:.1f}s", flush=True)
+    # one warm request, so the first measured one is not paying for Triton autotuning; a drafter
+    # that prices its rounds (one with `warming`) decodes WARM_TOKENS through them, learning nothing
+    warming = getattr(drafter, "warming", None) if drafter is not None else None
+    with torch.no_grad(), (warming() if warming is not None else contextlib.nullcontext()):
+        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].to(m["device"]),
+                             getattr(drafter, "WARM_TOKENS", 4) if warming is not None else 4, set()))
+        # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
+        # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
+        # first two chats queued 24 s behind the router's cold questions)
+        _warm_prefill(generate_stream, tok, STATE.get("resident"))
+    led.mark("warmup")
+    # the verify graphs for every width at the first context class, here rather than
+    # inside the first requests (one capture is a fraction of a second, thirty are several)
+    t_g = time.time()
+    with torch.no_grad():
+        n_g = eng.precapture(drafter)
+    if n_g is not None:
+        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
+    led.mark("graphs")
+    _kv_after_load(a)
+    if eng.kv.pages is not None:
+        # the warm-up's and the captures' rows are nobody's conversation
+        eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
+    if int(getattr(a, "parallel", 1) or 1) > 1:
+        if eng.caps.side_slots:
+            _build_side_slots(a, m["cfg"], m["w"], tok)
+            led.mark("side_slots")
+        else:
+            print(f"[parallel] --parallel {a.parallel}: side slots are not built for this model yet "
+                  f"(ENG-241): one slot", flush=True)
+    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
+        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
+        for x in led.stages()), flush=True)
+
+
+def _kv_pool_open(a) -> None:
+    """SRV-307: the shared KV pool (engine/kvpool.py) with `--kv-pool on`, before the engine
+    allocates its window (a builder asks for it: the 27B's, and any other's through `ctx.kv_pool`)."""
+    if getattr(a, "kv_pool", "off") != "on" or kvpool.POOL is not None:
+        return
+    kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
+                                margin_rows=int(a.kv_margin_rows), meminfo=memsplit.counted_available,
+                                on_event=_kv_pool_event)
+    kvpool.OWNER = "slot0"
+    if kvpool.Driver.get() is None:
+        print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
+              "only its accounts, every buffer is allocated in full", flush=True)
+
+
+def _build_qwen3_5(a, ctx) -> dict:
+    """The 27B (and every `qwen3_5` checkpoint): its weights (NVFP4, FP8 head), the KV pool, the
+    engine, the tokenizer, the vision tower and the drafter `--drafter` names. `ctx` as for a
+    registry builder (engine/models `Arch.serve`)."""
+    from engine.config import load_config
+    from engine.loader import Weights
+    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
+    from transformers import AutoTokenizer
+    cfg = load_config(a.model)
+    ctx.keys(cfg.path, [cfg.path, a.nvfp4, a.fp8_head])
     w = Weights(cfg.path, skip_mtp=a.drafter in ("none", "dflash2", "merged", "lenrouter"),
                 nvfp4=a.nvfp4,
                 fp8_head=a.fp8_head)
-    led.mark("weights")
-    if getattr(a, "kv_pool", "off") == "on":
-        kvpool.POOL = kvpool.KVPool(hard_floor=int(a.kv_hard_floor_gb * (1 << 30)),
-                                    margin_rows=int(a.kv_margin_rows),
-                                    on_event=_kv_pool_event)
-        kvpool.OWNER = "slot0"
-        if kvpool.Driver.get() is None:
-            print("[kv-pool] no CUDA virtual memory management on this device: the pool keeps "
-                  "only its accounts, every buffer is allocated in full", flush=True)
+    ctx.mark("weights")
+    _kv_pool_open(a)
     eng = Qwen38Engine(cfg, w, max_len=a.max_len)
-    led.mark("engine")
+    ctx.mark("engine")
     tok = AutoTokenizer.from_pretrained(cfg.path)
     _load_vision(a, cfg)
-    led.mark("vision")
+    ctx.mark("vision")
     drafter = None
     if a.drafter == "mtp":
         from engine.drafters.mtp import MTPDrafter
@@ -8764,14 +8962,24 @@ def _load(a) -> None:
         drafter = _make_lenrouter(a, eng, a.max_len)
     if a.narrow_arm == "off" and a.drafter != "lenrouter":
         raise SystemExit("[server] --narrow-arm off is the length router's (--drafter lenrouter)")
-    led.mark("drafters")
-    gen_cfg = os.path.join(cfg.path, "generation_config.json")
-    cfg_eos = None
-    if os.path.isfile(gen_cfg):
-        cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    ctx.mark("drafters")
     relax = Relax(a.relax_tau, a.relax_rank)
+    print(f"[server] {w.report()}")
+    if relax.on:
+        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
+              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
+              f"docs/exactness.md")
+    describe = (f"drafter={a.drafter} depth={a.depth} k={a.k or a.depth} "
+                f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} ")
+    return {"engine": eng, "tok": tok, "drafter": drafter, "path": cfg.path, "device": "cuda",
+            "cfg": cfg, "w": w, "describe": describe,
+            "serving": {"tree": bool(a.tree), "sampled_tree": a.sampled_tree, "relax": relax}}
 
-    # --- the serving-time caches (engine/cache.py) ---------------------------------------------
+
+def _load_caches(a, eng, tok, drafter, rcache) -> dict:
+    """The serving-time caches (engine/cache.py) of an engine that can hold them (`eng.caps.caches`):
+    the memory policy, the state store, the resident prefix and its end anchor, the suffix store.
+    Returns their entries of the request-path state."""
     session_on = not a.no_session_cache
     prefix_on = not a.no_prefix_cache
     budget = int(a.cache_budget_gb * (1 << 30))
@@ -8787,10 +8995,13 @@ def _load(a) -> None:
     # declared peak during a prefill, the reserve it may keep -- and each cache under its own cap
     # (the pin is its own, no longer paid out of the store's budget)
     gib = 1 << 30
+    cost = eng.cost()                      # a model's own prefill workspace (SRV-335), else the 27B's
     mem = STATE["mem"] = cache.Budget(int(a.mem_ceiling_gib * gib), int(a.mem_peak_gib * gib),
                                       int(a.reserve_slack_gib * gib),
                                       exclude=lambda: memlimits.role_exclude(STATE),
-                                      on_event=_memory_event)
+                                      ws_floor=cost.workspace_floor or cache.WORKSPACE_FLOOR,
+                                      ws_per_token=cost.workspace_per_token or cache.WORKSPACE_PER_TOKEN,
+                                      ws_cap=cost.workspace_cap, on_event=_memory_event)
     # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
     # the stale-reserve rule leaves them out of what the engine's allocator holds free
@@ -8824,8 +9035,6 @@ def _load(a) -> None:
         mem.register("stash", resident.shed_stash)
         mem.register("park", resident.shed_park)
         mem.register("pin", resident.shed_pin)
-    rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
-              if a.response_cache else None)
     suffix = None
     if a.suffix_store:
         suffix = cache.PersistentSuffixStore(
@@ -8839,37 +9048,6 @@ def _load(a) -> None:
         else:
             print(f"[cache] drafter {a.drafter} has no lookup store; the suffix store is being "
                   f"written but nothing reads it")
-
-    STATE["segments"] = (SegmentCache(tok, int(a.prompt_token_cache * 1e6))
-                         if a.prompt_token_cache > 0 else None)
-    STATE.update(engine=eng, tok=tok, drafter=drafter, k=a.k or a.depth, device="cuda",
-                 tree=bool(a.tree), sampled_tree=a.sampled_tree, relax=relax,
-                 model=a.served_model, started=int(time.time()), verbose=a.verbose,
-                 max_len=int(a.max_len), default_max_tokens=int(a.default_max_tokens),
-                 reasoning_format=a.reasoning_format, request_timeout=float(a.request_timeout),
-                 max_queue=int(a.max_queue), queue_timeout=float(a.queue_timeout),
-                 draining=False,
-                 cfg_eos=cfg_eos, think_budget=a.think_budget, think_stall=a.think_stall,
-                 reasoning_effort=a.reasoning_effort,
-                 answer_reserve=thinking_mod.parse_reserve(a.answer_reserve),
-                 pen_spec=PenaltySpec(a.rep_penalty, a.presence_penalty,
-                                     a.frequency_penalty, a.no_repeat_ngram),
-                 temperature=a.temperature, top_p=a.top_p, top_k=a.top_k,
-                 pattern_stop=(tuple(int(x) for x in a.pattern_stop.split(":"))
-                               if a.pattern_stop else None),
-                 argloop=a.argloop,
-                 state_store=store, session_cache=session_on, prefix_cache=prefix_on,
-                 session_trim=(a.session_trim == "on"),
-                 resident=resident, prefill_heartbeat=float(a.prefill_heartbeat_s),
-                 prefix_chunk=cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
-                 response_cache=rcache, suffix_store=suffix, suffix_scope=a.suffix_store_scope,
-                 usage_default=(a.usage_default == "on"))
-    led.mark("caches")
-    print(f"[server] {w.report()}")
-    if relax.on:
-        print(f"[server] LOSSY ACCEPT RULE ON: tau={relax.tau} rank={relax.rank}. Output is not "
-              f"greedy and not reproducible against a run with tau 1 and rank 1. See "
-              f"docs/exactness.md")
     print(f"[cache] session={'on' if session_on else 'off'} "
           f"prefix={'on' if prefix_on else 'off'}/{a.prefix_chunk} "
           f"budget={a.cache_budget_gb:.0f} GiB "
@@ -8884,40 +9062,10 @@ def _load(a) -> None:
           f"GiB during a prefill (the workspace at {a.max_len:,} tokens: "
           f"{mem.workspace(a.max_len) / gib:.1f} GiB), reserve slack {a.reserve_slack_gib:g} GiB; "
           f"narrow arm {a.narrow_arm}", flush=True)
-    print(f"[server] drafter={a.drafter} depth={a.depth} k={STATE['k']} "
-          f"nvfp4={w.nvfp4_source or 'off'} fp8_head={(w.fp8_head_source if str(w.fp8_head_source).startswith('build') else 'on') if w.fp8_head_source else 'off'} "
-          f" loaded in {time.time() - t0:.1f}s")
-    # one warm request, so the first measured one is not paying for Triton autotuning
-    with torch.no_grad():
-        list(generate_stream(tok("warm up the kernels", return_tensors="pt").input_ids[0].cuda(),
-                             4, set()))
-        # FX17: the prefill shapes a first real request brings (chunk-sized blocks and a tail),
-        # so the first requests after a restart do not pay for them (run 3 on 0.4.8-test: the
-        # first two chats queued 24 s behind the router's cold questions)
-        _warm_prefill(generate_stream, tok, STATE.get("resident"))
-    led.mark("warmup")
-    # the verify graphs for every width at the first context class, here rather than
-    # inside the first requests (one capture is a fraction of a second, thirty are several)
-    if eng._graphs_for(2, 0) is not None:
-        t_g = time.time()
-        with torch.no_grad():
-            # a router that sizes every block on the staircase (QWEN38_LEN_MODE calc/wide) submits
-            # any row count up to 32; the others stay at 2..16 and capture the rest lazily
-            import engine.model as _M
-            n_g = eng._graphs.precapture(widths=range(2, min(_M.VERIFY_ROWS, getattr(drafter, "max_nodes", 31) + 1) + 1)
-                                         if getattr(drafter, "calc", False) else range(2, 17))
-        print(f"[server] verify graphs: {n_g} captured in {time.time() - t_g:.1f}s", flush=True)
-    led.mark("graphs")
-    _kv_after_load(a)
-    if eng.kv.pages is not None:
-        # the warm-up's and the captures' rows are nobody's conversation
-        eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
-    if int(getattr(a, "parallel", 1) or 1) > 1:
-        _build_side_slots(a, cfg, w, tok)
-        led.mark("side_slots")
-    print("[memory] load stages, GiB allocated / taken from MemAvailable: " + ", ".join(
-        f"{x['stage']} {_gib(x['allocated'])}/{_gib(x['mem_available_drop'])}"
-        for x in led.stages()), flush=True)
+    return {"state_store": store, "session_cache": session_on, "prefix_cache": prefix_on,
+            "session_trim": (a.session_trim == "on"), "resident": resident,
+            "prefix_chunk": cache.prefill_chunk(prefix_on, a.prefix_chunk, a.max_prefill_rows),
+            "suffix_store": suffix}
 
 
 def _par_room() -> int | None:
@@ -9079,14 +9227,17 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     warmed and its verify graphs captured before the server answers. The engine's own memory
     policy (engine/cache.py `Budget`) then counts what the side slots took as the engine's: its
     ceiling and peak go up by that much, so slot 0's caches are not shed for it."""
-    from engine.model import Qwen38Engine
+    from engine.models.qwen3_5.adapter import Qwen38Engine   # with the adapter's cold verbs
     n = int(a.parallel)
-    if a.drafter not in ("lenrouter", "none"):
+    # ENG-241: an engine that builds its own side slots (`side_slot`: its state, graphs and drafter over
+    # the same weights); else the 27B's, below
+    make = getattr(STATE["engine"], "side_slot", None)
+    if make is None and a.drafter not in ("lenrouter", "none"):
         raise SystemExit(f"[parallel] --parallel {n} is built for --drafter lenrouter (or none), "
                          f"not {a.drafter}")
     L = int(min(a.side_max_len, a.max_len))
     floor = int(a.parallel_floor_gb * slots_mod.GiB)
-    adm = slots_mod.Admission(floor, growth=_par_growth, room=_par_room,
+    adm = slots_mod.Admission(floor, meminfo=memsplit.counted_meminfo, growth=_par_growth, room=_par_room,
                               committed=lambda o: (kvpool.POOL.owner_bytes(o)
                                                    if kvpool.POOL is not None else 0))
     drafter0 = STATE["drafter"]
@@ -9098,8 +9249,12 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     for i in range(1, n):
         # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a
         # token) and its constant are memory at load
-        need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
-                                    constant=int(_side_const_gb(a) * slots_mod.GiB))
+        if make is not None:
+            per_token, const = STATE["engine"].side_slot_bytes(L, paged)
+            need = slots_mod.slot_bytes(L, per_token=per_token, constant=const)
+        else:
+            need = slots_mod.slot_bytes(L, per_token=256 if paged else 106_752,
+                                        constant=int(_side_const_gb(a) * slots_mod.GiB))
         ok, d = adm.check(need, count=False)
         if not ok:
             print(f"[parallel] slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
@@ -9109,9 +9264,12 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         a1 = torch.cuda.memory_allocated()
         t0 = time.time()
         kvpool.OWNER = f"slot{i}"
-        e2 = Qwen38Engine(cfg, w, max_len=L)
-        e2.graphs_off = a.side_graphs == "off"
-        d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
+        if make is not None:
+            e2, d2 = make(L, drafter0)
+        else:
+            e2 = Qwen38Engine(cfg, w, max_len=L)
+            e2.graphs_off = a.side_graphs == "off"
+            d2 = (_make_lenrouter(a, e2, L, corpus_from=ng0) if a.drafter == "lenrouter" else None)
         a.depth = depth0
         values = {k: None for k in slots_mod.OVERLAY}
         values.update(engine=e2, drafter=d2, max_len=L)
@@ -9126,11 +9284,15 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         slots.append(slot)
         slots_mod.bind(slot)
         try:
-            with torch.no_grad():
+            warming = getattr(d2, "warming", None) if d2 is not None else None
+            with torch.no_grad(), (warming() if warming is not None else contextlib.nullcontext()):
                 list(_generate_stream(tok("warm up the kernels", return_tensors="pt")
-                                      .input_ids[0].cuda(), 4, set()))
+                                      .input_ids[0].cuda(),
+                                      getattr(d2, "WARM_TOKENS", 4) if warming is not None else 4, set()))
                 _warm_prefill(_generate_stream, tok, res_i)    # FX17: the router's question shape
-                if a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
+                if make is not None:
+                    e2.precapture(d2)          # its class 0 graphs now, not in its first request
+                elif a.side_precapture == "on" and e2._graphs_for(2, 0) is not None:
                     e2._graphs.precapture(widths=range(2, 33) if getattr(d2, "calc", False)
                                           else range(2, 17))
             values.update({k: None for k in ("last_ctx", "last_prompt_n", "hidden_spans",
@@ -9167,7 +9329,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     turn = slots_mod.Turn(a.turn_quantum_ms / 1e3, settle=settle)
     meet = (slots_mod.Meeting(a.parallel_max_rows, a.batch_timeout_ms / 1e3,
                               cut=a.parallel_cut)
-            if a.parallel_batch == "on" else None)
+            if a.parallel_batch == "on" and STATE["engine"].caps.joint_verify else None)
     timing = os.environ.get("QSE_PARALLEL_TIMING") == "1"
     if meet is not None:
         meet.timing = timing
@@ -9384,7 +9546,9 @@ def _serve(a, led) -> None:
                                min_tokens=a.compaction_min_tokens)
     STATE["prepared"] = compaction_mod.Prepared()
     STATE["last_end_mono"] = time.monotonic()
-    if STATE.get("resident") is not None and not a.fake_engine:
+    if not a.fake_engine:
+        # the summary written ahead and the memory writer (both need the resident prefix), and an
+        # engine's idle graph captures
         threading.Thread(target=_prepare_loop, name="compaction-prepare", daemon=True).start()
     print(f"[compaction] {a.compaction}; prepare {a.compaction_prepare} (idle "
           f"{a.compaction_idle_s:g} s, from {a.compaction_min_tokens} tokens)", flush=True)
@@ -9498,17 +9662,45 @@ def identity() -> dict:
 
 def weights_profile() -> dict:
     """The weight profile this process serves (QSE_WEIGHTS, exported from ops/profiles/<name>.env):
-    its name, the target's weights, the drafters, the draft head and the sampler's nucleus."""
+    its name, the target's weights, the drafters, the draft head and the sampler's nucleus; a loader
+    that serves weights the profile's knobs do not name records its own (`weights_info`)."""
     e = os.environ
     exl3 = _S.get("EXL3") or None
     nv = e.get("NV") or _S.get("NVFP4") or None
-    return {"name": e.get("QSE_WEIGHTS") or None,
-            "format": "exl3" if exl3 else ("nvfp4" if nv else None),
-            "weights": exl3 or nv,
-            "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
-            "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
-            "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
-            "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
+    out = {"name": e.get("QSE_WEIGHTS") or None,
+           "format": "exl3" if exl3 else ("nvfp4" if nv else None),
+           "weights": exl3 or nv,
+           "hf_repo": e.get("QSE_WEIGHTS_HF") or None,
+           "drafters": _S.get("DRAFT_EXL3") or "nvfp4 (ft-b8-v2, ft-b16)",
+           "draft_head": _S.get("DRAFT_HEAD_EXL3") or None,
+           "sample_nucleus": _S.get("SAMPLE_NUCLEUS")}
+    out.update(dict.get(STATE, "weights_info") or {})
+    # VIS-95: a profile on a branch of its repo, and the largest window its registry entry names (a
+    # pack that fits none: null); the 27B's profiles name neither, and their block stays as it was
+    if e.get("QSE_WEIGHTS_REVISION"):
+        out["hf_revision"] = e["QSE_WEIGHTS_REVISION"]
+    mw = _profile_max_window(out["name"])
+    if mw is not False:
+        out["max_window"] = mw
+    return out
+
+
+_MAX_WINDOW: dict = {}
+
+
+def _profile_max_window(name: str | None):
+    """The registry's `max_window` of profile `name` (an int, or None for a pack that fits no
+    window), or False when the profile names none or the registry does not read; read once."""
+    if not name:
+        return False
+    if name not in _MAX_WINDOW:
+        try:
+            from server.setup import registry
+            p = next((p for m in registry.load_all()[0].values() for p in m["profiles"] if p["id"] == name), None)
+            _MAX_WINDOW[name] = p["max_window"] if p is not None and "max_window" in p else False
+        except Exception:                                          # noqa: BLE001
+            _MAX_WINDOW[name] = False
+    return _MAX_WINDOW[name]
 
 
 def serve_until_drained(httpd) -> None:

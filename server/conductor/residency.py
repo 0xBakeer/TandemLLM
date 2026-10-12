@@ -210,14 +210,11 @@ def docs(root: str) -> tuple[dict, dict]:
 
 
 def _mem_gib() -> float | None:
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return round(int(line.split()[1]) * 1024 / GIB, 2)
-    except (OSError, ValueError, IndexError):
-        return None
-    return None
+    """MemAvailable less the engine's pinned page cache (SRV-335: a warm n-gram table is free to the
+    kernel, not to a role)."""
+    from server import memsplit
+    v = memsplit.counted_available()
+    return None if v is None else round(v / GIB, 2)
 
 
 def main(argv: list[str] | None = None) -> int:

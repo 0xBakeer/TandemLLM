@@ -130,6 +130,23 @@ async function call(ms: MockSetup, method: string, path: string, body?: unknown,
   return out;
 }
 
+describe('the second model (OPS-97)', () => {
+  it('the mock lists Flash-Next as a second tile and answers its entry, current and estimate', async () => {
+    const ms = new MockSetup();
+    const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; recommended: boolean; best_speed: unknown }[];
+    expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false]]);
+    expect(tiles[1].best_speed).toBeNull();                       // no measured row yet
+    const fn = (await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next')).body as SetupModel;
+    expect(fn.profiles.map((p) => p.max_window)).toEqual([262_144, 262_144, 212_992, 65_536, null]);
+    expect((await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next/current')).body.selection).toEqual({ model: 'qwen3.8-flash-next' });
+    const est = (await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id } })).body;
+    expect(est.fits).toBe(true);
+    expect(est.parts.some((p: { label: string }) => p.label.startsWith('n-gram row cache'))).toBe(true); // 3.05 reads its table cold (SPD-99)
+    const over = await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id, profile: 'flashnext-6.05' } });
+    expect(over.body.fits).toBe(false);
+    expect(over.body.notes[0]).toContain('does not fit');
+  });
+});
 describe('the mock answers as the server does', () => {
   it('the reset levels: the words, level 2 the configuration files, level 3 with what the engine clears itself', async () => {
     const ms = new MockSetup();

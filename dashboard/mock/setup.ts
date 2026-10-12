@@ -44,8 +44,13 @@ import type {
 import { checkSelection, estimate, SelectionError } from '../src/setup/estimate.ts';
 import { defaults } from '../src/setup/state.ts';
 import qwen from './setup/qwen3.8-27b.json';
+import flashNext from './setup/qwen3.8-flash-next.json';
 
 const MODEL = qwen as unknown as SetupModel;
+// OPS-97: the models step's second tile (its install is the 27B's walk; the estimate and plan are its own)
+const FLASH_NEXT = flashNext as unknown as SetupModel;
+const MODELS = [MODEL, FLASH_NEXT];
+const modelOf = (id: string | undefined): SetupModel => MODELS.find((m) => m.id === id) ?? MODEL;
 const GIB = 2 ** 30;
 
 type Scenario = 'ok' | 'rollback' | 'slow' | 'restart' | 'fail';
@@ -244,35 +249,37 @@ export class MockSetup {
   }
 
   envFor(sel: SetupSelection): Record<string, string> {
+    const M = modelOf(sel.model);
     const env: Record<string, string> = {};
-    for (const c of MODEL.components) {
+    for (const c of M.components) {
       const on = c.required || (sel.components[c.id] ?? c.default);
       for (const [k, v] of Object.entries(c.knobs)) {
         const val = on ? v.on : v.off;
         if (val != null) env[k] = val;
       }
     }
-    const p = MODEL.parallelism;
+    const p = M.parallelism;
     env[p.knobs.slots] = String(sel.slots);
     env[p.knobs.window] = String(sel.window);
     env[p.knobs.side_window] = String(sel.side_window ?? sel.window);
     env[p.knobs.kv_pool] = sel.kv_pool ? 'on' : 'off';
     env[p.knobs.floor_gb] = String(sel.floor_gb);
     for (const [k, v] of Object.entries(p.fixed ?? {})) env[k] = v;
-    for (const f of [...MODEL.methods, ...MODEL.advanced]) {
+    for (const f of [...M.methods, ...M.advanced]) {
       if (!f.knob) continue;
-      const v = (MODEL.methods.includes(f) ? sel.methods : sel.advanced)[f.id] ?? f.recommended;
+      const v = (M.methods.includes(f) ? sel.methods : sel.advanced)[f.id] ?? f.recommended;
       env[f.knob] = String(v);
     }
     return env;
   }
 
   plan(sel: SetupSelection): SetupPlan {
+    const M = modelOf(sel.model);
     const next = this.envFor(sel);
     const from = (key: string): string => {
-      for (const c of MODEL.components) if (key in c.knobs) return c.label;
-      for (const f of [...MODEL.methods, ...MODEL.advanced]) if (f.knob === key) return f.label;
-      const pk = Object.entries(MODEL.parallelism.knobs).find(([, v]) => v === key);
+      for (const c of M.components) if (key in c.knobs) return c.label;
+      for (const f of [...M.methods, ...M.advanced]) if (f.knob === key) return f.label;
+      const pk = Object.entries(M.parallelism.knobs).find(([, v]) => v === key);
       const names: Record<string, string> = { slots: 'Parallel chats', window: 'Longest conversation', side_window: 'Longest conversation in the extra chats', kv_pool: 'Shared memory pool', floor_gb: 'Memory kept free' };
       return pk ? names[pk[0]] : 'Parallel chats';
     };
@@ -282,8 +289,8 @@ export class MockSetup {
       const nx = next[key] ?? null;
       if (cur !== nx) changes.push({ key, current: cur, next: nx, from: from(key) });
     }
-    const est = estimate(MODEL, sel, this.memAvailable());
-    const prof = MODEL.profiles.find((p) => p.id === sel.profile)!;
+    const est = estimate(M, sel, this.memAvailable());
+    const prof = M.profiles.find((p) => p.id === sel.profile)!;
     const onDisk = !!this.onDisk[prof.id];
     const errors: string[] = [];
     const codes: string[] = [];
@@ -655,25 +662,37 @@ export class MockSetup {
     if (path === '/v1/setup/models') {
       if (o.models === 'error') return err(500, 'internal_error', 'models/: permission denied');
       if (o.models === 'empty') return json(200, { contract_version: '1.0', models: [], errors: [] });
-      const rec = MODEL.profiles.find((p) => p.recommended)!;
-      const row = MODEL.measurements.rows.find((r) => r.profile === rec.id)!;
-      const best = Object.entries(row.cells.greedy_512 ?? {}).sort((a, b) => b[1]!.tok_s - a[1]!.tok_s)[0];
+      const tile = (m: SetupModel) => {
+        const rec = m.profiles.find((p) => p.recommended)!;
+        const row = m.measurements.rows.find((r) => r.profile === rec.id);
+        const best = Object.entries(row?.cells.greedy_512 ?? {}).sort((a, b) => b[1]!.tok_s - a[1]!.tok_s)[0];
+        return { id: m.id, name: m.name, family: m.family, params: m.params, pitch: m.pitch, recommended: m.recommended, icon: null, best_speed: best ? { tok_s: best[1]!.tok_s, task: best[0], profile: rec.id } : null };
+      };
       return json(200, {
         contract_version: '1.0',
-        models: [{ id: MODEL.id, name: MODEL.name, family: MODEL.family, params: MODEL.params, pitch: MODEL.pitch, recommended: true, icon: null, best_speed: best ? { tok_s: best[1]!.tok_s, task: best[0], profile: rec.id } : null }],
+        models: MODELS.map(tile),
         errors: o.models === 'broken' ? [{ path: 'models/gemma-4-31b/model.yaml', message: 'models/gemma-4-31b/model.yaml: $.profiles: exactly one recommended profile, not 0' }] : [],
       });
     }
     const mm = path.match(/^\/v1\/setup\/models\/([^/]+)$/);
-    if (mm) return decodeURIComponent(mm[1]) === MODEL.id ? json(200, MODEL) : err(404, 'not_found', `no model ${mm[1]}`);
+    if (mm) {
+      const m = MODELS.find((x) => x.id === decodeURIComponent(mm[1]));
+      return m ? json(200, m) : err(404, 'not_found', `no model ${mm[1]}`);
+    }
     const mc = path.match(/^\/v1\/setup\/models\/([^/]+)\/current$/);
-    if (mc) return decodeURIComponent(mc[1]) === MODEL.id ? json(200, { contract_version: '1.0', model: MODEL.id, selection: this.box, unmatched: [] }) : err(404, 'not_found', `no model ${mc[1]}`);
+    if (mc) {
+      const id = decodeURIComponent(mc[1]);
+      if (id === MODEL.id) return json(200, { contract_version: '1.0', model: MODEL.id, selection: this.box, unmatched: [] });
+      // the box runs the 27B: another model's current is its id alone (the wizard seeds its defaults)
+      return MODELS.some((x) => x.id === id) ? json(200, { contract_version: '1.0', model: id, selection: { model: id }, unmatched: [] }) : err(404, 'not_found', `no model ${mc[1]}`);
+    }
     if (path === '/v1/setup/device') return json(200, this.device());
     const refuse = (e: unknown) => (e instanceof SelectionError ? err(e.status, e.code, e.message) : err(500, 'internal_error', String(e)));
     if (path === '/v1/setup/estimate' && method === 'POST') {
       if (o.estimateDown) return err(500, 'internal_error', 'estimate failed');
       try {
-        return json(200, estimate(MODEL, (body.selection ?? body) as SetupSelection, this.memAvailable()));
+        const sel = (body.selection ?? body) as SetupSelection;
+        return json(200, estimate(modelOf(sel.model), sel, this.memAvailable()));
       } catch (e) {
         return refuse(e);
       }
@@ -681,7 +700,8 @@ export class MockSetup {
     if (path === '/v1/setup/plan' && method === 'POST') {
       if (o.planDown) return err(500, 'internal_error', 'plan failed');
       try {
-        return json(200, this.plan(checkSelection(MODEL, body.selection ?? body)));
+        const sel = body.selection ?? body;
+        return json(200, this.plan(checkSelection(modelOf(sel.model), sel)));
       } catch (e) {
         return refuse(e);
       }
@@ -691,7 +711,7 @@ export class MockSetup {
       if (extra.length) return err(422, 'unknown_field', `unknown field '${extra[0]}'; apply takes selection and dry_run`);
       let sel: SetupSelection;
       try {
-        sel = checkSelection(MODEL, body.selection);
+        sel = checkSelection(modelOf(body.selection?.model), body.selection);
       } catch (e) {
         return refuse(e);
       }

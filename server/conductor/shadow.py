@@ -75,6 +75,9 @@ MODES = ("off", "on")
 ROUTER_MODES = ("off", "shadow")
 OFF_WHY = ("this engine serves no shadow reader: QWEN38_SHADOW_MODEL is empty (set it in "
            "ops/serve.env, e.g. qwen3.5-0.8b, and restart)")
+# SRV-339: a model whose adapter says its reasoning was never read by the reader (`caps.shadow`)
+NOT_VALIDATED_WHY = ("the shadow reader is not started: its thought lines and router verdicts were "
+                     "validated on another model's reasoning, not on the one this engine serves")
 
 # the narrator's question on top of the session (SR1): the open thought is closed, a hidden user
 # turn asks for the summary, the answer is begun with "It"
@@ -834,6 +837,11 @@ def start(state: dict, gate, *, fake: bool = False, log=print):
     name = configured()
     if not name:
         return None
+    caps = getattr(state.get("engine"), "caps", None)
+    if caps is not None and not getattr(caps, "shadow", True):
+        state["shadow_refused"] = NOT_VALIDATED_WHY
+        log(f"[shadow] {name}: {NOT_VALIDATED_WHY}")
+        return None
     from engine import generative
     from engine.generative.qwen35 import NAMES
     if name not in NAMES and not name.startswith(generative.FAKE_PREFIXES):
@@ -915,5 +923,5 @@ def planner(state: dict, *, fake: bool = False):
 def status(state: dict) -> dict:
     svc = state.get("shadow")
     if svc is None:
-        return {"enabled": False, "why": OFF_WHY}
+        return {"enabled": False, "why": state.get("shadow_refused") or OFF_WHY}
     return svc.status()

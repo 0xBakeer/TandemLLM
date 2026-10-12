@@ -287,6 +287,32 @@ class Tok:
         return {"<|im_end|>": IM_END}.get(t, 0)
 
 
+def test_a_model_the_reader_was_not_validated_on_gets_no_reader():
+    """SRV-339: an engine whose adapter says the reader's outputs were not validated on its reasoning
+    (`caps.shadow` False, Flash-Next) starts no reader, loads nothing, and the status says why; one
+    that says nothing (the 27B, the default True) is not refused here."""
+    import types
+
+    from engine.models.adapter import Capabilities
+    from server.conductor import shadow as SH
+    old = os.environ.get("QWEN38_SHADOW_MODEL")
+    os.environ["QWEN38_SHADOW_MODEL"] = "qwen3.5-0.8b"
+    logs: list = []
+    try:
+        state = {"engine": types.SimpleNamespace(caps=Capabilities(caches=True, side_slots=False, shadow=False))}
+        assert SH.start(state, None, log=logs.append) is None
+        st = SH.status(state)
+        assert st == {"enabled": False, "why": SH.NOT_VALIDATED_WHY} and "validated" in logs[0], (st, logs)
+        assert Capabilities(caches=True, side_slots=True).shadow
+        assert SH.status({})["why"] == SH.OFF_WHY
+    finally:
+        if old is None:
+            os.environ.pop("QWEN38_SHADOW_MODEL", None)
+        else:
+            os.environ["QWEN38_SHADOW_MODEL"] = old
+    return "refused with the reason in the status; the default capability keeps the reader"
+
+
 def test_the_router_question():
     import json
     svc = service()

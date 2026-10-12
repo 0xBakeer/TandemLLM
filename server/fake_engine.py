@@ -80,6 +80,8 @@ import types
 
 import torch
 
+from engine.models.adapter import CostModel
+
 THINK_OPEN, THINK_CLOSE, EOS = 0x110001, 0x110002, 0x110003
 # the tool-call markers are single ids too, as in Qwen's tokenizer (SRV-199's lift reads them)
 CALL_OPEN, CALL_CLOSE = 0x110004, 0x110005
@@ -177,6 +179,18 @@ class FakeEngine:
     state = _FakeState()
     kv = types.SimpleNamespace(length=0)
     w = types.SimpleNamespace(nvfp4_source="", fp8_head_source=None)
+
+    def cost(self) -> CostModel:
+        return CostModel(section_bytes=8, view_bytes_per_token=0, parts={"recurrent": 4, "conv": 4})
+
+    def discard_pending(self) -> None:
+        pass
+
+    def resident_files(self) -> list:
+        return []
+
+    def memory_parts(self) -> dict:
+        return {}
 
 
 def _call(name: str, user: str) -> str:

@@ -29,7 +29,7 @@ import './measure-table';
 import './memory-bar';
 import './reset';
 import './signin';
-import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
+import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, windowMax, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
 import { S, STEP_INTRO, STEP_LABEL, STEP_SHORT, STEP_TITLE } from './strings';
 import { fieldKey, planToolCall } from './tools';
 import './wren';
@@ -611,13 +611,15 @@ export class QseSetup extends LightElement {
   // ---- step 1: the model --------------------------------------------------------------------
 
   private stepOverview(m: SetupModel, sel: SetupSelection): TemplateResult {
-    const longest = m.parallelism.window.max;
+    // SRV-337: the selected profile's largest window, or that it fits none
+    const prof = m.profiles.find((p) => p.id === sel.profile);
+    const longest = windowMax(m, sel.profile);
     return html`<div class="ov">
       <div class="ov-facts">
         <p class="ov-arch">${m.architecture}</p>
         <dl class="ov-dl">
           <div><dt>${S.colWeights}</dt><dd>${m.profiles.length} sizes, ${m.profiles.map((p) => p.label.replace(/ bpw$/, '')).join(', ')}</dd></div>
-          <div><dt>${S.window}</dt><dd class="num">${longest.toLocaleString('en-US')} ${S.tokensUnit}</dd></div>
+          <div><dt>${S.window}</dt><dd class="num">${prof?.max_window === null ? S.windowNone(prof.label) : `${longest.toLocaleString('en-US')} ${S.tokensUnit}`}</dd></div>
           <div><dt>${S.license}</dt><dd>${m.license}</dd></div>
         </dl>
         <ul class="ov-links">${m.links.map((l) => html`<li><a href=${l.url} target="_blank" rel="noopener noreferrer">${l.label} ${icon('external')}</a></li>`)}</ul>
@@ -729,9 +731,15 @@ export class QseSetup extends LightElement {
     const fit = est?.context_tokens_fit ?? 0;
     const perSlot = Math.floor(fit / sel.slots);
     const set = (key: ParallelKey, value: number | boolean) => this.user('parallelism', key, { type: 'parallel', key, value });
+    // the main window's presets above the profile's largest stay, disabled with the reason (SRV-337);
+    // the side window's above the main window are left out
+    const prof = m.profiles.find((x) => x.id === sel.profile);
     const winCtl = (key: 'window' | 'side_window', value: number, max: number) => html`<div class="win-ctl">
       <div class="seg seg-wrap" role="radiogroup" aria-label=${key === 'window' ? S.window : S.sideWindow}>
-        ${WINDOW_PRESETS.filter((w) => w >= p[key].min && w <= max).map((w) => html`<button class="seg-btn ${value === w ? 'is-on' : ''}" role="radio" aria-checked=${value === w} @click=${() => set(key, w)}>${kTok(w)}</button>`)}
+        ${WINDOW_PRESETS.filter((w) => w >= p[key].min && w <= (key === 'window' ? p.window.max : max)).map((w) => {
+          const over = w > max;
+          return html`<button class="seg-btn ${value === w ? 'is-on' : ''}" role="radio" aria-checked=${value === w} ?disabled=${over} title=${over && prof ? S.windowAboveProfile(prof.label, max) : nothing} @click=${() => set(key, w)}>${kTok(w)}</button>`;
+        })}
       </div>
       <input class="num-input num" type="number" inputmode="numeric" min=${p[key].min} max=${max} step=${p[key].step} .value=${String(value)} aria-label=${`${key === 'window' ? S.window : S.sideWindow} (${S.tokensUnit})`} @change=${(e: Event) => set(key, Number((e.target as HTMLInputElement).value))} />
       <span class="muted small">${S.tokensUnit}</span>
@@ -746,7 +754,7 @@ export class QseSetup extends LightElement {
         </div>
         <div class="pfield" data-field="parallelism.window">
           <div class="pfield-k"><span class="pfield-label">${S.window}</span><span class="pfield-what">${S.windowWhat}</span></div>
-          ${winCtl('window', sel.window, p.window.max)}
+          ${winCtl('window', sel.window, windowMax(m, sel.profile))}
         </div>
         ${sel.slots > 1
           ? html`<div class="pfield" data-field="parallelism.side_window">

@@ -111,7 +111,7 @@ def reference():
 def engine_for(d, max_len=256):
     from engine.config import load_config
     from engine.loader import Weights
-    from engine.model import Qwen38Engine
+    from engine.models.qwen3_5.adapter import Qwen38Engine
     cfg = load_config(d)
     w = Weights(d, device="cpu", skip_mtp=True, nvfp4="", fp8_head="")
     eng = Qwen38Engine(cfg, w, max_len=max_len, device="cpu")

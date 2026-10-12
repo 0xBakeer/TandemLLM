@@ -286,6 +286,50 @@ KNOBS: dict[str, tuple] = {
     # SRV-171: the session's scratch directory the notes name (`{token}` = the session token;
     # '' = `.tandem` in the project)
     'TANDEM_SCRATCH': ('', 'server/conductor/packages.py'),
+    # ENG-E7: Qwen3.8-Flash-Next on turboderp's EXL3 packs (engine/models/flashnext/). The 27B's
+    # disk-tier fingerprint leaves knobs owned under engine/models/ and tools/fn_ out (engine/disk_cache.py).
+    # The hyper-connection mixers' served width: int8 rows with an fp32 scale, or the pack's fp16
+    'FN_MIX': ('int8', 'engine/models/flashnext/pack.py'),
+    # Flash-Next kernels launched with programmatic dependent launch (overlap a launch with its
+    # predecessor's tail; the bits do not change)
+    'FN_PDL': ('1', 'tools/fn_kernels.py'),
+    # cp.async stages of a warp in the MoE kernels (2..4; the bits do not depend on it)
+    'FN_MOE_ST': ('3', 'tools/fn_kernels.py'),
+    # warps a MoE CTA splits its K range over (4 or 8; sets the order of the partial sums)
+    'FN_MOE_WARPS': ('4', 'tools/fn_kernels.py'),
+    # EXL3 projections of up to 32 rows on tools/fn_kernels.dense (input rotation fused, PDL) instead
+    # of tools/exl3_linear's kernel; 2026-10-11 paired A/B at 1k: no difference (45.7 vs 45.4 prose)
+    'FN_DENSE': ('0', 'engine/models/flashnext/engine.py'),
+    # read the n-gram table into the page cache at load (POSIX_FADV_WILLNEED, in the background)
+    'FN_WARM_TABLE': ('1', 'engine/models/flashnext/load.py'),
+    # drop the shards' page cache after the load (the table's is kept); 0 = keep it (a warm reload)
+    'FN_DROP_SHARD_CACHE': ('1', 'engine/models/flashnext/load.py'),
+    # ENG-239: the n-gram table's rows from the page cache (warm, counted by every floor check) or read
+    # with O_DIRECT through a hot-row cache of FN_TABLE_CACHE_GB (cold, never in the page cache)
+    'FN_TABLE': ('warm', 'engine/models/flashnext/load.py'),
+    'FN_TABLE_CACHE_GB': ('2', 'engine/models/flashnext/load.py'),
+    # ENG-227: a speculative round's commit parks the accepted path's GDN rows and the next verify
+    # block or decode step applies them as it loads each state tile (one read of the GDN state less
+    # a round; the same arithmetic); 0 = the commit walks them itself
+    'FN_FOLD_COMMIT': ('1', 'engine/models/flashnext/engine.py'),
+    # ENG-225: a prompt chunk (and the MTP layer's catch-up) through the prefill kernels
+    # (tools/fn_prefill_kernels.py: experts grouped by expert, mixers and the router on the library
+    # GEMM, attention over each row's visible keys); "ref" = the reference's batched forward
+    'FN_PREFILL': ('kernels', 'engine/models/flashnext/engine.py'),
+    # rows a prompt chunk of the prefill kernels takes (the reference keeps 2,048)
+    'FN_PREFILL_CHUNK': ('4096', 'engine/models/flashnext/engine.py'),
+    # the prefill's mixers, router and small projections: "fp32" = exact weights and fp32 sums, "fp16" =
+    # weights rounded to fp16 on the tensor cores
+    'FN_PREFILL_MM': ('fp32', 'tools/fn_prefill_kernels.py'),
+    # GEMVs of few output rows (mixer down, router, GDN a/b) with each row's K split over the warps of a
+    # CTA (more loads in flight); sets their summation order, so a build keeps one value
+    'FN_GEMV_SPLIT': ('1', 'tools/fn_kernels.py'),
+    # SRV-87: the served Flash-Next's MTP draft head over the first N ids of ops/fn-hot-vocab.npy
+    # (int8 rows; 0 = the full EXL3 head)
+    'FN_DRAFT_HOT': ('32768', 'engine/models/flashnext/serving.py'),
+    # ENG-229: the lookup (the request's text, --corpus and the server's suffix store) in the MTP round's
+    # cut, one tree with the head's chain; 0 = the head alone
+    'FN_LOOKUP': ('0', 'engine/models/flashnext/serving.py'),
 }
 
 

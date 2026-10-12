@@ -85,6 +85,8 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
   const p = m.parallelism;
   const slots = intIn('slots', b.slots ?? p.slots.default, p.slots.min, p.slots.max);
   const window = onStep('window', intIn('window', b.window ?? p.window.default, p.window.min, p.window.max), p.window.step);
+  const mw = (m.profiles.find((x) => x.id === pid) as SetupProfile).max_window;
+  if (mw && window > mw) throw new SelectionError(422, 'out_of_range', `window: ${thousands(window)} is above ${pid}'s largest window, ${thousands(mw)}`);
   // a side slot never holds more than slot 0 (server/app.py: min(side_max_len, max_len))
   const side = Math.min(window, onStep('side_window', intIn('side_window', b.side_window ?? window, p.side_window.min, p.side_window.max), p.side_window.step));
   const pool = b.kv_pool ?? p.kv_pool.default;
@@ -147,10 +149,18 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     { id: 'weights', label: `Weights (${prof.label})`, gb: prof.weights_gib, kind: 'fixed' },
   ];
   for (const part of m.memory.parts) parts.push({ id: part.id, label: part.label, gb: part.gib, kind: part.kind });
+  // a profile's lookup table: warm, its size (the page cache); cold, its row cache (SRV-337)
+  const table = prof.table;
+  if (table) {
+    const warm = table.policy === 'warm';
+    parts.push({ id: 'table', label: warm ? 'n-gram table (page cache, kept warm)' : 'n-gram row cache (the table read past the page cache)', gb: warm ? table.gib : table.cache_gib, kind: 'fixed' });
+  }
+  // a part may stop growing (a prefill's workspace): max_gib
+  for (const part of m.memory.per_window_parts ?? []) parts.push({ id: part.id, label: part.label, gb: Math.min((part.bytes_per_token * window) / GIB, part.max_gib ?? Infinity), kind: part.kind });
   if (slots > 1) parts.push({ id: 'side_slots', label: `${slots - 1} more slot(s), beyond their KV`, gb: (slots - 1) * p.side_slot_const_gib, kind: 'fixed' });
   for (const c of m.components) {
     if (!sel.components[c.id]) continue;
-    const gb = c.id === 'drafters' ? (prof.drafters_gib ?? c.memory_gib) : c.memory_gib;
+    const gb = prof.components_gib?.[c.id] ?? (c.id === 'drafters' ? (prof.drafters_gib ?? c.memory_gib) : c.memory_gib);
     if (gb <= 0 && c.memory_max_gib == null) continue;
     const part: SetupEstimatePart = { id: c.id, label: c.label, gb, kind: 'fixed' };
     if (c.memory_max_gib != null) {
@@ -170,8 +180,12 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
   const room = budget - fixed;
   const fits = r2(total) <= r2(budget);
   const fitsWorst = r2(room) >= r2(kvWorst);
-  const ctx = Math.max(0, Math.floor((room * GIB) / kvb));
+  let ctx = Math.max(0, Math.floor((room * GIB) / kvb));
+  const mw = prof.max_window === undefined ? 0 : prof.max_window;
+  if (mw === null) ctx = 0;
+  else if (mw) ctx = Math.min(ctx, mw * slots);
   const notes: string[] = [];
+  if (mw === null) notes.push(`${prof.label} does not fit ${dev.label} at any window: it is ${r2(Math.max(0, fixed - budget)).toFixed(2)} GiB over the budget before any context.`);
   if (!fits) {
     const big = [...parts].sort((a, b) => b.gb - a.gb).slice(0, 3);
     notes.push(`Over the budget by ${r2(total - budget).toFixed(2)} GiB. The largest parts: ` + big.map((x) => `${x.label} ${x.gb.toFixed(2)} GiB`).join(', ') + '.');

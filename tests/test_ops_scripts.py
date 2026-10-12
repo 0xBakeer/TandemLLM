@@ -405,6 +405,31 @@ def test_the_disk_tier_reaches_the_service_only_when_serve_env_names_it():
     assert argv[argv.index("--disk-cache") + 1] == "off", argv
 
 
+def test_a_profile_of_another_model_replaces_the_27b_model_flags():
+    """OPS-99: QSE_ENGINE_FLAGS (a Flash-Next profile: its pack and its MTP drafter) take the place of
+    the 27B's model and drafter flags, the shared ones stay; unset, the 27B's argv is the one it was."""
+    r, marks = _start_with_fake_engine("0", 'QSE_ENGINE_FLAGS="--model /p/flashnext-packs/3.05 --drafter mtp"\n')
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
+    assert argv[argv.index("--model") + 1] == "/p/flashnext-packs/3.05" and argv.count("--drafter") == 1, argv
+    assert argv[argv.index("--drafter") + 1] == "mtp", argv
+    for gone in ("--nvfp4", "--fp8-head", "--dflash2-ckpt", "--tree", "--len-fixed", "--len-latch"):
+        assert gone not in argv, (gone, argv)
+    assert argv[argv.index("--corpus") + 1] == "x", argv          # the lookup's corpus (ENG-229)
+    for kept in ("--served-model", "--max-len", "--cache-budget-gb", "--conductor", "--disk-cache"):
+        assert kept in argv, (kept, argv)
+    r, marks = _start_with_fake_engine("0", "")
+    argv = next(line for line in marks.splitlines() if line.startswith("engine ")).split()
+    i = argv.index("--drafter")
+    assert argv[i:i + 7] == ["--drafter", "lenrouter", "--len-fixed", "0", "--len-latch", "--dflash2-path",
+                             "greedy"], argv
+    j = argv.index("--tree")
+    assert argv[j:j + 15] == ["--tree", "--budget", "16", "--corpus", "x", "--dflash2-ckpt", "x",
+                              "--dflash2-ckpt16", "x", "--nvfp4", "x", "--fp8-head", "x",
+                              "--cache-budget-gb", "0"], argv
+    assert "--model" not in argv, argv
+
+
 def test_the_served_memory_limits_are_the_owners():
     """The owner's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
     env = dict(line.split("=", 1) for line in open(os.path.join(OPS, "serve.env")).read().splitlines()

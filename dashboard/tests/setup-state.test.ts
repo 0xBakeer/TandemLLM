@@ -1,13 +1,15 @@
 // VIS-78 (QA VIS-79): the wizard reducer, the dependency rules and the localStorage store.
 import { describe, expect, it } from 'vitest';
 import model from '../mock/setup/qwen3.8-27b.json';
+import flashNext from '../mock/setup/qwen3.8-flash-next.json';
 import type { SetupModel } from '../src/api/types';
 import { availability, dependentsOf, normaliseComponents, toggleComponent } from '../src/setup/deps';
 import { estimate } from '../src/setup/estimate';
 import { howToFix, overSentence, stepIssues, tokenBlocked } from '../src/setup/checks';
-import { capChat, clearSaved, defaults, emptyState, readSaved, restoreSelection, setupReducer, STORAGE_KEY, toSaved, writeSaved, type SetupAction, type WizardState } from '../src/setup/state';
+import { capChat, clearSaved, defaults, emptyState, readSaved, restoreSelection, setupReducer, STORAGE_KEY, toSaved, windowMax, writeSaved, type SetupAction, type WizardState } from '../src/setup/state';
 
 const M = model as unknown as SetupModel;
+const FN = flashNext as unknown as SetupModel;
 
 class MemStore implements Storage {
   data = new Map<string, string>();
@@ -97,6 +99,38 @@ describe('setupReducer', () => {
     s = run([{ type: 'parallel', key: 'window', value: 999_999 }], s);
     expect(s.selection!.window).toBe(262_144);
     expect(s.selection!.side_window).toBeLessThanOrEqual(262_144);
+  });
+  it("a profile's largest window caps the window, and a switch to it takes the window down (SRV-337)", () => {
+    // the registry's packs all reach 262,144 on the Spark today: a copy with a shorter one
+    const fn = JSON.parse(JSON.stringify(FN)) as SetupModel;
+    fn.profiles.find((p) => p.id === 'flashnext-4.05')!.max_window = 131_072;
+    expect(windowMax(fn, 'flashnext-3.05')).toBe(262_144);
+    expect(windowMax(fn, 'flashnext-4.05')).toBe(131_072);
+    expect(windowMax(fn, 'flashnext-6.05')).toBe(262_144);      // fits none: the estimate says so
+    const go = (actions: SetupAction[], st: WizardState = emptyState()) => actions.reduce((s, a) => setupReducer(s, a, fn), st);
+    let s = go([{ type: 'open', model: fn }]);
+    expect(s.selection!.profile).toBe('flashnext-3.05');
+    expect(s.selection!.window).toBe(262_144);
+    s = go([{ type: 'profile', id: 'flashnext-4.05' }], s);
+    expect(s.selection!.window).toBe(131_072);
+    expect(s.selection!.side_window).toBe(131_072);
+    expect(s.notice).toMatch(/131,072/);
+    s = go([{ type: 'parallel', key: 'window', value: 262_144 }], s);
+    expect(s.selection!.window).toBe(131_072);
+    expect(estimate(fn, s.selection!).fits).toBe(true);
+    // a saved window above the profile's largest falls back inside it
+    const r = restoreSelection(fn, { ...s.selection!, window: 262_144 });
+    expect(r.selection.window).toBe(131_072);
+    expect(r.notices.length).toBe(1);
+  });
+  it('Flash-Next: the recommended pack fits the Spark at 262,144 with the small models off; 6.05 fits none', () => {
+    const d = defaults(FN);
+    expect(d.profile).toBe('flashnext-3.05');
+    expect(d.slots).toBe(1);
+    expect(estimate(FN, d).fits).toBe(true);
+    const big = estimate(FN, { ...d, profile: 'flashnext-6.05' });
+    expect(big.fits).toBe(false);
+    expect(big.context_tokens_fit).toBe(0);
   });
   it('the side window follows the main window down', () => {
     const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'window', value: 65_536 }]);

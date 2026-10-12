@@ -424,6 +424,10 @@ textarea {
   background: var(--cobalt-wash);
   color: var(--ink);
 }
+.seg-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .seg-btn:focus-visible {
   box-shadow: inset 0 0 0 2px var(--cobalt-hi);
   border-radius: 0;

@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from engine import cache  # noqa: E402
-from engine.model import Qwen38Engine  # noqa: E402
+from engine.models.qwen3_5.adapter import Qwen38Engine  # noqa: E402  (the served class: its cold verbs)
 from test_forward_tree import FakeWeights, tiny_config  # noqa: E402
 
 DEV = "cpu"

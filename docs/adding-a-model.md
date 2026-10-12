@@ -1,6 +1,6 @@
 # Adding a model
 
-Today TandemLLM runs one model family: Qwen3.8, a hybrid of Gated DeltaNet and attention layers. This page lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
+TandemLLM serves one model family: Qwen3.8, a hybrid of Gated DeltaNet and attention layers. A second, Qwen3.8-Flash-Next (a mixture of experts), runs through the model layer below but is not served yet. This page lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
 
 ## The seams
 
@@ -78,6 +78,21 @@ A new model needs its own block drafter. DFlash2 drafters are trained against on
 
 The server renders prompts with the model's own chat template and reads the model's own tool-call and reasoning formats. For Qwen3.8 that means the `<think>` block, which the template opens in the prompt, and tool calls in the model's XML form (`server/toolcall.py`). A model with another format needs its own parser behind the same OpenAI output. `tests/fixtures/qwen38_chat_template.jinja` is the fixture the server tests render with.
 
+### The model layer: architecture registry and per-model state
+
+`engine/models/__init__.py` says which architecture a checkpoint is. Each entry names the checkpoint's `architectures` strings and `model_type`s, a config reader and an engine class by import path, so registering a model imports nothing. `architecture(raw_config)` returns the entry, or fails with a message that names the checkpoint's architecture and every registered one.
+
+| name | selected by | config | engine | server builder |
+|-|-|-|-|-|
+| `qwen3_5` | `Qwen3_5ForConditionalGeneration`, `qwen3_5_text` | `engine.config.load_config` | `engine.models.qwen3_5.adapter.Qwen38Engine` (engine/model.py's class with the adapter's cold verbs) | the server's own, `server/app.py` `_build_qwen3_5` |
+| `qwen4_exp` | `Qwen4ExpForConditionalGeneration`, `qwen4_exp_text` | `engine.models.flashnext.config.load_flashnext_config` | `engine.models.flashnext.engine.FlashNextEngine` | `engine.models.flashnext.serving.serve` |
+
+The server has one loader (`server/app.py` `_load`, SRV-341). An entry's `serve` names the function that builds the model for it, `serve(a, ctx) -> dict`: the engine in the server loop's interface, the tokenizer, the drafter, the snapshot path, the device, the tree mode and accept rule, and its own record for `/health` (`weights_info`); `ctx.keys(path, weights)` sets the tokenizer's and the weights' fingerprints, `ctx.mark(stage)` writes the load ledger, `ctx.log(line)` the log. The engine says what the server may ask of it beyond the loop's verbs in `caps` (`engine/models/adapter.py` `Capabilities`: the caches and the KV pool, side slots); the loader turns off, with a log line, what a model cannot hold yet. Its cold verbs are `cost()`, `manifest()`, `precapture(drafter)`, `settle()`, `discard_pending()`, `trim_pending(n)`; the walk of a verified block is `engine/methods/walk.py` for every model. A model registered this way starts and answers without an edit under `server/` (`tests/test_load_shared.py` registers a third one on CPU).
+
+`engine/models/state.py` is the cache state interface (`ModelState`): the recurrent state of a sequence as named sections, with `nbytes`, `clone`, `restore` and a signature that refuses a restore across shapes. The 27B's state is `Qwen38State` (its `S` and `conv`, the same tensors, so a restore lands in the buffers its graphs captured); Flash-Next's is `FNModelState` (GDN `S` and `conv`, the PLE convolution and token context). A model without recurrent state has no sections. The caches still read the 27B's tensors directly; ENG-157 moves them onto this interface.
+
+A model's own code lives in its package under `engine/models/`. The disk tier's fingerprint v2 (`engine/disk_cache.py`) leaves `engine/models/` and `engine/methods/` out, together with knobs owned under `engine/models/` and `tools/fn_`, so adding a model sweeps none of the 27B's saved sessions (`tests/test_fn_fingerprint.py`). Fingerprint v3 (`engine/methods/manifest.py`) hashes what the adapter's `manifest()` lists: the model's files that compute stored rows, the knob registry, its own tile tables; the `tools/` kernels they import and the tables their knobs name follow. A new model writes its `manifest()` (Flash-Next: `engine/models/flashnext/serving.py`), and its fingerprint then moves with its kernels and tables and with nothing else (`tests/test_fp_v3.py`).
+
 ## The tests a new model must pass
 
 In this order, each on the new model:
@@ -91,6 +106,7 @@ In this order, each on the new model:
 ## What is still specific to Qwen3.8
 
 - `engine/model.py` implements this family's forward: the Gated DeltaNet layer with its gated norm, attention with a gated output and partial rotary, and the dense MLP. A new family needs its own layer code behind the same verify, commit and cache interfaces. A model with a mixture of experts also needs expert routing inside the verify.
+- The second family, Qwen3.8-Flash-Next (`engine/models/flashnext/`, turboderp's EXL3 packs), is served through the same server and request loop with its MTP drafter and the same caches ([server.md](server.md#qwen38-flash-next-srv-87), [caches.md](caches.md#what-a-state-is)); the KV pool, images and side slots are not wired to it yet (ENG-241, VIS-97).
 - The recurrent-layer kernels assume Gated DeltaNet's state shape (heads of 128 by 128).
 - Tile tables and router prices are measured for this model's shapes on the GB10. A new model or a new board needs its own sweep (`tools/fp8_probe.py --sweep`, `tools/nvfp4_skinny.py`) and its own price curve.
 - Some modules read their switches into globals at import. Two engines with different settings cannot share one process yet.
