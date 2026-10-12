@@ -39,7 +39,7 @@ The agreement gate, \code{tools/verify_spec.py}\index{tools/verifyspec.py@\textt
   \legend{identical over all 256 tokens, differ only after the answer ended, take the other token at a near tie in the answer}
 \end{axis}
 \end{tikzpicture}
-\caption[Agreement with plain greedy decoding]{StairCut in its served configuration against plain greedy decoding on 30 prompts (held-out prose, code and chat, 256 new tokens). 17 outputs are identical to the end of the answer. The 13 that diverge inside the answer do so at a gap of 0.04 to 0.76 ulp; no output differs inside the answer at a larger gap. \measured: the StairCut paper, published NVFP4 weights.}\label{fig:agreement}
+\caption[Agreement with plain greedy decoding]{StairCut in its served configuration against plain greedy decoding on 30 prompts of held-out prose, code or chat (256 new tokens). 17 outputs are identical to the end of the answer. The 13 that diverge inside the answer do so at a gap of 0.04 to 0.76 ulp; no output differs inside the answer at a larger gap. \measured: the StairCut paper, published NVFP4 weights.}\label{fig:agreement}
 \end{figure}
 
 The paper measured how often this happens (Figure~\ref{fig:agreement}). Of 30 prompts, 17 outputs are identical to plain greedy decoding to the end of the answer: 13 over all 256 tokens, and 4 that differ only after the answer ended (largest gap 1.46 ulp). The other 13 follow plain decoding up to a near tie inside the answer, with a gap of 0.04 to 0.76 ulp, take the other token, and continue from there; in one of them the token taken is the end-of-answer token, so that answer ends early. The one-ulp rule names the condition under which the two decoders can differ. It does not show that the difference is harmless.
@@ -63,7 +63,7 @@ alone, and with 10 side-lane guests & token 61 & token 573 \\
 \end{tabularx}
 \end{table}
 
-So the checks below hold arithmetic to bit equality, and text only where the shapes are fixed. A text check on the served engine (\code{tools/api_text_check.py}, \code{tools/lane_check.py}) can show a difference with no bug behind it. Such a difference is judged by the near-tie rule, as \code{tools/verify_spec.py} judges one.
+The checks below therefore hold arithmetic to bit equality, and text only where the shapes are fixed. A text check on the served engine (\code{tools/api_text_check.py}, \code{tools/lane_check.py}) can show a difference with no bug behind it. Such a difference is judged by the near-tie rule, as \code{tools/verify_spec.py} judges one.
 
 \section{Release identity}\index{release identity}
 
@@ -95,6 +95,10 @@ Some features change the text because the client or the operator asked for it. T
 
 Two relaxed accept rules exist (\code{--relax-tau}, \code{--relax-rank}) that accept a drafted token when it is close to the target's choice. They break the promise, exist only for measurement, and are off in every profile; the server prints a warning when either is set.
 
+\section{Flash-Next: no near-tie exception}\index{Flash-Next!exactness}
+
+Qwen3.8-Flash-Next is held to a stricter promise. Its verify kernels give every row the decode step's bits, whatever the number of rows, so a greedy speculative run equals plain greedy decoding token for token, with no near-tie exception, and a seeded sampled request draws what plain sampled decoding draws. The load-time self-check proves the row property on the device before speculation turns on. Two places are held to less. A request resumed from an end anchor follows the 27B's greedy gate, because the decode kernels wrote that state and the prefill kernels round differently. A think budget at low effort closes at a block boundary, so a speculative and a plain run close the reasoning a few tokens apart. Section~\ref{sec:fn-exact} has the checks.
+
 \section{The checks}
 
 \begin{table}[H]
@@ -110,7 +114,7 @@ Two relaxed accept rules exist (\code{--relax-tau}, \code{--relax-rank}) that ac
 \code{tools/cache_gate.py} & warm and cold runs agree: bit-identical on the chunk grid, the same tokens for a session \\
 \code{tests/test_forward_tree.py}, \code{test_tree.py} & tree verify equals chain verify on a tiny model, on the CPU \\
 \code{tests/test_cache.py}, \code{test_resident.py}, \code{test_disk_cache.py} & restores are bit-exact, the disk tier's through a reopened tier and after a failed restore \\
-\code{tests/test_end_anchor.py} & a resume at the end of the last generation writes the same greedy tokens as one at the prompt's line \\
+\code{tests/test_end_anchor.py} & resuming at the end of the last generation writes the same greedy tokens as one at the prompt's line \\
 \code{tests/test_side_lane.py} & the engine is bit for bit an uninterrupted run's after a guest \\
 \code{tools/lane_check.py} & a long request's tokens with guests against runs alone: the same up to the first fork, and the fork a near tie (the runs took each other's runner-up, top-2 gap within 0.125~nats, printed) \\
 \code{tests/test_sample.py}, \code{tools/sampled_dist.py} & sampled output follows the target's distribution \\

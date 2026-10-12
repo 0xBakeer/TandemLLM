@@ -34,6 +34,15 @@ To continue a sequence at token $L$ the engine needs three things:
 
 The recurrent part is the hard one. A KV row depends only on the tokens up to it, so rows written for an earlier request stay valid. The recurrent state has absorbed every token and cannot be rewound, so a cache must have taken a copy at $L$.
 
+The caches know no model. Every tier reads a sequence through the engine's adapter (\code{eng.cache_state()}, \code{engine/models/state.py}): its recurrent \emph{sections} by name, copied whole, and its position-indexed \emph{views} with their token axis, sliced to $L$. For the 27B the sections are \code{gdn.S} and \code{gdn.conv} and the views K and V. Flash-Next\index{Flash-Next!state} has more parts, and the tiers carry all of them with no code of their own for it:
+
+\begin{itemize}
+\item sections: 36 GDN states and convolution tails, the n-gram embedding's convolution and token context, and \code{mtp.h_last}, the last committed row's streams that its draft layer reads next, 115,662,864 bytes (110.3~MiB) whatever $L$ is;
+\item views: K, V and the sparse-attention indexer's keys of its 12 attention layers, and the draft layer's own, 29,952 bytes a token.
+\end{itemize}
+
+Flash-Next's grid is 4,096 tokens, its prefill chunk, so a resumed prefill runs the chunks a cold one runs and restores from grid anchors, the state store, the disk tier and the spill equal a cold prefill bit for bit. A disk anchor of format 2 names its sections; the 27B's older files of format 1 are read as \code{gdn.S} and \code{gdn.conv}. Section~\ref{sec:fn-caches} has the measured restores.
+
 \section{The tiers}\index{cache tiers}
 
 Figure~\ref{fig:cache-tiers} shows the caches in the order the engine looks them up before a prefill. A deeper tier is taken only when it starts later than every tier above it, and the NVMe tiers only when their read costs less than the prefill it saves.

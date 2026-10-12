@@ -179,6 +179,18 @@ Greedy requests (temperature 0) take the path above. A sampled request stays exa
 
 The model thinks inside \code{<think>} tags. A reasoning budget closes the block when it is spent: the engine appends the vendor's closing sentence and \code{</think>}, runs those tokens through the model at their real positions, and the model answers from there. This changes the answer, by design. The budget comes from the server's \code{--think-budget}, from the client in any of the shapes clients send (Section~\ref{sec:client-budgets}), or from the conductor's effort level. With the conductor on, the closing phrase is hidden from the client, which receives \code{</think>} and the answer; the conductor's loop guards close a reasoning block that goes in circles (Chapter~\ref{ch:monitor}).
 
+\section{The same method on Flash-Next}\label{sec:spec-flashnext}\index{MTP drafter}\index{StairCut!Flash-Next}
+
+Flash-Next drafts with the multi-token-prediction layer its checkpoint ships, and its StairCut is written once for every model (\code{engine/methods/staircut.py}). Each round the MTP head drafts a chain of 4 tokens with its top two a depth, from one captured graph. The cut keeps the spine's prefix and, with siblings, the second choices that maximise
+\[
+\frac{1 + \sum_{\text{kept}} q}{V(\text{rows}) + \text{draft}},
+\]
+where $q$ comes from \code{ProbDeciles}, the head's probability mapped to the acceptance measured per tenth of probability and learned from every verified round. With \code{QWEN38_FN_LOOKUP=1} the lookup's best continuation joins the same tree: where its tokens match the head's chain the two share nodes, where they differ it hangs under the last shared node, and the cut admits nodes best-first up to 32 rows. A round still runs one verify, and on a copy the lookup lifted the rate from 102.3 to 132.9~tok/s (Table~\ref{tab:fn-lookup}).
+
+$V(\text{rows})$ comes from \code{PriceModel}: a prior from a price file in the format of the 27B's stair tables, \code{ops/prices/<model>/<profile>.<device>.json}, followed online and never cheaper for more rows. The device is \code{dgx-spark} for the GB10 (\code{engine/methods/device.py}); a profile without a file for its device learns every price from the first rounds. On this model the verify is a ramp, not a staircase: every row can route to other experts, and at about 1k of context 2 rows cost 27.8~ms and 16 rows 68.8~ms (\measured, learned online).
+
+The cut also decides whether to draft at all. Prices, the plain step's cost and a drafted round's cost a token are kept per context class, by wall time; a class whose drafts cost more a token than its plain steps takes the plain step, with probe rounds at a doubling interval, and a turn drafts only when the saving pays for the prompt rows the head has not read yet. Section~\ref{sec:fn-plain} has the rule and the runs that set it. A verified row on Flash-Next is the decode step's row bit for bit, so none of this moves the text.
+
 \section{Knobs}
 
 \begin{table}[H]
@@ -199,6 +211,9 @@ The model thinks inside \code{<think>} tags. A reasoning budget closes the block
 \code{--sampled-tree det|mixed}, \code{QWEN38_DRAFT_TEMP} & sampled requests on the tree, and the drafter's temperature \\
 \code{--learn-cost}, \code{--no-learn-cost} & learn verify and draft costs online, or keep the price table \\
 \code{--think-budget}, \code{--reasoning-effort} & the server's reasoning defaults \\
+\code{--drafter mtp}, \code{QWEN38_FN_DRAFT_HOT} & Flash-Next: its MTP layer as the drafter, through a head of the 32,768 most frequent ids \\
+\code{QWEN38_FN_LOOKUP} & Flash-Next: the lookup in the MTP round's tree (on in its profiles) \\
+\code{ops/prices/<model>/<profile>.<device>.json} & the shared StairCut's price file \\
 \bottomrule
 \end{tabularx}
 \end{table}

@@ -4,20 +4,24 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 
 | page | what it covers |
 |-|-|
-| [architecture.md](architecture.md) | the model, the byte budget, the decode loop, a map of the code |
-| [quantisation.md](quantisation.md) | the checkpoint's FP8, NVFP4, the clip search, GPTQ from the BF16 release, the quality gate, the three profiles |
+| [architecture.md](architecture.md) | the 27B and Flash-Next, the byte budget, the decode loop, the layers every model plugs into, a map of the code |
+| [quantisation.md](quantisation.md) | the checkpoint's FP8, NVFP4, the clip search, GPTQ from the BF16 release, the quality gate, the three profiles, Flash-Next's EXL3 packs |
 | [kernels.md](kernels.md) | row invariance, the 4-bit and 8-bit matrix products, the recurrent-layer kernels, graphs |
-| [speculative-decoding.md](speculative-decoding.md) | the block drafter, the lookup drafter, StairCut, the older length router, tree verify through recurrent layers |
+| [speculative-decoding.md](speculative-decoding.md) | the block drafter, the lookup drafter, StairCut, the older length router, tree verify through recurrent layers, Flash-Next's MTP drafter |
 | [exactness.md](exactness.md) | the promise about the text, the near-tie exception, and the checks behind it |
 | [caches.md](caches.md) | the resident prefix, the state store, the persistent suffix store |
 | [server.md](server.md) | the OpenAI API, tool calls, structured outputs, streaming, admission |
-| [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text |
+| [parallel-requests.md](parallel-requests.md) | serving several requests at once (`--parallel N`): switching it on, memory, speed, the text, Flash-Next |
 | [dashboard.md](dashboard.md) | the Live activity view, the other views, the API contract |
 | [packages.md](packages.md) | the packages the conductor attaches by class: their shape, the first packages, how each is measured |
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
-| [adding-a-model.md](adding-a-model.md) | the seams a new model plugs into, and the tests it must pass |
-| [roadmap.md](roadmap.md) | mixture of experts, parallel requests, other GPUs |
+| [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |
+| [setup.md](setup.md) | the dashboard's setup guide, the model registry behind it, and Wren |
+| [memory.md](memory.md) | memory notes: what the model keeps about the user and the work |
+| [shadow-reader.md](shadow-reader.md) | the small model that follows each session and answers questions about it |
+| [proxy.md](proxy.md) | the dashboard as a proxy in front of other engines and cloud APIs |
+| [roadmap.md](roadmap.md) | what Flash-Next still lacks, parallel requests, other GPUs |
 
 Two more references live next to the code. [server/METRICS.md](../server/METRICS.md) lists every Prometheus metric, and [contract/dashboard-v1/](contract/dashboard-v1/README.md) holds the dashboard API's schemas.
 

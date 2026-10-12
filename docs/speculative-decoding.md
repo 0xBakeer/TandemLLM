@@ -71,7 +71,7 @@ A node's `q` is its path probability from the drafter's lattice (read at tempera
 
 What the router learns online (the draft cost per context class, the calibration, the copy counts) belongs to the router object. The server keeps one router for its whole life, so what one request teaches reaches the next; `router.reset()` clears the per-text evidence (the arms' acceptance, the calibration) and keeps the costs and the copy counts. `tools/forced_bench.py` also keeps one router per configuration for a whole run, while `tools/verify_spec.py` builds a new one for every prompt.
 
-The router releases the narrow drafter at the first round. With the node count calculated, the wide drafter's lattice cut to 16 nodes is a bush near the root on fresh text and a long line on copies, and the narrow drafter has nothing left to add. `tools/router_replay.py` replays these policies exactly on recorded lattices of both drafters, and `tools/forced_bench.py` measures them on the box on one reference text, so that different verify shapes, which move bf16 ties, compare on the same text.
+The router releases the narrow drafter at the first round. With the node count calculated, the wide drafter's lattice cut to 16 nodes is a bush near the root on fresh text and a long line on copies, and the narrow drafter has nothing left to add. `tools/router_replay.py` replays these policies exactly on recorded lattices of both drafters, and `tools/forced_bench.py` measures them on the box on one reference text, so that different verify shapes, which move BF16 ties, compare on the same text.
 
 On the benchmark row with the published NVFP4 set, StairCut reaches 49.89 tok/s against 47.13 for the fixed block 8 and 44.80 for the fixed block 16. On the teacher-forced bench of 25 workloads it averages 90.45 tok/s against 59.31 and 81.95 ([measurement.md](measurement.md)).
 
@@ -79,15 +79,45 @@ On the benchmark row with the published NVFP4 set, StairCut reaches 49.89 tok/s 
 
 Flash-Next drafts with its own MTP layer and the shared StairCut (`engine/methods/staircut.py`, ENG-245): each round the MTP head drafts a chain of 4 with its top-2 tokens a depth (`engine/models/flashnext/mtp.py`, one captured graph), and the cut keeps the chain's prefix (and, with `siblings`, second-choice leaves) that maximises (1 + sum of q) / (V(rows) + draft). q comes from `ProbDeciles`: the head's probability mapped to the measured acceptance per tenth of probability, starting from the probability itself and learned from every verified round. The drafter that drives it in the server loop is written once for any model's MTP head (`engine/methods/mtp_drafter.py`).
 
-With `QWEN38_FN_LOOKUP=1` (the Flash-Next profiles set it, ENG-229) the lookup joins the same round. It reads the request's own text, `--corpus` and the server's suffix store, the same stores as the 27B's lookup, because the tokenizer is the same. Its best continuation enters the cut as one more branch. While its tokens match the head's chain the two share nodes, and a shared node's q is 1 minus the chance that both are wrong. Where they differ, the lookup's chain hangs under the last shared node; where the head's chain ends, it runs on. The cut admits nodes best-first by q, as long as (1 + sum of q) / (V(rows) + draft) rises, up to 32 rows. There is still one verify a round, and the text does not change. A/B on 3.05 (2026-10-12, one greedy request of 512 tokens a class, every text equal to plain decode): edit 106 → 132 tok/s (4.6 → 10.4 tokens a block), copy 102 → 133 (4.4 → 11.9), prose 49 → 51, chat 62 → 64, code 85 → 83. The gain on copies is smaller than the gain in tokens a block, because a verify of 16 rows costs about 69 ms against 28 ms for 2 rows on this MoE.
+With `QWEN38_FN_LOOKUP=1` (the Flash-Next profiles set it, ENG-229) the lookup joins the same round. It reads the request's own text, `--corpus` and the server's suffix store, the same stores as the 27B's lookup, because the tokenizer is the same. Its best continuation enters the cut as one more branch. While its tokens match the head's chain the two share nodes, and a shared node's q is 1 minus the chance that both are wrong. Where they differ, the lookup's chain hangs under the last shared node; where the head's chain ends, it runs on. The cut admits nodes best-first by q, as long as (1 + sum of q) / (V(rows) + draft) rises, up to 32 rows. A round still runs one verify, and the text does not change.
 
-V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/<profile>.<device>.json` -- Flash-Next 3.05 on the DGX Spark is `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json` -- in the format of the 27B's stair tables:
+| class (one greedy request of up to 512 tokens) | MTP alone, tok/s | with the lookup, tok/s | tokens a block, alone and with the lookup |
+|-|-|-|-|
+| edit | 106 | 132 | 4.6 and 10.4 |
+| copy | 102 | 133 | 4.4 and 11.9 |
+| prose | 49 | 51 | 2.2 and 2.2 |
+| chat | 62 | 64 | 2.5 and 2.5 |
+| code | 85 | 83 | 3.4 and 3.5 |
+
+That A/B ran on 3.05 on 2026-10-12, and every text equalled plain decode. The gain on copies is smaller than the gain in tokens a block, because a verify of 16 rows costs about 69 ms against 28 ms for 2 rows on this MoE.
+
+V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/<profile>.<device>.json` (Flash-Next 3.05 on the DGX Spark: `ops/prices/qwen3.8-flash-next/flashnext-3.05.dgx-spark.json`), in the format of the 27B's stair tables:
 
     {"<context class>": {"<kind>": {"<rows>": ms, ...}, ...}, ..., "step_ms": 3.7, "measured": "how and when"}
 
-`kind` is `chain` or `tree`; the context class is the model's (the 27B's tables key it by context length, Flash-Next's one class is 0). A class not in the file takes the nearest lower one, rows between two measured counts interpolate, rows past the last add `step_ms` a row (else the last two counts' slope). The model follows the live prices online (EMA 0.1 a count, the unmeasured counts shifted by the learned offset), and a price never falls with more rows. A profile without a file for its device logs the missing path once and starts every count at the same 1 ms, so the cut drafts to the full depth until the first rounds price it; the text does not change either way. The device is `dgx-spark` for the GB10, else the GPU's name in lower case (`engine/methods/device.py`).
+`kind` is `chain` or `tree`; the context class is the model's. The 27B's tables key it by context length. Flash-Next's `price_class` is 0 while its sparse attention is still dense (up to 2,051 tokens), and above that the next of 4,096 × 2^k and 6,144 × 2^k at or above the context, up to 262,144. Its file also holds, per class, the plain step's cost (`plain`), a drafted round's cost a token (`spec`) and the draft head's cost a backlog row (`prime`). A class not in the file takes the nearest lower one, rows between two measured counts interpolate, rows past the last add `step_ms` a row (else the last two counts' slope). The model follows the live prices online (EMA 0.1 a count, the unmeasured counts shifted by the learned offset), and a price never falls with more rows. A profile without a file for its device logs the missing path once and starts every count at the same 1 ms, so the cut drafts to the full depth until the first rounds price it; the text does not change either way. The device is `dgx-spark` for the GB10, else the GPU's name in lower case (`engine/methods/device.py`).
 
-The 3.05 file is provisional (ENG-155). Rows 2 to 16 are the prices the cut learned online on the ENG-229 A/B server (about 1k of context, 600 rounds): 27.8 ms for 2 rows, 38.6 for 5, 52.2 for 10, 68.8 for 16. Row 1 is the bench of 2026-10-11. No sweep at 8k and 32k has been run, so a long context starts from these and moves them by the learned offset.
+The 3.05 file is provisional (ENG-155). In class 0, rows 2 to 16 are the prices the cut learned online on the ENG-229 A/B server (about 1k of context, 600 rounds): 27.8 ms for 2 rows, 38.6 for 5, 52.2 for 10, 68.8 for 16; row 1 is the bench of 2026-10-11. Classes 32,768, 131,072 and 262,144 come from single requests at 32,000, 140,000 and 260,800 tokens. No sweep has run; the cut follows the live prices either way.
+
+### Never slower than the plain step
+
+At long context a drafted round can cost more a token than the plain step. On the first runs at 260,800 tokens the drafter decoded 22.5 tok/s (the second request of a 3.05 run, its prompt from the caches) and plain decoding 36.6 (one request on a server without a drafter). StairCut on Flash-Next therefore keeps, per context class, the plain step's cost and a drafted round's cost a token, both by wall time and both starting from the price file:
+
+- `skip`: a class whose drafted rounds cost more a token than its plain steps takes the plain step, and drafts one probe round at an interval that doubles while drafting keeps losing (16 rounds, up to 256).
+- `turn`: a turn drafts only when what speculation saves over the expected answer pays for the draft head's backlog, the prompt rows it has not read yet (0.28 ms a row at 260,800 tokens). A turn that does not draft takes the plain step throughout and never reads the backlog.
+- What a class learned of its drafted rounds ages back to the file's prior while its turns take the plain step, so one slow request does not keep a class plain for good.
+- While the server is idle (one second after the last request), it captures the verify, commit and draft graphs the current context class lacks, 25 to 30 graphs in about 4.3 s a class. A drafted turn is charged for graphs its class still lacks. Before this, the first drafted request in a new class paid 3.4 to 5.1 s of captures inside its answer.
+
+Measured on 3.05 on 2026-10-12: one fresh server, two rounds at each length of one greedy request and the same request again (its prompt then from the caches), and plain decode from a `--drafter none` server. Each cell is the first request and its repeat:
+
+| context | speculation, round 2, tok/s | plain, tok/s |
+|-|-|-|
+| 1k | 56.6 and 57.3 | 41.0 and 45.4 |
+| 32k | 34.9 and 55.6 | 33.0 and 42.5 |
+| 140k | 42.1 and 52.4 | 33.9 and 41.4 |
+| 260,800 | 41.0 and 41.0 (plain turns) | 39.6 and 40.5 |
+
+All 16 texts equalled plain decode. With the idle captures, the first request at a new length took the plain step and the next one drafted: 48.2 against 42.5 tok/s at 32k and 46.0 against 41.4 at 140k, every answer equal to plain decode.
 
 ## The length router (StairCut off)
 

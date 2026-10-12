@@ -2,7 +2,9 @@
 
 Four-bit weights take a decode step from 26.93 GB to 15.01 GB, and on this board bytes are time. This page covers the formats the engine reads, the quantiser that writes the 4-bit copies, the gate that decides whether they ship, and the three profiles built from them.
 
-The served weights are the published set, [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4): every projection in NVFP4, quantised once from Qwen's BF16 release with GPTQ, plus an e4m3 output head ([From the BF16 release](#from-the-bf16-release)). Against the BF16 model its held-out loss rises by +0.0221 nats on prose and +0.0426 on code, inside the gate's bar of +0.05. The sections below start with the first weight sets, quantised from the FP8 release with the clip search alone, because the published set uses the same format and the same search.
+The served weights are the published set, [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4): every projection in NVFP4, quantised once from Qwen's BF16 release with GPTQ, plus an e4m3 output head ([From the BF16 release](quantisation.md#from-the-bf16-release)). Against the BF16 model its held-out loss rises by +0.0221 nats on prose and +0.0426 on code, inside the gate's bar of +0.05. The sections below start with the first weight sets, quantised from the FP8 release with the clip search alone, because the published set uses the same format and the same search.
+
+The second model, Qwen3.8-Flash-Next, is not quantised here at all. It runs from turboderp's published EXL3 packs, read as they are; [the last section](quantisation.md#flash-next-on-turboderps-exl3-packs) covers them.
 
 ## What the checkpoint stores
 
@@ -66,7 +68,7 @@ Code costs about three times what prose costs in every row. One published NVFP4 
 
 The set this section builds is the one the engine serves, published as [`0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4`](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) with its calibration manifest and quality reports.
 
-The weight set above came from Qwen's FP8 release, so every weight in it was rounded twice: to e4m3 on a 128 by 128 grid by Qwen, then to NVFP4 by us. `tools/quant_nvfp4.py` also reads the BF16 release `Qwen/Qwen3.8-27B`, whose projections are plain bf16 matrices in 18 shards. `Source` finds each projection through the checkpoint's index in either layout and skips the vision tower and the MTP layer.
+The weight set above came from Qwen's FP8 release, so every weight in it was rounded twice: to e4m3 on a 128 by 128 grid by Qwen, then to NVFP4 by us. `tools/quant_nvfp4.py` also reads the BF16 release `Qwen/Qwen3.8-27B`, whose projections are plain BF16 matrices in 18 shards. `Source` finds each projection through the checkpoint's index in either layout and skips the vision tower and the MTP layer.
 
 `quant_nvfp4.py build` loads the BF16 model once (about 50 GB) and does everything in that process:
 
@@ -91,7 +93,7 @@ For the published set (GPTQ, from BF16, with the e4m3 head), the paper reports, 
 
 ## Mixing NVFP4 and FP8
 
-`tools/quant_sensitivity.py measure` swaps one piece of one layer to NVFP4 at a time and measures how far the next-token distribution moves (KL over the reference's top 256 tokens, on 8,192 held-out tokens). A piece is a whole fusion group: the MLP's gate and up projections, its down projection, the GDN input projections, the GDN output projection, the attention q, k and v, the attention output. Per byte kept, the GDN and attention output projections cost the most, and layers 35 to 41 are the most sensitive. `quant_sensitivity.py mix --keep-gb N` keeps the pieces with the highest cost per byte in FP8 until N GB a step are spent and writes the rest into one file.
+`tools/quant_sensitivity.py measure` swaps one piece of one layer to NVFP4 at a time and measures how far the next-token distribution moves (KL over the reference's top 256 tokens, on 8,192 held-out tokens). A piece is a whole fusion group: the MLP's gate and up projections, its down projection, the GDN input projections, the GDN output projection, the attention's input projections (`q_proj`, `k_proj`, `v_proj`), the attention output. Per byte kept, the GDN and attention output projections cost the most, and layers 35 to 41 are the most sensitive. `quant_sensitivity.py mix --keep-gb N` keeps the pieces with the highest cost per byte in FP8 until N GB a step are spent and writes the rest into one file.
 
 | weights | prose | code | more code | more prose | GB a step |
 |-|-|-|-|-|-|
@@ -134,6 +136,8 @@ An FP8 profile reads nothing but the vendor's files, so its quality is the check
 
 Profiles and bytes interact with speculation. At one token a step, the full NVFP4 set is worth 14 % over NVFP4 MLPs alone. On a 16-node tree it is worth 0.2 %, because a round that commits 13 tokens has already spread its weight read over 13 tokens. Bytes and accepted tokens substitute for each other.
 
+The 27B also has weight profiles in EXL3 (`ops/profiles/exl3-<bpw>.env`, switched with `ops/use-profile.sh`, [operations.md](operations.md)). This page does not cover how those files were made.
+
 ## Knobs
 
 | knob | what |
@@ -142,7 +146,7 @@ Profiles and bytes interact with speculation. At one token a step, the full NVFP
 | `--fp8-head FILE`, `--fp8-head build` or `QWEN38_FP8_HEAD` | the e4m3 head; empty means the checkpoint's BF16 head |
 | `tools/quant_nvfp4.py quant --mode rtn\|clip --targets --stats` | the quantiser |
 | `tools/quant_head.py build --ratios` | the per-row scale search for the head |
-| `tools/quant_nvfp4.py build --model <BF16> --corpus --methods clip,gptq --h-budget-gb` | statistics, clip and GPTQ from one load |
+| `tools/quant_nvfp4.py build --model <BF16> --corpus --methods clip,gptq --h-budget-gb` | the statistics and both quantisers (clip and GPTQ) from one load |
 | `tools/calib_corpus.py --out DIR --eval-chars` | the calibration, sensitivity and wide-gate texts |
 | `tools/quant_sensitivity.py measure` and `mix --keep-gb` | the per-piece costs and the FP8/NVFP4 mix file |
 | `tools/quality_gate.py --plan plan.json --corpus name=path` | weight sets against a reference checkpoint, on extra texts |
@@ -150,3 +154,78 @@ Profiles and bytes interact with speculation. At one token a step, the full NVFP
 ## Limits
 
 The gate files are one held-out file per domain, 2,048 tokens each; the wider texts add 8k to 12k tokens per domain. No task benchmark ran against the quantised engine, so this page makes no claim about task accuracy. The clip search assumes that input channels are uncorrelated, which is a first-order model.
+
+## Flash-Next on turboderp's EXL3 packs
+
+Qwen3.8-Flash-Next comes in five sizes on Hugging Face, `turboderp/Qwen3.8-Flash-Next-exl3`, one branch each. The engine reads those packs as they are. It runs no quantiser of its own on them and adds no format. A pack is lossy against Qwen's BF16 release by design; speculation is still lossless against the pack that is served ([exactness.md](exactness.md)).
+
+### The five packs
+
+The branch name says what is inside: `3.05bpw_h5_ng5` is 3.05 bits a weight on average, the output head at 5 bits, and the n-gram table at 5 bits a value. The figures below are the registry's (`models/qwen3.8-flash-next/model.yaml`). The weights are the GiB the engine holds on the device, the draft layer and the int8 mixers included: measured for 3.05 at load, and estimated from the file sizes for the other four.
+
+| profile | branch | disk, with the table | weights on the device | n-gram table | largest window on one DGX Spark |
+|-|-|-|-|-|-|
+| `flashnext-2.05` | `2.05bpw_h4_ng4` | 61.5 GB | 32.83 GiB (estimate) | 24.44 GiB, warm | 262,144 |
+| `flashnext-3.05` (recommended) | `3.05bpw_h5_ng5` | 85.1 GB | 47.63 GiB (measured) | 30.4 GiB, cold | 262,144 |
+| `flashnext-4.05` | `4.05bpw_h6_ng6` | 106.1 GB | 62.45 GiB (estimate) | 36.36 GiB, cold | 212,992 |
+| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | 77.14 GiB (estimate) | 36.36 GiB, cold | does not load yet |
+| `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | 91.85 GiB (estimate) | 36.36 GiB, cold | none: it does not fit |
+
+The windows come from the Setup Guide's estimate ([setup.md](setup.md)), calibrated on one 260,800-token request each on 2.05, 3.05 and 4.05 (2026-10-12). It predicts the lowest MemAvailable of those three runs within 0.7 GiB. 2.05 and 3.05 hold the model's full 262,144 tokens. 4.05 ran a 260,800-token request with MemAvailable never under 17.8 GiB on a box whose other programs took 4.6 GiB; under the Setup Guide's frame of 10 GiB for the rest of the system, its window comes out at 212,992.
+
+5.05 does not load on this engine yet. Its routed experts use 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8 (`tools/fn_kernels.py` `MoEBank` refuses the 7). 6.05 needs about 92 GiB for its weights, which leaves too little under the 15 GiB floor at any window.
+
+The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha256), so `ops/fetch_weights.py` hard-links it between packs instead of downloading 39 GB again ([operations.md](operations.md#two-models-the-27b-and-flash-next)).
+
+### What a pack holds, and how the engine reads it
+
+`engine/models/flashnext/pack.py` (`PackIndex`) reads every shard header and puts each tensor in one kind:
+
+| kind | what | how the engine holds it |
+|-|-|-|
+| `expert` | the routed experts' gate, up and down projections, 98 % of the bytes | EXL3, one image a layer, through the MoE kernels |
+| `exl3` | every other coded projection: GDN, attention, the sparse-attention indexer, the shared expert, the MTP layer's projections, the head | EXL3 |
+| `mixer` | the hyper-connection mixers' projections | fp16 in the pack, int8 rows with an fp32 scale a row on the device |
+| `plain` | norms, the router, `in_proj_a` and `in_proj_b`, the n-gram projections, conv weights, the embedding | as stored |
+| `table` | the n-gram table, its own file | never on the device; read a row at a time |
+| `vision` | the vision tower | not loaded |
+
+An EXL3 projection is four tensors. `X.trellis` (int16) holds the codes at K bits a weight, and K is read from each tensor's own shape, so a pack that mixes K inside a layer is described as it is. `X.suh` and `X.svh` (fp16) scale and sign the input and output sides, which are rotated, and `X.mul1` is the codebook's multiplier. On the 3.05 pack the header audit counted 303,121 tensors: every routed expert at K 3, the dense projections and the head at K 5, except the sparse-attention indexer's projection at K 3 and the MTP layer's projections at K 3 to 5. By those headers a plain decode token reads about 4.23 GB in all at 1k of context, with the mixers as int8 (`PackIndex.decode_bytes`).
+
+`tools/fn_exl3_xcheck.py` holds our reading against exllamav3's own on the 3.05 pack. The trellis decode is equal bit for bit on 16 tensors (experts in layers 0, 11 and 47, GDN, attention, the indexer, a shared expert, a slice of the head). The dequantised weight agrees within 0.36 % of the largest weight, which is our BF16 rounding of the fp32 rotations. 4,096 n-gram rows are equal bit for bit.
+
+### The mixers as int8
+
+The pack stores the mixers in fp16, and every token reads them. The engine keeps each row as int8 with one fp32 scale, so a weight is off by at most the row's largest weight over 254, plus fp32 rounding. `QWEN38_FN_MIX=fp16` keeps the pack's values instead.
+
+`tools/fn_mix_quality.py` measures what that costs against the pack's fp16 mixers, on the same kernels. On 3.05 with 8,192 tokens of prose, int8 gave a KL of 0.047, beside an arithmetic noise of 0.025 between the reference forward and the kernels. Int4 rows gave 0.38 (0.35 in groups of 128) and changed the continuation at its first token, so the mixers stay int8. The code prompt of the same run turned the other way: int8 gave 0.267 (the top token agreed at 90.9 % of positions) against a noise of 0.0038, and int4 in groups of 32 gave 0.040. Nobody has looked into that row yet, and it needs a second run before it decides anything.
+
+### The n-gram table
+
+For every position the model hashes the token and the one or two before it into 16 row indices (8 hash heads for the bigram, 8 for the trigram), reads those 16 rows of 160 values from one table of about 320 million rows, and joins them into a 2,560-wide feature. The table is coded too: each row is a ring of trellis codes at K bits a value (`ng4` to `ng6`), with one fp16 scale a row and one bias vector a hash head (`engine/models/flashnext/ple.py`).
+
+The table is 32.6 GB in the 3.05 pack, and it never sits in device memory. The engine reads the packed rows a step needs and decodes them on the device. Where the rows come from is the profile's table policy (`QWEN38_FN_TABLE`):
+
+- warm: the file mapped and kept in the page cache. MemAvailable counts that page cache as free, so every floor check takes the table's resident bytes off first ([caches.md](caches.md#memory)).
+- cold: the rows read with O_DIRECT through a set-associative row cache of `QWEN38_FN_TABLE_CACHE_GB` (2) in host memory; nothing stays in the page cache.
+
+On 3.05, cold wrote the same greedy text as warm at 1k and 8k and decoded 40.9 tok/s against 42.0 (one run each). 2.05 keeps its table warm. 3.05 reads it cold: with the whole table resident, MemAvailable less the table fell to 8.4 GiB during a 146,400-token request at a 147,456-token window, under the 15 GiB floor. 4.05 and up read it cold because their weights and a warm table do not fit together.
+
+### Exact weights where the prefill needs them
+
+The prompt runs through other kernels than a decode step ([kernels.md](kernels.md)). There the mixers, the router and the small projections take exact fp32 copies of their weights (`QWEN38_FN_PREFILL_MM=fp32`). With fp16 copies the prefill failed its agreement gate on a 3k-token code prompt (95.6 % against the 96.2 % the gate asked), so fp32 is the default.
+
+### What is not measured
+
+Nobody has measured a pack's quality against the BF16 model yet. The BF16 release is 360 GB and does not fit the box, and the reference run that would give KL a pack is not done, so the registry's quality fields are empty. What is measured is our arithmetic against the reference on the same pack: all 48 layers equal the official `transformers` decoder layer on the served weights within BF16 noise (relative error 0.19 to 1.49 %). Teacher-forced, the decode path picks the reference's top token at 64 of 64 positions at 3k of context and 63 of 64 at 8k, where the one miss is a near tie (a margin of 0.0095). No task benchmark has run on any pack.
+
+### Knobs
+
+| knob | what |
+|-|-|
+| `ops/use-profile.sh flashnext-<bpw>` | switch to a pack; fetches the branch when it is missing |
+| `QWEN38_FN_MIX` | `int8` (the default): the mixers as int8 rows; `fp16`: the pack's values |
+| `QWEN38_FN_TABLE`, `QWEN38_FN_TABLE_CACHE_GB` | the n-gram table's policy (`warm` or `cold`) and the cold row cache in GiB |
+| `QWEN38_FN_PREFILL_MM` | the prefill's weights for the mixers, router and small projections: `fp32` (the default) |
+| `tools/fn_exl3_xcheck.py` | our reading of a pack against exllamav3's |
+| `tools/fn_mix_quality.py` | a mixer weight form against the pack's fp16 mixers |
