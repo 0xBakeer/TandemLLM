@@ -3,6 +3,7 @@
 \begin{reftable}{Every error status and type}{tab:ref-errors}{\hd{status, Retry-After} & \hd{error.type or code} & \hd{when}}
 \texttt{400} & \texttt{invalid\_\allowbreak{}request\_\allowbreak{}error} & a request the engine will not serve as asked: error.param names the field (messages, a role, \texttt{max\_\allowbreak{}tokens}, tools, an image part, a prompt too long, a body that is not JSON or not an object) \\
 \texttt{400} & \texttt{bad\_\allowbreak{}request} & a dashboard or conductor query that does not parse (a level, a range, a number) \\
+\texttt{400} & \texttt{confirm\_\allowbreak{}required} & a setup reset without the confirmation its level asks for (true, or the typed word) \\
 \texttt{401} & \texttt{unauthorized} & a guarded route without the token or the session it needs, once an admin password is set; a wrong collect token \\
 \texttt{401} & \texttt{invalid\_\allowbreak{}api\_\allowbreak{}key} & the proxy, once a user key exists: no key, or a key it does not know (code \texttt{invalid\_\allowbreak{}api\_\allowbreak{}key}) \\
 \texttt{403} & \texttt{forbidden} & a memory route outside a known session address \\
@@ -20,6 +21,8 @@
 \texttt{502} & \texttt{connect\_\allowbreak{}error}, \texttt{upstream\_\allowbreak{}error}, \texttt{key\_\allowbreak{}unreadable} & the proxy could not reach the backend or read its stored key, after its retries \\
 \texttt{200} & \texttt{upstream\_\allowbreak{}closed}, \texttt{upstream\_\allowbreak{}error} & a stream that already began: the backend failed or closed early; the client gets an error event, then \texttt{[DONE]} \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{server\_\allowbreak{}busy} & the queue is full, the server is draining, or the memory gate or the admission by bytes cannot make room \\
+\texttt{503}\newline with \texttt{Retry-After} & \texttt{memory\_\allowbreak{}wait\_\allowbreak{}timeout} & a request without a stream that waited past \texttt{-{}-queue-\allowbreak{}timeout} for memory to free (type \texttt{server\_\allowbreak{}busy}, Retry-After: 30) \\
+\texttt{503}\newline with \texttt{Retry-After} & \texttt{setup\_\allowbreak{}mode} & any route but the dashboard, \texttt{/\allowbreak{}health}, \texttt{/\allowbreak{}v1/\allowbreak{}models} and \texttt{/\allowbreak{}v1/\allowbreak{}setup/\allowbreak{}*} on a box in setup mode (Retry-After: 60) \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{max\_\allowbreak{}inflight} & every backend for the model is at the \texttt{max\_\allowbreak{}inflight} you set (Retry-After: 1) \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{warming}, \texttt{loading}, \texttt{refused}, \texttt{failed}, \texttt{not\_\allowbreak{}loaded}, \texttt{busy\_\allowbreak{}decoding} & a decision request while the model loads, was refused memory, failed, or the engine kept decoding past the deadline \\
 \texttt{503}\newline with \texttt{Retry-After} & \texttt{provider\_\allowbreak{}unavailable} & the status responder while the engine is stopped, starting or held (code engine\_\textless{}state\textgreater{}) \\
