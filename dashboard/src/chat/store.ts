@@ -78,6 +78,8 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
       return { ...c, sandbox: ev.sandbox };
     case 'usage.changed':
       return { ...c, usage: ev.usage };
+    case 'todos.changed':
+      return { ...c, todos: ev.todos };
     case 'settings.changed':
       return { ...c, settings: ev.settings };
     case 'branch.changed':

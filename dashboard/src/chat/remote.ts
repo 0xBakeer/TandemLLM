@@ -55,6 +55,12 @@ export class RemoteChatBackend implements ChatBackend {
   signOut() {
     return del('/session');
   }
+  approvePlan(id: string, items?: string[]) {
+    return call<void>(`/conversations/${enc(id)}/plan/approve`, { method: 'POST', body: JSON.stringify(items ? { items } : {}) });
+  }
+  rewind(id: string, messageId: string) {
+    return call<{ conversation: Conversation; text: string; files: number }>(`/conversations/${enc(id)}/rewind`, { method: 'POST', body: JSON.stringify({ message_id: messageId }) });
+  }
   uploadSkill(file: File) {
     return call<PackageInfo>('/packages/upload', { method: 'POST', body: form(file) });
   }

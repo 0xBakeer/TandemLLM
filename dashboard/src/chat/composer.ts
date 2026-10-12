@@ -238,6 +238,7 @@ export class QseChatComposer extends LightElement {
             <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'tools'} @click=${() => (this.pop = this.pop === 'tools' ? 'none' : 'tools')} title="tools, skills and MCP servers"><span class="ch-pill-main">${toolsOn} tool${toolsOn === 1 ? '' : 's'}</span>${mcpOn ? html`<span class="ch-pill-sub">${mcpOn} MCP</span>` : nothing}</button>
             ${this.pop === 'tools' && s ? this.renderToolsPop(s) : nothing}
           </span>
+          <button type="button" class="ch-pill ${s?.plan_mode ? 'is-on' : ''}" aria-pressed=${!!s?.plan_mode} ?disabled=${!s || model?.capabilities?.tools === false} title="Plan mode: the model reads and writes a plan, changes nothing until you approve it" @click=${() => s && this.patch({ plan_mode: !s.plan_mode })}><span class="ch-pill-main">plan</span>${s?.plan_mode ? html`<span class="ch-pill-sub">reads only</span>` : nothing}</button>
         </span>
         <span class="grow"></span>
         <label class="switch ch-enter" title="Enter sends; Shift+Enter is a new line. Off: Enter is a new line, Cmd/Ctrl+Enter sends."><input type="checkbox" .checked=${this.enterSends} @change=${(e: Event) => (this.enterSends = (e.target as HTMLInputElement).checked)} /><span>Enter sends</span></label>

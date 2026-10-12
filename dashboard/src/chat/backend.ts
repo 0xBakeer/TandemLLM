@@ -70,6 +70,10 @@ export interface ChatBackend {
   permission(id: string, callId: string, decision: 'once' | 'always' | 'deny', scope?: 'chat' | 'all'): Promise<void>;
   updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings>;
   compact(id: string): Promise<void>;
+  /** the plan answer's steps (or the edited list) become the todo list; a run carries it out */
+  approvePlan(id: string, items?: string[]): Promise<void>;
+  /** the files back to before the runs after this user message; the head to its parent */
+  rewind(id: string, messageId: string): Promise<{ conversation: Conversation; text: string; files: number }>;
 
   // the session (only when the server has a password set)
   signIn(password: string): Promise<void>;

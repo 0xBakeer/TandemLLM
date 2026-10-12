@@ -692,6 +692,16 @@ export class QseChat extends LightElement {
       @ch-regenerate=${(e: CustomEvent<{ messageId: string }>) => void this.guard(() => this.backend!.regenerate(c.id, e.detail.messageId), 'Regenerate')}
       @ch-continue=${() => void this.guard(() => this.backend!.continueRun(c.id), 'Continue')}
       @ch-branch=${(e: CustomEvent<{ messageId: string; index: number }>) => void this.guard(() => this.backend!.switchBranch(c.id, e.detail.messageId, e.detail.index).then((n) => this.adoptSnapshot(n)), 'Branch')}
+      @ch-approve-plan=${(e: CustomEvent<{ items?: string[] }>) => void this.guard(() => this.backend!.approvePlan(c.id, e.detail.items), 'Approve')}
+      @ch-rewind=${(e: CustomEvent<{ messageId: string }>) =>
+        void this.guard(
+          () =>
+            this.backend!.rewind(c.id, e.detail.messageId).then((r) => {
+              this.adoptSnapshot(r.conversation);
+              this.composer?.setText(r.text);
+            }),
+          'Rewind',
+        )}
       @ch-open-pane=${(e: CustomEvent<{ pane: PaneRef; inline?: { content: string; lang: string } | null }>) => void this.openPane(e.detail.pane, e.detail.inline)}
       @ch-unqueue=${(e: CustomEvent<{ id: string }>) => void this.guard(() => this.backend!.unqueue(c.id, e.detail.id), 'Queue')}
       @ch-send-now=${(e: CustomEvent<{ id: string }>) => void this.guard(() => this.backend!.sendNow(c.id, e.detail.id), 'Send now')}

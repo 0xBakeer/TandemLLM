@@ -56,6 +56,14 @@ export interface Conversation extends ConversationSummary {
   ui: ConversationUi;
   /** the last event id this snapshot includes: the stream resumes after it */
   seq: string;
+  /** the task's todo list (todo_write, an approved plan); the plan pane shows it */
+  todos?: TodoItem[];
+}
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  state: 'pending' | 'in_progress' | 'done';
 }
 
 export interface QueuedMessage {
@@ -97,7 +105,13 @@ export interface Message {
   stats?: TurnStats;
 }
 
-export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart;
+export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart | TodosPart;
+
+/** the open todo list as the model read it at the run's start; never drawn */
+export interface TodosPart {
+  type: 'todos';
+  text: string;
+}
 
 export interface TextPart {
   type: 'text';
@@ -320,6 +334,8 @@ export interface ChatSettings {
   max_steps: number;
   /** 'on' = the internet without the LAN; see SandboxStatus.network */
   sandbox_network: 'off' | 'on';
+  /** SRV-363: the model reads and plans, changes nothing, until the plan is approved */
+  plan_mode?: boolean;
 }
 
 export type ToolPolicy = 'ask' | 'always' | 'never';
@@ -508,7 +524,8 @@ export type ChatEvent =
   | { type: 'artifact.created'; artifact: ArtifactPart }
   | { type: 'sandbox.changed'; sandbox: SandboxStatus }
   | { type: 'usage.changed'; usage: ConversationUsage }
-  | { type: 'settings.changed'; settings: ChatSettings };
+  | { type: 'settings.changed'; settings: ChatSettings }
+  | { type: 'todos.changed'; todos: TodoItem[] };
 
 export interface StampedEvent {
   id: string;
@@ -547,4 +564,21 @@ export function valveValues(k: Pick<UserToolkit, 'valves'>, draft: Record<string
     out[v.name] = v.type === 'integer' || v.type === 'number' ? (t.trim() === '' ? null : Number(t)) : v.type === 'boolean' ? /^(true|1|yes|on)$/i.test(t.trim()) : t;
   }
   return out;
+}
+
+/** the steps of a plan answer, as the server reads them (chatd/plans.py `plan_items`): its
+ *  numbered lines, else its bullets, else the whole answer as one step */
+export function planItems(text: string): string[] {
+  const num: string[] = [];
+  const bul: string[] = [];
+  for (const line of text.split('\n')) {
+    const n = /^\s{0,3}\d{1,3}[.)]\s+(.+)/.exec(line);
+    if (n) num.push(n[1].trim());
+    else {
+      const b = /^\s{0,3}[-*+]\s+(?:\[[ xX]\]\s+)?(.+)/.exec(line);
+      if (b) bul.push(b[1].trim());
+    }
+  }
+  const items = num.length ? num : bul.length ? bul : text.trim() ? [text.split(/\s+/).join(' ').slice(0, 300)] : [];
+  return items.map((i) => i.replace(/\*\*(.+?)\*\*/g, '$1').slice(0, 300)).slice(0, 50);
 }

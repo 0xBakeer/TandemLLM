@@ -1807,6 +1807,64 @@ qse-chat-context {
   color: var(--cobalt-hi);
 }
 
+/* plan mode (SRV-363): the bar under a plan answer, the todo list in the plan pane */
+.ch-planbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--cobalt-dim);
+  border-radius: var(--radius);
+  background: var(--cobalt-wash);
+}
+.ch-planbar textarea {
+  width: 100%;
+  font: inherit;
+}
+.ch-planbar .ch-edit-row {
+  width: 100%;
+}
+.ch-pill.is-on {
+  border-color: var(--cobalt);
+  color: var(--cobalt-hi);
+}
+.ch-todos {
+  margin: 0;
+  padding: 10px 14px;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+}
+.ch-todo {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.ch-todo-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 3px;
+  display: grid;
+  place-items: center;
+}
+.ch-todo.is-in_progress .ch-todo-mark {
+  border-color: var(--orange);
+  background: var(--orange-wash);
+}
+.ch-todo.is-done {
+  color: var(--ink-3);
+  text-decoration: line-through;
+}
+.ch-todo.is-done .ch-todo-mark {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
 /* settings: Open WebUI tools and skill uploads (SRV-361) */
 .ch-settings-h4 {
   margin-top: 24px;

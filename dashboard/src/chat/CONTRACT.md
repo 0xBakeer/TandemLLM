@@ -288,6 +288,9 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/conversations/{id}/branch` | `{message_id, index}` | `Conversation` (head moved) | `switchBranch()` | MVP |
 | PATCH | `/conversations/{id}/settings` | `Partial<ChatSettings>` | `ChatSettings` | `updateSettings()` | MVP |
 | POST | `/conversations/{id}/compact` | | 202 | `compact()` | MVP |
+| POST | `/conversations/{id}/plan/approve` | `{message_id?, items?: string[]}` | 202 `{todos, message_id, run_id}`: the plan's steps (or `items`) become the todo list, plan mode goes off, "Carry out the approved plan." is sent | `approvePlan()` | v2 |
+| GET / PUT | `/conversations/{id}/todos` | `{items: [{id?, text, state}]}` | `TodoItem[]`; every device gets `todos.changed` | | v2 |
+| POST | `/conversations/{id}/rewind` | `{message_id}` (a user message on the branch) | `{conversation, text, files}`: the run that is on stops, the files go back to before the first run after that message, the head moves to its parent; nothing is deleted | `rewind()` | v2 |
 | POST | `/conversations/{id}/permissions/{call_id}` | `{decision: 'once' \| 'always' \| 'deny', scope?: 'chat' \| 'all', note?}` | 204; 409 when another device answered first | `permission()` | v2 |
 | GET | `/events` | `Last-Event-ID` | SSE, global: list changes, run states, permission asks in any chat | (v0.2: badges, notifications) | MVP |
 | POST | `/attachments` | multipart `file` (max 50 MB) | `Attachment` | (v0.2) | MVP |
@@ -348,6 +351,7 @@ type ChatEvent =
   | { type: 'queue.changed'; queue: QueuedMessage[] }
   | { type: 'context.changed'; context: ContextReport }   // E, at most 1 a second while running, every 10 s otherwise
   | { type: 'compaction'; compaction: Compaction }
+  | { type: 'todos.changed'; todos: TodoItem[] }       // SRV-363
   | { type: 'conversation.updated'; patch: Partial<ConversationSummary> }
   | { type: 'branch.changed'; head_id: string }            // v0.2: another device switched or made a branch; reload the conversation
   | { type: 'ui.changed'; ui: ConversationUi }             // v0.2: pane layout changed (any device)

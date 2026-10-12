@@ -8,8 +8,8 @@ import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, TOOLS, contextFor, iso, sandboxFor } from './mock-data';
 import { applyEvent } from './store';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TurnStats, UserToolkit } from './types';
-import { localId } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit } from './types';
+import { localId, planItems } from './types';
 
 // ---- the branch tree --------------------------------------------------------------------------
 
@@ -53,6 +53,9 @@ interface ConvState {
   cold?: number;
   /** tokens of history beyond the seeded messages (a long chat) */
   historyTokens?: number;
+  /** a rewind: the path ends before this message until the next send */
+  cut?: string | null;
+  todos?: TodoItem[];
 }
 
 const EMPTY_UI: ConversationUi = { panes: [], active: null, split: 0.6 };
@@ -296,7 +299,7 @@ export class MockChatBackend implements ChatBackend {
   pathIds(st: ConvState): string[] {
     const out: string[] = [];
     let id: string | undefined = st.roots[st.rootActive];
-    while (id) {
+    while (id && id !== st.cut) {
       out.push(id);
       const n: Node = st.nodes.get(id)!;
       id = n.children[n.active];
@@ -338,7 +341,7 @@ export class MockChatBackend implements ChatBackend {
 
   private full(st: ConvState): Conversation {
     const messages = this.materialize(st);
-    return { ...this.summary(st), messages, head_id: messages.length ? messages[messages.length - 1].id : null, settings: st.settings, run: st.run, context: this.context(st, messages), sandbox: st.sandbox, compactions: st.compactions, usage: usageOf(messages), queue: st.queue, ui: st.ui, seq: String(st.seq) };
+    return { ...this.summary(st), messages, head_id: messages.length ? messages[messages.length - 1].id : null, settings: st.settings, run: st.run, context: this.context(st, messages), sandbox: st.sandbox, compactions: st.compactions, usage: usageOf(messages), queue: st.queue, ui: st.ui, seq: String(st.seq), todos: st.todos ?? [] };
   }
 
   context(st: ConvState, messages = this.materialize(st)) {
@@ -487,6 +490,7 @@ export class MockChatBackend implements ChatBackend {
     if (st.clientIds.has(msg.client_msg_id)) return;
     if (st.run) return this.queue(id, msg.text, msg.client_msg_id);
     const path = this.pathIds(st);
+    st.cut = null;
     const parent = path.length ? path[path.length - 1] : null;
     const um: Message = { id: localId('m'), role: 'user', created_at: new Date().toISOString(), parent_id: parent, run_id: null, parts: [{ type: 'text', text: msg.text }], status: 'done', attachments: msg.attachments?.length ? msg.attachments : undefined };
     st.clientIds.set(msg.client_msg_id, um.id);
@@ -597,6 +601,27 @@ export class MockChatBackend implements ChatBackend {
     this.emit(st, { type: 'settings.changed', settings: st.settings });
     this.emit(st, { type: 'context.changed', context: this.context(st) });
     return st.settings;
+  }
+
+  async approvePlan(id: string, items?: string[]): Promise<void> {
+    const st = this.get(id);
+    const last = this.materialize(st).filter((m) => m.role === 'assistant').pop();
+    const steps = items ?? planItems(last ? last.parts.map((p) => (p.type === 'text' ? p.text : '')).join('') : '');
+    st.todos = steps.map((text, i) => ({ id: `t${i + 1}`, text, state: 'pending' as const }));
+    this.emit(st, { type: 'todos.changed', todos: st.todos });
+    await this.updateSettings(id, { plan_mode: false });
+    await this.send(id, { client_msg_id: localId('plan'), text: 'Carry out the approved plan.' });
+  }
+
+  async rewind(id: string, messageId: string) {
+    const st = this.get(id);
+    const n = st.nodes.get(messageId);
+    if (!n || n.msg.role !== 'user') throw new Error('rewind to one of your messages');
+    if (st.run) await this.stop(id);
+    st.cut = messageId;
+    const conversation = this.full(st);
+    this.emit(st, { type: 'branch.changed', head_id: conversation.head_id ?? '' });
+    return { conversation, text: n.msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join(''), files: 0 };
   }
 
   async compact(id: string): Promise<void> {

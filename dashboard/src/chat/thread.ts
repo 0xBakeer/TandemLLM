@@ -16,7 +16,7 @@ import type { QseWrenFigure } from '../setup/figure';
 import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
 import { dividersByMessage, dividerWords, messageText } from './store';
-import { toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
+import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -29,6 +29,8 @@ export class QseChatThread extends LightElement {
   @state() private editing: { id: string; text: string } | null = null;
   @state() private openCalls = new Set<string>();
   @state() private openDividers = new Set<string>();
+  /** the plan's steps while the user edits them before Approve */
+  @state() private planEdit: string | null = null;
   private stickToEnd = true;
   private lastDeltaAt = 0;
 
@@ -129,6 +131,7 @@ export class QseChatThread extends LightElement {
       ${m.parts.map((p, k) => this.renderPart(c, m, p, k, live))}
       ${!m.parts.length && live ? html`<p class="ch-waiting"><span class="pulse"></span> ${c.run?.phase === 'prefill' ? 'reading the prompt' : c.run?.phase === 'queued' ? (c.run.queue_position ? `in line, ${c.run.queue_position} ahead` : 'in line') : 'first token'}</p>` : nothing}
       ${m.status === 'interrupted' ? html`<div class="ch-interrupted" role="status" data-part="interrupted">${icon('warn')}<span>The engine restarted while this answer was being written. The text so far stays.</span><button type="button" class="btn btn-primary btn-sm" ?disabled=${!!c.run} @click=${() => this.fire('ch-continue', { messageId: m.id })}>${icon('play')} Continue</button></div>` : nothing}
+      ${isLast && c.settings.plan_mode && !c.run && m.status === 'done' ? this.renderPlanBar(m) : nothing}
       ${m.status !== 'streaming' ? this.renderFoot(m, isLast, c) : nothing}
     </article>`;
   }
@@ -154,9 +157,26 @@ export class QseChatThread extends LightElement {
         <span class="ch-tools">
           ${copyButton(text, 'Copy message')}
           <button type="button" class="btn btn-ghost btn-sm" aria-label="Edit and branch" title="Edit" ?disabled=${live || !!c.run} @click=${() => (this.editing = { id: m.id, text })}>${icon('edit')}</button>
+          <button type="button" class="btn btn-ghost btn-sm" aria-label="Rewind to here" title="Rewind to here: the files go back to before this message, and the message comes back to the composer" @click=${() => {
+            if (confirm('Rewind to this message? The files go back to how they were before it, and the message returns to the composer. Nothing is deleted: the old branch stays.')) this.fire('ch-rewind', { messageId: m.id });
+          }}>${icon('left')}</button>
         </span>
       </div>
     </article>`;
+  }
+
+  /** SRV-363: under a plan answer, Approve (its steps become the todo list) or Edit plan */
+  private renderPlanBar(m: Message): TemplateResult {
+    const approve = (items?: string[]) => {
+      this.planEdit = null;
+      this.fire('ch-approve-plan', { items });
+    };
+    return html`<div class="ch-planbar" data-part="plan" role="group" aria-label="the plan">
+      ${this.planEdit != null
+        ? html`<label class="sr-only" for="ch-plan-edit">the plan's steps, one a line</label><textarea id="ch-plan-edit" rows="5" .value=${this.planEdit} @input=${(e: Event) => (this.planEdit = (e.target as HTMLTextAreaElement).value)}></textarea>
+            <div class="ch-edit-row"><span class="muted small">one step a line</span><span class="grow"></span><button type="button" class="btn btn-ghost btn-sm" @click=${() => (this.planEdit = null)}>Cancel</button><button type="button" class="btn btn-primary btn-sm" ?disabled=${!this.planEdit.trim()} @click=${() => approve(this.planEdit!.split('\n').map((x) => x.trim()).filter(Boolean))}>${icon('check')} Approve</button></div>`
+        : html`<span class="small">${planItems(messageText(m)).length} step plan. Approve it to leave plan mode and carry it out.</span><span class="grow"></span><button type="button" class="btn btn-sm" @click=${() => (this.planEdit = planItems(messageText(m)).join('\n'))}>${icon('edit')} Edit plan</button><button type="button" class="btn btn-primary btn-sm" @click=${() => approve()}>${icon('check')} Approve plan</button>`}
+    </div>`;
   }
 
   private saveEdit(): void {
@@ -206,6 +226,8 @@ export class QseChatThread extends LightElement {
         return this.renderCall(c, m, p, live && lastPart);
       case 'error':
         return html`<div class="ch-error" role="alert" data-part="error">${icon('warn')}<span>${p.message}</span>${p.retryable ? html`<button type="button" class="btn btn-sm" ?disabled=${!!c.run} @click=${() => this.fire('ch-regenerate', { messageId: m.id })}>${icon('refresh')} Retry</button>` : nothing}</div>`;
+      case 'todos':
+        return html``;
       case 'artifact':
         return html`<button type="button" class="ch-artifact" data-part="artifact" @click=${() => this.fire('ch-open-pane', { pane: { kind: p.mime.startsWith('image/') ? 'image' : p.mime === 'text/html' ? 'preview' : 'markdown', ref: p.id, title: p.title } as PaneRef })}>${icon('preview')}<span class="ch-artifact-title">${p.title}</span><span class="muted small">v${p.version}, open in a pane</span></button>`;
     }

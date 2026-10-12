@@ -210,7 +210,7 @@ export class QseChatPanes extends LightElement {
       case 'image':
         return this.renderImage(p);
       case 'plan':
-        return this.renderMarkdown(p);
+        return this.conv?.todos?.length ? this.renderTodos() : this.renderMarkdown(p);
       case 'editor':
         return this.renderEditor(p);
       case 'context':
@@ -218,6 +218,14 @@ export class QseChatPanes extends LightElement {
       case 'pdf':
         return this.renderPdf(p);
     }
+  }
+
+  /** the todo list, live (todo_write, an approved plan) */
+  private renderTodos(): TemplateResult {
+    const t = this.conv!.todos!;
+    const done = t.filter((x) => x.state === 'done').length;
+    return html`<div class="ch-mdpane"><div class="ch-pane-bar"><span class="muted small">todo list</span><span class="grow"></span><span class="num small">${done} of ${t.length} done</span></div>
+      <ol class="ch-todos">${t.map((x) => html`<li class="ch-todo is-${x.state}" data-state=${x.state}><span class="ch-todo-mark" aria-hidden="true">${x.state === 'done' ? icon('check') : nothing}</span><span>${x.text}</span><span class="sr-only">, ${x.state.replace('_', ' ')}</span></li>`)}</ol></div>`;
   }
 
   private renderEditor(p: OpenPane): TemplateResult {

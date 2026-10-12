@@ -257,3 +257,17 @@ describe('Open WebUI valves', () => {
     expect(valveValues(kit, {})).toEqual({});
   });
 });
+
+describe('plan mode', () => {
+  it('reads the steps of a plan as the server does', async () => {
+    const { planItems } = await import('../src/chat/types');
+    expect(planItems('Plan:\n1. a\n2) **b**\n\n- not a step')).toEqual(['a', 'b']);
+    expect(planItems('- one\n* two\n- [ ] three')).toEqual(['one', 'two', 'three']);
+    expect(planItems('just do it')).toEqual(['just do it']);
+    expect(planItems('')).toEqual([]);
+  });
+  it('takes a todos.changed into the conversation', () => {
+    const c = applyEvent(conv(), { type: 'todos.changed', todos: [{ id: 't1', text: 'a', state: 'in_progress' }] });
+    expect(c.todos).toEqual([{ id: 't1', text: 'a', state: 'in_progress' }]);
+  });
+});
