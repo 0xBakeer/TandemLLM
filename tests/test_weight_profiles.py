@@ -67,7 +67,7 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QSE_ASSETS"] == "" and int(e["QSE_MEM_NEED_GIB"]) > 0, e
         assert e["QWEN38_FN_TABLE"] == table and e["QSE_PAGE_CACHE_DROP"] == d, e
         assert e["QSE_PAGE_CACHE_KEEP"] == ("ngram_embedding.safetensors" if table == "warm" else ""), e
-        assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "off", e
+        assert e["QSE_DISK_CACHE"].endswith(f"disk-flashnext-{bpw}") and e["VISION"] == "on", e
         assert e["QWEN38_FN_LOOKUP"] == "1", e
         # ENG-241: three slots on the KV pool; the side window serve.env's
         assert e["QSE_PARALLEL"] == "3" and e["QSE_KV_POOL"] == "on", e

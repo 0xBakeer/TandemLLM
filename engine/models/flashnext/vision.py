@@ -92,8 +92,8 @@ def tower_of(cfg: VisionConfig, tensors: dict, blocks: dict, device="cuda") -> F
 
 
 def load_tower(idx, pack: str, device="cuda") -> FlashNextVisionTower | None:
-    """The tower of a pack (`PackIndex` `idx`, its directory `pack`), or None for a pack without one (the
-    4.05 branch carries no `model.visual.*` though its config keeps the vision config, 2026-10-11)."""
+    """The tower of a pack (`PackIndex` `idx`, its directory `pack`), or None for a pack without one (a
+    vision config but no `model.visual.*` tensors in its files)."""
     cfg = load_vision_config(pack)
     if cfg is None or not idx.vision:
         return None

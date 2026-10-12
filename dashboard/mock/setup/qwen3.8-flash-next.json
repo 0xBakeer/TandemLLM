@@ -143,7 +143,7 @@
    "assets_required": [],
    "note": "Its table is read past the page cache (cold): weights and a warm table do not fit together.",
    "hf_revision": "4.05bpw_h6_ng6",
-   "max_window": 212992,
+   "max_window": 208896,
    "table": {
     "gib": 36.36,
     "policy": "cold",
@@ -174,7 +174,7 @@
    "assets_required": [],
    "note": "Does not load on this engine yet: its experts are coded at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8 (ENG-223; SPD-99, 2026-10-12). Its largest window is the estimate's.",
    "hf_revision": "5.05bpw_h6_ng6",
-   "max_window": 65536,
+   "max_window": 53248,
    "table": {
     "gib": 36.36,
     "policy": "cold",
@@ -370,6 +370,29 @@
    ],
    "docs": "docs/shadow-reader.md",
    "note": "Qwen3.5-0.8B (1.52 GiB in the live memory split) and up to 4 GiB of session states (QWEN38_SHADOW_GB). The first to unload when memory runs short."
+  },
+  {
+   "id": "vision",
+   "label": "Vision",
+   "group": "features",
+   "what": "Lets the model read images you send with a message.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.31,
+   "memory_max_gib": 0.81,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "VISION": {
+     "on": "on",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/server.md",
+   "note": "The tower ships inside the pack, quantised like the model (0.29 GB in 3.05; the load stage took 0.27 GiB allocated and 0.26 to 0.31 GiB of MemAvailable, VIS-97, 2026-10-12). The extra 0.5 GiB is the cache of encoded images (--image-cache-mb 512). The other packs' towers are 4 bits (2.05) or 6 (4.05 to 6.05), about 0.24 and 0.36 GB; 4.05 keeps its tower in vision_k6.safetensors beside the shards."
   },
   {
    "id": "prompt_cache",
@@ -766,6 +789,11 @@
     {
      "field": "shadow",
      "label": "Shadow reader",
+     "type": "bool"
+    },
+    {
+     "field": "vision",
+     "label": "Vision",
      "type": "bool"
     },
     {

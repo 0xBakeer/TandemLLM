@@ -16,7 +16,8 @@ every tensor in exactly one kind:
   plain    everything else the model reads, as stored (norms, router, `in_proj_a/b`, PLE
            projections, conv weights, A_log, the embedding)
   table    the n-gram table (its own file)
-  vision   the vision tower (not loaded; the text model only)
+  vision   the vision tower, by its "visual." name (engine/models/flashnext/vision.py loads it): in the
+           shards, or in a file of its own outside the index (`vision_k6.safetensors` in 4.05)
 
 K is read from each trellis' own shape, so a pack that mixes K inside a layer is described as it is
 (`k_histogram`). Anything the config's layout expects and no file holds stops `audit()` with its
@@ -182,6 +183,8 @@ class PackIndex:
         names = sorted(by_file)
         if os.path.isfile(os.path.join(path, PATCH_FILE)):
             names.append(PATCH_FILE)
+        names += sorted(n for n in os.listdir(path) if n.startswith("vision_") and n.endswith(".safetensors")
+                        and n not in by_file)
         for fn in names:
             fp = os.path.join(path, fn)
             if not os.path.isfile(fp):

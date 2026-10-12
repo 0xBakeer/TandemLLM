@@ -6,8 +6,8 @@ at K 3 with one expert at K 4, dense at K 5), mixers fp16, the n-gram table in e
 `exl3_ngram_trellis` format in its own file, and the MTP final mixer in the patch file. Checked:
 every tensor is accounted for with its kind and K, the byte totals, the decode byte budget's parts,
 the n-gram rows against exllamav3's encoder, the int8 mixers' error bound and the fp16 flag, the
-shared-table identity, and that a bad hash, a missing tensor, a truncated shard and a missing patch
-each fail naming the cause.
+shared-table identity, a vision tower in a file outside the index (4.05's), and that a bad hash, a
+missing tensor, a truncated shard and a missing patch each fail naming the cause.
 """
 
 from __future__ import annotations
@@ -230,6 +230,21 @@ def test_every_tensor_accounted_for():
     finally:
         shutil.rmtree(d)
 
+
+def test_a_vision_file_outside_the_index():
+    d, _ = mini()
+    try:
+        tower = {"model.visual.blocks.0.attn.q_proj.trellis": torch.zeros(4, 4, 48, dtype=torch.int16),
+                 "model.visual.pos_embed.weight": torch.ones(16, 8, dtype=torch.bfloat16)}
+        save_file(tower, os.path.join(d, "vision_k6.safetensors"))
+        idx = P.PackIndex.open(d)
+        t = idx.vision["visual.pos_embed.weight"]
+        assert t.file.endswith("vision_k6.safetensors") and "visual.blocks.0.attn.q_proj.trellis" in idx.vision
+        assert torch.equal(idx.read("visual.pos_embed.weight"), tower["model.visual.pos_embed.weight"])
+        assert not any(k.startswith("visual") for k in idx.tensors)
+        return "4.05's vision_k6.safetensors: its tensors under their visual. names, read back as stored"
+    finally:
+        shutil.rmtree(d)
 
 def test_k_histogram_and_budget():
     d, _ = mini()
