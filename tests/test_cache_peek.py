@@ -205,6 +205,30 @@ def test_a_parked_session_peeks_as_ram_park_and_comes_back_from_the_park():
     return f"ram_park at {p['cached_tokens']}; the next request reused {pre['reused']} ({pre['kind']})"
 
 
+def test_a_parked_end_brought_back_before_the_replay_reports_the_park():
+    """Live (rc-0.8.0): the parked chat's end comes back in place before the handler's replay
+    (`_spill_before_replay`: `unpark_end`), so the prefill resumed at the end anchor and the usage
+    frame said resident where the peek had said ram_park. The return is recorded (`park_returned`)
+    and the usage frame's tier is the park's."""
+    d = tempfile.mkdtemp(prefix="qse-peek-")
+    try:
+        res = _state(park_bytes=BIG, guest_max=40)
+        sp, t = _spill(d, res)
+        prompt = tokens(160, seed=88)
+        out1, _, _ = turn(prompt, 24, session="A")
+        turn(tokens(150, seed=89), 8, session="B")
+        nxt = prompt + out1 + TOOL
+        p = _peek(nxt, "A")
+        app._spill_before_replay(list(nxt))
+        assert app.STATE.get("park_returned") is True, res.stats
+        _, pre, _ = turn(nxt, 8, session="A")
+        assert p["tier"] == "ram_park" and pre.get("via") == "park" and pre["reused"] == p["cached_tokens"], (p, pre)
+        t.close()
+        return f"ram_park at {p['cached_tokens']}; the send came back via the park"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 # ------------------------------------------------------------------ 5. Flash-Next
 
 class _FNCacheState:

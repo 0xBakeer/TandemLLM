@@ -1387,8 +1387,11 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             STATE["last_prefill"]["spill"] = spilled
         if carried:
             STATE["last_prefill"]["side"] = carried
-        if reused and where.get("via"):
-            STATE["last_prefill"]["via"] = where["via"]   # the park or the pin (usage.tandem.cache)
+        # the park or the pin the rows came back from (usage.tandem.cache): in the prefill, or the
+        # parked end brought back before the replay (`_spill_before_replay`)
+        via = where.get("via") or ("park" if STATE.pop("park_returned", None) else None)
+        if reused and via:
+            STATE["last_prefill"]["via"] = via
         pos = prompt.numel()
         if pen is not None:
             pen.mask = bool(think is not None and think.inside)
@@ -2743,6 +2746,7 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
     sp, res = STATE.get("spill"), STATE.get("resident")
     if sp is None or res is None:
         return                 # FX16: with no entry the park's end still comes back here
+    parked = int(res.stats.get("park_tokens_reused", 0))
     try:
         with torch.no_grad():
             info = sp.maybe_restore(res, STATE["engine"], STATE["drafter"], ids, len(ids) - 1,
@@ -2752,6 +2756,8 @@ def _spill_before_replay(ids: list[int], mm_ok: bool = False) -> None:
         return
     if info:
         STATE["spill_restored"] = info
+    elif int(res.stats.get("park_tokens_reused", 0)) > parked:
+        STATE["park_returned"] = True      # the parked end came back in place (usage.tandem.cache)
 
 
 def _peek_ids(body: dict, headers) -> tuple[list[int], str | None]:
@@ -6784,6 +6790,7 @@ class Handler(BaseHTTPRequestHandler):
             rec.lock_acquired()
             STATE.pop("spill_restored", None)
             STATE.pop("side_carried", None)
+            STATE.pop("park_returned", None)
         # SRV-197: the generation list a request on slot 0 finds; only one that generated
         # (`_generate_stream` publishes a new list) records its conversation as slot 0's
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
