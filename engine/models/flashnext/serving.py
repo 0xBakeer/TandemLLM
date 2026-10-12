@@ -162,7 +162,9 @@ class FlashNextServing:
 
     # the caches' grid: the prefill kernels' chunk (FN_PREFILL_CHUNK), so a resumed prefill runs the
     # chunks a cold one runs; side slots: ENG-241; the shadow reader: validated on the 27B's text only
-    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False)
+    # side_lane: Borrow keeps the 27B's pending commit, not this engine's chain and folded commit
+    # (lending it raised `'FlashNextCacheState' object has no attribute 'primed'`, rc-0.8.0 live)
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=4096, shadow=False, side_lane=False)
 
     def __init__(self, fn: FlashNextEngine, max_len: int):
         self.fn, self.cfg, self.max_len = fn, fn.cfg, max_len

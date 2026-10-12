@@ -131,6 +131,18 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
 
 
+def test_an_engine_that_cannot_be_lent_gets_the_side_lane_off():
+    """rc-0.8.0 live (2026-10-12): Flash-Next on the side lane raised `'FlashNextCacheState' object has
+    no attribute 'primed'` for every short request it took (Borrow keeps the 27B's pending commit); an
+    engine whose caps say so starts with the lane off, and says so."""
+    serving = {"tree": True, "sampled_tree": "det", "relax": Relax(1.0, 1), "weights_info": {"format": "exl3"}}
+    eng, st, calls, lines, _ = _run(Capabilities(caches=False, side_slots=False, side_lane=False),
+                                    ["--side-lane", "on"], serving, registry_builder=True)
+    assert any("[side-lane] off" in x and "caps.side_lane" in x for x in lines), lines
+    assert Capabilities(caches=True, side_slots=True).side_lane, "the 27B keeps its lane"
+    return "the lane off and said; the default keeps it"
+
+
 # ------------------------------------------------------------------ a third architecture
 
 def toy_serve(a, ctx):

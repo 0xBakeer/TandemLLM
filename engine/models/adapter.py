@@ -28,6 +28,10 @@ class Capabilities:
     # joint verify rounds: the decoding slots' blocks in one pass (`forward_tree_multi`); False: the
     # slots take turns, a whole round each (ENG-241 step 2, until the multi-sequence kernels)
     joint_verify: bool = True
+    # the side lane (server/preempt.py): a short request served inside another one's generation on
+    # the lent engine (`engine/cache.py` Borrow, which copies the 27B's pending commit); False: the
+    # lane is off and such a request waits or takes an idle side slot
+    side_lane: bool = True
 
 
 @dataclass(frozen=True)

@@ -9126,6 +9126,10 @@ def _load(a) -> None:
     if eng.kv.pages is not None:
         # the warm-up's and the captures' rows are nobody's conversation
         eng.kv.pages.trim(_kv_keep_rows(eng, STATE.get("resident")))
+    if getattr(a, "side_lane", "off") != "off" and not eng.caps.side_lane:
+        a.side_lane = "off"
+        print("[side-lane] off: this model's engine is not lent to a short request inside another "
+              "one's generation yet (caps.side_lane)", flush=True)
     if int(getattr(a, "parallel", 1) or 1) > 1:
         if eng.caps.side_slots:
             _build_side_slots(a, m["cfg"], m["w"], tok)
