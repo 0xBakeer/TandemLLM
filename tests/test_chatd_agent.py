@@ -836,6 +836,13 @@ class RelayBoxes(FakeBoxes):
                 if not d:
                     break
                 b.sendall(bytes([1, 0, 0, 0]) + len(d).to_bytes(4, "big") + d)
+            # shut down before the close: on Linux a close() while `up` blocks in b.recv leaves
+            # the socket open (the blocked call holds it), the reader never sees the end and the
+            # preview hung on the Spark only (macOS wakes the reader)
+            try:
+                b.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             b.close()
             self.relays -= 1
         threading.Thread(target=up, daemon=True).start()

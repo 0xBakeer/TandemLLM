@@ -243,8 +243,11 @@ def make_handler(fake: Fake):
                 return self._json(400, {"error": {"message": "bad json"}})
             with fake.lock:
                 fake.requests += 1
-                fake.last = {"path": p, "headers": dict(self.headers.items()),
-                             "body": body, "raw": raw.decode("utf-8", "replace")}
+                if not p.startswith("/v1/cache/"):
+                    # `last` is the last completion: chatd's cache peek runs on its own thread
+                    # and would race the request a test looks at
+                    fake.last = {"path": p, "headers": dict(self.headers.items()),
+                                 "body": body, "raw": raw.decode("utf-8", "replace")}
                 fake.bodies.append(body)
             if not self._authed():
                 return

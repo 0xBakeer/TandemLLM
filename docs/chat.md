@@ -88,6 +88,13 @@ Export them before `ops/chatd.sh start`. Without a runtime, starting a sandbox a
 `sandbox_unavailable`, bash, render_page and the terminals are not offered, and the file tools work
 on the chat's workspace folder.
 
+The unit tests (`tests/test_chatd*.py`, `tests/test_chat_forward.py`) never reach a container
+runtime: `tests/chatd_util.py` points `QSE_SANDBOX_SOCKET` at a path that does not exist, and a test
+that needs a sandbox installs a fake one. On the Spark, Docker and the sandbox image are there, and
+before this the tests found them: `bash` was offered, the tools' order changed and the capabilities
+said the sandbox was installed. Only `tests/test_sandbox_box.py` (with `QSE_SANDBOX_BOX=1`) uses
+the real runtime.
+
 MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are called from chatd
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.

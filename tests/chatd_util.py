@@ -23,6 +23,15 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 import fake_backend  # noqa: E402
 
+# The unit tests never reach a container engine. The Spark has Docker with the sandbox image (the
+# :4180 chat), and there a Chat found it: `bash` was offered, the tool order changed and the
+# capabilities said the sandbox was installed (the box-only failures of 2026-10-12 in test_chatd,
+# test_chatd_agent and test_chat_forward). Tests that want a sandbox install `FakeBoxes`; the real
+# one is tests/test_sandbox_box.py, which binds the socket before this module is imported.
+if os.environ.get("QSE_SANDBOX_BOX") != "1":
+    os.environ.setdefault("QSE_SANDBOX_SOCKET",
+                          os.path.join(tempfile.gettempdir(), "qse-tests-no-sandbox.sock"))
+
 from chatd.http import make_server, serve_in_thread  # noqa: E402
 from chatd.service import Service  # noqa: E402
 

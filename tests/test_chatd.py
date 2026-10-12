@@ -207,7 +207,7 @@ def test_the_replay_to_live_switch_has_no_gap_and_no_duplicate():
         def emitter():
             while not stop.is_set():
                 c.svc.emit(conv, {"type": "queue.changed", "queue": []})
-        results = []
+        results, resets = [], []
         lock = threading.Lock()
 
         def attacher(seed, n):
@@ -217,6 +217,12 @@ def test_the_replay_to_live_switch_has_no_gap_and_no_duplicate():
                 after = max(start_seq, last - rng.randint(0, 200))
                 sub, replay = c.svc.attach(cid, after)
                 if sub is None:
+                    # a reset: the emitter wrote more than RESET_BEHIND events between the read of
+                    # last_seq and the attach (a thread descheduled that long: the Spark at nice
+                    # 19 under the CPU suite, 1 in 10,000)
+                    assert conv.last_seq - after > RESET_BEHIND, (after, conv.last_seq)
+                    with lock:
+                        resets.append(after)
                     continue
                 got = [r[0] for r in replay]
                 for _ in range(rng.randint(0, 3)):
@@ -235,7 +241,8 @@ def test_the_replay_to_live_switch_has_no_gap_and_no_duplicate():
             t.join()
         stop.set()
         em.join()
-        assert len(results) == attaches, len(results)
+        assert len(results) + len(resets) == attaches and len(resets) < attaches // 100, \
+            (len(results), len(resets))
         live = sum(1 for after, got in results if got and got[-1] > after + 200)
         for after, got in results:
             assert got == list(range(after + 1, after + 1 + len(got))), (after, got[:5])
