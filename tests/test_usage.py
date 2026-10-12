@@ -417,8 +417,10 @@ def test_the_non_streamed_body():
     head, raw, _ = _run(_chat(stream=False), engine=_script(_ids("An answer.")))
     body = json.loads(raw)
     u = body["usage"]
+    # the OpenAI fields, and our engine's split beside them (SRV-349; clients ignore the key)
     assert set(u) == {"prompt_tokens", "completion_tokens", "total_tokens",
-                      "prompt_tokens_details", "completion_tokens_details"}, u
+                      "prompt_tokens_details", "completion_tokens_details", "tandem"}, u
+    assert sum(u["tandem"]["parts"].values()) == u["prompt_tokens"], u["tandem"]
     assert u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"]
     assert set(body["timings"]) == set(usage.LLAMA_KEYS + usage.ENGINE_KEYS), body["timings"]
     assert set(body["metrics"]) == {"time_to_first_token_ms", "generation_time_ms",
