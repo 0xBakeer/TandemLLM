@@ -140,10 +140,13 @@ export class QseChat extends LightElement {
   }
 
   /** the list-level stream: a run ended or asks somewhere; notify this device, refresh the list */
-  private onGlobal(ev: { type: string; conversation_id?: string; status?: string }): void {
+  private async onGlobal(ev: { type: string; conversation_id?: string; status?: string }): Promise<void> {
     const id = ev.conversation_id;
     const kind = notifyKind(ev);
-    if (id && kind) void notify(kind, { id, title: this.list.find((x) => x.id === id)?.title ?? 'A chat' }, id === this.conv?.id);
+    if (id && kind) {
+      if (!this.list.some((x) => x.id === id)) await this.loadList();
+      void notify(kind, { id, title: this.list.find((x) => x.id === id)?.title ?? 'A chat' }, id === this.conv?.id);
+    }
     if (!this.listSoon && (kind || ev.type.startsWith('conversation.')))
       this.listSoon = setTimeout(() => {
         this.listSoon = null;
@@ -206,7 +209,7 @@ export class QseChat extends LightElement {
     this.listPoll = poll(() => this.loadList(), 10_000);
     this.listPoll.start();
     this.globalSub?.close();
-    this.globalSub = b.subscribeGlobal((ev) => this.onGlobal(ev));
+    this.globalSub = b.subscribeGlobal((ev) => void this.onGlobal(ev));
     await this.loadList();
     await this.openFromRoute();
   }
