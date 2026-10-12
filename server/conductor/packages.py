@@ -79,6 +79,27 @@ _FRONT = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 _REFERENCE = re.compile(r"(?m)^## Reference\b")
 
 
+def body_packages(body: dict, known) -> tuple[list[str], set[str], list[str]]:
+    """SRV-361: a client's own choice of packages for this request,
+    `tandem: {"packages": {"pin": [...], "block": [...]}}` (chatd sends a chat's pinned and
+    blocked skills). Returns (pinned and known, in order; blocked; pinned but unknown). A blocked
+    package never goes in; a pinned one goes in whatever the class and the package question say.
+    Without the field: nothing pinned, nothing blocked."""
+    t = body.get("tandem") if isinstance(body, dict) else None
+    p = t.get("packages") if isinstance(t, dict) else None
+    if not isinstance(p, dict):
+        return [], set(), []
+    names = lambda v: [x for x in v if isinstance(x, str) and x][:32] if isinstance(v, list) \
+        else []                                                   # noqa: E731
+    block = set(names(p.get("block")))
+    pin, unknown = [], []
+    for n in names(p.get("pin")):
+        if n in block or n in pin:
+            continue
+        (pin if n in known else unknown).append(n)
+    return pin, block, unknown
+
+
 def split_frontmatter(text: str) -> tuple[dict, str]:
     """(`{name, description}` from the frontmatter, the body after it)."""
     m = _FRONT.match(text)
