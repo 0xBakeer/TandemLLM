@@ -31,7 +31,7 @@ How to install and run it. Chapter~\ref{ch:install-engine} starts with the setup
 \input{chapters/operations}
 
 \partintro{%
-Why the engine is fast, and why its output is still the model's own text. The chapters go from the model's layers and the byte budget (\ref{ch:architecture}) through the weights (\ref{ch:quantisation}), the kernels (\ref{ch:kernels}), the drafters and StairCut (\ref{ch:speculation}), the exactness contract (\ref{ch:exactness}), the caches (\ref{ch:caches}), the server (\ref{ch:serving}) and the measurement method (\ref{ch:measurement}) to the seams a new model plugs into (\ref{ch:adding-model}). Every number is labelled measured or arithmetic.}
+Why the engine is fast, and why its output is still the model's own text. The chapters go from the model's layers and the byte budget (\ref{ch:architecture}) through the weights (\ref{ch:quantisation}), the kernels (\ref{ch:kernels}), the drafters and StairCut (\ref{ch:speculation}), the exactness contract (\ref{ch:exactness}), the caches (\ref{ch:caches}), the server (\ref{ch:serving}) and the measurement method (\ref{ch:measurement}) to the seams a new model plugs into (\ref{ch:adding-model}), and ends with the second model served through them, Qwen3.8-Flash-Next (\ref{ch:flashnext}). Every number is labelled measured or arithmetic.}
 \part{How the engine works}
 \input{chapters/architecture}
 \input{chapters/quantisation}
@@ -42,6 +42,7 @@ Why the engine is fast, and why its output is still the model's own text. The ch
 \input{chapters/serving}
 \input{chapters/measurement}
 \input{chapters/adding-model}
+\input{chapters/flashnext}
 
 \partintro{%
 The conductor: the layer in front of the model that plans each turn and watches it run. Profiles and the router (\ref{ch:conductor}), packages, the skill library and the small decision models (\ref{ch:packages}), the session monitor (\ref{ch:monitor}), status lines, the voice and the shadow reader (\ref{ch:lines}), memory notes (\ref{ch:memory}), and the same conductor in front of other backends (\ref{ch:harness-proxy}). Nothing here changes the model's arithmetic; all of it changes what the model reads.}
