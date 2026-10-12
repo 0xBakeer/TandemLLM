@@ -1,22 +1,21 @@
 # Roadmap
 
-Today TandemLLM runs one model (Qwen3.8-27B) on one board (DGX Spark), one request at a time. Each step below widens one of those three limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
+TandemLLM runs two models (Qwen3.8-27B and Qwen3.8-Flash-Next, one at a time) on one board (DGX Spark), one request at a time by default. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
 
-## Next: a mixture-of-experts model
+## A mixture-of-experts model: served, with four parts open
 
-Our first new model is Qwen3.8-Flash-Next, a mixture-of-experts hybrid of the same family, in its published NVFP4 form. What it needs:
+Qwen3.8-Flash-Next is served from turboderp's EXL3 packs through the same server, caches and ops scripts as the 27B ([architecture.md](architecture.md), [quantisation.md](quantisation.md)). The plan written here before it named the NVFP4 checkpoint; the published EXL3 packs replaced it. What is still open:
 
-- Expert routing inside the verify. A tree of 16 nodes can route each node to different experts, so a verify reads the union of the experts its nodes chose. A verify's cost curve therefore depends on the text, and the router has to price that.
-- The experts as W4A16 NVFP4, the rest of the weights in MXFP8, and a large per-layer embedding table kept memory-mapped rather than resident.
-- Its built-in prediction head as the first drafter.
+- Vision. Flash-Next has its own vision tower (27 layers, EXL3), and the engine does not load it yet (VIS-97).
+- The 5.05 pack codes its experts at 5 and 7 bits; the MoE kernels take 2 to 6 and 8, so it does not load until a 7-bit expert kernel exists.
+- Quality against the BF16 model, per pack. The BF16 release is 360 GB and does not fit the box, so the reference run that gives KL a pack is not done.
+- Parallel requests run and are lossless on it, but three at once were slower in total than one after the other ([parallel-requests.md](parallel-requests.md#on-flash-next)).
 
-By the byte math it fits: about 71.3 GiB resident without the embedding table, which stays on disk (arithmetic from the checkpoint headers). Bandwidth puts its floor at about 38 tok/s at 273 GB/s, or 31 at 220 GB/s (arithmetic, not measured). It never shares the board with the 27B engine, because the two together do not fit.
-
-After it, Qwen3.6-35B-A3B in its standard NVFP4 export, to check that the stack works on a checkpoint we did not quantise ourselves.
+Later, other EXL3 models that fit one box, Qwen3.6-35B-A3B among them.
 
 ## Parallel requests
 
-Several requests share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. Phase A is built behind `--parallel N`, off by default ([server.md](server.md#parallel-requests-0338-test---parallel-n-off-by-default)): side slots, the GPU turn, the joint verify, the packed draft, and admission by bytes (a request queues while its worst case would push the board under its floor). First single runs on the box: two requests at about 1.4 times the single-request total, four at about 1.4 times, the single-request row unchanged. Next: the host side of a round, one tree cut across the slots, graphs for the joint pass and one graph pool for every slot. A second request costs at least the step from 16 to 32 rows of the verify kernel, so two requests at about 1.6 times is the target at today's kernels; 2 times needs a 32-row verify priced like 16 rows.
+Several requests share one verify pass in lockstep rounds: each request brings its own tree, and one forward over all the trees costs little more than one over a single tree, because the weights are read once. Phase A is built behind `--parallel N`, off by default ([server.md](server.md), section Parallel requests): side slots, the GPU turn, the joint verify, the packed draft, and admission by bytes (a request queues while its worst case would push the board under its floor). First single runs on the box: two requests at about 1.4 times the single-request total, four at about 1.4 times, the single-request row unchanged. Next: the host side of a round, one tree cut across the slots, graphs for the joint pass and one graph pool for every slot. A second request costs at least the step from 16 to 32 rows of the verify kernel, so two requests at about 1.6 times is the target at today's kernels; 2 times needs a 32-row verify priced like 16 rows.
 
 Later, multi-user serving: an API key per user, with caches isolated per user, so no user can resume from another user's prefix.
 
