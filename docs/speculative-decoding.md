@@ -87,6 +87,8 @@ V(rows) comes from `PriceModel`. Its prior is a price file, `ops/prices/<model>/
 
 `kind` is `chain` or `tree`; the context class is the model's (the 27B's tables key it by context length, Flash-Next's one class is 0). A class not in the file takes the nearest lower one, rows between two measured counts interpolate, rows past the last add `step_ms` a row (else the last two counts' slope). The model follows the live prices online (EMA 0.1 a count, the unmeasured counts shifted by the learned offset), and a price never falls with more rows. A profile without a file for its device logs the missing path once and starts every count at the same 1 ms, so the cut drafts to the full depth until the first rounds price it; the text does not change either way. The device is `dgx-spark` for the GB10, else the GPU's name in lower case (`engine/methods/device.py`).
 
+The 3.05 file is provisional (ENG-155). Rows 2 to 16 are the prices the cut learned online on the ENG-229 A/B server (about 1k of context, 600 rounds): 27.8 ms for 2 rows, 38.6 for 5, 52.2 for 10, 68.8 for 16. Row 1 is the bench of 2026-10-11. No sweep at 8k and 32k has been run, so a long context starts from these and moves them by the learned offset.
+
 ## The length router (StairCut off)
 
 Before StairCut, the served profile picked the block width once per request. With the StairCut flags off, `engine/lenrouter.py` still does, so a `serve.env` without them behaves as before.

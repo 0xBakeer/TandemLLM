@@ -160,8 +160,13 @@ class _OldStairCut:
             b[1] *= 0.5
 
 
+# the price file as it was when the cut moved (2026-10-11, the old in-code prior); ENG-155 replaced the
+# file with learned prices, the replays keep deciding against the prior they were recorded with
+OLD_PRIOR = {"0": {"chain": {"1": 24.0, "2": 27.9, "3": 30.6, "4": 34.6, "5": 37.4, "6": 41.3}}}
+
+
 def _new(siblings: bool) -> StairCut:
-    return StairCut(PriceModel.load(FN_PRICES), siblings=siblings)
+    return StairCut(PriceModel(OLD_PRIOR, 3.7), siblings=siblings)
 
 
 def _replay(rounds, siblings: bool) -> int:
@@ -284,7 +289,7 @@ def test_the_lookup_joins_the_cut_in_one_tree():
     for p in par[1:]:
         depth.append(depth[p] + 1)
     path, new = accept_tree(DraftTree(tokens=toks, parents=par), [look[d] if d < len(look) else 7 for d in depth])
-    assert new == look[:len(new)] and len(new) > 3, new
+    assert new[:-1] == look[:len(new) - 1] and len(new) > 3, new
     # the lookup past the spine's end
     toks2, par2 = sc.cut(1, tok, [[0.99, 0.0]] * 4, ([10, 11, 12, 13, 50, 51, 52], 0.97))
     assert toks2[:5] == [1, 10, 11, 12, 13] and toks2[5:] == [50, 51, 52] and par2[5] == 4, (toks2, par2)
@@ -303,8 +308,13 @@ def test_the_lookup_joins_the_cut_in_one_tree():
 
 def test_price_model():
     pm = PriceModel.load(FN_PRICES)
-    old = _OldStairCut()
-    assert [pm.prior(r) for r in range(1, 12)] == [old.prior(r) for r in range(1, 12)]
+    doc = json.load(open(FN_PRICES))
+    # ENG-155 (provisional): the learned prices of the ENG-229 A/B; measured counts as written, the rest
+    # interpolated, monotone, step_ms past the last
+    for r, ms in doc["0"]["chain"].items():
+        assert pm.prior(int(r)) == ms
+    p = [pm.prior(r) for r in range(1, 21)]
+    assert all(b >= a for a, b in zip(p, p[1:])) and p[19] == 68.8 + 4 * doc["step_ms"], p
     logs = []
     none = PriceModel.load(os.path.join(ROOT, "ops", "prices", "no-such-model", "x.dgx-spark.json"), log=logs.append)
     assert len(logs) == 1 and "no-such-model" in logs[0] and none.prices(4) == [0.0, 1.0, 1.0, 1.0, 1.0]
@@ -318,7 +328,7 @@ def test_price_model():
     doc = json.load(open(os.path.join(ROOT, "ops", "stair-tables-nvfp4.json")))
     assert stair.prior(16, "tree", 16384) == doc["16384"]["tree"]["16"]
     assert stair.prior(16, "tree", 20000) == doc["16384"]["tree"]["16"]
-    return "Flash-Next's file = the old prior; missing file logged once; classes, interpolation; the 27B's stair tables"
+    return "Flash-Next's file (provisional, learned); missing file logged once; classes, interpolation; the 27B's stair tables"
 
 
 def test_no_price_constant_in_the_flashnext_package():

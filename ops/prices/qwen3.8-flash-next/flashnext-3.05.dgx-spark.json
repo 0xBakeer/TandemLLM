@@ -1,5 +1,5 @@
 {
- "0": {"chain": {"1": 24.0, "2": 27.9, "3": 30.6, "4": 34.6, "5": 37.4, "6": 41.3}},
- "step_ms": 3.7,
- "measured": "2026-10-11 Flash-Next 3.05 on the DGX Spark, 1k context, verify + commit from captured graphs (the bench StairCut started from; the cut follows the live prices online)"
+ "0": {"chain": {"1": 24.0, "2": 27.8, "3": 31.1, "4": 34.7, "5": 38.6, "6": 42.3, "7": 43.8, "10": 52.2, "16": 68.8}},
+ "step_ms": 2.8,
+ "measured": "PROVISIONAL (ENG-155, 2026-10-12): rows 2 to 16 are the prices StairCut learned online on the ENG-229 A/B server (Flash-Next 3.05, DGX Spark, about 1k context, verify + commit from captured graphs, MTP + lookup, 600 rounds; EMA 0.1 a count), row 1 the 2026-10-11 bench's; step_ms the 10 -> 16 slope. No sweep; the cut follows the live prices online either way"
 }
