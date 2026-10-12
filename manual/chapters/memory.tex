@@ -17,7 +17,7 @@ The model can keep notes\index{memory note} about the user and the work, as file
 
 \code{<user>} is one fixed name for the engine's own requests. A request the proxy relayed carries the proxy user's name (the key's label, or \code{X-Tandem-User} from a trusted address); a relayed request without one reads and writes nothing. Files are mode 0600, and the store refuses a root inside a git work tree.
 
-TandemLLM serves one user: every client of the engine is that user, so a ``remember ...'' from any client is a note in the same store, shown as the line \code{› remembered: <title>} and archived or deleted in the Notes tab. A request that must not touch the notes sends \code{X-Tandem-Memory: off} (nothing read, nothing written, no card; the journal says why) or \code{read} (the reads only; a block the model writes anyway is dropped). Tests and scripts against a live engine send \code{off}.
+TandemLLM serves one user: every client of the engine is that user, so a ``remember this'' from any client is a note in the same store, shown as the line \code{› remembered: <title>} and archived or deleted in the Notes tab. A request that must not touch the notes sends \code{X-Tandem-Memory: off} (nothing read, nothing written, no card; the journal says why) or \code{read} (the reads only; a block the model writes anyway is dropped). Tests and scripts against a live engine send \code{off}.
 
 A note has one of eight kinds: \code{rule} (how the user wants things done), \code{ruling} (a decision), \code{gotcha} (what went wrong once), \code{runbook}, \code{program_state} (with a \code{verify_by} date, stale after it and never injected), \code{reference}, \code{registry} and \code{archive}. And one of three scopes: the user, a project (one working directory), or a session.
 
@@ -42,7 +42,7 @@ The rules are code, not prompt text (\code{server/conductor/notes.py}):
 \item A write over a cap is refused, never cut: title 120 characters, body 400 words, 20 notes a session, 500 live notes a user.
 \item Every title and body passes the secret-pattern refusal of the transcripts, and a body that is mostly a secret is refused.
 \item A \code{rule} or \code{ruling} about the user needs the user's own message in the turn: a tool turn or a script cannot write one.
-\item The model writes provisional notes. Only the dashboard ratifies, pins or deletes a note, and a model's revision of a ratified note makes it provisional again. So does the model's archive of one: the note stays, with the model's reason in its changelog, until the user archives it or ratifies it again.
+\item The model writes provisional notes. Only the dashboard ratifies, pins or deletes a note, and a model's revision of a ratified note makes it provisional again. The model's archive of one does the same: the note stays, with the model's reason in its changelog, until the user archives it or ratifies it again.
 \item Before an \code{add} lands, the same scope is searched; the same normalised title, or a close BM25 match, turns the add into a revision of that note.
 \end{itemize}
 
@@ -78,6 +78,10 @@ Besides the blocks in its answers, a session's facts can be written by a hidden 
 \end{itemize}
 
 Measured on a test engine (the 0.4.0 series, a synthetic 10-turn coding session, low effort, writer on): the writer at the session's end wrote 2 notes in 7.6~s for 282 tokens from a 5,374-token record. A new session that asked what was remembered got 1,781 prompt tokens with memory on (the index and 3 notes) against 136 off, and its first token in 0.97~s against 0.39~s; the answer named both rules the user had asked to keep. Decode was 99.7~ms a block with memory on and 99.6 off (\measured).
+
+\section{On the second model}\index{Flash-Next!memory notes}
+
+Nothing in the notes depends on which model serves: they reach the model as prompt text, and the server parses the blocks it writes. In front of Qwen3.8-Flash-Next (Chapter~\ref{ch:flashnext}) the same code runs. Nobody has checked yet whether Flash-Next writes useful blocks, because no session with memory notes on has run against it. Its profiles keep the notes off, like every shipped profile.
 
 \section{Behind the proxy}
 
