@@ -547,6 +547,12 @@ class AgentMixin:
                                keep_reasoning_from=max(0, keep_from - b),
                                nudge=NUDGE if run.nudge else None,
                                tandem=self.tandem_field(settings) if ours else None)
+        if ours and run.step <= 1 and not run.remark:
+            gone = self.missing_pins(settings)
+            if gone:
+                run.remark = (f"The pinned skill{'s' if len(gone) > 1 else ''} "
+                              f"{', '.join(gone)} {'are' if len(gone) > 1 else 'is'} no longer "
+                              f"in the library; the request went without.")
         body = build()
         est = comp.estimate(body, conv.tok_ratio)
         if window and est > int(window * comp.COMPACT_SHARE) and not run.compacted:

@@ -256,6 +256,8 @@ export interface ContextReport {
     /** the engine slot the chat sits on */
     slot: string | null;
   };
+  /** the chat's skill mode and pins (SRV-361); a pin the library lost is `missing` */
+  skills?: { mode: 'auto' | 'manual' | 'model'; pinned: { name: string; tokens: number | null; missing: boolean }[]; blocked: string[] };
   /** what the harness decided for this chat; never inside the answer text */
   harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number }[] } | null;
   memory: {

@@ -713,8 +713,10 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
                         self.emit(conv, {"type": "tool.done", "message_id": run.message_id,
                                          "call_id": p["id"], "status": "cancelled",
                                          "is_error": False}, run_id=run.id)
-                if run.notice and status != "error":
-                    note = {"type": "error", "message": run.notice, "retryable": False,
+                for text in (run.notice, run.remark):
+                    if not text or status == "error":
+                        continue
+                    note = {"type": "error", "message": text, "retryable": False,
                             "step": run.step}
                     conv.live["parts"].append(note)
                     self.emit(conv, {"type": "part.added", "message_id": run.message_id,
@@ -1020,11 +1022,13 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         if harness is None and conv.context is not None:
             harness = conv.context.get("harness")
         peek = conv.peek[1] if conv.peek is not None else None
-        return ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
-                              files_tokens=files, stats=stats,
-                              run=run.as_dict() if run is not None else None, row=live_row,
-                              facts=self.facts(), peek=peek,
-                              harness=harness if isinstance(harness, dict) else None)
+        out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
+                             files_tokens=files, stats=stats,
+                             run=run.as_dict() if run is not None else None, row=live_row,
+                             facts=self.facts(), peek=peek,
+                             harness=harness if isinstance(harness, dict) else None)
+        out["skills"] = self.skills_report(settings)
+        return out
 
     def _maybe_peek(self, conv: Conv, settings: dict, branch: list[dict]) -> None:
         """On attach: where the chat's cache lives (`POST /v1/cache/peek`, SRV-349), and a prewarm

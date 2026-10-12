@@ -68,6 +68,28 @@ def test_the_three_modes_reach_the_router_as_pins_and_blocks():
         c.close()
 
 
+def test_a_pin_shows_in_the_panel_with_its_tokens_and_a_gone_one_is_left_out():
+    import time
+    c = engine_chat()
+    c.svc._lib_cache = (time.monotonic(), LIB)
+    try:
+        cid = c.new()
+        c.ok("PATCH", f"/conversations/{cid}/settings", {"packages": ["web-design", "old-skill"]})
+        sk = c.snap(cid)["context"]["skills"]
+        assert sk["mode"] == "auto" and sk["pinned"] == [
+            {"name": "web-design", "tokens": 900, "missing": False},
+            {"name": "old-skill", "tokens": None, "missing": True}]
+        c.send(cid, "hi")
+        s = c.wait_idle(cid)
+        assert last(c)["tandem"]["packages"]["pin"] == ["web-design"]
+        notes = [p["message"] for p in s["messages"][-1]["parts"] if p["type"] == "error"]
+        assert notes == ["The pinned skill old-skill is no longer in the library; the request "
+                         "went without."]
+        assert s["messages"][-1]["status"] == "done"
+    finally:
+        c.close()
+
+
 def test_a_server_that_is_not_ours_gets_no_tandem_field():
     c = Chat()
     try:

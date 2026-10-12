@@ -169,11 +169,27 @@ class SkillsMixin:
                  for s in self.library() if s["name"] not in off][:INDEX_MAX]
         return "\n".join(lines) or None
 
+    def skills_report(self, settings: dict) -> dict:
+        """The Context panel's skills: the mode and each pin with its tokens, from the library as
+        last read (no request here); a pin the library no longer has is `missing`."""
+        c = getattr(self, "_lib_cache", None)
+        lib = {s["name"]: s for s in c[1]} if c else None
+        return {"mode": settings.get("packages_mode") or "auto",
+                "pinned": [{"name": n, "tokens": (lib or {}).get(n, {}).get("tokens"),
+                            "missing": lib is not None and bool(lib) and n not in lib}
+                           for n in settings.get("packages") or []],
+                "blocked": list(settings.get("packages_blocked") or [])}
+
+    def missing_pins(self, settings: dict) -> list[str]:
+        names = {s["name"] for s in self.library()}
+        return [p for p in settings.get("packages") or [] if names and p not in names]
+
     def tandem_field(self, settings: dict) -> dict:
         """What our engine reads from the body: the compaction marker (SRV-351) and the chat's
-        pins and blocks by its mode (SRV-361)."""
+        pins and blocks by its mode (SRV-361). A pin the library no longer has is left out."""
         t: dict = {"compaction": False}
-        pin = list(settings.get("packages") or [])
+        gone = set(self.missing_pins(settings))
+        pin = [p for p in settings.get("packages") or [] if p not in gone]
         block = set(settings.get("packages_blocked") or []) | self._off()
         mode = settings.get("packages_mode") or "auto"
         if mode in ("manual", "model"):

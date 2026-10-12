@@ -8,7 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { bytes } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
-import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, ToolInfo } from './types';
+import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
 import { EFFORTS, effortWord, localId, toolLabel } from './types';
 
 const MAX_PREVIEW_BYTES = 400_000;
@@ -18,6 +18,7 @@ export class QseChatComposer extends LightElement {
   @property({ attribute: false }) settings: ChatSettings | null = null;
   @property({ attribute: false }) caps: Capabilities | null = null;
   @property({ attribute: false }) tools: ToolInfo[] = [];
+  @property({ attribute: false }) packages: PackageInfo[] = [];
   @property({ attribute: false }) prompts: Prompt[] = [];
   @property({ type: Boolean }) running = false;
   @property({ type: Boolean }) disabled = false;
@@ -287,6 +288,12 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}
       </div>
+      ${this.packages.length
+        ? html`<div class="ch-pop-group"><div class="ch-pop-title">Skills</div>
+            <div class="seg" role="radiogroup" aria-label="skill mode">${(['auto', 'manual', 'model'] as const).map((m) => html`<button type="button" class="seg-btn ${s.packages_mode === m ? 'is-on' : ''}" role="radio" aria-checked=${s.packages_mode === m} title=${m === 'auto' ? 'the harness picks, plus your pins' : m === 'manual' ? 'your pins only' : 'the model reads the skill index and picks'} @click=${() => this.patch({ packages_mode: m })}>${m}</button>`)}</div>
+            ${this.packages.filter((p) => p.enabled).map((p) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.packages.includes(p.id)} @change=${() => this.patch({ packages: s.packages.includes(p.id) ? s.packages.filter((x) => x !== p.id) : [...s.packages, p.id] })} /><code>${p.name}</code><span class="ch-pop-desc">pin: ${p.description}</span></label>`)}
+          </div>`
+        : nothing}
       <div class="ch-pop-foot"><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'tools' }), (this.pop = 'none'))}>All tools and policies</button><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'mcp' }), (this.pop = 'none'))}>MCP servers</button></div>
     </div>`;
   }

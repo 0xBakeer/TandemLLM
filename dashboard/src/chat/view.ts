@@ -30,7 +30,7 @@ import type { QseChatComposer } from './composer';
 import { defaultPane, type OpenPane, type Dock } from './panes';
 import type { SettingsSection } from './settings';
 import { SECTIONS } from './settings';
-import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type Prompt, type StampedEvent, type ToolInfo } from './types';
+import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type PackageInfo, type Prompt, type StampedEvent, type ToolInfo } from './types';
 
 const LS = {
   rail: 'qse.chat.rail',
@@ -76,6 +76,7 @@ export class QseChat extends LightElement {
   @state() private attach: Attach = initialAttachment();
   @state() private now = Date.now();
   @state() private tools: ToolInfo[] = [];
+  @state() private packages: PackageInfo[] = [];
   @state() private prompts: Prompt[] = [];
   @state() private unread = new Set<string>();
   // chrome
@@ -198,6 +199,7 @@ export class QseChat extends LightElement {
   private async afterSignIn(): Promise<void> {
     const b = this.backend!;
     void b.tools().then((t) => (this.tools = t)).catch(() => undefined);
+    void b.packages().then((p) => (this.packages = p)).catch(() => undefined);
     void b.prompts().then((p) => (this.prompts = p)).catch(() => undefined);
     this.listPoll = poll(() => this.loadList(), 10_000);
     this.listPoll.start();
@@ -741,7 +743,7 @@ export class QseChat extends LightElement {
   }
 
   private renderComposer(c: Conversation | null): TemplateResult {
-    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
+    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
       @ch-send=${(e: CustomEvent<{ text: string; attachments: Attachment[] }>) => void this.send(e.detail.text, e.detail.attachments)}
       @ch-stop=${() => c && void this.guard(() => this.backend!.stop(c.id), 'Stop')}
       @ch-draft=${(e: CustomEvent<{ text: string }>) => c && lsSet(LS.draft(c.id), e.detail.text || null)}

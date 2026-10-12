@@ -349,7 +349,9 @@ export class MockChatBackend implements ChatBackend {
     const thinking = st.run ? st.run.thinking.used : 0;
     const files = messages.some((m) => m.parts.some((p) => p.type === 'tool_call' && p.name === 'read_file')) ? 1_460 : 0;
     const compacted = st.compactions.length ? Math.max(0, tokens - 4_000) : tokens;
-    return contextFor(compacted, { tools: st.settings.tools.length > 0, files, thinking, warmAll: st.seen, profile: st.settings.profile, effort: st.settings.effort, thinkingOn: st.settings.thinking, slot: st.run ? 'slot 1' : null, cold: st.cold, packages: st.settings.packages });
+    const ctx = contextFor(compacted, { tools: st.settings.tools.length > 0, files, thinking, warmAll: st.seen, profile: st.settings.profile, effort: st.settings.effort, thinkingOn: st.settings.thinking, slot: st.run ? 'slot 1' : null, cold: st.cold, packages: st.settings.packages });
+    const pkg = (n: string) => this.pkgs.find((p) => p.id === n);
+    return { ...ctx, skills: { mode: st.settings.packages_mode, pinned: st.settings.packages.map((n) => ({ name: n, tokens: pkg(n)?.tokens ?? null, missing: !pkg(n) })), blocked: st.settings.packages_blocked } };
   }
 
   // ---- events ---------------------------------------------------------------------------------

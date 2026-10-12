@@ -44,6 +44,7 @@ export class QseChatContext extends LightElement {
       ${this.renderWindow(c)}
       ${this.renderNow(c)}
       ${this.renderModel(c)}
+      ${this.renderSkills(c)}
       ${this.renderMemory(c)}
       ${this.renderCompaction(c)}
       ${this.renderUsage(c)}
@@ -141,7 +142,22 @@ export class QseChatContext extends LightElement {
         <div><dt>drafter</dt><dd>${m.drafter ?? 'none'}</dd></div>
         <div><dt>window</dt><dd class="num">${exact(m.max_len)}</dd></div>
         <div><dt>effort</dt><dd>${m.thinking ? effortWord(m.effort) : 'thinking off'}</dd></div>
-        <div><dt>packages</dt><dd class="num">${c.settings.packages.length}</dd></div>
+      </dl>
+    </section>`;
+  }
+
+  /** SRV-361: the chat's pins with their tokens, and what the harness put in last */
+  private renderSkills(c: Conversation): TemplateResult {
+    const sk = c.context.skills;
+    const picked = c.context.harness?.packages ?? [];
+    if (!sk) return html``;
+    return html`<section class="ch-ctx-sec" data-sec="skills">
+      <h3 class="ch-ctx-h">Skills</h3>
+      <dl class="kv ch-kv">
+        <div><dt>mode</dt><dd>${sk.mode === 'auto' ? 'the harness picks' : sk.mode === 'manual' ? 'pins only' : 'the model reads them'}</dd></div>
+        ${sk.pinned.map((p) => html`<div data-pin=${p.name}><dt>pinned</dt><dd>${p.name} ${p.missing ? html`<span class="warn-ink">no longer in the library</span>` : html`<span class="num muted">${p.tokens != null ? `${exact(p.tokens)} tokens` : ''}</span>`}</dd></div>`)}
+        ${picked.map((p) => html`<div><dt>harness</dt><dd>${p.name} <span class="num muted">${exact(p.tokens)} tokens</span></dd></div>`)}
+        ${!sk.pinned.length && !picked.length ? html`<div><dt>pinned</dt><dd class="muted">none</dd></div>` : nothing}
       </dl>
     </section>`;
   }

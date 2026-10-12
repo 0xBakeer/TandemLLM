@@ -104,6 +104,7 @@ class Run:
         self.tps_history: list = []
         self.error: str | None = None
         self.notice: str | None = None         # why the run ended early (step cap, a loop)
+        self.remark: str | None = None         # a note for the end of the answer (a gone pin)
         # the loop
         self.cancel = threading.Event()        # a running tool ends on it
         self.step_parts: list[int] = []        # this step's tool_call part indexes, in order
