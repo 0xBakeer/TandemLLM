@@ -165,11 +165,11 @@ The branch name says what is inside: `3.05bpw_h5_ng5` is 3.05 bits a weight on a
 
 | profile | branch | disk, with the table | weights on the device | n-gram table | largest window on one DGX Spark |
 |-|-|-|-|-|-|
-| `flashnext-2.05` | `2.05bpw_h4_ng4` | 61.5 GB | 32.83 GiB (estimate) | 24.44 GiB, warm | 262,144 |
-| `flashnext-3.05` (recommended) | `3.05bpw_h5_ng5` | 85.1 GB | 47.63 GiB (measured) | 30.4 GiB, cold | 262,144 |
-| `flashnext-4.05` | `4.05bpw_h6_ng6` | 106.1 GB | 62.45 GiB (estimate) | 36.36 GiB, cold | 212,992 |
-| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | 77.14 GiB (estimate) | 36.36 GiB, cold | does not load yet |
-| `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | 91.85 GiB (estimate) | 36.36 GiB, cold | none: it does not fit |
+| `flashnext-2.05` | `2.05bpw_h4_ng4` | 61.5 GB | 32.85 GiB (estimate) | 24.44 GiB, warm | 262,144 |
+| `flashnext-3.05` (recommended) | `3.05bpw_h5_ng5` | 85.1 GB | 47.87 GiB (measured) | 30.4 GiB, cold | 262,144 |
+| `flashnext-4.05` | `4.05bpw_h6_ng6` | 106.1 GB | 62.47 GiB (estimate) | 36.36 GiB, cold | 212,992 |
+| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | 77.16 GiB (estimate) | 36.36 GiB, cold | does not load yet |
+| `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | 91.87 GiB (estimate) | 36.36 GiB, cold | none: it does not fit |
 
 The windows come from the Setup Guide's estimate ([setup.md](setup.md)), calibrated on one 260,800-token request each on 2.05, 3.05 and 4.05 (2026-10-12). It predicts the lowest MemAvailable of those three runs within 0.7 GiB. 2.05 and 3.05 hold the model's full 262,144 tokens. 4.05 ran a 260,800-token request with MemAvailable never under 17.8 GiB on a box whose other programs took 4.6 GiB; under the Setup Guide's frame of 10 GiB for the rest of the system, its window comes out at 212,992.
 
