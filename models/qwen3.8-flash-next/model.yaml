@@ -159,7 +159,8 @@ profiles:
     date: '2026-10-11'
     source: 'not measured: the BF16 reference run (ENG-159) is deferred'
   assets_required: []
-  note: On the edge of the Spark budget, with the table cold.
+  note: 'Does not load on this engine yet: its experts are coded at 5 and 7 bits a weight, and the MoE kernels
+    take 2 to 6 and 8 (ENG-223; SPD-99, 2026-10-12). Its largest window is the estimate''s.'
   hf_revision: 5.05bpw_h6_ng6
   max_window: 65536
   table:
