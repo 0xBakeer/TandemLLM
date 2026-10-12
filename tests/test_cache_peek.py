@@ -146,8 +146,8 @@ def test_the_prewarm_yields_to_requests_and_to_another_conversation_in_use():
                 assert app._cache_prewarm(list(nxt), "A") is None
             finally:
                 app.INFLIGHT[key] -= 1
-        # the engine lock held by a request (between its prefill and its last token): peek and
-        # prewarm answer None at once, the route's 409
+        # the engine lock held and a request waiting for it: peek and prewarm answer None at once,
+        # the route's 409
         held, done = threading.Event(), threading.Event()
 
         def hold(s=5):
@@ -157,23 +157,28 @@ def test_the_prewarm_yields_to_requests_and_to_another_conversation_in_use():
         th = threading.Thread(target=hold)
         th.start()
         held.wait(5)
-        app.INFLIGHT["running"] += 1
+        app.INFLIGHT["waiting"] += 1
         t0 = time.monotonic()
         try:
             assert _peek(nxt, "A") is None
-            assert time.monotonic() - t0 < 0.5, "no wait while a request runs"
+            assert time.monotonic() - t0 < 0.5, "no wait while a request waits"
         finally:
-            app.INFLIGHT["running"] -= 1
+            app.INFLIGHT["waiting"] -= 1
             done.set()
             th.join()
-        # held by the engine's idle work (no request): they wait for it (live: the idle graph
-        # captures right after a turn, 1,354 ms), and answer None past PEEK_IDLE_WAIT_S
+        # held by a request's tail (its bookkeeping after the answer went out) or the engine's
+        # idle work after it (live: right after a turn, 1,339 ms): they wait for it, and answer
+        # None past PEEK_IDLE_WAIT_S
         held.clear(); done.clear()
+        app.INFLIGHT["running"] += 1
         th = threading.Thread(target=hold, args=(0.3,))
         th.start()
         held.wait(5)
-        p = _peek(nxt, "A")
-        th.join()
+        try:
+            p = _peek(nxt, "A")
+        finally:
+            th.join()
+            app.INFLIGHT["running"] -= 1
         assert p is not None and p["tier"] in cache_peek.ORDER + ("none",), p
         held.clear(); done.clear()
         real_wait = app.PEEK_IDLE_WAIT_S
@@ -471,12 +476,12 @@ def test_through_the_handler_the_parts_add_up_and_the_peek_matches_the_send():
     th = threading.Thread(target=hold)
     th.start()
     held.wait(5)
-    app.INFLIGHT["running"] += 1
+    app.INFLIGHT["waiting"] += 1
     try:
         st, busy = _post("/v1/cache/peek", dict(body2, session="chat-1"))
         assert st == 409 and busy["error"]["type"] == "busy", busy
     finally:
-        app.INFLIGHT["running"] -= 1
+        app.INFLIGHT["waiting"] -= 1
         done.set()
         th.join()
     return (f"parts {tp} add up to {u['prompt_tokens']}; peek {p['tier']} {p['cached_tokens']} = "

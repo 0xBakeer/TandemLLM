@@ -2808,18 +2808,18 @@ def _peek_rate() -> float | None:
     return None
 
 
-#: with no request running or waiting, a peek or a prewarm waits this long for the engine lock (s):
-#: its holder is then the engine's own idle work (graph captures, prepares), which ends or stops
+#: with no request waiting, a peek or a prewarm waits this long for the engine lock (s): the end of a
+#: turn (its bookkeeping after the answer went out) and the engine's idle work after it
 PEEK_IDLE_WAIT_S = 3.0
 
 
 def _lock_when_idle() -> bool:
-    """The engine lock for a peek or a prewarm: at once while a request runs or waits (None, the
-    route's 409), else after the engine's idle work (live: right after a turn the idle graph
-    captures held it 1,354 ms and four peeks in a row answered 409)."""
+    """The engine lock for a peek or a prewarm: without waiting while a request waits for it (the
+    route's 409), else for up to PEEK_IDLE_WAIT_S (live: right after a turn its own tail and then
+    the idle graph captures, 1,339 ms, held it, and five peeks in a row answered 409)."""
     with QUEUE:
-        busy = bool(WAITERS) or INFLIGHT["waiting"] > 0 or INFLIGHT["running"] > 0
-    return LOCK.acquire(blocking=False) if busy else LOCK.acquire(timeout=PEEK_IDLE_WAIT_S)
+        queued = bool(WAITERS) or INFLIGHT["waiting"] > 0
+    return LOCK.acquire(blocking=False) if queued else LOCK.acquire(timeout=PEEK_IDLE_WAIT_S)
 
 
 def _cache_peek(ids: list[int], session: str | None) -> dict | None:
