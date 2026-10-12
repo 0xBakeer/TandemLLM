@@ -213,6 +213,9 @@ test('plan mode: a plan, Approve, the run that carries it out, then Rewind', asy
   await expect(a.page.locator('#ch-input')).toHaveValue('Carry out the approved plan.');
   const g = await request.get(`../v1/chat-app/conversations/${id}/sandbox/file?path=/workspace/notes/plan.md`);
   expect(g.status()).not.toBe(200);
+  // the todo list as the approved run found it: every step open again
+  await expect.poll(async () => (await snap(request, id)).todos?.every((t) => t.state === 'pending')).toBe(true);
+  await expect(a.page.locator('.ch-todos .ch-todo.is-done')).toHaveCount(0);
   await a.page.screenshot({ path: `${SHOTS}/p4-3-rewound.png` });
   await stopSandbox(request, id);
   await a.ctx.close();
