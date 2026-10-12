@@ -185,7 +185,7 @@ test('two MCP servers and an imported Open WebUI tool answer in one chat', async
 
 test('plan mode: a plan, Approve, the run that carries it out, then Rewind', async ({ browser, request }) => {
   const id = await newChat(request, { tools: ['bash', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'] });
-  await request.patch(`../v1/chat-app/conversations/${id}/settings`, { data: { policies: { write_file: 'always', edit_file: 'always' } } });
+  await request.patch(`../v1/chat-app/conversations/${id}/settings`, { data: { policies: { bash: 'always', write_file: 'always', edit_file: 'always' } } });
   const a = await open(browser, `#/chat/${id}`);
   await a.page.locator('.ch-pill', { hasText: 'plan' }).click();
   await expect(a.page.locator('.ch-pill', { hasText: 'plan' })).toHaveAttribute('aria-pressed', 'true');
@@ -240,33 +240,38 @@ test('the PWA: the service worker caches the shell only, and the page is install
   await a.ctx.close();
 });
 
-test('a chat that waits for permission notifies another tab, with no text, and counts on the badge', async ({ browser, request }) => {
-  const ctx = await browser.newContext({ viewport: DESKTOP });
-  await ctx.grantPermissions(['notifications']);
-  await ctx.addInitScript(() => {
-    const seen: { title: string; body?: string }[] = [];
-    (window as unknown as { __notes: typeof seen }).__notes = seen;
-    ServiceWorkerRegistration.prototype.showNotification = async function (title: string, opts?: NotificationOptions) {
-      seen.push({ title, body: opts?.body });
-    };
-    Object.defineProperty(document, 'hidden', { get: () => true });
+// the headless shell answers every notification permission with `denied`; the full Chromium in
+// its new headless mode honours the grant
+test.describe('notifications', () => {
+  test.use({ channel: 'chromium' });
+  test('a chat that waits for permission notifies another tab, with no text, and counts on the badge', async ({ browser, request }) => {
+    const ctx = await browser.newContext({ viewport: DESKTOP });
+    await ctx.grantPermissions(['notifications']);
+    await ctx.addInitScript(() => {
+      const seen: { title: string; body?: string }[] = [];
+      (window as unknown as { __notes: typeof seen }).__notes = seen;
+      ServiceWorkerRegistration.prototype.showNotification = async function (title: string, opts?: NotificationOptions) {
+        seen.push({ title, body: opts?.body });
+      };
+      Object.defineProperty(document, 'hidden', { get: () => true });
+    });
+    const page = await ctx.newPage();
+    await page.goto('./#/chat');
+    await page.locator('qse-chat').waitFor();
+    const id = await newChat(request, { tools: ['bash'] });
+    await request.patch(`../v1/chat-app/conversations/${id}`, { data: { title: 'Notify probe' } });
+    await say(request, id, 'Use the bash tool to run: echo secret-words-here. Do nothing else.');
+    await expect.poll(async () => page.evaluate(() => (window as unknown as { __notes: { title: string; body?: string }[] }).__notes), { timeout: 300_000 }).toContainEqual({ title: 'Notify probe', body: 'waits for permission' });
+    const notes = await page.evaluate(() => JSON.stringify((window as unknown as { __notes: unknown[] }).__notes));
+    expect(notes).not.toContain('secret-words-here');
+    await expect.poll(async () => page.title(), { timeout: 15_000 }).toMatch(/^\(\d+\) /);
+    await page.goto('./#/chat/settings/device');
+    await page.screenshot({ path: `${SHOTS}/p4-4-this-device.png` });
+    const s = await snap(request, id);
+    const ask = calls(s).find((c) => c.status === 'asking');
+    if (ask) await request.post(`../v1/chat-app/conversations/${id}/permissions/${ask.id ?? ''}`, { data: { decision: 'deny' } });
+    await request.post(`../v1/chat-app/conversations/${id}/stop`);
+    await stopSandbox(request, id);
+    await ctx.close();
   });
-  const page = await ctx.newPage();
-  await page.goto('./#/chat');
-  await page.locator('qse-chat').waitFor();
-  const id = await newChat(request, { tools: ['bash'] });
-  await request.patch(`../v1/chat-app/conversations/${id}`, { data: { title: 'Notify probe' } });
-  await say(request, id, 'Use the bash tool to run: echo secret-words-here. Do nothing else.');
-  await expect.poll(async () => page.evaluate(() => (window as unknown as { __notes: { title: string; body?: string }[] }).__notes), { timeout: 300_000 }).toContainEqual({ title: 'Notify probe', body: 'waits for permission' });
-  const notes = await page.evaluate(() => JSON.stringify((window as unknown as { __notes: unknown[] }).__notes));
-  expect(notes).not.toContain('secret-words-here');
-  await expect.poll(async () => page.title(), { timeout: 15_000 }).toMatch(/^\(\d+\) /);
-  await page.goto('./#/chat/settings/device');
-  await page.screenshot({ path: `${SHOTS}/p4-4-this-device.png` });
-  const s = await snap(request, id);
-  const ask = calls(s).find((c) => c.status === 'asking');
-  if (ask) await request.post(`../v1/chat-app/conversations/${id}/permissions/${ask.id ?? ''}`, { data: { decision: 'deny' } });
-  await request.post(`../v1/chat-app/conversations/${id}/stop`);
-  await stopSandbox(request, id);
-  await ctx.close();
 });
