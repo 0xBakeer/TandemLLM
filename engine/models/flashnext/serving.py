@@ -196,11 +196,13 @@ class FlashNextServing:
         per_tok = len(c.attention_layers) * (c.num_key_value_heads * c.head_dim * 2
                                              + (c.indexer_head_dim if c.has_indexer else 0)) * 2
         # the prefill workspace, measured 2026-10-12 on 3.05: 2.51 GiB at 8k and 2.40 GiB at 32k
-        # (tools/fn_memory_check.py; the 4,096-row chunk's activations, flat there), so a floor of 2.75
-        # GiB, and 10.47 GiB above the engine at a 261,549-token prefill (SPD-99), 42,976 bytes a context
-        # token on a line through zero -- the memory policy's own figure once it observed that peak
+        # (tools/fn_memory_check.py; the 4,096-row chunk's activations), 10.46 GiB above the engine at a
+        # 147,149-token prefill and 10.47 GiB at 261,549 (SPD-99): it grows to about 140k tokens and then
+        # stops -- a floor of 2.75 GiB, the line through the 147,149-token point (76,309 bytes a token),
+        # capped at 10.75 GiB (the memory policy raises the cap if a prefill ever needs more)
         return CostModel(section_bytes=sum(sec.values()), view_bytes_per_token=per_tok,
-                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=42976,
+                         workspace_floor=int(2.75 * (1 << 30)), workspace_per_token=76309,
+                         workspace_cap=int(10.75 * (1 << 30)),
                          parts={"recurrent": sum(b for k, b in sec.items() if k.startswith("gdn.S")),
                                 "conv": sum(b for k, b in sec.items() if k.startswith(("gdn.conv", "ple.conv")))})
 

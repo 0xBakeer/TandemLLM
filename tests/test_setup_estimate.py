@@ -311,12 +311,13 @@ def test_flash_next_packs():
     parts = {x["id"]: x for x in e["parts"]}
     # SPD-99: 3.05 reads its table cold (the row cache), and its prefill workspace was measured at 256k
     assert parts["table"]["gb"] == 2.0 and "row cache" in parts["table"]["label"]
-    assert parts["prefill_workspace"]["gb"] == round(42976 * 262_144 / GIB, 2)
+    assert parts["prefill_workspace"]["gb"] == 10.5                    # stops growing at about 140k
+    assert parts["window_buffers"]["gb"] == round(32230 * 262_144 / GIB, 2)
     assert parts["prefill_workspace"]["kind"] == "reserve"
     assert e["fits"] and e["context_tokens_fit"] == 262_144, (e["context_tokens_fit"], e["room_gb"])
     warm = {x["id"]: x for x in est(profile="flashnext-2.05", window=262_144)["parts"]}
     assert warm["table"]["gb"] == 24.44 and "kept warm" in warm["table"]["label"]
-    cold = {x["id"]: x for x in est(profile="flashnext-4.05")["parts"]}
+    cold = {x["id"]: x for x in est(profile="flashnext-4.05", window=131_072)["parts"]}
     assert cold["table"]["gb"] == 2.0 and "row cache" in cold["table"]["label"]
     six = est(profile="flashnext-6.05", window=8192)
     assert not six["fits"] and six["context_tokens_fit"] == 0

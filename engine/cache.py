@@ -384,7 +384,7 @@ class Budget:
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
                  ws_floor: int = WORKSPACE_FLOOR, ws_per_token: int = WORKSPACE_PER_TOKEN,
-                 on_event=None):
+                 ws_cap: int | None = None, on_event=None):
         self.ceiling = int(ceiling_bytes)
         self.peak = int(peak_bytes)
         self.slack = int(slack_bytes)
@@ -401,6 +401,7 @@ class Budget:
         self.exclude = exclude
         self.ws_floor = int(ws_floor)
         self.ws_per_token = int(ws_per_token)
+        self.ws_cap = int(ws_cap) if ws_cap is not None else None
         self.on_event = on_event
         self.shedders: dict = {}
         self.ws_now = 0                    # the running prefill's workspace, until it is done
@@ -446,7 +447,9 @@ class Budget:
         return max(0, alloc - xa), max(0, res - xr)
 
     def workspace(self, n: int) -> int:
-        return max(self.ws_floor, self.ws_per_token * int(n))
+        w = max(self.ws_floor, self.ws_per_token * int(n))
+        # a model whose workspace stops growing (its adapter's `workspace_cap`; the 27B's: none)
+        return min(w, self.ws_cap) if self.ws_cap is not None else w
 
     def _event(self, kind: str, **kw) -> dict:
         ev = dict(kind=kind, ts=round(time.time(), 3), **kw)
@@ -611,6 +614,10 @@ class Budget:
             return
         self.stats["observed"] = {"n": int(n), "workspace": int(workspace),
                                   "estimate": self.workspace(n)}
+        if self.ws_cap is not None and workspace > self.ws_cap:
+            self._event("estimate_raised", n=int(n), workspace=int(workspace), cap=int(workspace),
+                        was_cap=self.ws_cap)
+            self.ws_cap = int(workspace)
         per = int(workspace / n)
         if per > self.ws_per_token:
             self._event("estimate_raised", n=int(n), workspace=int(workspace),

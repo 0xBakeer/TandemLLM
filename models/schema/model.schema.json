@@ -738,6 +738,10 @@
                 "maxLength": 2000,
                 "type": "string"
               },
+              "max_gib": {
+                "minimum": 0,
+                "type": "number"
+              },
               "source": {
                 "maxLength": 2000,
                 "type": "string"

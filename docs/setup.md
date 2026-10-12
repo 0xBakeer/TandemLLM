@@ -45,7 +45,7 @@ The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verif
 - `max_window`: the largest window the pack holds on the device preset; null when it fits none (6.05). The overview line and the window buttons follow the selected profile (buttons above it are disabled, with the reason), the estimate refuses a longer window (422 `out_of_range`), and the engine refuses one at start.
 - `table`: the pack's n-gram table, its size and policy. Warm adds the table as a fixed part ("n-gram table (page cache, kept warm)"); cold adds its row cache instead.
 - `components_gib`: a tool's memory under this profile, where it differs from the tool's own figure.
-- `memory.per_window_parts`: parts that grow with slot 0's window. Flash-Next's prefill workspace is 42,976 bytes a context token, measured at a 261,549-token prefill on 3.05.
+- `memory.per_window_parts`: parts that grow with slot 0's window, each with an optional `max_gib` where it stops. Flash-Next's prefill workspace grows 76,309 bytes a context token up to 10.5 GiB (10.46 GiB measured at a 147,149-token prefill on 3.05, 10.47 at 261,549); its warm-up buffers, graphs and draft-layer cache take 32,230 bytes a token of window. With these and the engine's part calibrated on the SPD-99 runs, the estimate predicts the lowest MemAvailable of the 2.05, 3.05 and 4.05 runs at 262,144 tokens within 0.7 GiB.
 
 Rows of the measured table and every `max_window` come from runs on the box only.
 

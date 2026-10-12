@@ -8915,7 +8915,7 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                                       exclude=lambda: memlimits.role_exclude(STATE),
                                       ws_floor=cost.workspace_floor or cache.WORKSPACE_FLOOR,
                                       ws_per_token=cost.workspace_per_token or cache.WORKSPACE_PER_TOKEN,
-                                      on_event=_memory_event)
+                                      ws_cap=cost.workspace_cap, on_event=_memory_event)
     # The roles' pools. Their free segments count in `reserved` and only dropping
     # the pool gives them back: the gate's last level asks the shadow reader to (`release`), and
     # the stale-reserve rule leaves them out of what the engine's allocator holds free

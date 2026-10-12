@@ -1180,7 +1180,7 @@ export interface SetupModel {
     parts: { id: string; label: string; gib: number; kind: 'fixed' | 'reserve'; source: string }[];
     sources: string[];
     /** SRV-337: parts that grow with slot 0's window (bytes a token) */
-    per_window_parts?: { id: string; label: string; bytes_per_token: number; kind: 'fixed' | 'reserve'; source: string }[];
+    per_window_parts?: { id: string; label: string; bytes_per_token: number; max_gib?: number; kind: 'fixed' | 'reserve'; source: string }[];
   };
   /** 1.0+: the tile's recommended badge */
   recommended: boolean;

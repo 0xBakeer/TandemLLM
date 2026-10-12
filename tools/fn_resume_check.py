@@ -8,6 +8,10 @@ For each length n (prose held-out text through the chat template, tools/fn_gener
   cont     the prompt to the last 4,096 grid point g, then the rest, in the same state;
   resumed  the prompt to g, the state's sections and the first g rows of its views copied out, the
            state reset, both written back, `resume_at(g)` (the caches' restore), then the rest;
+  dirty    the buffers first filled by another prompt (the code prompt, a little longer), then only the
+           state's own reset (`reset_inplace`, the sections and the length; K, V, the indexer keys and
+           the pool keep the other prompt's rows, as a live engine's do after any request), then the
+           prompt cold: a kernel that reads a row past the length shows here;
 then `--new` greedy tokens from each through the decode step. Recorded: the last logits' largest
 difference to the cold ones and whether the argmax agrees, and the greedy tokens' first difference.
 """
@@ -77,13 +81,22 @@ def main() -> None:
         eng.resume_at(g)
         res_lg = eng.forward(ids[g:], g).clone()
         row["resumed_tokens"] = greedy(eng, res_lg, n, a.new)
-        for name, lg in (("cont", cont), ("resumed", res_lg)):
+        other = torch.tensor(class_prompt(tok, "code", n + 512), device="cuda")
+        eng.reset()
+        eng.forward(other, 0)
+        eng.settle()
+        eng._chain, eng.picks = None, None
+        eng.st.reset_inplace()
+        dirty = eng.forward(ids, 0).clone()
+        row["dirty_tokens"] = greedy(eng, dirty, n, a.new)
+        for name, lg in (("cont", cont), ("resumed", res_lg), ("dirty", dirty)):
             row[f"{name}_max_diff"] = float((lg - cold).abs().max())
             row[f"{name}_argmax_same"] = int(lg.argmax()) == int(cold.argmax())
             toks = row[f"{name}_tokens"]
             row[f"{name}_first_token_diff"] = next((i for i, (x, y) in enumerate(zip(toks, row["cold_tokens"])) if x != y), None)
         print(f"[resume] n {n} grid {g}: cont diff {row['cont_max_diff']:.4g} first token diff {row['cont_first_token_diff']}; "
               f"resumed diff {row['resumed_max_diff']:.4g} first token diff {row['resumed_first_token_diff']}; "
+              f"dirty diff {row['dirty_max_diff']:.4g} first token diff {row['dirty_first_token_diff']}; "
               f"cold prefill {row['cold_s']} s", flush=True)
         res.append(row)
     if a.json:

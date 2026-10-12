@@ -155,7 +155,8 @@ export function estimate(m: SetupModel, selection: SetupSelection, availableGb: 
     const warm = table.policy === 'warm';
     parts.push({ id: 'table', label: warm ? 'n-gram table (page cache, kept warm)' : 'n-gram row cache (the table read past the page cache)', gb: warm ? table.gib : table.cache_gib, kind: 'fixed' });
   }
-  for (const part of m.memory.per_window_parts ?? []) parts.push({ id: part.id, label: part.label, gb: (part.bytes_per_token * window) / GIB, kind: part.kind });
+  // a part may stop growing (a prefill's workspace): max_gib
+  for (const part of m.memory.per_window_parts ?? []) parts.push({ id: part.id, label: part.label, gb: Math.min((part.bytes_per_token * window) / GIB, part.max_gib ?? Infinity), kind: part.kind });
   if (slots > 1) parts.push({ id: 'side_slots', label: `${slots - 1} more slot(s), beyond their KV`, gb: (slots - 1) * p.side_slot_const_gib, kind: 'fixed' });
   for (const c of m.components) {
     if (!sel.components[c.id]) continue;

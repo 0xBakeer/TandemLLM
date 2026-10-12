@@ -308,7 +308,7 @@
      "weights_gib": 62.45,
      "drafters_gib": 0.0,
      "recommended": false,
-     "max_window": 262144,
+     "max_window": 212992,
      "table": {
       "gib": 36.36,
       "policy": "cold",
@@ -321,7 +321,7 @@
      "weights_gib": 77.14,
      "drafters_gib": 0.0,
      "recommended": false,
-     "max_window": 180224,
+     "max_window": 65536,
      "table": {
       "gib": 36.36,
       "policy": "cold",
@@ -355,9 +355,9 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gib": 1.85,
+      "gib": 5.69,
       "kind": "fixed",
-      "source": "parity note 2026-10-11: load stages engine 1.21, drafters 0.34, warm-up 0.06 GiB on 3.05, rounded up for the verify graphs"
+      "source": "calibrated on the SPD-99 runs of 2026-10-12 (2.05 warm, 3.05 cold, 4.05 cold at 262,144 tokens): what the engine held at its peak beyond the weights, the table and the other parts here, 34.2 to 35.5 GiB at 262,144, the mean taken; the parity note had 1.85 from short contexts"
      },
      {
       "id": "allocator",
@@ -371,9 +371,17 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "bytes_per_token": 42976,
+      "bytes_per_token": 76309,
+      "max_gib": 10.5,
       "kind": "reserve",
-      "source": "measured 2026-10-12 on 3.05 (SPD-99), 10.47 GiB above the engine at a 261,549-token prefill, the memory policy's line through zero"
+      "source": "measured 2026-10-12 on 3.05 (SPD-99), 10.46 GiB above the engine at a 147,149-token prefill and 10.47 at 261,549, 2.40 at 32,768; it stops growing at about 140k tokens"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "bytes_per_token": 32230,
+      "kind": "fixed",
+      "source": "the load stages on 3.05 (2026-10-12): MemAvailable taken by the warm-up 1.14 GiB at 32,768, 4.23 at 147,456, 7.2 to 7.5 at 262,144; the draft layer's KV 0.32 and 0.83 GiB at 32,768 and 262,144"
      }
     ]
    },
@@ -5483,7 +5491,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 81.38,
+    "total_gb": 93.22,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5504,7 +5512,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -5522,8 +5530,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 5.25,
+      "gb": 9.32,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 3.93,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -5553,7 +5567,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 29.04,
+    "room_gb": 17.2,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5568,7 +5582,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 90.41,
+    "total_gb": 102.13,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5589,7 +5603,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -5607,8 +5621,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 10.49,
+      "gb": 10.5,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -5638,7 +5658,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 23.8,
+    "room_gb": 12.08,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5653,7 +5673,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 73.74,
+    "total_gb": 85.58,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5674,7 +5694,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -5692,8 +5712,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 5.25,
+      "gb": 9.32,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 3.93,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -5723,7 +5749,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 36.68,
+    "room_gb": 24.84,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
@@ -5738,7 +5764,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 82.77,
+    "total_gb": 94.49,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5759,7 +5785,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -5777,8 +5803,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 10.49,
+      "gb": 10.5,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -5808,7 +5840,7 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": 31.44,
+    "room_gb": 19.72,
     "notes": [
      "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
     ]
@@ -5823,7 +5855,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 88.56,
+    "total_gb": 100.4,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -5844,7 +5876,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -5862,8 +5894,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 5.25,
+      "gb": 9.32,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 3.93,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -5889,13 +5927,13 @@
     ],
     "fits": true,
     "fits_worst": true,
-    "context_tokens_fit": 262144,
+    "context_tokens_fit": 212992,
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": 21.86,
+    "room_gb": 10.02,
     "notes": [
-     "About 262,144 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
+     "About 212,992 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
     ]
    }
   },
@@ -5906,82 +5944,9 @@
     "profile": "flashnext-4.05",
     "window": 262144
    },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 97.59,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 4.05 bpw (turboderp))",
-      "gb": 62.45,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.3,
-      "kind": "reserve"
-     },
-     {
-      "id": "table",
-      "label": "n-gram row cache (the table read past the page cache)",
-      "gb": 2.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "prefill_workspace",
-      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 10.49,
-      "kind": "reserve"
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 7.58,
-      "kind": "kv",
-      "worst_gb": 7.58
-     }
-    ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 262144,
-    "kv_bytes_per_token": 31040,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 7.58,
-    "room_gb": 16.62,
-    "notes": [
-     "About 262,144 tokens of conversation fit in all, 262,144 a slot when all 1 are full (the window is 262,144)."
-    ]
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
    }
   },
   {
@@ -5991,82 +5956,9 @@
     "profile": "flashnext-5.05",
     "window": 131072
    },
-   "expect": {
-    "contract_version": "1.0",
-    "total_gb": 103.25,
-    "available_gb": null,
-    "device_gb": 121.63,
-    "floor_gb": 15.0,
-    "budget_gb": 106.63,
-    "parts": [
-     {
-      "id": "os",
-      "label": "The OS and other programs",
-      "gb": 10.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "weights",
-      "label": "Weights (EXL3 5.05 bpw (turboderp))",
-      "gb": 77.14,
-      "kind": "fixed"
-     },
-     {
-      "id": "engine",
-      "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
-      "kind": "fixed"
-     },
-     {
-      "id": "allocator",
-      "label": "Allocator reserve",
-      "gb": 2.3,
-      "kind": "reserve"
-     },
-     {
-      "id": "table",
-      "label": "n-gram row cache (the table read past the page cache)",
-      "gb": 2.0,
-      "kind": "fixed"
-     },
-     {
-      "id": "prefill_workspace",
-      "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 5.25,
-      "kind": "reserve"
-     },
-     {
-      "id": "prompt_cache",
-      "label": "Conversation cache",
-      "gb": 0.43,
-      "kind": "reserve",
-      "worst_gb": 11.5
-     },
-     {
-      "id": "state_store",
-      "label": "State store",
-      "gb": 0.49,
-      "kind": "reserve",
-      "worst_gb": 2.0
-     },
-     {
-      "id": "kv",
-      "label": "Conversations (KV), every window at load",
-      "gb": 3.79,
-      "kind": "kv",
-      "worst_gb": 3.79
-     }
-    ],
-    "fits": true,
-    "fits_worst": true,
-    "context_tokens_fit": 180224,
-    "kv_bytes_per_token": 31040,
-    "typical_fill_tokens": 32768,
-    "kv_worst_gb": 3.79,
-    "room_gb": 7.17,
-    "notes": [
-     "About 180,224 tokens of conversation fit in all, 131,072 a slot when all 1 are full (the window is 131,072)."
-    ]
+   "error": {
+    "status": 422,
+    "code": "out_of_range"
    }
   },
   {
@@ -6090,7 +5982,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 117.96,
+    "total_gb": 129.8,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6111,7 +6003,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -6129,8 +6021,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 5.25,
+      "gb": 9.32,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 3.93,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -6160,10 +6058,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 3.79,
-    "room_gb": -7.54,
+    "room_gb": -19.38,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 7.54 GiB over the budget before any context.",
-     "Over the budget by 11.33 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 5.25 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 19.38 GiB over the budget before any context.",
+     "Over the budget by 23.17 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, The OS and other programs 10.00 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 9.32 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]
@@ -6178,7 +6076,7 @@
    },
    "expect": {
     "contract_version": "1.0",
-    "total_gb": 126.99,
+    "total_gb": 138.71,
     "available_gb": null,
     "device_gb": 121.63,
     "floor_gb": 15.0,
@@ -6199,7 +6097,7 @@
      {
       "id": "engine",
       "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-      "gb": 1.85,
+      "gb": 5.69,
       "kind": "fixed"
      },
      {
@@ -6217,8 +6115,14 @@
      {
       "id": "prefill_workspace",
       "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-      "gb": 10.49,
+      "gb": 10.5,
       "kind": "reserve"
+     },
+     {
+      "id": "window_buffers",
+      "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+      "gb": 7.87,
+      "kind": "fixed"
      },
      {
       "id": "prompt_cache",
@@ -6248,10 +6152,10 @@
     "kv_bytes_per_token": 31040,
     "typical_fill_tokens": 32768,
     "kv_worst_gb": 7.58,
-    "room_gb": -12.78,
+    "room_gb": -24.5,
     "notes": [
-     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 12.78 GiB over the budget before any context.",
-     "Over the budget by 20.36 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.49 GiB, The OS and other programs 10.00 GiB.",
+     "EXL3 6.05 bpw (turboderp) does not fit NVIDIA DGX Spark (128 GB unified memory) at any window: it is 24.50 GiB over the budget before any context.",
+     "Over the budget by 32.08 GiB. The largest parts: Weights (EXL3 6.05 bpw (turboderp)) 91.85 GiB, Prefill workspace (sparse-attention scores, a chunk's activations) 10.50 GiB, The OS and other programs 10.00 GiB.",
      "Turn the shared KV pool on: without it every window takes its memory at load.",
      "Fewer slots, a shorter window, a smaller weight profile or fewer tools bring it down."
     ]

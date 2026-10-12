@@ -5,13 +5,14 @@
 # others from their file sizes, 2026-10-11); disk_gb: the pack with its n-gram table (3.05 measured,
 # the others from the repository's file sizes; 4.05, 5.05 and 6.05 share one table file). table: the
 # n-gram table beside the weights, warm in the page cache or read past it (ENG-239). max_window: the
-# largest window that fits the Spark preset (SRV-337; 6.05 fits none): 3.05's is confirmed by a run
-# (SPD-99, 2026-10-12: cold table, a 260,800-token prompt, MemAvailable never under 31.9 GiB), the others
-# are the estimate's until their packs are run. 3.05 reads its table cold: warm, the whole table resident
-# took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. No drafters: the
-# draft layer is in the pack. Rows of the measured table come from real runs only (SPD-65, SPD-99). The
-# small models (narrator, Laya, the shadow reader) are off by default; switched on, the estimate shows
-# the window that is left.
+# largest window that fits the Spark preset (SRV-337), from the estimate below calibrated on the SPD-99
+# runs of 2026-10-12, whose lowest MemAvailable it predicts within 0.7 GiB (2.05 warm, 3.05 and 4.05
+# cold, all at 262,144 tokens, with this box's 4.6 GiB of other programs in place of the preset's 10):
+# 2.05 and 3.05 262,144, 4.05 212,992, 5.05 65,536, 6.05 none. 3.05 reads its table cold: warm, the whole
+# table resident took MemAvailable less the table to 8.4 GiB at 147,456 tokens, under the 15 GiB floor. No
+# drafters: the draft layer is in the pack. Rows of the measured table come from real runs only (SPD-65,
+# SPD-99). The small models (narrator, Laya, the shadow reader) are off by default; switched on, the
+# estimate shows the window that is left.
 schema: 1
 id: qwen3.8-flash-next
 name: Qwen3.8-Flash-Next
@@ -135,7 +136,7 @@ profiles:
   assets_required: []
   note: 'Its table is read past the page cache (cold): weights and a warm table do not fit together.'
   hf_revision: 4.05bpw_h6_ng6
-  max_window: 262144
+  max_window: 212992
   table:
     gib: 36.36
     policy: cold
@@ -160,7 +161,7 @@ profiles:
   assets_required: []
   note: On the edge of the Spark budget, with the table cold.
   hf_revision: 5.05bpw_h6_ng6
-  max_window: 180224
+  max_window: 65536
   table:
     gib: 36.36
     policy: cold
@@ -200,10 +201,11 @@ memory:
   parts:
   - id: engine
     label: Engine state, the draft layer's buffers, graphs and warm-up
-    gib: 1.85
+    gib: 5.69
     kind: fixed
-    source: 'parity note 2026-10-11: load stages engine 1.21, drafters 0.34, warm-up 0.06 GiB on 3.05, rounded up
-      for the verify graphs'
+    source: 'calibrated on the SPD-99 runs of 2026-10-12 (2.05 warm, 3.05 cold, 4.05 cold at 262,144 tokens):
+      what the engine held at its peak beyond the weights, the table and the other parts here, 34.2 to 35.5 GiB
+      at 262,144, the mean taken; the parity note had 1.85 from short contexts'
   - id: allocator
     label: Allocator reserve
     gib: 2.3
@@ -212,13 +214,21 @@ memory:
   sources:
   - Flash-Next caches note, 2026-10-12 (bytes a token 29,952 stored, 31,040 a slot)
   - tools/fn_memory_check.py on 3.05, 2026-10-12 (prefill workspace 2.51 GiB at 8k, 2.40 GiB at 32k)
+  - tools/fn_fit_run.py on 2.05, 3.05 and 4.05, 2026-10-12 (SPD-99; the lowest MemAvailable at 262,144 tokens)
   per_window_parts:
   - id: prefill_workspace
     label: Prefill workspace (sparse-attention scores, a chunk's activations)
-    bytes_per_token: 42976
+    bytes_per_token: 76309
+    max_gib: 10.5
     kind: reserve
-    source: measured 2026-10-12 on 3.05 (SPD-99), 10.47 GiB above the engine at a 261,549-token prefill, the
-      memory policy's line through zero
+    source: measured 2026-10-12 on 3.05 (SPD-99), 10.46 GiB above the engine at a 147,149-token prefill and 10.47
+      at 261,549, 2.40 at 32,768; it stops growing at about 140k tokens
+  - id: window_buffers
+    label: Warm-up buffers, graphs and the draft layer's cache (they grow with the window)
+    bytes_per_token: 32230
+    kind: fixed
+    source: 'the load stages on 3.05 (2026-10-12): MemAvailable taken by the warm-up 1.14 GiB at 32,768, 4.23 at
+      147,456, 7.2 to 7.5 at 262,144; the draft layer''s KV 0.32 and 0.83 GiB at 32,768 and 262,144'
 components:
 - id: conductor
   label: Conductor

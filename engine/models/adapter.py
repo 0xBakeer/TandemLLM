@@ -38,6 +38,7 @@ class CostModel:
     # of the floor and a line through zero); None: engine/cache.py's figures, measured on the 27B
     workspace_floor: int | None = None
     workspace_per_token: int | None = None
+    workspace_cap: int | None = None   # where the workspace stops growing; None: it does not
 
     def snapshot_cost(self) -> dict:
         """The dashboard's `cache.snapshot_cost` row (contract 1.3 keys)."""

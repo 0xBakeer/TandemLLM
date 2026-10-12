@@ -199,8 +199,10 @@ def estimate(m: dict, sel: dict, *, available_gb: float | None = None) -> dict:
                       "n-gram row cache (the table read past the page cache)",
                       "gb": table["gib"] if warm else table["cache_gib"], "kind": "fixed"})
     for part in m["memory"].get("per_window_parts") or []:
-        parts.append({"id": part["id"], "label": part["label"], "gb": part["bytes_per_token"] * window / GIB,
-                      "kind": part["kind"]})
+        gb = part["bytes_per_token"] * window / GIB
+        if part.get("max_gib") is not None:
+            gb = min(gb, part["max_gib"])           # a part that stops growing (a prefill's workspace)
+        parts.append({"id": part["id"], "label": part["label"], "gb": gb, "kind": part["kind"]})
     if slots > 1:
         parts.append({"id": "side_slots", "label": f"{slots - 1} more slot(s), beyond their KV",
                       "gb": (slots - 1) * p["side_slot_const_gib"], "kind": "fixed"})

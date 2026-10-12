@@ -143,7 +143,7 @@
    "assets_required": [],
    "note": "Its table is read past the page cache (cold): weights and a warm table do not fit together.",
    "hf_revision": "4.05bpw_h6_ng6",
-   "max_window": 262144,
+   "max_window": 212992,
    "table": {
     "gib": 36.36,
     "policy": "cold",
@@ -172,7 +172,7 @@
    "assets_required": [],
    "note": "On the edge of the Spark budget, with the table cold.",
    "hf_revision": "5.05bpw_h6_ng6",
-   "max_window": 180224,
+   "max_window": 65536,
    "table": {
     "gib": 36.36,
     "policy": "cold",
@@ -221,9 +221,9 @@
    {
     "id": "engine",
     "label": "Engine state, the draft layer's buffers, graphs and warm-up",
-    "gib": 1.85,
+    "gib": 5.69,
     "kind": "fixed",
-    "source": "parity note 2026-10-11: load stages engine 1.21, drafters 0.34, warm-up 0.06 GiB on 3.05, rounded up for the verify graphs"
+    "source": "calibrated on the SPD-99 runs of 2026-10-12 (2.05 warm, 3.05 cold, 4.05 cold at 262,144 tokens): what the engine held at its peak beyond the weights, the table and the other parts here, 34.2 to 35.5 GiB at 262,144, the mean taken; the parity note had 1.85 from short contexts"
    },
    {
     "id": "allocator",
@@ -235,15 +235,24 @@
   ],
   "sources": [
    "Flash-Next caches note, 2026-10-12 (bytes a token 29,952 stored, 31,040 a slot)",
-   "tools/fn_memory_check.py on 3.05, 2026-10-12 (prefill workspace 2.51 GiB at 8k, 2.40 GiB at 32k)"
+   "tools/fn_memory_check.py on 3.05, 2026-10-12 (prefill workspace 2.51 GiB at 8k, 2.40 GiB at 32k)",
+   "tools/fn_fit_run.py on 2.05, 3.05 and 4.05, 2026-10-12 (SPD-99; the lowest MemAvailable at 262,144 tokens)"
   ],
   "per_window_parts": [
    {
     "id": "prefill_workspace",
     "label": "Prefill workspace (sparse-attention scores, a chunk's activations)",
-    "bytes_per_token": 42976,
+    "bytes_per_token": 76309,
+    "max_gib": 10.5,
     "kind": "reserve",
-    "source": "measured 2026-10-12 on 3.05 (SPD-99), 10.47 GiB above the engine at a 261,549-token prefill, the memory policy's line through zero"
+    "source": "measured 2026-10-12 on 3.05 (SPD-99), 10.46 GiB above the engine at a 147,149-token prefill and 10.47 at 261,549, 2.40 at 32,768; it stops growing at about 140k tokens"
+   },
+   {
+    "id": "window_buffers",
+    "label": "Warm-up buffers, graphs and the draft layer's cache (they grow with the window)",
+    "bytes_per_token": 32230,
+    "kind": "fixed",
+    "source": "the load stages on 3.05 (2026-10-12): MemAvailable taken by the warm-up 1.14 GiB at 32,768, 4.23 at 147,456, 7.2 to 7.5 at 262,144; the draft layer's KV 0.32 and 0.83 GiB at 32,768 and 262,144"
    }
   ]
  },
