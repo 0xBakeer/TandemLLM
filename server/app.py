@@ -9121,6 +9121,7 @@ def _load(a) -> None:
     if eng.caps.caches:
         if eng.caps.anchor_grid:
             a.prefix_chunk = int(eng.caps.anchor_grid)     # the model's own grid (its prefill chunk)
+            STATE["anchor_grid"] = a.prefix_chunk          # the memory plan shows it (server/memlimits.py)
         caches = _load_caches(a, eng, tok, drafter, rcache)
     else:
         if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":

@@ -313,19 +313,26 @@ def view(state: dict) -> dict:
             over = doc_section(doc)
         except Exception:                                          # noqa: BLE001
             pass
+    # a model whose caches keep its own grid (its prefill chunk, `caps.anchor_grid`) runs
+    # that grid whatever serve.env says: the row shows it, locked, and no restart is pending
+    grid = state.get("anchor_grid")
+    locked = dict(LOCKED, **({"PREFIX_CHUNK": f"the model's own grid: {int(grid):,} tokens, its "
+                                              f"prefill chunk"} if grid else {}))
     rows = []
     for key, dest, unit, live, what in LIMITS:
         flag = flag_value(flags, key)
         value = over.get(key, flag)
         running = applied.get(key, flag_value(args, key)) if live else flag_value(args, key)
+        if key == "PREFIX_CHUNK" and grid:
+            value = running = int(grid)
         u = _usage(state, key)
         rows.append({
             "key": key, "unit": unit, "what": what, "value": value, "flag": flag,
             "source": "dashboard" if key in over else "serve.env",
-            "applies": "locked" if key in LOCKED else ("next request" if live else "restart"),
-            "locked": LOCKED.get(key),
+            "applies": "locked" if key in locked else ("next request" if live else "restart"),
+            "locked": locked.get(key),
             "running": running,
-            "pending_restart": (not live and key not in LOCKED and value != running),
+            "pending_restart": (not live and key not in locked and value != running),
             # bytes for a GiB or MiB key, a count otherwise; None where the part is off
             "used": u[0] if u else None,
             "cap": u[1] if u else None,

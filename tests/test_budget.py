@@ -455,6 +455,22 @@ def test_the_view_has_every_key_and_max_len_is_locked():
     assert row["NARROW_ARM"]["value"] == 1 and row["CACHE_GB"]["source"] == "serve.env"
 
 
+def test_a_models_own_grid_is_shown_locked_with_no_restart_pending():
+    """rc-0.8.0 live: on Flash-Next the memory plan said PREFIX_CHUNK 1,024 "needs a restart; the
+    engine runs 4,096 until it restarts", which no restart changes: the model's caches keep its own
+    grid (`caps.anchor_grid`). The row shows that grid, locked, with nothing pending."""
+    from server import memlimits
+    st = {"args": _args(prefix_chunk=4096), "serve_flags": _args(), "max_len": 262144,
+          "anchor_grid": 4096}
+    row = {r["key"]: r for r in memlimits.view(st)["rows"]}["PREFIX_CHUNK"]
+    assert row["value"] == row["running"] == 4096 and row["applies"] == "locked", row
+    assert not row["pending_restart"] and "own grid: 4,096 tokens" in row["locked"], row
+    # a dashboard override changes nothing for such a model either
+    st["conductor"] = _Cond(5, {"engine": {"PREFIX_CHUNK": 512}})
+    row = {r["key"]: r for r in memlimits.view(st)["rows"]}["PREFIX_CHUNK"]
+    assert row["value"] == 4096 and not row["pending_restart"]
+
+
 def test_a_dashboard_override_applies_live_or_says_it_needs_a_restart():
     from server import memlimits
     fa = FakeAlloc(60)
