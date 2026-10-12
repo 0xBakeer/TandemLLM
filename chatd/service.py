@@ -1136,6 +1136,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
                     "structured": bool(c.get("structured", False))},
                 "loaded": bool(card.get("loaded", True)),
                 # chatd's own use, not part of the contract's list
+                # the weight profile the engine serves (QSE_WEIGHTS, ops/use-profile.sh)
+                "_profile": (w.get("name") if isinstance(w, dict) else None) or card.get("pack"),
                 "_max_output": card.get("max_output") or (eng.get("default_max_tokens")
                                                          if ours else None),
                 "_drafter": (w.get("drafters") if isinstance(w, dict) else None)
@@ -1160,6 +1162,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         m = next((x for x in models if x["id"] == model_id), None) or (models[0] if models else {})
         return {"id": m.get("id") or model_id or "", "max_len": m.get("max_len") or 0,
                 "weights": m.get("weights") or "", "drafter": m.get("_drafter"),
+                "profile": m.get("_profile"),
                 "backend": m.get("backend") or "engine",
                 "max_output": m.get("_max_output"),
                 "vision": (m.get("capabilities") or {}).get("vision", False),

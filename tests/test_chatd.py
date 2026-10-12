@@ -904,6 +904,20 @@ def test_the_peek_asks_with_the_next_requests_head_and_the_usage_frame_fills_the
         c.close()
 
 
+def test_the_reports_profile_is_the_served_weight_profile():
+    """rc-0.8.0 live: the Context panel's "Model and pack" said profile none on Flash-Next 3.05 (it
+    showed the chat's conductor profile, which a raw server does not have). The profile the engine
+    serves comes first; a server that names none leaves the chat's own."""
+    from chatd import context as ctx_mod
+    model = {"id": "TandemLLM", "max_len": 262144, "weights": "flashnext-3.05", "profile": "flashnext-3.05"}
+    r = ctx_mod.report(model=model, settings={"profile": None}, branch_tokens=10, files_tokens=0,
+                       stats=None, run=None, row=None, facts={}, peek=None, harness=None)
+    assert r["model"]["profile"] == "flashnext-3.05" and r["window"] == 262144
+    r = ctx_mod.report(model=dict(model, profile=None), settings={"profile": "coding"}, branch_tokens=10,
+                       files_tokens=0, stats=None, run=None, row=None, facts={}, peek=None, harness=None)
+    assert r["model"]["profile"] == "coding"
+
+
 def test_run_metrics_and_context_are_ephemeral():
     c = Chat()
     try:

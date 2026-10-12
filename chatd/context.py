@@ -80,7 +80,9 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
         "memory": {"kv_bytes": None, "resident_bytes": None, "sandbox_disk_bytes": None,
                    "available_bytes": mem.get("unified_available_bytes"),
                    "floor_bytes": FLOOR_BYTES if ours else None, "sandbox_bytes": None},
-        "model": {"name": model.get("id") or "", "profile": settings.get("profile"),
+        # the profile the engine serves (flashnext-3.05, exl3-4.5), else the chat's conductor profile
+        "model": {"name": model.get("id") or "",
+                  "profile": model.get("profile") or settings.get("profile"),
                   "weights": model.get("weights") or "", "drafter": model.get("drafter"),
                   "max_len": window, "effort": settings.get("effort") or "auto",
                   "thinking": bool(settings.get("thinking", True)),
