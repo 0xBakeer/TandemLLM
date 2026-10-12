@@ -865,6 +865,15 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 return None
             if SIDE_GUESTS == "on" and _guest_of_slot0(res, len(ids), rc, chunk):
                 why["guest"] = valid      # FX5: an idle side slot first (the handler's `_take`)
+            # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
+            # comes back through slot 0, whose prefill reads the spill; a side slot has none
+            sp = STATE.get("spill")
+            if not why.get("guest") and sp is not None and sp.entries:
+                with cache_peek.quiet(sp):
+                    got = sp.candidate(res, ids, len(ids) - 1)
+                if got is not None:
+                    why.update(wait="spill", spill=int(got[1]))
+                    return None
         except Exception:                                          # noqa: BLE001
             pass
     if lane and not why.get("guest"):
@@ -2840,6 +2849,23 @@ def _cache_prewarm(ids: list[int], session: str | None) -> dict | None:
             **out}
 
 
+def _drain_side_slots(sp) -> list:
+    """rc-0.8.0: each side slot's conversation to the NVMe too (reason `drain-side`, so the start
+    reads back slot 0's), so a chat that last ran on a side slot comes back from the spill after a
+    restart instead of cold: its next turn waits for slot 0, whose prefill reads the spill
+    (`_par_side_need`). Under the engine lock, after the work in flight."""
+    pool, out = dict.get(STATE, "pool"), []
+    for s in (pool.side() if pool is not None else ()):
+        sv = s.values or {}
+        r, seng = sv.get("resident"), sv.get("engine")
+        if r is None or seng is None or r.valid < int(sp.cfg["drain_min_tokens"]):
+            continue
+        if r._stash is not None:
+            r.settle_guest(seng)
+        out.append((f"slot {s.index}'s", sp.save_resident(r, seng, sv.get("drafter"), "drain-side")))
+    return out
+
+
 def spill_drain() -> None:
     """At a planned stop, after the work in flight: the resident conversation and the parked one
     to the NVMe (engine/spill.py), for the next start."""
@@ -2861,6 +2887,7 @@ def spill_drain() -> None:
             top = res.park_base + res.park_rows
             if res.park_rows and top >= int(sp.cfg["drain_min_tokens"]):
                 got.append(("parked", sp.save_park(res, eng, drafter, "drain")))
+            got += _drain_side_slots(sp)
     except Exception as exc:                                       # noqa: BLE001
         print(f"[spill] drain failed: {type(exc).__name__}: {exc}", flush=True)
         return
@@ -6708,7 +6735,7 @@ class Handler(BaseHTTPRequestHandler):
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
                                                           "home", "home_wait", "prefer_side",
-                                                          "new_wait")
+                                                          "new_wait", "spill")
                             if k in par_why)
             if side is not None:
                 # A request that shares only the client's head with slot 0's
@@ -6730,7 +6757,7 @@ class Handler(BaseHTTPRequestHandler):
                         par_why["max_new"] = room
                 print(f"[parallel] {cid} slot {side.index} ({len(par_why.get('ids') or ())} "
                       f"tokens; slot 0 {_holder_name()}):{new_conv} {nums}{clip}", flush=True)
-            elif par_why.get("wait") in ("view", "resident"):
+            elif par_why.get("wait") in ("view", "resident", "spill"):
                 print(f"[parallel] {cid} slot 0, continues its conversation "
                       f"({par_why['wait']}): {nums}", flush=True)
         if side is not None:
