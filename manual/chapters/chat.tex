@@ -1,0 +1,51 @@
+\chapter{The Chat tab}\label{ch:chat}\index{Chat tab}\index{chatd}
+
+The dashboard's Chat tab (\texttt{\#/chat}) is a chat whose runs live on the server. Close the browser in the middle of an answer, open the chat on a phone, and it shows the answer at the token the engine is writing now and keeps streaming. The tab is in beta in this release; a Beta pill beside it says so, and Section~\ref{sec:chat-limits} lists what does not work yet. \code{docs/chat.md} has the full contract and every route.
+
+\section{What runs where}
+
+The browser talks to the engine server on port 8000, which passes \code{/v1/chat-app/*} to chatd after the dashboard's own auth check. chatd (\code{python -m chatd}, on \code{127.0.0.1:8016}) is a standard-library Python process. It holds the stream to the engine, so a run does not end when a browser closes, and it writes every change of a conversation to an event log with a sequence number. A device that attaches gets a snapshot and then follows the log from there. chatd reaches the model as any client does, through \code{POST /v1/chat/completions}, and reads what the model can do from its card in \code{/v1/models}, never from its name.
+
+\begin{shell}
+bash ops/make-secrets.sh            # once: adds QSE_CHAT_FORWARD_KEY to secrets.env
+bash ops/chatd.sh start             # 127.0.0.1:8016, log in logs/chatd.log
+bash ops/chatd.sh status
+\end{shell}
+
+At most two runs talk to the engine at once (\code{QSE_CHAT_MAX_RUNS}); the others wait as \code{queued}. A run that waits for a permission prompt gives its slot back until the answer comes. An engine restart does not touch chatd: a run that loses the engine retries for 10 minutes, then ends \code{interrupted} with its text kept, and Continue resumes it.
+
+\section{The sandbox}\label{sec:chat-sandbox}\index{sandbox}
+
+Each chat's tools run in a container of its own, \code{tandem-chat-<id>}, from the image \code{tandem-sandbox:1}. Every container runs as uid 1000 with no capabilities, a read-only root and no network of its own, at most 4~GiB, 4 CPUs and 512 processes, and no GPU. Its internet goes through chatd's per-chat proxy, which refuses the LAN and the box itself. The engine comes first: a memory guard starts a sandbox only when the box keeps its floor, stops the least recently used idle one when memory runs short, and stops any sandbox that sat idle for 30 minutes. The chat's files stay.
+
+A deleted chat goes to the trash for 7 days, and its sandbox stops at once. \code{POST /v1/chat-app/conversations/<id>/restore} brings the chat back, and its sandbox starts again on its next tool call. When the 7 days end, or on \code{DELETE /v1/chat-app/conversations/<id>?forever=1}, chatd removes the container and the chat's folders under \code{workspaces/}, \code{homes/}, \code{egress/} and \code{snapshots/}. At its start chatd also removes every container whose chat is gone or in the trash, and logs each one.
+
+\section{Permission modes}\label{sec:chat-modes}\index{permission modes}
+
+Each chat has a permission mode, and the Tools settings page holds the default that a new chat gets. A pill in the composer's options row shows the chat's mode and opens a menu of the three, with one line each; YOLO is orange. A change applies from the next tool call. The modes came from a test run on a phone on 2026-10-13: six bash prompts for commands such as \code{grep} and \code{cp} took 20~s of tapping, and every one of those commands ran inside the chat's own sandbox.
+
+\begin{table}[htbp]
+\centering\small
+\caption{The Chat tab's permission modes (0.8.2).}\label{tab:chat-modes}
+\begin{tabularx}{\linewidth}{@{}L{.16\linewidth}Y@{}}
+\toprule
+\hd{mode} & \hd{what asks first} \\
+\midrule
+Ask & every risky call, as before 0.8.2 \\
+Auto (default) & only a call that leaves the sandbox: \code{web_fetch} to a domain this chat has not fetched yet, an MCP tool its server does not mark \code{readOnlyHint}, an imported Open WebUI tool whose file imports a network or process module, and \code{rm} or \code{rmdir} aimed at \code{/}, \code{/workspace} or a home directory. Bash, files in \code{/workspace} and \code{render_page} run without a prompt. \\
+YOLO & nothing \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Some limits hold in every mode. A deny rule refuses the call, and so does a tool set to \enquote{never}; a tool set to \enquote{ask} asks. Plan mode offers only the read tools. The sandbox stays as locked down as before.
+
+A call that ran without a prompt still leaves a record. Its tool card carries a small badge that names what allowed it (\enquote{auto}, \enquote{yolo}, \enquote{always}), and \code{tool.started} carries \code{approved}: \code{"auto"}, \code{"yolo"}, \code{"rule"} for a saved rule, or \code{"user"} after a prompt. The chat's event log gets a \code{tool.auto_approved} event with the call's one-line summary, and the run's mode is on \code{run.started} and on the assistant message. The default and each chat's mode have routes of their own (\code{GET} and \code{PUT /v1/chat-app/permissions/mode}, and \code{/v1/chat-app/conversations/<id>/permission-mode}). A chat from before 0.8.2 has no mode and runs in the default.
+
+\section{Rules and \enquote{Always allow}}
+
+A bash rule names a command's first word, or its first two for programs with subcommands (\code{git push}, \code{npm install}); \code{grep tilt} saves \code{grep}. A chained command (\code{&&}, \code{||}, \code{;}, \code{|}) runs without a prompt when every part has an allow rule, and is refused when any part hits a deny rule. \enquote{Always allow} on such a command saves a rule for every part no rule covers yet, and the prompt names them: \enquote{Always allow cd, node, echo, cat}. Until 0.8.2 it offered only the first word, which never covered the whole command, so the prompt came back: one chat saved \code{cd} 11 times for \code{cd /workspace && node ... > run.log 2>&1; echo "exit:$?"; cat run.log}. Store schema 6 keeps one copy of each duplicate rule. A command with \code{$(...)} or backticks matches no rule and offers no \enquote{Always}. All of this matters in Ask mode; Auto runs bash in the sandbox without asking.
+
+\section{Known limitations}\label{sec:chat-limits}
+
+The agent loop does not yet keep its prompts prefix-stable from step to step (SRV-375), and old tool results and old thinking stay in the context until a compaction (SRV-365). A compaction writes a general summary, not the task's state (SRV-373). Nothing notices when the model repeats the same failing approach with different calls (SRV-367), long tool output has no paging (SRV-371), and searches run in the main context with no sub-agents (SRV-381). The engine-side limits of 0.8.0 still hold (Section~\ref{sec:changelog-080}); the phone layout's keyboard behaviour is still not verified in Safari on an iPhone.

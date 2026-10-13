@@ -23,12 +23,13 @@ Two chapters for every reader. Chapter~\ref{ch:intro} says what TandemLLM is, na
 \input{chapters/tour}
 
 \partintro{%
-How to install and run it. Chapter~\ref{ch:install-engine} starts with the setups that work today, then installs the engine with one command, says who can reach it, and adds the small models and other backends. Chapter~\ref{ch:install-dash} installs the dashboard and proxy on any machine, Chapter~\ref{ch:other-engines} puts other engines and cloud APIs behind it, and Chapter~\ref{ch:operations} is the operator's chapter: the memory rules, the service scripts, the watchdog, how to hold the board for a measurement, where the logs are, and how to upgrade and roll back.}
+How to install and run it. Chapter~\ref{ch:install-engine} starts with the setups that work today, then installs the engine with one command, says who can reach it, and adds the small models and other backends. Chapter~\ref{ch:install-dash} installs the dashboard and proxy on any machine, Chapter~\ref{ch:other-engines} puts other engines and cloud APIs behind it, and Chapter~\ref{ch:operations} is the operator's chapter: the memory rules, the service scripts, the watchdog, how to hold the board for a measurement, where the logs are, and how to upgrade and roll back. Chapter~\ref{ch:community} runs weights other people published, and says how to list your own.}
 \part{Installing and running}
 \input{chapters/install-engine}
 \input{chapters/install-dash}
 \input{chapters/other-engines}
 \input{chapters/operations}
+\input{chapters/community}
 
 \partintro{%
 Why the engine is fast, and why its output is still the model's own text. The chapters go from the model's layers and the byte budget (\ref{ch:architecture}) through the weights (\ref{ch:quantisation}), the kernels (\ref{ch:kernels}), the drafters and StairCut (\ref{ch:speculation}), the exactness contract (\ref{ch:exactness}), the caches (\ref{ch:caches}), the server (\ref{ch:serving}) and the measurement method (\ref{ch:measurement}) to the seams a new model plugs into (\ref{ch:adding-model}), and ends with the second model served through them, Qwen3.8-Flash-Next (\ref{ch:flashnext}). Every number is labelled measured or arithmetic.}
@@ -55,9 +56,10 @@ The conductor: the layer in front of the model that plans each turn and watches 
 \input{chapters/harness-proxy}
 
 \partintro{%
-The dashboard, view by view (\ref{ch:dashboard}), and how it watches several engines at once: the Parallel page, the engines' own metrics pages, the plugins inside vLLM and SGLang, and the host collector (\ref{ch:hosts}). Every figure on it is measured or null, never estimated.}
+The dashboard, view by view (\ref{ch:dashboard}), its Chat tab with the sandbox and the permission modes (\ref{ch:chat}), and how it watches several engines at once: the Parallel page, the engines' own metrics pages, the plugins inside vLLM and SGLang, and the host collector (\ref{ch:hosts}). Every figure on it is measured or null, never estimated.}
 \part{The dashboard}
 \input{chapters/dashboard}
+\input{chapters/chat}
 \input{chapters/hosts}
 
 \partintro{%

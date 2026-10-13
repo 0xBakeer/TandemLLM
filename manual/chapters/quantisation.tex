@@ -123,6 +123,18 @@ Since 0.5.0 the 27B also runs from EXL3 weights at six sizes, one weight profile
 
 Each card also has a speed table for every size on one DGX Spark (TandemLLM 0.6.2, one greedy request of 512 tokens, speculation on). An EXL3 profile needs four more downloads beside its weights: the K3 drafters and the K4 head (1.9~GB), the BF16 drafters \code{0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8} and \code{-b16} (7.7~GB, into the repository's \code{train/}), and the base checkpoint \code{Qwen/Qwen3.8-27B-FP8} (30.4~GB, without \code{mtp.safetensors}). Since 0.8.1 \code{ops/use-profile.sh} fetches all of them, checks each weight file against the hub's sha256, and needs no token. Each card's \code{calibration/} folder has the recipe; the calibration repository itself stays private, and no profile reads it.
 
+\section{Standalone EXL3 packs}\label{sec:exl3-standalone}\index{EXL3!standalone pack}
+
+Our EXL3 profiles are overlays: their files hold the coded projections, and the vendor's FP8 checkpoint supplies the rest. Since 0.8.2 a complete EXL3 pack of the 27B family also loads on its own, passed as \code{--model}, with no BF16 or FP8 base to download. 0xWhiteMage wrote this path in pull request \#1, and the first community pack (Chapter~\ref{ch:community}) runs on it. The loader recognises \code{quantization_config.quant_method: exl3} in the pack's configuration; the pack must hold the embedding, the norms and the recurrent layers' small tensors too.
+
+\begin{shell}
+python server/app.py --model /path/to/exl3-pack --drafter none --vision off
+\end{shell}
+
+The projections and the output head keep their EXL3 codes, channel scales and mixed bit widths, also when a projection's parts span several shards. When the pack declares a BF16 source (\code{dtype} or \code{torch_dtype}), the loader turns its FP16 plain tensors into BF16 only where every stored value survives the round trip exactly. Missing or non-BF16 source metadata, a value that is not finite, or a lossy conversion stops the load with a named error. The pack's stored values are kept; precision lost while the pack was made cannot come back, and only the original checkpoint can show that a pack equals its source.
+
+The path adds no codebook, no architecture and no MTP format: the \code{mul1} reader and its checks are the ones above. It has three limits. It is text only, even for a pack that carries a vision tower, and the registry refuses a community entry that claims images on it (ENG-271). Quantised MTP layers are not qualified. A stock DFlash2 drafter runs one sequence (\code{--drafter dflash2 --dflash2-ckpt <dir>}), and speculative parallel serving still needs the \code{lenrouter} configuration with our drafters, which \code{use-profile.sh community/<id>} fetches for a pack whose entry names them. Our own profiles, an EXL3 overlay over the base or NVFP4, load exactly as before.
+
 \section{Flash-Next's EXL3 packs}\label{sec:exl3-packs}\index{EXL3 pack}\index{EXL3}
 
 turboderp publishes Qwen3.8-Flash-Next in five sizes, one branch each of \code{turboderp/Qwen3.8-Flash-Next-exl3}, and the engine reads them as they are: no quantiser of ours runs on them and no format is added. The branch name says what is inside. \code{3.05bpw_h5_ng5} is 3.05 bits a weight on average, the output head at 5 bits and the n-gram table at 5 bits a value. Table~\ref{tab:fn-packs} lists the five with the window each fits. A pack is lossy against the BF16 release by design, and speculation is lossless against the pack that is served (Section~\ref{sec:fn-exact}).

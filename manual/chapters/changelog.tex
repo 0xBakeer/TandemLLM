@@ -28,14 +28,26 @@
 0.7.2 & 10-11 & Wren answers a question in words again; setup guide only \\
 0.8.0 & 10-13 & a second model, Qwen3.8-Flash-Next, from turboderp's EXL3 packs; the Chat tab with chatd; the cache peek and prewarm \\
 0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the EXL3 weights public; the early-access repository; the engine unchanged \\
-0.8.2 & 10-13 & a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked; standalone EXL3 packs of the 27B family load directly \\
+0.8.2 & 10-13 & community weight packs; permission modes in the Chat tab; standalone EXL3 packs of the 27B family; a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\section{0.8.2, the slot-0 wait and the identity note}
+\section{0.8.2, community weights and permission modes}\label{sec:changelog-082}
 
-Two bugs from v0.8.0 in Open WebUI. A new chat waited 437~s for slot 0 behind another chat's 496~s generation while both side slots were free: it shared only Open WebUI's system prompt and tools with an entry on the NVMe, and a wait for slot 0 had no limit. Now the spill wait needs the request's own conversation, and every wait for slot 0 ends after 3~s (\code{QWEN38\_SIDE\_SLOT0\_WAIT\_S}) when a side slot the request fits in is free. \code{/health} \code{parallel.max\_running} is the limit with its reason, not the high-water mark, and the Lanes view says why a request is queued. Asked who it was, Flash-Next said it was Fable or Claude, made by Anthropic: the reference box served it with the conductor off, so the identity note never went in. The note now says it is TandemLLM running the served model (Qwen3.8-Flash-Next or Qwen3.8-27B, from the pack's model card) on the user's own machine, and that it is no other assistant, for every client the conductor serves.
+0.8.2 adds community weight packs, permission modes in the Chat tab and standalone EXL3 packs of the 27B family, and fixes two bugs found on v0.8.0 in Open WebUI on a phone. The engine's modules are the bytes of 0.8.1.
+
+\paragraph{Community weights.} One JSON file per pack under \code{models/<model>/community/}, checked by the registry against \code{models/schema/community.schema.json} and gathered in \code{models/community-index.json}. The setup guide lists the packs after our profiles as \code{community/<id>}, with search and five sort orders. It fetches the index from the public repository when its weights step opens or on Refresh, never on a timer, and falls back to its last copy, then to the one in the release; a 404 shows as the note \enquote{no published list yet}. \code{ops/use-profile.sh community/<id>} downloads a pack at its pinned commit, checks the hub's sha256 and runs it with our drafters. An issue form and a check on pull requests come with it. The first entry is ThinkingCap Qwen3.8-27B Kearuga by 0xWhiteMage: EXL3 at 4.0 bits a weight, standalone, 39.6~tok/s prose, 95.9 code and 51.3 chat on 0.8.2 (\measured). Chapter~\ref{ch:community}.
+
+\paragraph{Permission modes.} Each chat in the Chat tab runs in one of three modes, and Auto is the new default: a call that stays inside the chat's sandbox runs without a prompt, and one that leaves it still asks. Deny rules and plan mode's read-only list hold in every mode. A tool card that ran without a prompt carries a badge, and every such call is logged as \code{tool.auto_approved}. \enquote{Always allow} on a chained bash command now saves a rule for every part not yet allowed; before, one chat saved \code{cd} 11 times and still got the prompt. Chapter~\ref{ch:chat}.
+
+\paragraph{Standalone EXL3 packs.} A complete BF16-origin \code{mul1} EXL3 pack of the 27B family loads as \code{--model}, with no separate base checkpoint (pull request \#1 by 0xWhiteMage). The path is text only, and speculative parallel serving still needs our drafters (Section~\ref{sec:exl3-standalone}). The 27B's own profiles take the path they took before. \code{engine/loader.py}'s new bytes count as the old ones in the disk tier's fingerprint (\code{SAME_ROWS} in \code{engine/methods/manifest.py}), so the first 27B start adopts v0.8.0's saved files once, and the 27B's code fingerprint stays 0.7.2's.
+
+\paragraph{The slot-0 wait.} A new Open WebUI chat waited 437~s for slot 0 behind another chat's 496~s generation while both side slots were free. It shared only Open WebUI's system prompt and tool list with an entry on the NVMe, and the wait for slot 0 had no limit. Now the spill wait needs the request's own conversation, and every wait for slot 0 ends after 3~s (\code{QWEN38_SIDE_SLOT0_WAIT_S}) when a side slot the request fits in is free. \code{/health} \code{parallel.max_running} is the limit with its reason, not the high-water mark, and the Lanes view says why a request is queued. On the reference box a turn that slot 0's chat had held moved to slot 2 after its 3.0~s wait, while another chat ran 80~s on slot 0 (\measured).
+
+\paragraph{Identity.} Asked who it was, Flash-Next named another assistant and its maker: the reference box served it with the conductor off, so the identity note never went in. The note now says the model is TandemLLM running the served model (Qwen3.8-Flash-Next or Qwen3.8-27B, from the pack's model card) on the user's own machine, for every client the conductor serves, and the reference box runs Flash-Next with the conductor on. With Open WebUI's own system prompt and 49 tools, 20 of 20 answers said so, against 0 of 20 on v0.8.0 (\measured).
+
+\paragraph{Smaller fixes.} The Flash-Next profiles load Laya, so the memory features work there: the remember, forget and recall intent took 20.6~ms on 3.05. A deleted chat's sandbox stops at once; a restore brings the chat back, and the purge after 7 days or on \code{?forever=1} removes the container and the chat's folders. A 404 from the community sync is a note, not an error.
 
 \section{0.8.1, a new box fetches every file}
 
@@ -45,7 +57,7 @@ A new DGX Spark runs every 27B EXL3 profile and Flash-Next from public files, wi
 
 \paragraph{Early access.} Testers read the private repository \code{0xBakeer/TandemLLM-early-access}: one branch, \code{main}, and a tag for each release. \code{EARLY-ACCESS.md} at its top says how to install from it: clone it with your own GitHub login, run \code{install.sh --setup --yes --repo <its address>}, then \code{use-profile.sh flashnext-3.05} or \code{exl3-4.5} (Section~\ref{sec:early-access}). This book is in the repository as \code{manual/tandemllm-manual.pdf}, so a tester can read it without LaTeX.
 
-\section{0.8.0, Qwen3.8-Flash-Next and the Chat tab}
+\section{0.8.0, Qwen3.8-Flash-Next and the Chat tab}\label{sec:changelog-080}
 
 A second model, Qwen3.8-Flash-Next, served from turboderp's EXL3 packs through the same server, caches, ops scripts and setup guide as the 27B (Chapter~\ref{ch:flashnext}). The 27B's text does not change: its modules, flags and disk-tier fingerprint are as in 0.7.2, and every switch added for Flash-Next is off for it. On Flash-Next, greedy and seeded answers with speculation equal plain decoding token for token.
 

@@ -14,6 +14,8 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 
 \paragraph{A download stopped halfway.} Run the same \code{use-profile.sh} command again. It keeps every file that finished and checked, pins the same commit, and continues; a folder appears only when all its files are there.
 
+\paragraph{The setup guide's community section says \enquote{no published list yet}.} GitHub answered 404 for \texttt{models/community-index.json} on the public repository's \texttt{main}: no release there carries the list yet. That is a note, not an error. The page shows the list from the box's last fetch, or the one that came with its release, and Refresh asks again (Section~\ref{sec:community-sync}). A real failure shows one short line instead, such as \enquote{GitHub could not be reached}, and the server's log has the URL.
+
 \section{The engine}
 
 \paragraph{The start refuses: an engine is already alive.} One engine per board. Two engines loading side by side run a DGX Spark out of memory, and a board in that state stops answering until a power cycle. A loading engine counts although it answers nothing yet, because it binds its port only after the weights are in. \code{. ops/engines.sh; engine_pids} lists every engine process; stop the other one before starting. The same rule holds for a vLLM or SGLang on the same board: check the free memory first and keep at least 15~GiB of \code{MemAvailable} at the worst case.
@@ -45,6 +47,14 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 \paragraph{Open WebUI shows a literal \texttt{</think>} while an answer streams.} Open WebUI 0.11.3 shows the stream piece that carries \code{</think>} as message text until the round ends. Under a conductor plan the engine sends Open WebUI its reasoning in \code{reasoning_content}, which has no tag; a request with \code{reasoning_format: tags}, the raw path, or \code{QWEN38_CLIENT_REASONING} set empty bring the tags back. The saved chat is clean either way.
 
 \paragraph{The model writes ``Laya unavailable''.} Its scripts could not reach the engine from where they run. Set \code{QWEN38_TANDEM_URL} to an address that machine reaches.
+
+\section{The Chat tab}\label{sec:trouble-chat}
+
+\paragraph{The Chat tab asks before every bash command.} The chat runs in Ask mode. The pill in the composer's options row names the mode; pick Auto there, and calls that stay inside the chat's sandbox run without a prompt from the next call on. The default for new chats is at the top of the Tools settings page. A chat from before 0.8.2 has no mode of its own and runs in the default (Section~\ref{sec:chat-modes}).
+
+\paragraph{Auto still asks.} The call leaves the sandbox: \texttt{web\_fetch} to a domain this chat has not fetched yet, an MCP tool its server does not mark read-only, an imported Open WebUI tool that imports a network or process module, or \texttt{rm} aimed at \texttt{/}, \texttt{/workspace} or a home directory. A tool set to \enquote{ask} in the tool settings asks in every mode, and a deny rule refuses in every mode, YOLO included.
+
+\paragraph{\enquote{Always allow} does not stop the prompt.} Before 0.8.2 it saved only the first word of a chained command, which never covered the whole command, so one chat saved \texttt{cd} 11 times. On 0.8.2 it saves a rule for every part and names them in the prompt. A command with \texttt{\$(...)} or backticks still matches no rule and offers no \enquote{Always}; Auto runs it without asking when it stays in the sandbox.
 
 \section{vLLM and SGLang behind the proxy}
 

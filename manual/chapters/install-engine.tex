@@ -53,7 +53,7 @@ bash install.sh --setup --yes
 
 The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model of Qwen's.
 
-Run \code{use-profile.sh} from \code{~/TandemLLM/run/ops/}, next to the \code{serve.env} the installer wrote. With \code{--dry-run} it prints every file's URL and size and changes nothing. Without it, the script downloads what the profile needs and checks every weight file against the sha256 the hub lists. It then leaves setup mode, starts the engine on port 8000 and sends one smoke request. \code{use-profile.sh --list} prints every profile; \code{exl3-4.5} is the default for the 27B and \code{flashnext-3.05} for Flash-Next.
+Run \code{use-profile.sh} from \code{~/TandemLLM/run/ops/}, next to the \code{serve.env} the installer wrote. With \code{--dry-run} it prints every file's URL and size and changes nothing. Without it, the script downloads what the profile needs and checks every weight file against the sha256 the hub lists. It then leaves setup mode, starts the engine on port 8000 and sends one smoke request. \code{use-profile.sh --list} prints every profile; \code{exl3-4.5} is the default for the 27B and \code{flashnext-3.05} for Flash-Next. Since 0.8.2, \code{community/<id>} runs a pack someone else published (Chapter~\ref{ch:community}).
 
 \begin{table}[htbp]
 \centering\small
