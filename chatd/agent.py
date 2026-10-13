@@ -487,14 +487,28 @@ class AgentMixin:
                       run_id=run.id)
 
     # ================================================================== the request
-    def _compaction_for(self, cid: str, path: list[dict]) -> tuple[str, int] | None:
+    def _compaction_for(self, cid: str, path: list[dict]) -> tuple | None:
+        """The newest compaction on `path`: (its summary, the first message kept, None) for one
+        before a user turn; for one inside a long run (boundary `<message id>@<step>`), (its
+        summary, that run's user message, (the run's message index, its first step kept))."""
         ids = {m["id"]: i for i, m in enumerate(path) if m.get("id")}
         best = None
         for r in self.store.all("SELECT * FROM compactions WHERE conversation_id = ? ORDER BY "
                                 "created", (cid,)):
-            if r["boundary_id"] in ids:
-                best = (r["summary"], ids[r["boundary_id"]])
+            mid, _, step = str(r["boundary_id"]).partition("@")
+            if mid not in ids:
+                continue
+            i = ids[mid]
+            if step:
+                u = next((k for k in range(i - 1, -1, -1) if path[k]["role"] == "user"), 0)
+                best = (r["summary"], u, (i, int(step)))
+            else:
+                best = (r["summary"], i, None)
         return best
+
+    @staticmethod
+    def _step_from(c) -> tuple[int, int] | None:
+        return (c[2][0] - c[1], c[2][1]) if c and c[2] else None
 
     def compactions(self, cid: str, path: list[dict]) -> list[dict]:
         ids = {m["id"] for m in path}
@@ -502,7 +516,8 @@ class AgentMixin:
                  "after_tokens": r["after_tokens"], "summary": r["summary"],
                  "duration_ms": r["duration_ms"], "boundary_id": r["boundary_id"]}
                 for r in self.store.all("SELECT * FROM compactions WHERE conversation_id = ? "
-                                        "ORDER BY created", (cid,)) if r["boundary_id"] in ids]
+                                        "ORDER BY created", (cid,))
+                if str(r["boundary_id"]).partition("@")[0] in ids]
 
     def _system(self, settings: dict, tools: list, summary: str | None) -> str | None:
         prompt = None
@@ -526,12 +541,13 @@ class AgentMixin:
         tools = self.tools_for(settings, info, conv.id, listing=False)
         c = self._compaction_for(conv.id, branch)
         b = c[1] if c else 0
+        ours = info.get("backend") == "engine"
         return render.body(settings.get("model") or info.get("id") or "default", settings,
                            branch[b:], system=self._system(settings, tools, c[0] if c else None),
                            vision=bool(info.get("vision")), blob=self._blob_of,
                            tools=[t.openai() for t in tools],
-                           tandem=(self.tandem_field(settings)
-                                   if info.get("backend") == "engine" else None))
+                           tandem=self.tandem_field(settings) if ours else None,
+                           inline_images=ours, step_from=self._step_from(c))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -546,7 +562,9 @@ class AgentMixin:
             path = [msgs[m] for m in self._path(msgs, run.user_message_id)]
             live = conv.live
             if live is not None and live["parts"]:
-                path.append({"role": "assistant", "parts": [dict(p) for p in live["parts"]
+                # with its id: a compaction inside the run names its steps by it
+                path.append({"id": run.message_id, "role": "assistant",
+                             "parts": [dict(p) for p in live["parts"]
                                                              if p.get("step", 1) < run.step or
                                                              run.continue_final]})
         if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
@@ -574,7 +592,8 @@ class AgentMixin:
                                continue_final=run.continue_final, tools=schemas,
                                keep_reasoning_from=max(0, keep_from - b),
                                nudge=NUDGE if run.nudge else None,
-                               tandem=self.tandem_field(settings) if ours else None)
+                               tandem=self.tandem_field(settings) if ours else None,
+                               inline_images=ours, step_from=self._step_from(c))
         if ours and run.step <= 1 and not run.remark:
             gone = self.missing_pins(settings)
             if gone:
@@ -583,8 +602,8 @@ class AgentMixin:
                               f"in the library; the request went without.")
         body = build()
         est = comp.estimate(body, conv.tok_ratio)
-        if window and est > int(window * comp.COMPACT_SHARE) and not run.compacted:
-            run.compacted = True
+        if window and est > int(window * comp.COMPACT_SHARE) and run.compacted != run.step:
+            run.compacted = run.step            # once a step: a long run compacts again later
             if self.compact(conv, run, [m for m in path if m.get("id")]):
                 body = build()
                 est = comp.estimate(body, conv.tok_ratio)
@@ -600,8 +619,8 @@ class AgentMixin:
             room = window - est - 256
             cap = int(info.get("max_output") or 0)
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
-        run.request_chars = len(json.dumps(body["messages"], ensure_ascii=False)) + \
-            len(json.dumps(schemas, ensure_ascii=False))
+        # the text's characters and the images' tokens apart: the ratio is learned on text only
+        run.request_chars, run.request_images = comp.measure(body)
         run.request_est = est
         self.store.run("UPDATE runs SET request = ?, state = 'running', step = ? WHERE id = ?",
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
@@ -621,15 +640,32 @@ class AgentMixin:
                 path = [msgs[m] for m in self._path(msgs, row["head_id"])]
         b = comp.boundary(path)
         prior = self._compaction_for(conv.id, path)
-        if b is None or (prior is not None and prior[1] >= b):
-            return False
+        sb = None
+        done = prior[2] if prior else None             # a long run's compaction: (index, step)
+        if b is None or (prior is not None and (done[0] if done else prior[1]) >= b):
+            # one long run: its earlier steps instead (its user message stays)
+            prior_step = done[1] if done and done[0] == len(path) - 1 else 0
+            sb = comp.step_boundary(path, prior_step)
+            if sb is None:
+                return False
         info = self.model_info(settings.get("model"))
         window = int(info.get("max_len") or 0)
         start = prior[1] if prior else 0
         system = render.system_block(today=None, tools=False, summary=prior[0] if prior else None)
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
-        for m in path[start:b]:
-            msgs.extend(render.message(m, False, self._blob_of))
+        if sb is None:
+            for k in range(start, b):
+                msgs.extend(render.message(path[k], False, self._blob_of,
+                                           from_step=done[1] if done and done[0] == k else 0))
+        else:
+            i, keep_step = sb
+            first = done[1] if done and done[0] == i else 0
+            run_msg = dict(path[i], parts=[p for p in path[i].get("parts") or []
+                                           if int(p.get("step") or 1) < keep_step])
+            for m in path[start:i]:
+                msgs.extend(render.message(m, False, self._blob_of))
+            msgs.extend(render.message(run_msg, False, self._blob_of, from_step=first))
+            b = i
         before = comp.estimate({"messages": msgs}, conv.tok_ratio)
         if window and before + comp.SUMMARY_TOKENS + 512 > window:
             ratio = conv.tok_ratio or comp.DEFAULT_RATIO
@@ -659,18 +695,24 @@ class AgentMixin:
             return False
         usage = obj.get("usage") or {}
         before_tokens = int(usage.get("prompt_tokens") or before)
-        kept = comp.estimate({"messages": [{"content": text}] + [
-            x for m in path[b:] for x in render.message(m, False)]}, conv.tok_ratio)
+        if sb is None:
+            rest, bid = [x for m in path[b:] for x in render.message(m, False)], path[b]["id"]
+        else:
+            u = next((k for k in range(b - 1, -1, -1) if path[k]["role"] == "user"), 0)
+            rest = [x for m in path[u:b] for x in render.message(m, False)]
+            rest += render.message(path[b], False, from_step=sb[1])
+            bid = f"{path[b]['id']}@{sb[1]}"              # the run's message and its first step kept
+        kept = comp.estimate({"messages": [{"content": text}] + rest}, conv.tok_ratio)
         cid = ulid()
         ms = int((time.monotonic() - t0) * 1000)
         with conv.lock:
             self.store.run("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (cid, conv.id, path[b]["id"], text, before_tokens, kept, now_ms(), ms,
+                           (cid, conv.id, bid, text, before_tokens, kept, now_ms(), ms,
                             run.id if run else None))
             self.emit(conv, {"type": "compaction", "compaction": {
                 "id": cid, "at": iso(now_ms()), "before_tokens": before_tokens,
                 "after_tokens": kept, "summary": text, "duration_ms": ms,
-                "boundary_id": path[b]["id"]}})
+                "boundary_id": bid}})
         self.log(f"[compact] {conv.id} {before_tokens} -> {kept} tokens in {ms} ms")
         return True
 

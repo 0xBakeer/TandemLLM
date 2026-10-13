@@ -115,8 +115,9 @@ class Run:
         self.nudge = False
         self.recent_calls: collections.deque = collections.deque(maxlen=3)
         self.request_chars = 0
+        self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
-        self.compacted = False
+        self.compacted = 0                      # the step a compaction last ran before
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
         self.step_usage: list[dict] = []       # per model call: prompt, cached, cache source
@@ -341,7 +342,7 @@ class Run:
                 self.acc["reasoning"] += int((u.get("completion_tokens_details") or {})
                                              .get("reasoning_tokens") or 0)
                 self.svc.learn_ratio(self.conv, int(u.get("prompt_tokens") or 0),
-                                     self.request_chars)
+                                     self.request_chars, self.request_images)
             for ch in obj.get("choices") or []:
                 if not isinstance(ch, dict):
                     continue

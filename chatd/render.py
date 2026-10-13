@@ -12,6 +12,8 @@ same bytes across calls and across a restart (a fresh store read).
                     it, images as `image_url` parts when the model reads images), assistant text with
                     its reasoning as `reasoning_content` (the engine's template decides what to keep);
                     notices (role `system` in the tree) are the UI's and are left out
+    tool images     in the tool message that returned them, the newest one only: an older
+                    screenshot is a line saying a newer one follows (TOOL_IMAGES_KEPT)
     effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide)
     thinking off    `chat_template_kwargs.enable_thinking: false` (read by our engine, vLLM and
                     SGLang alike)
@@ -70,12 +72,37 @@ def steps(parts: list[dict]) -> list[list[dict]]:
     return [out[k] for k in sorted(out)]
 
 
-def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True) -> list[dict]:
+#: the tool images a request carries as images, the newest first: older ones become a line with
+#: their path. Live (2026-10-13), five 300 KB screenshots of one run stayed in every later request
+TOOL_IMAGES_KEPT = 1
+LEFT_OUT = "\n[The image of this result is left out: a newer screenshot follows.]"
+
+
+def _image_part(a: dict, data: bytes) -> dict:
+    return {"type": "image_url", "image_url": {
+        "url": f"data:{a.get('mime') or 'image/png'};base64," + base64.b64encode(data).decode()}}
+
+
+def kept_tool_images(branch: list[dict], n: int | None = None) -> set:
+    """The ids of the newest `n` (TOOL_IMAGES_KEPT) images tool results returned on `branch`."""
+    n = TOOL_IMAGES_KEPT if n is None else n
+    ids = [a.get("id") for m in branch if m.get("role") == "assistant"
+           for p in m.get("parts") or [] if p.get("type") == "tool_call"
+           for a in (p.get("output") or {}).get("images") or []]
+    return set(ids[-n:]) if n > 0 else set()
+
+
+def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
+               keep: set | None = None, inline: bool = True, from_step: int = 0) -> list[dict]:
     """One assistant message as the model saw it: per step its text, reasoning and tool calls,
-    then one `tool` message per call with the result the model read, then the images of those
-    results (vision models only)."""
+    then one `tool` message per call with the result the model read. The images of those results
+    (vision models only, the ones in `keep`; None: all) go in the tool message itself with
+    `inline` (our engine's template renders them in the tool response, so the conversation keeps
+    one user turn: a separate user message per screenshot read to the model as the user sending
+    again, live 2026-10-13), else in a user message after the results. `from_step`: the steps
+    before it were compacted (the summary is in the system block)."""
     out: list[dict] = []
-    for group in steps(m.get("parts") or []):
+    for group in steps([p for p in m.get("parts") or [] if int(p.get("step") or 1) >= from_step]):
         text = text_of(group)
         thinking = text_of(group, "thinking") if keep_reasoning else ""
         calls = [p for p in group if p.get("type") == "tool_call"]
@@ -92,13 +119,20 @@ def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True) ->
         out.append(msg)
         images = []
         for c in calls:
-            out.append({"role": "tool", "tool_call_id": c["id"], "content": result_text(c)})
+            text, own = result_text(c), []
             for a in ((c.get("output") or {}).get("images") or []) if vision else []:
+                if keep is not None and a.get("id") not in keep:
+                    text += LEFT_OUT
+                    continue
                 data = blob(a) if blob is not None else None
                 if data:
-                    images.append({"type": "image_url", "image_url": {
-                        "url": f"data:{a.get('mime') or 'image/png'};base64,"
-                               + base64.b64encode(data).decode()}})
+                    own.append(_image_part(a, data))
+            if own and inline:
+                out.append({"role": "tool", "tool_call_id": c["id"],
+                            "content": [{"type": "text", "text": text}, *own]})
+            else:
+                out.append({"role": "tool", "tool_call_id": c["id"], "content": text})
+                images += own
         if images:
             out.append({"role": "user", "content": [
                 {"type": "text", "text": "The images the tool calls above returned."}, *images]})
@@ -121,12 +155,13 @@ def result_text(c: dict) -> str:
     return "(no output)"
 
 
-def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True) -> list[dict]:
+def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True, keep: set | None = None,
+            inline: bool = True, from_step: int = 0) -> list[dict]:
     """One branch message as OpenAI messages; [] for what the model does not see (notices)."""
     if m.get("role") == "user":
         return [_user(m, vision, blob)]
     if m.get("role") == "assistant":
-        return _assistant(m, vision, blob, keep_reasoning)
+        return _assistant(m, vision, blob, keep_reasoning, keep, inline, from_step)
     return []
 
 
@@ -134,14 +169,21 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          vision: bool = False, blob=None, continue_final: bool = False,
          max_tokens: int | None = None, tools: list[dict] | None = None,
          keep_reasoning_from: int = 0, nudge: str | None = None,
-         tandem: dict | None = None) -> dict:
+         tandem: dict | None = None, inline_images: bool = True,
+         step_from: tuple[int, int] | None = None) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
-    context guard drops it before that); `nudge`: a hidden last user line (the empty-turn retry)."""
+    context guard drops it before that); `nudge`: a hidden last user line (the empty-turn retry);
+    `inline_images`: tool images in the tool message (our engine) or in a user message after it;
+    `step_from`: (a branch index, a step): that assistant message's steps before the step were
+    compacted (a long run: the summary is in the system block)."""
     msgs: list[dict] = []
     if system:
         msgs.append({"role": "system", "content": system})
+    keep = kept_tool_images(branch)
     for i, m in enumerate(branch):
-        msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from))
+        msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from, keep=keep,
+                            inline=inline_images,
+                            from_step=step_from[1] if step_from and i == step_from[0] else 0))
     if nudge:
         msgs.append({"role": "user", "content": nudge})
     out: dict = {"model": model, "messages": msgs, "stream": True,

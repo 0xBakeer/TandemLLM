@@ -666,8 +666,10 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
                            (dumps(conv.live["parts"]), conv.live["status"], conv.live["id"]))
             conv.persisted_at = time.monotonic()
 
-    def learn_ratio(self, conv: Conv, prompt_tokens: int, request_chars: int) -> None:
-        r = __import__("chatd.compaction", fromlist=["learn"]).learn(prompt_tokens, request_chars)
+    def learn_ratio(self, conv: Conv, prompt_tokens: int, request_chars: int,
+                    image_tokens: int = 0) -> None:
+        r = __import__("chatd.compaction", fromlist=["learn"]).learn(prompt_tokens, request_chars,
+                                                                     image_tokens)
         if r is not None:
             conv.tok_ratio = r
 

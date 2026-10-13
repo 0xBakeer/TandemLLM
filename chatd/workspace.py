@@ -50,7 +50,8 @@ class Workspace:
         if p.startswith(MOUNT):
             p = p[len(MOUNT):]
         elif p.startswith("/"):
-            raise PathError(f"{path}: outside {MOUNT}")
+            raise PathError(f"{path}: outside {MOUNT}; the file tools read and write {MOUNT} only "
+                            f"(copy the file there with bash first)")
         parts = []
         for seg in p.replace("\\", "/").split("/"):
             if seg in ("", "."):
@@ -78,7 +79,8 @@ class Workspace:
         full = os.path.join(self.root, rel) if rel else self.root
         real = os.path.realpath(full)
         if real != self.root and not real.startswith(self.root + os.sep):
-            raise PathError(f"{path}: outside {MOUNT}")
+            raise PathError(f"{path}: outside {MOUNT}; the file tools read and write {MOUNT} only "
+                            f"(copy the file there with bash first)")
         return full
 
     def show(self, full: str) -> str:

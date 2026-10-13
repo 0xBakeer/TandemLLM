@@ -25,11 +25,13 @@ name (`mcp__x1__*`).
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import html.parser
 import json
 import os
 import re
 import shlex
+import time
 import urllib.parse
 
 from chatd.workspace import ChangedError, PathError
@@ -197,7 +199,11 @@ def _render(ctx, a):
     except (PathError, OSError):
         raise ToolError("the page did not render: " + (log.strip() or "no screenshot")) from None
     errors = [ln for ln in log.splitlines() if ln.strip()]
-    msg = f"rendered {url} at {w}x{h}; screenshot {shot}\n"
+    # a new render of the page as it is now, each call (its own file): live (2026-10-13) the
+    # model read a correct clock as "still tilted" four times and took the screenshots for stale
+    msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
+           f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
+           f"screenshot {shot}\n")
     msg += ("console:\n" + "\n".join(errors[:40])) if errors else "no console errors"
     return Result(msg, images=[("image/png", png)],
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
