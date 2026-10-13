@@ -4,6 +4,46 @@ TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With t
 
 TandemLLM is a working name, and it says how the engine works. Small drafters guess the next tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
 
+Since 0.8.0 the same engine also serves Qwen3.8-Flash-Next, a mixture-of-experts model, from turboderp's EXL3 packs. The box runs one of the two models at a time.
+
+## Start here
+
+If you are an early-access tester and can read the private repository `0xBakeer/TandemLLM-early-access`, follow [EARLY-ACCESS.md](EARLY-ACCESS.md). It clones that repository with your own GitHub login and installs from it.
+
+Everyone else starts with [docs/setup.md](docs/setup.md), section "A new box from the command line". On a new DGX Spark it takes three commands: `install.sh --setup`, then `use-profile.sh <profile> --dry-run` to see the downloads, then `use-profile.sh <profile>`. You need no Hugging Face token.
+
+The manual is in [manual/tandemllm-manual.pdf](manual/tandemllm-manual.pdf), a PDF you can read without LaTeX. Its install chapter covers both paths.
+
+## Models
+
+Every file below is public on Hugging Face. `ops/use-profile.sh <profile>` downloads what a profile needs, checks each weight file against the hub's sha256, and starts the engine on port 8000.
+
+Qwen3.8-27B comes as NVFP4 or as one of six EXL3 sizes. The six EXL3 sizes and their drafters are one collection: [TandemLLM Qwen3.8-27B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4). Each EXL3 card has its KL against BF16 and a speed table; the KL column below comes from those cards.
+
+| profile | weights | download | KL vs BF16 |
+|-|-|-|-|
+| `nvfp4` | [0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) | 15.0 GB | see [docs/quantisation.md](docs/quantisation.md) |
+| `exl3-2.5` | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5) | 12.0 GB | 0.1112 |
+| `exl3-3.0` | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0) | 13.5 GB | 0.0621 |
+| `exl3-3.5` | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5) | 15.2 GB | 0.0298 |
+| `exl3-4.0` | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0) | 16.9 GB | 0.0171 |
+| `exl3-4.5` (default for the 27B) | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5) | 18.4 GB | 0.0096 |
+| `exl3-6.0` | [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0) | 23.3 GB | 0.0018 |
+
+The 27B profiles share the rest: the base checkpoint `Qwen/Qwen3.8-27B-FP8` (30.4 GB, without `mtp.safetensors`) and the BF16 drafters [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) and [-b16](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16) (7.7 GB together). An EXL3 profile also needs the K3 drafters and the K4 draft head, [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters) (1.9 GB). The script fetches all of them; you never copy a drafter by hand.
+
+Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Qwen3.8-Flash-Next-exl3`](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3). A Flash-Next profile needs nothing else: the pack carries its own draft layer.
+
+| profile | branch | download | largest window on one DGX Spark |
+|-|-|-|-|
+| `flashnext-2.05` | `2.05bpw_h4_ng4` | 61.5 GB | 262,144 tokens |
+| `flashnext-3.05` (default) | `3.05bpw_h5_ng5` | 85.1 GB | 262,144 tokens |
+| `flashnext-4.05` | `4.05bpw_h6_ng6` | 106.1 GB | 208,896 tokens with vision on |
+| `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | does not load yet |
+| `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | does not fit |
+
+The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
+
 ## See it
 
 | StairCut sizes the draft tree each round | the speed follows the kind of text |
@@ -29,7 +69,7 @@ The paper measured commit `431ddee` on branch `router-eng169`. StairCut is on `m
 | fixed block 16 (the wide drafter alone) | 44.80 |
 | plain greedy decoding | 13.69 |
 
-Plain greedy decoding was measured on 28 September on an earlier build; its path with speculation off is unchanged since. On a teacher-forced bench of 25 workloads (fresh text, edits, quotations and copies, 32k context), where every configuration commits the same reference text, StairCut averages 90.45 tok/s against 81.95 for the fixed block 16 and 59.31 for the fixed block 8. On 30 prompts checked against plain greedy decoding, 17 outputs are identical to the end of the answer and 13 diverge at a near tie of at most one ulp ([docs/exactness.md](docs/exactness.md)). A long prompt sent a second time resumes from the cache and reaches its first token in 0.3, 0.6 and 1.1 s at 32k, 64k and 128k tokens, against 44.4, 93.7 and 208.3 s cold ([docs/caches.md](docs/caches.md)). Against Qwen's BF16 release the weights cost +0.0221 nats on prose and +0.0426 on code ([docs/quantisation.md](docs/quantisation.md)).
+Plain greedy decoding was measured on 28 September on an earlier build; its path with speculation off is unchanged since. On a teacher-forced bench of 25 workloads (fresh text, edits, quotations, copies; 32k context), where every configuration commits the same reference text, StairCut averages 90.45 tok/s against 81.95 for the fixed block 16 and 59.31 for the fixed block 8. On 30 prompts checked against plain greedy decoding, 17 outputs are identical to the end of the answer and 13 diverge at a near tie of at most one ulp ([docs/exactness.md](docs/exactness.md)). A long prompt sent a second time resumes from the cache and reaches its first token in 0.3, 0.6 and 1.1 s at 32k, 64k and 128k tokens, against 44.4, 93.7 and 208.3 s cold ([docs/caches.md](docs/caches.md)). Against Qwen's BF16 release the weights cost +0.0221 nats on prose and +0.0426 on code ([docs/quantisation.md](docs/quantisation.md)).
 
 [CITATION.cff](CITATION.cff) has the citation.
 
@@ -72,24 +112,33 @@ The parts:
 - Server. An OpenAI-compatible API. Tool calls come back typed by their JSON schema, structured-output masks apply to every verified row, and a long prefill stops when the client leaves.
 - Dashboard. The engine serves its own web page. It shows what each request is doing right now (prefilling at 76 %, thinking, calling `write_file`), and keeps a year of speed and usage.
 
-Start with [docs/architecture.md](docs/architecture.md), a one-page tour. Each of the 12 pages in [docs](docs/README.md) covers one part.
+Start with [docs/architecture.md](docs/architecture.md), a one-page tour. [docs/README.md](docs/README.md) lists every page, one part each.
 
 ## Install
 
-One command sets up the served profile, StairCut included, on a DGX Spark:
+On a new DGX Spark, install in setup mode and then switch to a profile ([docs/setup.md](docs/setup.md)):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh | bash
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.8.1/install.sh
+bash install.sh --setup --yes
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5; --list prints every profile
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, about 70 GB of free disk and 64 GiB of free memory to start. It clones the engine at release `v0.3.0` into `~/TandemLLM/src` and builds a venv with pinned packages. The base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Then it starts the engine, waits for `/health`, runs a smoke test that prints tok/s, and shows how to point an OpenAI client or opencode at it. Run it again to update: it skips finished steps, and downloads resume where they stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.8.1` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+
+Where the tag `v0.8.1` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.8.1'". Pass `--repo` and `--ref` to install from another repository or release. Early-access testers clone from their own repository ([EARLY-ACCESS.md](EARLY-ACCESS.md)).
+
+Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.
 
 | flag | what |
 |-|-|
+| `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.3.0`; `v0.2.0-staircut` is the paper's |
-| `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too) |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.8.1`; `v0.2.0-staircut` is the paper's |
+| `--repo URL` | the git repository to clone, default `https://github.com/0xBakeer/TandemLLM.git` |
+| `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |
 | `--no-start` | install and configure, don't start |
 | `--systemd` | also install a systemd user unit, `tandemllm.service` |
@@ -116,12 +165,12 @@ hf download 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16 --local-dir ~/tandem/ft-b
 
 Then edit the path lines at the top of `ops/serve.env` to match your machine: `REPO` (this checkout), `PY` (a Python with the packages above), `NV=~/tandem/nvfp4/mlp.safetensors,~/tandem/nvfp4/gdn.safetensors,~/tandem/nvfp4/attn.safetensors`, `HEAD=~/tandem/nvfp4/head-fp8.safetensors`, `CKPT8=~/tandem/ft-b8`, `CKPT16=~/tandem/ft-b16` and `CORPUS`. Start it with `bash ops/start.sh`. That is the served profile, StairCut included.
 
-To build the published weight set yourself, quantise from the BF16 release with GPTQ on the NVFP4 grid (about 80 GB of GPU memory with the default `--h-budget-gb 22`, and 25 minutes on an RTX PRO 6000; see [docs/quantisation.md](docs/quantisation.md)), then build the FP8 head:
+To build the published weight set yourself, quantise from the BF16 release with GPTQ on the NVFP4 grid (about 80 GB of GPU memory with the default `--h-budget-gb 22`, and 25 minutes on an RTX PRO 6000; see [docs/quantisation.md](docs/quantisation.md)), then build the FP8 head. `<BF16>` is the snapshot folder of `Qwen/Qwen3.8-27B` in the Hugging Face cache, the path `hf download` prints last:
 
 ```bash
-hf download Qwen/Qwen3.8-27B
+hf download Qwen/Qwen3.8-27B          # prints the snapshot folder: use it for <BF16> below
 python tools/calib_corpus.py --out ~/calib
-python tools/quant_nvfp4.py build --model ~/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots --methods gptq --out-dir ~/nvfp4-bf16 \
+python tools/quant_nvfp4.py build --model <BF16> --methods gptq --out-dir ~/nvfp4-bf16 \
     --corpus ~/calib/calib-code.txt:80000,~/calib/calib-en.txt:60000,~/calib/calib-de.txt:16000
 python tools/quant_head.py build --out ~/nvfp4-bf16/head-fp8.safetensors --ratios 1.0,0.95,0.90
 ```
@@ -171,6 +220,8 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 ## Documentation
 
+- [The manual](manual/tandemllm-manual.pdf), the whole book as one PDF; its source is in `manual/`
+- [Setup](docs/setup.md): a new box, the setup guide in the dashboard, the model registry
 - [Architecture](docs/architecture.md): the model, the byte budget, the decode loop
 - [Quantisation and profiles](docs/quantisation.md)
 - [Kernels](docs/kernels.md)
@@ -179,33 +230,27 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
 - [Dashboard](docs/dashboard.md)
+- [The Chat tab](docs/chat.md), in beta, with its known limitations
+- [Parallel requests](docs/parallel-requests.md)
 - [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`pip install .` gives `tandem-dash`, no GPU needed), the host collector, the docker image
 - [Operations](docs/operations.md)
 - [Measurement](docs/measurement.md)
 - [Adding a model](docs/adding-a-model.md)
 - [Roadmap](docs/roadmap.md)
 
-## Weights
-
-| repository | what |
-|-|-|
-| [0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4) | the NVFP4 overlays and the FP8 head, quantised once from Qwen's BF16 release |
-| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) | the fine-tuned block 8 drafter, loaded by the served profile and released at the first round |
-| [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16) | the fine-tuned block 16 drafter, the one StairCut runs |
-
 ## Status
 
-The current release is `v0.3.0`, which adds image input: chat messages may carry `image_url` parts, and the checkpoint's vision tower encodes them ([docs/server.md](docs/server.md) has the limits). Text requests are unchanged. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. `v0.2.1` changed only the dashboard login, which is now off by default, and docs and config. It runs on one board (DGX Spark) with one model (Qwen3.8-27B) today. [CHANGELOG.md](CHANGELOG.md) lists the releases.
+The current release is `v0.8.1`. It lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95); the engine's modules are the bytes of 0.8.0. `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of two models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Credits
 
-Qwen made the model weights and their reference implementation. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
+Qwen made the model weights and their reference implementation. turboderp made exllamav3, which quantised our EXL3 sizes of the 27B, and the Flash-Next packs the engine serves. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
 
 ## License
 
 - The engine code is dual-licensed: [AGPL-3.0-only](LICENSE) (version 3 only; see [NOTICE](NOTICE)) for everyone, or a [commercial license](COMMERCIAL-LICENSE.md) from the copyright holder for use without the AGPL's obligations.
 - Contributions are accepted under the Contributor License Agreement in [CONTRIBUTING.md](CONTRIBUTING.md), so that both licenses stay possible.
 - The documentation in `docs/` is licensed under [CC BY 4.0](docs/LICENSE).
-- This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`incoai/Qwen3.8-27B-DFlash2`) are Apache-2.0. The published NVFP4 overlays and fine-tuned drafters are derived from them and are Apache-2.0 too: keep the attribution and the license when you pass them on.
+- This repository contains no model weights. The base model (`Qwen/Qwen3.8-27B` and its FP8 release) and the base drafter (`incoai/Qwen3.8-27B-DFlash2`) are Apache-2.0. The published NVFP4 and EXL3 weights and the fine-tuned drafters are derived from them and are Apache-2.0 too: keep the attribution and the license when you pass them on.
 
 © 2026 Khaled Bakeer.

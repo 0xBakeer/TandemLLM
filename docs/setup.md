@@ -21,10 +21,10 @@ Until an admin password is set, anyone who reaches the port can run the setup, a
 
 ## A new box from the command line
 
-Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Install in setup mode, then switch to a profile:
+Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. Install in setup mode, then switch to a profile:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.8.1/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # what it would download: each URL and size
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, or any name --list prints
@@ -40,6 +40,8 @@ Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installe
 The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Before a download starts, the script checks that the disk keeps 60 GB free after it. It checks every weight file against the sha256 the hub lists, and a folder appears only when its files are all there. If a download stops, run the same command again: it continues and keeps the files that finished. The engine needs about 80 GiB free for a 27B profile and 70 GiB for `flashnext-3.05`. The switch stops setup mode first.
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
+
+The `curl` line fetches the installer from the tag `v0.8.1`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.8.1'"; `--ref` picks another release. Early-access testers clone the private repository `0xBakeer/TandemLLM-early-access` with their own GitHub login and pass it as `--repo`. [EARLY-ACCESS.md](../EARLY-ACCESS.md) has their commands, and the manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has both paths.
 
 ## The model registry
 
@@ -59,7 +61,7 @@ One token of context window costs 106,752 bytes, which is 104.25 KiB or 106.75 k
 
 The 6.63 GiB of CUDA graphs belong to slot 0. A side slot captures its own verify graphs, about 7.5 GiB each, only with `QSE_SIDE_GRAPHS=on`; the guide always writes it off, as the reference box runs, and a side slot then costs 1.19 GiB beyond its KV (the load stage `side_slots` took 3.58 GiB for three on 2026-10-10).
 
-### A second model: Flash-Next
+### Flash-Next, the second model
 
 `models/qwen3.8-flash-next/model.yaml` gives the models step its second tile. Its five profiles are the EXL3 packs (2.05 to 6.05 bits a weight). Fields the 27B's entry does not use, all optional:
 
@@ -107,7 +109,7 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 
 | step | what it runs |
 |-|-|
-| check | the selection, the memory, the disk, the files the profile needs, the HF token, the box lock |
+| check | the selection, the memory, the disk, the files the profile needs, the HF token (only a private repository needs one; every published profile is public), the box lock |
 | unload_assistant | Wren is unloaded before the job starts |
 | fetch | `bash ops/use-profile.sh <profile> --fetch-only`: the profile's weights and the files it needs beside them (the `assets_required` with a `fetch` list in the registry); skipped when all of them are on disk |
 | write_config | first `waiting` until no request runs or waits on the engine (10 minutes at most, else nothing changes); then `run/setup.env`, every value quoted, the old one kept as `run/setup.env.bak-<time>`; with a port change, `bash ops/stop.sh 120` first, and a failure after that stop goes through the rollback; with "generate", `bash ops/make-secrets.sh --admin` |

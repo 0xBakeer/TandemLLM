@@ -136,7 +136,7 @@ An FP8 profile reads nothing but the vendor's files, so its quality is the check
 
 Profiles and bytes interact with speculation. At one token a step, the full NVFP4 set is worth 14 % over NVFP4 MLPs alone. On a 16-node tree it is worth 0.2 %, because a round that commits 13 tokens has already spread its weight read over 13 tokens. Bytes and accepted tokens substitute for each other.
 
-The 27B also has weight profiles in EXL3 (`ops/profiles/exl3-<bpw>.env`, switched with `ops/use-profile.sh`, [operations.md](operations.md)). This page does not cover how those files were made.
+The 27B also has weight profiles in EXL3 (`ops/profiles/exl3-<bpw>.env`, switched with `ops/use-profile.sh`, [operations.md](operations.md)). The six sizes are public on Hugging Face, `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-{2.5,3.0,3.5,4.0,4.5,6.0}`, with the K3 drafters and the K4 draft head in `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters`; the collection is [TandemLLM Qwen3.8-27B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4). We quantised them with exllamav3 from Qwen's BF16 release. Each card lists every size's KL against BF16 on wikitext-2, from 0.1112 at 2.5 bits to 0.0018 at 6.0, and its speed on one DGX Spark. Running them needs nothing beyond those repositories, the BF16 drafters (`...-DFlash2-b8` and `-b16`) and the base checkpoint; `ops/use-profile.sh exl3-<bpw>` fetches all of it. This page does not cover how the EXL3 files were made.
 
 ## Knobs
 
