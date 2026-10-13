@@ -979,7 +979,7 @@ textarea.mono,
     grid-column: 1 / -1;
   }
   .savebar {
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 6px);
+    bottom: calc(var(--tabbar-space) + 6px);
   }
 }
 

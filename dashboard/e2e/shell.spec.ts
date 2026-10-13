@@ -56,7 +56,8 @@ test.describe('shell', () => {
     await expect(page.locator('qse-dev')).toBeVisible();
     await page.reload();
     await expect(page.locator('qse-dev')).toBeVisible();
-    await expect(page.locator('.rail-tab.is-on')).toHaveText(/Dev/);
+    // on the phone the Dev link is behind More and the More slot shows Dev: the visible one counts
+    await expect(page.locator('.rail-tab.is-on:visible')).toHaveText(/Dev/);
   });
 
   test('theme: follows a light OS preference, and a toggle to dark is remembered', async ({ page }) => {
@@ -93,18 +94,30 @@ test.describe('shell', () => {
     await expect(page.locator('.topbar-meta')).toContainText(/up \d/);
   });
 
-  test('phone: every bottom-bar label shows whole at 390 px', async ({ page }, info) => {
+  test('phone: the bottom bar is Chat, Usage, Performance and More, every label whole at 390 px', async ({ page }, info) => {
     test.skip(info.project.name !== 'webkit-phone', 'the bottom bar is the phone layout');
-    // NP1's night pass (2026-10-04, issue 5): "Backends" showed as "Backen…"
+    // NP1's night pass (2026-10-04, issue 5): "Backends" showed as "Backen…"; since 2026-10-13 the
+    // bar holds four slots and the other views sit behind More
     await login(page);
     await expect(page.locator('.rail-tab').first()).toBeVisible();
-    const clipped = await page.evaluate(() =>
-      [...document.querySelectorAll('.rail-tab')].map((tab) => {
-        const shown = tab.querySelector('.rail-short') ?? tab.querySelector('.rail-label');
-        const el = shown as HTMLElement;
-        return { text: el.textContent, over: el.scrollWidth - el.clientWidth };
-      }).filter((x) => x.over > 0));
-    expect(clipped).toEqual([]);
+    const shown = await page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>('.rail-tab')]
+        .filter((tab) => tab.offsetParent !== null)
+        .map((tab) => {
+          const el = tab.querySelector('.rail-label') as HTMLElement;
+          return { text: el.textContent, over: el.scrollWidth - el.clientWidth };
+        }));
+    expect(shown.map((x) => x.text)).toEqual(['Chat', 'Usage', 'Performance', 'More']);
+    expect(shown.filter((x) => x.over > 0)).toEqual([]);
+    // the More sheet lists the rest; a view behind More takes the More slot
+    await page.locator('.rail-more').click();
+    await expect(page.locator('.more-sheet')).toBeVisible();
+    await expect(page.locator('.more-item')).toHaveText(['Dev', 'Playground', 'Conductor', 'Backends', 'System', 'Setup']);
+    await page.locator('.more-item', { hasText: 'Dev' }).click();
+    await expect(page).toHaveURL(/#\/dev/);
+    await expect(page.locator('.more-sheet')).toBeHidden();
+    await expect(page.locator('.rail-more')).toHaveText('Dev');
+    await expect(page.locator('.rail-more')).toHaveClass(/is-on/);
   });
 
   test('AU1: no password set, Performance reads /v1/dashboard/metrics with no session and System opens; no cookie is set', { tag: '@mock' }, async ({ page, context }) => {

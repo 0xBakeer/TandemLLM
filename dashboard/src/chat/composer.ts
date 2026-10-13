@@ -6,6 +6,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { bytes } from '../lib/format';
+import { stripEdge, type Edge } from '../lib/phone';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
@@ -33,18 +34,35 @@ export class QseChatComposer extends LightElement {
   @state() private slash: { items: SlashCommand[]; index: number } | null = null;
   @state() private dragging = false;
   @state() private enterSends = !(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
+  /** the phone (the shell's one breakpoint): shorter placeholders, the text beside the buttons */
+  @state() private phone = typeof matchMedia === 'function' && matchMedia('(max-width: 768px)').matches;
+  private mqPhone = typeof matchMedia === 'function' ? matchMedia('(max-width: 768px)') : null;
+  private onMedia = () => (this.phone = !!this.mqPhone?.matches);
+  /** the phone's pill strip: which edge has more behind it, so that edge fades */
+  @state() private edge: Edge = 'none';
 
   connectedCallback(): void {
     super.connectedCallback();
     this.text = this.draft;
     document.addEventListener('click', this.onDocClick);
+    this.mqPhone?.addEventListener('change', this.onMedia);
   }
   disconnectedCallback(): void {
     document.removeEventListener('click', this.onDocClick);
+    this.mqPhone?.removeEventListener('change', this.onMedia);
     super.disconnectedCallback();
   }
   updated(changed: Map<string, unknown>): void {
     if (changed.has('draft') && this.draft !== this.text && !this.text) this.text = this.draft;
+    // after every render (a width change on a phone is a rotation, which re-renders through the
+    // media query), the strip's edges follow its scroll position
+    if (!changed.has('edge')) this.measureStrip();
+  }
+  private measureStrip(): void {
+    const strip = this.querySelector<HTMLElement>('.ch-pills');
+    if (!strip) return;
+    const e = stripEdge(strip.scrollLeft, strip.scrollWidth, strip.clientWidth);
+    if (e !== this.edge) this.edge = e;
   }
 
   private onDocClick = (e: Event) => {
@@ -232,14 +250,14 @@ export class QseChatComposer extends LightElement {
       ${this.slash ? this.renderSlash() : nothing}
       ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${bytes(a.bytes, 0)}</span><button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>` : nothing}
       <label class="sr-only" for="ch-input">Message</label>
-      <textarea id="ch-input" rows="1" placeholder=${this.running ? 'Steer: goes in after the current step' : 'Message TandemLLM, or / for a command'} .value=${this.text} ?disabled=${this.disabled} @input=${this.onInput} @keydown=${this.onKey} @paste=${this.onPaste}></textarea>
+      <textarea id="ch-input" rows="1" placeholder=${this.running ? (this.phone ? 'Steer the run' : 'Steer: goes in after the current step') : this.phone ? 'Message TandemLLM' : 'Message TandemLLM, or / for a command'} .value=${this.text} ?disabled=${this.disabled} @input=${this.onInput} @keydown=${this.onKey} @paste=${this.onPaste}></textarea>
       <div class="ch-composer-row">
         <label class="btn btn-ghost btn-icon ch-attach-btn" title="Attach files" aria-label="Attach files"><input type="file" multiple class="sr-only" @change=${(e: Event) => {
           const inp = e.target as HTMLInputElement;
           if (inp.files?.length) void this.addFiles(inp.files);
           inp.value = '';
         }} />${icon('plus')}</label>
-        <span class="ch-pills">
+        <span class="ch-pills" data-edge=${this.edge} @scroll=${() => this.measureStrip()}>
           <span class="ch-pillwrap">
             <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'model'} @click=${() => (this.pop = this.pop === 'model' ? 'none' : 'model')} title="model and profile"><span class="ch-pill-main">${model?.name ?? '…'}</span>${profile ? html`<span class="ch-pill-sub">${profile.name}</span>` : nothing}</button>
             ${this.pop === 'model' && caps ? this.renderModelPop(caps, s) : nothing}
@@ -257,8 +275,8 @@ export class QseChatComposer extends LightElement {
         <span class="grow"></span>
         <label class="switch ch-enter" title="Enter sends; Shift+Enter is a new line. Off: Enter is a new line, Cmd/Ctrl+Enter sends."><input type="checkbox" .checked=${this.enterSends} @change=${(e: Event) => (this.enterSends = (e.target as HTMLInputElement).checked)} /><span>Enter sends</span></label>
         ${this.running
-          ? html`<span class="ch-send-group"><button type="submit" class="btn btn-sm ch-queue-btn" ?disabled=${!this.text.trim()} title="Queue: goes in after the current step">${icon('send')} Queue</button><button type="button" class="btn ch-stop" @click=${() => this.fire('ch-stop')}>${icon('stop')} Stop</button></span>`
-          : html`<button type="submit" class="btn btn-primary ch-send" ?disabled=${this.disabled || (!this.text.trim() && !this.files.length)}>${icon('send')} Send</button>`}
+          ? html`<span class="ch-send-group"><button type="submit" class="btn btn-sm ch-queue-btn" ?disabled=${!this.text.trim()} title="Queue: goes in after the current step">${icon('send')} <span class="ch-btn-word">Queue</span></button><button type="button" class="btn ch-stop" aria-label="Stop" title="Stop the run" @click=${() => this.fire('ch-stop')}>${icon('stop')} <span class="ch-btn-word">Stop</span></button></span>`
+          : html`<button type="submit" class="btn btn-primary ch-send" aria-label="Send" ?disabled=${this.disabled || (!this.text.trim() && !this.files.length)}>${icon('send')} <span class="ch-btn-word">Send</span></button>`}
       </div>
     </form>`;
   }

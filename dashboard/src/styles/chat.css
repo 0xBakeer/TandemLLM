@@ -2685,9 +2685,10 @@ qse-chat-panes {
   .ch {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: 'main';
-    height: calc(100vh - var(--topbar-h) - var(--tabbar-h) - env(safe-area-inset-bottom));
-    height: calc(100dvh - var(--topbar-h) - var(--tabbar-h) - env(safe-area-inset-bottom));
-    min-height: 380px;
+    /* the bar's room (--tabbar-space, the shell's) is gone while typing: the thread takes it */
+    height: calc(100vh - var(--topbar-h) - var(--tabbar-space));
+    height: calc(100dvh - var(--topbar-h) - var(--tabbar-space));
+    min-height: 240px;
   }
   .ch-rail {
     position: fixed;
@@ -2746,31 +2747,114 @@ qse-chat-panes {
   qse-chat-composer {
     padding: 6px 10px 10px;
   }
-  .ch-composer textarea {
-    font-size: 16px; /* no iOS zoom on focus */
+  /* the composer on a phone (2026-10-13): the same elements, laid out as two rows. Row one is
+     the message: attach, the text, Send (or Queue and Stop). Row two is the readout strip: the
+     model, the effort, the tools, plan mode, every value in view at 390 px; at 320 px it scrolls
+     and the edge with more behind it fades. */
+  .ch-composer {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      'att att att'
+      'plus text send'
+      'pills pills pills';
+    column-gap: 6px;
+    row-gap: 4px;
+    padding: 8px 8px 6px;
   }
+  .ch-composer-row {
+    display: contents;
+  }
+  .ch-composer .ch-attachments-draft {
+    grid-area: att;
+  }
+  .ch-composer textarea {
+    grid-area: text;
+    align-self: end;
+    font-size: 16px; /* no iOS zoom on focus */
+    min-height: 36px;
+    padding: 7px 2px;
+    max-height: 160px;
+  }
+  .ch-composer .ch-attach-btn {
+    grid-area: plus;
+    align-self: end;
+    min-width: 36px;
+    min-height: 36px;
+    justify-content: center;
+  }
+  .ch-composer .grow,
   .ch-enter {
     display: none;
   }
+  .ch-composer .ch-send,
+  .ch-composer .ch-send-group {
+    grid-area: send;
+    align-self: end;
+  }
+  .ch-composer .ch-send,
+  .ch-composer .ch-stop,
+  .ch-composer .ch-queue-btn {
+    min-height: 36px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
   .ch-pills {
+    grid-area: pills;
     flex-wrap: nowrap;
+    gap: 6px;
     overflow-x: auto;
-    flex: 1;
+    margin: 0 -2px;
+    padding: 2px 2px 3px;
     scrollbar-width: none;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
   }
   .ch-pills::-webkit-scrollbar {
     display: none;
   }
-  .ch-pop {
-    position: fixed;
-    left: 8px;
-    right: 8px;
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 72px);
+  .ch-pills[data-edge='start'] {
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .ch-pills[data-edge='end'] {
+    mask-image: linear-gradient(to right, transparent, #000 28px);
+  }
+  .ch-pills[data-edge='mid'] {
+    mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
+  }
+  .ch-pillwrap {
+    position: static;
+    flex: none;
+  }
+  .ch-pill {
+    flex: none;
+    padding: 5px 10px;
+  }
+  /* the value alone on a phone (the profile, the MCP count and "reads only" wait in the popover),
+     so the four pills stand in one row at 390 px; a long model name ends in an ellipsis */
+  .ch-pill-sub {
+    display: none;
+  }
+  .ch-pill-main {
+    max-width: 38vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* a pill's popover spans the composer and rises above it, keyboard or not: it is anchored to
+     the composer's box, not to the screen's bottom (iOS keeps fixed boxes under the keyboard) */
+  .ch-pop,
+  .ch-pop-wide {
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    bottom: calc(100% + 6px);
+    min-width: 0;
     max-width: none;
+    max-height: min(60vh, calc(100dvh - var(--topbar-h) - 150px));
   }
   .ch-ctx {
     width: 100vw;
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    bottom: var(--tabbar-space);
   }
   /* the panes: a full-screen sheet from the bottom */
   qse-chat-panes.is-sheet,
@@ -2778,7 +2862,7 @@ qse-chat-panes {
     position: fixed;
     left: 0;
     right: 0;
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    bottom: var(--tabbar-space);
     top: var(--topbar-h);
     z-index: 30;
     display: flex;
@@ -2815,7 +2899,13 @@ qse-chat-panes {
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--rule);
-    padding: 6px 8px;
+    padding: 6px 28px 6px 8px;
+    scrollbar-width: none;
+    /* the strip scrolls: the right edge fades so a cut tab reads as more, not as the end */
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .ch-settings-nav::-webkit-scrollbar {
+    display: none;
   }
   .ch-settings-tab {
     white-space: nowrap;
@@ -2843,7 +2933,7 @@ qse-chat-panes {
     font-size: 24px;
   }
   .ch-toast {
-    bottom: 80px;
+    bottom: calc(var(--tabbar-space) + 20px);
   }
   .ch-add-mcp .field input,
   .ch-edit-form .field input,
@@ -2851,6 +2941,24 @@ qse-chat-panes {
   .ch-editor-area,
   .ch-edit textarea {
     font-size: 16px;
+  }
+}
+
+/* ---- the narrowest phones: Send and Stop keep their glyph and their name, lose the word --------- */
+@media (max-width: 360px) {
+  .ch-composer .ch-send .ch-btn-word,
+  .ch-composer .ch-stop .ch-btn-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ch-composer .ch-send,
+  .ch-composer .ch-stop {
+    padding-left: 9px;
+    padding-right: 9px;
   }
 }
 
