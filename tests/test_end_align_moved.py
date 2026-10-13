@@ -182,7 +182,8 @@ def test_the_slot_choice_sees_the_moved_block_as_the_same_conversation():
     app.STATE["end_align"] = al
     try:
         need, why = _need(copy2)
-        assert need is None and why["wait"] == "view" and why.get("view_moved", 0) > 0, why
+        assert (need is None or why.get("slot0_first")) and why["wait"] == "view", why
+        assert why.get("view_moved", 0) > 0, why
     finally:
         app.STATE["end_align"] = was
         _restore(saved)

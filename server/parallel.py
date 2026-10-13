@@ -489,7 +489,9 @@ class ParallelBoard:
             label = ("waiting for memory" if state == "waiting_memory" else
                      act.label({"state": state, "prefill": prefill and {
                          "done": prefill["done"], "total": prefill["total"],
-                         "pct": prefill["pct"]}, "tool": {"name": tool}}))
+                         "pct": prefill["pct"]}, "tool": {"name": tool},
+                         # 0.8.2: the handler's reason for the wait (server/app.py `_queue_why`)
+                         "queue": {"reason": getattr(rec, "queue_why", None)}}))
         peer = self._peer_lane(rec) if ended is None else None
         if peer is not None:
             # our engine's own view of this request (server/parallel.py on the engine)

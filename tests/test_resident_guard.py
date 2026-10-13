@@ -213,7 +213,7 @@ def test_a_guest_of_slot_0_takes_an_idle_side_slot_first():
         A.STATE["resident"], A.STATE["slot0_view"] = Res(conv), conv
         # the conversation's own next turn waits for slot 0, as SRV-197 made it
         need, why = need_for(conv + [1, 2, 3], max_new=32_000)
-        assert need is None and why["wait"] == "view" and "guest" not in why
+        assert (need is None or why.get("slot0_first")) and why["wait"] == "view" and "guest" not in why
         # a request that shares the head (a sub-agent of the same session) is not sent away:
         # slot 0's anchors serve its head
         need, why = need_for(conv[:2048] + [3, 4], max_new=64)

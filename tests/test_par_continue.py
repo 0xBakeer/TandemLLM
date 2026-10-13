@@ -124,7 +124,7 @@ def test_a_continuing_turn_waits_for_slot_0():
     pool, saved = _setup(FakeResident(rows), view=r1)
     try:
         need, why = _need(r2)
-        assert need is None and why["wait"] == "view", why
+        assert (need is None or why.get("slot0_first")) and why["wait"] == "view", why
         assert why["view"] == len(r1) and why["view_common"] == len(r1) - 1
         assert pool.stats["resident_waits"] == 1
     finally:
@@ -184,7 +184,7 @@ def test_without_a_view_the_rows_test_still_applies():
     pool, saved = _setup(FakeResident(rows), view=None)
     try:
         need, why = _need(p2, plan_active=False)
-        assert need is None and why["wait"] == "resident", why
+        assert (need is None or why.get("slot0_first")) and why["wait"] == "resident", why
     finally:
         _restore(saved)
 
@@ -299,7 +299,7 @@ def test_w18_a_new_chat_that_shares_only_the_head_takes_the_side_slot():
         pool, saved = _setup(res, view=None)
         try:
             need, why = _need(b, max_new=32_768, plan_active=False)
-            assert need is None and why["wait"] == "resident", why
+            assert (need is None or why.get("slot0_first")) and why["wait"] == "resident", why
         finally:
             A.SIDE_CONV = was
             _restore(saved)
@@ -343,7 +343,7 @@ def test_the_next_turn_of_the_same_chat_still_waits():
         pool, saved = _setup(FakeResident(rows), view=t1)
         try:
             need, why = _need(t2, max_new=32_768, plan_active=True)
-            assert need is None and why["wait"] in ("view", "resident"), why
+            assert (need is None or why.get("slot0_first")) and why["wait"] in ("view", "resident"), why
             assert why["conv"] < why["view_common"]
         finally:
             _restore(saved)
@@ -352,7 +352,7 @@ def test_the_next_turn_of_the_same_chat_still_waits():
         pool, saved = _setup(FakeResident(rows2), view=r1)
         try:
             need, why = _need(r2)
-            assert need is None and why["wait"] == "view", why
+            assert (need is None or why.get("slot0_first")) and why["wait"] == "view", why
         finally:
             _restore(saved)
     _with_marks(t)

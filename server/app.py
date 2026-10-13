@@ -735,6 +735,13 @@ SIDE_HOME_WAIT_S = float(_S.get("SIDE_HOME_WAIT_S") or 10.0)
 SIDE_NEW_WAIT_S = float(_S.get("SIDE_NEW_WAIT_S") or 20.0)
 SIDE_NEW_SHORT = 16384
 
+#: 0.8.2: how long a request whose conversation slot 0 holds (or reads back from the NVMe) waits for
+#: slot 0 before it takes a free side slot it fits in. Before, it waited for slot 0 as long as a
+#: request may run: a new Open WebUI chat, matched to another chat's NVMe entry by its shared system
+#: prompt, sat "Queued" 437 s behind a 496 s tool-call generation while two side slots were free
+#: (2026-10-13). On the side slot the disk tier serves what it holds; the rest is prefilled
+SIDE_SLOT0_WAIT_S = float(_S.get("SIDE_SLOT0_WAIT_S") or 3.0)
+
 #: FX16: a side slot's own resident prefix (engine/cache.py `ResidentPrefix`): the anchors it may
 #: hold (GB; 0 builds none, the 0.4.7 slot with no conversation of its own), the stash that keeps
 #: its conversation under a guest (GB), with the end anchor on when slot 0's is
@@ -813,13 +820,18 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images (side slots are text only),
-    a request that continues slot 0's resident conversation (it resumes there in place; on a side
-    slot it would prefill its whole conversation again), or one no side slot is long enough for.
-    Host work only: the ids are rendered on the CPU, before any lock. `why`, when given, gets the
-    numbers the choice was made on and the rendered ids (`ids`, for `_par_view_keep`)."""
+    or one no side slot is long enough for. A request that continues slot 0's resident
+    conversation (it resumes there in place; on a side slot it prefills what the disk tier does not
+    hold) gets its window too, with `why["slot0_first"]`: the handler tries slot 0 first, for
+    SIDE_SLOT0_WAIT_S (0.8.2). Host work only: the ids are rendered on the CPU, before any lock.
+    `why`, when given, gets the numbers the choice was made on and the rendered ids (`ids`, for
+    `_par_view_keep`)."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
-    if pool is None or pool.n < 2 or images:
+    if pool is None or pool.n < 2:
+        return None
+    if images:
+        why["images"] = True              # the Lanes view's reason (`_queue_why`)
         return None
     # a side lane job is served at slot 0's safe points, unless it is a guest of slot 0's
     # conversation (FX5: the router's own questions are short enough for the lane, and when slot 0
@@ -852,8 +864,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             why["wait"] = "view"
             with pool._lk:
                 pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
-            return None
-    if res is not None:
+    if res is not None and not why.get("wait"):
         try:
             valid = int(getattr(res, "valid", 0) or 0)
             rc = res.common(ids) if valid else 0
@@ -862,18 +873,27 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 why["wait"] = "resident"
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
-                return None
-            if SIDE_GUESTS == "on" and _guest_of_slot0(res, len(ids), rc, chunk):
-                why["guest"] = valid      # FX5: an idle side slot first (the handler's `_take`)
-            # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
-            # comes back through slot 0, whose prefill reads the spill; a side slot has none
-            sp = STATE.get("spill")
-            if not why.get("guest") and sp is not None and sp.entries:
-                with cache_peek.quiet(sp):
-                    got = sp.candidate(res, ids, len(ids) - 1)
-                if got is not None:
-                    why.update(wait="spill", spill=int(got[1]))
-                    return None
+            else:
+                if SIDE_GUESTS == "on" and _guest_of_slot0(res, len(ids), rc, chunk):
+                    why["guest"] = valid  # FX5: an idle side slot first (the handler's `_take`)
+                # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
+                # comes back through slot 0, whose prefill reads the spill; a side slot has none
+                sp = STATE.get("spill")
+                if not why.get("guest") and sp is not None and sp.entries:
+                    with cache_peek.quiet(sp):
+                        got = sp.candidate(res, ids, len(ids) - 1)
+                    # 0.8.2: only an entry that holds this conversation past its first user
+                    # message (`conv`) is its conversation. A line at the client's head is not:
+                    # a new Open WebUI chat matched another chat's entry at 8,192 tokens, its
+                    # system prompt and tools (conv 9,087), and waited 437 s for slot 0 behind a
+                    # 496 s generation (2026-10-13); the disk tier serves that head on a side
+                    # slot too (server/diskcache.py `SideReader`)
+                    if got is not None and (conv is None or int(got[1]) >= conv):
+                        why.update(wait="spill", spill=int(got[1]))
+                        with pool._lk:
+                            pool.stats["spill_waits"] = pool.stats.get("spill_waits", 0) + 1
+                    elif got is not None:
+                        why["spill_head"] = int(got[1])
         except Exception:                                          # noqa: BLE001
             pass
     if lane and not why.get("guest"):
@@ -891,11 +911,20 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         if SIDE_MIN_ROOM > 0 and any(least <= s.max_len for s in pool.side()):
             why["need"], why["clip"] = least, True
             need = least
+        elif why.get("wait"):
+            why["too_long"] = True            # its conversation's slot, and no other fits it
+            return None
         else:
             why["wait"] = "too_long"
             with pool._lk:
                 pool.stats["too_long"] = pool.stats.get("too_long", 0) + 1
             return None
+    if why.get("wait"):
+        # 0.8.2: it continues slot 0's conversation (view, resident) or reads it back from the
+        # NVMe there (spill): slot 0 first, for SIDE_SLOT0_WAIT_S, then a free side slot (the
+        # handler); never minutes behind another conversation's run on slot 0
+        why["slot0_first"] = True
+        return need
     # FX16: the side slot that holds this conversation's rows (its last turn ran there and
     # nothing wrote over them since): the turn resumes at its end there, beside slot 0
     home = _side_home(pool, ids, need, chunk, conv)
@@ -922,6 +951,33 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         except Exception:                                          # noqa: BLE001
             pass
     return need
+
+
+def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
+    """0.8.2: why a queued request waits, in words, for the Lanes view's queued line
+    (server/parallel.py; it said only "Queued" for 6 min 25 s while two side slots were free):
+    the slot it waits for and for how long, or what holds slot 0 (`_wait_reason`)."""
+    if pool is None:
+        return _wait_reason(me)[0]
+    if side_need is None:
+        if why.get("images"):
+            return "it has images, which only slot 0 reads; waits for slot 0"
+        if why.get("wait") == "too_long" or why.get("too_long"):
+            longest = max((s.max_len for s in pool.side()), default=0)
+            return f"too long for a side slot ({longest:,} tokens); waits for slot 0"
+        return _wait_reason(me)[0]
+    if why.get("home") is not None and why.get("home_wait") is None:
+        return f"waits up to {SIDE_HOME_WAIT_S:g} s for slot {why['home']}, which holds its conversation"
+    if why.get("slot0_first") and waited < SIDE_SLOT0_WAIT_S:
+        where = ("slot 0 reads its conversation back from the NVMe" if why.get("wait") == "spill"
+                 else "slot 0 holds its conversation")
+        return f"{where}; a free side slot takes it after {SIDE_SLOT0_WAIT_S:g} s"
+    if why.get("prefer_side_wait") and why.get("new_wait") is None:
+        return (f"a new chat: waits up to {SIDE_NEW_WAIT_S:g} s for a side slot, so slot 0 keeps "
+                f"its long conversation")
+    if all(s.busy for s in pool.slots):
+        return f"all {pool.n} slots are busy"
+    return _wait_reason(me)[0]
 
 
 def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
@@ -6654,16 +6710,20 @@ class Handler(BaseHTTPRequestHandler):
                         key = "guest_side" if par_why.get("guest") else "new_side"
                         par.stats[key] = par.stats.get(key, 0) + 1
             new_wait = bool(par_why.get("prefer_side_wait")) and not got and side_need is not None
+            # 0.8.2: its conversation is slot 0's: slot 0 first, a side slot after SIDE_SLOT0_WAIT_S
+            slot0_first = bool(par_why.get("slot0_first")) and side_need is not None
             if not got and home is None and not new_wait:
                 got = _take(me, None)
             if (not got and home is None and not new_wait and side_need is not None
-                    and _side_ok(0.0, _own_holder())):
+                    and not slot0_first and _side_ok(0.0, _own_holder())):
                 side = par.take_side(side_need, owner=cid)
                 got = side is not None
                 if got:
                     side.no_carry = bool(me["own"]) or lane_kind is not None
             micro = not got and lane_kind is not None
             while not got and not micro:
+                # 0.8.2: the Lanes view's queued line says why (server/parallel.py)
+                rec.queue_why = _queue_why(par, par_why, side_need, time.monotonic() - t_wait, me)
                 if new_wait:
                     # FX17: the side slot first, for SIDE_NEW_WAIT_S; then slot 0 as before
                     side = par.take_side(side_need, owner=cid,
@@ -6728,11 +6788,18 @@ class Handler(BaseHTTPRequestHandler):
                     # SRV-177: the time this request waited behind TandemLLM's own work
                     own_wait[0] += time.monotonic() - t_slice
                     own_rank = holder_own
-                if not got and side_need is not None and _side_ok(time.monotonic() - t_wait,
-                                                                  _own_holder()):
+                waited = time.monotonic() - t_wait
+                if (not got and side_need is not None and _side_ok(waited, _own_holder())
+                        and (not slot0_first or waited >= SIDE_SLOT0_WAIT_S)):
                     side = par.take_side(side_need, owner=cid)
                     if side is not None:
                         side.no_carry = bool(me["own"]) or lane_kind is not None
+                        if slot0_first:
+                            # slot 0 stayed busy: the side slot, its prefill from the disk tier
+                            # and the rest read again, not a wait behind slot 0's run
+                            par_why["slot0_wait"] = round(waited, 1)
+                            with par._lk:
+                                par.stats["slot0_gave_up"] = par.stats.get("slot0_gave_up", 0) + 1
                     got = side is not None
         finally:
             # Off the waiting list whatever happened, including an exception in `acquire` itself.
@@ -6760,13 +6827,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._busy(429, f"timed out waiting for the engine ({wait_s:.0f} s)", retry=10)
         with QUEUE:
             INFLIGHT["lane" if micro else "running"] += 1
+        if par is not None and not micro and side is None:
+            par.took_slot0()
         if par is not None and not micro and (side is not None or par_why.get("wait")):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
                                                           "home", "home_wait", "prefer_side",
-                                                          "new_wait", "spill")
+                                                          "new_wait", "spill", "spill_head",
+                                                          "slot0_wait")
                             if k in par_why)
             if side is not None:
                 # A request that shares only the client's head with slot 0's
@@ -6777,6 +6847,9 @@ class Handler(BaseHTTPRequestHandler):
                             if conv is not None and head >= 1024 and head < conv else "")
                 if par_why.get("home") == side.index:
                     new_conv = " continues its conversation here (home)"
+                elif par_why.get("slot0_wait") is not None:
+                    new_conv = (f" slot 0 still busy after {par_why['slot0_wait']} s, its "
+                                f"conversation ({par_why.get('wait')}) read here")
                 clip = ""
                 if par_why.get("clip"):
                     # FX16: the slot's window leaves this request less than its output limit
@@ -9567,6 +9640,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     a0, r0 = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
     depth0 = a.depth
     paged = kvpool.POOL is not None and kvpool.Driver.get() is not None
+    not_built = None
     for i in range(1, n):
         # SRV-307: with the pool a slot's window is addresses; only its rotary table (256 B a
         # token) and its constant are memory at load
@@ -9578,8 +9652,9 @@ def _build_side_slots(a, cfg, w, tok) -> None:
                                         constant=int(_side_const_gb(a) * slots_mod.GiB))
         ok, d = adm.check(need, count=False)
         if not ok:
-            print(f"[parallel] slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
-                  f"{slots_mod.Admission.describe(d)}", flush=True)
+            not_built = (f"slot {i} NOT built (window {L:,}, ~{_gib(need)} GiB): "
+                         f"{slots_mod.Admission.describe(d)}")
+            print(f"[parallel] {not_built}", flush=True)
             break
         mi0 = slots_mod.read_meminfo() or {}
         a1 = torch.cuda.memory_allocated()
@@ -9662,6 +9737,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
         dmeet.timing = timing
         _df2.DRAFT_MEET = _draft_meet
     pool = slots_mod.Pool(slots, turn=turn, meeting=meet, admission=adm, draft_meeting=dmeet)
+    pool.requested, pool.limit_reason = n, not_built       # /health's `max_running_reason`
     slots[0].lock = LOCK
     if a.parallel_switch_ms > 0:
         # a slot woken for its turn waits for the GIL up to the interpreter's switch interval (5 ms

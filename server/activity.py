@@ -588,7 +588,9 @@ def label(act: dict) -> str:
     if state == "queued":
         q = act.get("queue") or {}
         place = q.get("place")
-        return f"Queued, about {_ordinal(place)} in line" if place else "Queued"
+        base = f"Queued, about {_ordinal(place)} in line" if place else "Queued"
+        # 0.8.2: what it waits for (server/app.py `_queue_why`), e.g. "all 3 slots are busy"
+        return f"{base}: {q['reason']}" if q.get("reason") else base
     if state == "prefilling":
         p = act.get("prefill") or {}
         done, total, pct = p.get("done"), p.get("total"), p.get("pct")

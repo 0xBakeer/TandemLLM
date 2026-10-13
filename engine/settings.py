@@ -171,6 +171,9 @@ KNOBS: dict[str, tuple] = {
     # FX17: a short new chat waits this long for a busy side slot before it takes slot 0 and
     # evicts a long resident conversation
     'SIDE_NEW_WAIT_S': ('20', 'server/app.py'),
+    # 0.8.2: a request whose conversation slot 0 holds (or reads back from the NVMe) waits this
+    # long for slot 0, then takes a free side slot it fits in
+    'SIDE_SLOT0_WAIT_S': ('3', 'server/app.py'),
     # FX17: the warm-up prefill at start (tokens; 0 skips)
     'WARM_PREFILL_TOKENS': ('2600', 'server/app.py'),
     'REREAD_SAY_TOKENS': ('8192', 'server/app.py'),

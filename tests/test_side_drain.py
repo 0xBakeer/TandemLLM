@@ -55,7 +55,8 @@ def test_a_side_slots_chat_is_drained_and_comes_back_through_slot_0():
         assert res2.owner == "R" and side_res2.valid == 0
         nxt = S_PROMPT + out1 + TOOL
         need, why = _need(nxt, max_new=24)
-        assert need is None and why.get("wait") == "spill" and why.get("spill") == e_side, why
+        assert (need is None or why.get("slot0_first")) and why.get("wait") == "spill", why
+        assert why.get("spill") == e_side, why
         out2, pre2, _ = turn(nxt, 24, session="S")
         assert pre2["kind"] == "spill" and pre2["reused"] == e_side, pre2
         assert out2 == ref2, "the same tokens as the chat with no restart"

@@ -327,7 +327,7 @@ def test_take_side_gives_the_smallest_free_slot_that_fits():
     pool.release_side(s)
     assert pool.take_side(20000) is None, "16k is too short for 20k, and 64k is busy"
     assert pool.take_side(16000) is ss[2]
-    assert pool.stats["side_grants"] == 3 and pool.stats["max_running"] >= 2
+    assert pool.stats["side_grants"] == 3 and pool.stats["peak_running"] >= 2
 
 
 def test_the_overlay_covers_what_the_generation_publishes():

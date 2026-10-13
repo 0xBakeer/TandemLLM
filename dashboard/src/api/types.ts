@@ -608,7 +608,7 @@ export interface LiveActivity {
   label: string; // the server's short phrase: "Prefilling 36,864 of 48,210 (76 %)"
   since_ms: number | null; // time in this state
   constrained: 'response_format' | 'tool_choice' | null;
-  queue: { place: number | null; wait_ms: number | null; timeout_s: number | null; place_is_estimate: boolean } | null;
+  queue: { place: number | null; wait_ms: number | null; timeout_s: number | null; place_is_estimate: boolean; /** 0.8.2: why it waits, in words; absent on older servers */ reason?: string | null } | null;
   prefill: {
     done: number | null;
     total: number;

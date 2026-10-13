@@ -105,6 +105,7 @@ class Admission:
         self.held: dict = {}
         self.kv: dict = {}                 # key -> (KV bytes of `held`, owner, committed at admit)
         self.waiting: dict = {}            # SRV-305: key -> arrival time, while it waits for memory
+        self.last_refused: dict | None = None   # 0.8.2: the last check that said no (`check`'s d)
         self.stats = {"checks": 0, "admitted": 0, "waits": 0, "refused": 0, "min_after": None,
                       "timeouts": 0}
 
@@ -158,6 +159,8 @@ class Admission:
         take += held_kv + int(kv)
         after = avail - take
         d.update(avail=avail, after=after, ok=after >= self.floor, room=room)
+        if not d["ok"]:
+            self.last_refused = d
         if count:
             self.stats["checks"] += 1
             m = self.stats["min_after"]
@@ -565,8 +568,14 @@ class Pool:
         self.draft_meeting = draft_meeting
         self.admission = admission
         self._lk = threading.Lock()
-        self.stats = {"side_grants": 0, "slot0_grants": 0, "max_running": 0}
+        # `peak_running`: the most slots busy at once so far. /health showed it as `max_running`
+        # until 0.8.2, where it read as a limit ("max_running 2" on three slots, 2026-10-13)
+        self.stats = {"side_grants": 0, "slot0_grants": 0, "peak_running": 0}
         self.last_joint: dict = {}             # slot -> blocks in its last joint pass
+        # 0.8.2: the slots `--parallel` asked for, and why fewer were built (the memory floor at
+        # load, `_build_side_slots`); None when all of them were
+        self.requested = len(self.slots)
+        self.limit_reason: str | None = None
 
     @property
     def n(self) -> int:
@@ -598,7 +607,7 @@ class Pool:
                 s.t_start = time.monotonic()
                 with self._lk:
                     self.stats["side_grants"] += 1
-                    self.stats["max_running"] = max(self.stats["max_running"], self.running())
+                    self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
                 return s
         return None
 
@@ -615,10 +624,34 @@ class Pool:
                 s.t_start = time.monotonic()
                 with self._lk:
                     self.stats["side_grants"] += 1
-                    self.stats["max_running"] = max(self.stats["max_running"], self.running())
+                    self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
                 return s
             return None
         return None
+
+    def took_slot0(self) -> None:
+        """A request of the pool's took slot 0 (server/app.py, once it holds `LOCK`)."""
+        with self._lk:
+            self.stats["slot0_grants"] += 1
+            self.stats["peak_running"] = max(self.stats["peak_running"], self.running())
+
+    def limit(self) -> tuple[int, str | None]:
+        """0.8.2: how many requests may run at once now, and why that is fewer than the slots
+        `--parallel` asked for (None when it is not): every slot that was built, unless the
+        memory floor kept slots from being built at load, or the admission holds requests for
+        memory now (then the ones running are all that may)."""
+        n, why = self.n, self.limit_reason
+        adm = self.admission
+        if adm is not None:
+            with adm.lock:
+                held = len(adm.waiting)
+            if held:
+                d = adm.last_refused
+                n = max(1, self.running())
+                why = (f"memory: {held} request(s) wait for memory"
+                       + (f" ({Admission.describe(d)})" if d and d.get("avail") is not None
+                          else ""))
+        return n, why
 
     def release_side(self, slot: Slot) -> None:
         slot.owner = None
@@ -634,7 +667,9 @@ class Pool:
         return [s.index for s in self.slots if s.phase == "decode"]
 
     def report(self) -> dict:
+        limit, why = self.limit()
         return {"n": self.n, "running": self.running(), "decoding": self.decoding(),
+                "requested": self.requested, "max_running": limit, "max_running_reason": why,
                 "slots": [s.report() for s in self.slots], **self.stats,
                 "turn": self.turn.report() if self.turn is not None else None,
                 "meeting": self.meeting.report() if self.meeting is not None else None,

@@ -868,6 +868,13 @@
             },
             "place_is_estimate": {
               "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "0.8.2: why it waits, in words (the slot it waits for, or what holds slot 0); absent on older servers"
             }
           },
           "required": [
