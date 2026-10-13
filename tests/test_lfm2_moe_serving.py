@@ -61,12 +61,20 @@ class _Eng:
             st.v[li] = torch.zeros(c.num_key_value_heads, st.cap, c.head_dim)
         return st
 
-    def verify(self, toks, parents, st, graphs=None):
+    @staticmethod
+    def _key(slot, M):
+        return M if slot is None else (slot, M)
+
+    def verify(self, toks, parents, st, graphs=None, slot=None):
         M = len(toks)
-        self.blocks.append((list(toks), list(parents), st.length))
-        self._rb[M] = {"next": torch.arange(M), "logits": torch.zeros(M, 8), "hidden": torch.zeros(M, 4)}
-        self._block = (toks, parents, None)
+        self.blocks.append((list(toks), list(parents), st.length, slot))
+        self._rb[self._key(slot, M)] = {"next": torch.arange(M), "logits": torch.zeros(M, 8), "hidden": torch.zeros(M, 4)}
         return list(range(M))
+
+    def verify_multi(self, items):
+        self.joint = [(list(t), list(p), st.length) for t, p, st in items]
+        return [{"next": torch.arange(len(t)) + 100 * j, "logits": torch.full((len(t), 8), float(j)),
+                 "hidden": torch.zeros(len(t), 4)} for j, (t, _, _) in enumerate(items)]
 
     def commit(self, st, path, graphs=None):
         self.commits.append(list(path))
@@ -143,6 +151,25 @@ def test_chain_block_pending_and_trim():
     s.rollback_to(1)
     assert e.commits[-1] == [0] and s.st.length == 7
     assert s.trim_pending(7) and not s.trim_pending(8)
+
+
+def test_side_slots_and_a_joint_pass():
+    """A side slot shares the engine (the one copy of the weights) and has its own state and row
+    buffers; a joint pass leaves each slot its picks and logits and commits nothing."""
+    e = _Eng()
+    s0 = Lfm2MoeServing(e, 64)
+    s1, d1 = s0.side_slot(32)
+    assert s1.fn is e and s1.st is not s0.st and s1.slot is not None and d1 is None and s1.max_len == 32
+    s1.forward_tree(torch.tensor([1, 2]), [-1, 0], start=0)
+    assert e.blocks[-1][3] == s1.slot and (s1.slot, 2) in e._rb
+    s0.st.length, s1.st.length = 5, 3
+    out = Lfm2MoeServing.forward_tree_multi([(s0, torch.tensor([9, 8, 7]), [-1, 0, 1], 5), (s1, torch.tensor([4, 5]), [-1, 0], 3)])
+    assert e.joint == [([9, 8, 7], [-1, 0, 1], 5), ([4, 5], [-1, 0], 3)]
+    assert s0.picks.tolist() == [0, 1, 2] and s1.picks.tolist() == [100, 101]
+    assert float(out[1][0, 0]) == 1.0 and s0.st.length == 5 and e.commits == []
+    assert s0.tree_batchable(list(range(32))) and not s0.tree_batchable(list(range(33)))
+    per_token, const = s0.side_slot_bytes(32, paged=True)
+    assert per_token == 0 and const > s0.cost().section_bytes
 
 
 if __name__ == "__main__":

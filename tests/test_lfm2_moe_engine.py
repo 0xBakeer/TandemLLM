@@ -127,6 +127,35 @@ def test_commit_a_moved_path_and_a_rollback():
     assert torch.equal(_decode(eng, st, [60]), _decode(eng, alone, [60]))
 
 
+def test_a_joint_pass_is_each_states_lone_verify():
+    """ENG-241 for LFM2: two states' blocks in one pass give each state the bits of its lone verify, and
+    each commits its own block."""
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
+    a, b = eng.new_state(128), eng.new_state(128)
+    eng.prefill(PROMPT, a)
+    eng.prefill(PROMPT[:9], b)
+    blocks = [([7, 19, 23, 44], [-1, 0, 1, 1]), ([5, 6, 7], [-1, 0, 1])]
+    lone = []
+    for (toks, par), st in zip(blocks, (a, b)):
+        eng.verify(toks, par, st)
+        lone.append(eng._rb[len(toks)]["logits"][:len(toks)].clone())
+    rbs = eng.verify_multi([(toks, par, st) for (toks, par), st in zip(blocks, (a, b))])
+    for rb, want, (toks, _) in zip(rbs, lone, blocks):
+        assert torch.equal(rb["logits"][:len(toks)], want)
+    eng.commit(a, [0, 1, 3])
+    eng.commit(b, [0, 1])
+    alone_a, alone_b = eng.new_state(128), eng.new_state(128)
+    eng.prefill(PROMPT, alone_a)
+    eng.prefill(PROMPT[:9], alone_b)
+    _decode(eng, alone_a, [7, 19, 44])
+    _decode(eng, alone_b, [5, 6])
+    assert torch.equal(_decode(eng, a, [3]), _decode(eng, alone_a, [3]))
+    assert torch.equal(_decode(eng, b, [3]), _decode(eng, alone_b, [3]))
+    return "7 rows of 2 states: each its lone bits; each commit its own block"
+
+
 def test_self_check_passes():
     if SKIP:
         return SKIP

@@ -115,8 +115,11 @@ class Lfm2MoeServing:
     caps = Capabilities(caches=False, side_slots=False, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=False,
                         side_lane=False)
 
-    def __init__(self, eng: Lfm2MoeEngine, max_len: int):
+    def __init__(self, eng: Lfm2MoeEngine, max_len: int, slot=None):
         self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len
+        # slot 0 (None) keys its row buffers by row count; a side slot by (its tag, rows), so no slot
+        # stages into a buffer another slot's graph reads
+        self.slot = slot
         self.st = eng.new_state(max_len, paged=True)
         self.state = Lfm2CacheState(self)
         self.kv = _KV(self)
@@ -134,6 +137,7 @@ class Lfm2MoeServing:
         self.captured = False
         self.plain_captured = False
         self.heads: dict = {}
+        self.sides: list = []
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
@@ -162,7 +166,7 @@ class Lfm2MoeServing:
     def precapture(self, drafter) -> int | None:
         """The decode graph of the first class, after the server's warm-up (whose rows are nobody's)."""
         if self.dg is None:
-            self.dg = DecodeGraph(self.fn, self.st)
+            self.dg = DecodeGraph(self.fn, self.st, self.slot)
         self.kv.length = 0
         return len(self.dg.graphs)
 
@@ -239,11 +243,11 @@ class Lfm2MoeServing:
         self._ensure(start + T + CAPTURE_ROWS)
         if T == 1 and start > 0:
             if self.dg is None:
-                self.dg = DecodeGraph(self.fn, self.st)
+                self.dg = DecodeGraph(self.fn, self.st, self.slot)
             n0 = self.dg.captures
             lg = self.dg(int(ids[0]))
             self.plain_captured = self.dg.captures != n0
-            self._hidden = self.fn.g["hidden"].view(1, 1, -1)
+            self._hidden = self.dg.rb["hidden"].view(1, 1, -1)
             self.stats["decode_steps"] += 1
             return lg.view(1, 1, -1)
         lg = self.fn.prefill(ids, self.st)
@@ -262,10 +266,10 @@ class Lfm2MoeServing:
         M = len(toks)
         self._ensure(start + M + CAPTURE_ROWS)
         n_graphs = len(self.vgraphs)
-        self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs)
+        self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs, slot=self.slot)
         self.captured = len(self.vgraphs) > n_graphs
         self._width = M
-        rb = self.fn._rb[M]
+        rb = self.fn._rb[self.fn._key(self.slot, M)]
         self.picks = rb["next"][:M]
         self._hidden = rb["hidden"][:M].unsqueeze(0)
         self.stats["verify_blocks"] += 1
@@ -273,7 +277,57 @@ class Lfm2MoeServing:
         return rb["logits"][:M]
 
     def tree_batchable(self, parents) -> bool:
-        return False
+        """A block a joint pass may take: its rows within the row kernels' 32."""
+        return len(parents) <= 32
+
+    @staticmethod
+    @torch.no_grad()
+    def forward_tree_multi(items: list) -> list:
+        """ENG-241: [(serving, block, parents, start)] of sequence slots over one engine, verified in one
+        pass (`Lfm2MoeEngine.verify_multi`: the projections, experts and head read once); each slot's
+        logits, picks and final rows as its `forward_tree` leaves them, its block committed by its
+        `commit_tree`."""
+        fn = items[0][0].fn
+        jobs = []
+        for s, block, parents, start in items:
+            s._settle_chain()
+            s._at(start)
+            s._ensure(start + block.numel() + CAPTURE_ROWS)
+            jobs.append(([int(t) for t in block.view(-1).tolist()], [int(p) for p in parents], s.st))
+        rbs = fn.verify_multi(jobs)
+        out = []
+        for (s, block, parents, start), rb in zip(items, rbs):
+            M = block.numel()
+            s.picks, s._hidden = rb["next"][:M], rb["hidden"][:M].unsqueeze(0)
+            s.captured, s._width = False, M
+            s.stats["verify_blocks"] += 1
+            s.stats["verify_rows"] += M
+            out.append(rb["logits"][:M])
+        return out
+
+    def side_slot(self, max_len: int, drafter0=None) -> tuple:
+        """ENG-241: a side slot's engine over this engine's weights (`fn`, the one copy): its own state
+        (paged as slot 0's when the pool is on), its own row buffers and graphs; with a drafter, the
+        same lookup cut over slot 0's corpus (read-only) from the same price file."""
+        e2 = Lfm2MoeServing(self.fn, max_len, slot=f"slot{id(self) % 9973}.{len(self.sides)}")
+        self.sides.append(e2)
+        d2 = None
+        if drafter0 is not None:
+            from engine.drafters.ngram import NgramDrafter
+            from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
+            from engine.methods.staircut import PriceModel, StairCut
+            ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16, min_corpus_order=8)
+            if drafter0.ngram is not None:
+                ng.corpus = drafter0.ngram.corpus
+            c0 = drafter0.cut
+            d2 = MTPTreeDrafter(e2, NoHead(), StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=False), ng)
+        return e2, d2
+
+    def side_slot_bytes(self, max_len: int, paged: bool) -> tuple:
+        """(bytes a token, constant bytes) a side slot takes before it serves anything: its KV when the
+        window is not paged; its conv states and the graphs' pools (SIDE_SLOT_CONST, an estimate)."""
+        cost = self.cost()
+        return (0 if paged else cost.view_bytes_per_token), cost.section_bytes + SIDE_SLOT_CONST
 
     @torch.no_grad()
     def commit_tree(self, path: list[int]) -> None:
@@ -316,6 +370,10 @@ class Lfm2MoeServing:
     def _at(self, start: int) -> None:
         if int(start) != self.st.length:
             raise ValueError(f"LFM2 forward at {start}, the state holds {self.st.length} rows")
+
+
+#: a side slot's graph pools and buffers beyond its state, bytes (an estimate until measured, SPD-107)
+SIDE_SLOT_CONST = int(0.5 * (1 << 30))
 
 
 def profile_of(path: str) -> str:

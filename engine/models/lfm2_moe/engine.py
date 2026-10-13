@@ -91,7 +91,6 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         self.exl3 = any(_is_exl3(w) for w in W.values())
         self.banks = {li: e.bank(self.device) for li, e in experts.items() if hasattr(e, "bank")} \
             if str(self.device).startswith("cuda") else {}
-        self._block = None
 
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None, paged: bool = False) -> LfmState:
@@ -221,9 +220,14 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         self._rb[key] = rb
         return rb
 
-    def stage(self, token: int, st: LfmState) -> None:
+    @staticmethod
+    def _key(slot, M: int):
+        """The row buffers' key of an M-row call of a sequence slot (None: slot 0's, keyed by M alone)."""
+        return M if slot is None else (slot, M)
+
+    def stage(self, token: int, st: LfmState, slot=None) -> None:
         """Host work of one decode step: the token, its position and slot, its attention control."""
-        rb = self._rows_buffers(1)
+        rb = self._rows_buffers(1, self._key(slot, 1))
         rb["copied"].synchronize()            # the image is the previous call's copy source until then
         h, L = rb["h"], st.length
         h["tok"].numpy()[0] = token
@@ -260,7 +264,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         h["csrc"].numpy()[:] = K.window_src(parents, self.cfg.conv_L_cache)
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
-        self._block = (list(tokens), list(parents), paths)
+        # what a commit needs: the block, and the buffers whose B * x rows it keeps
+        st.block = (list(tokens), list(parents), paths, M if key is None else key)
 
     def rows_step(self, st: LfmState, M: int, write: bool = False, ns: int | None = None, key=None) -> torch.Tensor:
         """M rows from the device buffers (`stage` / `stage_rows` first) through every layer and the head.
@@ -268,26 +273,45 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         rows past the length are written and each conv layer's B * x rows are kept (`rb["bx"]`). `ns`:
         the attention class (kernels.class_of). Returns logits [M, vocab] fp32 (a static buffer) and leaves
         the greedy tokens in rb["next"] and its pinned host copy; `st.length` is the caller's."""
-        c = self.cfg
         rb = self._rows_buffers(M, key)
-        d = rb["d"]
-        ns = ns or K.class_of(st.length + M, st.cap)
+        self._rows([(st, rb, M, ns or K.class_of(st.length + M, st.cap))], write)
+        return rb["logits"]
+
+    def _rows(self, parts: list, write: bool = False) -> None:
+        """The rows of one or more states [(state, its row buffers, rows, attention class)] in one pass:
+        the projections, the experts and the head over every row at once (their weights read once), the
+        short conv and attention per state on its own rows and caches. Every kernel is row-invariant, so a
+        state's rows get the bits of its lone call. Each part's logits, greedy tokens and final rows land
+        in its buffers."""
+        c = self.cfg
         eps = c.rms_norm_eps
-        h = self.W["embed_tokens.weight"].index_select(0, d["tok"])
+        cuts = [0]
+        for _, _, M, _ in parts:
+            cuts.append(cuts[-1] + M)
+        R = cuts[-1]
+        sl = [slice(cuts[j], cuts[j + 1]) for j in range(len(parts))]
+        one = len(parts) == 1
+        tok = parts[0][1]["d"]["tok"] if one else torch.cat([rb["d"]["tok"] for _, rb, _, _ in parts])
+        h = self.W["embed_tokens.weight"].index_select(0, tok)
         h, n = K.add_rms(h, None, self.W["layers.0.operator_norm.weight"], eps)
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
             if c.is_attention(li):
                 a = p + "self_attn."
                 qkv = self.lin(n, self.W[a + "qkv"])
-                q = K.qk_prep(qkv, d["pos"], d["slot"], self.W[a + "q_layernorm.weight"], self.W[a + "k_layernorm.weight"],
-                              self.rope_cos, self.rope_sin, st.k[li], st.v[li], c.num_attention_heads,
-                              c.num_key_value_heads, eps)
-                o = K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"])
-                out = self.lin(o.view(M, -1), self.W[a + "out_proj.weight"])
+                o = torch.empty(R, c.num_attention_heads, c.head_dim, dtype=self.dtype, device=self.device)
+                for (st, rb, M, ns), r in zip(parts, sl):
+                    d = rb["d"]
+                    q = K.qk_prep(qkv[r], d["pos"], d["slot"], self.W[a + "q_layernorm.weight"],
+                                  self.W[a + "k_layernorm.weight"], self.rope_cos, self.rope_sin, st.k[li], st.v[li],
+                                  c.num_attention_heads, c.num_key_value_heads, eps)
+                    K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"], out=o[r])
+                out = self.lin(o.view(R, -1), self.W[a + "out_proj.weight"])
             else:
                 bcx = self.lin(n, self.W[p + "conv.in_proj.weight"])
-                y = K.conv_rows(bcx, st.conv[li], self._wc[li], d["csrc"], rb["bx"][li], write=write)
+                y = torch.empty(R, c.hidden_size, dtype=self.dtype, device=self.device)
+                for (st, rb, M, ns), r in zip(parts, sl):
+                    K.conv_rows(bcx[r], st.conv[li], self._wc[li], rb["d"]["csrc"], rb["bx"][li], y=y[r], write=write)
                 out = self.lin(y, self.W[p + "conv.out_proj.weight"])
             h, n = K.add_rms(h, out, self.W[p + "ffn_norm.weight"], eps)
             if c.is_moe(li):
@@ -300,53 +324,83 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["embedding_norm.weight"]
             h, n = K.add_rms(h, m, nxt, eps)
-        rb["hidden"].copy_(n)
-        self.head(n, out=rb["logits"])
-        torch.argmax(rb["logits"], dim=-1, out=rb["next"])
-        rb["next_h"].copy_(rb["next"], non_blocking=True)
-        return rb["logits"]
+        if one:
+            rb = parts[0][1]
+            rb["hidden"].copy_(n)
+            self.head(n, out=rb["logits"])
+        else:
+            logits = self.head(n)
+            for (_, rb, _, _), r in zip(parts, sl):
+                rb["hidden"].copy_(n[r])
+                rb["logits"].copy_(logits[r])
+        for _, rb, _, _ in parts:
+            torch.argmax(rb["logits"], dim=-1, out=rb["next"])
+            rb["next_h"].copy_(rb["next"], non_blocking=True)
 
-    def step(self, st: LfmState, ns: int | None = None) -> torch.Tensor:
+    def step(self, st: LfmState, ns: int | None = None, slot=None) -> torch.Tensor:
         """One decode token from the device buffers (`stage` first): the conv states shift in place, the
         KV row lands at the length; `st.length` is the caller's. Logits [1, vocab] fp32 (static)."""
-        return self.rows_step(st, 1, write=True, ns=ns)
+        return self.rows_step(st, 1, write=True, ns=ns, key=self._key(slot, 1))
 
     @property
     def g(self) -> dict:
         return self._rb.get(1, {})
 
     @torch.no_grad()
-    def verify(self, tokens: list[int], parents: list[int], st: LfmState, graphs: dict | None = None) -> list[int]:
+    def verify(self, tokens: list[int], parents: list[int], st: LfmState, graphs: dict | None = None,
+               slot=None) -> list[int]:
         """The greedy token at every row of a draft block (DFS pre-order), eager or from `graphs`
-        ((M, class) -> VerifyGraph). Nothing in `st` moves until `commit`."""
+        ((M, class) -> VerifyGraph). Nothing in `st` moves until `commit`. `slot`: a side slot's own
+        row buffers (None: slot 0's)."""
         M = len(tokens)
+        key = self._key(slot, M)
         ns = K.class_of(st.length + M, st.cap)
         gr = None
         if graphs is not None:
             gr = graphs.get((M, ns))
             if gr is None:
-                gr = graphs[(M, ns)] = VerifyGraph(self, st, M, ns)
+                gr = graphs[(M, ns)] = VerifyGraph(self, st, M, ns, key)
                 gr.capture()
         t0 = time.perf_counter()
-        self.stage_rows(tokens, parents, st)
+        self.stage_rows(tokens, parents, st, key=key)
         self.host_ms["stage_rows"] = self.host_ms.get("stage_rows", 0.0) + 1e3 * (time.perf_counter() - t0)
         if gr is not None:
             gr.replay()
         else:
-            self.rows_step(st, M, ns=ns)
+            self.rows_step(st, M, ns=ns, key=key)
         self._width = M
         _sync(self.device)
-        return self._rb[M]["next_h"].tolist()
+        return self._rb[key]["next_h"].tolist()
+
+    @torch.no_grad()
+    def verify_multi(self, items: list) -> list:
+        """ENG-241's joint pass for LFM2: the verify blocks of several states (sequence slots over these
+        weights) [(tokens, parents, state)] in one pass of at most 32 rows (`_rows`): each state's
+        greedy tokens are its lone verify's, bit for bit. Eager; each state commits its block
+        (`commit`). Returns per state its row buffers (logits, next, hidden)."""
+        if sum(len(t) for t, _, _ in items) > ROWS_MAX:
+            raise ValueError(f"a joint pass of {sum(len(t) for t, _, _ in items)} rows: at most {ROWS_MAX}")
+        parts = []
+        for j, (tokens, parents, st) in enumerate(items):
+            M = len(tokens)
+            key = ("joint", j, M)
+            self.stage_rows(tokens, parents, st, key=key)
+            parts.append((st, self._rows_buffers(M, key), M, K.class_of(st.length + M, st.cap)))
+        self._rows(parts)
+        _sync(self.device)
+        return [rb for _, rb, _, _ in parts]
 
     @torch.no_grad()
     def commit(self, st: LfmState, path: list[int], graphs: dict | None = None) -> None:
         """Keep the rows `path` (row 0 first, each the next one's parent) of the last verify block: each
         conv state from its last inputs along the path, the path's KV rows moved to their positions,
         the length moved. `graphs`: (M, n, moved) -> CommitGraph."""
-        tokens, parents, _ = self._block
+        tokens, parents, _, rbkey = st.block
         if path and (path[0] != 0 or any(parents[b] != a for a, b in zip(path, path[1:]))):
             raise ValueError(f"{path} is not a root path of the last block")
         key = self.stage_commit(st, path)
+        if rbkey != len(tokens):
+            graphs = None                    # a joint pass's block: its own buffers, committed eagerly
         if graphs is not None and path:
             g = graphs.get(key)
             if g is None:
@@ -354,7 +408,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 g.capture()
             g.graph.replay()
         elif path:
-            self.commit_dev(st, key)
+            self.commit_dev(st, key, rbkey)
         st.length += len(path)
 
     def _commit_bufs(self, key) -> dict:
@@ -382,7 +436,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         return cb
 
     def stage_commit(self, st: LfmState, path: list[int]) -> tuple:
-        M, n = len(self._block[0]), len(path)
+        M, n = len(st.block[0]), len(path)
         moved = any(path[j] != j for j in range(n))
         key = (M, n, moved)
         if not path:
@@ -400,11 +454,12 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         cb["copied"].record()
         return key
 
-    def commit_dev(self, st: LfmState, key) -> None:
-        """The device half of `commit` (capturable): every input from `_commit_bufs(key)`."""
+    def commit_dev(self, st: LfmState, key, rbkey=None) -> None:
+        """The device half of `commit` (capturable): every input from `_commit_bufs(key)`, the B * x rows
+        from the block's row buffers (`rbkey`, the lone verify's of M rows by default)."""
         c = self.cfg
         d = self._commit_bufs(key)["d"]
-        bx = self._rb[key[0]]["bx"]
+        bx = self._rb[key[0] if rbkey is None else rbkey]["bx"]
         for li in c.conv_layers:
             st.conv[li].copy_(torch.cat([st.conv[li], bx[li]], 0).index_select(0, d["cols"]))
         if key[2]:
@@ -552,9 +607,9 @@ class DecodeGraph:
     the token, replays the class's graph (captured when the length first enters it) and moves the
     length."""
 
-    def __init__(self, eng: Lfm2MoeEngine, st: LfmState):
-        self.eng, self.st = eng, st
-        eng._rows_buffers(1)
+    def __init__(self, eng: Lfm2MoeEngine, st: LfmState, slot=None):
+        self.eng, self.st, self.slot = eng, st, slot
+        self.rb = eng._rows_buffers(1, eng._key(slot, 1))
         self.graphs: dict = {}
         self.graph = None
         self.captures = 0
@@ -566,12 +621,12 @@ class DecodeGraph:
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
-                eng.stage(0, st)
-                eng.step(st, ns)
+                eng.stage(0, st, self.slot)
+                eng.step(st, ns, self.slot)
         torch.cuda.current_stream().wait_stream(s)
         g = torch.cuda.CUDAGraph()
         with capture_lock.LOCK, torch.cuda.graph(g):
-            eng.step(st, ns)
+            eng.step(st, ns, self.slot)
         torch.cuda.synchronize()
         _state_restore(saved)                       # the warm-up steps shifted the conv states: undo
         self.graphs[ns] = g
@@ -587,38 +642,38 @@ class DecodeGraph:
     def __call__(self, token: int) -> torch.Tensor:
         eng, st = self.eng, self.st
         self._ready()
-        eng.stage(token, st)
+        eng.stage(token, st, self.slot)
         self.graph.replay()
         st.length += 1
-        return eng.g["logits"]
+        return self.rb["logits"]
 
     @torch.no_grad()
     def greedy(self, token: int) -> int:
         self(token)
         torch.cuda.current_stream().synchronize()
-        return int(self.eng.g["next_h"][0])
+        return int(self.rb["next_h"][0])
 
 
 class VerifyGraph:
     """`Lfm2MoeEngine.rows_step` of an M-row verify block captured once for a state and a class: every
     block of M rows (chain or tree) replays it; `replay()` after `stage_rows`."""
 
-    def __init__(self, eng: Lfm2MoeEngine, st: LfmState, M: int, ns: int):
-        self.eng, self.st, self.M, self.ns = eng, st, M, ns
+    def __init__(self, eng: Lfm2MoeEngine, st: LfmState, M: int, ns: int, key=None):
+        self.eng, self.st, self.M, self.ns, self.key = eng, st, M, ns, M if key is None else key
         self.graph = None
 
     def capture(self) -> None:
         eng, st, M = self.eng, self.st, self.M
-        eng.stage_rows([0] * M, list(range(-1, M - 1)), st)       # writes only KV rows past the length
+        eng.stage_rows([0] * M, list(range(-1, M - 1)), st, key=self.key)   # writes only KV rows past the length
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):
-                eng.rows_step(st, M, ns=self.ns)
+                eng.rows_step(st, M, ns=self.ns, key=self.key)
         torch.cuda.current_stream().wait_stream(s)
         self.graph = torch.cuda.CUDAGraph()
         with capture_lock.LOCK, torch.cuda.graph(self.graph):
-            eng.rows_step(st, M, ns=self.ns)
+            eng.rows_step(st, M, ns=self.ns, key=self.key)
         torch.cuda.synchronize()
 
     def replay(self) -> None:
