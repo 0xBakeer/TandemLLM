@@ -27,9 +27,14 @@
 0.7.1 & 10-11 & Wren drawn as the DGX Spark box; dashboard only \\
 0.7.2 & 10-11 & Wren answers a question in words again; setup guide only \\
 0.8.0 & 10-13 & a second model, Qwen3.8-Flash-Next, from turboderp's EXL3 packs; the Chat tab with chatd; the cache peek and prewarm \\
+0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the engine unchanged \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.8.1, a new box fetches every file}
+
+A new DGX Spark runs every 27B EXL3 profile and Flash-Next from public files, with no Hugging Face token (OPS-95). \code{ops/use-profile.sh} downloads what a 27B profile reads besides its weights before it switches: the K3 drafters and the K4 draft head, the BF16 drafters into \code{train/}, and the FP8 base checkpoint into the Hugging Face cache. It pins each download to the hub's commit, checks each weight file's sha256, checks the disk first, and continues an interrupted run; \code{--dry-run} prints every URL and size. The EXL3 profiles read the BF16 drafters from \code{train/} on every box. A switch from setup mode removes the marker first and puts it back if the profile does not start. \code{install.sh} installs v0.8.1 by default. The engine's modules are the bytes of 0.8.0. The steps for a tester are in \code{docs/setup.md}, ``A new box from the command line''.
 
 \section{0.8.0, Qwen3.8-Flash-Next and the Chat tab}
 

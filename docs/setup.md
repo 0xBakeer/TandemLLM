@@ -19,6 +19,28 @@ The installer writes the marker `run/setup-pending` (with the host to bind). Whi
 
 Until an admin password is set, anyone who reaches the port can run the setup, apply it and reset the box. The review step says so. `ops/make-secrets.sh --admin` sets one; the setup page's "generate" option does the same on a box that has no `secrets.env` yet.
 
+## A new box from the command line
+
+Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Install in setup mode, then switch to a profile:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/install.sh
+bash install.sh --setup --yes
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # what it would download: each URL and size
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, or any name --list prints
+```
+
+Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installer wrote. The switch downloads what the profile needs, checks it, and starts the engine on port 8000:
+
+| profile | downloads | size |
+|-|-|-|
+| `flashnext-3.05` | the pack's branch of `turboderp/Qwen3.8-Flash-Next-exl3` | 85.1 GB |
+| `exl3-4.5` | `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5`, the K3 drafters and the K4 draft head (`...-EXL3-drafters`, into `~/.qwen38-spark-engine/weights`), the BF16 drafters (`...-DFlash2-b8` and `-b16`, into `~/TandemLLM/src/train`) and the base checkpoint `Qwen/Qwen3.8-27B-FP8` (into the Hugging Face cache, without `mtp.safetensors`) | 18.4 + 1.9 + 7.7 + 30.4 GB |
+
+The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Before a download starts, the script checks that the disk keeps 60 GB free after it. It checks every weight file against the sha256 the hub lists, and a folder appears only when its files are all there. If a download stops, run the same command again: it continues and keeps the files that finished. The engine needs about 80 GiB free for a 27B profile and 70 GiB for `flashnext-3.05`. The switch stops setup mode first.
+
+On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
+
 ## The model registry
 
 Each model the guide offers is a folder under `models/` with a `model.yaml` ([models/README.md](../models/README.md) lists the fields). `models/qwen3.8-27b/model.yaml` and `models/qwen3.8-flash-next/model.yaml` are the two models today. Every number in it says where it comes from:
@@ -87,7 +109,7 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 |-|-|
 | check | the selection, the memory, the disk, the files the profile needs, the HF token, the box lock |
 | unload_assistant | Wren is unloaded before the job starts |
-| fetch | `bash ops/use-profile.sh <profile> --fetch-only`, skipped when the weights are on disk |
+| fetch | `bash ops/use-profile.sh <profile> --fetch-only`: the profile's weights and the files it needs beside them (the `assets_required` with a `fetch` list in the registry); skipped when all of them are on disk |
 | write_config | first `waiting` until no request runs or waits on the engine (10 minutes at most, else nothing changes); then `run/setup.env`, every value quoted, the old one kept as `run/setup.env.bak-<time>`; with a port change, `bash ops/stop.sh 120` first, and a failure after that stop goes through the rollback; with "generate", `bash ops/make-secrets.sh --admin` |
 | switch | `bash ops/use-profile.sh <profile>` with `QSE_NO_ROLLBACK=1`: stop, start, smoke; a failure is this job's rollback, not the script's (which would start the old profile under the new overlay); in setup mode `run/setup-pending` goes first, a copy kept in the job's folder |
 | smoke | `/health` names the profile and one chat answers (512 tokens at most, as use-profile.sh asks) |
@@ -97,7 +119,7 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 
 The job runs as a process of its own, because the switch replaces the server that started it. Its state is in `run/setup-jobs/<id>/`, and the status page (`ops/engine_status.py`) answers `GET /v1/setup/jobs/{id}` while the engine restarts. Apply is refused while requests run (409 `busy`), while another job runs (409 `job_running`), when the selection does not fit (409 `over_budget`), and when the box lacks something (412 `missing_assets`, `missing_token`, `disk_full`, `no_overlay_hook`).
 
-On a fresh box today every profile fails the check: the K3 drafters, the K4 draft head and the FP8 base checkpoint have no download yet (OPS-95), and the job says which files are missing before it changes anything.
+On a new box the fetch step downloads the 27B's K3 drafters, K4 draft head, BF16 drafters and FP8 base checkpoint with the weights, and the plan's `download_gb` counts them (OPS-95). Only a file nothing downloads fails the check with `missing_assets`, before anything changes.
 
 ## Benchmarks and the overlay
 

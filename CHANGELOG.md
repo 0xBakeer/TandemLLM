@@ -2,6 +2,19 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.8.1, 2026-10-13
+
+0.8.1 lets a new DGX Spark run every 27B EXL3 profile and Flash-Next with public files only and no Hugging Face token (OPS-95). The engine's modules are the same bytes as in 0.8.0, so the text, the speed and the disk tier's fingerprint stay as they were. The changes are in `ops/`, `server/setup/`, the registry, `install.sh` and the docs.
+
+- `ops/use-profile.sh` fetches the files a 27B profile reads besides its weights before it switches, and with `--fetch-only`: the K3 drafters and the K4 draft head (`0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters`), the BF16 drafters (`...-DFlash2-b8` and `-b16`, into `train/ft-b8-v2` and `train/ft-b16`) and the base checkpoint `Qwen/Qwen3.8-27B-FP8` (into the Hugging Face cache, without `mtp.safetensors`). Before 0.8.1 these four had no download, so an `exl3-<size>` profile could not start on a new box. Each asset in `models/qwen3.8-27b/model.yaml` now says where its files come from and where they go.
+- The fetcher pins every download to the hub's commit, checks each weight file against the hub's sha256, and moves a folder into place only when it is complete. The disk check runs first and counts the assets, the weights after them and the 60 GB margin. A run that stops continues where it stopped. `--dry-run` prints every file's URL and size, for the weights and for the assets.
+- The EXL3 profiles read the BF16 drafters from the repository's `train/` folder. An install.sh box pointed `CKPT8` and `CKPT16` into the Hugging Face cache, whose folder names are commit hashes, so the drafter arms did not find their K3 files. With `--setup` they were empty.
+- A switch from the command line on a box in setup mode removes `run/setup-pending` first, so the engine starts with the profile. A failed start puts it back and starts setup mode again.
+- The setup guide's plan downloads the missing assets in its fetch step and counts them in `download_gb`. It refuses only a file with no download (`missing_assets`). Every published profile is public, so no profile asks for a token.
+- `install.sh` installs v0.8.1 by default (it still named v0.4.8, which has no setup mode). With `--setup` it points `QWEN38_MODEL` at the base checkpoint's folder in its own Hugging Face cache. Its messages no longer call the repositories private.
+- The switch's smoke turn goes to the engine on `127.0.0.1` unless `serve.env` or the environment sets `SMOKE_URL`. Before, it went to the reference box's own address. The smoke's model name follows the conductor, as the setup guide's does.
+- New box path for testers: docs/setup.md, "A new box from the command line".
+
 ## 0.8.0, 2026-10-13
 
 0.8.0 adds a second model, Qwen3.8-Flash-Next, the Chat tab with chatd, its own chat service, and the cache peek and prewarm the Chat tab's Context panel reads. Flash-Next 3.05 is served with a 262,144-token window and three slots. The 27B's text does not change: its v2 disk-tier fingerprint is the same as 0.7.2's (`9ac3d8a94c8a9199`).
