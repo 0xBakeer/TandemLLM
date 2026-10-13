@@ -15,7 +15,8 @@ KEYS = ("QSE_WEIGHTS", "QWEN38_EXL3", "QWEN38_DRAFT_EXL3", "QWEN38_DRAFT_HEAD_EX
         "QSE_DISK_CACHE", "NV", "HEAD", "QSE_WEIGHTS_HF", "PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG",
         "QSE_WEIGHTS_DIR", "QSE_WEIGHTS_REVISION", "QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
         "QWEN38_FN_TABLE", "QSE_PAGE_CACHE_DROP", "QSE_PAGE_CACHE_KEEP", "VISION", "MAX_LEN", "QWEN38_FN_LOOKUP",
-        "RESIDENT_STASH_GB", "QSE_PARALLEL", "QSE_KV_POOL", "QSE_SIDE_MAX_LEN")
+        "RESIDENT_STASH_GB", "QSE_PARALLEL", "QSE_KV_POOL", "QSE_SIDE_MAX_LEN", "QWEN38_DECIDER_MODELS",
+        "QWEN38_DECIDER_DIR")
 
 
 def _env(profile: str | None, extra: dict | None = None) -> dict:
@@ -73,6 +74,9 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
         assert e["QWEN38_FN_LOOKUP"] == "1", e
         # ENG-241: three slots on the KV pool; the side window serve.env's
         assert e["QSE_PARALLEL"] == "3" and e["QSE_KV_POOL"] == "on", e
+        # 0.8.2: Laya beside it, as on the 27B box; its checkpoints where serve.env says
+        assert e["QWEN38_DECIDER_MODELS"] == "laya-english,laya-multilingual,laya-typed-decisions", e
+        assert e["QWEN38_DECIDER_DIR"] == base["QWEN38_DECIDER_DIR"], e
         # the guest stash as serve.env sets it (ENG-157 fixed: it was off on Flash-Next)
         for k in ("PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG", "MAX_LEN", "RESIDENT_STASH_GB", "QSE_SIDE_MAX_LEN"):
             assert e[k] == base[k], k
@@ -80,6 +84,7 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
     e = _env("exl3-4.5")
     assert all(e[k] == "<unset>" for k in ("QSE_ENGINE_FLAGS", "QSE_ASSETS", "QSE_MEM_NEED_GIB",
                                            "QSE_WEIGHTS_REVISION", "QSE_PAGE_CACHE_KEEP")), e
+    assert e["QWEN38_DECIDER_MODELS"] == base["QWEN38_DECIDER_MODELS"] == "", e
 
 
 def _use_profile(*args: str) -> subprocess.CompletedProcess:
