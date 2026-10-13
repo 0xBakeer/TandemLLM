@@ -100,6 +100,19 @@ MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are calle
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.
 
+## Chat tab (beta): known limitations
+
+The Chat tab is in beta in this release, and a Beta pill beside it says so. We know of these limits and have not fixed them yet:
+
+- The agent loop does not yet work the way Claude Code does (epic VIS-E10). Its prompts are not kept prefix-stable from step to step (SRV-375). Old tool results and old thinking stay in the context until a compaction (SRV-365). A compaction writes a general summary, not the task's state (SRV-373). Every sandbox command asks for permission; there is no mode that runs them without asking (SRV-387). Nothing notices when the model repeats the same failing approach with different calls (SRV-367). render_page passes on Chromium's console noise (SRV-369). Long tool output has no "see more" paging (SRV-371). Searches run in the main context, with no sub-agents (SRV-381).
+- The engine reads a short Flash-Next chat again on its next turn when the answer ended inside a verified block (ENG-235).
+- A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
+- When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
+- Images only: there is no video input (VIS-97).
+- The 5.05 Flash-Next pack does not load yet.
+- Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
+- The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
+
 ## Not yet
 
 Importing Open WebUI tools and uploading a skill zip answer `not_available` (501). Uploads of

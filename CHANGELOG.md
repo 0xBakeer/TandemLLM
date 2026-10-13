@@ -10,6 +10,8 @@ The first release candidate of 0.8: a second model, Qwen3.8-Flash-Next, the Chat
 
 - A Chat tab in the dashboard (`#/chat`) and chatd, the service behind it (`python -m chatd` on 127.0.0.1:8016, reached through the engine's `/v1/chat-app/*`). A run belongs to the server: it goes on when the browser closes, and another device attaches mid-run and catches up from the last event it saw (docs/chat.md).
 - Tools in a sandbox per chat (a locked-down container, no LAN, a memory guard that gives way to the engine), permission prompts on every device, the terminal, preview, files and diff panes, MCP servers, Open WebUI tool imports, pinned and blocked skills, plan mode with a todo list and Rewind, the PWA and local notifications.
+- The Chat tab is in beta: a Beta pill beside it in the rail, in the phone's bottom bar and in the chat's header. Its known limitations are listed below.
+- On a phone the bottom bar has four slots, with the other views behind More, and the composer shows every control.
 - The model card in `/v1/models` (SRV-347): what a model can do, read from `models/<id>/card.json`, and what the process serves (its window, its pack, the vision tower). `POST /v1/tokenize` counts a chat body's tokens by part.
 
 ### The cache peek and prewarm (SRV-349)
@@ -27,6 +29,22 @@ The first release candidate of 0.8: a second model, Qwen3.8-Flash-Next, the Chat
 - A request that arrived during a prewarm waited for the whole save and restore (1,246 ms). The prewarm now stops between blocks when a request waits and answers `yielded`; the request still waits 0.5 to 1 s.
 - Right after a turn, a peek found the engine lock held by the turn's end and the idle graph captures, and answered 409. The peek and the prewarm now wait up to 3 s for the lock unless a request waits for it. A parked chat's next turn reports the park, as its peek does.
 - A chat waiting for a permission prompt held one of chatd's two run slots, and two other chats ran one after the other. A run gives its slot back while it waits for the answer.
+- Khaled's iPhone test (2026-10-13): a 21-step run building a clock stopped with "This conversation is about 319,136 tokens" while the engine held 16,980. chatd counted five 300 KB screenshots by their base64 text, sent each screenshot as a new user message (the model then thought the user kept repeating the request), and could not compact a run with a single user message. chatd now counts an image by its pixels, puts a tool's image inside the tool's result, keeps only the newest screenshot, and compacts a long run's earlier steps between two steps. render_page says each screenshot is a fresh render, and the sandbox runs Chromium for any command. The same prompt now finishes in 6 to 9 steps with at most 8,144 tokens of context.
+- The disk tier now knows its files by content (the `fp4` fingerprint). Before, the 27B moved to a new folder threw away all 29 of its saved files (2.97 GB) because the fingerprint held folder paths. 0.7.2's files carry over in place, or from the old folder named in `QSE_DISK_ADOPT_FROM`. On the box, Flash-Next kept its 34 saved chats through the switch.
+- Under the 27B's conductor the cache peek counted fewer tokens than the turn would send: it left out the memory notes a turn replays. It now replays them, and the peek's prompt matches the sent one from the second turn on.
+
+### Chat tab (beta): known limitations
+
+The Chat tab is in beta in this release, and a Beta pill beside it says so. We know of these limits and have not fixed them yet:
+
+- The agent loop does not yet work the way Claude Code does (epic VIS-E10). Its prompts are not kept prefix-stable from step to step (SRV-375). Old tool results and old thinking stay in the context until a compaction (SRV-365). A compaction writes a general summary, not the task's state (SRV-373). Every sandbox command asks for permission; there is no mode that runs them without asking (SRV-387). Nothing notices when the model repeats the same failing approach with different calls (SRV-367). render_page passes on Chromium's console noise (SRV-369). Long tool output has no "see more" paging (SRV-371). Searches run in the main context, with no sub-agents (SRV-381).
+- The engine reads a short Flash-Next chat again on its next turn when the answer ended inside a verified block (ENG-235).
+- A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
+- When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.
+- Images only: there is no video input (VIS-97).
+- The 5.05 Flash-Next pack does not load yet.
+- Parallel decoding does not raise throughput over one request at a time: three requests together took 27.18 s against 27.03 s one after another, though the later ones start sooner.
+- The phone layout's keyboard behaviour is not verified in Safari on an iPhone.
 
 ### Qwen3.8-Flash-Next
 
