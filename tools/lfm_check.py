@@ -241,9 +241,15 @@ def cmd_staircase(a) -> None:
     idx, eng, info = _engine(a.model, a.max_len)
     g = torch.Generator().manual_seed(0)
     res = {"model": a.model, "load": info, "rows": {}}
+    res["prefill_tok_s"] = {}
     for ctx in a.contexts:
         st = eng.new_state(a.max_len)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
         eng.prefill(torch.randint(0, 120_000, (ctx,), generator=g), st)
+        torch.cuda.synchronize()
+        res["prefill_tok_s"][ctx] = round(ctx / (time.perf_counter() - t0), 1)
+        print(json.dumps({"ctx": ctx, "prefill_tok_s": res["prefill_tok_s"][ctx]}), flush=True)
         toks = torch.randint(0, 120_000, (16,), generator=g).tolist()
         out = {}
         for M in range(1, 17):
