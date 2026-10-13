@@ -1,0 +1,354 @@
+"""LFM2 MoE behind the server's own generation loop (SRV-425): an engine with the shapes `server/app.py`
+drives every model through (the Flash-Next adapter's, engine/models/flashnext/serving.py).
+
+  forward, one token      the captured decode step (`DecodeGraph`)
+  forward, more tokens    `Lfm2MoeEngine.prefill` (chunks on the batched kernels)
+  forward_tree            `verify` from captured graphs: logits [M, vocab], the greedy picks
+  commit_tree             `commit` (captured per shape)
+  forward_block           a chain verify whose commit waits for `rollback_to` or the next call
+
+so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
+the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
+server's code. A verified row is the decode step's row bit for bit (ENG-287), so greedy speculation
+writes the plain greedy text. The caches, side slots and drafters come with SPD-107: `caps` says what
+is on.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+
+import torch
+
+from engine.methods.manifest import Manifest
+from engine.models.adapter import Capabilities, CostModel
+from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
+from engine.models.state import SectionState
+
+#: fingerprint v3: the package's files that compute rows
+MODULES = ("engine/models/lfm2_moe/__init__.py", "engine/models/lfm2_moe/config.py",
+           "engine/models/lfm2_moe/engine.py", "engine/models/lfm2_moe/kernels.py",
+           "engine/models/lfm2_moe/load.py", "engine/models/lfm2_moe/pack.py",
+           "engine/models/lfm2_moe/ref.py", "engine/settings.py")
+#: the model's name in ops/prices/ and models/
+MODEL_ID = "lfm2.5-24b-a2b"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def manifest() -> Manifest:
+    return Manifest(arch="lfm2_moe", modules=MODULES)
+
+
+def _tensors(o) -> list:
+    """The tensors a weight entry holds: a tensor, an EXL3Block's, a layer's experts'."""
+    if torch.is_tensor(o):
+        return [o]
+    if hasattr(o, "blocks"):
+        return [t for e in o.blocks for b in e for t in (b.t, b.suh, b.svh)]
+    if hasattr(o, "w13"):
+        return [o.w13, o.w2]
+    if hasattr(o, "trellis") or hasattr(o, "svh"):
+        return [o.t, o.suh, o.svh]
+    return []
+
+
+class _KV:
+    """The `kv` the server reads: the sequence's length (a pending chain commit lands first) and its
+    capacity. Zero starts a new sequence in place (`restart`); any other length keeps the KV rows by
+    length -- the conv states are the caller's to restore first (`state.restore`)."""
+
+    def __init__(self, serving: "Lfm2MoeServing"):
+        self._s = serving
+
+    @property
+    def pages(self):
+        return self._s.st.pages
+
+    @property
+    def length(self) -> int:
+        self._s._settle_chain()
+        return self._s.st.length
+
+    @length.setter
+    def length(self, v: int) -> None:
+        v = int(v)
+        if v == 0:
+            self._s.restart()
+            return
+        if not 0 < v <= self.max_len:
+            raise ValueError(f"the LFM2 state cannot hold {v} rows (capacity {self.max_len})")
+        self._s.st.length = v
+
+    @property
+    def max_len(self) -> int:
+        return self._s.max_len
+
+
+class Lfm2CacheState(SectionState):
+    """What the caches keep of a sequence (engine/models/state.py): sections the conv states of every
+    conv layer ("conv.<layer>", [conv_L_cache - 1, H] bf16); views K and V of every attention layer
+    ([kv heads, rows, D], axis 1)."""
+
+    def __init__(self, serving: "Lfm2MoeServing"):
+        self.s = serving
+
+    def sections(self) -> dict:
+        st = self.s.st
+        return {f"conv.{li}": st.conv[li] for li in sorted(st.conv)}
+
+    def views(self) -> list:
+        st = self.s.st
+        out = []
+        for li in sorted(st.k):
+            out += [(f"k.{li}", st.k[li], 1), (f"v.{li}", st.v[li], 1)]
+        return out
+
+
+class Lfm2MoeServing:
+    """`Lfm2MoeEngine` with one state and its graphs, in the server's engine interface."""
+
+    # the caches and side slots wait for SPD-107's checks; the shadow reader was validated on Qwen text
+    caps = Capabilities(caches=False, side_slots=False, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=False,
+                        side_lane=False)
+
+    def __init__(self, eng: Lfm2MoeEngine, max_len: int):
+        self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len
+        self.st = eng.new_state(max_len, paged=True)
+        self.state = Lfm2CacheState(self)
+        self.kv = _KV(self)
+        self.dg = None
+        self.vgraphs: dict = {}
+        self.cgraphs: dict = {}
+        self.picks = None
+        self.tap = None
+        self.mm = None                       # no vision tower: the server's image path is off
+        self.pos_delta = 0
+        self._hidden = None
+        self._chain = None
+        self._width = 0
+        self.commit_ms = 0.0
+        self.captured = False
+        self.plain_captured = False
+        self.heads: dict = {}
+        self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
+
+    # --- the loop's interface -------------------------------------------------------------------
+    @property
+    def hidden_post_norm(self) -> torch.Tensor:
+        return self._hidden
+
+    def cost(self) -> CostModel:
+        """A snapshot: the conv states whole; K and V of the 10 attention layers a token (bf16)."""
+        sec = sum(t.numel() * t.element_size() for t in self.st.conv.values())
+        return CostModel(section_bytes=sec, view_bytes_per_token=self.cfg.kv_bytes_per_token(2),
+                         parts={"recurrent": 0, "conv": sec})
+
+    def manifest(self) -> Manifest:
+        return manifest()
+
+    def precapture(self, drafter) -> int | None:
+        """The decode graph of the first class, after the server's warm-up (whose rows are nobody's)."""
+        if self.dg is None:
+            self.dg = DecodeGraph(self.fn, self.st)
+        self.kv.length = 0
+        return len(self.dg.graphs)
+
+    def draft_heads(self) -> dict:
+        """The draft heads this model carries, by name: none yet. Liquid's DSpark drafter for this
+        model plugs in here (a head with the MTP tree drafter's interface, engine/methods/mtp_drafter.py)."""
+        return self.heads
+
+    def settle(self) -> None:
+        self._settle_chain()
+
+    def cache_state(self) -> Lfm2CacheState:
+        return self.state
+
+    def resume_at(self, n: int) -> None:
+        self.discard_pending()
+        self.kv.length = n
+
+    def memory_parts(self) -> dict:
+        """The dashboard's memory split (server/memsplit.py): weights (each storage once), the KV rows,
+        the conv states."""
+        fn = self.fn
+        seen, w = set(), 0
+        for o in list(fn.W.values()) + list(fn.experts.values()):
+            for t in _tensors(o):
+                s = t.untyped_storage()
+                if s.data_ptr() not in seen:
+                    seen.add(s.data_ptr())
+                    w += s.nbytes()
+        st = self.st
+        kv = sum(int(t.numel() * t.element_size()) for d in (st.k, st.v) for t in d.values())
+        return {"weights": w, "kv_pool": kv, "drafter_kv": 0,
+                "gdn_state": sum(int(t.numel() * t.element_size()) for t in st.conv.values())}
+
+    def resident_files(self) -> list:
+        return []
+
+    def discard_pending(self) -> None:
+        self._chain = None
+        self.picks = None
+
+    def trim_pending(self, n: int) -> bool:
+        """Back to length `n` inside work not committed yet (a chain block whose commit waits)."""
+        n, L = int(n), self.st.length
+        if self._chain is None:
+            return n == L
+        if not L <= n <= L + self._chain:
+            return False
+        self._chain = None
+        if n > L:
+            self.commit_tree(list(range(n - L)))
+        return True
+
+    def window_ok(self, i: int) -> bool:
+        return False
+
+    def reset(self) -> None:
+        self.restart()
+
+    def restart(self) -> None:
+        """A new sequence in the same buffers: the conv states zeroed, the length 0 (KV rows stay)."""
+        self._chain = None
+        self.picks = None
+        self.st.reset_inplace()
+
+    @torch.no_grad()
+    def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
+        """Rows `ids` at positions start..: one token through the decode graph, more through the
+        prefill. Logits [1, 1, vocab] of the last row (fp32)."""
+        self._settle_chain()
+        ids = ids.view(-1)
+        self._at(start)
+        T = ids.numel()
+        self._ensure(start + T + CAPTURE_ROWS)
+        if T == 1 and start > 0:
+            if self.dg is None:
+                self.dg = DecodeGraph(self.fn, self.st)
+            n0 = self.dg.captures
+            lg = self.dg(int(ids[0]))
+            self.plain_captured = self.dg.captures != n0
+            self._hidden = self.fn.g["hidden"].view(1, 1, -1)
+            self.stats["decode_steps"] += 1
+            return lg.view(1, 1, -1)
+        lg = self.fn.prefill(ids, self.st)
+        self._hidden = self.fn.prompt_hidden.unsqueeze(0)
+        self.stats["prefill_rows"] += T
+        return lg.view(1, 1, -1)
+
+    @torch.no_grad()
+    def forward_tree(self, block: torch.Tensor, parents: list[int], start: int) -> torch.Tensor:
+        """A draft block in DFS pre-order (row 0 the anchor at `start`): every row's logits [M, vocab]
+        fp32, its greedy pick in `picks`. Nothing but the block's own KV rows is written until
+        `commit_tree`."""
+        self._settle_chain()
+        self._at(start)
+        toks = [int(t) for t in block.view(-1).tolist()]
+        M = len(toks)
+        self._ensure(start + M + CAPTURE_ROWS)
+        n_graphs = len(self.vgraphs)
+        self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs)
+        self.captured = len(self.vgraphs) > n_graphs
+        self._width = M
+        rb = self.fn._rb[M]
+        self.picks = rb["next"][:M]
+        self._hidden = rb["hidden"][:M].unsqueeze(0)
+        self.stats["verify_blocks"] += 1
+        self.stats["verify_rows"] += M
+        return rb["logits"][:M]
+
+    def tree_batchable(self, parents) -> bool:
+        return False
+
+    @torch.no_grad()
+    def commit_tree(self, path: list[int]) -> None:
+        t0 = time.perf_counter()
+        n_graphs = len(self.cgraphs)
+        self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
+        self.commit_ms = (time.perf_counter() - t0) * 1e3
+        if len(self.cgraphs) > n_graphs:
+            self.captured = True
+
+    @torch.no_grad()
+    def forward_block(self, block: torch.Tensor, start: int) -> torch.Tensor:
+        n = block.numel()
+        lg = self.forward_tree(block, list(range(-1, n - 1)), start)
+        self._chain = n
+        return lg
+
+    @torch.no_grad()
+    def rollback_to(self, keep: int) -> None:
+        self._chain = None
+        self.commit_tree(list(range(int(keep))))
+
+    # --- internals -------------------------------------------------------------------------------
+    def _settle_chain(self) -> None:
+        if self._chain is not None:
+            n, self._chain = self._chain, None
+            self.commit_tree(list(range(n)))
+
+    def _ensure(self, rows: int) -> None:
+        """ENG-241: commit the KV pool's pages that hold rows [0, rows) before a write reaches them;
+        never inside a graph capture (its caller committed the rows first)."""
+        ps = self.st.pages
+        rows = min(rows, self.max_len)
+        if ps is None or rows + ps.margin() <= ps.rows:
+            return
+        if ps.on_device() and torch.cuda.is_current_stream_capturing():
+            return
+        ps.ensure(rows)
+
+    def _at(self, start: int) -> None:
+        if int(start) != self.st.length:
+            raise ValueError(f"LFM2 forward at {start}, the state holds {self.st.length} rows")
+
+
+def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_pool=None, check: bool = True):
+    """LFM2 MoE for the server: the weights, the engine in the loop's interface, the load-time self-check
+    (a verify block's rows against the decode step's). Returns (serving, info)."""
+    from engine.models.lfm2_moe.load import load
+    idx, W, experts, timing = load(path, "cuda", log=log)
+    mark("weights")
+    eng = Lfm2MoeEngine(idx.cfg, W, experts, device="cuda", max_len=max_len)
+    if kv_pool is not None:
+        kv_pool()
+    srv = Lfm2MoeServing(eng, max_len)
+    mark("engine")
+    res = None
+    if check:
+        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
+                                       tokenize=False, add_generation_prompt=True)
+        res = eng.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
+    info = {"pack": path, "load": timing, "formats": idx.notes, "self_check": res, "exl3": idx.is_exl3,
+            "quant": idx.quant}
+    return srv, info
+
+
+def serve(a, ctx) -> dict:
+    """LiquidAI's LFM2 MoE from a BF16 checkpoint or an EXL3 pack for the server (`--model <dir>`, the
+    registry's `serve`; server/app.py `_load`). Plain decode from the captured step; no drafter yet
+    (SPD-107), so `--drafter` is taken as none. What the engine cannot hold yet is in
+    `Lfm2MoeServing.caps`."""
+    from transformers import AutoTokenizer
+
+    from engine.spec import Relax
+    ctx.keys(a.model, [a.model])
+    if a.drafter != "none":
+        ctx.log(f"[server] LFM2 MoE has no drafter yet: --drafter {a.drafter} taken as none")
+    tok = AutoTokenizer.from_pretrained(a.model)
+    pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
+    srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool)
+    ctx.mark("drafters")
+    fmt = "exl3" if info["exl3"] else "bf16"
+    describe = (f"LFM2 MoE {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter none, "
+                f"max_len {a.max_len:,},")
+    return {"engine": srv, "tok": tok, "drafter": None, "path": a.model, "device": "cuda",
+            "cfg": None, "w": None, "describe": describe,
+            "serving": {"tree": False, "sampled_tree": getattr(a, "sampled_tree", "det"), "relax": Relax(1.0, 1),
+                        "tool_format": "pythonic",
+                        "weights_info": {"format": fmt, "weights": a.model, "drafters": None,
+                                         "load_s": info["load"].get("total_s"),
+                                         "self_check": info["self_check"]}}}

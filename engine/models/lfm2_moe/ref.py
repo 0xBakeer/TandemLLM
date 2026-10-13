@@ -48,6 +48,7 @@ class LfmState:
     conv: dict = field(default_factory=dict)
     k: dict = field(default_factory=dict)
     v: dict = field(default_factory=dict)
+    pages: object = None        # the KV pool's paged set of the K and V rows (engine/kvpool.py), or None
 
     def reset_inplace(self) -> None:
         """A new sequence in the same buffers: the conv state zeroed, the length 0 (KV rows past the
