@@ -52,7 +52,7 @@ The installer works in seven steps, and each step is skipped when it is already 
 
 \begin{enumerate}
 \item Checks. The GPU needs its driver and the CUDA compiler, the disk and the memory need room, and Hugging Face must answer.
-\item The engine: a clone of the repository into \code{~/TandemLLM/src} at the pinned release, \code{v0.4.8}.
+\item The engine: a clone of the repository into \code{~/TandemLLM/src} at the pinned release, \code{v0.8.1}.
 \item A Python venv in \code{~/TandemLLM/venv} with the pinned packages; torch and torchvision come from the CUDA 13.0 index. If neither \code{uv} nor Python 3.11 is on the machine, the installer fetches \code{uv} first.
 \item The weights, into the normal Hugging Face cache: the vendor's FP8 checkpoint (it supplies the tensors the NVFP4 overlays do not replace, and the tokenizer), the four NVFP4 files and both fine-tuned drafters.
 \item A lookup corpus built from public text (one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens). \code{--no-corpus} skips it.

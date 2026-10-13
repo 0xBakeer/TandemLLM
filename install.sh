@@ -31,11 +31,14 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.4.8 adds two chats beside each other and the moved-block alignment; v0.4.7 added the conductor, memory notes, packages, the long-session caches, the
-# proxy and the dashboard's views of other engines. The raw path (X-Tandem: raw) decodes as in v0.3.0;
-# v0.2.0-staircut is the StairCut paper's version (merge c111fa7).
+# The engine release. v0.8.1 fetches every file a weight profile reads (OPS-95), so --setup and then
+# ops/use-profile.sh exl3-<size> or flashnext-<size> work on a new box; v0.8.0 added Qwen3.8-Flash-Next
+# and the Chat tab; v0.4.8 two chats beside each other and the moved-block alignment; v0.4.7 the
+# conductor, memory notes, packages, the long-session caches, the proxy and the dashboard's views of other
+# engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
+# version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.4.8}"
+TANDEM_REF="${TANDEM_REF:-v0.8.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -452,12 +455,13 @@ else
     info "no uv and no python3.11: uv $UV_VERSION goes into $DIR/uv and fetches Python 3.11 (user-local)"
 fi
 
-# Hugging Face access: the published repositories are private until the release.
+# Hugging Face access: every repository the installer and the weight profiles read is public; a token
+# is used when there is one, and needed only for a repository someone made private or gated.
 HF_TOKEN_FILE="${HF_TOKEN_PATH:-${HF_HOME:-$HOME/.cache/huggingface}/token}"
 HF_AUTH=""
 if [ -n "${HF_TOKEN:-}" ]; then HF_AUTH="$HF_TOKEN"; ok "HF token from HF_TOKEN/--hf-token"
 elif [ -r "$HF_TOKEN_FILE" ]; then HF_AUTH="$(cat "$HF_TOKEN_FILE")"; ok "HF token from $HF_TOKEN_FILE"
-else info "no Hugging Face token: fine once the weights are public"
+else info "no Hugging Face token: fine, the weights are public"
 fi
 if [ "$SETUP" = 1 ]; then
     code="$(curl -s -o /dev/null -w '%{http_code}' -m 20 "https://huggingface.co/api/models/$WREN_REPO" || true)"
@@ -471,7 +475,7 @@ for r in "$BASE_REPO" "$NVFP4_REPO" "$B8_REPO" "$B16_REPO"; do
         | curl -s -K - -o /dev/null -w '%{http_code}' -m 20 "https://huggingface.co/api/models/$r" || true)"
     case "$code" in
         200) ;;
-        401|403|404) fail "cannot read $r on Hugging Face (HTTP $code). The repositories are private until the release: pass --hf-token, set HF_TOKEN, or run 'hf auth login' with an account that has access" ;;
+        401|403|404) fail "cannot read $r on Hugging Face (HTTP $code). The repositories are public, so this is a network or proxy problem, or the repository moved; a token (--hf-token, HF_TOKEN or 'hf auth login') helps only if it was made private" ;;
         *) fail "cannot reach huggingface.co for $r (HTTP ${code:-none}); check the network" ;;
     esac
 done
@@ -582,7 +586,9 @@ fi
 
 if [ "$SETUP" = 1 ]; then
 step "Wren's model (the setup guide's assistant): $WREN_REPO"
-SNAP_BASE=""; SNAP_NV=""; SNAP_B8=""; SNAP_B16=""
+# no weights yet; the base snapshot's folder is where ops/use-profile.sh fetches it for a 27B profile
+# (OPS-95), this install's HF cache (HF_HOME), which the engine's default would not follow
+SNAP_BASE="$(hf_repo_dir "$BASE_REPO")/snapshots"; SNAP_NV=""; SNAP_B8=""; SNAP_B16=""
 if [ -f "$WREN_DIR/config.json" ] && [ -f "$WREN_DIR/tokenizer.json" ]; then
     ok "already here: $WREN_DIR"
 elif [ "$DRY" = 1 ]; then
@@ -608,7 +614,7 @@ repo, patterns = sys.argv[1], sys.argv[2:]
 try:
     path = snapshot_download(repo, allow_patterns=patterns, max_workers=16)
 except (RepositoryNotFoundError, GatedRepoError) as e:
-    sys.exit(f"cannot read {repo}: {type(e).__name__}. Private until the release: pass --hf-token or set HF_TOKEN.")
+    sys.exit(f"cannot read {repo}: {type(e).__name__}. It is public: check the network (a token, --hf-token or HF_TOKEN, helps only if it was made private).")
 except HfHubHTTPError as e:
     sys.exit(f"download of {repo} failed: {e}")
 print(path)
