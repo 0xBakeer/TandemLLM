@@ -18,14 +18,23 @@ describe('dist/', () => {
       }
     }
   });
+  it.skipIf(!present)('0.8.0: the Chat tab carries a Beta pill in the rail and in the chat header', () => {
+    const files = readdirSync(join(DIST, 'assets'));
+    const js = files.filter((f) => f.endsWith('.js')).map((f) => readFileSync(join(DIST, 'assets', f), 'utf8'));
+    const css = files.filter((f) => f.endsWith('.css')).map((f) => readFileSync(join(DIST, 'assets', f), 'utf8')).join('');
+    const pills = js.filter((src) => src.includes('beta-pill') && src.includes('The Chat tab is in beta'));
+    expect(pills.length).toBeGreaterThanOrEqual(2);
+    expect(css).toMatch(/\.beta-pill\{/);
+    expect(css).toMatch(/\.rail-tab \.beta-pill\{/);
+  });
   it.skipIf(!present)('index.html uses relative asset paths and no external origin', () => {
     const html = readFileSync(join(DIST, 'index.html'), 'utf8');
     expect(html).toMatch(/src="\.\/assets\//);
     expect(html).toMatch(/href="\.\/assets\//);
     expect(html).not.toMatch(/https?:\/\//);
   });
-  // 405 KB since xterm.js (a chunk that loads only with a terminal) and the PWA (scripts/check-size.mjs)
-  it.skipIf(!present)('total gzip size is under 405 KB', () => {
+  // 410 KB since 0.8.0's phone bar, composer and Beta pill; 405 before (scripts/check-size.mjs)
+  it.skipIf(!present)('total gzip size is under 410 KB', () => {
     let total = 0;
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
@@ -35,6 +44,6 @@ describe('dist/', () => {
       }
     };
     walk(DIST);
-    expect(total).toBeLessThan(405 * 1024);
+    expect(total).toBeLessThan(410 * 1024);
   });
 });

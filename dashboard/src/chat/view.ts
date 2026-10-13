@@ -671,8 +671,8 @@ export class QseChat extends LightElement {
         <div class="ch-head-title">
           ${c
             ? html`<h1 class="ch-title" title=${c.title}>${c.title}</h1>
-                <span class="ch-head-sub">${c.status !== 'idle' ? html`<span class="ch-mark ch-mark-${c.status}"><span class="ch-mark-dot" aria-hidden="true"></span>${c.status === 'running' ? 'running' : c.status === 'waiting' ? 'waiting for you' : 'error'}</span>` : nothing}<span class="ch-head-model">${c.model}${c.profile ? `, ${c.profile}` : ''}</span>${this.attach.state !== 'idle' && this.attach.state !== 'live' && c.run ? html`<span class="ch-attach is-${attachLabel(this.attach, this.now).tone}">${attachLabel(this.attach, this.now).text}</span>` : nothing}</span>`
-            : html`<h1 class="ch-title">Chat</h1>`}
+                <span class="ch-head-sub"><span class="beta-pill" title="The Chat tab is in beta">Beta</span>${c.status !== 'idle' ? html`<span class="ch-mark ch-mark-${c.status}"><span class="ch-mark-dot" aria-hidden="true"></span>${c.status === 'running' ? 'running' : c.status === 'waiting' ? 'waiting for you' : 'error'}</span>` : nothing}<span class="ch-head-model">${c.model}${c.profile ? `, ${c.profile}` : ''}</span>${this.attach.state !== 'idle' && this.attach.state !== 'live' && c.run ? html`<span class="ch-attach is-${attachLabel(this.attach, this.now).tone}">${attachLabel(this.attach, this.now).text}</span>` : nothing}</span>`
+            : html`<h1 class="ch-title">Chat</h1><span class="ch-head-sub"><span class="beta-pill" title="The Chat tab is in beta">Beta</span></span>`}
         </div>
         <div class="ch-head-tools">
           ${this.backend?.kind === 'mock' ? html`<span class="ch-mock-badge ch-mock-head" title=${this.backendReason === 'forced' ? 'opened with ?chat=mock' : 'the server has no chat routes yet; this is the in-browser mock'}>mock data</span>` : nothing}

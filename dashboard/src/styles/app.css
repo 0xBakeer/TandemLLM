@@ -253,6 +253,29 @@ textarea {
   width: 20px;
   height: 20px;
 }
+/* 0.8.0: the Chat tab is in beta; a small pill on the tab's corner and in the chat's header */
+.beta-pill {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--cobalt);
+  color: var(--cobalt-hi);
+  background: var(--cobalt-wash);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.rail-tab {
+  position: relative;
+}
+.rail-tab .beta-pill {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
 /* the phone's More slot and sheet: nothing of them above 768 px */
 .rail-more,
 .more-sheet,

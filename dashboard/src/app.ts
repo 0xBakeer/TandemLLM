@@ -28,6 +28,9 @@ import { icon } from './ui/bits';
 import { S } from './setup/strings';
 
 
+/** the Chat tab is in beta in 0.8.0 (docs/chat.md "known limitations"): a small pill beside it */
+const BETA = html`<span class="beta-pill" title="The Chat tab is in beta">Beta</span>`;
+
 const TABS: TabDef[] = [
   { view: 'chat', label: 'Chat' },
   { view: 'usage', label: 'Usage' },
@@ -354,7 +357,7 @@ export class QseApp extends LightElement {
   private tab(t: TabDef, cls: string, primary: string | typeof nothing = nothing): TemplateResult {
     const off = this.setupMode && t.view !== 'setup';
     const on = this.route.view === t.view;
-    return html`<a class="${cls} ${on ? 'is-on' : ''} ${off ? 'is-off' : ''}" href=${off ? nothing : `#/${t.view}`} aria-disabled=${off ? 'true' : nothing} title=${off ? S.setupModeTab : nothing} aria-current=${on ? 'page' : nothing} data-primary=${primary} @click=${(e: Event) => cls === 'more-item' && !off && this.goMore(e, t.view)}>${icon(t.view)}<span class="rail-label">${t.label}</span></a>`;
+    return html`<a class="${cls} ${on ? 'is-on' : ''} ${off ? 'is-off' : ''}" href=${off ? nothing : `#/${t.view}`} aria-disabled=${off ? 'true' : nothing} title=${off ? S.setupModeTab : nothing} aria-current=${on ? 'page' : nothing} data-primary=${primary} @click=${(e: Event) => cls === 'more-item' && !off && this.goMore(e, t.view)}>${icon(t.view)}<span class="rail-label">${t.label}</span>${t.view === 'chat' ? BETA : nothing}</a>`;
   }
 
   private renderView(): TemplateResult {
