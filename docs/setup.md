@@ -53,6 +53,8 @@ Each model the guide offers is a folder under `models/` with a `model.yaml` ([mo
 
 Memory is in GiB (2^30 bytes) and disk in GB (10^9 bytes) everywhere in the registry and the API. `python -m server.setup.registry --check` checks a file.
 
+Packs that other people published sit beside our profiles as community packs, one JSON file each under `models/<model>/community/`. The weights step lists them after our own, as profiles named `community/<id>`. The page fetches the list from GitHub when it opens and when you press Refresh, never on a timer, and an unchanged list costs one 304 answer. Without the network it shows the last list it fetched, or the one that came with the release. [docs/community-weights.md](community-weights.md) says how to add a pack.
+
 ### The KV bytes a token
 
 One token of context window costs 106,752 bytes, which is 104.25 KiB or 106.75 kB: 64 KiB of the model's attention KV (16 attention layers, 4 KV heads of 256, K and V in BF16), 20 KiB for each of the two drafters' context KV (5 layers, 8 KV heads of 128) and 256 B of rotary table. At 262,144 tokens that is 28.0 GB, or 26.1 GiB. The docs said "106.5 KiB" until 0.6.2: that was the kB figure with the KiB unit. With the KV pool on (`QSE_KV_POOL=on`) a slot reserves its window as addresses and commits pages only for the rows its conversation writes.
@@ -155,6 +157,8 @@ GET  /v1/setup/models/{id}             model.yaml as JSON, with wizard_fields
 GET  /v1/setup/models/{id}/steps       the step schema and Wren's tools
 GET  /v1/setup/models/{id}/current     what the box runs now as a selection: the wizard's start
 GET  /v1/setup/device                  memory, GPU, disk, profiles on disk, Wren's state
+GET  /v1/setup/community               every model's community packs and where the list came from
+POST /v1/setup/community/sync          fetch the list from GitHub now (the page opened, Refresh)
 POST /v1/setup/estimate                {selection} -> the estimate
 POST /v1/setup/plan                    {selection} -> the review step's plan
 POST /v1/setup/apply                   {selection, dry_run?} -> 202 {job}

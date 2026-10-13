@@ -8,6 +8,10 @@ Thank you for helping. Bug reports, measurements from other boards and pull requ
 - Run the dashboard tests if you touched `dashboard/`: `npm ci && npm test` in that folder.
 - A change must not change the text the engine writes. [docs/exactness.md](docs/exactness.md) lists the checks, and a speed claim needs the method in [docs/measurement.md](docs/measurement.md).
 
+## Community weight packs
+
+To list weights you published on Hugging Face in the setup guide, send a pull request that adds one file, `models/<model>/community/<id>.json`. [docs/community-weights.md](docs/community-weights.md) explains each field, and a maintainer runs the pack on a DGX Spark before it shows as verified. The agreement below applies to that file too.
+
 ## Contributor License Agreement
 
 TandemLLM is dual-licensed: AGPL-3.0 for everyone, and a commercial license from the copyright holder ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)). To keep that possible, every contributor must agree to the Contributor License Agreement below before a pull request is merged. To agree, add this sentence to your pull request: "I have read the Contributor License Agreement in CONTRIBUTING.md and I agree to it."

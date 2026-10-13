@@ -7,7 +7,12 @@ models/<id>/model.yaml           the entry, schema 1
 models/<id>/measurements/*.json  the raw data behind the measured table (optional)
 models/<id>/README.md            more about the model (optional)
 models/schema/model.schema.json  the schema as a JSON Schema file (python -m server.setup.registry --schema)
+models/<id>/community/<pack>.json  a community pack: weights someone else published (optional)
+models/schema/community.schema.json  its schema (python -m server.setup.registry --community-schema)
+models/community-index.json      every community pack in one file (python -m server.setup.community --index)
 ```
+
+A community pack is one JSON file that a pull request adds: a Hugging Face repository at a pinned commit, its format and size, its author and what a maintainer measured. [docs/community-weights.md](../docs/community-weights.md) lists every field and what is not accepted.
 
 What a `model.yaml` holds, in the order of the file:
 
