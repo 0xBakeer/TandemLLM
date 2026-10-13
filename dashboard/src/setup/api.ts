@@ -10,6 +10,7 @@ import type {
   SetupAssistantStatus,
   SetupChatEvent,
   SetupChatRequest,
+  CommunityBody,
   SetupCurrent,
   SetupDevice,
   SetupEstimate,
@@ -49,6 +50,11 @@ export const setupApi = {
   apply: (body: SetupApplyRequest) => post<SetupApplyResponse>('/v1/setup/apply', body),
   job: (id: string) => get<SetupJob>(`/v1/setup/jobs/${encodeURIComponent(id)}?format=json`),
   jobUrl: (id: string) => `${apiBase()}/v1/setup/jobs/${encodeURIComponent(id)}`,
+  /** the community list, fetched from GitHub now (CONTRACT.md addition 3: on the weights section's
+   *  open and on Refresh only; one conditional GET, 10 s); the cache or the bundled copy when GitHub
+   *  does not answer, with `sync.error` */
+  communitySync: (signal?: AbortSignal) => post<CommunityBody>('/v1/setup/community/sync', {}, signal),
+  community: () => get<CommunityBody>('/v1/setup/community'),
   resetLevels: () => get<SetupResetLevels>('/v1/setup/reset'),
   reset: (body: SetupResetRequest) => post<SetupResetResult>('/v1/setup/reset', body),
   assistant: {

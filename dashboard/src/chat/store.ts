@@ -61,7 +61,7 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
     case 'tool.asking':
       return { ...c, status: 'waiting', messages: mapCall(c.messages, ev.message_id, ev.call_id, (t) => ({ ...t, status: 'asking', risk: (ev.risk as ToolCallPart['risk']) ?? t.risk, permission: { summary: ev.summary, suggested_rule: ev.suggested_rule } })) };
     case 'tool.started':
-      return { ...c, status: 'running', messages: mapCall(c.messages, ev.message_id, ev.call_id, (t) => ({ ...t, status: 'running', started_at: t.started_at ?? new Date().toISOString(), pane: ev.pane ?? t.pane ?? null, permission: null })) };
+      return { ...c, status: 'running', messages: mapCall(c.messages, ev.message_id, ev.call_id, (t) => ({ ...t, status: 'running', started_at: t.started_at ?? new Date().toISOString(), pane: ev.pane ?? t.pane ?? null, permission: null, approved: ev.approved ?? t.approved ?? null })) };
     case 'tool.output':
       return { ...c, messages: mapCall(c.messages, ev.message_id, ev.call_id, (t) => ({ ...t, output: { content: (t.output?.content ?? '') + ev.delta, is_error: t.output?.is_error ?? false, bytes: (t.output?.bytes ?? 0) + ev.delta.length } })) };
     case 'tool.done':

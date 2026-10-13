@@ -1,0 +1,232 @@
+{
+ "community": [
+  {
+   "schema": 1,
+   "finetune_of": "bottlecapai/ThinkingCap-Qwen3.8-27B",
+   "modalities_in_pack": [
+    "text",
+    "image"
+   ],
+   "license_url": "https://huggingface.co/0xWhiteMage/ThinkingCap-Qwen3.8-27B-Kearuga-EXL3-4.00bpw/blob/main/LICENSE",
+   "description": "A reasoning fine-tune of Qwen3.8-27B, quantised to EXL3 at 4 bits a weight from the BF16 checkpoint.",
+   "tags": [
+    "fine-tune",
+    "reasoning"
+   ],
+   "links": {
+    "pr": "https://github.com/0xBakeer/TandemLLM-early-access/pull/1"
+   },
+   "verified": {
+    "build": "0.8.2",
+    "device": "dgx-spark",
+    "date": "2026-10-13",
+    "tok_s": {
+     "prose": 39.6,
+     "code": 95.9,
+     "chat": 51.3,
+     "plain": 15.2
+    },
+    "tokens_per_round": {
+     "prose": 3.09,
+     "code": 7.69,
+     "chat": 4.11
+    },
+    "notes": "text only; one run per kind"
+   },
+   "id": "thinkingcap-27b-kearuga-exl3-4.00",
+   "name": "ThinkingCap Qwen3.8-27B Kearuga",
+   "base_model": "qwen3.8-27b",
+   "author": {
+    "github": "0xWhiteMage",
+    "name": "thewhitemage.",
+    "social": {}
+   },
+   "hf": {
+    "repo": "0xWhiteMage/ThinkingCap-Qwen3.8-27B-Kearuga-EXL3-4.00bpw",
+    "revision": "11447639033dd80a4c04536b5b37ed7d642802ee"
+   },
+   "format": "exl3",
+   "bpw": 4.0,
+   "size_gb": 16.4,
+   "load": "standalone",
+   "modalities": {
+    "text": true,
+    "image": false,
+    "audio": false,
+    "video": false
+   },
+   "drafters": "tandem-exl3",
+   "license": "PolyForm-Small-Business-1.0.0 + Apache-2.0 (Qwen)",
+   "added": "2026-10-13",
+   "status": "verified",
+   "profile": "community/thinkingcap-27b-kearuga-exl3-4.00",
+   "avatar_url": "https://github.com/0xWhiteMage.png?size=96",
+   "author_url": "https://github.com/0xWhiteMage",
+   "social_links": [],
+   "hf_url": "https://huggingface.co/0xWhiteMage/ThinkingCap-Qwen3.8-27B-Kearuga-EXL3-4.00bpw/tree/11447639033dd80a4c04536b5b37ed7d642802ee",
+   "memory": {
+    "weights_gib": 14.76,
+    "drafters_gib": 5.41,
+    "like": "exl3-4.0"
+   }
+  },
+  {
+   "schema": 1,
+   "finetune_of": null,
+   "modalities_in_pack": [
+    "text",
+    "audio"
+   ],
+   "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+   "description": "A mock entry for the dashboard's preview: a small stock quant with no drafters, sent in but not run on our box.",
+   "tags": [
+    "stock",
+    "small"
+   ],
+   "links": {},
+   "verified": null,
+   "id": "mock-stock-27b-exl3-3.00",
+   "name": "Mock stock 27B, 3 bits",
+   "base_model": "qwen3.8-27b",
+   "author": {
+    "github": "mock-quanter-does-not-exist",
+    "name": "Mock Quanter",
+    "social": {}
+   },
+   "hf": {
+    "repo": "mock-quanter/Qwen3.8-27B-EXL3-3.00bpw",
+    "revision": "0000000000000000000000000000000000000001"
+   },
+   "format": "exl3",
+   "bpw": 3.0,
+   "size_gb": 12.6,
+   "load": "standalone",
+   "modalities": {
+    "text": true,
+    "image": false,
+    "audio": false,
+    "video": false
+   },
+   "drafters": "none",
+   "license": "Apache-2.0",
+   "added": "2026-10-12",
+   "status": "submitted",
+   "profile": "community/mock-stock-27b-exl3-3.00",
+   "avatar_url": "https://github.com/mock-quanter-does-not-exist.png?size=96",
+   "author_url": "https://github.com/mock-quanter-does-not-exist",
+   "social_links": [],
+   "hf_url": "https://huggingface.co/mock-quanter/Qwen3.8-27B-EXL3-3.00bpw/tree/0000000000000000000000000000000000000001",
+   "memory": {
+    "weights_gib": 11.58,
+    "drafters_gib": 0,
+    "like": "exl3-3.0"
+   }
+  },
+  {
+   "schema": 1,
+   "finetune_of": "mock-sparktuner/SparkTuner-Qwen3.8-27B",
+   "modalities_in_pack": [
+    "text",
+    "image",
+    "video"
+   ],
+   "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+   "description": "A mock entry for the dashboard's preview: a coding fine-tune at 5 bits a weight with every network link filled in.",
+   "tags": [
+    "fine-tune",
+    "code"
+   ],
+   "links": {},
+   "verified": {
+    "build": "0.8.2",
+    "device": "dgx-spark",
+    "date": "2026-10-12",
+    "tok_s": {
+     "prose": 31.2,
+     "code": 70.4,
+     "chat": 40.0
+    },
+    "tokens_per_round": {},
+    "notes": "mock numbers"
+   },
+   "id": "mock-sparktuner-27b-exl3-5.00",
+   "name": "Mock SparkTuner 27B",
+   "base_model": "qwen3.8-27b",
+   "author": {
+    "github": "mock-sparktuner-does-not-exist",
+    "name": "SparkTuner",
+    "social": {
+     "x": "sparktuner_mock",
+     "huggingface": "mock-sparktuner",
+     "bluesky": "sparktuner.bsky.social",
+     "website": "https://example.com/sparktuner"
+    }
+   },
+   "hf": {
+    "repo": "mock-sparktuner/SparkTuner-Qwen3.8-27B-EXL3-5.00bpw",
+    "revision": "0000000000000000000000000000000000000002"
+   },
+   "format": "exl3",
+   "bpw": 5.0,
+   "size_gb": 20.1,
+   "load": "overlay",
+   "modalities": {
+    "text": true,
+    "image": false,
+    "audio": false,
+    "video": false
+   },
+   "drafters": "dflash2",
+   "license": "Apache-2.0",
+   "added": "2026-10-11",
+   "status": "verified",
+   "profile": "community/mock-sparktuner-27b-exl3-5.00",
+   "avatar_url": "https://github.com/mock-sparktuner-does-not-exist.png?size=96",
+   "author_url": "https://github.com/mock-sparktuner-does-not-exist",
+   "social_links": [
+    {
+     "network": "x",
+     "label": "@sparktuner_mock on X",
+     "url": "https://x.com/sparktuner_mock"
+    },
+    {
+     "network": "huggingface",
+     "label": "mock-sparktuner on Hugging Face",
+     "url": "https://huggingface.co/mock-sparktuner"
+    },
+    {
+     "network": "bluesky",
+     "label": "@sparktuner.bsky.social on Bluesky",
+     "url": "https://bsky.app/profile/sparktuner.bsky.social"
+    },
+    {
+     "network": "website",
+     "label": "SparkTuner's website",
+     "url": "https://example.com/sparktuner"
+    }
+   ],
+   "hf_url": "https://huggingface.co/mock-sparktuner/SparkTuner-Qwen3.8-27B-EXL3-5.00bpw/tree/0000000000000000000000000000000000000002",
+   "memory": {
+    "weights_gib": 16.14,
+    "drafters_gib": 5.41,
+    "like": "exl3-4.5"
+   }
+  }
+ ],
+ "community_sync": {
+  "source": "github",
+  "url": "https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/models/community-index.json",
+  "fetched_at": null,
+  "checked_at": null,
+  "error": null,
+  "dropped": [
+   {
+    "model": "qwen3.8-27b",
+    "id": "example-unpinned",
+    "path": "models/qwen3.8-27b/community/example-unpinned.json",
+    "reason": "$.hf.revision: a 40-hex commit is required, not \"main\""
+   }
+  ],
+  "add_url": "https://github.com/0xBakeer/TandemLLM/issues/new?template=community-quant.yml&title=Community+quant%3A+%3Cname%3E&labels=community-weights&base_model=qwen3.8-27b"
+ }
+}

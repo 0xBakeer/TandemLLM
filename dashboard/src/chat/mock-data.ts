@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   auto_accept_edits: false,
   max_steps: 50,
   sandbox_network: 'off',
+  permission_mode: 'auto',
 };
 
 export const CAPABILITIES: Capabilities = {
@@ -55,15 +56,15 @@ export const CAPABILITIES: Capabilities = {
 };
 
 export const TOOLS: ToolInfo[] = [
-  { id: 'bash', name: 'bash', description: 'run a command in the chat\'s sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'ask' },
-  { id: 'read_file', name: 'read_file', description: 'read a file from the sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'always' },
-  { id: 'write_file', name: 'write_file', description: 'write a whole file in the sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'ask' },
-  { id: 'edit_file', name: 'edit_file', description: 'replace one block in a file', source: { kind: 'builtin' }, enabled: true, policy: 'ask' },
-  { id: 'web_fetch', name: 'web_fetch', description: 'fetch a page and return its text', source: { kind: 'builtin' }, enabled: true, policy: 'always' },
-  { id: 'browser', name: 'browser', description: 'drive a headless browser in the sandbox', source: { kind: 'builtin' }, enabled: false, policy: 'ask' },
+  { id: 'bash', name: 'bash', description: 'run a command in the chat\'s sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'ask', risk: 'exec' },
+  { id: 'read_file', name: 'read_file', description: 'read a file from the sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'always', risk: 'read' },
+  { id: 'write_file', name: 'write_file', description: 'write a whole file in the sandbox', source: { kind: 'builtin' }, enabled: true, policy: 'ask', risk: 'write' },
+  { id: 'edit_file', name: 'edit_file', description: 'replace one block in a file', source: { kind: 'builtin' }, enabled: true, policy: 'ask', risk: 'write' },
+  { id: 'web_fetch', name: 'web_fetch', description: 'fetch a page and return its text', source: { kind: 'builtin' }, enabled: true, policy: 'always', risk: 'network' },
+  { id: 'browser', name: 'browser', description: 'drive a headless browser in the sandbox', source: { kind: 'builtin' }, enabled: false, policy: 'ask', risk: 'exec' },
   { id: 'notes_search', name: 'notes_search', description: 'search the notes workspace', source: { kind: 'mcp', id: 'notes' }, enabled: true, policy: 'always' },
   { id: 'notes_read', name: 'notes_read', description: 'read one note by id', source: { kind: 'mcp', id: 'notes' }, enabled: true, policy: 'always' },
-  { id: 'notes_write', name: 'notes_write', description: 'create or update a note', source: { kind: 'mcp', id: 'notes' }, enabled: true, policy: 'ask' },
+  { id: 'notes_write', name: 'notes_write', description: 'create or update a note', source: { kind: 'mcp', id: 'notes' }, enabled: true, policy: 'ask', risk: 'write' },
   { id: 'search', name: 'search', description: 'web search, ten results', source: { kind: 'mcp', id: 'web-search' }, enabled: true, policy: 'always' },
   { id: 'fetch_page', name: 'fetch_page', description: 'fetch a result as readable text', source: { kind: 'mcp', id: 'web-search' }, enabled: true, policy: 'always' },
   { id: 'image_gen', name: 'image_gen', description: 'draw an image from a prompt (the image model on this box)', source: { kind: 'package', id: 'image-answer' }, enabled: false, policy: 'ask' },

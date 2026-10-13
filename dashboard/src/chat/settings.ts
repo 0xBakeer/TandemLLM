@@ -12,6 +12,7 @@ import { icon } from '../ui/bits';
 import type { ChatBackend } from './backend';
 import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, ToolInfo, ToolPolicy, UserToolkit } from './types';
 import { EFFORTS, effortWord, valveValues } from './types';
+import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { NOTIFY_WORDS, notifyPrefs, notifyState, setNotifyPrefs, type NotifyKind } from './notify';
 
 export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'prompts' | 'sandbox' | 'device';
@@ -113,6 +114,7 @@ export class QseChatSettings extends LightElement {
     const list = this.tools.filter((t) => !q || t.name.includes(q) || t.description.toLowerCase().includes(q));
     return html`<h3 class="ch-settings-h">Tools</h3>
       <p class="ch-settings-lead">What the model may call, and when it has to ask. These are the defaults for new chats; a chat's own choices sit in its composer.</p>
+      ${this.renderMode()}
       <label class="field field-search ch-settings-search"><span class="sr-only">Search tools</span>${icon('search')}<input type="search" placeholder="Search tools" .value=${this.filter} @input=${(e: Event) => (this.filter = (e.target as HTMLInputElement).value)} /></label>
       <ul class="ch-tool-list">
         ${list.map(
@@ -194,6 +196,19 @@ export class QseChatSettings extends LightElement {
           </form>`
         : nothing}
     </li>`;
+  }
+
+  /** the permission mode for new chats (chat/permission.ts); a chat changes its own in the composer */
+  private renderMode(): TemplateResult {
+    const cur = modeOf(this.caps?.defaults);
+    return html`<h4 class="ch-settings-h4">Before a tool runs</h4>
+      <div class="ch-mode-list" role="radiogroup" aria-label="permission mode for new chats">
+        ${PERMISSION_MODES.map((m) => html`<label class="ch-mode ${cur === m ? 'is-on' : ''} ${m === 'yolo' ? 'is-yolo' : ''}" data-mode=${m}>
+          <input type="radio" name="permission-mode" .checked=${cur === m} ?disabled=${!this.caps} @change=${() => this.fire('ch-defaults-patch', { patch: { permission_mode: m } })} />
+          <span class="ch-mode-name">${modeWord(m)}${m === 'auto' ? html` <span class="muted small">default</span>` : nothing}</span>
+          <span class="ch-mode-desc">${modeDesc(m)}</span>
+        </label>`)}
+      </div>`;
   }
 
   private async setTool(id: string, patch: { enabled?: boolean; policy?: ToolPolicy }): Promise<void> {

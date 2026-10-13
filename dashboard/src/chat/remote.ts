@@ -189,6 +189,9 @@ export class RemoteChatBackend implements ChatBackend {
   updateSettings(id: string, p: Partial<ChatSettings>) {
     return patch<ChatSettings>(`/conversations/${enc(id)}/settings`, p);
   }
+  updateDefaults(p: Partial<ChatSettings>) {
+    return patch<ChatSettings>('/defaults', p);
+  }
   async compact(id: string) {
     await post(`/conversations/${enc(id)}/compact`);
   }

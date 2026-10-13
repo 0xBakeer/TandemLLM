@@ -486,3 +486,12 @@ message's `stats.acceptance` has it. `thinking.budget` null means no cap. A mess
 is on is queued (`202 {queued: QueuedMessage}`). Branch switches answer 409 `run_active` while a run
 is on. Stop, like the mock, lets the queue drain afterwards. Not in phase 1: compaction (501
 `not_available`), tools, permissions, MCP, prompts, presets, the sandbox.
+
+
+## Permission modes (frontend, 2026-10-13; the server's section lands in chat-ui-brief/community/CONTRACT.md "Permission modes (API)")
+
+Khaled: "too many allow prompts for cd and ls; I want a yolo mode". A chat runs in one of three modes; `chat/permission.ts` holds the words and the mock's copy of the decision.
+
+- `ChatSettings.permission_mode: 'ask' | 'auto' | 'yolo'`, default `auto`; absent on an older server = auto. The composer's mode pill patches it like the other settings (`PATCH /conversations/{id}/settings`); the settings page's choice is the default for new chats: `PATCH /defaults` with `Partial<ChatSettings>`, answering the new `Capabilities.defaults`.
+- ask: every tool asks unless its policy says always. auto: commands and reads in the sandbox (risk `exec`, `read`) run without asking; writes and the internet ask (`auto_accept_edits` still lets writes through). yolo: nothing asks. A `never` policy refuses in every mode.
+- `tool.started` carries `approved: 'user' | 'rule' | 'auto' | 'yolo' | null`; `ToolCallPart.approved` keeps it and the card shows a small badge for everything but `user` (YOLO in orange).

@@ -149,9 +149,13 @@ export interface ToolCallPart {
   ended_at: string | null;
   /** what the permission prompt should say, when the tool asks */
   permission?: { summary: string; suggested_rule?: { tool: string; match?: string } } | null;
+  /** who allowed the call: the user at the prompt, an always rule, auto mode or YOLO mode */
+  approved?: ToolApproval | null;
   /** a pane that can show this call's work */
   pane?: PaneRef | null;
 }
+/** a tool call that ran without a prompt says who allowed it (the badge on its card) */
+export type ToolApproval = 'user' | 'rule' | 'auto' | 'yolo';
 export interface ErrorPart {
   type: 'error';
   message: string;
@@ -338,7 +342,12 @@ export interface ChatSettings {
   sandbox_network: 'off' | 'on';
   /** SRV-363: the model reads and plans, changes nothing, until the plan is approved */
   plan_mode?: boolean;
+  /** who approves a tool call (chat/permission.ts); absent on an older server = auto */
+  permission_mode?: PermissionMode;
 }
+/** ask: every tool asks unless its policy says always; auto (the default): sandbox commands and
+ *  reads run, writes and the internet ask; yolo: nothing asks */
+export type PermissionMode = 'ask' | 'auto' | 'yolo';
 
 export type ToolPolicy = 'ask' | 'always' | 'never';
 export type ToolSource = { kind: 'builtin' } | { kind: 'package'; id: string } | { kind: 'mcp'; id: string } | { kind: 'user'; id: string };
@@ -529,7 +538,7 @@ export type ChatEvent =
   | { type: 'part.delta'; message_id: string; index: number; delta: string; field?: 'text' | 'input' }
   | { type: 'part.done'; message_id: string; index: number; tokens?: number | null }
   | { type: 'tool.asking'; message_id: string; call_id: string; summary: string; risk?: string; suggested_rule?: { tool: string; match?: string } }
-  | { type: 'tool.started'; message_id: string; call_id: string; pane?: PaneRef | null }
+  | { type: 'tool.started'; message_id: string; call_id: string; pane?: PaneRef | null; approved?: ToolApproval | null }
   | { type: 'tool.output'; message_id: string; call_id: string; delta: string }
   | { type: 'tool.done'; message_id: string; call_id: string; status: 'done' | 'failed' | 'denied' | 'cancelled'; is_error: boolean; output?: ToolOutput | null }
   | { type: 'queue.changed'; queue: QueuedMessage[] }

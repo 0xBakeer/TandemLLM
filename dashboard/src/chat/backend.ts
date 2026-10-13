@@ -71,6 +71,8 @@ export interface ChatBackend {
   switchBranch(id: string, messageId: string, index: number): Promise<Conversation>;
   permission(id: string, callId: string, decision: 'once' | 'always' | 'deny', scope?: 'chat' | 'all'): Promise<void>;
   updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings>;
+  /** the server's defaults for new chats (Capabilities.defaults): the settings page writes them */
+  updateDefaults(patch: Partial<ChatSettings>): Promise<ChatSettings>;
   compact(id: string): Promise<void>;
   /** the plan answer's steps (or the edited list) become the todo list; a run carries it out */
   approvePlan(id: string, items?: string[]): Promise<void>;

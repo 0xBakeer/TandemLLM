@@ -505,6 +505,12 @@ export class QseChat extends LightElement {
     if (s && this.conv?.id === id) this.conv = { ...this.conv, settings: s };
   }
 
+  /** the settings page's defaults for new chats (the permission mode) */
+  private async patchDefaults(patch: Partial<ChatSettings>): Promise<void> {
+    const d = await this.guard(() => this.backend!.updateDefaults(patch), 'Defaults');
+    if (d && this.caps) this.caps = { ...this.caps, defaults: d };
+  }
+
   private async applyPreset(p: Preset): Promise<void> {
     await this.patchSettings({ model: p.model, profile: p.profile, effort: p.effort, thinking: p.thinking, tools: p.tools, prompt_id: p.prompt_id, ...(p.packages ? { packages: p.packages } : {}), ...(p.mcp ? { mcp: p.mcp } : {}) });
     this.say('ok', `Preset "${p.name}" applied to this chat.`);
@@ -786,6 +792,7 @@ export class QseChat extends LightElement {
       }}
       @ch-reset-sandbox=${() => this.conv && void this.guard(() => this.backend!.resetSandbox(this.conv!.id).then((s) => (this.conv = this.conv ? { ...this.conv, sandbox: s } : this.conv)), 'Reset sandbox')}
       @ch-settings-patch=${(e: CustomEvent<{ patch: Partial<ChatSettings> }>) => void this.patchSettings(e.detail.patch)}
+      @ch-defaults-patch=${(e: CustomEvent<{ patch: Partial<ChatSettings> }>) => void this.patchDefaults(e.detail.patch)}
     ></qse-chat-settings>`;
   }
 

@@ -13,6 +13,7 @@
 // Every figure is GiB (2^30 bytes).
 
 import type { SetupEstimate, SetupEstimatePart, SetupModel, SetupProfile, SetupSelection, SetupValue } from '../api/types';
+import { packNoImage } from './community';
 import { fieldError } from './fields';
 
 export const GIB = 2 ** 30;
@@ -73,6 +74,8 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
     if (typeof on !== 'boolean') throw new SelectionError(422, 'invalid_selection', `components.${cid}: true or false`);
     comps[cid] = on;
   }
+  // a community pack that cannot run images: the server turns the Vision tool off, so does this copy
+  if ('vision' in comps && packNoImage(m, pid)) comps.vision = false;
   const bad: string[] = [];
   const label = (id: string) => m.components.find((c) => c.id === id)?.label ?? id;
   for (const c of m.components) {

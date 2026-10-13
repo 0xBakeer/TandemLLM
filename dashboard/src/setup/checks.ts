@@ -4,6 +4,7 @@
 
 import type { SetupDevice, SetupEstimate, SetupModel, SetupPageState, SetupSelection, SetupStepId } from '../api/types';
 import { isOn, lowerLabel } from './deps';
+import { isCommunity } from './community';
 import { estimateLoose, overBy, profileOf } from './estimate';
 import { fieldError, stepIndex, stepsOf } from './fields';
 import { S, STEP_TITLE } from './strings';
@@ -94,7 +95,8 @@ export function howToFix(m: SetupModel, sel: SetupSelection): Fix[] {
     }
   }
   const cur = profileOf(m, sel.profile);
-  const smaller = m.profiles.filter((p) => p.weights_gib < cur.weights_gib).sort((a, b) => b.weights_gib - a.weights_gib);
+  // a memory fix names our own weights, never a community pack
+  const smaller = m.profiles.filter((p) => !isCommunity(p) && p.weights_gib < cur.weights_gib).sort((a, b) => b.weights_gib - a.weights_gib);
   for (const p of smaller) {
     const e = try_({ ...sel, profile: p.id });
     if (e.fits || p === smaller[smaller.length - 1]) {
