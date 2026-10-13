@@ -22,6 +22,11 @@ The first release candidate of 0.8: a second model, Qwen3.8-Flash-Next, the Chat
 - A restart could leave the engine unusable on Flash-Next: the spill's restore at startup told the MTP drafter its cache was valid before reading any row back, the drafter read pages the KV pool had released, and the GPU faulted (`illegal memory access`). Every request after it failed. The rows are now committed before a drafter resumes, and it resumes again over the restored rows (the spill, the disk tier and a side slot's carry).
 - Every short request the side lane took on Flash-Next failed (`'FlashNextCacheState' object has no attribute 'primed'`): the lane lends the engine with the 27B's pending commit in mind. The lane is off for an engine whose capabilities say it cannot be lent; such a request waits or takes an idle side slot.
 - Flash-Next had no model card, so the Chat tab saw no thinking and no images on it, and sent an attached image as a file. It has its card now.
+- A chat that last ran on a side slot came back cold after a restart. The drain now writes each side slot's conversation to the NVMe too, and its next turn reads it back through slot 0.
+- The System view said PREFIX_CHUNK 1,024 needed a restart on Flash-Next, whose caches keep their own grid. It shows the grid the engine runs (4,096), locked.
+- A request that arrived during a prewarm waited for the whole save and restore (1,246 ms). The prewarm now stops between blocks when a request waits and answers `yielded`; the request still waits 0.5 to 1 s.
+- Right after a turn, a peek found the engine lock held by the turn's end and the idle graph captures, and answered 409. The peek and the prewarm now wait up to 3 s for the lock unless a request waits for it. A parked chat's next turn reports the park, as its peek does.
+- A chat waiting for a permission prompt held one of chatd's two run slots, and two other chats ran one after the other. A run gives its slot back while it waits for the answer.
 
 ### Qwen3.8-Flash-Next
 
