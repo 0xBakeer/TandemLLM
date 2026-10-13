@@ -88,6 +88,13 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                     for li in c.conv_layers}
         self._gate = {li: W[self.pre(li) + "feed_forward.gate.weight"].to(torch.bfloat16).contiguous()
                       for li in c.moe_layers}
+        # the router's 64 x 2048 weight on tools/fn_kernels.gemv (K split over a CTA's warps, rows
+        # invariant) where fp16 holds it exactly; a 16-row tile GEMM has 4 programs for 64 outputs
+        self._gate16 = {}
+        for li, g in self._gate.items():
+            h = g.to(torch.float16)
+            if self.device.type == "cuda" and torch.equal(h.to(torch.bfloat16), g):
+                self._gate16[li] = h.contiguous()
         self._bias = {li: W[self.pre(li) + "feed_forward.expert_bias"].float().contiguous()
                       for li in c.moe_layers if c.use_expert_bias}
         self.exl3 = any(_is_exl3(w) for w in W.values())
@@ -165,7 +172,8 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         in ascending expert id."""
         from tools import fn_kernels as FK
         c = self.cfg
-        logits = K.linear_rows(n, self._gate[li], f32=True)
+        g16 = self._gate16.get(li)
+        logits = FK.gemv(n, g16) if g16 is not None else K.linear_rows(n, self._gate[li], f32=True)
         ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.routed_scaling_factor)
         if li in self.banks:
             yd = FK.moe_experts(n, ids, self.banks[li], order=self._order1 if n.shape[0] == 1 else None)
