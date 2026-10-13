@@ -95,6 +95,25 @@ test('the Context panel: the split by part and the cache the second turn came fr
 });
 
 test('two chats stream at once and the engine decodes them together', async ({ browser, request }) => {
+  await twoChats(browser, request, true);
+});
+
+// live (2026-10-13): a chat waiting for a bash prompt held one of chatd's two run slots, and two
+// other chats ran one after the other
+test('a chat waiting for a permission prompt does not hold back two other chats', async ({ browser, request }) => {
+  const r = await request.post('../v1/chat-app/conversations', { data: { settings: { thinking: false } } });
+  const w = ((await r.json()) as { id: string }).id;
+  await request.post(`../v1/chat-app/conversations/${w}/messages`, {
+    data: { client_msg_id: `w${Date.now()}`, text: 'Use the bash tool to run this command: python3 -c "print(6*7)" . Then tell me the number it printed, in one short sentence.' },
+  });
+  await expect.poll(async () => (await snap(request, w)).run?.phase ?? null, { timeout: 120_000 }).toBe('permission');
+  await twoChats(browser, request, false);
+  expect((await snap(request, w)).run?.phase).toBe('permission');
+  await request.post(`../v1/chat-app/conversations/${w}/stop`);
+  await expect.poll(async () => (await snap(request, w)).run, { timeout: 30_000 }).toBeNull();
+});
+
+async function twoChats(browser: Browser, request: APIRequestContext, shots: boolean) {
   const cctx = await browser.newContext({ viewport: DESKTOP });
   const c = { ctx: cctx, page: await cctx.newPage() };
   await c.page.goto('./#/performance?tab=parallel');
@@ -119,12 +138,14 @@ test('two chats stream at once and the engine decodes them together', async ({ b
   expect(l2[0]).toBeGreaterThan(l1[0]);
   expect(l2[1]).toBeGreaterThan(l1[1]);
   const health = (await (await request.get('../health')).json()) as Record<string, unknown>;
-  console.log(`[rc080] decoding together: ${together}; /health parallel ${JSON.stringify(health.parallel)}; +${l2[0] - l1[0]} and +${l2[1] - l1[1]} chars in 3 s`);
-  await a.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-a.png` });
-  await b.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-b.png` });
+  console.log(`[rc080] ${shots ? '' : 'beside a waiting chat, '}decoding together: ${together}; /health parallel ${JSON.stringify(health.parallel)}; +${l2[0] - l1[0]} and +${l2[1] - l1[1]} chars in 3 s`);
+  if (shots) {
+    await a.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-a.png` });
+    await b.page.screenshot({ path: `${SHOTS}/rc080-3-two-chats-b.png` });
+  }
   // the Parallel tab shows the engine's slots while it has requests in flight
   await expect(c.page.locator('.par-slots')).toHaveAttribute('data-slots', SLOTS, { timeout: 30_000 });
-  await c.page.screenshot({ path: `${SHOTS}/rc080-3-parallel-slots.png` });
+  if (shots) await c.page.screenshot({ path: `${SHOTS}/rc080-3-parallel-slots.png` });
   await c.ctx.close();
   await a.page.locator('.ch-stop').click();
   await b.page.locator('.ch-stop').click();
@@ -132,7 +153,7 @@ test('two chats stream at once and the engine decodes them together', async ({ b
   await expect.poll(async () => (await snap(request, two.id)).run, { timeout: 30_000 }).toBeNull();
   await a.ctx.close();
   await b.ctx.close();
-});
+}
 
 test('the Setup Guide shows both models, the Flash-Next windows and the 5.05 badge', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: DESKTOP });
