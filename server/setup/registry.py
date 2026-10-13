@@ -69,9 +69,13 @@ def _obj(props: dict, required=None) -> dict:
 _CELL = {"type": "array", "items": _NUM0}
 _QUALITY = _obj({"kl_vs_bf16": {"type": ["number", "null"]}, "top1_pct": {"type": ["number", "null"]},
                  "ppl": {"type": ["number", "null"]}, "date": _STR, "source": _STR})
+# OPS-95: `fetch`, optional, what ops/fetch_weights.py --assets downloads when the asset is missing:
+# each entry's files (names or globs of the repo) into `to` (${HOME}, ${REPO} or ${HF_HUB}: the HF cache)
+_FETCH = _obj({"repo": _STR, "files": {"type": "array", "items": _STR}, "to": _STR, "gb": _NUM0})
 _ASSET = _obj({"id": _ID, "label": _STR, "path": _STR, "also": {"type": "array", "items": _STR},
                "fetchable": {"type": "boolean"}, "protected": {"type": "boolean"},
-               "hf_repo": _NOTE, "source": _STR})
+               "hf_repo": _NOTE, "fetch": {"type": "array", "items": _FETCH}, "source": _STR},
+              required=("id", "label", "path", "also", "fetchable", "protected", "hf_repo", "source"))
 _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "drafters_gib", "hf_repo",
                      "hf_private", "recommended", "badges", "quality", "assets_required", "note")
 # SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
@@ -235,6 +239,13 @@ def _cross(m: dict, root: str) -> list[str]:
     if len(rec) != 1:
         errs.append(f"$.profiles: exactly one recommended profile, not {len(rec)}")
     assets = {a["id"] for a in m["assets"]}
+    for i, a in enumerate(m["assets"]):
+        if a.get("fetch") and not a["fetchable"]:
+            errs.append(f"$.assets[{i}]: an asset with a fetch list is fetchable")
+        for j, f in enumerate(a.get("fetch") or []):
+            if not f["files"] or not re.match(r"^\$\{(HOME|REPO|HF_HUB)\}", f["to"]):
+                errs.append(f"$.assets[{i}].fetch[{j}]: files, and a `to` under ${{HOME}}, "
+                            f"${{REPO}} or ${{HF_HUB}}")
     for i, p in enumerate(m["profiles"]):
         for a in p["assets_required"]:
             if a not in assets:

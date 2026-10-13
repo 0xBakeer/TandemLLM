@@ -8,8 +8,9 @@ The test matrix:
      with a command substitution in it is refused         test_the_overlay
   2  the plan: what changes against serve.env now, the commands it will run, the warnings (no
      password, the 4 x 262,144 worst case); and each refusal with its code: over_budget,
-     missing_assets, missing_token, disk_full, no_overlay_hook, secrets_exist, port_in_use,
-     repo_mismatch
+     missing_assets (only an asset nothing downloads; OPS-95: a missing asset with a fetch list is
+     part of the fetch step and its download_gb), missing_token (a private profile), disk_full,
+     no_overlay_hook, secrets_exist, port_in_use, repo_mismatch
                                                          test_the_plan
   3  the allowlist, with a recording runner over a corpus of selections: every command is bash
      and one of ops/use-profile.sh, start.sh, stop.sh, make-secrets.sh, every argument a
@@ -198,6 +199,22 @@ def test_the_overlay():
             assert not apply._value_ok(v) or v == "a b", v
 
 
+def _private(m: dict, pid: str) -> dict:
+    """`m` with profile `pid` private (the token check; every published profile is public)."""
+    m = json.loads(json.dumps(m))
+    registry.profile(m, pid)["hf_private"] = True
+    return m
+
+
+def _no_download(m: dict, aid: str) -> dict:
+    """`m` with asset `aid` as one nothing downloads (before OPS-95, every 27B asset)."""
+    m = json.loads(json.dumps(m))
+    a = registry.asset(m, aid)
+    a["fetchable"] = False
+    a.pop("fetch")
+    return m
+
+
 def _plan(sel=None, **kw):
     return apply.plan(M, sel or _sel(), setup_mode=kw.pop("setup_mode", False),
                       password_set=kw.pop("password_set", False), **kw)
@@ -221,11 +238,16 @@ def test_the_plan():
         assert p["estimate"]["fits"] is True and p["restart"] is True
         p = _plan(_sel(kv_pool=False))
         assert not p["ok"] and p["error_codes"][0] == "over_budget", p
+        # OPS-95: every published profile is public; a private one needs a token
         p = _plan(_sel(profile="exl3-3.0"))
-        assert "missing_token" in p["error_codes"] and p["profile"]["download_gb"] == 13.5
+        assert p["ok"] and p["profile"]["download_gb"] == 13.5, p
         assert any("--fetch-only" in c for c in p["commands"])
+        p = apply.plan(_private(M, "exl3-3.0"), _sel(profile="exl3-3.0"), setup_mode=False,
+                       password_set=False)
+        assert "missing_token" in p["error_codes"] and p["profile"]["download_gb"] == 13.5
         os.environ["HF_TOKEN"] = HF
-        p = _plan(_sel(profile="exl3-3.0"))
+        p = apply.plan(_private(M, "exl3-3.0"), _sel(profile="exl3-3.0"), setup_mode=False,
+                       password_set=False)
         assert p["ok"], p["errors"]
         assert HF not in json.dumps(p)
         apply.DISK_MARGIN_GB = 10 ** 6
@@ -247,10 +269,22 @@ def test_the_plan():
             p = _plan(_sel(advanced={"port": port}))
             assert "port_in_use" in p["error_codes"], p["errors"]
     with Box(assets=False):
+        # OPS-95: the 27B's assets have a download: the fetch step gets them, with the weights
         p = _plan()
-        assert p["error_codes"][0] == "missing_assets" and "OPS-95" in p["errors"][0], p
-        assert any("Draft models (EXL3 K3)" in e for e in p["errors"])
+        assert p["ok"], p["errors"]
+        gb = sum(e["gb"] for a in M["assets"] if a["id"] in registry.profile(M, "exl3-4.5")[
+            "assets_required"] for e in a["fetch"])
+        assert p["profile"]["on_disk"] is False and p["profile"]["download_gb"] == round(gb, 2), p
+        fetch = [c for c in p["commands"] if "--fetch-only" in c]
+        assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base checkpoint" in fetch[0]
+        assert "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5" not in fetch[0]   # the weights are here
         assert any("Narrator is on, but its model" in w for w in p["warnings"])
+        p = _plan(_sel(profile="exl3-3.0"))
+        assert p["profile"]["download_gb"] == round(13.5 + gb, 2), p["profile"]
+        # an asset nothing downloads is still refused before anything changes
+        p = apply.plan(_no_download(M, "base-fp8"), _sel(), setup_mode=False, password_set=False)
+        assert p["error_codes"][0] == "missing_assets" and "Base checkpoint" in p["errors"][0], p
+        assert "Draft models (EXL3 K3)" not in p["errors"][0]
     with Box(hook=False):
         assert "no_overlay_hook" in _plan()["error_codes"]
     with Box() as box:
@@ -745,7 +779,12 @@ def test_the_routes():
             apply.spawn = real
     with Box(assets=False):
         app.STATE.update(wren=FakeWren())
-        code, b = _api("POST", "/v1/setup/apply", {"selection": {"model": M["id"]}})
+        real_get = registry.get
+        registry.get = lambda mid, d=None: _no_download(M, "base-fp8") if mid == M["id"] else real_get(mid, d)
+        try:
+            code, b = _api("POST", "/v1/setup/apply", {"selection": {"model": M["id"]}})
+        finally:
+            registry.get = real_get
         assert code == 412 and b["error"]["code"] == "missing_assets", b
 
 

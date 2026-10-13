@@ -12,7 +12,8 @@ selection's checked numbers, `shell=False`, a minimal environment, a timeout eac
     check             the selection again (the runner checks it itself), the estimate, the disk,
                       the assets, the HF token, the overlay hook in serve.env, the box lock
     unload_assistant  Wren unloaded (the server does it before it starts the runner)
-    fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when on disk)
+    fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when the weights and
+                      the assets are on disk; OPS-95: it fetches the missing assets too)
     (waiting)         write_config waits until no request runs or waits on the engine (its /health,
                       IDLE_WAIT_S at most; then nothing has changed and the job fails)
     write_config      run/setup.env from the registry's keys and the selection, the old one kept
@@ -345,14 +346,17 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
 
     if not est["fits"]:
         error("over_budget", " ".join(n for n in est["notes"] if not n.startswith("About")))
-    missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
+    missing, fetched = _assets_missing(m, disk)
     if missing:
         error("missing_assets", "This profile needs files that are not on this box and that "
-              "nothing here can download yet: " + "; ".join(
+              "nothing here can download: " + "; ".join(
                   f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})"
-                  for a in missing) + ". See OPS-95 and docs/setup.md.")
-    on_disk = bool(disk.get("weights"))
-    if not on_disk and prof["hf_private"] and not device_mod.hf_token_present():
+                  for a in missing) + ". See docs/setup.md.")
+    weights_here = bool(disk.get("weights"))
+    # OPS-95: the fetch step downloads the weights and the missing assets with a download list
+    on_disk = weights_here and not fetched
+    download_gb = round((0.0 if weights_here else prof["disk_gb"]) + _fetch_gb(fetched), 2)
+    if not weights_here and prof["hf_private"] and not device_mod.hf_token_present():
         error("missing_token", f"{prof['hf_repo']} is private and no Hugging Face token is set. "
               f"Add one with `hf auth login` on the box, or set HF_TOKEN, then try again.")
     if not on_disk:
@@ -360,8 +364,8 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
             free = shutil.disk_usage(os.path.expanduser("~")).free / 1e9
         except OSError:
             free = None
-        if free is not None and free < prof["disk_gb"] + DISK_MARGIN_GB:
-            error("disk_full", f"The download needs {prof['disk_gb']:g} GB and {DISK_MARGIN_GB} "
+        if free is not None and free < download_gb + DISK_MARGIN_GB:
+            error("disk_full", f"The download needs {download_gb:g} GB and {DISK_MARGIN_GB} "
                   f"GB left after it; the disk has {free:.0f} GB free.")
     if not hook_present():
         error("no_overlay_hook", "ops/serve.env on this box does not read run/setup.env. Add the "
@@ -413,8 +417,9 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
     active = device_mod.active_profile()
     commands = []
     if not on_disk:
+        what = ([prof["hf_repo"]] if not weights_here else []) + [a["label"] for a in fetched]
         commands.append(f"bash ops/use-profile.sh {prof['id']} --fetch-only   "
-                        f"(about {prof['disk_gb']:g} GB from {prof['hf_repo']})")
+                        f"(about {download_gb:g} GB: {', '.join(what)})")
     if new_port != old_port:
         commands.append(f"bash ops/stop.sh 120   (the engine on port {old_port})")
     written = len(_without_unset_defaults(overlay_values(m, sel), sel["profile"]))
@@ -427,10 +432,20 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
     return {"contract_version": "1.0", "ok": not errors, "errors": errors, "error_codes": codes,
             "warnings": warnings,
             "profile": {"current": None if setup_mode and not active else active,
-                        "next": prof["id"], "on_disk": on_disk,
-                        "download_gb": 0.0 if on_disk else prof["disk_gb"]},
+                        "next": prof["id"], "on_disk": on_disk, "download_gb": download_gb},
             "changes": changes, "restart": True, "commands": commands, "estimate": est,
             "ports": {"current": old_port, "next": new_port}}
+
+
+def _assets_missing(m: dict, disk: dict) -> tuple[list[dict], list[dict]]:
+    """The profile's missing assets: (those nothing downloads, those use-profile.sh --fetch-only
+    downloads: the ones with a fetch list, OPS-95)."""
+    missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
+    return [a for a in missing if not a.get("fetch")], [a for a in missing if a.get("fetch")]
+
+
+def _fetch_gb(assets: list[dict]) -> float:
+    return sum(e.get("gb", 0.0) for a in assets for e in a["fetch"])
 
 
 def _preview(m: dict, sel: dict, keys: list[str]) -> dict:
@@ -462,13 +477,14 @@ def reset_plan(m: dict, *, setup_mode: bool) -> dict:
     prof = registry.recommended_profile(m)
     disk = device_mod.on_disk(m, fresh=True).get(prof["id"], {})
     errors, codes = [], []
-    missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
+    missing, fetched = _assets_missing(m, disk)
     if missing:
         errors.append("The recommended profile needs files that are not on this box: " + "; ".join(
             f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})" for a in missing) + ".")
         codes.append("missing_assets")
-    on_disk = bool(disk.get("weights"))
-    if not on_disk and prof["hf_private"] and not device_mod.hf_token_present():
+    on_disk = bool(disk.get("weights")) and not fetched
+    download_gb = round((0.0 if disk.get("weights") else prof["disk_gb"]) + _fetch_gb(fetched), 2)
+    if not disk.get("weights") and prof["hf_private"] and not device_mod.hf_token_present():
         errors.append(f"{prof['hf_repo']} is private and no Hugging Face token is set.")
         codes.append("missing_token")
     keys = list(overlay_values(m, sel))
@@ -490,7 +506,7 @@ def reset_plan(m: dict, *, setup_mode: bool) -> dict:
     return {"contract_version": "1.0", "ok": not errors, "errors": errors, "error_codes": codes,
             "warnings": [], "profile": {"current": None if setup_mode and not active else active,
                                         "next": prof["id"], "on_disk": on_disk,
-                                        "download_gb": 0.0 if on_disk else prof["disk_gb"]},
+                                        "download_gb": download_gb},
             "changes": changes, "restart": True, "commands": commands,
             "estimate": estimate_mod.estimate(m, sel), "ports": {"current": port(now),
                                                                  "next": port(base)},

@@ -244,7 +244,7 @@ test('setup mode: #/ goes to #/setup and the other views are off with a reason',
 });
 
 test('private weights without a token: the notice, and Finish stays off', async ({ page, request }) => {
-  await setupMock(request, { hfToken: false });
+  await setupMock(request, { hfToken: false, privateProfile: 'exl3-3.0' });
   await open(page, `#/setup/${MODEL}/weights`);
   await page.locator('[data-profile-card="exl3-3.0"]').click();
   await expect(page.locator('[data-token-blocked]')).toContainText('no Hugging Face token');

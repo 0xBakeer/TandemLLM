@@ -61,7 +61,7 @@ assets:
   fetchable: true
   protected: false
   hf_repo: convaiinnovations/laya
-  source: On Hugging Face, read with the token.
+  source: Public on Hugging Face (no token needed). Nothing here downloads it yet; the engine starts without it.
 quality_source: not measured (ENG-159)
 profiles:
 - id: flashnext-2.05

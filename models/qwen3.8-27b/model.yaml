@@ -30,7 +30,8 @@ icon: null
 links:
   - {label: Base model, url: "https://huggingface.co/Qwen/Qwen3.8-27B-FP8"}
   - {label: NVFP4 weights, url: "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4"}
-  - {label: EXL3 weights (private), url: "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5"}
+  - {label: EXL3 weights, url: "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5"}
+  - {label: EXL3 draft models, url: "https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters"}
 
 # The device presets. total_gib: MemTotal (130,596,188,160 bytes on the reference box);
 # reserved_gib: what the OS, the CUDA context and other programs take outside the engine's
@@ -43,42 +44,69 @@ devices:
     note: The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB.
 
 # Files a profile or a tool needs besides the profile's own weights. fetchable: something in the
-# repository downloads it (use-profile.sh only downloads a profile's weights; the K3 drafters, the K4
-# draft head and the base snapshot have no download yet, OPS-95). protected: reset level 4 never
-# deletes it, since nothing would download it again. A path may end in a glob.
+# repository downloads it. fetch: what ops/use-profile.sh downloads when the asset is missing (before
+# the switch, with --fetch-only too; ops/fetch_weights.py --assets, OPS-95): each entry's `files` from
+# the public Hugging Face `repo`, at the hub's commit of the day, into `to` with the repository's own
+# folders kept (`${HF_HUB}`: the Hugging Face cache, where the engine reads the base), every LFS file
+# checked against the hub's sha256; `gb` is the download's size (10^9 bytes) for the disk check and
+# the plan. protected: reset level 4 never deletes it. A path may end in a glob.
 assets:
   - id: exl3-drafters-k3
     label: Draft models (EXL3 K3)
     path: ${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b8-v2.safetensors
     also: ["${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3/ft-b16.safetensors"]
-    fetchable: false
+    fetchable: true
     protected: true
-    hf_repo: null
-    source: Converted on the reference box (ENG-215); a private backup is 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters. No download yet (OPS-95).
+    hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters
+    fetch:
+      - repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters
+        files: [exl3-drafters-k3/ft-b8-v2.safetensors, exl3-drafters-k3/ft-b16.safetensors]
+        to: ${HOME}/.qwen38-spark-engine/weights
+        gb: 1.3
+    source: Converted on the reference box (ENG-215) and published in 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters (exl3-drafters-k3/). Each file holds one drafter's projections; the drafter's BF16 checkpoint (nvfp4-drafters) gives the rest.
   - id: exl3-draft-head-k4
     label: Draft head (EXL3 K4)
     path: ${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4/model.safetensors
     also: []
-    fetchable: false
+    fetchable: true
     protected: true
-    hf_repo: null
-    source: Converted on the reference box (ENG-215). No download yet (OPS-95).
+    hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters
+    fetch:
+      - repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters
+        files: [exl3-draft-head-k4/model.safetensors, exl3-draft-head-k4/source-config.json]
+        to: ${HOME}/.qwen38-spark-engine/weights
+        gb: 0.64
+    source: Converted on the reference box (ENG-215) and published in 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters (exl3-draft-head-k4/).
   - id: base-fp8
     label: Base checkpoint (Qwen3.8-27B-FP8)
     path: ${HF_HUB}/models--Qwen--Qwen3.8-27B-FP8/snapshots/*/config.json
     also: []
-    fetchable: false
+    fetchable: true
     protected: true
     hf_repo: Qwen/Qwen3.8-27B-FP8
-    source: Every profile reads its embeddings, norms and tokenizer. install.sh downloads it; use-profile.sh does not.
+    fetch:
+      - repo: Qwen/Qwen3.8-27B-FP8
+        files: ["*.json", "*.jinja", merges.txt, LICENSE, layers-*.safetensors, outside.safetensors]
+        to: ${HF_HUB}
+        gb: 30.4
+    source: Public on Hugging Face. Every 27B profile reads its embeddings, norms, the tensors the quantised weights leave and the tokenizer; not mtp.safetensors (the 27B drafts with its own drafters). install.sh downloads it, except with --setup; use-profile.sh downloads it when it is missing.
   - id: nvfp4-drafters
-    label: Draft models (NVFP4)
+    label: Draft models (DFlash2 b8 and b16, BF16)
     path: ${REPO}/train/ft-b8-v2
     also: ["${REPO}/train/ft-b16"]
-    fetchable: false
+    fetchable: true
     protected: true
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8
-    source: The 0.4.8 release's drafters (DFlash2-b8 and -b16 on Hugging Face); the profile reads them from the repository's train/ folder.
+    fetch:
+      - repo: 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8
+        files: [config.json, model.safetensors]
+        to: ${REPO}/train/ft-b8-v2
+        gb: 3.85
+      - repo: 0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16
+        files: [config.json, model.safetensors]
+        to: ${REPO}/train/ft-b16
+        gb: 3.85
+    source: The 0.4.8 release's drafters (DFlash2-b8 and -b16 on Hugging Face, BF16), read from the repository's train/ folder (CKPT8, CKPT16). The NVFP4 profile quantises their projections at load; an EXL3 profile replaces them with the K3 files, named after these folders.
   - id: qwen3.5-2b
     label: Qwen3.5-2B (the narrator, and Wren)
     path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json
@@ -102,7 +130,7 @@ assets:
     fetchable: true
     protected: false
     hf_repo: convaiinnovations/laya
-    source: On Hugging Face, read with the token.
+    source: Public on Hugging Face (no token needed). Nothing here downloads it yet; the engine starts without it.
 
 # One entry per ops/profiles/<id>.env. weights_gib: the target's weights on the device (load stage
 # `weights`, GiB allocated); drafters_gib: the draft models, the draft head and their buffers (load
@@ -119,11 +147,11 @@ profiles:
     weights_gib: 10.15
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5
-    hf_private: true
+    hf_private: false
     recommended: false
     badges: [fastest]
     quality: {kl_vs_bf16: 0.2121, top1_pct: 86.27, ppl: 3.1187, date: "2026-10-09", source: *qsrc}
-    assets_required: &exl3assets [exl3-drafters-k3, exl3-draft-head-k4, base-fp8]
+    assets_required: &exl3assets [exl3-drafters-k3, exl3-draft-head-k4, nvfp4-drafters, base-fp8]
     note: The fastest, and the furthest from the original model.
   - id: exl3-3.0
     label: EXL3 3.0 bpw
@@ -133,7 +161,7 @@ profiles:
     weights_gib: 11.58
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0
-    hf_private: true
+    hf_private: false
     recommended: false
     badges: []
     quality: {kl_vs_bf16: 0.1246, top1_pct: 89.80, ppl: 2.9180, date: "2026-10-09", source: *qsrc}
@@ -147,7 +175,7 @@ profiles:
     weights_gib: 13.17
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5
-    hf_private: true
+    hf_private: false
     recommended: false
     badges: []
     quality: {kl_vs_bf16: 0.0749, top1_pct: 92.31, ppl: 2.8001, date: "2026-10-09", source: *qsrc}
@@ -161,7 +189,7 @@ profiles:
     weights_gib: 14.76
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0
-    hf_private: true
+    hf_private: false
     recommended: false
     badges: [best speed for quality]
     quality: {kl_vs_bf16: 0.0392, top1_pct: 94.71, ppl: 2.7458, date: "2026-10-09", source: *qsrc}
@@ -175,7 +203,7 @@ profiles:
     weights_gib: 16.14
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5
-    hf_private: true
+    hf_private: false
     recommended: true
     badges: [recommended]
     quality: {kl_vs_bf16: 0.0217, top1_pct: 95.78, ppl: 2.7271, date: "2026-10-09", source: *qsrc}
@@ -189,7 +217,7 @@ profiles:
     weights_gib: 20.65
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0
-    hf_private: true
+    hf_private: false
     recommended: false
     badges: [closest to BF16]
     quality: {kl_vs_bf16: 0.0042, top1_pct: 98.06, ppl: 2.7064, date: "2026-10-09", source: *qsrc}

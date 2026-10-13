@@ -9,7 +9,7 @@
 //   assistant: loaded | not_loaded                    Wren's state now
 //   refuse: bool (a load is refused for memory), noModel: bool (no Qwen3.5 on disk),
 //   loadMs: n (how long a load takes), fallback: bool (the 0.8B)
-//   hfToken: bool, password: bool, busy: n (requests running), setupMode: bool (/health mode)
+//   hfToken: bool, privateProfile: a profile id served as private (OPS-95: none is), password: bool, busy: n (requests running), setupMode: bool (/health mode)
 //   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3),
 //   shadowOn: bool (the shadow reader runs: its sessions are kept, `skip`, and reported in `failed`)
 //   waitIdle: bool (the next job's write_config first waits for 2 requests to finish)
@@ -71,6 +71,8 @@ interface Options {
   fallback: boolean;
   loadMs: number;
   hfToken: boolean;
+  /** OPS-95: every published profile is public; this one is served as private (the token notice) */
+  privateProfile: string;
   password: boolean;
   busy: number;
   setupMode: boolean;
@@ -97,6 +99,7 @@ const START: Options = {
   fallback: false,
   loadMs: 2600,
   hfToken: true,
+  privateProfile: '',
   password: false,
   busy: 0,
   setupMode: false,
@@ -298,7 +301,7 @@ export class MockSetup {
       errors.push(`The selection needs ${est.total_gb.toFixed(2)} GiB, ${(est.total_gb - (est.budget_gb ?? 0)).toFixed(2)} GiB more than the ${(est.budget_gb ?? 0).toFixed(2)} GiB there is.`);
       codes.push('over_budget');
     }
-    if (!onDisk && prof.hf_private && !this.o.hfToken) {
+    if (!onDisk && (prof.hf_private || prof.id === this.o.privateProfile) && !this.o.hfToken) {
       errors.push(`${prof.hf_repo} is private and no Hugging Face token is set. Add one with \`hf auth login\` on the box, or set HF_TOKEN, then try again.`);
       codes.push('missing_token');
     }
@@ -677,7 +680,8 @@ export class MockSetup {
     const mm = path.match(/^\/v1\/setup\/models\/([^/]+)$/);
     if (mm) {
       const m = MODELS.find((x) => x.id === decodeURIComponent(mm[1]));
-      return m ? json(200, m) : err(404, 'not_found', `no model ${mm[1]}`);
+      const served = m && { ...m, profiles: m.profiles.map((p) => (p.id === o.privateProfile ? { ...p, hf_private: true } : p)) };
+      return served ? json(200, served) : err(404, 'not_found', `no model ${mm[1]}`);
     }
     const mc = path.match(/^\/v1\/setup\/models\/([^/]+)\/current$/);
     if (mc) {

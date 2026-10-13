@@ -1,6 +1,8 @@
 """ops/profiles: serve.env's overlay sets only the weight-specific values, and every profile resolves."""
 from __future__ import annotations
 
+import glob
+import json
 import os
 import re
 import shutil
@@ -82,26 +84,55 @@ def test_flashnext_profiles_name_their_pack_and_replace_the_27b_flags():
 
 def _use_profile(*args: str) -> subprocess.CompletedProcess:
     with tempfile.TemporaryDirectory() as home:
-        m = re.search(r"^REPO=\$\{HOME\}/(\S+)$", open(os.path.join(ROOT, "ops/serve.env")).read(), re.M)
+        text = open(os.path.join(ROOT, "ops/serve.env")).read()
+        m = re.search(r"^REPO=\$\{HOME\}/(\S+)$", text, re.M)
         os.symlink(ROOT, os.path.join(home, m.group(1) if m else "qwen38-spark-engine"))
+        py = re.search(r"^PY=\$\{HOME\}/(\S+)$", text, re.M)     # serve.env's python: this one (a
+        if py:                                                     # link would lose its venv)
+            os.makedirs(os.path.dirname(os.path.join(home, py.group(1))))
+            with open(os.path.join(home, py.group(1)), "w") as fh:
+                fh.write(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+            os.chmod(os.path.join(home, py.group(1)), 0o755)
         env = {"HOME": home, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         return subprocess.run(["bash", os.path.join(ROOT, "ops/use-profile.sh"), *args], env=env,
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, text=True, timeout=180)
+
+
+def _hub_reachable() -> bool:
+    import urllib.request
+    try:
+        urllib.request.urlopen("https://huggingface.co/api/models/Qwen/Qwen3.8-27B-FP8", timeout=10)
+        return True
+    except OSError:
+        return False
 
 
 def test_use_profile_fetches_a_flashnext_branch_and_needs_no_27b_asset():
     """OPS-97: a Flash-Next switch on a box with none of the 27B's drafters, draft head or base snapshot
-    is not refused; it would fetch the pack's branch, and the memory it waits for is the profile's. A
-    27B profile on the same box is still refused for its missing assets."""
+    is not refused; it would fetch the pack's branch, and the memory it waits for is the profile's.
+    OPS-95: a 27B profile on the same box would fetch its assets first (the K3 drafters, the K4 head,
+    the BF16 drafters into train/, the base into the HF cache), then its weights, every file's URL
+    and size resolved against the hub; with no token."""
     if sys.platform == "darwin":
         print("    (skipped: GNU df -- run it on the box)")
+        return
+    if not _hub_reachable():
+        print("    (skipped: huggingface.co does not answer)")
         return
     r = _use_profile("flashnext-3.05", "--dry-run")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "turboderp/Qwen3.8-Flash-Next-exl3@3.05bpw_h5_ng5 (~85.1 GB)" in r.stdout, r.stdout
     assert "dry run: would fetch" in r.stdout and "MemAvailable >= 70 GB" in r.stdout, r.stdout
+    assert "/resolve/" in r.stdout and "ngram_embedding.safetensors" in r.stdout, r.stdout
     r = _use_profile("exl3-4.5", "--dry-run")
-    assert r.returncode == 3 and "REFUSING" in r.stdout and "27B-FP8 base snapshot" in r.stdout, r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+    for want in ("exl3-drafters-k3/ft-b8-v2.safetensors", "exl3-draft-head-k4/model.safetensors",
+                 "TandemLLM-Qwen3.8-27B-DFlash2-b8/resolve/", "TandemLLM-Qwen3.8-27B-DFlash2-b16/resolve/",
+                 "Qwen/Qwen3.8-27B-FP8/resolve/", "outside.safetensors", "dry run: nothing downloaded",
+                 "TandemLLM-Qwen3.8-27B-EXL3-4.5/resolve/", "model-00001-of-00003.safetensors",
+                 "then 18.4 GB of weights", "dry run: would fetch"):
+        assert want in r.stdout, (want, r.stdout)
+    assert "mtp.safetensors" not in r.stdout and "REFUSING" not in r.stdout, r.stdout
     r = _use_profile("--list")
     assert r.returncode == 0 and "flashnext-6.05" in r.stdout, r.stdout
 
@@ -153,6 +184,44 @@ def test_a_pack_links_the_table_a_sibling_pack_already_holds():
         assert a.st_ino == b.st_ino and not os.path.exists(os.path.join(part, "model-00001-of-00001.safetensors"))
 
 
+def _fake_box(home: str, fails: str) -> tuple[str, str, dict]:
+    """A checkout under `home` with the real use-profile.sh, profiles and serve.env tail, fake stop.sh and
+    start.sh that note what they do (start.sh: setup mode while run/setup-pending is there, as the real
+    one; the profile `fails` does not come up), a fake curl whose /health names the active profile, and a
+    complete Flash-Next 3.05 pack. (repo, marks file, env)."""
+    repo = os.path.join(home, "repo")
+    os.makedirs(os.path.join(repo, "ops"))
+    shutil.copy(os.path.join(ROOT, "ops/use-profile.sh"), os.path.join(repo, "ops"))
+    shutil.copytree(os.path.join(ROOT, "ops/profiles"), os.path.join(repo, "ops/profiles"))
+    tail = open(os.path.join(ROOT, "ops/serve.env")).read().split("# Weight profile (ops/use-profile.sh)")[1]
+    with open(os.path.join(repo, "ops/serve.env"), "w") as fh:
+        fh.write(f"REPO={repo}\nPY={sys.executable}\nPORT=18996\n# Weight profile{tail}")
+    marks = os.path.join(home, "marks")
+    fakes = {"stop.sh": f'echo "stop" >> {marks}\n',
+             "start.sh": f'if [ -f {repo}/run/setup-pending ]; then echo "start setup" >> {marks}; exit 0; fi\n'
+                         f'echo "start $(cat {repo}/ops/active-profile)" >> {marks}\n'
+                         f'[ "$(cat {repo}/ops/active-profile)" != {fails} ]\n'}
+    for name, body in fakes.items():
+        with open(os.path.join(repo, "ops", name), "w") as fh:
+            fh.write("#!/bin/bash\n" + body)
+        os.chmod(os.path.join(repo, "ops", name), 0o755)
+    binary = os.path.join(home, "bin")
+    os.makedirs(binary)
+    with open(os.path.join(binary, "curl"), "w") as fh:         # /health names the active profile
+        fh.write(f'#!/bin/bash\ncase "$*" in *health*) echo "{{\\"weights\\": {{\\"name\\": '
+                 f'\\"$(cat {repo}/ops/active-profile)\\"}}}}";; '
+                 '*) echo \'{"choices": [{"message": {"content": "ready"}}]}\';; esac\n')
+    os.chmod(os.path.join(binary, "curl"), 0o755)
+    pack = os.path.join(home, "flashnext-packs/3.05")            # a complete pack on disk
+    os.makedirs(pack)
+    for n, body in (("config.json", "{}"), ("model.safetensors.index.json", '{"weight_map": {}}'),
+                    ("ngram_embedding.safetensors", "t")):
+        open(os.path.join(pack, n), "w").write(body)
+    env = {"HOME": home, "PATH": binary + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+           "BOX_LOCK": os.path.join(home, "box.flock"), "MEM_NEED_GB": "1"}
+    return repo, marks, env
+
+
 def test_a_failed_switch_to_flashnext_rolls_back_to_the_27b():
     """OPS-99: a switch from a 27B profile to Flash-Next whose start fails stops, starts Flash-Next,
     stops again and starts the 27B profile -- one engine at a time, in that order -- and says so. The
@@ -161,42 +230,229 @@ def test_a_failed_switch_to_flashnext_rolls_back_to_the_27b():
         print("    (skipped: needs /proc/meminfo and flock -- run it on the box)")
         return
     with tempfile.TemporaryDirectory() as home:
-        repo = os.path.join(home, "repo")
-        os.makedirs(os.path.join(repo, "ops"))
-        shutil.copy(os.path.join(ROOT, "ops/use-profile.sh"), os.path.join(repo, "ops"))
-        shutil.copytree(os.path.join(ROOT, "ops/profiles"), os.path.join(repo, "ops/profiles"))
-        tail = open(os.path.join(ROOT, "ops/serve.env")).read().split("# Weight profile (ops/use-profile.sh)")[1]
-        with open(os.path.join(repo, "ops/serve.env"), "w") as fh:
-            fh.write(f"REPO={repo}\nPY={sys.executable}\nPORT=18996\n# Weight profile{tail}")
-        marks = os.path.join(home, "marks")
-        fakes = {"stop.sh": f'echo "stop" >> {marks}\n',
-                 # the Flash-Next start fails; anything else comes up
-                 "start.sh": f'echo "start $(cat {repo}/ops/active-profile)" >> {marks}\n'
-                             f'[ "$(cat {repo}/ops/active-profile)" != flashnext-3.05 ]\n'}
-        for name, body in fakes.items():
-            with open(os.path.join(repo, "ops", name), "w") as fh:
-                fh.write("#!/bin/bash\n" + body)
-            os.chmod(os.path.join(repo, "ops", name), 0o755)
-        binary = os.path.join(home, "bin")
-        os.makedirs(binary)
-        with open(os.path.join(binary, "curl"), "w") as fh:         # /health names the active profile
-            fh.write(f'#!/bin/bash\ncase "$*" in *health*) echo "{{\\"weights\\": {{\\"name\\": '
-                     f'\\"$(cat {repo}/ops/active-profile)\\"}}}}";; '
-                     '*) echo \'{"choices": [{"message": {"content": "ready"}}]}\';; esac\n')
-        os.chmod(os.path.join(binary, "curl"), 0o755)
-        pack = os.path.join(home, "flashnext-packs/3.05")            # a complete pack on disk
-        os.makedirs(pack)
-        for n, body in (("config.json", "{}"), ("model.safetensors.index.json", '{"weight_map": {}}'),
-                        ("ngram_embedding.safetensors", "t")):
-            open(os.path.join(pack, n), "w").write(body)
+        repo, marks, env = _fake_box(home, fails="flashnext-3.05")
         open(os.path.join(repo, "ops/active-profile"), "w").write("exl3-4.5\n")
-        env = {"HOME": home, "PATH": binary + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-               "BOX_LOCK": os.path.join(home, "box.flock"), "MEM_NEED_GB": "1"}
         r = subprocess.run(["bash", os.path.join(repo, "ops/use-profile.sh"), "flashnext-3.05"], env=env,
                            capture_output=True, text=True, timeout=120)
         assert r.returncode == 1 and "rolled back: exl3-4.5 live" in r.stdout, r.stdout + r.stderr
         assert open(marks).read().split("\n")[:-1] == ["stop", "start flashnext-3.05", "stop", "start exl3-4.5"]
         assert open(os.path.join(repo, "ops/active-profile")).read().strip() == "exl3-4.5"
+
+
+def test_a_switch_from_setup_mode_configures_the_box_or_goes_back_to_setup_mode():
+    """OPS-95: on a box install.sh --setup left in setup mode (run/setup-pending, no active profile),
+    ops/use-profile.sh flashnext-3.05 removes the marker before the start, so start.sh starts the
+    profile, not setup mode again; a failed start puts the marker back as it was, removes the active
+    profile and starts setup mode."""
+    if not os.path.isfile("/proc/meminfo") or not shutil.which("flock"):
+        print("    (skipped: needs /proc/meminfo and flock -- run it on the box)")
+        return
+    for fails in ("none", "flashnext-3.05"):
+        with tempfile.TemporaryDirectory() as home:
+            repo, marks, env = _fake_box(home, fails=fails)
+            os.makedirs(os.path.join(repo, "run"))
+            open(os.path.join(repo, "run/setup-pending"), "w").write("HOST=0.0.0.0\n")
+            r = subprocess.run(["bash", os.path.join(repo, "ops/use-profile.sh"), "flashnext-3.05"], env=env,
+                               capture_output=True, text=True, timeout=120)
+            out = r.stdout + r.stderr
+            pending, active = os.path.join(repo, "run/setup-pending"), os.path.join(repo, "ops/active-profile")
+            if fails == "none":
+                assert r.returncode == 0 and "OK: flashnext-3.05 live" in out, out
+                assert open(marks).read().split("\n")[:-1] == ["stop", "start flashnext-3.05"], out
+                assert not os.path.exists(pending) and open(active).read().strip() == "flashnext-3.05"
+            else:
+                assert r.returncode == 1 and "back in setup mode" in out, out
+                assert open(marks).read().split("\n")[:-1] == ["stop", "start flashnext-3.05", "stop",
+                                                              "start setup"], out
+                assert open(pending).read() == "HOST=0.0.0.0\n" and not os.path.exists(active), out
+
+
+def test_exl3_profiles_read_the_bf16_drafters_under_train():
+    """OPS-95: an EXL3 profile's drafter arms load their K3 file by the checkpoint folder's name
+    (engine/drafters/dflash2.py _exl3_file), so CKPT8/CKPT16 are the repository's train/ft-b8-v2 and
+    train/ft-b16 whatever serve.env says (an install.sh box points them into the HF cache, or leaves
+    them empty with --setup), the folders the nvfp4-drafters asset is fetched into."""
+    for n in ("exl3-2.5", "exl3-4.5", "exl3-6.0"):
+        e = _env(n, {"CKPT8": "/hf/snapshots/abc", "CKPT16": ""})
+        out = subprocess.run(["bash", "-c", f"set -a; . {ROOT}/ops/serve.env; echo $CKPT8 $CKPT16"],
+                             env={"HOME": "/h", "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                  "QSE_PROFILE_OVERRIDE": n}, capture_output=True, text=True).stdout.split()
+        assert out == ["/h/qwen38-spark-engine/train/ft-b8-v2", "/h/qwen38-spark-engine/train/ft-b16"], out
+        assert os.path.basename(e["QWEN38_DRAFT_EXL3"]) == "exl3-drafters-k3", e
+
+
+class _Hub:
+    """fetch_weights' view of the hub, on the disk: hub_files from a table, snapshot_download writes
+    the table's bytes (into local_dir, or a snapshot folder of the cache), and every call is noted."""
+
+    def __init__(self, fw, cache: str, bad: tuple = ()):
+        import hashlib
+        import huggingface_hub
+        self.fw, self.cache, self.calls, self.bad = fw, cache, [], set(bad)
+        self.body = {}
+        for repo, names in {
+                "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters": [
+                    "exl3-drafters-k3/ft-b8-v2.safetensors", "exl3-drafters-k3/ft-b16.safetensors",
+                    "exl3-draft-head-k4/model.safetensors", "exl3-draft-head-k4/source-config.json", "README.md"],
+                "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8": ["config.json", "model.safetensors", "README.md"],
+                "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16": ["config.json", "model.safetensors", "README.md"],
+                "Qwen/Qwen3.8-27B-FP8": ["config.json", "tokenizer.json", "layers-0.safetensors",
+                                         "outside.safetensors", "mtp.safetensors", "README.md"]}.items():
+            for n in names:
+                self.body[(repo, n)] = f"{repo}/{n}".encode() * 3
+        self.sha = {k: hashlib.sha256(v).hexdigest() for k, v in self.body.items()}
+        self.saved = (fw.hub_files, huggingface_hub.snapshot_download)
+        fw.hub_files = self.hub_files
+        huggingface_hub.snapshot_download = self.snapshot_download
+
+    def close(self):
+        import huggingface_hub
+        self.fw.hub_files, huggingface_hub.snapshot_download = self.saved
+
+    def hub_files(self, repo, revision=None):
+        files = {n: {"size": len(b), "sha256": self.sha[(r, n)] if n.endswith((".safetensors", ".json"))
+                     and not n.endswith("config.json") else None}
+                 for (r, n), b in self.body.items() if r == repo}
+        return {"repo": repo, "revision": revision, "commit": "c0ffee", "files": files}
+
+    def snapshot_download(self, repo_id, revision=None, local_dir=None, allow_patterns=None,
+                          ignore_patterns=None, token=None, **_kw):
+        import fnmatch
+        self.calls.append((repo_id, local_dir, tuple(allow_patterns or ())))
+        out = local_dir or os.path.join(self.cache, "models--" + repo_id.replace("/", "--"), "snapshots", revision)
+        for (r, n), b in self.body.items():
+            if r == repo_id and (not allow_patterns or any(fnmatch.fnmatch(n, p) for p in allow_patterns)):
+                os.makedirs(os.path.dirname(os.path.join(out, n)), exist_ok=True)
+                with open(os.path.join(out, n), "wb") as fh:
+                    fh.write(b + (b"!" if n in self.bad else b""))
+        return out
+
+
+def _fetch_box():
+    """A HOME, a checkout (the repository's files, train/ empty) and fetch_weights on a fake hub."""
+    sys.path.insert(0, os.path.join(ROOT, "ops"))
+    import fetch_weights
+    tmp = tempfile.mkdtemp(prefix="fetch-box-")
+    home, repo = os.path.join(tmp, "home"), os.path.join(tmp, "repo")
+    os.makedirs(home)
+    os.makedirs(repo)
+    for d in os.listdir(ROOT):                 # a checkout of its own: train/ and run/ empty
+        if d not in ("train", "run", ".git"):
+            os.symlink(os.path.join(ROOT, d), os.path.join(repo, d))
+    old = {k: os.environ.get(k) for k in ("HOME", "HF_HOME", "HF_HUB_CACHE", "HF_TOKEN")}
+    os.environ.update(HOME=home)
+    for k in ("HF_HOME", "HF_HUB_CACHE", "HF_TOKEN"):
+        os.environ.pop(k, None)
+    return fetch_weights, tmp, home, repo, old
+
+
+def _fetch_box_close(tmp, old, hub=None):
+    if hub:
+        hub.close()
+    for k, v in old.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_assets_are_fetched_where_the_profile_reads_them():
+    """OPS-95: fetch_weights.py --assets on a new box (no token): the K3 drafters and the K4 head into
+    ~/.qwen38-spark-engine/weights (the repo's folders kept), the BF16 drafters into the checkout's
+    train/ft-b8-v2 and train/ft-b16, the base into the HF cache without mtp.safetensors; every LFS file
+    checked against the hub's sha256. Run again, nothing is downloaded; a Flash-Next profile needs no
+    asset; an asset that is gone (the K4 head) is the only one fetched again."""
+    fw, tmp, home, repo, old = _fetch_box()
+    hub = _Hub(fw, os.path.join(home, ".cache", "huggingface", "hub"))
+    try:
+        assert fw.assets("exl3-4.5", repo, margin_gb=0) == 0
+        w = os.path.join(home, ".qwen38-spark-engine", "weights")
+        for f in ("exl3-drafters-k3/ft-b8-v2.safetensors", "exl3-drafters-k3/ft-b16.safetensors",
+                  "exl3-draft-head-k4/model.safetensors"):
+            assert open(os.path.join(w, f), "rb").read() == hub.body[("0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters", f)]
+        for arm, r in (("ft-b8-v2", "b8"), ("ft-b16", "b16")):
+            d = os.path.join(repo, "train", arm)
+            assert open(os.path.join(d, "model.safetensors"), "rb").read() == \
+                hub.body[(f"0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-{r}", "model.safetensors")]
+        snap = os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/c0ffee")
+        assert os.path.isfile(os.path.join(snap, "outside.safetensors")) and not os.path.exists(
+            os.path.join(snap, "mtp.safetensors"))
+        assert json.load(open(fw.state_path("base-fp8")))["complete"] is True
+        assert not glob.glob(os.path.join(home, ".qwen38-spark-engine", "weights.partial*")), "a .partial left"
+        assert len(hub.calls) == 5, hub.calls
+        hub.calls.clear()
+        assert fw.assets("exl3-4.5", repo, margin_gb=0) == 0 and hub.calls == []
+        assert fw.assets("flashnext-3.05", repo, margin_gb=0) == 0 and hub.calls == []
+        shutil.rmtree(os.path.join(w, "exl3-draft-head-k4"))
+        assert fw.assets("exl3-2.5", repo, margin_gb=0) == 0
+        assert [c[0] for c in hub.calls] == ["0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters"], hub.calls
+        assert os.path.isfile(os.path.join(w, "exl3-drafters-k3/ft-b16.safetensors"))   # the merge kept it
+    finally:
+        _fetch_box_close(tmp, old, hub)
+
+
+def test_an_interrupted_or_bad_download_is_not_taken_for_the_asset():
+    """OPS-95: a base download that stopped half-way leaves its state `complete: false`, so the next
+    run fetches it again even though config.json is there; a file whose sha256 is not the hub's fails
+    the fetch (exit 5) and stays out of the folder the profile reads."""
+    fw, tmp, home, repo, old = _fetch_box()
+    hub = _Hub(fw, os.path.join(home, ".cache", "huggingface", "hub"), bad=("model.safetensors",))
+    try:
+        snap = os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/c0ffee")
+        os.makedirs(snap)
+        open(os.path.join(snap, "config.json"), "w").write("{}")
+        fw._write_state("base-fp8", {"complete": False})
+        assert fw.assets("nvfp4", repo, margin_gb=0) == 5
+        assert not os.path.exists(os.path.join(repo, "train", "ft-b8-v2")), "a bad file reached train/"
+        assert os.path.isfile(os.path.join(repo, "train", "ft-b8-v2.partial-nvfp4-drafters", "model.safetensors"))
+        hub.bad.clear()
+        hub.calls.clear()
+        assert fw.assets("nvfp4", repo, margin_gb=0) == 0
+        assert [c[0] for c in hub.calls] == ["0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8",
+                                             "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16",
+                                             "Qwen/Qwen3.8-27B-FP8"], hub.calls
+        assert json.load(open(fw.state_path("base-fp8")))["complete"] is True
+    finally:
+        _fetch_box_close(tmp, old, hub)
+
+
+def test_the_disk_is_checked_before_any_download_and_a_dry_run_downloads_nothing():
+    """OPS-95: the assets still to download, the weights after them (--extra-gb) and the margin must
+    fit, or nothing is downloaded (exit 4); a dry run prints every file's URL and size and downloads
+    nothing; an asset with no download is refused (exit 3)."""
+    import contextlib
+    import io
+    fw, tmp, home, repo, old = _fetch_box()
+    hub = _Hub(fw, os.path.join(home, ".cache", "huggingface", "hub"))
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert fw.assets("exl3-4.5", repo, margin_gb=10 ** 9) == 4
+        assert hub.calls == [] and "REFUSING the download" in out.getvalue(), out.getvalue()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert fw.assets("exl3-4.5", repo, dry_run=True, extra_gb=18.4, margin_gb=0) == 0
+        text = out.getvalue()
+        assert hub.calls == [] and "dry run: nothing downloaded" in text, text
+        assert "https://huggingface.co/Qwen/Qwen3.8-27B-FP8/resolve/c0ffee/outside.safetensors" in text, text
+        assert "mtp.safetensors" not in text and "then 18.4 GB of weights" in text, text
+        # a model.yaml whose asset has no download: refused, nothing fetched
+        os.remove(os.path.join(repo, "models"))
+        shutil.copytree(os.path.join(ROOT, "models"), os.path.join(repo, "models"))
+        y = os.path.join(repo, "models", "qwen3.8-27b", "model.yaml")
+        text = open(y).read()
+        i = text.index("  - id: base-fp8")
+        j = text.index("    source:", i)
+        k = text.index("    fetch:", i)
+        open(y, "w").write(text[:i] + text[i:k].replace("fetchable: true", "fetchable: false") + text[j:])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert fw.assets("exl3-4.5", repo, margin_gb=0) == 3
+        assert "base-fp8" in out.getvalue() and "has no download" in out.getvalue(), out.getvalue()
+        assert [c[0] for c in hub.calls] == [], hub.calls
+    finally:
+        _fetch_box_close(tmp, old, hub)
 
 
 def test_every_profile_resolves():

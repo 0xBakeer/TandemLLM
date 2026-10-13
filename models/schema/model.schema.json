@@ -116,6 +116,40 @@
             },
             "type": "array"
           },
+          "fetch": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "files": {
+                  "items": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "gb": {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "repo": {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                "to": {
+                  "maxLength": 2000,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo",
+                "files",
+                "to",
+                "gb"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "fetchable": {
             "type": "boolean"
           },
