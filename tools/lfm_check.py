@@ -280,6 +280,24 @@ def cmd_staircase(a) -> None:
         json.dump(res, open(a.json, "w"), indent=1)
 
 
+def cmd_audit(a) -> None:
+    """The pack's audit record from its headers alone (CPU, nothing loaded): kinds, formats, the K
+    histogram, resident and decode bytes; a tensor the kernels cannot decode is named."""
+    from engine.models.lfm2_moe.pack import PackIndex, summary
+    idx = PackIndex.open(a.pack)
+    try:
+        idx.audit()
+        ok = None
+    except ValueError as e:
+        ok = str(e)
+    s = summary(idx)
+    s.pop("files")
+    s["refused"] = ok
+    s["safetensors_gb"] = round(sum(os.path.getsize(os.path.join(idx.path, f)) for f in os.listdir(idx.path)
+                                    if f.endswith(".safetensors")) / 1e9, 2)
+    print(json.dumps(s, indent=1))
+
+
 def cmd_prices(a) -> None:
     """StairCut's price file from a staircase run and a bench run: per attention class (the adapter's
     price_class of the staircase's contexts) the chain verify ms for 1..16 rows, the plain step's ms."""
@@ -333,13 +351,15 @@ def main() -> None:
     s.add_argument("--reps", type=int, default=20)
     s.add_argument("--max-len", type=int, default=16384)
     s.add_argument("--json")
+    au = sub.add_parser("audit")
+    au.add_argument("--pack", required=True)
     pr = sub.add_parser("prices")
     pr.add_argument("--stair", required=True)
     pr.add_argument("--bench", required=True)
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
     a = ap.parse_args()
-    {"prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
+    {"audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
      "staircase": cmd_staircase}[a.cmd](a)
 
 
