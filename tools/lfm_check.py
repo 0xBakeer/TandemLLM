@@ -280,6 +280,31 @@ def cmd_staircase(a) -> None:
         json.dump(res, open(a.json, "w"), indent=1)
 
 
+def cmd_prices(a) -> None:
+    """StairCut's price file from a staircase run and a bench run: per attention class (the adapter's
+    price_class of the staircase's contexts) the chain verify ms for 1..16 rows, the plain step's ms."""
+    from engine.models.lfm2_moe import kernels as K
+    stair = json.load(open(a.stair))
+    bench = json.load(open(a.bench))
+    plain = bench["graph"]["ms_token"]
+    out = {}
+    for ctx, rows in stair["rows"].items():
+        cls = K.CHUNK * K.class_of(int(ctx) + 16, int(a.max_len))
+        out[str(cls)] = {"chain": {str(r): v["ms"] for r, v in rows.items()}, "plain": {"1": plain}}
+    lo = min(out, key=int)
+    out = {("0" if k == lo else k): v for k, v in out.items()}
+    out["step_ms"] = round(max(0.1, (stair["rows"][max(stair["rows"], key=int)]["16"]["ms"]
+                                     - stair["rows"][max(stair["rows"], key=int)]["15"]["ms"])), 2)
+    out["measured"] = (f"tools/lfm_check.py staircase and bench on {os.path.basename(a.stair)}, "
+                       f"{os.path.basename(a.bench)}: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the "
+                       "median), at the staircase's contexts (the lowest as class 0); plain = the captured decode "
+                       "step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut "
+                       "drafts and learns them online.")
+    os.makedirs(os.path.dirname(a.out), exist_ok=True)
+    json.dump(out, open(a.out, "w"), indent=1)
+    print(json.dumps(out, indent=1))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -308,8 +333,13 @@ def main() -> None:
     s.add_argument("--reps", type=int, default=20)
     s.add_argument("--max-len", type=int, default=16384)
     s.add_argument("--json")
+    pr = sub.add_parser("prices")
+    pr.add_argument("--stair", required=True)
+    pr.add_argument("--bench", required=True)
+    pr.add_argument("--out", required=True)
+    pr.add_argument("--max-len", type=int, default=131072)
     a = ap.parse_args()
-    {"engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
+    {"prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
      "staircase": cmd_staircase}[a.cmd](a)
 
 
