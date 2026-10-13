@@ -29,9 +29,14 @@
 0.8.0 & 10-13 & a second model, Qwen3.8-Flash-Next, from turboderp's EXL3 packs; the Chat tab with chatd; the cache peek and prewarm \\
 0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the EXL3 weights public; the early-access repository; the engine unchanged \\
 0.8.2 & 10-13 & community weight packs; permission modes in the Chat tab; standalone EXL3 packs of the 27B family; a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
+0.8.3 & 10-13 & repository hygiene for the public release; no code change \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.8.3, repository hygiene}\label{sec:changelog-083}
+
+Repository hygiene for the public release: no private hostnames, home paths or personal notes in the files; no code change. The engine's modules are the bytes of 0.8.2, and the text does not change. Comments, docs and tests no longer name a person who gave an instruction, and tests use \code{192.168.1.x} for a LAN address and \code{tandem.example.lan} for a host behind a proxy. \code{install.sh} installs v0.8.3 by default.
 
 \section{0.8.2, community weights and permission modes}\label{sec:changelog-082}
 

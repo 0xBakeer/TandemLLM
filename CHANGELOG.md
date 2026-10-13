@@ -2,6 +2,14 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.8.3, 2026-10-13
+
+Repository hygiene for the public release: no private hostnames, home paths or personal notes in the files; no code change. The engine's modules are the bytes of 0.8.2, and the text does not change.
+
+- Comments, docs, tests and this file's history no longer name a person who gave an instruction, and no agent as the author of code or docs.
+- Tests and e2e specs use `192.168.1.x` for a LAN address and `tandem.example.lan` for a host behind a proxy.
+- `install.sh` installs v0.8.3 by default; the install commands in README.md, docs/setup.md and the manual follow.
+
 ## 0.8.2, 2026-10-13
 
 0.8.2 fixes two bugs found on v0.8.0 in Open WebUI on a phone: a chat that waited minutes for slot 0 while the side slots were free (SRV-409), and Flash-Next calling itself Fable or Claude, made by Anthropic (SRV-411). The engine's modules are the same bytes as in 0.8.1; the disk tier's fingerprint does not change (the new knob is the server's).
