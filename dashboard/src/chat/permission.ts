@@ -1,7 +1,8 @@
 // Permission modes (Khaled, 2026-10-13: "too many allow prompts for cd and ls; I want a yolo
 // mode"). A chat runs in one of three modes, the default for new chats sits in the settings:
 //   ask   every tool asks, unless its policy says always (the old behaviour)
-//   auto  commands and reads in the sandbox run without asking; writes and the internet still ask
+//   auto  what stays in the chat's sandbox runs without asking (commands, reads, writes in the
+//         workspace); the internet and tools outside the sandbox still ask
 //   yolo  nothing asks: the model runs every tool it calls (a never policy still refuses)
 // The server decides for real; this copy drives the mock and the words on screen.
 
@@ -20,7 +21,7 @@ export function modeWord(m: PermissionMode): string {
 /** one line each, for the popover and the settings */
 export function modeDesc(m: PermissionMode): string {
   if (m === 'ask') return 'Every tool asks first, unless its policy says always.';
-  if (m === 'auto') return 'Commands and reads in the sandbox run; writes and the internet ask.';
+  if (m === 'auto') return 'Everything in the sandbox runs; the internet and outside tools ask.';
   return 'Nothing asks. The model runs every tool it calls.';
 }
 
@@ -36,7 +37,7 @@ export function decideCall(mode: PermissionMode, policy: ToolPolicy, risk: ToolR
   if (policy === 'always') return { run: 'allow', approved: 'rule' };
   if (mode === 'yolo') return { run: 'allow', approved: 'yolo' };
   if (risk === 'write' && autoAcceptEdits) return { run: 'allow', approved: 'rule' };
-  if (mode === 'auto' && (risk === 'exec' || risk === 'read')) return { run: 'allow', approved: 'auto' };
+  if (mode === 'auto' && (risk === 'exec' || risk === 'read' || risk === 'write')) return { run: 'allow', approved: 'auto' };
   return { run: 'ask', approved: null };
 }
 

@@ -16,10 +16,10 @@ describe('decideCall', () => {
   it('ask: every tool with an ask policy asks', () => {
     for (const r of ['exec', 'read', 'write', 'network', undefined] as const) expect(decideCall('ask', 'ask', r).run).toBe('ask');
   });
-  it('auto: commands and reads run, writes and the internet ask, an unknown risk asks', () => {
+  it('auto: commands, reads and workspace writes run, the internet asks, an unknown risk asks', () => {
     expect(decideCall('auto', 'ask', 'exec')).toEqual({ run: 'allow', approved: 'auto' });
     expect(decideCall('auto', 'ask', 'read')).toEqual({ run: 'allow', approved: 'auto' });
-    expect(decideCall('auto', 'ask', 'write').run).toBe('ask');
+    expect(decideCall('auto', 'ask', 'write')).toEqual({ run: 'allow', approved: 'auto' });
     expect(decideCall('auto', 'ask', 'network').run).toBe('ask');
     expect(decideCall('auto', 'ask', undefined).run).toBe('ask');
   });
@@ -63,7 +63,7 @@ describe('the mock under each mode', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('auto (the default): bash runs without asking, with the badge; edit_file still asks', async () => {
+  it('auto (the default): bash and edit_file run without asking, with the badge', async () => {
     const mock = new MockChatBackend();
     const c = await mock.createConversation();
     expect(c.settings.permission_mode).toBe('auto');
@@ -71,8 +71,9 @@ describe('the mock under each mode', () => {
     await flush(200);
     await mock.send(c.id, { text: 'Fix the flaky test', client_msg_id: 'cm_a' });
     await flush(70_000);
-    const asking = calls(box.conv).find((p) => p.status === 'asking');
-    expect(asking?.name).toBe('edit_file');
+    expect(calls(box.conv).some((p) => p.status === 'asking' && p.name !== 'web_fetch')).toBe(false);
+    const edit = calls(box.conv).find((p) => p.name === 'edit_file');
+    if (edit) expect(edit.approved).toBe('auto');
     // the script's first bash call fails on purpose (the flaky test); it ran, and nobody was asked
     const bash = calls(box.conv).find((p) => p.name === 'bash');
     expect(['done', 'failed']).toContain(bash?.status);

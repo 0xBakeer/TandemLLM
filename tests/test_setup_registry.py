@@ -366,7 +366,10 @@ def _mock_copy(mid: str) -> str:
 
 
 def _served(m: dict) -> dict:
-    """GET /v1/setup/models/{id} (server/setup_api.py), as JSON."""
+    """GET /v1/setup/models/{id} (server/setup_api.py), as JSON, without the community packs: the
+    dashboard's mock keeps those in mock/setup/community-<id>.json (tests/test_community_weights.py
+    checks the API's own list)."""
+    m = {k: v for k, v in dict(m, community=[]).items() if k != "community"}
     return json.loads(json.dumps(dict(m, contract_version="1.0",
                                       wizard_fields=registry.wizard_fields(m))))
 

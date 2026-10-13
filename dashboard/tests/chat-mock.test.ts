@@ -93,7 +93,7 @@ describe('the mock chat backend', () => {
 
   it('deny skips the tool and the model says what to do by hand; stop ends the turn as stopped', async () => {
     const mock = new MockChatBackend();
-    const c = await mock.createConversation();
+    const c = await mock.createConversation({ permission_mode: 'ask' });
     const { box, sub } = follow(mock, c.id, c);
     await flush(200);
     await mock.send(c.id, { text: 'rename the module', client_msg_id: 'cm_2' });

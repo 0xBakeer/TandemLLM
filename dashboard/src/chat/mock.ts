@@ -265,6 +265,8 @@ export class MockChatBackend implements ChatBackend {
     const sync = mk(this.attachedId, 'Fix the flaky test in the sync worker', 3 * 60_000, { turns: [], sandbox: sandboxFor(true) });
     const uid = this.node(sync, { id: localId('m'), role: 'user', created_at: iso(-200_000, now), parent_id: null, run_id: null, parts: [{ type: 'text', text: 'tests/test_worker.py fails about once in fifty runs. Find out why and fix it; run it 200 times before and after.' }], status: 'done' }, null);
     sync.queue = [{ id: localId('q'), text: 'Also check that ruff passes afterwards.', created_at: iso(-60_000, now), client_msg_id: 'cm_seed1' }];
+    // this seed shows the prompts: it runs in ask (auto would let its edit run, chatd's rule)
+    sync.settings = { ...sync.settings, permission_mode: 'ask' };
     sync.ui = { panes: [{ id: 'pane_term', kind: 'terminal', ref: 'shell', title: 'Terminal' }], active: 'pane_term', split: 0.6 };
     const runner = new Runner(this, sync, uid, CODING_SCRIPT, { startedBy: 'another browser', startedAgoMs: 180_000, skip: { steps: 3, outputLines: 3 } });
     runner.start();

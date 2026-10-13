@@ -345,8 +345,8 @@ export interface ChatSettings {
   /** who approves a tool call (chat/permission.ts); absent on an older server = auto */
   permission_mode?: PermissionMode;
 }
-/** ask: every tool asks unless its policy says always; auto (the default): sandbox commands and
- *  reads run, writes and the internet ask; yolo: nothing asks */
+/** ask: every tool asks unless its policy says always; auto (the default): what stays in the
+ *  sandbox runs (commands, reads, workspace writes), the internet asks; yolo: nothing asks */
 export type PermissionMode = 'ask' | 'auto' | 'yolo';
 
 export type ToolPolicy = 'ask' | 'always' | 'never';
