@@ -1,0 +1,158 @@
+"""SRV-425 / SPD-107: the host side of LFM2.5 in the server loop (engine/models/lfm2_moe/serving.py) and the
+shared tree drafter with no draft head (engine/methods/mtp_drafter.py `NoHead`), no GPU.
+
+  * with no head the round's tree is the lookup's copy of the request's own text alone, and a round
+    with no match takes the plain step; the head's bookkeeping follows the rows synced;
+  * `kv.length` reads the length after a pending chain commit, zero restarts the sequence (conv states
+    zeroed, KV rows kept), another length keeps the rows by length; a forward not at the length is
+    refused;
+  * the cold verbs: `cost()` from the conv states and the KV bytes a token, the cache state's sections
+    (the conv states, in layer order) and views (K and V, token axis 1), `trim_pending(n)` cuts a
+    pending chain and refuses a cut past it, `rollback_to(keep)` commits the kept rows.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import types
+
+import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from engine.drafters.ngram import NgramDrafter  # noqa: E402
+from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead  # noqa: E402
+from engine.methods.staircut import PriceModel, StairCut  # noqa: E402
+from engine.models.lfm2_moe.config import config_from_dict  # noqa: E402
+from engine.models.lfm2_moe.ref import LfmState  # noqa: E402
+from engine.models.lfm2_moe.serving import Lfm2MoeServing  # noqa: E402
+from tests.test_lfm2_moe_ref import TINY  # noqa: E402
+
+
+def _raises(fn, *needles):
+    try:
+        fn()
+    except ValueError as e:
+        for n in needles:
+            assert n in str(e), (n, str(e))
+        return
+    raise AssertionError(f"no ValueError (wanted {needles})")
+
+
+class _Eng:
+    """What the adapter reads of Lfm2MoeEngine, on the host: a state, a verify that records its block,
+    a commit that moves the length."""
+
+    device, dtype = torch.device("cpu"), torch.float32
+
+    def __init__(self):
+        self.cfg = config_from_dict(TINY)
+        self.blocks, self.commits = [], []
+        self._rb = {}
+        self.W, self.experts = {}, {}
+
+    def new_state(self, cap=None, paged=False):
+        c = self.cfg
+        st = LfmState(cap=cap or 64)
+        for li in c.conv_layers:
+            st.conv[li] = torch.ones(c.conv_state_len, c.hidden_size)
+        for li in c.attention_layers:
+            st.k[li] = torch.zeros(c.num_key_value_heads, st.cap, c.head_dim)
+            st.v[li] = torch.zeros(c.num_key_value_heads, st.cap, c.head_dim)
+        return st
+
+    def verify(self, toks, parents, st, graphs=None):
+        M = len(toks)
+        self.blocks.append((list(toks), list(parents), st.length))
+        self._rb[M] = {"next": torch.arange(M), "logits": torch.zeros(M, 8), "hidden": torch.zeros(M, 4)}
+        self._block = (toks, parents, None)
+        return list(range(M))
+
+    def commit(self, st, path, graphs=None):
+        self.commits.append(list(path))
+        st.length += len(path)
+
+
+def _rows(pos, n):
+    return torch.arange(pos, pos + n, dtype=torch.float32)[:, None].repeat(1, 3)
+
+
+def test_no_head_drafts_the_lookup_alone():
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16)
+    head = NoHead()
+    d = MTPTreeDrafter(eng, head, StairCut(PriceModel(), siblings=False), ng)
+    text = [500, 501, 502, 503, 504, 505, 506, 507, 508, 509, 600, 601]
+    prompt = text + [700] + text[:4]
+    d.reset()
+    d.prime(prompt)
+    d.sync(prompt, _rows(0, len(prompt)), 0)
+    tree = d.propose_tree(prompt, 32)
+    tree.check()
+    copy = text[4:] + [700] + text[:4]
+    assert tree.tokens == [prompt[-1]] + copy and tree.parents == list(range(-1, len(copy))), tree.tokens
+    assert head.st.length == len(prompt), head.st.length              # every synced row went in
+    d.reset()
+    d.prime([1, 2, 3, 4])
+    d.sync([1, 2, 3, 4], _rows(0, 4), 0)
+    tree = d.propose_tree([1, 2, 3, 4], 32)
+    assert tree is None or tree.n_draft == 0, tree.tokens              # no match: the plain step
+    return "a copy of the request's text as the whole block; no match, no draft"
+
+
+def test_kv_length_and_restart():
+    s = Lfm2MoeServing(_Eng(), 64)
+    s.st.length = 10
+    s.kv.length = 7
+    assert s.st.length == 7 and s.kv.max_len == 64
+    s.st.k[2][:, 3] = 5.0
+    s.kv.length = 0
+    assert s.st.length == 0 and all(float(t.abs().sum()) == 0 for t in s.st.conv.values())
+    assert float(s.st.k[2][:, 3].sum()) != 0                         # KV rows stay
+    _raises(lambda: setattr(s.kv, "length", 65), "capacity 64")
+    _raises(lambda: s.forward_tree(torch.tensor([1, 2]), [-1, 0], start=3), "forward at 3", "holds 0 rows")
+
+
+def test_cost_and_cache_state():
+    s = Lfm2MoeServing(_Eng(), 64)
+    c = s.cfg
+    cost = s.cost()
+    assert cost.view_bytes_per_token == len(c.attention_layers) * 2 * c.kv_dim * 2
+    assert cost.section_bytes == len(c.conv_layers) * c.conv_state_len * c.hidden_size * 4
+    secs = s.cache_state().sections()
+    assert list(secs) == [f"conv.{li}" for li in c.conv_layers]
+    assert all(secs[f"conv.{li}"] is s.st.conv[li] for li in c.conv_layers)   # the live tensors
+    views = s.cache_state().views()
+    assert [(n, ax) for n, _, ax in views] == [(f"{kv}.{li}", 1) for li in c.attention_layers for kv in "kv"]
+    snap = s.cache_state().clone()
+    for t in s.st.conv.values():
+        t.zero_()
+    s.cache_state().restore(snap)
+    assert all(float(t.min()) == 1.0 for t in s.st.conv.values())
+
+
+def test_chain_block_pending_and_trim():
+    e = _Eng()
+    s = Lfm2MoeServing(e, 64)
+    s.forward_block(torch.tensor([7, 8, 9, 10]), start=0)
+    assert s.kv.length == 4 and e.commits == [[0, 1, 2, 3]]          # the next read lands it
+    s.forward_block(torch.tensor([1, 2, 3]), start=4)
+    assert not s.trim_pending(9) and s.trim_pending(6) and e.commits[-1] == [0, 1]
+    assert s.st.length == 6
+    s.forward_block(torch.tensor([1, 2, 3]), start=6)
+    s.rollback_to(1)
+    assert e.commits[-1] == [0] and s.st.length == 7
+    assert s.trim_pending(7) and not s.trim_pending(8)
+
+
+if __name__ == "__main__":
+    fails = 0
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    for name, fn in tests:
+        try:
+            print(f"  {name:<44} ok   {fn() or ''}")
+        except AssertionError as e:
+            fails += 1
+            print(f"  {name:<44} FAIL {e}")
+    print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
+    sys.exit(1 if fails else 0)

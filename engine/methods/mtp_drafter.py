@@ -48,6 +48,40 @@ from engine.methods.staircut import StairCut
 from engine.tree import DraftTree
 
 
+class NoHead:
+    """The head of a model that has no draft layer (LFM2.5-24B-A2B until Liquid publishes its drafter,
+    ENG-E10): it drafts nothing, so the cut admits the lookup's continuation alone (`StairCut._merged`
+    with an empty spine) and a round with no match takes the plain step. A real head replaces it with
+    no change to the drafter."""
+
+    depth = 0
+    captures = 0
+
+    def __init__(self):
+        self.st = type("NoHeadState", (), {"length": 0})()
+
+    def reset(self) -> None:
+        self.st.length = 0
+
+    def prime(self, rows, nexts) -> None:
+        self.st.length += len(nexts)
+
+    def launch(self, rows, nexts) -> None:
+        self.st.length += len(nexts)
+
+    def read(self) -> tuple[list, list]:
+        return [], []
+
+    def capture_all(self) -> None:
+        pass
+
+    def views(self) -> list:
+        return []
+
+    def resume(self, n: int) -> None:
+        self.st.length = int(n)
+
+
 class MTPTreeDrafter:
     name = "mtp"
     last_q = None

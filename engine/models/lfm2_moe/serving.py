@@ -21,8 +21,11 @@ import time
 
 import torch
 
+from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
+from engine.methods.staircut import PriceModel
 from engine.models.adapter import Capabilities, CostModel
+from engine.models.lfm2_moe import kernels as K
 from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
 from engine.models.state import SectionState
 
@@ -137,6 +140,15 @@ class Lfm2MoeServing:
     @property
     def hidden_post_norm(self) -> torch.Tensor:
         return self._hidden
+
+    def price_class(self, n: int) -> int:
+        """The draft prices' context class of a round at context length `n`: the keys its attention
+        programs cover (kernels.class_of: 2,048 keys, doubling to the window)."""
+        return K.CHUNK * K.class_of(max(1, int(n)), self.max_len)
+
+    def last_streams(self) -> torch.Tensor:
+        """The last committed row's final normed state [1, H] (what a draft head would read next)."""
+        return self._hidden[0, -1:] if self._hidden is not None else torch.zeros(1, self.cfg.hidden_size)
 
     def cost(self) -> CostModel:
         """A snapshot: the conv states whole; K and V of the 10 attention layers a token (bf16)."""
@@ -306,6 +318,31 @@ class Lfm2MoeServing:
             raise ValueError(f"LFM2 forward at {start}, the state holds {self.st.length} rows")
 
 
+def profile_of(path: str) -> str:
+    """The weight profile a checkpoint is served as: the running one (QSE_WEIGHTS), else lfm25-<dir>."""
+    return os.environ.get("QSE_WEIGHTS") or "lfm25-" + os.path.basename(os.path.normpath(path))
+
+
+def prices(path: str, log=print) -> PriceModel:
+    """StairCut's prior for this profile on this device (ops/prices/lfm2.5-24b-a2b/<profile>.<device>.json)."""
+    return PriceModel.load(os.path.join(ROOT, "ops", "prices", MODEL_ID, f"{profile_of(path)}.{device_id()}.json"),
+                           log=log)
+
+
+def lookup_drafter(srv: "Lfm2MoeServing", path: str, corpus: str | None, log=print):
+    """SPD-107: the lookup (the request's own text, `corpus` and the server's suffix store) cut by
+    StairCut, through the shared tree drafter with no head (`NoHead`: this model has no draft layer
+    yet; Liquid's drafter takes its place)."""
+    from engine.drafters.ngram import NgramDrafter
+    from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
+    from engine.methods.staircut import StairCut
+    from engine.tokfp import fingerprint
+    ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path), min_order=3, max_depth=16,
+                      min_corpus_order=8)
+    log(f"[server] LFM2 lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}")
+    return MTPTreeDrafter(srv, NoHead(), StairCut(prices(path, log), siblings=False), ng)
+
+
 def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_pool=None, check: bool = True):
     """LFM2 MoE for the server: the weights, the engine in the loop's interface, the load-time self-check
     (a verify block's rows against the decode step's). Returns (serving, info)."""
@@ -329,26 +366,35 @@ def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_p
 
 def serve(a, ctx) -> dict:
     """LiquidAI's LFM2 MoE from a BF16 checkpoint or an EXL3 pack for the server (`--model <dir>`, the
-    registry's `serve`; server/app.py `_load`). Plain decode from the captured step; no drafter yet
-    (SPD-107), so `--drafter` is taken as none. What the engine cannot hold yet is in
-    `Lfm2MoeServing.caps`."""
+    registry's `serve`; server/app.py `_load`). Plain decode from the captured step; any `--drafter` but
+    none serves the lookup cut by StairCut (`lookup_drafter`, gated by the load-time self-check). What
+    the engine cannot hold yet is in `Lfm2MoeServing.caps`."""
     from transformers import AutoTokenizer
 
     from engine.spec import Relax
     ctx.keys(a.model, [a.model])
-    if a.drafter != "none":
-        ctx.log(f"[server] LFM2 MoE has no drafter yet: --drafter {a.drafter} taken as none")
+    if a.drafter not in ("none", "mtp"):
+        ctx.log(f"[server] LFM2 MoE drafts with the lookup: --drafter {a.drafter} taken as the lookup")
     tok = AutoTokenizer.from_pretrained(a.model)
     pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
     srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool)
+    drafter = None
+    if a.drafter != "none":
+        if info["self_check"] and info["self_check"]["ok"]:
+            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log)
+            # the loop hands a round k rows past the anchor: the lookup's copy runs up to what the cut admits
+            a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
+        else:
+            ctx.log("[server] LFM2 self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
     fmt = "exl3" if info["exl3"] else "bf16"
-    describe = (f"LFM2 MoE {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter none, "
-                f"max_len {a.max_len:,},")
-    return {"engine": srv, "tok": tok, "drafter": None, "path": a.model, "device": "cuda",
+    describe = (f"LFM2 MoE {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
+                f"{'lookup + StairCut' if drafter is not None else 'none'}, max_len {a.max_len:,},")
+    return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
-            "serving": {"tree": False, "sampled_tree": getattr(a, "sampled_tree", "det"), "relax": Relax(1.0, 1),
+            "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "tool_format": "pythonic",
-                        "weights_info": {"format": fmt, "weights": a.model, "drafters": None,
+                        "weights_info": {"format": fmt, "weights": a.model,
+                                         "drafters": "lookup (no draft head)" if drafter is not None else None,
                                          "load_s": info["load"].get("total_s"),
                                          "self_check": info["self_check"]}}}
