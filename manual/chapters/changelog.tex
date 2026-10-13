@@ -28,9 +28,14 @@
 0.7.2 & 10-11 & Wren answers a question in words again; setup guide only \\
 0.8.0 & 10-13 & a second model, Qwen3.8-Flash-Next, from turboderp's EXL3 packs; the Chat tab with chatd; the cache peek and prewarm \\
 0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the engine unchanged \\
+0.8.2 & 10-13 & a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.8.2, the slot-0 wait and the identity note}
+
+Two bugs from v0.8.0 in Open WebUI. A new chat waited 437~s for slot 0 behind another chat's 496~s generation while both side slots were free: it shared only Open WebUI's system prompt and tools with an entry on the NVMe, and a wait for slot 0 had no limit. Now the spill wait needs the request's own conversation, and every wait for slot 0 ends after 3~s (\code{QWEN38\_SIDE\_SLOT0\_WAIT\_S}) when a side slot the request fits in is free. \code{/health} \code{parallel.max\_running} is the limit with its reason, not the high-water mark, and the Lanes view says why a request is queued. Asked who it was, Flash-Next said it was Fable or Claude, made by Anthropic: the reference box served it with the conductor off, so the identity note never went in. The note now says it is TandemLLM running the served model (Qwen3.8-Flash-Next or Qwen3.8-27B, from the pack's model card) on the user's own machine, and that it is no other assistant, for every client the conductor serves.
 
 \section{0.8.1, a new box fetches every file}
 
