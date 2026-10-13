@@ -96,6 +96,8 @@ before this the tests found them: `bash` was offered, the tools' order changed a
 said the sandbox was installed. Only `tests/test_sandbox_box.py` (with `QSE_SANDBOX_BOX=1`) uses
 the real runtime.
 
+A deleted chat goes to the trash for 7 days, and its sandbox stops at once. `POST /conversations/{id}/restore` brings the chat back, and its sandbox starts again on its next tool call. When the 7 days end, or on `DELETE /conversations/{id}?forever=1`, chatd removes the container and the chat's folders under `workspaces/`, `homes/`, `egress/` and `snapshots/`. When chatd starts, it removes every container whose chat is gone or in the trash, and logs each one.
+
 MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are called from chatd
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.

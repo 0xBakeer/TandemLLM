@@ -144,7 +144,7 @@ def entries(doc: dict, models: dict[str, dict]) -> tuple[dict[str, list[dict]], 
 
 
 # ---------------------------------------------------------------------- the sync
-_STATE: dict = {"fetched": False, "checked_at": None, "error": None}
+_STATE: dict = {"fetched": False, "checked_at": None, "error": None, "note": None}
 _GUARD = threading.Lock()
 _INFLIGHT: dict | None = None
 
@@ -182,12 +182,21 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _fail(u: str, short: str, detail: str | None = None) -> None:
+    """A fetch that did not work: the page gets `short` (no URL, one line), the server's log the
+    URL and the detail."""
+    print(f"[community] {u}: {detail or short}", flush=True)
+    _STATE.update(fetched=False, error=short, note=None)
+
+
 def _fetch(timeout: float) -> None:
-    """One conditional GET of url() into the cache; the outcome in _STATE."""
+    """One conditional GET of url() into the cache; the outcome in _STATE. A 404 is not an error:
+    the repository has published no index yet (its main before the first release that carries
+    one), so the page shows the cache or the bundle with a quiet note."""
     u = url()
     _STATE["checked_at"] = _now()
     if u is None:
-        _STATE.update(fetched=False, error="QSE_COMMUNITY_URL is off: nothing is fetched")
+        _STATE.update(fetched=False, error=None, note="fetching is off (QSE_COMMUNITY_URL=off)")
         return
     meta = _meta()
     headers = {"Accept": "application/json", "User-Agent": "TandemLLM-setup"}
@@ -199,28 +208,39 @@ def _fetch(timeout: float) -> None:
             etag = r.headers.get("ETag")
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
-            _STATE.update(fetched=True, error=None)
+            _STATE.update(fetched=True, error=None, note=None)
             return
-        _STATE.update(fetched=False, error=f"{u}: HTTP {exc.code}")
+        if exc.code == 404:
+            print(f"[community] {u}: HTTP 404, no published index yet", flush=True)
+            _STATE.update(fetched=False, error=None, note="no published list yet")
+            return
+        _fail(u, f"GitHub answered HTTP {exc.code}")
         return
-    except (OSError, ValueError) as exc:          # URLError, a timeout, a refused connection
-        _STATE.update(fetched=False, error=f"{u}: {getattr(exc, 'reason', None) or exc}")
+    except TimeoutError:
+        _fail(u, f"GitHub did not answer within {timeout:g} s")
+        return
+    except (OSError, ValueError) as exc:          # URLError, a refused connection, no DNS
+        reason = getattr(exc, "reason", None) or exc
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason):
+            _fail(u, f"GitHub did not answer within {timeout:g} s", str(reason))
+        else:
+            _fail(u, "GitHub could not be reached", str(reason))
         return
     if len(body) > MAX_BYTES:
-        _STATE.update(fetched=False, error=f"{u}: larger than {MAX_BYTES // 1024} KiB")
+        _fail(u, f"the published list is larger than {MAX_BYTES // 1024} KiB")
         return
     try:
         doc = json.loads(body.decode("utf-8"))
     except ValueError as exc:
-        _STATE.update(fetched=False, error=f"{u}: not JSON ({exc})")
+        _fail(u, "the published list is not valid JSON", f"not JSON ({exc})")
         return
     bad = validate(doc, INDEX_SCHEMA)
     if bad:
-        _STATE.update(fetched=False, error=f"{u}: not a community index ({'; '.join(bad[:3])})")
+        _fail(u, "the published list has the wrong shape", "not a community index: " + "; ".join(bad[:3]))
         return
     _write(cache_path(), render_index(doc))
     _write(meta_path(), json.dumps({"url": u, "etag": etag, "fetched_at": _now()}, indent=1) + "\n")
-    _STATE.update(fetched=True, error=None)
+    _STATE.update(fetched=True, error=None, note=None)
 
 
 def sync(timeout: float = TIMEOUT_S) -> dict:
@@ -254,13 +274,15 @@ def add_url(model_id: str | None = None) -> str:
 
 def state(model_id: str | None = None) -> dict:
     """CommunitySync: where the entries come from, when the index was fetched and checked, the last
-    error, the dropped entries (of `model_id` only, when given)."""
+    error (short, for the page; the server's log has the URL), a quiet note (no published list
+    yet, fetching off), the dropped entries (of `model_id` only, when given)."""
     _doc, src, _key = current()
     dropped = registry.community_dropped()
     if model_id is not None:
         dropped = [d for d in dropped if d["model"] == model_id]
     return {"source": src, "url": url(), "fetched_at": _meta().get("fetched_at") if src != "bundled" else None,
-            "checked_at": _STATE["checked_at"], "error": _STATE["error"], "dropped": dropped,
+            "checked_at": _STATE["checked_at"], "error": _STATE["error"], "note": _STATE["note"],
+            "dropped": dropped,
             "add_url": add_url(model_id)}
 
 

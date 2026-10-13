@@ -83,7 +83,7 @@ class _Env:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        community._STATE.update(fetched=False, checked_at=None, error=None)
+        community._STATE.update(fetched=False, checked_at=None, error=None, note=None)
         return self
 
     def __exit__(self, *exc):
@@ -92,7 +92,7 @@ class _Env:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        community._STATE.update(fetched=False, checked_at=None, error=None)
+        community._STATE.update(fetched=False, checked_at=None, error=None, note=None)
 
 
 def test_the_first_entry():
@@ -457,17 +457,25 @@ def test_the_sync():
             # a timeout: the cache, with the reason
             hub.delay = 2.0
             st = community.sync(timeout=0.3)
-            assert st["source"] == "cache" and st["error"] and "second-pack" in json.dumps(community_ids()), st
+            assert st["source"] == "cache" and st["error"] == "GitHub did not answer within 0.3 s", st
+            assert "second-pack" in json.dumps(community_ids())
             hub.delay = 0.0
             # an index of the wrong shape is not written over the cache
             hub.etag, hub.body = '"v2"', b'{"entries": "nope"}'
             st = community.sync()
-            assert st["source"] == "cache" and "not a community index" in st["error"], st
+            assert st["source"] == "cache" and st["error"] == "the published list has the wrong shape", st
             assert "second-pack" in community_ids()
-            # an HTTP error: the cache
+            # an HTTP error: the cache, a short error without the URL (the server's log has it)
+            hub.status = 503
+            out = io.StringIO()
+            with redirect_stdout(out):
+                st = community.sync()
+            assert st["source"] == "cache" and st["error"] == "GitHub answered HTTP 503", st
+            assert hub.url not in json.dumps(st["error"]) and hub.url in out.getvalue(), out.getvalue()
+            # a 404: no published list yet, which is no error (public main before tonight's release)
             hub.status = 404
             st = community.sync()
-            assert st["source"] == "cache" and "HTTP 404" in st["error"], st
+            assert st["source"] == "cache" and st["error"] is None and st["note"] == "no published list yet", st
             hub.status = 200
             # ten page loads at once: one request
             hub.etag, hub.body, hub.delay = '"v3"', _index(second), 0.5
@@ -485,12 +493,13 @@ def test_the_sync():
         with _Env(QSE_COMMUNITY_DIR=tmp, QSE_COMMUNITY_URL="off"):
             n = len(hub.seen)
             st = community.sync()
-            assert len(hub.seen) == n and st["source"] == "cache" and "off" in st["error"] and st["url"] is None, st
+            assert len(hub.seen) == n and st["source"] == "cache" and st["error"] is None, st
+            assert "off" in st["note"] and st["url"] is None, st
         # no cache and nothing answers: the bundle
         with _Env(QSE_COMMUNITY_DIR=os.path.join(tmp, "empty"),
                   QSE_COMMUNITY_URL="http://127.0.0.1:9/models/community-index.json"):
             st = community.sync(timeout=2)
-            assert st["source"] == "bundled" and st["error"], st
+            assert st["source"] == "bundled" and st["error"] == "GitHub could not be reached", st
             assert community_ids() == [SLUG]
     finally:
         hub.close()
@@ -535,7 +544,9 @@ def test_the_api():
             setup_api._get(h, None, ["community"])
             assert h.out[0] == 200 and list(h.out[1]["models"]["qwen3.8-27b"][0]) == list(body["community"][0])
             setup_api._post(h, None, ["community", "sync"], {})
-            assert len(hub.seen) == 1 and h.out[1]["sync"]["source"] == "bundled" and "404" in h.out[1]["sync"]["error"]
+            sync = h.out[1]["sync"]
+            assert len(hub.seen) == 1 and sync["source"] == "bundled", sync
+            assert sync["error"] is None and sync["note"] == "no published list yet", sync
             hub.status, hub.body = 200, _index()
             setup_api._post(h, None, ["community", "sync"], {})
             assert h.out[1]["sync"]["source"] == "github" and h.out[1]["sync"]["fetched_at"], h.out

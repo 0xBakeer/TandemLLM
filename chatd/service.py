@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import sys
 import threading
 import time
@@ -183,6 +184,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         n = self.sandboxes.adopt()
         if n:
             self.log(f"[sandbox] {n} running sandbox(es) adopted")
+        self.reap_sandboxes()
         threading.Thread(target=self.sandboxes.guard, name="chatd-sandbox-guard",
                          daemon=True).start()
         if self.mcp is not None:
@@ -192,6 +194,25 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         self._log(line)
 
     # ================================================================== sandbox glue
+    def reap_sandboxes(self) -> list[str]:
+        """At start: the containers adopt() found whose chat is gone (its container and folders
+        go) or in the trash (its container goes; the files wait for the purge or a restore)."""
+        out = []
+        for cid in list(self.sandboxes.boxes):
+            row = self.store.one("SELECT deleted FROM conversations WHERE id = ?", (cid,))
+            if row is not None and row["deleted"] is None:
+                continue
+            gone = row is None
+            self.sandboxes.remove(cid, files=gone)
+            with self.sandboxes.lock:
+                self.sandboxes.boxes.pop(cid, None)
+            if gone:
+                shutil.rmtree(os.path.join(self.data_dir, "snapshots", cid), ignore_errors=True)
+            self.log(f"[sandbox] {cid}: removed the container of a chat that is "
+                     f"{'gone (and its folders)' if gone else 'in the trash'}")
+            out.append(cid)
+        return out
+
     def workspace(self, cid: str) -> Workspace:
         ws = Workspace(self.sandboxes.paths(cid)[0])
         ws.ensure()
@@ -506,8 +527,42 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         with conv.lock:
             for s in list(conv.fan.subs):
                 s.close()
+        # the chat's sandbox stops with it (its files stay for a restore; the purge removes them)
+        self.sandboxes.stop(cid, "deleted")
         self.log(f"[conv] {cid} deleted (trash for 7 days)")
         self.emit_global({"type": "conversation.deleted", "id": cid})
+
+    def restore(self, cid: str) -> dict:
+        """POST /conversations/{id}/restore: back from the trash. Its sandbox starts again on its
+        next tool call, as any stopped one does."""
+        n = self.store.run("UPDATE conversations SET deleted = NULL WHERE id = ? AND deleted IS NOT "
+                           "NULL", (cid,))
+        if not n:
+            raise ApiError(404, "not_found", "no such conversation in the trash")
+        self.log(f"[conv] {cid} restored from the trash")
+        snap = self.snapshot(cid)
+        self.emit_global({"type": "conversation.created",
+                          "conversation": {k: snap[k] for k in _SUMMARY_KEYS}})
+        return snap
+
+    def purge(self, cid: str) -> None:
+        """The trash's end (7 days, or delete forever): the rows, the sandbox's container and
+        the chat's folders (workspace, home, egress, snapshots)."""
+        if self.store.one("SELECT deleted FROM conversations WHERE id = ?", (cid,)) is None:
+            raise ApiError(404, "not_found", "no such conversation")
+        if self.store.one("SELECT 1 FROM conversations WHERE id = ? AND deleted IS NULL", (cid,)):
+            self.delete(cid)
+        with self.store.tx() as db:
+            for table in ("events", "messages", "runs", "queue", "todos", "compactions", "sandboxes",
+                          "terminals"):
+                db.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (cid,))
+            db.execute("DELETE FROM permission_rules WHERE conversation_id = ?", (cid,))
+            db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+        self.sandboxes.remove(cid, files=True)
+        with self.sandboxes.lock:
+            self.sandboxes.boxes.pop(cid, None)
+        shutil.rmtree(os.path.join(self.data_dir, "snapshots", cid), ignore_errors=True)
+        self.log(f"[conv] {cid} purged: its rows, its sandbox and its folders")
 
     def create_folder(self, name: str) -> dict:
         f = {"id": ulid(), "name": (name or "").strip()[:80] or "Folder"}
@@ -1443,10 +1498,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         now = now or now_ms()
         for r in self.store.all("SELECT id FROM conversations WHERE deleted IS NOT NULL AND "
                                 "deleted < ?", (now - TRASH_KEEP_MS,)):
-            with self.store.tx() as db:
-                for table in ("events", "messages", "runs", "queue"):
-                    db.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (r["id"],))
-                db.execute("DELETE FROM conversations WHERE id = ?", (r["id"],))
+            self.purge(r["id"])
         self.store.run("DELETE FROM events WHERE type IN ('part.delta', 'tool.output') AND ts < ?",
                        (now - DELTA_KEEP_MS,))
         self.store.run("DELETE FROM global_events WHERE ts < ?", (now - DELTA_KEEP_MS,))

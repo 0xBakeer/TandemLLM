@@ -116,6 +116,7 @@ export class QseCommunity extends LightElement {
       <span class="cw-src-text small" role="status">${text}</span>
       <button class="btn btn-ghost btn-sm cw-refresh" ?disabled=${this.syncing} aria-busy=${this.syncing} @click=${() => this.onRefresh()}>${icon('refresh')} ${C.refresh}</button>
       ${idx?.error && !this.syncing ? html`<span class="cw-src-err small" role="alert">${icon('warn')} ${C.syncFailed(idx.error.replace(/\.?$/, '.'))}</span>` : nothing}
+      ${idx?.note && !idx.error && !this.syncing ? html`<span class="cw-src-note small muted">${idx.note}</span>` : nothing}
     </div>`;
   }
 

@@ -1110,8 +1110,11 @@ export interface CommunitySync {
   fetched_at: string | null;
   /** the last attempt by this server; null: none yet */
   checked_at: string | null;
-  /** why the last attempt failed (shown small, not fatal) */
+  /** why the last attempt failed (shown small, not fatal; one short line, no URL) */
   error: string | null;
+  /** a quiet note that is no failure: "no published list yet" (the repo has no index: HTTP 404),
+   *  "fetching is off (QSE_COMMUNITY_URL=off)"; absent on an older server */
+  note?: string | null;
   /** entries that failed validation */
   dropped: { model: string; id: string; path: string; reason: string }[];
   /** "Add yours": the pre-filled GitHub issue form */

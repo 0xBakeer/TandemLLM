@@ -42,6 +42,7 @@ ROUTES = [
     ("GET", rf"/conversations/{_ID}", "get"),
     ("PATCH", rf"/conversations/{_ID}", "patch"),
     ("DELETE", rf"/conversations/{_ID}", "delete"),
+    ("POST", rf"/conversations/{_ID}/restore", "restore"),
     ("POST", r"/folders", "folder"),
     ("GET", rf"/conversations/{_ID}/events", "events"),
     ("POST", rf"/conversations/{_ID}/messages", "send"),
@@ -256,8 +257,15 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self.svc.patch(cid, self._body()))
 
     def r_delete(self, cid):
-        self.svc.delete(cid)
+        # ?forever=1: the purge now (the container and the chat's folders), not the trash
+        if self.query.get("forever") in ("1", "true"):
+            self.svc.purge(cid)
+        else:
+            self.svc.delete(cid)
         self._empty(204)
+
+    def r_restore(self, cid):
+        self._json(200, self.svc.restore(cid))
 
     def r_folder(self):
         self._json(200, self.svc.create_folder(str(self._body().get("name") or "")))
