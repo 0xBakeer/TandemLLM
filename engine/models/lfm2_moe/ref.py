@@ -72,8 +72,10 @@ def chain(n: int) -> list[int]:
 
 
 class Lfm2MoeRef:
-    def __init__(self, cfg, W: dict, dtype=torch.float32, device="cpu"):
+    def __init__(self, cfg, W: dict, dtype=torch.float32, device="cpu", experts: dict | None = None):
         self.cfg, self.W, self.dtype, self.device = cfg, W, dtype, torch.device(device)
+        # MoE layer -> its experts as loaded (engine/models/lfm2_moe/load.py); None: the W names
+        self.experts = experts or {}
         D = cfg.head_dim
         self.inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, D, 2, dtype=torch.float32) / D))
         self.rec: dict = {}          # what a commit needs of the last block: each conv layer's B * x rows
@@ -91,6 +93,9 @@ class Lfm2MoeRef:
         return self.W.get("lm_head.weight", self.W["embed_tokens.weight"])
 
     def lin(self, x: torch.Tensor, w) -> torch.Tensor:
+        if not torch.is_tensor(w):
+            # an EXL3Block (tools/exl3_linear: its torch reference on the CPU)
+            return w.matmul(x.to(torch.bfloat16)).to(x.dtype if not w.out_fp32 else torch.float32)
         return F.linear(x, w)
 
     def rms(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -188,9 +193,12 @@ class Lfm2MoeRef:
         return ids, wts * c.routed_scaling_factor
 
     def expert(self, x: torch.Tensor, li: int, e: int) -> torch.Tensor:
-        p = f"{self.pre(li)}feed_forward.experts.{e}."
-        return self.lin(F.silu(self.lin(x, self.w(p + "w1.weight"))) * self.lin(x, self.w(p + "w3.weight")),
-                        self.w(p + "w2.weight"))
+        if li in self.experts:
+            w1, w3, w2 = self.experts[li].expert(e)
+        else:
+            p = f"{self.pre(li)}feed_forward.experts.{e}."
+            w1, w3, w2 = self.w(p + "w1.weight"), self.w(p + "w3.weight"), self.w(p + "w2.weight")
+        return self.lin(F.silu(self.lin(x, w1)) * self.lin(x, w3), w2)
 
     def moe(self, h: torch.Tensor, li: int) -> torch.Tensor:
         ids, wts = self.route(h, li)
