@@ -159,7 +159,7 @@ Server behaviour (ports, limits, caches, reasoning) is set by command-line flags
 
 Run the gate and the client smoke set before step 1 ([measurement.md](measurement.md)). A deploy that fails step 4 goes back to the backup.
 
-On a box that `install.sh` set up, the installer is the deploy: `bash ~/TandemLLM/src/install.sh --yes --ref <new tag>` checks out the tag, installs the new lock and rewrites `run/ops/serve.env` from the release's template; `run/local.env` stays. A box installed with `--setup` and then switched to a profile counts as configured, and `--setup` alone refuses it. Run `install.sh --setup --force-setup --yes --ref <new tag>` (with `--repo`, for an early-access box: [EARLY-ACCESS.md](../EARLY-ACCESS.md)), then `ops/use-profile.sh <profile>` again; the profile's files are on disk already.
+On a box that `install.sh` set up, the installer is the deploy: `bash ~/TandemLLM/src/install.sh --yes --ref <new tag>` checks out the tag, installs the new lock and rewrites `run/ops/serve.env` from the release's template; `run/local.env` stays. A box installed with `--setup` and then switched to a profile counts as configured, and `--setup` alone refuses it. Run `install.sh --setup --force-setup --yes --ref <new tag>`, then `ops/use-profile.sh <profile>` again; the profile's files are on disk already.
 
 ## Monitoring
 

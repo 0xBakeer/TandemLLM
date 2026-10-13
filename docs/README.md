@@ -1,6 +1,6 @@
 # Documentation
 
-Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others. To install, start with [setup.md](setup.md), or with [EARLY-ACCESS.md](../EARLY-ACCESS.md) if you test from the early-access repository. The manual, [`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), puts these pages and the reference tables in one book.
+Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others. To install, start with [setup.md](setup.md). The manual, [`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), puts these pages and the reference tables in one book.
 
 | page | what it covers |
 |-|-|

@@ -27,7 +27,7 @@
 0.7.1 & 10-11 & Wren drawn as the DGX Spark box; dashboard only \\
 0.7.2 & 10-11 & Wren answers a question in words again; setup guide only \\
 0.8.0 & 10-13 & a second model, Qwen3.8-Flash-Next, from turboderp's EXL3 packs; the Chat tab with chatd; the cache peek and prewarm \\
-0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the EXL3 weights public; the early-access repository; the engine unchanged \\
+0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the EXL3 weights public; the engine unchanged \\
 0.8.2 & 10-13 & community weight packs; permission modes in the Chat tab; standalone EXL3 packs of the 27B family; a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
 0.8.3 & 10-13 & repository hygiene for the public release; no code change \\
 \bottomrule
@@ -60,7 +60,6 @@ A new DGX Spark runs every 27B EXL3 profile and Flash-Next from public files, wi
 
 \paragraph{Public weights.} The six EXL3 sizes of the 27B and their drafters are public on Hugging Face: \code{0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-<bpw>} for 2.5, 3.0, 3.5, 4.0, 4.5 and 6.0 bits a weight, and \code{0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters}, in one collection. Each card has the size's KL against BF16 and a speed table; KL runs from 0.1112 at 2.5 bits to 0.0018 at 6.0 (Table~\ref{tab:exl3-27b}). The calibration repository stays private, and nothing that runs reads it.
 
-\paragraph{Early access.} Testers read the private repository \code{0xBakeer/TandemLLM-early-access}: one branch, \code{main}, and a tag for each release. \code{EARLY-ACCESS.md} at its top says how to install from it: clone it with your own GitHub login, run \code{install.sh --setup --yes --repo <its address>}, then \code{use-profile.sh flashnext-3.05} or \code{exl3-4.5} (Section~\ref{sec:early-access}). This book is in the repository as \code{manual/tandemllm-manual.pdf}, so a tester can read it without LaTeX.
 
 \section{0.8.0, Qwen3.8-Flash-Next and the Chat tab}\label{sec:changelog-080}
 

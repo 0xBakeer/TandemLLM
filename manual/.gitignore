@@ -14,5 +14,5 @@
 *.toc
 *.synctex.gz
 tandemllm-manual.pdf
-# the one built copy in the repository (README.md and EARLY-ACCESS.md link it)
+# the one built copy in the repository (README.md links it)
 !tandemllm-manual.pdf
