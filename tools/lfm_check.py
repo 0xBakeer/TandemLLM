@@ -133,6 +133,8 @@ def cmd_hf(a) -> None:
             seq = torch.tensor([r["ids"] + r["gen"][:-1]], device="cuda")
             lg = model(seq).logits[0, len(r["ids"]) - 1:].float().cpu()
             refs.append(lg)
+    if a.save:
+        torch.save([r.to(torch.bfloat16) for r in refs], a.save)
     res = {"rung": "b", "reference": "transformers Lfm2MoeForCausalLM bf16 sdpa", **_compare(run, refs)}
     print(json.dumps(res, indent=1), flush=True)
     if a.json:
@@ -226,6 +228,27 @@ def cmd_bench(a) -> None:
         res[mode] = {"tok_s": round(a.tokens / dt, 2), "ms_token": round(1e3 * dt / a.tokens, 3)}
         print(json.dumps({mode: res[mode]}), flush=True)
     res["GBps_graph"] = round(res["decode_bytes"] * res["graph"]["tok_s"] / 1e9, 1)
+    if a.profile:
+        # where a decode step's GPU time goes: 16 eager steps under the profiler, kernels by total time
+        from torch.profiler import ProfilerActivity, profile
+        st = eng.new_state(a.max_len)
+        eng.prefill(torch.tensor(ids), st)
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            for _ in range(16):
+                eng.stage(t, st)
+                eng.step(st)
+                st.length += 1
+            torch.cuda.synchronize()
+        rows = []
+        for ev in prof.key_averages():
+            ms = getattr(ev, "device_time_total", None) or getattr(ev, "cuda_time_total", 0)
+            if ms:
+                rows.append((ms / 1e3 / 16, ev.count // 16, ev.key[:90]))
+        rows.sort(reverse=True)
+        res["profile_ms_per_step"] = [{"ms": round(m, 4), "calls": c, "kernel": k} for m, c, k in rows[:25]]
+        res["profile_total_ms"] = round(sum(r[0] for r in rows), 3)
+        for r in res["profile_ms_per_step"]:
+            print(json.dumps(r), flush=True)
     res["peak_allocated_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
     print(json.dumps(res), flush=True)
     if a.json:
@@ -338,6 +361,7 @@ def main() -> None:
         r.add_argument("--model", required=True)
         r.add_argument("--inp", required=True)
         r.add_argument("--json")
+        r.add_argument("--save", help="the reference's logits, for a closer look")
     x = sub.add_parser("xcheck")
     x.add_argument("--pack", required=True)
     b = sub.add_parser("bench")
@@ -345,6 +369,7 @@ def main() -> None:
     b.add_argument("--tokens", type=int, default=256)
     b.add_argument("--max-len", type=int, default=8192)
     b.add_argument("--json")
+    b.add_argument("--profile", action="store_true", help="the decode step's kernels by GPU time")
     s = sub.add_parser("staircase")
     s.add_argument("--model", required=True)
     s.add_argument("--contexts", type=int, nargs="+", default=[1024, 8192])
