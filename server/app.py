@@ -4492,19 +4492,26 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             kwargs.update(add_generation_prompt=False, continue_final_message=True)
         else:
             kwargs["add_generation_prompt"] = True
+        # a client that asked for no thinking, to a model whose template opens the reasoning block
+        # anyway (LFM2.5 always does): the block is closed right after the generation prompt, as the
+        # Qwen template's own thinking off renders it, so the answer starts at once
+        close = (list(tok(CLOSE_THINK, add_special_tokens=False).input_ids)
+                 if client.off and kwargs.get("add_generation_prompt") else [])
         seg = STATE.get("segments")
         if seg is None:
             enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
                                           **kwargs)
+            cids = _as_ids(enc, device="cpu")
+            if close and opens_think(tok.decode(cids[-8:].tolist(), skip_special_tokens=False)):
+                cids = torch.cat([cids, torch.tensor(close, dtype=cids.dtype)])
             if count == "ids":
-                return _as_ids(enc, device="cpu").tolist()
+                return cids.tolist()
             if count == "think":
-                cids = _as_ids(enc, device="cpu")
                 return int(cids.numel()), opens_think(tok.decode(cids.tolist(),
                                                                  skip_special_tokens=False))
             if count:
-                return int(_as_ids(enc, device="cpu").numel())
-            ids = _as_ids(enc)
+                return int(cids.numel())
+            ids = cids.to(STATE["device"])
             # Decoded from the ids rather than rendered a second time, so what is inspected is
             # exactly the token sequence the engine is about to be given.
             return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
@@ -4512,6 +4519,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # (server/tokcache.py); the reasoning tag read from the prompt's decoded tail
         text = tok.apply_chat_template(messages, tokenize=False, **kwargs)
         ids = seg.encode(text)
+        if close and opens_think(tok.decode(ids[-8:], skip_special_tokens=False)):
+            ids = list(ids) + close
         if count == "ids":
             return list(ids)
         if count == "think":
