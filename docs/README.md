@@ -1,6 +1,6 @@
 # Documentation
 
-Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others.
+Each page covers one part of TandemLLM and names the files that implement it. Start with the architecture page, a one-page tour that links to all the others. To install, start with [setup.md](setup.md), or with [EARLY-ACCESS.md](../EARLY-ACCESS.md) if you test from the early-access repository. The manual, [`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), puts these pages and the reference tables in one book.
 
 | page | what it covers |
 |-|-|
@@ -17,7 +17,8 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [operations.md](operations.md) | running a profile, memory rules, holds, deploys, troubleshooting |
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
 | [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |
-| [setup.md](setup.md) | the dashboard's setup guide, the model registry behind it, and Wren |
+| [setup.md](setup.md) | a new box from the command line, the dashboard's setup guide, the model registry behind it, and Wren |
+| [chat.md](chat.md) | the Chat tab (in beta) and chatd, the service behind it, with the known limitations |
 | [memory.md](memory.md) | memory notes: what the model keeps about the user and the work |
 | [shadow-reader.md](shadow-reader.md) | the small model that follows each session and answers questions about it |
 | [proxy.md](proxy.md) | the dashboard as a proxy in front of other engines and cloud APIs |

@@ -126,7 +126,7 @@ The engine's own 503s (a drain, a full queue) pass through unchanged: nginx only
 
 ## Roles beside the engine (residency)
 
-The engine loads first and holds most of the board. Anything else that should run beside it -- a decision model, a librarian, a reader -- loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable`, less what the engine may still take up to its declared peak (`MEM_PEAK_GIB`, 77, less what it holds now, from its `/health`; the whole peak when it does not answer), minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.
+The engine loads first and holds most of the board. Anything else that should run beside it (a decision model, a librarian, a reader) loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable`, less what the engine may still take up to its declared peak (`MEM_PEAK_GIB`, 77, less what it holds now, from its `/health`; the whole peak when it does not answer), minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.
 
 A claim is the role's peak, not its idle size, and it is what the role takes from `MemAvailable`, not what `nvidia-smi` shows: arbiter shows 5.1 GB there and took 8.2 GiB of `MemAvailable` (2026-10-01). The floor, the margin, the settle time, the load order and the claims are the conductor's `residency` document, versioned like the others and edited in the dashboard (Conductor, Profiles, Residency). The System view shows the plan: the engine's own split (`memory.split` of `/v1/dashboard/system`, every part read off the object that holds it, and the load stages), `MemAvailable`, every role with its claim and whether it fits now, and the last refusal.
 
@@ -140,7 +140,7 @@ Open WebUI sends no conversation id unless told to. Without one the conductor te
 {"X-OpenWebUI-Chat-Id": "{{CHAT_ID}}"}
 ```
 
-The placeholder is filled per request (Open WebUI 0.11 or later, `parse_custom_headers`); the model list and the task requests get it too, which costs nothing (an empty value is ignored, a title request is a side request with no session). Prefer this to `ENABLE_FORWARD_USER_INFO_HEADERS=true`, which sends the same header but also the user's name, id, email and role on every connection, external providers included. The engine reads `X-OpenWebUI-Chat-Id` either way; a decision row with `extra.session` = `id` shows it arrived.
+The placeholder is filled per request (Open WebUI 0.11 or later, `parse_custom_headers`); the model list and the task requests get it too, which costs nothing (an empty value is ignored, a title request is a side request with no session). Prefer this to `ENABLE_FORWARD_USER_INFO_HEADERS=true`, which sends the same header but also four fields about the user (`name`, `id`, `email`, `role`) on every connection, external providers included. The engine reads `X-OpenWebUI-Chat-Id` either way; a decision row with `extra.session` = `id` shows it arrived.
 
 ## Settings
 
@@ -158,6 +158,8 @@ Server behaviour (ports, limits, caches, reasoning) is set by command-line flags
 4. Check that `/health` says `ok` and that `VERSION` is the new one, then send a short request.
 
 Run the gate and the client smoke set before step 1 ([measurement.md](measurement.md)). A deploy that fails step 4 goes back to the backup.
+
+On a box that `install.sh` set up, the installer is the deploy: `bash ~/TandemLLM/src/install.sh --yes --ref <new tag>` checks out the tag, installs the new lock and rewrites `run/ops/serve.env` from the release's template; `run/local.env` stays. A box installed with `--setup` and then switched to a profile counts as configured, and `--setup` alone refuses it. Run `install.sh --setup --force-setup --yes --ref <new tag>` (with `--repo`, for an early-access box: [EARLY-ACCESS.md](../EARLY-ACCESS.md)), then `ops/use-profile.sh <profile>` again; the profile's files are on disk already.
 
 ## Monitoring
 

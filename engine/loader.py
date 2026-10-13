@@ -103,12 +103,17 @@ class Weights:
         # ENG-197: an EXL3 checkpoint replaces every projection it quantises and the head. The
         # base snapshot still gives everything else (norms, embedding, the GDN gates and
         # convolutions in their original bf16), and its copies of the replaced projections are
-        # never read off the disk. Unset (the default), nothing below this line changes.
+        # never read off the disk. A standalone EXL3 pack identifies itself in config.json;
+        # explicit exl3 paths (or an empty string to disable it) still take precedence.
         exl3 = exl3 if exl3 is not None else _S.get("EXL3")
+        if exl3 is None and _config_exl3(snapshot):
+            exl3 = snapshot
         self._skip: set[str] = set()
         if exl3:
             exl3 = os.path.expanduser(str(exl3))
             self._skip = exl3_bases(exl3)
+        self._standalone_exl3 = bool(exl3 and os.path.realpath(exl3) == os.path.realpath(snapshot))
+        self._standalone_bf16 = self._standalone_exl3 and _config_declares_bf16(snapshot)
         self._load(skip_mtp)
         if Layout.head not in self.t and Layout.embed in self.t and "lm_head" not in self._skip:
             if tied is None:
@@ -184,6 +189,12 @@ class Weights:
                             pending_scale[base] = s
                         continue
                     t = f.get_tensor(key)
+                    if self._standalone_exl3 and t.dtype == torch.float16:
+                        if not self._standalone_bf16:
+                            raise ValueError(f"{key}: standalone EXL3 FP16 copies require a declared BF16 "
+                                             "source dtype (dtype or torch_dtype); use the original BF16 "
+                                             "checkpoint as the base and this pack as the EXL3 overlay")
+                        t = _stored_fp16_to_bf16(t, key)
                     if t.dtype == torch.float8_e4m3fn:
                         base = name[: -len(".weight")]
                         if base in pending_scale:
@@ -360,31 +371,39 @@ class Weights:
         fp16 copies of the bf16 originals, e.g. in_proj_a/b). A projection the base has and the
         EXL3 checkpoint does not quantise stays what the base loaded, and is named."""
         from tools.exl3_linear import read_block
+        from contextlib import ExitStack
         files = _exl3_files(path)
         found, added, kbits = 0, 0, {}
-        for fpath in files:
-            with safe_open(fpath, framework="pt", device=self.device) as f:
-                bases = sorted({k[: -len(".trellis")] for k in f.keys() if k.endswith(".trellis")})
-                for base in bases:
-                    name = Layout.canonical(base)
-                    if name is None or name.startswith(Layout.mtp_prefix):
-                        continue
-                    if name == Layout.head[: -len(".weight")]:
-                        blk = read_block(f, base, out_fp32=True)
-                        old = self.t.get(Layout.head)
-                        if old is not None:
-                            assert tuple(blk.shape) == tuple(old.shape), (blk.shape, old.shape)
-                            was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
-                            self.bytes_other -= was
-                        self.t[Layout.head] = blk
-                        self.bytes_other += blk.nbytes
-                    else:
-                        blk = read_block(f, base)
-                        self.q[name] = blk
-                        self.bytes_fp8 += blk.nbytes
-                    added += blk.nbytes
-                    kbits[blk.kb] = kbits.get(blk.kb, 0) + 1
-                    found += 1
+        with ExitStack() as stack:
+            owners = {}
+            for fpath in files:
+                shard = stack.enter_context(safe_open(fpath, framework="pt", device=self.device))
+                for key in shard.keys():
+                    if key in owners:
+                        raise ValueError(f"{key}: duplicate tensor in EXL3 shards")
+                    owners[key] = shard
+            f = _EXL3ShardView(owners)
+            bases = sorted({k[: -len(".trellis")] for k in f.keys() if k.endswith(".trellis")})
+            for base in bases:
+                name = Layout.canonical(base)
+                if name is None or name.startswith(Layout.mtp_prefix):
+                    continue
+                if name == Layout.head[: -len(".weight")]:
+                    blk = read_block(f, base, out_fp32=True)
+                    old = self.t.get(Layout.head)
+                    if old is not None:
+                        assert tuple(blk.shape) == tuple(old.shape), (blk.shape, old.shape)
+                        was = 0 if old is self.t.get(Layout.embed) else old.numel() * old.element_size()
+                        self.bytes_other -= was
+                    self.t[Layout.head] = blk
+                    self.bytes_other += blk.nbytes
+                else:
+                    blk = read_block(f, base)
+                    self.q[name] = blk
+                    self.bytes_fp8 += blk.nbytes
+                added += blk.nbytes
+                kbits[blk.kb] = kbits.get(blk.kb, 0) + 1
+                found += 1
         if not found:
             raise RuntimeError(f"no EXL3 tensors found in {path}")
         from tools.exl3_linear import EXL3Block
@@ -480,7 +499,8 @@ def _exl3_files(path: str) -> list[str]:
     idx = os.path.join(path, "model.safetensors.index.json")
     if os.path.isfile(idx):
         import json
-        names = sorted(set(json.load(open(idx))["weight_map"].values()))
+        with open(idx) as f:
+            names = sorted(set(json.load(f)["weight_map"].values()))
         return [os.path.join(path, n) for n in names]
     return sorted(glob_safetensors(path))
 
@@ -492,7 +512,8 @@ def exl3_bases(path: str) -> set[str]:
     idx = os.path.join(path, "model.safetensors.index.json") if os.path.isdir(path) else None
     if idx and os.path.isfile(idx):
         import json
-        keys = list(json.load(open(idx))["weight_map"])
+        with open(idx) as f:
+            keys = list(json.load(f)["weight_map"])
     else:
         for fpath in _exl3_files(path):
             with safe_open(fpath, framework="pt", device="cpu") as f:
@@ -504,6 +525,66 @@ def exl3_bases(path: str) -> set[str]:
             if name and not name.startswith(Layout.mtp_prefix):
                 out.add(name)                 # "lm_head" too: the base's bf16 head is not read
     return out
+
+
+class _EXL3ShardView:
+    """A projection's trellis, signs and codebook may live in different indexed shards."""
+    def __init__(self, owners):
+        self.owners = owners
+
+    def keys(self):
+        return self.owners.keys()
+
+    def get_tensor(self, key):
+        return self.owners[key].get_tensor(key)
+
+
+def _stored_fp16_to_bf16(t: torch.Tensor, key: str) -> torch.Tensor:
+    """Preserve finite stored values, not a claim to recover the pre-conversion BF16 source.
+
+    Only the original and the resulting tensor are full-size; comparison temporaries are
+    bounded even when a pack leaves its vocabulary head or embedding unquantised.
+    """
+    out = torch.empty(t.shape, dtype=torch.bfloat16, device=t.device)
+    src, dst = t.reshape(-1), out.reshape(-1)
+    for i in range(0, src.numel(), 1 << 20):
+        part = src[i:i + (1 << 20)]
+        if not torch.isfinite(part).all().item():
+            raise ValueError(f"{key}: standalone EXL3 plain FP16 tensor contains non-finite values")
+        bf = part.to(torch.bfloat16)
+        if not torch.equal(part, bf.to(torch.float16)):
+            raise ValueError(f"{key}: standalone EXL3 stored FP16 values cannot be converted to BF16 "
+                             "losslessly; use the original BF16 checkpoint as the base and this "
+                             "pack as the EXL3 overlay")
+        dst[i:i + (1 << 20)].copy_(bf)
+    return out
+
+
+def _config_declares_bf16(snapshot: str) -> bool:
+    import json
+    try:
+        with open(os.path.join(snapshot, "config.json")) as f:
+            raw = json.load(f)
+    except OSError:
+        return False
+    t = raw.get("text_config") or raw
+    values = [t[k] for k in ("dtype", "torch_dtype") if t.get(k) is not None]
+    if not values:
+        values = [raw[k] for k in ("dtype", "torch_dtype") if raw.get(k) is not None]
+    return bool(values) and all(isinstance(v, str) and
+                               v.lower().removeprefix("torch.") in ("bfloat16", "bf16") for v in values)
+
+
+def _config_exl3(snapshot: str) -> bool:
+    import json
+    try:
+        with open(os.path.join(snapshot, "config.json")) as f:
+            raw = json.load(f)
+    except OSError:
+        return False
+    t = raw.get("text_config") or raw
+    q = raw.get("quantization_config") or t.get("quantization_config") or {}
+    return q.get("quant_method") == "exl3"
 
 
 def _config_tied(snapshot: str) -> bool:

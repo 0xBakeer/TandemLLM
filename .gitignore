@@ -17,6 +17,8 @@ train/
 # the manual's PDF is built by .github/workflows/manual.yml on a tag and attached to the release
 manual/tandemllm-manual*.pdf
 tandemllm-manual*.pdf
+# except one built copy of the book, so a reader needs no LaTeX
+!manual/tandemllm-manual.pdf
 ops/active-profile
 # the setup guide's files on a box: the generated overlay, its backups, the jobs, the audit log
 /run/

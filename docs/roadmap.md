@@ -1,6 +1,6 @@
 # Roadmap
 
-TandemLLM runs two models (Qwen3.8-27B and Qwen3.8-Flash-Next, one at a time) on one board (DGX Spark), one request at a time by default. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
+TandemLLM runs two models (Qwen3.8-27B and Qwen3.8-Flash-Next, one at a time) on one board (DGX Spark). The 27B serves one request at a time by default; Flash-Next's profiles run three slots. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
 
 ## A mixture-of-experts model: served, with four parts open
 
@@ -24,9 +24,9 @@ Built in 0.3.13-test ([caches.md](caches.md#disk-tier)): recurrent-state anchors
 
 ## Profiles as data
 
-Today a profile is a `serve.env` file. The plan is a small profile format that a validator checks. It names every weight file with its format and hash, and it holds all the settings. A facts block records what we measured: memory and disk, speed at prompt lengths from 256 to 64k tokens, and quality against the reference. Each number carries a label that says how we got it, such as "measured" or "estimate".
+Today a profile is a `serve.env` file. Part of this plan shipped: weight profiles in 0.5.0 (`ops/use-profile.sh` switches one engine at a time and rolls back when the new one fails its smoke), the model registry and the setup guide's memory estimate in 0.7.0 ([setup.md](setup.md)), and in 0.8.1 a fetch of every file a profile reads, each checked against the hub's sha256. The plan is a small profile format that a validator checks. It names every weight file with its format and hash, and it holds all the settings. A facts block records what we measured: memory and disk, speed at prompt lengths from 256 to 64k tokens, and quality against the reference. Each number carries a label that says how we got it, such as "measured" or "estimate".
 
-The repository would ship a signed catalog of tested profiles, and the dashboard would get a Profiles view to install them and switch between them. A switch would do the byte math first, allow one engine at a time, and roll back if the new profile does not come up healthy.
+Still open: the format and its validator, and a signed catalog of tested profiles in the repository that the setup guide installs from.
 
 ## Other GPUs, then several GPUs
 
