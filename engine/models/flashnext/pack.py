@@ -11,8 +11,8 @@ every tensor in exactly one kind:
            the head): `X.trellis` int16 [Kin/16, N/16, 16 K], `X.suh` fp16 [Kin], `X.svh` fp16 [N],
            `X.mul1` (the codebook's multiplier, checked to be 0x83DCD12D)
   mixer    a hyper-connection mixer's projections (`input_mix_weight_down/up`,
-           `block_inject_weight`): fp16 in the pack, int8 with a per-row fp32 scale here (Khaled,
-           2026-10-11: lossy accepted; QWEN38_FN_MIX=fp16 keeps the pack's values)
+           `block_inject_weight`): fp16 in the pack, int8 with a per-row fp32 scale here (a project
+           decision of 2026-10-11: lossy accepted; QWEN38_FN_MIX=fp16 keeps the pack's values)
   plain    everything else the model reads, as stored (norms, router, `in_proj_a/b`, PLE
            projections, conv weights, A_log, the embedding)
   table    the n-gram table (its own file)

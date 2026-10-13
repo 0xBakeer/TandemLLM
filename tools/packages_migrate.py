@@ -10,7 +10,7 @@ The edits:
 
   1  SRV-163: a literal address in front of TandemLLM's own routes (`/v1/laya`, `/v1/library`,
      `/v1/memory`) becomes `{tandem_url}`, the address the client used (the box's saved packages
-     had `https://ai-api.khaled.de`, which failed TLS wherever the private root CA is not trusted:
+     had a literal LAN address, which failed TLS wherever the private root CA is not trusted:
      42 % of a session went to certificate debugging).
   2  SRV-163: the Laya helper fails fast with a truthful message (the call failed on this
      machine, the code is not the cause, continue without the verdict) and exits 3; the curl
@@ -213,7 +213,7 @@ SCRATCH_RULE = ('''- Scratch: logs, helper scripts and kits go to {tandem_scratc
                 '''"$(git rev-parse --git-dir)/info/exclude"; true)`, so git never lists it, and delete it (`rm -rf '''
                 '''{tandem_scratch}`) as your last step before "done". The project gets only what the user asked for; '''
                 '''never list scratch files as deliverables.''')
-# 34 (FX15, UX3 2026-10-08): A01 ran `rm -rf /home/user/pago/.tandem` in Khaled's own project (his
+# 34 (FX15, UX3 2026-10-08): A01 ran `rm -rf /home/user/pago/.tandem` in the user's own project (their
 # test kit of 18:43), by the leftover rule below, right after writing "let me not touch pago's files".
 # The scratch is this conversation's own folder (`.tandem/<session token>`, packages.scratch_for),
 # marked when this run makes it; only a marked folder is deleted, never one that was there before

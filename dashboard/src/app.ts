@@ -42,7 +42,7 @@ const TABS: TabDef[] = [
   { view: 'system', label: 'System' },
   { view: 'setup', label: 'Setup' },
 ];
-/** The phone's bottom bar (2026-10-13, Khaled's iPhone pass): Chat one tap away, the two views
+/** The phone's bottom bar (2026-10-13, an iPhone pass): Chat one tap away, the two views
  *  watched daily beside it, and a More slot that opens the rest as a sheet. The slot shows the
  *  active view when that view is behind More, so the page you are on is never invisible. */
 const PHONE_BAR: View[] = ['chat', 'usage', 'performance'];

@@ -1,5 +1,5 @@
 """Quality of the hyper-connection mixers' weight forms against the pack's own fp16 mixers (ENG-221 byte
-cuts, Fable 5.1's P2.4): int8 rows (what decode serves today), int8 or int4 with a scale a group of G
+cuts, P2.4): int8 rows (what decode serves today), int8 or int4 with a scale a group of G
 weights (`int8g128`, `int4g32`), as fake-quantised fp16 weights on the same kernels, so only the weight
 values differ; `form@scope` quantises only some mixers (`@down`, `@up`, `@L0-11`) to find where a
 loss comes from.

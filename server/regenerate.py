@@ -5,7 +5,7 @@ names, same wording), and on 0.3.49 the same five names in the same order. The s
 greedy (temperature 0, the exact path) and Open WebUI sends no sampling parameter, so the same
 prompt gives the same answer. To the user Regenerate looks broken.
 
-THE RULING (Khaled, 2026-10-07 22:50, "do the best practice"). A normal answer stays exactly as
+THE RULE (the project's, 2026-10-07: follow best practice). A normal answer stays exactly as
 today: greedy, lossless, the drafter on. Only a regenerate gets a varied answer.
 
 WHAT A REGENERATE IS. Open WebUI sends no flag. What it sends was read off its own source

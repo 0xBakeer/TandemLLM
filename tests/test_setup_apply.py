@@ -614,10 +614,10 @@ def test_the_current_selection():
         assert any(w.startswith("SERVED_MODEL changes from mine to other") for w in p["warnings"])
         # a HOST the registry has no option for stays recommended and is listed
         with open(apply.overlay_path(), "a") as fh:
-            fh.write("HOST='192.168.178.143'\n")
+            fh.write("HOST='192.168.1.143'\n")
         b = apply.current_selection(M)
         assert b["selection"]["advanced"]["host"] == "0.0.0.0"
-        assert {"field": "advanced.host", "value": "192.168.178.143"} in b["unmatched"], b
+        assert {"field": "advanced.host", "value": "192.168.1.143"} in b["unmatched"], b
 
 
 def test_the_current_selection_of_unset_keys():

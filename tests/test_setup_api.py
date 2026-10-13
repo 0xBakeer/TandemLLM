@@ -230,7 +230,7 @@ def test_cross_site_posts_are_refused():
                           ({"Content-Type": "application/x-www-form-urlencoded"}, (415, "json_only")),
                           ({"Content-Type": ""}, (415, "json_only")),
                           ({"Sec-Fetch-Site": "cross-site"}, (403, "cross_site")),
-                          ({"Origin": "https://evil.example", "Host": "192.168.178.143:8000"},
+                          ({"Origin": "https://evil.example", "Host": "192.168.1.143:8000"},
                            (403, "cross_origin")),
                           ({"Origin": "null", "Host": "127.0.0.1:8000"}, (403, "cross_origin")),
                           ({"Origin": "http://127.0.0.1:8000.evil.example", "Host": "127.0.0.1:8000"},
@@ -238,11 +238,11 @@ def test_cross_site_posts_are_refused():
         for route in ("/v1/setup/reset", "/v1/setup/apply", "/v1/setup/assistant/load"):
             code, b = call("POST", route, body, headers)
             assert (code, b["error"]["code"]) == want, (route, headers, code, b)
-    ok = ({"Origin": "http://192.168.178.143:8000", "Host": "192.168.178.143:8000",
+    ok = ({"Origin": "http://192.168.1.143:8000", "Host": "192.168.1.143:8000",
            "Sec-Fetch-Site": "same-origin"},
-          {"Origin": "https://ai-api.khaled.de", "Host": "ai-api.khaled.de", **PROXY},
-          {"Origin": "https://ai-api.khaled.de", "Host": "127.0.0.1:8000",
-           "X-Forwarded-Host": "ai-api.khaled.de"},
+          {"Origin": "https://tandem.example.lan", "Host": "tandem.example.lan", **PROXY},
+          {"Origin": "https://tandem.example.lan", "Host": "127.0.0.1:8000",
+           "X-Forwarded-Host": "tandem.example.lan"},
           {"Content-Type": "application/json; charset=utf-8"},
           {})
     for headers in ok:

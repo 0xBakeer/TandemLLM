@@ -65,11 +65,11 @@ def test_the_sandbox_on_this_box():
         assert "nvidiactl" not in out and "nvidia0" not in out, out      # no GPU device
 
         # the network: nothing local, the internet through the proxy
-        for target in ("http://192.168.178.1/", "http://192.168.178.131:8000/v1/models",
+        for target in ("http://192.168.1.1/", "http://192.168.1.131:8000/v1/models",
                        "http://10.0.0.1/", "http://169.254.169.254/"):
             code, out = _run(sb, f"curl -sS -m 10 -o /dev/null -w '%{{http_code}}' {target}")
             assert out.strip().endswith("403") or code != 0, (target, code, out)
-        code, out = _run(sb, "curl -sS -m 5 --noproxy '*' http://192.168.178.131:8000/ 2>&1 "
+        code, out = _run(sb, "curl -sS -m 5 --noproxy '*' http://192.168.1.131:8000/ 2>&1 "
                              "| head -c 200")
         assert "Couldn't connect" in out or "unreachable" in out, out   # no route at all
         code, out = _run(sb, "curl -sS -m 30 -o /dev/null -w '%{http_code}' "

@@ -1,6 +1,6 @@
 // Release candidate 0.8.0 on a phone-sized screen, against the deployed engine and chatd over https
-// (the Spark's live tier, 2026-10-13: Khaled's iPhone pass and the rc-mobile fix). Spark only:
-//   PW_LIVE=1 PW_BASE=https://tandem.khaled.de/dashboard/ PW_SHOTS=<dir> \
+// (the Spark's live tier, 2026-10-13: an iPhone pass and the rc-mobile fix). Spark only:
+//   PW_LIVE=1 PW_BASE=https://tandem.example.lan/dashboard/ PW_SHOTS=<dir> \
 //     npx playwright test -c pw-chat-live.config.ts e2e/rc080-phone-live.spec.ts
 //
 // At 390x844: the Chat tab with the four-slot bar and its Beta pill, a message sent from the composer and its answer,

@@ -1,6 +1,6 @@
 """A first message under the accept bar takes the top class when it builds something (CPU).
 
-Router v17 grew the chat class's description, and Khaled's "Create a new folder and
+Router v17 grew the chat class's description, and the request "Create a new folder and
 create there a pagoda garden" read three_d 0.378 instead of 0.464: under the 0.45 bar the turn fell
 back to chat, got no 3D skill, wrote an ASCII pagoda into a file and the argument loop guard
 stopped it twice. `classifier.below_accept` (mode `build`, `margin`) keeps such a message on its

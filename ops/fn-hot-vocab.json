@@ -1,6 +1,6 @@
 {
  "_about": "hot vocabulary of the Flash-Next MTP draft head (tools/fn_hot_vocab.py)",
- "corpus": "/home/bakeer/tandem-live/corpus/tokens.npy",
+ "corpus": "~/tandem-live/corpus/tokens.npy",
  "corpus_tokens": 38121609,
  "special": 33,
  "size": 65536,

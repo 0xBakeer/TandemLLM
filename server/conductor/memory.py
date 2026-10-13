@@ -5,7 +5,7 @@ A profile's `memory` switch (server/conductor/schema.py, absent: off):
 
   off      nothing: no card, no filter on the stream, no read. The request is the release's.
   shadow   the card goes in (the model may write) and its blocks are stored; nothing is read back,
-           so Khaled can read what a model would remember before it is read back to it.
+           so an operator can read what a model would remember before it is read back to it.
   on       the card, the writes, and the three reads below.
 
 THE CARD. `tandem-memory` (packages/inline/tandem-memory.md, about 150 tokens): the block's shape

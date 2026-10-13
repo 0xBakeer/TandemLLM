@@ -1,6 +1,6 @@
 """The dashboard's cache hit and prefill rate count what the engine did (2026-10-09).
 
-Two readings on the live EXL3 4.5 server (0.5.0), both from Khaled's phone:
+Two readings on the live EXL3 4.5 server (0.5.0), both from a phone:
 
   1  Perf -> Parallel: "Cache hit 117.2 % -- 112K of 95.3K prompt tokens, 10 requests". The
      parallel view summed the engine's own cached rows (`rec.cached_tokens`, served positions:

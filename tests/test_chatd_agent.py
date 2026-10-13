@@ -297,7 +297,7 @@ def test_always_allow_writes_a_rule_and_the_next_call_runs_without_asking():
         cid = c.new()
         sse = c.events(cid)
         sse.until(lambda f: f[1] == "current")
-        c.send(cid, calls(("web_fetch", {"url": "http://192.168.178.1/admin"})))
+        c.send(cid, calls(("web_fetch", {"url": "http://192.168.1.1/admin"})))
         ev = json.loads(sse.until(lambda f: f[1] == "tool.asking")[-1][2])
         c.ok("POST", f"/conversations/{cid}/permissions/{ev['call_id']}",
              {"decision": "always", "scope": "chat"})
@@ -305,9 +305,9 @@ def test_always_allow_writes_a_rule_and_the_next_call_runs_without_asking():
         call = [p for p in parts_of(c.snap(cid)) if p["type"] == "tool_call"][0]
         assert call["status"] == "failed" and "local network address" in call["output"]["content"]
         rules = c.ok("GET", "/permissions/rules")
-        assert rules[0]["tool"] == "web_fetch" and rules[0]["match"] == "192.168.178.1"
+        assert rules[0]["tool"] == "web_fetch" and rules[0]["match"] == "192.168.1.1"
         assert rules[0]["scope"] == "chat"
-        c.send(cid, calls(("web_fetch", {"url": "http://192.168.178.1/other"})))
+        c.send(cid, calls(("web_fetch", {"url": "http://192.168.1.1/other"})))
         c.wait_idle(cid, 20)
         frames = sse.until(is_done)
         assert not any(f[1] == "tool.asking" for f in frames)
@@ -586,7 +586,7 @@ def test_snapshots_diff_and_undo_with_renames_and_deletes():
 
 # ---------------------------------------------------------------------- the egress filter
 def test_the_egress_filter_refuses_the_lan_and_this_box():
-    for bad in ("10.0.0.1", "192.168.178.131", "172.20.0.1", "127.0.0.1", "169.254.1.1",
+    for bad in ("10.0.0.1", "192.168.1.131", "172.20.0.1", "127.0.0.1", "169.254.1.1",
                 "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:192.168.1.1", "0.0.0.0",
                 "224.0.0.1"):
         assert not egress.allowed(bad), bad
@@ -615,7 +615,7 @@ def test_the_egress_filter_refuses_the_lan_and_this_box():
                 out += x
             s.close()
             return out
-        assert ask(b"CONNECT 192.168.178.1:443 HTTP/1.1\r\nHost: x\r\n\r\n").startswith(
+        assert ask(b"CONNECT 192.168.1.1:443 HTTP/1.1\r\nHost: x\r\n\r\n").startswith(
             b"HTTP/1.1 403")
         assert b"local network" in ask(b"GET http://127.0.0.1:8000/v1/models HTTP/1.1\r\n"
                                        b"Host: 127.0.0.1\r\n\r\n")

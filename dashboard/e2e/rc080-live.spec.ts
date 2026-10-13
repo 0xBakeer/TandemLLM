@@ -1,6 +1,6 @@
 // Release candidate 0.8.0 on the Spark (the box's live checks of 2026-10-12): the deployed engine
 // with chatd behind its /v1/chat-app, over https. Spark only, never on a laptop:
-//   PW_LIVE=1 PW_BASE=https://tandem.khaled.de/dashboard/ PW_SHOTS=<dir> \
+//   PW_LIVE=1 PW_BASE=https://tandem.example.lan/dashboard/ PW_SHOTS=<dir> \
 //     npx playwright test -c pw-chat-live.config.ts e2e/rc080-live.spec.ts
 //
 // 1. the chats of the :4180 store are in the rail;

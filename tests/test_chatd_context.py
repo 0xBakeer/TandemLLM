@@ -1,4 +1,4 @@
-"""chatd's context on a long tool run (rc-0.8.0, Khaled's "Create a clock in a single html").
+"""chatd's context on a long tool run (rc-0.8.0, the prompt "Create a clock in a single html").
 
 THE CASE (live, 2026-10-13): a 21-step run on Flash-Next failed with "This conversation is about
 319,136 tokens and the model's window is 262,144" while the engine had 16,980 tokens. Re-rendered
@@ -44,7 +44,7 @@ def png(w: int, h: int, pad: int = 0) -> bytes:
 
 
 def run_with_screenshots(n: int = 5, pad: int = 300_000):
-    """Khaled's shape: one user message, then n steps that each rendered the page."""
+    """The live case's shape: one user message, then n steps that each rendered the page."""
     shots = {f"img{k}": png(800, 900, pad) for k in range(n)}
     parts = []
     for k in range(n):

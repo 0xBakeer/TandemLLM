@@ -257,7 +257,7 @@ interface PaneRef {
 
 ## 2. Endpoints
 
-Auth: the dashboard's one switch (`QSE_ADMIN_TOKEN`). No password set (today's default, Khaled's ruling
+Auth: the dashboard's one switch (`QSE_ADMIN_TOKEN`). No password set (today's default, the project's rule
 of 2026-10-06): every route answers anyone on the trusted network and the UI shows no sign-in. Password
 set: every route needs the `qse_dash` session cookie or the admin bearer token, and the Chat tab shows a
 sign-in screen (only then). Routes that run code do so only inside the chat's sandbox (section 5); they
@@ -490,7 +490,7 @@ is on. Stop, like the mock, lets the queue drain afterwards. Not in phase 1: com
 
 ## Permission modes (frontend, 2026-10-13; the server's section lands in chat-ui-brief/community/CONTRACT.md "Permission modes (API)")
 
-Khaled: "too many allow prompts for cd and ls; I want a yolo mode". A chat runs in one of three modes; `chat/permission.ts` holds the words and the mock's copy of the decision.
+The ask: fewer allow prompts for `cd` and `ls`, and a mode that asks for nothing. A chat runs in one of three modes; `chat/permission.ts` holds the words and the mock's copy of the decision.
 
 - `ChatSettings.permission_mode: 'ask' | 'auto' | 'yolo'`, default `auto`; absent on an older server = auto. The composer's mode pill patches it like the other settings (`PATCH /conversations/{id}/settings`); the settings page's choice is the default for new chats: `PATCH /defaults` with `Partial<ChatSettings>`, answering the new `Capabilities.defaults`.
 - ask: every tool asks unless its policy says always. auto: what stays in the sandbox (risk `exec`, `read`, `write`: commands, reads, writes in /workspace) runs without asking; the internet asks (web_fetch to a domain the chat has not fetched, MCP tools not marked read-only, Open WebUI tools with network or process imports), and so does rm on /, /workspace or home (server-side; chatd/tools.py decide_mode is the authority). yolo: nothing asks. A `never` policy refuses in every mode.

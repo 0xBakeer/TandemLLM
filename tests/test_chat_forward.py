@@ -86,7 +86,7 @@ def _req(port, method, path, body=None, headers=None):
         return r.status, raw
 
 
-PROXIED = {"X-Forwarded-For": "192.168.178.20", "X-Real-IP": "192.168.178.20"}
+PROXIED = {"X-Forwarded-For": "192.168.1.20", "X-Real-IP": "192.168.1.20"}
 
 
 def test_the_auth_matrix():

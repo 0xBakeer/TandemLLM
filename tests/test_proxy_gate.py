@@ -222,7 +222,7 @@ def test_judge():
     assert G.judge(ok[:19] + [_row(19, 0.0, fail=["token counts differ"])])["verdict"] == "FAIL"
     assert G.judge([_row(i, 0.0, pms=2.5) for i in range(20)])["verdict"] == "FAIL"
     assert G.loopback("http://127.0.0.1:8000/v1") and G.loopback("http://localhost:8000/v1")
-    assert not G.loopback("http://192.168.178.10:8000/v1")
+    assert not G.loopback("http://192.168.1.10:8000/v1")
     return "median, per-request bound, strict checks, proxy_ms, loopback"
 
 

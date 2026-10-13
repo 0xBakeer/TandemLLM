@@ -264,7 +264,7 @@ export class MockSetup {
       mem_total_gb: MODEL.devices[0].total_gib,
       mem_available_gb: this.memAvailable(),
       gpu: { name: 'NVIDIA GB10', util_pct: o.busy ? 92 : 3, temp_c: o.busy ? 71 : 44, power_w: o.busy ? 88 : 14 },
-      disk: { path: '/home/bakeer/.qwen38-spark-engine', free_gb: 1412.6, total_gb: 3726.0 },
+      disk: { path: '/home/user/.qwen38-spark-engine', free_gb: 1412.6, total_gb: 3726.0 },
       engine: { version: '0.6.2', profile: o.setupMode ? null : o.active, uptime_s: 22_841, running: o.busy, waiting: 0, busy: o.busy > 0, mode: o.setupMode ? 'setup' : 'serving' },
       active_profile: o.setupMode ? null : o.active,
       profiles_on_disk: { ...Object.fromEntries(MODEL.profiles.filter((p) => p.community).map((p) => [p.id, o.communityOnDisk])), ...this.onDisk },

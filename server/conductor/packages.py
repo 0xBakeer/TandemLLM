@@ -19,7 +19,7 @@ TandemLLM from its own scripts (Laya, the library) names the provider `{tandem_u
 puts in the address the request came in on (`Library.at`, from its Host header), so a box answers
 with its own address however the client reaches it. A text without the token is served as stored.
 
-SRV-163 (UT1, 2026-10-06). The box's saved packages had the literal `https://ai-api.khaled.de` where
+SRV-163 (UT1, 2026-10-06). The box's saved packages had a literal LAN address (`https://ai-api.example.lan`) where
 the token belongs: on the Spark, whose trust store lacks the private root CA, every Laya call failed
 TLS and the model spent up to 42 % of a session debugging certificates. Now: `QWEN38_TANDEM_URL`
 sets the address the token becomes (empty: the request's own address, as before; an opencode on the

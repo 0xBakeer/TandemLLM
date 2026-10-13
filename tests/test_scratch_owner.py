@@ -1,9 +1,9 @@
 """FX15 (UX3, 2026-10-08): the testing package deletes only the scratch folder its own run made.
 
-The live case: PKG3's A01 run (2026-10-07 23:45, opencode in Khaled's existing project
+The live case: PKG3's A01 run (2026-10-07 23:45, opencode in an existing project
 /home/user/pago) wrote "let me not touch pago's files" and then ran `rm -rf /home/user/pago/.tandem`:
 the testing package's rule "A {tandem_scratch} left by an earlier run that was cut off: ... delete it
-before you start" and its last step `rm -rf {tandem_scratch}`. That `.tandem` held Khaled's own test
+before you start" and its last step `rm -rf {tandem_scratch}`. That `.tandem` held the user's own test
 kit (run.mjs, 18:43). Not recoverable.
 
 The test matrix:

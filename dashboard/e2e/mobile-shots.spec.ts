@@ -1,4 +1,4 @@
-// The phone fix of 2026-10-13 (Khaled's iPhone pass): the bottom bar of four slots with the rest
+// The phone fix of 2026-10-13 (an iPhone pass): the bottom bar of four slots with the rest
 // behind More, the composer's two rows with every control in view, and the bar stepping aside
 // while typing. iPhone sizes 390x844 and 320x568, dark and light, against the in-browser mock.
 // Picked up by the `shots` project into screenshots/mobile-*.png (PW_SHOTS_DIR overrides it).

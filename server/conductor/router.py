@@ -1203,7 +1203,7 @@ class Router:
         """A session's first classified message whose answer stayed under the accept bar
         (`classifier.below_accept`, mode `build`): the top class when it builds something (its
         policy names `files-care`: code, a page, a scene, a drawing) and leads the second by at
-        least `margin`, else None (the default class, as before). Khaled's "Create a new folder and
+        least `margin`, else None (the default class, as before). The request "Create a new folder and
         create there a pagoda garden" read three_d 0.378 under a router whose chat class had just
         grown (0.464 before) and fell back to chat: no 3D skill, an ASCII pagoda written into a
         file until the argument loop guard stopped it. The class's reading line still says what

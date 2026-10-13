@@ -195,13 +195,13 @@ def test_web_fetch_asks_once_per_domain_in_auto_and_never_in_yolo():
         sse = c.events(cid)
         sse.until(lambda f: f[1] == "current")
         # a LAN address: allowed, then refused by the egress filter (no request leaves the test)
-        c.send(cid, calls(("web_fetch", {"url": "http://192.168.178.1/a"})))
+        c.send(cid, calls(("web_fetch", {"url": "http://192.168.1.1/a"})))
         ev = json.loads(sse.until(lambda f: f[1] == "tool.asking")[-1][2])
         c.ok("POST", f"/conversations/{cid}/permissions/{ev['call_id']}", {"decision": "once"})
         c.wait_idle(cid, 20)
         sse.until(is_done)
         assert c.ok("GET", "/permissions/rules") == []          # once: no rule was written
-        c.send(cid, calls(("web_fetch", {"url": "http://192.168.178.1/b"})))
+        c.send(cid, calls(("web_fetch", {"url": "http://192.168.1.1/b"})))
         c.wait_idle(cid, 20)
         frames = sse.until(is_done)
         assert not any(f[1] == "tool.asking" for f in frames), [f[1] for f in frames]

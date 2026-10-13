@@ -1,4 +1,4 @@
-// VIS-76: the Perf tab's live readings against the 0.6.x feed (2026-10-10, Khaled on a phone).
+// VIS-76: the Perf tab's live readings against the 0.6.x feed (2026-10-10, read on a phone).
 // A prefill that reports one mark per 8,192-row window shows its progress between marks as an
 // estimate, said to be one; the tile and the card count the same total on the same clock; the
 // five-minute charts have no holes from the sampler's 1.007 s second; a decode that stands still

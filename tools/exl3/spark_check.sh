@@ -2,7 +2,7 @@
 # Spark-side check of the EXL3 quants (the SPD ticket of the plan): real decode tok/s per size
 # with exllamav3's aarch64 port on the box (~/exl3x, 2026-09-02) and the loss on the same held-out
 # rows, next to the served NVFP4 profile measured in the same hour. NOT part of the HF jobs and
-# NOT to be run while TandemLLM serves :8000 for Khaled: it refuses unless TANDEM_EXL3_BOX_OK=1
+# NOT to be run while TandemLLM serves :8000 for its users: it refuses unless TANDEM_EXL3_BOX_OK=1
 # is set by whoever holds the box. Weights come from the private repos; nothing is written to the
 # engine's directories.
 #

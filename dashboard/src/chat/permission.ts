@@ -1,5 +1,5 @@
-// Permission modes (Khaled, 2026-10-13: "too many allow prompts for cd and ls; I want a yolo
-// mode"). A chat runs in one of three modes, the default for new chats sits in the settings:
+// Permission modes (2026-10-13: fewer allow prompts for cd and ls, and a mode that asks for
+// nothing). A chat runs in one of three modes, the default for new chats sits in the settings:
 //   ask   every tool asks, unless its policy says always (the old behaviour)
 //   auto  what stays in the chat's sandbox runs without asking (commands, reads, writes in the
 //         workspace); the internet and tools outside the sandbox still ask

@@ -1,5 +1,5 @@
 // <qse-wren-figure>: Wren's figure, the gold DGX Spark box (D7, VIS-80, VIS-89), drawn as the
-// paper-cut character from Khaled's video "7 weeks with one DGX Spark": a warm gold box, wider than
+// paper-cut character from the video "7 weeks with one DGX Spark": a warm gold box, wider than
 // tall, with a lighter top, the metal foam as three columns of dots on each side, two dark eyes with
 // a highlight, pink cheeks, a mouth and tiny feet, cut out with an edge that reads on either theme.
 // A tiny status LED on the front's top-right edge is the one nod to the real box.

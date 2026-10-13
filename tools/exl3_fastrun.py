@@ -163,7 +163,7 @@ def main() -> None:
     p.add_argument("--prefill", default="8192,32768")
     p.add_argument("--workloads", default="prose,chat",
                    help="any of prose, chat, code, and long<N>k (the code task after N*1024 tokens of "
-                        "held-out text: decode at long context, Khaled's opencode shape)")
+                        "held-out text: decode at long context, an opencode session's shape)")
     p.add_argument("--long-reps", type=int, default=2,
                    help="reps of a long<N>k workload (each pays its prefill unless --caches)")
     p.add_argument("--temperature", type=float, default=0.0,
