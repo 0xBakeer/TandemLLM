@@ -146,6 +146,38 @@ test('desktop dark: the empty state, the offline copy and the failed sync', asyn
   await sectionShot(page, 'desktop', 'dropped-desktop-dark');
 });
 
+// the 0.8.2 live check: "On this box" ran past the card's edge and was cut at 320; the sync error
+// with a long URL was clipped. Both wrap now.
+for (const size of ['desktop', 390, 320] as Size[]) {
+  test(`${size} dark: a pack on the box and a long sync error wrap inside the card and the head`, async ({ page, request }) => {
+    await page.setViewportSize(SIZES[size]);
+    await setupMock(request, { communityOnDisk: true, communitySource: 'error', communityMs: 50 });
+    await open(page, 'dark');
+    await expect(page.locator('.cw-src-err')).toContainText('community-index.json');
+    const card = page.locator('[data-community-card="thinkingcap-27b-kearuga-exl3-4.00"]');
+    await expect(card.locator('.ccard-readout dd').last()).toHaveText('On this box');
+    // nothing reaches past the card's or the page's right edge
+    const over = await page.evaluate(() => {
+      const bad: string[] = [];
+      const page_ = document.documentElement.clientWidth;
+      for (const el of Array.from(document.querySelectorAll<HTMLElement>('.cw *'))) {
+        const r = el.getBoundingClientRect();
+        if (r.width && r.right > page_ + 1) bad.push(el.className);
+      }
+      for (const card_ of Array.from(document.querySelectorAll<HTMLElement>('.ccard'))) {
+        const cr = card_.getBoundingClientRect();
+        for (const el of Array.from(card_.querySelectorAll<HTMLElement>('*'))) {
+          const r = el.getBoundingClientRect();
+          if (r.width && r.right > cr.right + 1 && !el.closest('.tip-host')) bad.push(el.className);
+        }
+      }
+      return bad;
+    });
+    expect(over).toEqual([]);
+    await sectionShot(page, size, `ondisk-${size}-dark`);
+  });
+}
+
 test('phone 390 dark: the whole weights step, our cards and the community section', async ({ page, request }) => {
   await page.setViewportSize(SIZES[390]);
   await setupMock(request, { communityMs: 50 });

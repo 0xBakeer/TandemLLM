@@ -1021,6 +1021,8 @@ qse-wren-figure {
   align-items: center;
   gap: 6px;
   color: var(--ink-2);
+  min-width: 0;
+  max-width: 100%;
 }
 .cw-src-dot {
   width: 7px;
@@ -1063,15 +1065,18 @@ qse-wren-figure {
   }
 }
 .cw-src-err {
-  display: inline-flex;
+  display: flex;
   gap: 5px;
-  align-items: center;
+  align-items: flex-start;
   color: var(--warn-ink);
   flex-basis: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .cw-src-err .icon {
   width: 14px;
   height: 14px;
+  margin-top: 2px;
 }
 .cw-intro {
   margin: 0;
@@ -1367,7 +1372,8 @@ a.ccard-login:hover {
   margin: 0;
   font-size: var(--fs-md);
   font-weight: 600;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .ccard-modes {
   display: flex;

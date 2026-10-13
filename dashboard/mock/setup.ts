@@ -17,7 +17,8 @@
 //   active: <profile id> (what the box runs), secretsExist: bool (generate is refused, secrets_exist)
 //   communitySource: github | cache | bundled | error (what the next community sync answers:
 //   error = GitHub did not answer, the cached list with `error`), communityMs: n (how long it
-//   takes, default 1200), communityEmpty: bool (no packs at all: the empty state)
+//   takes, default 1200), communityEmpty: bool (no packs at all: the empty state),
+//   communityOnDisk: bool (every pack's files are on the box: the cards say On this box)
 //   unauthorized: bool (an admin password is set: every /v1/setup route answers 401 until
 //   POST /v1/dashboard/session {token: QSE_MOCK_TOKEN or "mock"} signs in), loginOff: bool (with
 //   unauthorized: the dashboard login is off, so that POST is a 404 as on the server)
@@ -106,6 +107,7 @@ interface Options {
   communitySource: 'github' | 'cache' | 'bundled' | 'error';
   communityMs: number;
   communityEmpty: boolean;
+  communityOnDisk: boolean;
 }
 
 const START: Options = {
@@ -135,6 +137,7 @@ const START: Options = {
   communitySource: 'github',
   communityMs: 1200,
   communityEmpty: false,
+  communityOnDisk: false,
 };
 
 const TOKEN = process.env.QSE_MOCK_TOKEN ?? 'mock';
@@ -264,7 +267,7 @@ export class MockSetup {
       disk: { path: '/home/bakeer/.qwen38-spark-engine', free_gb: 1412.6, total_gb: 3726.0 },
       engine: { version: '0.6.2', profile: o.setupMode ? null : o.active, uptime_s: 22_841, running: o.busy, waiting: 0, busy: o.busy > 0, mode: o.setupMode ? 'setup' : 'serving' },
       active_profile: o.setupMode ? null : o.active,
-      profiles_on_disk: { ...Object.fromEntries(MODEL.profiles.filter((p) => p.community).map((p) => [p.id, false])), ...this.onDisk },
+      profiles_on_disk: { ...Object.fromEntries(MODEL.profiles.filter((p) => p.community).map((p) => [p.id, o.communityOnDisk])), ...this.onDisk },
       password_set: o.password,
       hf_token_present: o.hfToken,
       admin_password_set: o.password,
@@ -712,7 +715,7 @@ export class MockSetup {
       if (fetching) {
         if (o.communitySource === 'github') Object.assign(sync, { source: 'github', fetched_at: new Date().toISOString() });
         else if (o.communitySource === 'cache') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString() });
-        else if (o.communitySource === 'error') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString(), error: 'GitHub did not answer within 10 s' });
+        else if (o.communitySource === 'error') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString(), error: 'https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/models/community-index.json: HTTP 404' });
         else Object.assign(sync, { source: 'bundled', fetched_at: null });
       }
       const body: CommunityBody = { contract_version: '1.0', sync, models: { [MODEL.id]: o.communityEmpty ? [] : COMMUNITY.community, [FLASH_NEXT.id]: [] } };
