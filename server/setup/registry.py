@@ -186,7 +186,7 @@ COMMUNITY_SLUG = r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
 COMMUNITY_FORMATS = ("exl3", "nvfp4", "fp8", "gguf")
 COMMUNITY_SUPPORTED = ("exl3",)            # a format with a load path here; the others are refused
 # the base models a community pack loads on: #1's standalone loader and the EXL3 overlay are the
-# 27B family's (engine/loader.py); Flash-Next's packs load through their own --model path only
+# 27B family's (engine/loader.py); another model's packs load only through that model's own profiles
 COMMUNITY_BASES = ("qwen3.8-27b",)
 # what the engine reads on each load path today: the standalone path is text only (ENG-271); the
 # overlay keeps the base checkpoint's vision tower; no path takes audio or video
