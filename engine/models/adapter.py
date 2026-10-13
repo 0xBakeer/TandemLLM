@@ -32,6 +32,10 @@ class Capabilities:
     # the lent engine (`engine/cache.py` Borrow, which copies the 27B's pending commit); False: the
     # lane is off and such a request waits or takes an idle side slot
     side_lane: bool = True
+    # a decoding slot's plain step (no draft this round) joins the round's joint pass as a one-row block,
+    # so N slots taking plain steps read the weights once a round (ENG-241; a model with no draft head,
+    # LFM2.5); False: a plain step runs alone, as before
+    joint_plain: bool = False
 
 
 @dataclass(frozen=True)

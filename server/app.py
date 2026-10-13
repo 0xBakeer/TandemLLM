@@ -54,6 +54,7 @@ from server.stream import (  # noqa: E402
     CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
     answer_stops, drop_stray_close, opens_think, split_full,
 )
+from engine.tree import DraftTree  # noqa: E402
 from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
                              answer_items, parse_tool_calls, rewrite_pythonic, schema_types, strip_blocks)
 from server import compat  # noqa: E402
@@ -1508,7 +1509,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # when it is a tree loop), and the GPU is offered to a waiting slot between blocks
                 # a drafter taking the plain step all turn (`plain_turn`) submits no block: the
                 # round's barrier must not wait for it
-                _par_block(par, tree_mode and not getattr(drafter, "plain_turn", False))
+                _par_block(par, tree_mode and (not getattr(drafter, "plain_turn", False)
+                                               or getattr(eng.caps, "joint_plain", False)))
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
                 # A short request waits (server/preempt.py). A block boundary: the
@@ -1544,7 +1546,13 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     tree = tree.truncate(eng.max_len - pos)
                 if par is not None and tree is not None and tree.n_draft > 0:
                     tree = _share_trim(par, tree)
-                if tree is None or tree.n_draft == 0:
+                joint_anchor = False
+                if ((tree is None or tree.n_draft == 0) and par is not None
+                        and getattr(eng.caps, "joint_plain", False) and len(par.decoding()) > 1):
+                    # ENG-241: no draft this round, other slots decoding: the plain step joins the
+                    # round's pass as the anchor alone, so the slots read the weights once
+                    tree, joint_anchor = DraftTree(tokens=[int(ctx[-1])], parents=[-1]), True
+                if tree is None or (tree.n_draft == 0 and not joint_anchor):
                     draft = []
                 else:
                     block = h2d(tree.tokens, torch.long, prompt.device)
