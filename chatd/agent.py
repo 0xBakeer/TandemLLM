@@ -298,12 +298,36 @@ class AgentMixin:
     def delete_rule(self, rid: str) -> None:
         self.store.run("DELETE FROM permission_rules WHERE id = ?", (rid,))
 
-    def _decide(self, cid: str, tool, args: dict, settings: dict) -> str:
+    def _decide(self, cid: str, tool, args: dict, settings: dict) -> tuple[str, str | None]:
+        """(allow | ask | deny, the permission mode that allowed it or None): the rules, then the
+        chat's mode (SRV-387/SRV-391, tools.decide_mode)."""
         rules = self.rules(cid)
         chat = [r for r in rules if r["conversation_id"] == cid]
         glob = [r for r in rules if r["conversation_id"] is None]
         pref = (self._prefs().get(tool.name) or {}).get("policy")
-        return tools_mod.decide(tool, args, chat, glob, settings, pref)
+        mode = self.permission_mode(settings)
+        fetched = self._fetched_domains(cid) if tool.name == "web_fetch" and mode == "auto" else ()
+        return tools_mod.decide_mode(tool, args, chat, glob, settings, pref, mode, frozenset(fetched))
+
+    def _fetched_domains(self, cid: str) -> set[str]:
+        """The domains this chat's web_fetch calls have reached (a call that ran: done or failed
+        after it was allowed), which auto mode fetches again without asking."""
+        out = set()
+        conv = self.conv(cid)
+        live = (conv.live or {}).get("parts") or []
+        rows = self.store.all("SELECT parts FROM messages WHERE conversation_id = ? AND role = "
+                              "'assistant'", (cid,))
+        for parts in [json.loads(r["parts"]) for r in rows] + [live]:
+            for p in parts:
+                if p.get("type") == "tool_call" and p.get("name") == "web_fetch" and \
+                        p.get("status") in ("done", "failed"):
+                    try:
+                        url = json.loads(p.get("input") or "{}").get("url")
+                    except ValueError:
+                        continue
+                    if url:
+                        out.add(tools_mod.domain_of(str(url)))
+        return out
 
     def answer_permission(self, cid: str, call_id: str, body: dict) -> None:
         """POST /permissions/{call}: the first answer wins; a second device gets 409."""
@@ -322,8 +346,18 @@ class AgentMixin:
         w["event"].set()
 
     def _permit(self, run, part: dict, tool, args: dict, settings: dict) -> tuple[str, str]:
-        """allow, deny (with the model's note) or cancel."""
-        d = self._decide(run.conv.id, tool, args, settings)
+        """allow, deny (with the model's note) or cancel. A call the chat's mode allowed runs
+        without a prompt and is still recorded: the part's `approval` and a `tool.auto_approved`
+        event in the chat's log."""
+        d, by = self._decide(run.conv.id, tool, args, settings)
+        if d == "allow" and by:
+            conv = run.conv
+            with conv.lock:
+                part["approval"] = {"by": "mode", "mode": by}
+                self.emit(conv, {"type": "tool.auto_approved", "message_id": run.message_id,
+                                 "call_id": part["id"], "name": tool.name, "mode": by,
+                                 "summary": tools_mod.summary(tool.name, args)}, run_id=run.id)
+            return "allow", ""
         if d == "allow":
             return "allow", ""
         if d == "deny":

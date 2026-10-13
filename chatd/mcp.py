@@ -654,9 +654,13 @@ class Mcp:
             name = f"mcp__{slug(r['name'])}__{re.sub(r'[^A-Za-z0-9_-]', '_', t['name'])}"[:64]
             schema = t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else \
                 {"type": "object", "properties": {}}
+            # the server's own annotation (MCP 2025-03-26): a tool marked readOnlyHint does not
+            # change anything, so auto mode runs it; every other tool counts as a write
+            ann = t.get("annotations") if isinstance(t.get("annotations"), dict) else {}
             out.append(Tool(name, (t.get("description") or "")[:1024], schema, risk="network",
                             default="ask", source={"kind": "mcp", "id": r["id"]},
-                            executor=self._executor(r["id"], t["name"])))
+                            executor=self._executor(r["id"], t["name"]),
+                            side_effects=ann.get("readOnlyHint") is not True))
         return out
 
     def all_tools(self) -> list[Tool]:

@@ -71,6 +71,10 @@ ROUTES = [
     ("GET", r"/tools", "tools"),
     ("PATCH", rf"/tools/{_ID}", "set_tool"),
     ("GET", r"/permissions/rules", "rules"),
+    ("GET", r"/permissions/mode", "permission_modes"),
+    ("PUT", r"/permissions/mode", "set_permission_default"),
+    ("GET", rf"/conversations/{_ID}/permission-mode", "chat_permission_mode"),
+    ("PUT", rf"/conversations/{_ID}/permission-mode", "set_chat_permission_mode"),
     ("DELETE", rf"/permissions/rules/{_ID}", "delete_rule"),
     ("POST", rf"/conversations/{_ID}/permissions/{_ID}", "permission"),
     ("POST", rf"/conversations/{_ID}/compact", "compact"),
@@ -415,6 +419,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_rules(self):
         self._json(200, self.svc.rules())
+
+    def r_permission_modes(self):
+        self._json(200, self.svc.permission_modes())
+
+    def r_set_permission_default(self):
+        self._json(200, self.svc.set_permission_default(self._body()))
+
+    def r_chat_permission_mode(self, cid):
+        self._json(200, self.svc.chat_permission_mode(cid))
+
+    def r_set_chat_permission_mode(self, cid):
+        self._json(200, self.svc.set_chat_permission_mode(cid, self._body()))
 
     def r_delete_rule(self, rid):
         self.svc.delete_rule(rid)

@@ -179,6 +179,32 @@ def _valves(cls: ast.ClassDef) -> list[dict]:
     return out
 
 
+# SRV-387: the modules through which a toolkit reaches past its sandbox (the network through the
+# egress proxy, or other programs); auto mode asks before a call of a toolkit that imports one
+EFFECT_MODULES = {"requests", "httpx", "aiohttp", "urllib", "urllib3", "http", "socket", "ssl",
+                  "smtplib", "ftplib", "imaplib", "poplib", "websocket", "websockets", "paramiko",
+                  "boto3", "subprocess", "asyncio.subprocess", "pexpect"}
+
+
+def side_effects(source: str) -> bool:
+    """Whether a toolkit imports a network or process module (EFFECT_MODULES); a file that does
+    not parse counts as one that does."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return True
+    for node in ast.walk(tree):
+        names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+            [node.module or ""] if isinstance(node, ast.ImportFrom) else []
+        if any(n in EFFECT_MODULES or n.split(".")[0] in EFFECT_MODULES for n in names):
+            return True
+        if isinstance(node, ast.Call) and (getattr(node.func, "id", None) == "__import__" or
+                                           getattr(node.func, "attr", None) in ("system", "popen")
+                                           or str(getattr(node.func, "attr", "")).startswith(("spawn", "exec"))):
+            return True
+    return False
+
+
 def parse(source: str) -> dict:
     """The spec of an Open WebUI Tools file: {title, description, requirements, tools, valves}."""
     if len(source.encode()) > MAX_SOURCE:
@@ -332,11 +358,12 @@ class Owui:
 
     def _tools_of(self, r) -> list[Tool]:
         spec = json.loads(r["spec"])
+        effects = side_effects(r["source"] or "")
         return [Tool(self.tool_name(r["name"], t["method"]),
                      f"{t['description']} ({spec['title']}, an Open WebUI tool)"[:1024],
                      t["parameters"], risk="exec", default="ask", sandbox=True,
                      source={"kind": "user", "id": r["id"]},
-                     executor=self._executor(r["id"], t["method"]))
+                     executor=self._executor(r["id"], t["method"]), side_effects=effects)
                 for t in spec["tools"]]
 
     def all_tools(self) -> list[Tool]:

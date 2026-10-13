@@ -125,8 +125,13 @@ CREATE TABLE todos (
 )
 """
 
+# v5 (SRV-387/SRV-391): the permission mode each run ran in (its badge in the thread)
+SCHEMA_V5 = """
+ALTER TABLE runs ADD COLUMN permission_mode TEXT
+"""
+
 # version n: the SQL that takes a file from n-1 to n
-MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4}
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5}
 BACKUPS_KEPT = 7
 
 

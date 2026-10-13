@@ -13,7 +13,7 @@ refusal as the sandbox's proxy, chatd/egress.py). A result for the model is at m
 a longer one is written to /workspace/.tandem/outputs/<call>.txt and the model gets its first and
 last 4,000 tokens and the path. The part the UI keeps is cut at 30,000 characters (CONTRACT 5).
 
-PERMISSIONS (Claude Code's model). A call is decided by: the chat's rules (deny, then allow), the
+PERMISSIONS (Claude Code's model; the chat's mode on top: `decide_mode`). A call is decided by: the chat's rules (deny, then allow), the
 global rules (deny, then allow), the chat's policy for the tool (always, never, ask), "auto-accept
 edits" for write tools, and the tool's default. A rule names a tool and, for some, what it may do:
 `bash` a command prefix by whole words ("npm install" matches `npm install three`, never `npm
@@ -46,7 +46,7 @@ SHOTS_DIR = ".tandem/shots"
 
 class Tool:
     def __init__(self, name, description, schema, *, risk="read", default="allow", sandbox=False,
-                 source=None, executor=None, needs=None):
+                 source=None, executor=None, needs=None, side_effects=None):
         self.name = name
         self.description = description
         self.schema = schema
@@ -56,6 +56,9 @@ class Tool:
         self.source = source or {"kind": "builtin"}
         self.executor = executor
         self.needs = needs              # a capability the box must have ("library")
+        # whether a call reaches past the chat's sandbox (an MCP tool not marked read-only, an
+        # Open WebUI toolkit that imports a network or process module); None: a built-in
+        self.side_effects = side_effects
 
     def openai(self) -> dict:
         return {"type": "function", "function": {"name": self.name,
@@ -420,6 +423,65 @@ def decide(tool: Tool, args: dict, chat_rules: list[dict], global_rules: list[di
     return tool.default
 
 
+# ---------------------------------------------------------------------- permission modes
+# SRV-387/SRV-391: a mode per chat on top of the rules. ask: as above. auto (the default): what runs
+# in the chat's own sandbox runs without a prompt (bash, the workspace's files, render_page); what
+# leaves it still asks (web_fetch to a domain this chat has not fetched, an MCP tool not marked
+# read-only, an Open WebUI toolkit with side effects), and so does rm aimed at /, /workspace or the
+# home directory. yolo: nothing asks. In every mode a deny rule (or the policy never) refuses, an
+# explicit ask policy asks, and plan mode keeps its read-only tool list (chatd/agent.py tools_for).
+MODES = ("ask", "auto", "yolo")
+DEFAULT_MODE = "auto"
+_RM_TARGET = re.compile(r"^(?:/|/workspace|~|\$HOME|\$\{HOME\}|/root|/home(?:/[^/]+)?)(?:/\*?)?$")
+
+
+def risky_rm(command: str) -> bool:
+    """rm or rmdir aimed at /, /workspace or a home directory (or a command that hides what it
+    runs and mentions rm)."""
+    if "$(" in command or "`" in command:
+        return bool(re.search(r"\brm(?:dir)?\b", command))
+    for part in _SPLIT.split(command.strip()):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            return bool(re.search(r"\brm(?:dir)?\b", part))
+        while words and words[0] in ("sudo", "command", "exec", "nice", "nohup", "time"):
+            words = words[1:]
+        if words and os.path.basename(words[0]) in ("rm", "rmdir") and \
+                any(_RM_TARGET.match(w) for w in words[1:] if not w.startswith("-")):
+            return True
+    return False
+
+
+def leaves_sandbox(tool: Tool, args: dict, fetched: set | frozenset = frozenset()) -> bool:
+    """A call auto mode still asks for: it reaches past the chat's sandbox."""
+    if tool.name == "web_fetch":
+        return domain_of(str(args.get("url") or "")) not in fetched
+    if tool.side_effects is not None:
+        return bool(tool.side_effects)
+    return tool.risk == "network"
+
+
+def decide_mode(tool: Tool, args: dict, chat_rules: list[dict], global_rules: list[dict],
+                settings: dict, global_policy: str | None = None, mode: str = "ask",
+                fetched: set | frozenset = frozenset()) -> tuple[str, str | None]:
+    """(allow | ask | deny, the mode that allowed it or None). `decide` first: its deny, allow and
+    ask stand except an ask that came from the tool's default, which the mode may turn into an
+    allow. `fetched`: the domains this chat's web_fetch has already reached."""
+    d = decide(tool, args, chat_rules, global_rules, settings, global_policy)
+    if d != "ask" or mode not in ("auto", "yolo"):
+        return d, None
+    if (settings.get("policies") or {}).get(tool.name) == "ask" or global_policy == "ask":
+        return "ask", None
+    if mode == "yolo":
+        return "allow", "yolo"
+    if leaves_sandbox(tool, args, fetched):
+        return "ask", None
+    if tool.name == "bash" and risky_rm(str(args.get("command") or "")):
+        return "ask", None
+    return "allow", "auto"
+
+
 def summary(tool: str, args: dict) -> str:
     """The prompt's one line: what the call wants to do."""
     if tool == "bash":
@@ -520,6 +582,7 @@ def html_to_text(doc: str) -> str:
     return re.sub(r"\n\s*\n\s*\n+", "\n\n", text).strip()
 
 
-__all__ = ["Tool", "Result", "ToolError", "BUILTINS", "BY_NAME", "decide", "rule_matches",
+__all__ = ["Tool", "Result", "ToolError", "BUILTINS", "BY_NAME", "decide", "decide_mode", "MODES",
+           "DEFAULT_MODE", "risky_rm", "leaves_sandbox", "rule_matches",
            "suggested_rule", "summary", "bash_prefix", "for_model", "for_ui", "parse_args",
            "html_to_text", "PathError", "ChangedError"]

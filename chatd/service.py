@@ -32,6 +32,7 @@ import time
 
 from chatd import context as ctx_mod
 from chatd import render
+from chatd import tools as tools_mod
 from chatd.agent import AgentMixin
 from chatd.panes import PanesMixin
 from chatd.plans import PlansMixin
@@ -51,6 +52,9 @@ DEFAULT_SETTINGS = {
     "tools": [], "packages": [], "packages_blocked": [], "packages_mode": "auto", "mcp": [],
     "prompt_id": None, "policies": {}, "auto_accept_edits": False, "max_steps": 50,
     "sandbox_network": "on", "plan_mode": False,
+    # SRV-387/SRV-391: ask | auto | yolo (chatd/tools.py decide_mode); null: the default mode
+    # (GET/PUT /permissions/mode), which a new chat copies when it is created
+    "permission_mode": None,
 }
 EFFORTS = ("auto", "low", "medium", "high", "xhigh")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
@@ -277,10 +281,12 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
 
     def _messages(self, cid: str) -> dict[str, dict]:
         out = {}
-        for r in self.store.all("SELECT * FROM messages WHERE conversation_id = ? ORDER BY id",
+        for r in self.store.all("SELECT m.*, r.permission_mode FROM messages m LEFT JOIN runs r "
+                                "ON r.id = m.run_id WHERE m.conversation_id = ? ORDER BY m.id",
                                 (cid,)):
             out[r["id"]] = {"id": r["id"], "role": r["role"], "created": r["created"],
                             "parent_id": r["parent_id"], "run_id": r["run_id"],
+                            "permission_mode": r["permission_mode"],
                             "status": r["status"], "parts": json.loads(r["parts"]),
                             "attachments": json.loads(r["attachments"]) if r["attachments"] else None,
                             "stats": json.loads(r["stats"]) if r["stats"] else None,
@@ -322,6 +328,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             out["siblings"] = {"index": sib.index(m["id"]), "count": len(sib)}
         if m.get("stats"):
             out["stats"] = m["stats"]
+        if m.get("permission_mode"):
+            out["permission_mode"] = m["permission_mode"]      # the run's mode: the thread's badge
         return out
 
     def _status(self, conv: Conv, branch: list[dict]) -> str:
@@ -430,6 +438,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         settings = {**caps["defaults"],
                     **_clean_settings(self.preset_settings(body.get("preset_id"))),
                     **_clean_settings(body.get("settings") or {})}
+        settings["permission_mode"] = settings.get("permission_mode") or self.permission_default()
         cid = ulid()
         t = now_ms()
         self.store.run("INSERT INTO conversations (id, title, created, updated, model, settings, "
@@ -505,6 +514,47 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         self.store.run("INSERT INTO folders VALUES (?, ?, ?)", (f["id"], f["name"], now_ms()))
         return f
 
+    # ================================================================== permission modes
+    def permission_default(self) -> str:
+        """The mode a new chat gets (and a chat from before the modes runs in): auto unless the
+        user chose another (chatd's meta table)."""
+        r = self.store.one("SELECT value FROM meta WHERE key = 'permission_mode_default'")
+        return r["value"] if r and r["value"] in tools_mod.MODES else tools_mod.DEFAULT_MODE
+
+    def set_permission_default(self, body: dict) -> dict:
+        mode = (body or {}).get("default")
+        if mode not in tools_mod.MODES:
+            raise ApiError(400, "bad_request", f"default must be one of {', '.join(tools_mod.MODES)}")
+        self.store.run("INSERT OR REPLACE INTO meta VALUES ('permission_mode_default', ?)", (mode,))
+        self._caps = None                       # the capabilities' defaults name it
+        self.emit_global({"type": "permission_mode.default", "default": mode})
+        return self.permission_modes()
+
+    def permission_modes(self) -> dict:
+        """GET /permissions/mode: the default and the modes there are."""
+        return {"default": self.permission_default(), "modes": list(tools_mod.MODES)}
+
+    def permission_mode(self, settings: dict) -> str:
+        """The mode a chat's calls are decided in: its own, else the default."""
+        m = settings.get("permission_mode")
+        return m if m in tools_mod.MODES else self.permission_default()
+
+    def chat_permission_mode(self, cid: str) -> dict:
+        """GET /conversations/{id}/permission-mode."""
+        row = self._row(cid)
+        settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+        return {"mode": settings.get("permission_mode"), "effective": self.permission_mode(settings),
+                "default": self.permission_default()}
+
+    def set_chat_permission_mode(self, cid: str, body: dict) -> dict:
+        """PUT /conversations/{id}/permission-mode {mode}: from the next call on, a running run
+        included (its badge follows: `run.mode`)."""
+        mode = (body or {}).get("mode")
+        if mode not in tools_mod.MODES:
+            raise ApiError(400, "bad_request", f"mode must be one of {', '.join(tools_mod.MODES)}")
+        self.update_settings(cid, {"permission_mode": mode})
+        return self.chat_permission_mode(cid)
+
     def update_settings(self, cid: str, patch: dict) -> dict:
         conv = self.conv(cid)
         with conv.lock:
@@ -517,6 +567,13 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             self.store.run("UPDATE conversations SET settings = ?, model = ? WHERE id = ?",
                            (dumps(settings), settings.get("model"), cid))
             self.emit(conv, {"type": "settings.changed", "settings": settings})
+            run = conv.run
+            if run is not None and run.active and run.permission_mode != self.permission_mode(settings):
+                run.permission_mode = self.permission_mode(settings)
+                self.store.run("UPDATE runs SET permission_mode = ? WHERE id = ?",
+                               (run.permission_mode, run.id))
+                self.emit(conv, {"type": "run.mode", "run_id": run.id,
+                                 "permission_mode": run.permission_mode}, run_id=run.id)
             branch, _ = self._branch(conv, row["head_id"])
             conv.context = self._context(conv, settings, branch)
             self._send_context(conv, force=True)
@@ -606,6 +663,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         run = Run(self, conv, user_message_id=user_mid, message_id=mid,
                   max_steps=int(settings.get("max_steps") or 50), started_by=viewer,
                   continue_final=bool(continue_mid))
+        run.permission_mode = self.permission_mode(settings)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
             run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])
@@ -615,10 +673,10 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             run.max_steps = run.step + int(settings.get("max_steps") or 50)
         self.store.run("UPDATE messages SET run_id = ? WHERE id = ?", (run.id, mid))
         self.store.run("INSERT INTO runs (id, conversation_id, user_message_id, "
-                       "assistant_message_id, state, max_steps, model, started, started_by) "
-                       "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+                       "assistant_message_id, state, max_steps, model, started, started_by, "
+                       "permission_mode) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
                        (run.id, conv.id, user_mid, mid, run.max_steps, settings.get("model"),
-                        run.started_ms, viewer))
+                        run.started_ms, viewer, run.permission_mode))
         conv.run = run
         run.metrics["thinking_budget"] = self._budget(settings)
         self.emit(conv, {"type": "run.started", "run": run.as_dict(viewer)}, run_id=run.id)
@@ -1150,6 +1208,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         levels = (first or {}).get("capabilities", {}).get("effort_levels") or []
         defaults = dict(DEFAULT_SETTINGS)
         defaults["model"] = first["id"] if first else ""
+        defaults["permission_mode"] = self.permission_default()
         return {
             "models": [{k: v for k, v in m.items() if not k.startswith("_")} for m in out],
             "_models": out,
@@ -1429,6 +1488,8 @@ def _clean_settings(patch: dict) -> dict:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
     if "max_steps" in out:
         out["max_steps"] = max(1, min(200, int(out["max_steps"] or 50)))
+    if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):
+        raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
     return out
 
 

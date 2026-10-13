@@ -100,11 +100,32 @@ MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are calle
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.
 
+## Permission modes
+
+Each chat has a permission mode, and the chat settings hold the default that a new chat gets. A test run on a phone (2026-10-13) asked six times for bash commands such as `grep` and `cp`, which cost 20 s of tapping, and every one of them ran inside the chat's own sandbox. The three modes:
+
+- Ask: every risky call asks first, as before 0.8.2.
+- Auto, the default: a call that stays inside the chat's sandbox runs without asking. That covers bash, reading and writing files in `/workspace`, and `render_page`. A call that leaves the sandbox still asks: `web_fetch` to a domain this chat has not fetched before, an MCP tool that its server does not mark `readOnlyHint`, and an imported Open WebUI tool whose file imports a network or process module (`requests`, `urllib`, `socket`, `subprocess` and the like). `rm` or `rmdir` aimed at `/`, `/workspace` or a home directory asks too.
+- YOLO: nothing asks, and everything runs.
+
+Some limits hold in every mode. A deny rule refuses the call, and so does a tool set to "never". A tool set to "ask" asks. Plan mode offers only the read tools. The sandbox stays locked down: no LAN, no host, and the internet only through chatd's proxy.
+
+A call that runs without a prompt still leaves a record. Its tool card carries `approval: {by: "mode", mode}`, and the chat's event log gets a `tool.auto_approved` event with the call's one-line summary. The run's mode is on `run.started`, on the assistant message (`permission_mode`) and, after a change during the run, on `run.mode`. A change applies from the next call. The routes:
+
+```text
+GET  /v1/chat-app/permissions/mode                       {default, modes}
+PUT  /v1/chat-app/permissions/mode                       {default: ask|auto|yolo}
+GET  /v1/chat-app/conversations/{id}/permission-mode     {mode, effective, default}
+PUT  /v1/chat-app/conversations/{id}/permission-mode     {mode: ask|auto|yolo}
+```
+
+`PATCH /conversations/{id}/settings` takes `permission_mode` too. A chat from before 0.8.2 has none and runs in the default mode.
+
 ## Chat tab (beta): known limitations
 
 The Chat tab is in beta in this release, and a Beta pill beside it says so. We know of these limits and have not fixed them yet:
 
-- The agent loop does not yet work the way Claude Code does (epic VIS-E10). Its prompts are not kept prefix-stable from step to step (SRV-375). Old tool results and old thinking stay in the context until a compaction (SRV-365). A compaction writes a general summary, not the task's state (SRV-373). Every sandbox command asks for permission; there is no mode that runs them without asking (SRV-387). Nothing notices when the model repeats the same failing approach with different calls (SRV-367). render_page passes on Chromium's console noise (SRV-369). Long tool output has no "see more" paging (SRV-371). Searches run in the main context, with no sub-agents (SRV-381).
+- The agent loop does not yet work the way Claude Code does (epic VIS-E10). Its prompts are not kept prefix-stable from step to step (SRV-375). Old tool results and old thinking stay in the context until a compaction (SRV-365). A compaction writes a general summary, not the task's state (SRV-373). Nothing notices when the model repeats the same failing approach with different calls (SRV-367). render_page passes on Chromium's console noise (SRV-369). Long tool output has no "see more" paging (SRV-371). Searches run in the main context, with no sub-agents (SRV-381).
 - The engine reads a short Flash-Next chat again on its next turn when the answer ended inside a verified block (ENG-235).
 - A request that arrives during a prewarm still waits 0.5 to 1 s (SRV-349).
 - When memory reaches its ceiling, the engine drops the parked chat without writing it to the NVMe, so its next turn starts cold.

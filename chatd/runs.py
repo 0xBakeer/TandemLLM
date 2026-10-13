@@ -70,6 +70,9 @@ class Run:
         self.started_by = started_by
         self.continue_final = continue_final
         self.max_steps = max_steps
+        # the chat's permission mode at the start, and after a change mid-run (service.py): the
+        # badge on the live view and the thread
+        self.permission_mode = "ask"
         self.state = "queued"
         self.phase = "queued"
         self.now = "Queued"
@@ -131,6 +134,7 @@ class Run:
             "id": self.id, "conversation_id": self.conv.id, "message_id": self.message_id,
             "started_at": iso(self.started_ms), "started_by": by,
             "phase": self.phase, "now": self.now, "step": self.step, "max_steps": self.max_steps,
+            "permission_mode": self.permission_mode,
             "queue_position": self.queue_position,
             "tool": self.tool, "prefill": self.prefill,
             "decode_tps": self.metrics["decode_tps"],
