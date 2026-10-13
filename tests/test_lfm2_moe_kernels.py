@@ -76,7 +76,11 @@ def test_qk_prep_and_attention_rows():
     qw, kw = rnd(D, s=0.2) + 1, rnd(D, s=0.2) + 1
     q = K.qk_prep(qkv, pos, slot, qw, kw, cos, sin, kc, vc, HQ, HK, 1e-5)
     rq, rk, rv = K.qk_prep_reference(qkv, pos, qw, kw, cos, sin, HQ, HK, D, 1e-5)
-    assert same(q, rq) and same(kc[:, 600:604].transpose(0, 1), rk) and torch.equal(vc[:, 600:604].transpose(0, 1), rv)
+    # the per-head norm's rsqrt and sum order differ from torch's: within one bf16 step, a quarter of
+    # the values one step apart on the GPU (2026-10-14); the row invariance below is bit for bit
+    for a, b in ((q, rq), (kc[:, 600:604].transpose(0, 1), rk)):
+        assert float((a.float() - b.float()).abs().max()) <= (2 ** -6 if DEV == "cuda" else 2 ** -4) * float(b.float().abs().max())
+    assert torch.equal(vc[:, 600:604].transpose(0, 1), rv)
     anc = torch.zeros(4, K.ANC, dtype=torch.int32, device=DEV)
     for i, pa in enumerate([[0], [0, 1], [0, 1, 2], [0, 3]]):
         anc[i, :len(pa)] = 600 + torch.tensor(pa, dtype=torch.int32)
@@ -86,6 +90,8 @@ def test_qk_prep_and_attention_rows():
     ro = K.attn_rows_reference(q, kc, vc, ctl, anc)
     assert (o.float() - ro).abs().max() < 2e-2
     # a row alone, and in a larger class (more programs): the same bits
+    q1 = K.qk_prep(qkv[3:4], pos[3:4], slot[3:4], qw, kw, cos, sin, kc, vc, HQ, HK, 1e-5)
+    assert torch.equal(q1[0], q[3])
     assert torch.equal(K.attn_rows(q[3:4], kc, vc, ctl[3:4], anc[3:4], ns)[0], o[3])
     assert torch.equal(K.attn_rows(q, kc, vc, ctl, anc, ns * 2), o)
 
