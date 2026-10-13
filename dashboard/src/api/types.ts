@@ -987,6 +987,8 @@ export interface SetupModelTile {
   icon: string | null;
   /** the fastest measured cell of the recommended profile (greedy, 512 tokens) */
   best_speed: { tok_s: number; task: string; profile: string } | null;
+  /** the community packs for this model (absent on an older server) */
+  community_count?: number;
 }
 export interface SetupModelsList {
   contract_version: SetupContract;
@@ -1006,7 +1008,7 @@ export interface SetupQuality {
 export interface SetupProfile {
   id: string;
   label: string;
-  format: 'exl3' | 'nvfp4';
+  format: 'exl3' | 'nvfp4' | 'fp8' | 'gguf';
   bpw: number | null;
   /** download size */
   disk_gb: number;
@@ -1032,6 +1034,96 @@ export interface SetupProfile {
   table?: { gib: number; policy: 'warm' | 'cold'; cache_gib: number } | null;
   /** SRV-337: a tool's memory under this profile, by component id */
   components_gib?: Record<string, number>;
+  /** page-side only (setup/community.ts withCommunityProfiles): the community entry this profile
+   *  stands for, so the reducer, the estimate and Wren's select_profile treat a pack like one of
+   *  ours; absent on our own profiles and in the API */
+  community?: CommunityEntry;
+}
+
+// ---- community weights (CONTRACT.md 2026-10-13, "API (as built)") -----------------------------
+export type SetupModality = 'text' | 'image' | 'audio' | 'video';
+export type SetupCommunityStatus = 'submitted' | 'verified' | 'broken';
+export type SetupCommunityDrafters = 'tandem-exl3' | 'dflash2' | 'none';
+export type SetupSocialNetwork = 'x' | 'huggingface' | 'bluesky' | 'mastodon' | 'website';
+/** One community pack as GET models/{id} lists it in `community` (newest first): the entry as
+ *  written in models/<model>/community/<id>.json with every default filled in, plus what the server
+ *  computes. Every string is untrusted text (fetched from GitHub): rendered as text, links only
+ *  when https. */
+export interface CommunityEntry {
+  schema: 1;
+  id: string;
+  name: string;
+  base_model: string;
+  /** the HF id of the source model when it is not stock Qwen */
+  finetune_of: string | null;
+  author: { github: string; name: string | null; social: Partial<Record<SetupSocialNetwork, string>> };
+  hf: { repo: string; revision: string };
+  /** only exl3 passes validation today */
+  format: 'exl3';
+  bpw: number;
+  /** download, 10^9 bytes */
+  size_gb: number;
+  load: 'standalone' | 'overlay';
+  /** what works in TandemLLM today */
+  modalities: Record<SetupModality, boolean>;
+  /** what the pack contains (greyed when not supported yet) */
+  modalities_in_pack: SetupModality[];
+  drafters: SetupCommunityDrafters;
+  license: string;
+  license_url: string | null;
+  description: string;
+  tags: string[];
+  added: string;
+  status: SetupCommunityStatus;
+  verified: null | {
+    build: string;
+    device: string;
+    date: string;
+    tok_s: Partial<Record<'prose' | 'code' | 'chat' | 'plain', number>>;
+    tokens_per_round: Partial<Record<'prose' | 'code' | 'chat', number>>;
+    notes: string | null;
+  };
+  /** https URLs, e.g. { pr } */
+  links: Record<string, string>;
+  // computed by the server
+  /** "community/<id>": the selection's profile value */
+  profile: string;
+  /** https://github.com/<github>.png?size=96 */
+  avatar_url: string;
+  author_url: string;
+  /** ready-made, in a fixed order, [] when none */
+  social_links: { network: SetupSocialNetwork; label: string; url: string }[];
+  /** https://huggingface.co/<repo>/tree/<revision> */
+  hf_url: string;
+  /** the estimate's numbers, from our own profile of the same format and nearest bpw (`like`) */
+  memory: { weights_gib: number; drafters_gib: number; like: string };
+}
+/** Where the community list came from (the server fetches models/community-index.json from GitHub
+ *  only when the weights section opens or Refresh is pressed; offline: the cache, else the copy
+ *  bundled with the release). */
+export interface CommunitySync {
+  /** github: the fetch this server just did (200 or 304) succeeded */
+  source: 'github' | 'cache' | 'bundled';
+  /** null when QSE_COMMUNITY_URL=off */
+  url: string | null;
+  /** the last 200; null when bundled */
+  fetched_at: string | null;
+  /** the last attempt by this server; null: none yet */
+  checked_at: string | null;
+  /** why the last attempt failed (shown small, not fatal) */
+  error: string | null;
+  /** entries that failed validation */
+  dropped: { model: string; id: string; path: string; reason: string }[];
+  /** "Add yours": the pre-filled GitHub issue form */
+  add_url: string;
+}
+/** POST /v1/setup/community/sync {} (after one conditional fetch) and GET /v1/setup/community */
+export interface CommunityBody {
+  contract_version: SetupContract;
+  /** `dropped` covers every model */
+  sync: CommunitySync;
+  /** model id -> entries, newest first */
+  models: Record<string, CommunityEntry[]>;
 }
 
 /** 1.0+: a file a profile or a tool needs besides the profile's weights. */
@@ -1188,6 +1280,10 @@ export interface SetupModel {
   assets: SetupAsset[];
   /** 1.0+: the step schema (the same list GET .../steps returns as `steps`) */
   wizard_fields: SetupStep[];
+  /** the community packs (newest first) from the index in use, no fetch; absent on an older server */
+  community?: CommunityEntry[];
+  /** `dropped` and `add_url` for this model only */
+  community_sync?: CommunitySync;
 }
 
 /** The wizard's choices: what the estimate, the plan and the apply job take. */

@@ -4,6 +4,7 @@
 // every access is in try/catch (private mode, quota). A typed secret is never part of the state.
 
 import type { SetupChatMessage, SetupModel, SetupSelection, SetupStepId, SetupValue } from '../api/types';
+import { packVisionOff } from './community';
 import { normaliseComponents, toggleComponent } from './deps';
 import { fieldError, isStepId, registryField, STEP_IDS, stepIndex } from './fields';
 import { S } from './strings';
@@ -104,6 +105,7 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
     }
   }
   if (typeof s.device === 'string' && m.devices.some((x) => x.id === s.device)) out.device = s.device;
+  if (packVisionOff(m, out)) out.components = { ...out.components, vision: false };
   return { selection: out, notices };
 }
 
@@ -197,8 +199,19 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
       if (!m.profiles.some((p) => p.id === a.id)) return st;
       // a profile with a shorter largest window takes the window down with it, and the side window
       const max = windowMax(m, a.id);
-      if (sel.window <= max) return done({ selection: { ...sel, profile: a.id } });
-      return done({ selection: { ...sel, profile: a.id, window: max, side_window: Math.min(sel.side_window ?? sel.window, max) }, notice: S.windowClamped(max) });
+      const notices: string[] = [];
+      let next: SetupSelection = { ...sel, profile: a.id };
+      if (sel.window > max) {
+        next = { ...next, window: max, side_window: Math.min(sel.side_window ?? sel.window, max) };
+        notices.push(S.windowClamped(max));
+      }
+      // a community pack the engine cannot run images from: the Vision tool goes off with it
+      if (packVisionOff(m, next)) {
+        const r = toggleComponent(m, next.components, 'vision', false);
+        next = { ...next, components: r.ok ? r.components : { ...next.components, vision: false } };
+        notices.push(S.community.visionOff);
+      }
+      return done({ selection: next, notice: notices.length ? notices.join(' ') : null });
     }
     case 'component': {
       const r = toggleComponent(m, sel.components, a.id, a.on);

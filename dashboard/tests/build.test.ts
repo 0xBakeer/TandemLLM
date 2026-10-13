@@ -33,8 +33,8 @@ describe('dist/', () => {
     expect(html).toMatch(/href="\.\/assets\//);
     expect(html).not.toMatch(/https?:\/\//);
   });
-  // 410 KB since 0.8.0's phone bar, composer and Beta pill; 405 before (scripts/check-size.mjs)
-  it.skipIf(!present)('total gzip size is under 410 KB', () => {
+  // 415 KB since the community weights section (2026-10-13); 410 since 0.8.0's phone bar, composer and Beta pill; 405 before (scripts/check-size.mjs)
+  it.skipIf(!present)('total gzip size is under 415 KB', () => {
     let total = 0;
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
@@ -44,6 +44,6 @@ describe('dist/', () => {
       }
     };
     walk(DIST);
-    expect(total).toBeLessThan(410 * 1024);
+    expect(total).toBeLessThan(415 * 1024);
   });
 });

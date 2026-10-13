@@ -15,6 +15,9 @@
 //   waitIdle: bool (the next job's write_config first waits for 2 requests to finish)
 //   estimateDown: bool, planDown: bool, models: ok | empty | error | broken
 //   active: <profile id> (what the box runs), secretsExist: bool (generate is refused, secrets_exist)
+//   communitySource: github | cache | bundled | error (what the next community sync answers:
+//   error = GitHub did not answer, the cached list with `error`), communityMs: n (how long it
+//   takes, default 1200), communityEmpty: bool (no packs at all: the empty state)
 //   unauthorized: bool (an admin password is set: every /v1/setup route answers 401 until
 //   POST /v1/dashboard/session {token: QSE_MOCK_TOKEN or "mock"} signs in), loginOff: bool (with
 //   unauthorized: the dashboard login is off, so that POST is a 404 as on the server)
@@ -29,6 +32,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
   SetupAssistantStatus,
   SetupChatMessage,
+  CommunityBody,
+  CommunityEntry,
+  CommunitySync,
   SetupChatRequest,
   SetupDevice,
   SetupEnvChange,
@@ -41,12 +47,21 @@ import type {
   SetupResetLevel,
   SetupSelection,
 } from '../src/api/types.ts';
+import { ownProfiles, withCommunityProfiles } from '../src/setup/community.ts';
 import { checkSelection, estimate, SelectionError } from '../src/setup/estimate.ts';
 import { defaults } from '../src/setup/state.ts';
 import qwen from './setup/qwen3.8-27b.json';
+import community from './setup/community-qwen3.8-27b.json';
 import flashNext from './setup/qwen3.8-flash-next.json';
 
-const MODEL = qwen as unknown as SetupModel;
+// the community packs (CONTRACT.md 2026-10-13, "API (as built)"): GET models/{id} lists the 27B's
+// entries in `community` with `community_sync` (the cached list, synced 12 min ago); POST
+// /v1/setup/community/sync answers the fresh one after `communityMs`. In MODEL the entries are
+// profiles as well (withCommunityProfiles, the page's own adapter) so the estimate, the plan and
+// apply take `community/<id>` as the server does.
+const COMMUNITY = community as unknown as { community: CommunityEntry[]; community_sync: CommunitySync };
+const SYNC_AT = new Date(Date.now() - 12 * 60_000).toISOString();
+const MODEL = withCommunityProfiles({ ...(qwen as unknown as SetupModel), community: COMMUNITY.community, community_sync: { ...COMMUNITY.community_sync, fetched_at: SYNC_AT, checked_at: SYNC_AT } });
 // OPS-97: the models step's second tile (its install is the 27B's walk; the estimate and plan are its own)
 const FLASH_NEXT = flashNext as unknown as SetupModel;
 const MODELS = [MODEL, FLASH_NEXT];
@@ -88,6 +103,9 @@ interface Options {
   /** a box with an admin password and no session: every /v1/setup route answers 401 */
   unauthorized: boolean;
   loginOff: boolean;
+  communitySource: 'github' | 'cache' | 'bundled' | 'error';
+  communityMs: number;
+  communityEmpty: boolean;
 }
 
 const START: Options = {
@@ -114,6 +132,9 @@ const START: Options = {
   active: 'exl3-4.5',
   unauthorized: false,
   loginOff: false,
+  communitySource: 'github',
+  communityMs: 1200,
+  communityEmpty: false,
 };
 
 const TOKEN = process.env.QSE_MOCK_TOKEN ?? 'mock';
@@ -243,7 +264,7 @@ export class MockSetup {
       disk: { path: '/home/bakeer/.qwen38-spark-engine', free_gb: 1412.6, total_gb: 3726.0 },
       engine: { version: '0.6.2', profile: o.setupMode ? null : o.active, uptime_s: 22_841, running: o.busy, waiting: 0, busy: o.busy > 0, mode: o.setupMode ? 'setup' : 'serving' },
       active_profile: o.setupMode ? null : o.active,
-      profiles_on_disk: { ...this.onDisk },
+      profiles_on_disk: { ...Object.fromEntries(MODEL.profiles.filter((p) => p.community).map((p) => [p.id, false])), ...this.onDisk },
       password_set: o.password,
       hf_token_present: o.hfToken,
       admin_password_set: o.password,
@@ -669,7 +690,7 @@ export class MockSetup {
         const rec = m.profiles.find((p) => p.recommended)!;
         const row = m.measurements.rows.find((r) => r.profile === rec.id);
         const best = Object.entries(row?.cells.greedy_512 ?? {}).sort((a, b) => b[1]!.tok_s - a[1]!.tok_s)[0];
-        return { id: m.id, name: m.name, family: m.family, params: m.params, pitch: m.pitch, recommended: m.recommended, icon: null, best_speed: best ? { tok_s: best[1]!.tok_s, task: best[0], profile: rec.id } : null };
+        return { id: m.id, name: m.name, family: m.family, params: m.params, pitch: m.pitch, recommended: m.recommended, icon: null, best_speed: best ? { tok_s: best[1]!.tok_s, task: best[0], profile: rec.id } : null, community_count: o.communityEmpty ? 0 : (m.community?.length ?? 0) };
       };
       return json(200, {
         contract_version: '1.0',
@@ -680,8 +701,22 @@ export class MockSetup {
     const mm = path.match(/^\/v1\/setup\/models\/([^/]+)$/);
     if (mm) {
       const m = MODELS.find((x) => x.id === decodeURIComponent(mm[1]));
-      const served = m && { ...m, profiles: m.profiles.map((p) => (p.id === o.privateProfile ? { ...p, hf_private: true } : p)) };
+      // the API lists the packs as entries, never as profiles
+      const served = m && { ...m, profiles: ownProfiles(m).map((p) => (p.id === o.privateProfile ? { ...p, hf_private: true } : p)), ...(m.community ? { community: o.communityEmpty ? [] : m.community } : {}) };
       return served ? json(200, served) : err(404, 'not_found', `no model ${mm[1]}`);
+    }
+    if (path === '/v1/setup/community' || (path === '/v1/setup/community/sync' && method === 'POST')) {
+      const fetching = path.endsWith('/sync');
+      if (fetching) await new Promise((r) => setTimeout(r, o.communityMs));
+      const sync: CommunitySync = { ...COMMUNITY.community_sync, fetched_at: SYNC_AT, checked_at: fetching ? new Date().toISOString() : SYNC_AT };
+      if (fetching) {
+        if (o.communitySource === 'github') Object.assign(sync, { source: 'github', fetched_at: new Date().toISOString() });
+        else if (o.communitySource === 'cache') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString() });
+        else if (o.communitySource === 'error') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString(), error: 'GitHub did not answer within 10 s' });
+        else Object.assign(sync, { source: 'bundled', fetched_at: null });
+      }
+      const body: CommunityBody = { contract_version: '1.0', sync, models: { [MODEL.id]: o.communityEmpty ? [] : COMMUNITY.community, [FLASH_NEXT.id]: [] } };
+      return json(200, body);
     }
     const mc = path.match(/^\/v1\/setup\/models\/([^/]+)\/current$/);
     if (mc) {

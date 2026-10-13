@@ -14,12 +14,14 @@
 import { html, nothing, render as litRender, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../api/client';
-import type { SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
+import type { CommunitySync, SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
 import { poll, type Poller } from '../lib/poll';
 import { LightElement, type Loadable } from '../ui/base';
 import { emptyState as emptyPanel, errorState, icon, skeleton } from '../ui/bits';
 import { setupApi } from './api';
 import { buildPageState, howToFix, overSentence, planFixStep, stepIssues, tokenBlocked, type StepIssues } from './checks';
+import { communityProfiles, ownProfiles, packNoImage, withCommunityProfiles } from './community';
+import './community-view';
 import { availability, isOn } from './deps';
 import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
@@ -63,6 +65,8 @@ export class QseSetup extends LightElement {
   @state() private resetOpen = false;
   @state() private unauthorized = false;
   @state() private winNarrow = false;
+  /** the community list's sync with GitHub (CONTRACT.md addition 3: on the weights step's open and on Refresh) */
+  @state() private communitySyncing = false;
 
   private store: Storage | null = null;
   private devPoll: Poller | null = null;
@@ -70,6 +74,7 @@ export class QseSetup extends LightElement {
   private estCtrl: AbortController | null = null;
   private planTimer: ReturnType<typeof setTimeout> | null = null;
   private planCtrl: AbortController | null = null;
+  private commCtrl: AbortController | null = null;
   private warnedDiff = false;
   private touchedAt = new Map<string, number>();
   private loadingModel: string | null = null;
@@ -92,6 +97,7 @@ export class QseSetup extends LightElement {
     this.devPoll?.stop();
     this.estCtrl?.abort();
     this.planCtrl?.abort();
+    this.commCtrl?.abort();
     window.removeEventListener('qse-setup-reset', this.onReset);
     window.removeEventListener('qse-setup-unauthorized', this.onUnauthorized);
     window.removeEventListener('qse-signed-in', this.onSignedIn);
@@ -111,6 +117,7 @@ export class QseSetup extends LightElement {
     void this.loadDevice();
     if (this.wiz.selection) this.queueEstimate();
     if (this.wiz.step === 'review') this.queuePlan();
+    if (this.wiz.step === 'weights') void this.syncCommunity();
   };
 
   private onReset = (): void => {
@@ -139,7 +146,7 @@ export class QseSetup extends LightElement {
     this.loadingModel = id;
     this.model = { state: 'loading' };
     try {
-      const m = await setupApi.model(id);
+      const m = withCommunityProfiles(await setupApi.model(id));
       this.model = { state: 'ready', data: m };
       await this.openModel(m, this.routeStep() ?? undefined);
     } catch (e) {
@@ -170,6 +177,7 @@ export class QseSetup extends LightElement {
       }
     }
     this.dispatch({ type: 'open', model: m, step, seed }, false);
+    if (this.wiz.step === 'weights') void this.syncCommunity();
   }
 
   private get m(): SetupModel | null {
@@ -227,6 +235,7 @@ export class QseSetup extends LightElement {
     if (stepChanged) {
       if (push) window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
       if (next.step === 'review') this.queuePlan();
+      if (next.step === 'weights') void this.syncCommunity();
     }
     if (a.type !== 'go' && a.type !== 'next' && a.type !== 'previous' && a.type !== 'chat' && a.type !== 'dismiss') {
       this.queueEstimate();
@@ -302,6 +311,39 @@ export class QseSetup extends LightElement {
       if ((e as Error).name === 'AbortError' || ctrl.signal.aborted) return;
       const d = describeError(e);
       this.plan = { state: 'error', endpoint: d.endpoint, message: d.message };
+    }
+  }
+
+  // ---- the community list -------------------------------------------------------------------
+
+  /** fetch the community packs from GitHub now (POST /v1/setup/community/sync: one conditional
+   *  GET; the server keeps its cache and the bundled copy for when GitHub does not answer); the
+   *  list from GET models/{id} stays on screen meanwhile. A pack the selection named that is gone
+   *  falls back to the recommended weights, with the note. */
+  private async syncCommunity(): Promise<void> {
+    const m = this.m;
+    if (!m) return;
+    this.commCtrl?.abort();
+    const ctrl = (this.commCtrl = new AbortController());
+    this.communitySyncing = true;
+    try {
+      const r = await setupApi.communitySync(ctrl.signal);
+      if (ctrl.signal.aborted || this.m?.id !== m.id) return;
+      const cur = this.m!;
+      // the body covers every model: this model's entries, its dropped ones, its own Add yours link
+      const sync: CommunitySync = { ...r.sync, dropped: r.sync.dropped.filter((d) => d.model === m.id), add_url: cur.community_sync?.add_url || r.sync.add_url };
+      const fresh = withCommunityProfiles({ ...cur, community_sync: sync }, r.models[m.id] ?? []);
+      this.model = { state: 'ready', data: fresh };
+      const sel = this.wiz.selection;
+      if (sel && !fresh.profiles.some((p) => p.id === sel.profile)) this.dispatch({ type: 'open', model: fresh }, false);
+      else this.queueEstimate();
+    } catch (e) {
+      if ((e as Error).name === 'AbortError' || ctrl.signal.aborted) return;
+      // an older server (404) has no list to sync; a failed sync keeps the list and says why
+      const cur = this.m;
+      if (cur?.community_sync && !(e instanceof ApiError && e.status === 404)) this.model = { state: 'ready', data: { ...cur, community_sync: { ...cur.community_sync, error: describeError(e).message, checked_at: new Date().toISOString() } } };
+    } finally {
+      if (!ctrl.signal.aborted) this.communitySyncing = false;
     }
   }
 
@@ -497,6 +539,7 @@ export class QseSetup extends LightElement {
                   <span class="mtile-name">${t.name}</span>
                   <span class="mtile-params">${S.tileParams(t.params)}</span>
                   <span class="mtile-pitch">${t.pitch}</span>
+                  ${t.community_count ? html`<span class="mtile-comm">${S.community.tileCount(t.community_count)}</span>` : nothing}
                   ${t.best_speed
                     ? html`<span class="mtile-speed"><span class="mtile-speed-n num">${t.best_speed.tok_s.toFixed(1)}</span><span class="mtile-speed-u">tok/s</span><span class="mtile-speed-note">${t.best_speed.task}, ${t.best_speed.profile}</span></span>`
                     : nothing}
@@ -641,7 +684,7 @@ export class QseSetup extends LightElement {
       ${blocked ? html`<div class="banner banner-offline" role="alert" data-token-blocked>${icon('warn')} ${S.privateNoToken}</div>` : nothing}
       ${!blocked && dev?.hf_token_present && m.profiles.some((p) => p.hf_private && !dev.profiles_on_disk?.[p.id]) ? html`<p class="wnote muted small">${icon('info')} ${S.privateRepo}</p>` : nothing}
       <div class="wcards" role="radiogroup" aria-label=${STEP_TITLE.weights}>
-        ${m.profiles.map((p) => {
+        ${ownProfiles(m).map((p) => {
           const on = sel.profile === p.id;
           const row = rows.find((r) => r.profile === p.id);
           const g = row?.cells.greedy_512;
@@ -677,13 +720,17 @@ export class QseSetup extends LightElement {
             ${p.hf_private && !here && dev?.hf_token_present === false ? html`<span class="wcard-private is-blocked" data-private>${icon('warn')} ${S.privateNoTokenShort}</span>` : nothing}
           </label>`;
         })}
-      </div>`;
+      </div>
+      ${communityProfiles(m).length || m.community
+        ? html`<qse-community .model=${m} .sync=${m.community_sync ?? null} .selected=${sel.profile} .device=${dev} .syncing=${this.communitySyncing} .onUse=${(id: string) => this.user('weights', 'profile', { type: 'profile', id })} .onRefresh=${() => void this.syncCommunity()}></qse-community>`
+        : nothing}`;
   }
 
   // ---- step 3: components -------------------------------------------------------------------
 
   private stepComponents(m: SetupModel, sel: SetupSelection): TemplateResult {
     const av = availability(m, sel.components);
+    if (av.vision && packNoImage(m, sel.profile)) av.vision = { disabled: true, reason: S.community.visionOff, required: false };
     const groups = [...new Set(m.components.map((c) => c.group))];
     const prof = profileOf(m, sel.profile);
     return html`

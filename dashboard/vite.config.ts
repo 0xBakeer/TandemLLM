@@ -52,6 +52,8 @@ export default defineConfig(({ mode }) => ({
     emptyOutDir: true,
     target: 'es2022',
     sourcemap: false,
+    // every browser the es2022 target reaches preloads modules itself; the polyfill was 0.2 KB gzip
+    modulePreload: { polyfill: false },
     assetsInlineLimit: 0,
     rollupOptions: {
       output: {
