@@ -215,6 +215,14 @@ def legacy_fingerprints(here: str, m, a, adopt_from=(), tree: str | None = None)
         for x in (e, bare):
             out += [dc.fingerprint(here, x, skip=spill_mod.NOT_ARITHMETIC),
                     mf.fingerprint(here, m, x, formula="fp3")]
+            if mf.SAME_ROWS:
+                # 0.8.2: the same on the bytes `SAME_ROWS` replaced
+                out += [dc.fingerprint(here, x, skip=spill_mod.NOT_ARITHMETIC, same=mf.SAME_ROWS),
+                        mf.fingerprint(here, m, x, formula="fp3", same=mf.SAME_ROWS)]
+    if mf.SAME_ROWS:
+        # and fp4 itself (its extra by content, as `start` computes it) on those bytes: the files
+        # this tree's formula wrote before a `SAME_ROWS` change
+        out.append(mf.fingerprint(here, m, fingerprint_extra(a), same=mf.SAME_ROWS))
     return list(dict.fromkeys(out))
 
 
@@ -252,7 +260,7 @@ def start(state, a, journal=None):
     # from then on
     adopt = [x for x in (os.environ.get("QSE_DISK_ADOPT_FROM") or "").split(":") if x]
     also = dc.equivalents(root, fp, legacy_fingerprints(here, eng.manifest(), a, adopt),
-                          formula=mf.FORMULA)
+                          formula=mf.adoption())
     state["disk_cache_fp_also"] = also
     tok = state.get("tok")
 

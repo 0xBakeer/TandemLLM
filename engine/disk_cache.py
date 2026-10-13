@@ -1693,7 +1693,15 @@ def _tools_modules(root: str, files: list[str]) -> list[str]:
     return [os.path.join(root, "tools", n + ".py") for n in sorted(seen)]
 
 
-def fingerprint(root: str, extra: dict, skip=()) -> str:
+def module_digest(rel: str, data: bytes, same: dict | None = None) -> bytes:
+    """A module's sha256 as a fingerprint reads it: the bytes' own, or with `same` (0.8.2,
+    engine/methods/manifest.py `SAME_ROWS`) the digest of the bytes they replaced."""
+    d = hashlib.sha256(data).digest()
+    old = same.get((rel, d.hex())) if same else None
+    return bytes.fromhex(old) if old else d
+
+
+def fingerprint(root: str, extra: dict, skip=(), same: dict | None = None) -> str:
     """Fingerprint v2 (frozen since ENG-243; the tier and the spill use v3, engine/methods/manifest.py,
     and compute this one to adopt its files once): what the rows on disk depend on besides the
     tokens: the engine's code (every file under `engine/` but the model layer and the other
@@ -1714,7 +1722,7 @@ def fingerprint(root: str, extra: dict, skip=()) -> str:
         if data is None:
             with open(p, "rb") as f:
                 data = f.read()
-        h.update(hashlib.sha256(data).digest())
+        h.update(module_digest(rel, data, same))
     h.update(json.dumps(extra, sort_keys=True, default=str).encode())
     return h.hexdigest()
 
@@ -1748,7 +1756,9 @@ def equivalents(root_dir: str, fp: str, legacy, formula: str | None = None) -> t
     formulas = formulas if isinstance(formulas, dict) else {}
     if doc is None if formula is None else formula not in formulas:
         doc = {} if doc is None else doc
-        got = set()
+        # 0.8.2: what `fp` adopted before stays (a new adoption key on an unchanged fingerprint)
+        had = doc.get(fp)
+        got = {str(x) for x in had} if isinstance(had, list) else set()
         for leg in ([legacy] if isinstance(legacy, str) else list(legacy or ())):
             if leg and leg != fp:
                 prev = doc.get(leg) if formula is not None else None

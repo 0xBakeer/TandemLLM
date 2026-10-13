@@ -31,6 +31,26 @@ from engine import disk_cache as dc
 #: to adopt the files the builds before wrote (`server/diskcache.py legacy_fingerprints`)
 FORMULA = "fp4"
 
+#: 0.8.2: module bytes that changed without changing a stored row on any profile the bytes they
+#: replace served: (repo-relative path, sha256 of the bytes now) -> sha256 of the bytes replaced.
+#: The fingerprints read the bytes as they are; the legacy ones (server/diskcache.py
+#: `legacy_fingerprints`) also read them with the replaced bytes, and the first start under
+#: `adoption()` adopts the files written under those, once (engine/disk_cache.py `equivalents`).
+#: #1 (0xWhiteMage, a6f2142c): engine/loader.py loads a standalone EXL3 pack as --model (its
+#: config.json says exl3 and no QWEN38_EXL3 overlay is set); a 27B profile sets QWEN38_EXL3 or serves
+#: NVFP4 and takes the path it took before, reading the same tensors (the shards now opened at once)
+SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
+             "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441"}
+
+
+def adoption() -> str:
+    """The key `equivalents` records an adoption under: the formula, and `SAME_ROWS`' entries, so
+    a tree that adds one adopts once more on a directory that already adopted under the formula."""
+    if not SAME_ROWS:
+        return FORMULA
+    rows = sorted([k[0], k[1], v] for k, v in SAME_ROWS.items())
+    return f"{FORMULA}+same-{hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:12]}"
+
 
 @dataclass(frozen=True)
 class Manifest:
@@ -84,7 +104,9 @@ def tables(root: str, owners: set, env=None) -> list[str]:
     return sorted(out)
 
 
-def fingerprint(root: str, m: Manifest, extra: dict, formula: str = FORMULA) -> str:
+def fingerprint(root: str, m: Manifest, extra: dict, formula: str = FORMULA,
+                same: dict | None = None) -> str:
+    """`same` (`SAME_ROWS`): a module whose bytes it names counts as the bytes it replaced."""
     h = hashlib.sha256()
     h.update(formula.encode())
     h.update(m.arch.encode())
@@ -98,7 +120,7 @@ def fingerprint(root: str, m: Manifest, extra: dict, formula: str = FORMULA) -> 
         else:
             with open(p, "rb") as f:
                 data = f.read()
-        h.update(hashlib.sha256(data).digest())
+        h.update(dc.module_digest(rel, data, same))
     for d in sorted(set(m.data) | set(tables(root, owners))):
         full = os.path.expanduser(d) if os.path.isabs(os.path.expanduser(d)) else os.path.join(root, d)
         rel = os.path.relpath(full, root)
