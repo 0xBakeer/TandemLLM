@@ -82,9 +82,10 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
     # draft_graph.py twice: the lone draft graph and the packed draft of parallel requests
     # ENG-221: Flash-Next's decode step (engine/models/flashnext/engine.py DecodeGraph); ENG-227/153:
     # its verify block (VerifyGraph), its commit (CommitGraph) and its MTP chain draft (MTPChainGraph)
+    # ENG-287: LFM2's decode step, verify block and commit (engine/models/lfm2_moe/engine.py)
     assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/drafters/draft_graph.py",
                              "engine/generative/qwen35.py"] + ["engine/models/flashnext/engine.py"] * 4 + [
-                             "engine/verify_graph.py"], found
+                             "engine/models/lfm2_moe/engine.py"] * 3 + ["engine/verify_graph.py"], found
     return f"{len(found)} capture sites, each under the lock"
 
 
