@@ -45,6 +45,8 @@ PREFILL_CHUNK = 4096
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
+#: the bit widths tools/fn_kernels.dense decodes
+DENSE_K = (2, 3, 4, 5, 6, 8)
 
 
 def _is_exl3(w) -> bool:
@@ -127,7 +129,9 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         if _is_exl3(w):
-            y = FK.dense(x2, w) if x2.shape[0] <= ROWS_MAX else exl3_matmul(x2, w)
+            # fn_kernels.dense takes K 2..6 and 8; a K-7 tensor (a 6.0 pack's) takes the library's skinny
+            # kernel, whose split is the shape's too (row-invariant up to 32 rows, tools/exl3_linear.py)
+            y = FK.dense(x2, w) if x2.shape[0] <= ROWS_MAX and w.kb in DENSE_K else exl3_matmul(x2, w)
             return y.view(*x.shape[:-1], w.N)
         if x2.shape[0] <= ROWS_MAX:
             return K.linear_rows(x2, w).view(*x.shape[:-1], w.shape[0])
@@ -140,7 +144,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         w = self.head_weight()
         M = n.shape[0]
         if _is_exl3(w):
-            if M <= ROWS_MAX:
+            if M <= ROWS_MAX and w.kb in DENSE_K:
                 return FK.dense(n, w, out=out)
             return exl3_matmul(n, w, out=out)
         if M <= ROWS_MAX:
