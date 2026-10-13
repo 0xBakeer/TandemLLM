@@ -27,7 +27,7 @@ The engine runs on Linux. The dashboard and the proxy run on Linux and macOS.
 
 \section*{Building this book}
 
-The source is in \code{manual/} of the repository. \code{make} in that directory regenerates the reference tables from the code (\code{tools/gen_reference.py}) and runs \code{latexmk -lualatex}. The PDF is not kept in the repository: the \code{manual.yml} workflow builds it when a release tag is pushed and attaches it to that GitHub release, as \code{tandemllm-manual-<version>.pdf}.
+The source is in \code{manual/} of the repository. \code{make} in that directory regenerates the reference tables from the code (\code{tools/gen_reference.py}) and runs \code{latexmk -lualatex}. The repository keeps one built copy, \code{manual/tandemllm-manual.pdf}, so a reader needs no LaTeX; build it again before a release changes the book. The \code{manual.yml} workflow also builds it when a release tag is pushed and attaches it to that GitHub release, as \code{tandemllm-manual-<version>.pdf}.
 
 \section*{Citing}
 

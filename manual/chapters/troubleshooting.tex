@@ -2,6 +2,18 @@
 
 Each entry is a symptom, what causes it, and what to do. The dashboard's Dev view shows the server log live, and \code{~/TandemLLM/bin/tandem logs} follows it on an installed engine.
 
+\section{Installing}\label{sec:trouble-install}
+
+\paragraph{The installer stops: no tag, branch or commit 'v0.8.1'.} The repository it clones has no such tag. The installer clones the repository \code{--repo} names, the public one by default, at the tag \code{--ref} names, \code{v0.8.1} by default. A tester installs from the early-access repository: pass its address with \code{--repo} (Section~\ref{sec:early-access}). The same missing tag makes \code{curl} answer 404 for the installer's own URL.
+
+\paragraph{Cloning the early-access repository says \enquote{Repository not found}.} GitHub answers that way for a private repository your login cannot read. Check that the account you use has accepted the invitation, and that git uses that account: an SSH key on it, or \code{gh auth login} followed by \code{gh auth setup-git} for HTTPS.
+
+\paragraph{\texttt{install.sh -{}-setup} refuses: the directory already has a configured engine.} A box that switched to a profile counts as configured, and \code{--setup} would stop that engine. To update it, add \code{--force-setup}, then run \code{use-profile.sh} with the profile again; its files are already on disk.
+
+\paragraph{\texttt{use-profile.sh} refuses the download: not enough disk.} The fetcher keeps 60~GB free after every download, per filesystem, and counts the profile's weights and the files beside them first. \code{--dry-run} prints each file with its size. Free the space, or pick a smaller profile: \code{exl3-2.5} needs 12.0~GB of weights beside the 27B's shared 40~GB.
+
+\paragraph{A download stopped halfway.} Run the same \code{use-profile.sh} command again. It keeps every file that finished and checked, pins the same commit, and continues; a folder appears only when all its files are there.
+
 \section{The engine}
 
 \paragraph{The start refuses: an engine is already alive.} One engine per board. Two engines loading side by side run a DGX Spark out of memory, and a board in that state stops answering until a power cycle. A loading engine counts although it answers nothing yet, because it binds its port only after the weights are in. \code{. ops/engines.sh; engine_pids} lists every engine process; stop the other one before starting. The same rule holds for a vLLM or SGLang on the same board: check the free memory first and keep at least 15~GiB of \code{MemAvailable} at the worst case.
