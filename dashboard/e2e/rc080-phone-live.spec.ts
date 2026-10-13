@@ -3,7 +3,7 @@
 //   PW_LIVE=1 PW_BASE=https://tandem.khaled.de/dashboard/ PW_SHOTS=<dir> \
 //     npx playwright test -c pw-chat-live.config.ts e2e/rc080-phone-live.spec.ts
 //
-// At 390x844: the Chat tab with the four-slot bar, a message sent from the composer and its answer,
+// At 390x844: the Chat tab with the four-slot bar and its Beta pill, a message sent from the composer and its answer,
 // the composer's controls in view, the Context panel as a sheet with its split, and the More sheet.
 import { expect, test, type APIRequestContext } from '@playwright/test';
 
@@ -25,15 +25,17 @@ test('a phone sends a message, reads the answer, and opens the context and More 
   await page.locator('qse-chat').waitFor();
   await expect(page.locator('.ch-mock-badge')).toHaveCount(0);
   await expect(page.locator('.rail-tab:visible')).toHaveCount(4);
+  await expect(page.locator('.rail-tab .beta-pill')).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/phone-1-chat.png` });
-  await page.locator('.ch-new').first().click();
-  await page.waitForFunction(() => /#\/chat\/.+/.test(location.hash));
-  const id = decodeURIComponent(page.url().split('#/chat/')[1]);
+  // the phone's empty Chat page is the composer: the first message makes the chat
   for (const t of ['model and profile', 'thinking effort', 'tools, skills and MCP servers']) {
     await expect(page.locator(`.ch-pill[title="${t}"]`)).toBeVisible();
   }
   await page.locator('#ch-input').fill('In one sentence: what is a lighthouse for?');
   await page.locator('.ch-send').click();
+  await page.waitForFunction(() => /#\/chat\/.+/.test(location.hash), null, { timeout: 20_000 });
+  const id = decodeURIComponent(page.url().split('#/chat/')[1]);
+  await expect(page.locator('.ch-head-sub .beta-pill')).toBeVisible();
   await expect.poll(async () => (await run(request, id)).messages.length, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
   await expect.poll(async () => (await run(request, id)).run, { timeout: 120_000 }).toBeNull();
   const s = await run(request, id);
