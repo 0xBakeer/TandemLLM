@@ -1,0 +1,817 @@
+{
+ "schema": 1,
+ "id": "lfm2.5-24b-a2b",
+ "name": "LFM2.5-24B-A2B",
+ "family": "LFM2.5",
+ "params": "~24B, ~2B active a token",
+ "recommended": false,
+ "pitch": "LiquidAI's fast chat model, a mixture of 64 experts with short convolutions, about 2B parameters a token.",
+ "architecture": "40 layers, 30 double-gated short convolutions and 10 grouped-query attention layers, with a mixture of 64 experts of which 4 run a token in 38 of them (two dense layers first); it always thinks before it answers and calls tools in a Pythonic list.",
+ "license": "The model's license (LFM Open License v1.0) is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.",
+ "icon": null,
+ "links": [
+  {
+   "label": "Model card",
+   "url": "https://huggingface.co/LiquidAI/LFM2.5-24B-A2B"
+  }
+ ],
+ "devices": [
+  {
+   "id": "dgx-spark",
+   "label": "NVIDIA DGX Spark (128 GB unified memory)",
+   "total_gib": 121.63,
+   "reserved_gib": 10.0,
+   "note": "The GPU and the CPU share this memory. MemTotal reads 121.6 GiB of the 128 GB."
+  }
+ ],
+ "assets": [
+  {
+   "id": "qwen3.5-2b",
+   "label": "Qwen3.5-2B (the narrator, and Wren)",
+   "path": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "Qwen/Qwen3.5-2B",
+   "source": "Public on Hugging Face; install.sh --setup downloads it for Wren."
+  },
+  {
+   "id": "laya",
+   "label": "Laya decision models",
+   "path": "${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors",
+   "also": [],
+   "fetchable": true,
+   "protected": false,
+   "hf_repo": "convaiinnovations/laya",
+   "source": "Public on Hugging Face (no token needed). Nothing here downloads it yet; the engine starts without it."
+  }
+ ],
+ "profiles": [
+  {
+   "id": "lfm25-bf16",
+   "label": "BF16 (Liquid's checkpoint)",
+   "format": "bf16",
+   "bpw": 16,
+   "disk_gb": 47.9,
+   "weights_gib": 44.65,
+   "drafters_gib": 0.0,
+   "hf_repo": "LiquidAI/LFM2.5-24B-A2B",
+   "hf_private": false,
+   "recommended": false,
+   "badges": [
+    "reference quality"
+   ],
+   "quality": {
+    "kl_vs_bf16": 0.0,
+    "top1_pct": 100.0,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "the BF16 checkpoint is the reference"
+   },
+   "assets_required": [],
+   "note": "The checkpoint as Liquid published it (revision 1769516a). The quality reference; a decode token reads 4.9 GB of it (the pack index's decode bytes), so it is the slowest profile. Weights GiB: the safetensors bytes.",
+   "hf_revision": "1769516ac588c4c558089c94f27d96b0dc67b183",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-2.5",
+   "label": "EXL3 2.5 bpw",
+   "format": "exl3",
+   "bpw": 2.5,
+   "disk_gb": 8.1,
+   "weights_gib": 7.54,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-2.5",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [
+    "smallest"
+   ],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-3.0",
+   "label": "EXL3 3.0 bpw",
+   "format": "exl3",
+   "bpw": 3.0,
+   "disk_gb": 9.5,
+   "weights_gib": 8.85,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.0",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-3.5",
+   "label": "EXL3 3.5 bpw",
+   "format": "exl3",
+   "bpw": 3.5,
+   "disk_gb": 11.0,
+   "weights_gib": 10.24,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.5",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-4.0",
+   "label": "EXL3 4.0 bpw",
+   "format": "exl3",
+   "bpw": 4.0,
+   "disk_gb": 12.5,
+   "weights_gib": 11.64,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.0",
+   "hf_private": true,
+   "recommended": true,
+   "badges": [
+    "recommended",
+    "provisional"
+   ],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-4.5",
+   "label": "EXL3 4.5 bpw",
+   "format": "exl3",
+   "bpw": 4.5,
+   "disk_gb": 13.9,
+   "weights_gib": 12.95,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.5",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  },
+  {
+   "id": "lfm25-exl3-6.0",
+   "label": "EXL3 6.0 bpw",
+   "format": "exl3",
+   "bpw": 6.0,
+   "disk_gb": 18.3,
+   "weights_gib": 17.04,
+   "drafters_gib": 0.0,
+   "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-6.0",
+   "hf_private": true,
+   "recommended": false,
+   "badges": [],
+   "quality": {
+    "kl_vs_bf16": null,
+    "top1_pct": null,
+    "ppl": null,
+    "date": "2026-10-14",
+    "source": "not measured yet (ENG-285)"
+   },
+   "assets_required": [],
+   "note": "Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "max_window": 131072
+  }
+ ],
+ "measurements": {
+  "build": "0.8.3",
+  "date": "2026-10-14",
+  "method": "Not measured yet: rows are added from recorded runs on the Spark only (SPD-107), one greedy request a cell, thinking off, a fresh server, every limit knob recorded.",
+  "source": "none yet",
+  "rows": []
+ },
+ "memory": {
+  "parts": [
+   {
+    "id": "engine",
+    "label": "Engine state, the decode graphs and warm-up",
+    "gib": 3.0,
+    "kind": "fixed",
+    "source": "an estimate until measured on the Spark (SPD-107): the decode and verify graphs of 40 layers at 2,048 wide, the row buffers, the conv states (240 KiB a sequence)"
+   },
+   {
+    "id": "allocator",
+    "label": "Allocator reserve",
+    "gib": 1.5,
+    "kind": "reserve",
+    "source": "an estimate until measured on the Spark (SPD-107)"
+   }
+  ],
+  "sources": [
+   "engine/models/lfm2_moe/pack.py decode_bytes (BF16 checkpoint headers, 2026-10-14)"
+  ],
+  "per_window_parts": [
+   {
+    "id": "prefill_workspace",
+    "label": "Prefill workspace (a 4,096-token chunk's activations and the attention's keys)",
+    "bytes_per_token": 8192,
+    "max_gib": 3.0,
+    "kind": "reserve",
+    "source": "an estimate until measured (SPD-107): the chunk's keys and values repeated for the 32 query heads grow with the context (8 KiB a token over the 10 layers, one at a time), the chunk's own activations are fixed"
+   }
+  ]
+ },
+ "components": [
+  {
+   "id": "conductor",
+   "label": "Conductor",
+   "group": "features",
+   "what": "Gives each request the right instructions and helper packages, and watches long sessions so they do not get stuck.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.1,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "CONDUCTOR": {
+     "on": "on",
+     "off": "raw"
+    },
+    "QSE_CONDUCTOR_CONFIG": {
+     "on": "${HOME}/.qwen38-spark-engine/conductor",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/server.md",
+   "note": "Off, clients talk to the raw engine and the small models below have nothing to do."
+  },
+  {
+   "id": "narrator",
+   "label": "Narrator",
+   "group": "roles",
+   "what": "A small model that writes short status lines while the big model thinks, so you can see what it is doing.",
+   "default": false,
+   "required": false,
+   "memory_gib": 3.6,
+   "memory_max_gib": null,
+   "elastic": true,
+   "disk_gb": 4.3,
+   "depends_on": [
+    "conductor"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_NARRATOR_MODEL": {
+     "on": "qwen3.5-2b",
+     "off": ""
+    },
+    "QWEN38_NARRATOR_DIR": {
+     "on": "${HOME}/.qwen38-spark-engine/models/qwen3.5-2b",
+     "off": ""
+    }
+   },
+   "assets": [
+    "qwen3.5-2b"
+   ],
+   "docs": "docs/server.md",
+   "note": "Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and loads again later."
+  },
+  {
+   "id": "laya",
+   "label": "Laya decision models",
+   "group": "roles",
+   "what": "Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in milliseconds.",
+   "default": false,
+   "required": false,
+   "memory_gib": 1.6,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 2.3,
+   "depends_on": [
+    "conductor"
+   ],
+   "conflicts": [],
+   "knobs": {
+    "QWEN38_DECIDER_MODELS": {
+     "on": "laya-english,laya-multilingual,laya-typed-decisions",
+     "off": ""
+    }
+   },
+   "assets": [
+    "laya"
+   ],
+   "docs": "docs/server.md",
+   "note": "Without them the big model answers those questions itself, which costs a turn each time."
+  },
+  {
+   "id": "response_cache",
+   "label": "Response cache",
+   "group": "caches",
+   "what": "Answers an identical greedy request again from memory, without running the model.",
+   "default": false,
+   "required": false,
+   "memory_gib": 0.25,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "RESPONSE_CACHE": {
+     "on": "on",
+     "off": "off"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "Off on the reference box. Useful for scripts that send the same request many times; never for a benchmark."
+  },
+  {
+   "id": "proxy",
+   "label": "Other backends",
+   "group": "features",
+   "what": "Lets the dashboard send some model names to other servers or cloud APIs, beside this engine.",
+   "default": false,
+   "required": false,
+   "memory_gib": 0.0,
+   "memory_max_gib": null,
+   "elastic": false,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "QSE_BACKENDS": {
+     "on": "${HOME}/.qwen38-spark-engine/backends/config.sqlite3",
+     "off": ""
+    }
+   },
+   "assets": [],
+   "docs": "docs/proxy.md",
+   "note": "You add the backends later, on the Backends screen."
+  }
+ ],
+ "parallelism": {
+  "slots": {
+   "min": 1,
+   "max": 1,
+   "default": 1
+  },
+  "window": {
+   "min": 8192,
+   "max": 131072,
+   "default": 131072,
+   "step": 4096
+  },
+  "side_window": {
+   "min": 8192,
+   "max": 131072,
+   "default": 131072,
+   "step": 4096
+  },
+  "kv_pool": {
+   "default": false
+  },
+  "floor_gb": {
+   "min": 10,
+   "max": 40,
+   "default": 15
+  },
+  "kv_hard_floor_gb": 10,
+  "kv_bytes_per_token": 20480,
+  "typical_fill_tokens": 32768,
+  "side_slot_const_gib": 0.0,
+  "knobs": {
+   "slots": "QSE_PARALLEL",
+   "window": "MAX_LEN",
+   "side_window": "QSE_SIDE_MAX_LEN",
+   "kv_pool": "QSE_KV_POOL",
+   "floor_gb": "QSE_PARALLEL_FLOOR_GB"
+  },
+  "fixed": {}
+ },
+ "methods": [
+  {
+   "id": "temperature",
+   "label": "Temperature",
+   "what": "How random the answers are when a client does not say. Liquid recommends 0.1 for this model.",
+   "type": "number",
+   "min": 0,
+   "max": 2,
+   "default": 0.1,
+   "recommended": 0.1,
+   "knob": "TEMPERATURE",
+   "docs": "docs/lfm2.5-24b-a2b.md"
+  },
+  {
+   "id": "top_k",
+   "label": "Top-k",
+   "what": "How many of the likeliest next tokens a sampled answer draws from, when a client does not say.",
+   "type": "int",
+   "min": 0,
+   "max": 1000,
+   "default": 50,
+   "recommended": 50,
+   "knob": "TOP_K",
+   "docs": "docs/lfm2.5-24b-a2b.md"
+  },
+  {
+   "id": "repetition_penalty",
+   "label": "Repetition penalty",
+   "what": "How much the model is kept from repeating itself, when a client does not say. 1 is off.",
+   "type": "number",
+   "min": 1,
+   "max": 2,
+   "default": 1.05,
+   "recommended": 1.05,
+   "knob": "REP_PENALTY",
+   "docs": "docs/lfm2.5-24b-a2b.md"
+  },
+  {
+   "id": "default_max_tokens",
+   "label": "Default answer length",
+   "what": "The longest answer, in tokens, when a client does not set max_tokens.",
+   "type": "int",
+   "min": 1024,
+   "max": 262144,
+   "default": 32768,
+   "recommended": 32768,
+   "knob": "DEFAULT_MAX_TOKENS",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "request_timeout",
+   "label": "Request time limit",
+   "what": "Seconds one request may run before the engine stops it.",
+   "type": "int",
+   "min": 60,
+   "max": 14400,
+   "default": 3600,
+   "recommended": 3600,
+   "knob": "REQUEST_TIMEOUT",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "max_queue",
+   "label": "Queue length",
+   "what": "How many requests may wait for a free slot before new ones are turned away.",
+   "type": "int",
+   "min": 1,
+   "max": 64,
+   "default": 8,
+   "recommended": 8,
+   "knob": "MAX_QUEUE",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "queue_timeout",
+   "label": "Queue wait",
+   "what": "Seconds a request may wait in the queue before it gets an error.",
+   "type": "int",
+   "min": 10,
+   "max": 3600,
+   "default": 240,
+   "recommended": 240,
+   "knob": "QUEUE_TIMEOUT",
+   "docs": "docs/server.md"
+  }
+ ],
+ "advanced": [
+  {
+   "id": "port",
+   "label": "Port",
+   "what": "The port the API and the dashboard answer on.",
+   "type": "int",
+   "min": 1024,
+   "max": 65535,
+   "default": 8000,
+   "recommended": 8000,
+   "knob": "PORT",
+   "docs": "docs/operations.md"
+  },
+  {
+   "id": "host",
+   "label": "Listen on",
+   "what": "The whole network, or only this machine.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "0.0.0.0",
+     "label": "the whole network"
+    },
+    {
+     "value": "127.0.0.1",
+     "label": "this machine only"
+    }
+   ],
+   "default": "0.0.0.0",
+   "recommended": "0.0.0.0",
+   "knob": "HOST",
+   "docs": "docs/operations.md"
+  },
+  {
+   "id": "served_model",
+   "label": "Raw engine name",
+   "what": "The model name of the raw engine. With the conductor on, clients see TandemLLM and this name is a hidden alias.",
+   "type": "string",
+   "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+   "default": "qwen38-spark-engine",
+   "recommended": "qwen38-spark-engine",
+   "knob": "SERVED_MODEL",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "dashboard_login",
+   "label": "Dashboard login",
+   "what": "With an admin password set, on makes the dashboard ask for it too.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "off",
+     "label": "off"
+    },
+    {
+     "value": "on",
+     "label": "on"
+    }
+   ],
+   "default": "off",
+   "recommended": "off",
+   "knob": "QSE_DASHBOARD_LOGIN",
+   "docs": "docs/server.md"
+  },
+  {
+   "id": "admin_password",
+   "label": "Admin password",
+   "what": "Without one, anyone who reaches the port can change the setup. Generate writes a random one into secrets.env on the box; read it there with cat.",
+   "type": "enum",
+   "options": [
+    {
+     "value": "keep",
+     "label": "keep as it is"
+    },
+    {
+     "value": "generate",
+     "label": "generate one"
+    }
+   ],
+   "default": "keep",
+   "recommended": "keep",
+   "knob": null,
+   "docs": "docs/operations.md"
+  }
+ ],
+ "contract_version": "1.0",
+ "wizard_fields": [
+  {
+   "index": 0,
+   "id": "models",
+   "label": "Models",
+   "fields": []
+  },
+  {
+   "index": 1,
+   "id": "overview",
+   "label": "Model",
+   "fields": []
+  },
+  {
+   "index": 2,
+   "id": "weights",
+   "label": "Weights",
+   "fields": [
+    {
+     "field": "profile",
+     "label": "Weight profile",
+     "type": "enum",
+     "options": [
+      "lfm25-bf16",
+      "lfm25-exl3-2.5",
+      "lfm25-exl3-3.0",
+      "lfm25-exl3-3.5",
+      "lfm25-exl3-4.0",
+      "lfm25-exl3-4.5",
+      "lfm25-exl3-6.0"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 3,
+   "id": "components",
+   "label": "Tools",
+   "fields": [
+    {
+     "field": "conductor",
+     "label": "Conductor",
+     "type": "bool"
+    },
+    {
+     "field": "narrator",
+     "label": "Narrator",
+     "type": "bool"
+    },
+    {
+     "field": "laya",
+     "label": "Laya decision models",
+     "type": "bool"
+    },
+    {
+     "field": "response_cache",
+     "label": "Response cache",
+     "type": "bool"
+    },
+    {
+     "field": "proxy",
+     "label": "Other backends",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "id": "parallelism",
+   "label": "Parallelism and memory",
+   "fields": [
+    {
+     "field": "slots",
+     "label": "Parallel requests",
+     "type": "int",
+     "min": 1,
+     "max": 1
+    },
+    {
+     "field": "window",
+     "label": "Context window, first slot",
+     "type": "int",
+     "min": 8192,
+     "max": 131072
+    },
+    {
+     "field": "side_window",
+     "label": "Context window, other slots",
+     "type": "int",
+     "min": 8192,
+     "max": 131072
+    },
+    {
+     "field": "kv_pool",
+     "label": "Shared KV pool",
+     "type": "bool"
+    },
+    {
+     "field": "floor_gb",
+     "label": "Memory kept free (GiB)",
+     "type": "number",
+     "min": 10,
+     "max": 40
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "id": "methods",
+   "label": "Methods and advanced",
+   "fields": [
+    {
+     "field": "temperature",
+     "label": "Temperature",
+     "type": "number",
+     "min": 0,
+     "max": 2
+    },
+    {
+     "field": "top_k",
+     "label": "Top-k",
+     "type": "int",
+     "min": 0,
+     "max": 1000
+    },
+    {
+     "field": "repetition_penalty",
+     "label": "Repetition penalty",
+     "type": "number",
+     "min": 1,
+     "max": 2
+    },
+    {
+     "field": "default_max_tokens",
+     "label": "Default answer length",
+     "type": "int",
+     "min": 1024,
+     "max": 262144
+    },
+    {
+     "field": "request_timeout",
+     "label": "Request time limit",
+     "type": "int",
+     "min": 60,
+     "max": 14400
+    },
+    {
+     "field": "max_queue",
+     "label": "Queue length",
+     "type": "int",
+     "min": 1,
+     "max": 64
+    },
+    {
+     "field": "queue_timeout",
+     "label": "Queue wait",
+     "type": "int",
+     "min": 10,
+     "max": 3600
+    },
+    {
+     "field": "port",
+     "label": "Port",
+     "type": "int",
+     "min": 1024,
+     "max": 65535
+    },
+    {
+     "field": "host",
+     "label": "Listen on",
+     "type": "enum",
+     "options": [
+      "0.0.0.0",
+      "127.0.0.1"
+     ]
+    },
+    {
+     "field": "served_model",
+     "label": "Raw engine name",
+     "type": "string",
+     "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    {
+     "field": "dashboard_login",
+     "label": "Dashboard login",
+     "type": "enum",
+     "options": [
+      "off",
+      "on"
+     ]
+    },
+    {
+     "field": "admin_password",
+     "label": "Admin password",
+     "type": "enum",
+     "options": [
+      "keep",
+      "generate"
+     ]
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "id": "review",
+   "label": "Review",
+   "fields": []
+  },
+  {
+   "index": 7,
+   "id": "install",
+   "label": "Install",
+   "fields": []
+  }
+ ]
+}

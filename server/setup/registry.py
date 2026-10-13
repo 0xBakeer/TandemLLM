@@ -89,7 +89,7 @@ _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "
 # SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
 # that fits the device preset (null: none fits), a lookup table beside the weights (warm: in the page
 # cache; cold: read past it through a row cache), a tool's memory under this profile
-_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4"]},
+_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4", "bf16"]},
                  "bpw": {"type": ["number", "null"]}, "disk_gb": _NUM0, "weights_gib": _NUM0,
                  "drafters_gib": _NUM0, "hf_repo": _STR, "hf_private": {"type": "boolean"},
                  "recommended": {"type": "boolean"}, "badges": {"type": "array", "items": _STR},

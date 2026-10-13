@@ -1143,7 +1143,8 @@
           "format": {
             "enum": [
               "exl3",
-              "nvfp4"
+              "nvfp4",
+              "bf16"
             ]
           },
           "hf_private": {

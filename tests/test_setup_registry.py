@@ -28,7 +28,7 @@ The test matrix:
      refused, and numbers keep their range                  test_field_values
  11  the KV bytes a token are the server's (server/slots.py) and the units add up: 104.25 KiB,
      26.06 GiB = 27.98 GB at 262,144 tokens                 test_kv_units
- 12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next) are what
+ 12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next, LFM2.5) are what
      GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
 
 Run: python tests/test_setup_registry.py
@@ -358,7 +358,7 @@ def test_the_mock_copy():
 
 
 # the 27B and, for the models step's second tile and a pack's largest window, Flash-Next (OPS-97)
-MOCKED = ("qwen3.8-27b", "qwen3.8-flash-next")
+MOCKED = ("qwen3.8-27b", "qwen3.8-flash-next", "lfm2.5-24b-a2b")
 
 
 def _mock_copy(mid: str) -> str:

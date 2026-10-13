@@ -1008,7 +1008,7 @@ export interface SetupQuality {
 export interface SetupProfile {
   id: string;
   label: string;
-  format: 'exl3' | 'nvfp4' | 'fp8' | 'gguf';
+  format: 'exl3' | 'nvfp4' | 'bf16' | 'fp8' | 'gguf';
   bpw: number | null;
   /** download size */
   disk_gb: number;
