@@ -264,6 +264,33 @@ def test_a_prompt_waits_two_devices_see_it_and_deny_with_a_note_reaches_the_mode
         c.close()
 
 
+def test_a_run_waiting_for_permission_gives_its_run_slot_back():
+    # live (rc-0.8.0, 2026-10-13): a chat waiting for a bash prompt held one of the two run slots,
+    # and two other chats ran one after the other
+    c = Chat(max_runs=2)
+    try:
+        cid = c.new()
+        sse = c.events(cid)
+        sse.until(lambda f: f[1] == "current")
+        c.send(cid, calls(("web_fetch", {"url": "http://example.org/x"})))
+        ev = json.loads(sse.until(lambda f: f[1] == "tool.asking")[-1][2])
+        ids = [c.new() for _ in range(2)]
+        for x in ids:
+            c.send(x, "FAKE_SLOW FAKE_LONG 20 x")
+        c.wait(lambda: c.fake.max_streams == 2, 10)      # both at once beside the waiting chat
+        for x in ids:
+            c.wait_idle(x, 20)
+            assert "free run slot" not in ((c.snap(x)["run"] or {}).get("now") or "")
+        assert c.snap(cid)["run"]["phase"] == "permission"
+        # the answer: the run takes a slot again for its next call, and ends
+        c.ok("POST", f"/conversations/{cid}/permissions/{ev['call_id']}", {"decision": "deny"})
+        c.wait_idle(cid, 20)
+        assert is_done(sse.until(is_done)[-1])
+        sse.close()
+    finally:
+        c.close()
+
+
 def test_always_allow_writes_a_rule_and_the_next_call_runs_without_asking():
     c = Chat()
     try:

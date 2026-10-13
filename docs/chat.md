@@ -40,7 +40,8 @@ bash ops/chatd.sh stop
 ```
 
 `ops/chatd.service` is the systemd user unit for when linger is enabled. At most 2 runs talk to the
-engine at once (`QSE_CHAT_MAX_RUNS`); the others wait as `queued`.
+engine at once (`QSE_CHAT_MAX_RUNS`); the others wait as `queued`. A run that waits for a
+permission prompt gives its slot back until the answer comes, and takes one again for its next call.
 
 **An engine without the forward.** An engine server from an older build (or another engine
 altogether) has no `/v1/chat-app` route. `bash ops/chatd.sh start --front 0.0.0.0:4180` also serves

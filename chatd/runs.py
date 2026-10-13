@@ -197,12 +197,19 @@ class Run:
             self.svc.slots.release_if(self)
             self.svc.finish_run(self, outcome)
 
-    def _run(self) -> str:
-        # one of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one)
+    def _slot(self) -> bool:
+        """One of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one),
+        before each model call: a run that waits for the user's permission gives its slot back
+        (agent.py `_permit`). False when the run is stopped meanwhile."""
         while not self.svc.slots.acquire(self, timeout=1.0):
             if self.stop_mode:
-                return self._stopped()
+                return False
             self.set_phase("queued", "Waiting for a free run slot")
+        return True
+
+    def _run(self) -> str:
+        if not self._slot():
+            return self._stopped()
         self.state = "running"
         while True:
             if self.stop_mode:
@@ -211,6 +218,8 @@ class Run:
                 self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
                                f"Continue goes on from here.")
                 return "interrupted"
+            if not self._slot():
+                return self._stopped()
             outcome = self._call()
             if outcome != "completed":
                 return outcome

@@ -345,6 +345,9 @@ class AgentMixin:
         self.emit_global({"type": "tool.asking", "conversation_id": conv.id,
                           "call_id": part["id"], "summary": words})
         self.summary_changed(conv, status="waiting")
+        # the answer can take hours: the run's engine slot goes back meanwhile (live: one chat
+        # waiting for a bash prompt held one of the two, and two other chats ran one at a time)
+        self.slots.release_if(run)
         w["event"].wait()
         run.waiting.pop(part["id"], None)
         part["permission"] = None
