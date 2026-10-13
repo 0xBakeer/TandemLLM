@@ -241,6 +241,41 @@ def test_a_request_can_keep_out_of_memory():
     assert "short answers" in [n.title for n in cond.notes.notes("owner")], "other: the profile's"
 
 
+class _Headers(dict):
+    """Request headers as the handler reads them: names in any case."""
+
+    def get(self, k, d=None):
+        return super().get(k.lower(), d) if isinstance(k, str) else d
+
+
+def test_the_cache_peek_renders_the_memory_notes_the_next_turn_carries():
+    # SRV-349 on the 27B (live, 2026-10-13): under the conductor the peek's prompt was shorter than
+    # the turn's -- the session's memory notes (and the other kinds a turn turns on for its replay)
+    # did not replay, so its count of tokens and of cached rows was off
+    cond, seen = setup()
+    cond.notes.write("owner", {"op": "add", "scope": "project", "kind": "gotcha",
+                               "title": "the summer scene checker gate",
+                               "body": "Gate (a) wants the summer scene within 1.0 of night 1."},
+                     writer="human", project="/home/user/pagoda")
+    hist = []
+    for i, q in enumerate(("How is the summer scene checked by the gate?",
+                           "And the winter scene, briefly?", "Which file holds the gate?")):
+        body = {"model": "TandemLLM", "stream": True, "max_tokens": 2000, "tools": TOOLS,
+                "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+                "messages": [{"role": "system", "content": SYSTEM}, *hist,
+                             {"role": "user", "content": q}]}
+        peek, _ = app._peek_ids(dict(body), _Headers({"user-agent": OPENCODE_UA,
+                                                      "x-session-id": "ses_peek"}))
+        out = _go(body, {"User-Agent": OPENCODE_UA, "x-session-id": "ses_peek"})
+        if i:                       # the first turn's own note is the router's to choose
+            assert peek == seen[-1], (i, len(peek), len(seen[-1]))
+            assert any(k == "memory" for n in cond.router._sessions["c:ses_peek"].notes
+                       for k in n.kinds)
+        hist += [{"role": "user", "content": q},
+                 {"role": "assistant", "content": out["content"],
+                  "reasoning_content": out["reasoning"]}]
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

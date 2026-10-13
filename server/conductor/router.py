@@ -747,7 +747,10 @@ class Router:
     def replayed_for(self, key: str, ids: list[int], tok) -> list[int]:
         """`ids` with session `key`'s notes replayed where its next turn would carry them (the
         cache peek, SRV-349): `Plan.replayed_ids` for a session that exists, every decision type
-        taken as on. Nothing is created or changed; an unknown session gives `ids` back."""
+        taken as on, the ones a turn turns on for its notes' replay as well (memory, library,
+        outcomes, identity, client: live on the 27B the peek's prompt was shorter than the turn's,
+        and a CPU run through the handler showed the memory notes missing). Nothing is created or changed; an unknown
+        session gives `ids` back."""
         with self._lock:
             sess = self._sessions.get(key)
         if sess is None or not sess.notes:
@@ -755,7 +758,9 @@ class Router:
         plan = Plan(None)
         plan.active, plan.session = True, sess
         plan.router_cfg = self.store.peek("router")[1]
-        plan.decisions = {d: "on" for d in schema.DECISIONS}
+        with sess.lock:
+            kinds = {k for n in sess.notes for k in n.kinds}
+        plan.decisions = {d: "on" for d in (*schema.DECISIONS, *sorted(kinds))}
         return plan.replayed_ids(ids, tok)
 
     def session(self, key: str) -> Session:
