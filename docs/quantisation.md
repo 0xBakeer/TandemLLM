@@ -138,6 +138,35 @@ Profiles and bytes interact with speculation. At one token a step, the full NVFP
 
 The 27B also has weight profiles in EXL3 (`ops/profiles/exl3-<bpw>.env`, switched with `ops/use-profile.sh`, [operations.md](operations.md)). The six sizes are public on Hugging Face, `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-{2.5,3.0,3.5,4.0,4.5,6.0}`, with the K3 drafters and the K4 draft head in `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters`; the collection is [TandemLLM Qwen3.8-27B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4). We quantised them with exllamav3 from Qwen's BF16 release. Each card lists every size's KL against BF16 on wikitext-2, from 0.1112 at 2.5 bits to 0.0018 at 6.0, and its speed on one DGX Spark. Running them needs nothing beyond those repositories, the BF16 drafters (`...-DFlash2-b8` and `-b16`) and the base checkpoint; `ops/use-profile.sh exl3-<bpw>` fetches all of it. This page does not cover how the EXL3 files were made.
 
+### Standalone 27B EXL3 checkpoints
+
+A complete BF16-origin, `mul1` EXL3 checkpoint of the supported 27B family can be passed directly as `--model`.
+The loader recognises `quantization_config.quant_method: exl3` in its config; a separate BF16/FP8
+base download is not needed when the pack includes the embedding, norms and GDN auxiliary tensors.
+For example, for a text-only run without speculation:
+
+```bash
+python server/app.py --model /path/to/exl3-pack --drafter none --vision off
+```
+
+The projected weights and output head retain their original EXL3 codes, channel scales and mixed
+bit widths, including indexed packs whose projection components span multiple shards. When a standalone
+pack declares a BF16 source through `dtype` or `torch_dtype`, the loader re-encodes its finite FP16
+plain tensors as BF16 only when every stored value survives an exact round trip. Comparisons use
+bounded chunks, including for a plain output head. Missing or non-BF16 source metadata, non-finite
+values and lossy conversions fail with a named error rather than silently changing precision.
+This preserves the pack's stored numerical values, not necessarily its pre-conversion BF16 source:
+precision already lost while creating the pack cannot be recovered. Source-equivalence needs the
+original checkpoint, and the original BF16 base plus an EXL3 overlay remains an alternative.
+The existing separate-base overlay precision path is unchanged, and explicit
+EXL3 paths take precedence over detection (an empty `exl3` setting disables detection).
+
+This does not add another codebook, model architecture or MTP format. The existing `mul1` reader
+and its validation still apply. A stock DFlash2 checkpoint can be supplied with `--drafter dflash2
+--dflash2-ckpt /path/to/drafter` for one sequence; speculative parallel serving still requires the
+engine's `lenrouter` configuration and a suitable block-16 drafter. Vision and quantised MTP
+loading are not qualified by this text-only path.
+
 ## Knobs
 
 | knob | what |
