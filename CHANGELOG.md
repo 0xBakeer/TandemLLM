@@ -2,9 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## 0.8.0-rc1, 2026-10-12
+## 0.8.0, 2026-10-13
 
-The first release candidate of 0.8: a second model, Qwen3.8-Flash-Next, the Chat tab with chatd, its own chat service, and the cache peek and prewarm the Chat tab's Context panel reads. The box serves it from branch `rc-0.8.0` (Flash-Next 3.05, a 262,144-token window, three slots). The 27B's text does not change: its v2 disk-tier fingerprint is the same as 0.7.2's (`9ac3d8a94c8a9199`).
+0.8.0 adds a second model, Qwen3.8-Flash-Next, the Chat tab with chatd, its own chat service, and the cache peek and prewarm the Chat tab's Context panel reads. Flash-Next 3.05 is served with a 262,144-token window and three slots. The 27B's text does not change: its v2 disk-tier fingerprint is the same as 0.7.2's (`9ac3d8a94c8a9199`).
 
 ### The Chat tab
 
