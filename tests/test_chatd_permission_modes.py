@@ -144,7 +144,9 @@ def test_auto_is_the_default_and_bash_runs_without_a_prompt_but_is_logged():
         assert ev["name"] == "bash" and ev["mode"] == "auto" and ev["summary"] == "Run: ls -la", ev
         s = c.snap(cid)
         call = next(p for p in parts_of(s) if p["type"] == "tool_call")
-        assert call["status"] == "done" and call["approval"] == {"by": "mode", "mode": "auto"}, call
+        assert call["status"] == "done" and call["approved"] == "auto", call
+        started_ev = json.loads(next(f for f in frames if f[1] == "tool.started")[2])
+        assert started_ev["approved"] == "auto", started_ev
         assert s["messages"][-1]["permission_mode"] == "auto"
         assert any("ls -la" in " ".join(cmd) for cmd in c.svc.sandboxes.ran)
         # the chat's event log keeps it
@@ -179,7 +181,8 @@ def test_ask_mode_keeps_todays_prompts():
         s = c.snap(cid)
         assert s["messages"][-1]["permission_mode"] == "ask"
         calls_ = [p for p in parts_of(s) if p["type"] == "tool_call"]
-        assert [p["status"] for p in calls_] == ["done", "done"] and not calls_[0].get("approval")
+        assert [p["status"] for p in calls_] == ["done", "done"], calls_
+        assert calls_[0]["approved"] == "user" and calls_[1].get("approved") is None, calls_
         sse.close()
     finally:
         c.close()
@@ -270,7 +273,11 @@ def test_the_api_and_the_default():
         c.svc.update_settings(cid, {"permission_mode": None})
         assert c.ok("GET", f"/conversations/{cid}/permission-mode") == \
             {"mode": None, "effective": "ask", "default": "ask"}
-        c.ok("PUT", "/permissions/mode", {"default": "auto"})
+        # the settings page's call (dashboard remote.ts updateDefaults): PATCH /defaults
+        d = c.ok("PATCH", "/defaults", {"permission_mode": "auto"})
+        assert d["permission_mode"] == "auto" and "model" in d, d
+        for bad in ({"permission_mode": "never"}, {"effort": "low"}, {}, {"permission_mode": None}):
+            assert c.call("PATCH", "/defaults", bad)[0] == 400, bad
         assert c.ok("GET", f"/conversations/{cid}/permission-mode")["effective"] == "auto"
         assert c.snap(c.new())["settings"]["permission_mode"] == "auto"
     finally:

@@ -71,6 +71,7 @@ ROUTES = [
     ("GET", r"/tools", "tools"),
     ("PATCH", rf"/tools/{_ID}", "set_tool"),
     ("GET", r"/permissions/rules", "rules"),
+    ("PATCH", r"/defaults", "patch_defaults"),
     ("GET", r"/permissions/mode", "permission_modes"),
     ("PUT", r"/permissions/mode", "set_permission_default"),
     ("GET", rf"/conversations/{_ID}/permission-mode", "chat_permission_mode"),
@@ -419,6 +420,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_rules(self):
         self._json(200, self.svc.rules())
+
+    def r_patch_defaults(self):
+        self._json(200, self.svc.patch_defaults(self._body()))
 
     def r_permission_modes(self):
         self._json(200, self.svc.permission_modes())

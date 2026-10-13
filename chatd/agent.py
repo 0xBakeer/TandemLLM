@@ -346,19 +346,22 @@ class AgentMixin:
         w["event"].set()
 
     def _permit(self, run, part: dict, tool, args: dict, settings: dict) -> tuple[str, str]:
-        """allow, deny (with the model's note) or cancel. A call the chat's mode allowed runs
-        without a prompt and is still recorded: the part's `approval` and a `tool.auto_approved`
-        event in the chat's log."""
+        """allow, deny (with the model's note) or cancel. Who allowed a call that runs is the
+        part's `approved` (and tool.started's): user (the prompt), rule (a rule, an always
+        policy, auto-accept edits), auto or yolo (the chat's mode), None (the tool's default). A
+        call the mode allowed also leaves a `tool.auto_approved` event in the chat's log."""
         d, by = self._decide(run.conv.id, tool, args, settings)
         if d == "allow" and by:
             conv = run.conv
             with conv.lock:
-                part["approval"] = {"by": "mode", "mode": by}
+                part["approved"] = by
                 self.emit(conv, {"type": "tool.auto_approved", "message_id": run.message_id,
                                  "call_id": part["id"], "name": tool.name, "mode": by,
                                  "summary": tools_mod.summary(tool.name, args)}, run_id=run.id)
             return "allow", ""
         if d == "allow":
+            part["approved"] = "rule" if tool.default != "allow" or \
+                (settings.get("policies") or {}).get(tool.name) == "always" else None
             return "allow", ""
         if d == "deny":
             return "deny", "A permission rule denies this call."
@@ -394,6 +397,7 @@ class AgentMixin:
         if a["decision"] == "always":
             self.add_rule(rule["tool"], rule.get("match"), "allow",
                           None if a["scope"] == "all" else conv.id)
+        part["approved"] = "user"
         return "allow", ""
 
     # ================================================================== running the calls
@@ -469,7 +473,8 @@ class AgentMixin:
         with conv.lock:
             part["status"], part["started_at"] = "running", iso(now_ms())
             self.emit(conv, {"type": "tool.started", "message_id": run.message_id,
-                             "call_id": part["id"], "pane": None}, run_id=run.id)
+                             "call_id": part["id"], "pane": None,
+                             "approved": part.get("approved")}, run_id=run.id)
         ctx = ToolCtx(self, run, part)
         if not tool.sandbox:
             run.set_phase("tool", ctx._running_words(), tool={"call_id": part["id"],

@@ -530,6 +530,18 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         self.emit_global({"type": "permission_mode.default", "default": mode})
         return self.permission_modes()
 
+    def patch_defaults(self, body: dict) -> dict:
+        """PATCH /defaults {permission_mode}: the settings a new chat starts with that the user
+        sets (the permission mode, today); answers the capabilities' defaults."""
+        clean = _clean_settings(body)
+        other = sorted(k for k in clean if k != "permission_mode")
+        if other or not clean:
+            raise ApiError(400, "bad_request", "only permission_mode can be set as a default")
+        if clean["permission_mode"] is None:
+            raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
+        self.set_permission_default({"default": clean["permission_mode"]})
+        return self.capabilities()["defaults"]
+
     def permission_modes(self) -> dict:
         """GET /permissions/mode: the default and the modes there are."""
         return {"default": self.permission_default(), "modes": list(tools_mod.MODES)}

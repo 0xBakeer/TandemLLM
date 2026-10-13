@@ -110,11 +110,12 @@ Each chat has a permission mode, and the chat settings hold the default that a n
 
 Some limits hold in every mode. A deny rule refuses the call, and so does a tool set to "never". A tool set to "ask" asks. Plan mode offers only the read tools. The sandbox stays locked down: no LAN, no host, and the internet only through chatd's proxy.
 
-A call that runs without a prompt still leaves a record. Its tool card carries `approval: {by: "mode", mode}`, and the chat's event log gets a `tool.auto_approved` event with the call's one-line summary. The run's mode is on `run.started`, on the assistant message (`permission_mode`) and, after a change during the run, on `run.mode`. A change applies from the next call. The routes:
+A call that runs without a prompt still leaves a record. Its tool card and `tool.started` carry `approved: "auto"` or `"yolo"` (`"user"` after a prompt, `"rule"` for a rule or an always policy), and the chat's event log gets a `tool.auto_approved` event with the call's one-line summary. The run's mode is on `run.started`, on the assistant message (`permission_mode`) and, after a change during the run, on `run.mode`. A change applies from the next call. The routes:
 
 ```text
 GET  /v1/chat-app/permissions/mode                       {default, modes}
 PUT  /v1/chat-app/permissions/mode                       {default: ask|auto|yolo}
+PATCH /v1/chat-app/defaults                              {permission_mode} -> the capabilities' defaults
 GET  /v1/chat-app/conversations/{id}/permission-mode     {mode, effective, default}
 PUT  /v1/chat-app/conversations/{id}/permission-mode     {mode: ask|auto|yolo}
 ```
