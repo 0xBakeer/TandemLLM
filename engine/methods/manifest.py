@@ -26,7 +26,10 @@ from dataclasses import dataclass
 
 from engine import disk_cache as dc
 
-FORMULA = "fp3"
+#: fp4 (rc-0.8.0): fp3's hash over the server's extra by content (server/diskcache.py
+#: `fingerprint_extra`), where fp3's named files and tables by path; fp3 is still computed, by path,
+#: to adopt the files the builds before wrote (`server/diskcache.py legacy_fingerprints`)
+FORMULA = "fp4"
 
 
 @dataclass(frozen=True)
@@ -81,9 +84,9 @@ def tables(root: str, owners: set, env=None) -> list[str]:
     return sorted(out)
 
 
-def fingerprint(root: str, m: Manifest, extra: dict) -> str:
+def fingerprint(root: str, m: Manifest, extra: dict, formula: str = FORMULA) -> str:
     h = hashlib.sha256()
-    h.update(FORMULA.encode())
+    h.update(formula.encode())
     h.update(m.arch.encode())
     paths = files(root, m)
     owners = {os.path.relpath(p, root) for p in paths}

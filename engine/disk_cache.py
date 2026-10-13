@@ -1723,7 +1723,7 @@ def fingerprint(root: str, extra: dict, skip=()) -> str:
 EQUIV_FILE = "fp-equal.json"
 
 
-def equivalents(root_dir: str, fp: str, legacy: str | None, formula: str | None = None) -> tuple:
+def equivalents(root_dir: str, fp: str, legacy, formula: str | None = None) -> tuple:
     """The fingerprints whose files a tier (and its session spill) under `fp` may read besides
     `fp`'s own. The first start under the current formula adopts the files of the formula before
     it computed on this same tree (`fingerprint_legacy`): same engine bytes, flags, weights and
@@ -1734,7 +1734,8 @@ def equivalents(root_dir: str, fp: str, legacy: str | None, formula: str | None 
     `formula` (fingerprint v3, ENG-243, engine/methods/manifest.py): the adoption is recorded per
     formula (`formulas` in the record), so a directory that already has a record still adopts once
     more -- `legacy` is then the previous formula's fingerprint of this tree, and what that one
-    read comes along."""
+    read comes along. `legacy` may name several (fp4: the extra by path as v2 and as fp3, on this
+    folder and the ones a tree moved from; server/diskcache.py `legacy_fingerprints`)."""
     path = os.path.join(root_dir, EQUIV_FILE)
     try:
         with open(path) as f:
@@ -1747,9 +1748,13 @@ def equivalents(root_dir: str, fp: str, legacy: str | None, formula: str | None 
     formulas = formulas if isinstance(formulas, dict) else {}
     if doc is None if formula is None else formula not in formulas:
         doc = {} if doc is None else doc
-        if legacy and legacy != fp:
-            prev = doc.get(legacy) if formula is not None else None
-            doc[fp] = sorted({legacy, *(str(x) for x in (prev if isinstance(prev, list) else []))} - {fp})
+        got = set()
+        for leg in ([legacy] if isinstance(legacy, str) else list(legacy or ())):
+            if leg and leg != fp:
+                prev = doc.get(leg) if formula is not None else None
+                got |= {leg, *(str(x) for x in (prev if isinstance(prev, list) else []))}
+        if got - {fp}:
+            doc[fp] = sorted(got - {fp})
         if formula is not None:
             doc["formulas"] = {**formulas, formula: fp}
         try:

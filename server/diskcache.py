@@ -16,6 +16,7 @@ never under 50 GB, whatever the document says (engine/disk_cache.py FLOOR_BYTES)
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -26,6 +27,19 @@ DEFAULT_ROOT = "~/.qwen38-spark-engine/cache/disk"
 _LOGGED = ("write", "evict", "drop", "restore_failed", "error", "clear")
 # the settings environment that cannot change a prefill's rows: left out of the fingerprint
 _NOT_ARITHMETIC = ("QWEN38_DECIDER", "QWEN38_NARRATOR", "QWEN38_PROBE", "QWEN38_DRAFT_TEMP")
+# rc-0.8.0: nor can the shadow reader's (server/conductor/shadow.py: a second model's own states).
+# The extra by path, which 0.7.2 hashed, keeps them, so its files can be adopted
+_NOT_ROWS = _NOT_ARITHMETIC + ("QWEN38_SHADOW",)
+#: the serve.env lines main added after 0.7.2, at their defaults: a 0.7.2 environment had none of
+#: them, so 0.7.2 hashed this tree's extra by path without them (`legacy_fingerprints`). Live on the
+#: box, these four and the tree's folder were the whole difference (tools/tier_fp_inputs.py)
+ADDED_AFTER_072 = {"QWEN38_SHADOW_DIR": "", "QWEN38_SHADOW_DISK_GB": "20", "QWEN38_SHADOW_GB": "4",
+                   "QWEN38_SHADOW_GRID": "512"}
+# the arguments that name weight and drafter files
+_ARG_FILES = ("model", "nvfp4", "fp8_head", "head", "dflash2_ckpt", "dflash2_ckpt16")
+# a file past this size is identified by a sample of its bytes (`content_id`)
+SAMPLE_OVER = 64 << 20
+_IDS: dict = {}
 
 
 def settings_of(settings: dict | None) -> dict:
@@ -72,12 +86,79 @@ def _file_id(path: str) -> list:
         return [path, None, None]
 
 
+def content_id(path: str):
+    """What is at `path`, not where it is: a file's size and sha256 (over the whole file up to
+    SAMPLE_OVER; past that over its first and last MiB and 16 reads of 64 KiB spread between them),
+    a folder's .safetensors and .json files by name, "missing" for neither. Remembered by the file's
+    real path, size, mtime and inode for the process."""
+    p = os.path.expanduser(path)
+    if os.path.isdir(p):
+        return {"dir": [[f, content_id(os.path.join(p, f))] for f in sorted(os.listdir(p))
+                        if f.endswith((".safetensors", ".json"))]}
+    try:
+        st = os.stat(p)
+    except OSError:
+        return "missing"
+    key = (os.path.realpath(p), st.st_size, st.st_mtime_ns, st.st_ino)
+    got = _IDS.get(key)
+    if got is None:
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            if st.st_size <= SAMPLE_OVER:
+                for b in iter(lambda: f.read(1 << 20), b""):
+                    h.update(b)
+            else:
+                spots = [(0, 1 << 20), (st.st_size - (1 << 20), 1 << 20)]
+                spots += [(st.st_size * i // 17, 1 << 16) for i in range(1, 17)]
+                for off, n in spots:
+                    f.seek(off)
+                    h.update(f.read(n))
+        got = _IDS[key] = f"{st.st_size}:{h.hexdigest()}"
+    return got
+
+
+def _located(v: str):
+    """An environment value that names files by where they are (a path, or paths with commas): what
+    is there instead. Any other value as it is."""
+    parts = v.split(",")
+    if not v or not all(x.startswith(("/", "~")) for x in parts):
+        return v
+    ids = [content_id(x) for x in parts]
+    return ids[0] if len(ids) == 1 else ids
+
+
+def _libraries(out: dict) -> dict:
+    out["python"] = sys.version.split()[0]
+    for mod in ("torch", "triton"):
+        try:
+            out[mod] = __import__(mod).__version__
+        except Exception:                                          # noqa: BLE001
+            out[mod] = None
+    return out
+
+
 def fingerprint_extra(a) -> dict:
-    """What a prefill's rows depend on besides the engine's code and the tokens: the weight files
-    (path, size, mtime), the arithmetic flags in the environment, the grid, the drafters and the
-    libraries' versions."""
+    """What a prefill's rows depend on besides the engine's code and the tokens, by content: the
+    weight and drafter files, the arithmetic flags in the environment (a value that names files, by
+    what is in them), the grid, the drafter and the libraries' versions. A path is only where a file
+    lives: a tree in another folder, or a copied checkpoint, keeps the fingerprint (rc-0.8.0: the 27B
+    moved from ~/tandem-live to ~/tandem-rc080 swept 29 files, 2.97 GB, for its folder's name)."""
     files = []
-    for name in ("model", "nvfp4", "fp8_head", "head", "dflash2_ckpt", "dflash2_ckpt16"):
+    for name in _ARG_FILES:
+        v = getattr(a, name, None)
+        files += [content_id(p) for p in (str(v).split(",") if v else [])]
+    env = {k: _located(v) for k, v in sorted(os.environ.items())
+           if k.startswith("QWEN38_") and not k.startswith(_NOT_ROWS)}
+    return _libraries({"files": files, "env": env, "chunk": getattr(a, "prefix_chunk", None),
+                       "drafter": getattr(a, "drafter", None),
+                       "narrow_arm": getattr(a, "narrow_arm", None)})
+
+
+def fingerprint_extra_paths(a) -> dict:
+    """The extra as 0.7.2 and the RC up to fp4 hashed it: the weight files by path, size and mtime,
+    the environment's values as written. Kept to adopt their files (`legacy_fingerprints`)."""
+    files = []
+    for name in _ARG_FILES:
         v = getattr(a, name, None)
         for p in (str(v).split(",") if v else []):
             p = os.path.expanduser(p)
@@ -88,15 +169,53 @@ def fingerprint_extra(a) -> dict:
                 files.append(_file_id(p))
     env = {k: v for k, v in sorted(os.environ.items())
            if k.startswith("QWEN38_") and not k.startswith(_NOT_ARITHMETIC)}
-    out = {"files": files, "env": env, "chunk": getattr(a, "prefix_chunk", None),
-           "drafter": getattr(a, "drafter", None), "narrow_arm": getattr(a, "narrow_arm", None),
-           "python": sys.version.split()[0]}
-    for mod in ("torch", "triton"):
-        try:
-            out[mod] = __import__(mod).__version__
-        except Exception:                                          # noqa: BLE001
-            out[mod] = None
+    return _libraries({"files": files, "env": env, "chunk": getattr(a, "prefix_chunk", None),
+                       "drafter": getattr(a, "drafter", None),
+                       "narrow_arm": getattr(a, "narrow_arm", None)})
+
+
+def _moved(extra: dict, here: str, old: str) -> dict:
+    """`extra` as the same files had it under the tree's old folder `old`."""
+    def at(v):
+        return old + v[len(here):] if isinstance(v, str) and (v == here or v.startswith(here + "/")) else v
+    out = dict(extra)
+    out["files"] = [[at(f[0]), *f[1:]] for f in extra["files"]]
+    out["env"] = {k: ",".join(at(x) for x in v.split(",")) for k, v in extra["env"].items()}
     return out
+
+
+def _same_content(extra: dict, here: str, old: str) -> bool:
+    """Whether every argument file of `extra` under `here` (the drafter checkpoints) holds what the
+    same file under `old` holds: a moved tree's files, not others with the same size and mtime.
+    False when one is missing at either place. The tables the environment names are not compared:
+    the extra by path never read their content (fp4 and v3 do)."""
+    for p in (f[0] for f in extra["files"]):
+        if isinstance(p, str) and p.startswith(here + "/"):
+            q = old + p[len(here):]
+            if not (os.path.isfile(p) and os.path.isfile(q)) or content_id(p) != content_id(q):
+                return False
+    return True
+
+
+def legacy_fingerprints(here: str, m, a, adopt_from=(), tree: str | None = None) -> list:
+    """The fingerprints the files this start may adopt were written under, for the same rows: the
+    extra by path on this tree (0.7.2's v2, the RC's fp3 before fp4), and as the trees in
+    `adopt_from` had it (QSE_DISK_ADOPT_FROM: the folders a tree moved from), each also without the
+    serve.env lines main added after 0.7.2 (`ADDED_AFTER_072`) where they hold their defaults. A
+    folder counts only when its files hold what this tree's hold (`_same_content`).
+    `here` is the code's tree; `tree` the folder the paths are under (`here` unless a test says)."""
+    from engine import spill as spill_mod
+    from engine.methods import manifest as mf
+    tree = here if tree is None else tree
+    base, out = fingerprint_extra_paths(a), []
+    olds = [os.path.abspath(os.path.expanduser(x)) for x in adopt_from if x]
+    for old in (tree, *[x for x in olds if x != tree and _same_content(base, tree, x)]):
+        e = base if old == tree else _moved(base, tree, old)
+        bare = dict(e, env={k: v for k, v in e["env"].items() if ADDED_AFTER_072.get(k) != v})
+        for x in (e, bare):
+            out += [dc.fingerprint(here, x, skip=spill_mod.NOT_ARITHMETIC),
+                    mf.fingerprint(here, m, x, formula="fp3")]
+    return list(dict.fromkeys(out))
 
 
 def _in_repository(path: str) -> str | None:
@@ -124,17 +243,15 @@ def start(state, a, journal=None):
         print(f"[disk-cache] off: {root} is inside the git work tree {repo}", flush=True)
         return None
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # The files that keep state rather than compute it are left out, as the session
-    # spill leaves them out: a deploy that changes only them keeps the tier's heads (0.3.22's swept
-    # 49 GB for a change in engine/cache.py alone)
-    from engine import spill as spill_mod
     from engine.methods import manifest as mf
     extra = fingerprint_extra(a)
-    # fingerprint v3 (ENG-243): what the model's adapter says its rows depend on
+    # fingerprint v3 (ENG-243): what the model's adapter says its rows depend on, by content (fp4)
     fp = mf.fingerprint(here, eng.manifest(), extra)
-    # the first start under this formula adopts the files of the one before it (v2, FX15) on this
-    # same tree (`dc.equivalents`); the record in the directory says so from then on
-    also = dc.equivalents(root, fp, dc.fingerprint(here, extra, skip=spill_mod.NOT_ARITHMETIC),
+    # the first start under this formula adopts the files of the ones before it for the same rows
+    # (0.7.2's v2, the RC's fp3; `legacy_fingerprints`); the record in the directory says so
+    # from then on
+    adopt = [x for x in (os.environ.get("QSE_DISK_ADOPT_FROM") or "").split(":") if x]
+    also = dc.equivalents(root, fp, legacy_fingerprints(here, eng.manifest(), a, adopt),
                           formula=mf.FORMULA)
     state["disk_cache_fp_also"] = also
     tok = state.get("tok")
