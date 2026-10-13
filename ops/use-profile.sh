@@ -5,6 +5,8 @@
 #   ops/use-profile.sh <name> --fetch-only check / fetch / verify the profile's files, touch nothing else
 #   ops/use-profile.sh <name> --dry-run    print what a switch would do
 #   ops/use-profile.sh --list              the profiles and which one is active
+#   ops/use-profile.sh community/<id> ...  a community pack (models/<model>/community/<id>.json): the same, its
+#                                          profile written from the entry first (docs/community-weights.md)
 #
 # Everything but the weights is shared: serve.env, the conductor, ledger, caches, crons. The active profile
 # is ops/active-profile, which serve.env reads, so start.sh, the watchdog and the @reboot line always start
@@ -37,7 +39,23 @@ if [ "$NAME" = "--list" ]; then
     done
     exit 0
 fi
-[ -n "$NAME" ] && [ -f "$PROFILES/$NAME.env" ] || { echo "usage: $0 <profile>|--list [--fetch-only|--dry-run]; profiles: $(ls "$PROFILES" | grep -v '^_' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
+usage() { echo "usage: $0 <profile>|community/<id>|--list [--fetch-only|--dry-run]; profiles: $(ls "$PROFILES" | grep -v '^_' | grep '\.env$' | sed 's/\.env$//' | tr '\n' ' ')"; exit 2; }
+COMMUNITY=0
+case "$NAME" in
+    community/*/*|community/*..*|community/) usage ;;
+    community/*)
+        # a community pack (docs/community-weights.md): its profile is written from its registry entry
+        # (server/setup/community.py) to run/community/<id>.env, which serve.env reads for this name;
+        # a dry run writes it to a folder of its own and leaves run/ alone
+        COMMUNITY=1; CDIR="$REPO_DIR/run"
+        if [ "$MODE" = "--dry-run" ]; then
+            CDIR="$(mktemp -d)"; trap 'rm -rf "$CDIR"' EXIT; export QSE_COMMUNITY_ENV_DIR="$CDIR"
+        fi
+        PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}" "$(pv PY)" -m server.setup.community env "$NAME" \
+            --out "$CDIR/$NAME.env" || exit 2
+        say "$NAME: profile $CDIR/$NAME.env written from its registry entry" ;;
+    *) [ -n "$NAME" ] && [ -f "$PROFILES/$NAME.env" ] || usage ;;
+esac
 
 WDIR="$(pv QSE_WEIGHTS_DIR)"; HF="$(pv QSE_WEIGHTS_HF)"; GB="$(pv QSE_WEIGHTS_GB)"; FILES="$(pv QSE_WEIGHTS_FILES)"
 REV="$(pv QSE_WEIGHTS_REVISION)"; ALSO="$(pv QSE_WEIGHTS_ALSO)"
@@ -73,7 +91,9 @@ else
     [ "$RC" -eq 0 ] || { say "REFUSING: $NAME's files besides its weights did not fetch (fetch_weights.py exit $RC)"; exit "$RC"; }
     # the base snapshot as engine/config.py resolves it: QWEN38_MODEL, else the default HF cache folder
     BASE="$(pv QWEN38_MODEL)"; BASE="${BASE:-$HOME/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots}"
-    if [ "$MODE" != "--dry-run" ]; then
+    # a community pack's files besides its own are exactly its entry's assets, which fetch_weights.py
+    # --assets has fetched and checked above (a standalone pack is its own base, fetched below)
+    if [ "$MODE" != "--dry-run" ] && [ "$COMMUNITY" = 0 ]; then
         for p in ${DRAFT:+$DRAFT/ft-b8-v2.safetensors $DRAFT/ft-b16.safetensors} ${DHEAD:+$DHEAD/model.safetensors} \
                  "$C8" "$C16"; do [ -n "$p" ] && [ -e "$p" ] || MISSING="$MISSING ${p:-(an empty CKPT8/CKPT16)}"; done
         compgen -G "$BASE/config.json" >/dev/null || compgen -G "$BASE/*/config.json" >/dev/null \
