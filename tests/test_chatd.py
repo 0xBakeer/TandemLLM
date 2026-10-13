@@ -63,7 +63,7 @@ def test_the_daily_backup_keeps_seven():
     kept = sorted(os.listdir(out))
     assert len(kept) == 7 and kept[0] == "chat-20261003.sqlite3", kept
     assert sqlite3.connect(os.path.join(out, kept[-1])).execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "5"
+        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "6"
 
 
 # ------------------------------------------------------------------ the forward key

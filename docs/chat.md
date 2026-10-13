@@ -120,6 +120,8 @@ GET  /v1/chat-app/conversations/{id}/permission-mode     {mode, effective, defau
 PUT  /v1/chat-app/conversations/{id}/permission-mode     {mode: ask|auto|yolo}
 ```
 
+A bash rule names a command's first word, or its first two for programs with subcommands (`git push`, `npm install`). A chained command (`&&`, `||`, `;`, `|`) runs without a prompt when every part has an allow rule, and is refused when any part hits a deny rule. "Always allow" on it saves a rule for each part not yet allowed. A command with `$(...)` or backticks matches no rule.
+
 `PATCH /conversations/{id}/settings` takes `permission_mode` too. A chat from before 0.8.2 has none and runs in the default mode.
 
 ## Chat tab (beta): known limitations

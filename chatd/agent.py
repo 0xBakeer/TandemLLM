@@ -290,6 +290,11 @@ class AgentMixin:
                 for r in rows if cid is None or r["conversation_id"] in (None, cid)]
 
     def add_rule(self, tool: str, match: str | None, decision: str, cid: str | None) -> dict:
+        """A rule, once: the same tool, match, decision and scope give back the saved one."""
+        same = next((r for r in self.rules() if r["tool"] == tool and r["match"] == (match or None)
+                     and r["decision"] == decision and r["conversation_id"] == cid), None)
+        if same is not None:
+            return same
         rid = ulid()
         self.store.run("INSERT INTO permission_rules VALUES (?, ?, ?, ?, ?, ?)",
                        (rid, tool, match or None, decision, cid, now_ms()))
@@ -366,7 +371,8 @@ class AgentMixin:
         if d == "deny":
             return "deny", "A permission rule denies this call."
         conv = run.conv
-        rule = tools_mod.suggested_rule(tool.name, args)
+        allows = [r for r in self.rules(conv.id) if r["decision"] == "allow"]
+        rule = tools_mod.suggested_rule(tool.name, args, allows)
         words = tools_mod.summary(tool.name, args)
         w = {"event": threading.Event(), "answer": None}
         with conv.lock:
@@ -395,8 +401,9 @@ class AgentMixin:
             note = a["note"]
             return "deny", "The user denied this call." + (f" Their note: {note}" if note else "")
         if a["decision"] == "always":
-            self.add_rule(rule["tool"], rule.get("match"), "allow",
-                          None if a["scope"] == "all" else conv.id)
+            scope = None if a["scope"] == "all" else conv.id
+            for m in rule["matches"] if "matches" in rule else [rule.get("match")]:
+                self.add_rule(rule["tool"], m, "allow", scope)
         part["approved"] = "user"
         return "allow", ""
 

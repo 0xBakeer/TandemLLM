@@ -148,7 +148,7 @@ export interface ToolCallPart {
   started_at: string | null;
   ended_at: string | null;
   /** what the permission prompt should say, when the tool asks */
-  permission?: { summary: string; suggested_rule?: { tool: string; match?: string } } | null;
+  permission?: { summary: string; suggested_rule?: { tool: string; match?: string; matches?: string[] } } | null;   // matches: bash, one prefix per part not yet allowed ([] = a hidden command, no always)
   /** who allowed the call: the user at the prompt, an always rule, auto mode or YOLO mode */
   approved?: ToolApproval | null;
   /** a pane that can show this call's work */
@@ -537,7 +537,7 @@ export type ChatEvent =
   | { type: 'part.added'; message_id: string; part: Part }
   | { type: 'part.delta'; message_id: string; index: number; delta: string; field?: 'text' | 'input' }
   | { type: 'part.done'; message_id: string; index: number; tokens?: number | null }
-  | { type: 'tool.asking'; message_id: string; call_id: string; summary: string; risk?: string; suggested_rule?: { tool: string; match?: string } }
+  | { type: 'tool.asking'; message_id: string; call_id: string; summary: string; risk?: string; suggested_rule?: { tool: string; match?: string; matches?: string[] } }
   | { type: 'tool.started'; message_id: string; call_id: string; pane?: PaneRef | null; approved?: ToolApproval | null }
   | { type: 'tool.output'; message_id: string; call_id: string; delta: string }
   | { type: 'tool.done'; message_id: string; call_id: string; status: 'done' | 'failed' | 'denied' | 'cancelled'; is_error: boolean; output?: ToolOutput | null }

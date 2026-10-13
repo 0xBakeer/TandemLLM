@@ -284,5 +284,87 @@ def test_the_api_and_the_default():
         c.close()
 
 
+# ---------------------------------------------------------------------- chained commands (Ask mode)
+MARIO = 'cd /workspace && node tools/check.js --level 1-1 > run.log 2>&1; echo "exit:$?"; cat run.log'
+
+
+def _rule(match, decision="allow"):
+    return {"tool": "bash", "match": match, "decision": decision}
+
+
+def test_a_chained_command_is_covered_part_by_part():
+    """The live bug of 2026-10-13 (chat 01M4TJG422BS6CS816PJR837A6): eleven "always allow cd" and
+    the prompt came back every time, because the suggestion was the first part's prefix only."""
+    cmd = {"command": MARIO}
+    # every part needs a rule, any rule per part, from either scope
+    assert T.decide(BASH, cmd, [_rule("cd"), _rule("node")], [], {}) == "ask"
+    assert T.decide(BASH, cmd, [_rule("cd"), _rule("node")], [_rule("echo"), _rule("cat")], {}) == "allow"
+    # what "always allow" offers: the parts not covered yet, each once, redirections ignored
+    assert T.suggested_rule("bash", cmd) == {"tool": "bash", "match": "cd, node, echo, cat",
+                                             "matches": ["cd", "node", "echo", "cat"]}
+    assert T.suggested_rule("bash", cmd, [_rule("cd"), _rule("node")])["matches"] == ["echo", "cat"]
+    assert T.bash_prefixes("ls > a.txt 2>&1 && ls -la >> b.txt | grep x") == ["ls", "grep"]
+    assert T.bash_prefixes("git status && git push origin main") == ["git status", "git push"]
+    # a deny in one part refuses the whole command, whatever covers the rest
+    rest = [_rule("cd"), _rule("node"), _rule("echo")]
+    assert T.decide(BASH, cmd, rest + [_rule("cat", "deny")], [], {}) == "deny"
+    assert T.decide(BASH, cmd, rest, [_rule("cat", "deny")], {}) == "deny"
+    # a command that hides a command is never allowed by a rule, and no rule is offered for it
+    hidden = {"command": "cd /workspace && node $(cat which.txt)"}
+    assert T.decide(BASH, hidden, [_rule("cd"), _rule("node")], [], {}) == "ask"
+    assert T.suggested_rule("bash", hidden)["matches"] == []
+    assert T.decide(BASH, {"command": "echo `id`"}, [_rule("echo")], [], {}) == "ask"
+
+
+def test_always_allow_saves_every_part_once_and_the_prompt_does_not_come_back():
+    c = chat_with_sandbox()
+    try:
+        cid = c.new()
+        c.ok("PUT", f"/conversations/{cid}/permission-mode", {"mode": "ask"})
+        c.svc.add_rule("bash", "cd", "allow", cid)
+        assert c.svc.add_rule("bash", "cd", "allow", cid)["id"] == c.svc.rules(cid)[0]["id"]   # once
+        sse = c.events(cid)
+        sse.until(lambda f: f[1] == "current")
+        c.send(cid, calls(("bash", {"command": MARIO})))
+        ev = json.loads(sse.until(lambda f: f[1] == "tool.asking")[-1][2])
+        assert ev["suggested_rule"] == {"tool": "bash", "match": "node, echo, cat",
+                                        "matches": ["node", "echo", "cat"]}, ev
+        c.ok("POST", f"/conversations/{cid}/permissions/{ev['call_id']}", {"decision": "always"})
+        c.wait_idle(cid, 20)
+        sse.until(is_done)
+        assert sorted(r["match"] for r in c.ok("GET", "/permissions/rules")) == ["cat", "cd", "echo", "node"]
+        # the same command again: no prompt; and no rule is written twice
+        c.send(cid, calls(("bash", {"command": MARIO})))
+        c.wait_idle(cid, 20)
+        frames = sse.until(is_done)
+        assert not any(f[1] == "tool.asking" for f in frames), [f[1] for f in frames]
+        assert len(c.ok("GET", "/permissions/rules")) == 4
+        calls_ = [p for p in parts_of(c.snap(cid)) if p["type"] == "tool_call"]
+        assert [p["status"] for p in calls_] == ["done", "done"] and calls_[-1]["approved"] == "rule"
+        sse.close()
+    finally:
+        c.close()
+
+
+def test_the_store_drops_the_duplicate_rules_once():
+    """Schema 6: the eleven "cd" rows of the live chat become one; other rules stay."""
+    import os
+    import tempfile
+    from chatd.store import MIGRATIONS, Store
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "chat.sqlite3")
+    old = Store(path, {k: v for k, v in MIGRATIONS.items() if k <= 5})
+    rows = [("r%02d" % i, "bash", "cd", "allow", "01M4TJG422BS6CS816PJR837A6", i) for i in range(11)]
+    rows += [("rn", "bash", "node", "allow", "01M4TJG422BS6CS816PJR837A6", 20),
+             ("rg", "bash", "cd", "allow", None, 21), ("rd", "bash", "cd", "deny", "other", 22),
+             ("rw", "web_fetch", None, "allow", None, 23), ("rw2", "web_fetch", None, "allow", None, 24)]
+    for r in rows:
+        old.run("INSERT INTO permission_rules VALUES (?, ?, ?, ?, ?, ?)", r)
+    old.db.close()
+    new = Store(path)
+    got = sorted(r["id"] for r in new.all("SELECT id FROM permission_rules"))
+    assert got == ["r00", "rd", "rg", "rn", "rw"], got
+
+
 if __name__ == "__main__":
     run_all(globals())

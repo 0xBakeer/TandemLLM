@@ -274,7 +274,9 @@ export class QseChatThread extends LightElement {
                   <p class="ch-perm-text">${t.permission.summary}</p>
                   <div class="ch-perm-row">
                     <button type="button" class="btn btn-primary btn-sm" @click=${() => this.fire('ch-permission', { callId: t.id, decision: 'once' })}>Allow once</button>
-                    <button type="button" class="btn btn-sm" @click=${() => this.fire('ch-permission', { callId: t.id, decision: 'always' })}>Always allow ${toolLabel(t.permission.suggested_rule?.tool ?? t.name)}${t.permission.suggested_rule?.match ? html` <code class="small">${t.permission.suggested_rule.match}</code>` : nothing}</button>
+                    ${t.permission.suggested_rule?.matches?.length === 0
+                      ? nothing
+                      : html`<button type="button" class="btn btn-sm" @click=${() => this.fire('ch-permission', { callId: t.id, decision: 'always' })}>${t.permission.suggested_rule?.matches ? html`Always allow <code class="small">${t.permission.suggested_rule.matches.join(', ')}</code>` : html`Always allow ${toolLabel(t.permission.suggested_rule?.tool ?? t.name)}${t.permission.suggested_rule?.match ? html` <code class="small">${t.permission.suggested_rule.match}</code>` : nothing}`}</button>`}
                     <button type="button" class="btn btn-sm ch-deny" @click=${() => this.fire('ch-permission', { callId: t.id, decision: 'deny' })}>Deny</button>
                   </div>
                 </div>`

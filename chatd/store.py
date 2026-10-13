@@ -130,8 +130,19 @@ SCHEMA_V5 = """
 ALTER TABLE runs ADD COLUMN permission_mode TEXT
 """
 
+# v6 (2026-10-13): one permission rule per tool, match, decision and scope. A bash prompt offered
+# only its first part's prefix, which never covered a chained command, and every "always allow"
+# saved it again (the live chat 01M4TJG422BS6CS816PJR837A6 held 11 rows of bash "cd"); the oldest
+# row of each stays
+SCHEMA_V6 = """
+DELETE FROM permission_rules WHERE rowid NOT IN (
+  SELECT MIN(rowid) FROM permission_rules
+  GROUP BY tool, IFNULL(match, ''), decision, IFNULL(conversation_id, ''))
+"""
+
 # version n: the SQL that takes a file from n-1 to n
-MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5}
+MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5,
+                              6: SCHEMA_V6}
 BACKUPS_KEPT = 7
 
 

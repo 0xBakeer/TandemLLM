@@ -320,21 +320,42 @@ BY_NAME = {t.name: t for t in BUILTINS}
 
 # ---------------------------------------------------------------------- permissions
 _SUB = re.compile(r"^[a-z][a-z0-9_-]*$")
+# the programs whose second word is a subcommand worth its own rule (`git push` is not `git status`);
+# for any other program the second word is an argument (`grep tilt` would allow only that search)
+_SUBCOMMANDS = {"git", "npm", "pnpm", "yarn", "npx", "pip", "pip3", "uv", "poetry", "cargo", "go",
+                "docker", "podman", "kubectl", "apt", "apt-get", "brew", "make", "dotnet", "gh"}
 _SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 
 def bash_prefix(command: str) -> str:
-    """The rule a "always allow" on a bash call suggests: the first word, plus the second when
-    it is a subcommand (`npm install`, `git status`), never the whole line."""
+    """The rule a "always allow" suggests for one command: the first word, plus the second when
+    it is a subcommand of a program that has them (`npm install`, `git status`; _SUBCOMMANDS),
+    never the whole line. Of a chained command,
+    its first part (bash_prefixes has them all)."""
     try:
         words = shlex.split(_SPLIT.split(command.strip())[0])
     except ValueError:
         words = command.split()
     if not words:
         return ""
-    if len(words) > 1 and _SUB.match(words[1]):
+    if len(words) > 1 and words[0] in _SUBCOMMANDS and _SUB.match(words[1]):
         return f"{words[0]} {words[1]}"
     return words[0]
+
+
+def bash_prefixes(command: str, allows: list[dict] = ()) -> list[str]:
+    """The prefixes "always allow" saves for a chained command: one per part that no allow rule in
+    `allows` covers yet, each once, in order (`cd /w && node a.js > run.log 2>&1; echo $?; cat
+    run.log` with cd and node allowed: echo, cat). The live bug of 2026-10-13: only the first
+    part's prefix was offered, so the rule never covered the command and the prompt came back."""
+    out: list[str] = []
+    for p in _bash_parts(command) or []:
+        if any(rule_matches(r, "bash", p) for r in allows):
+            continue
+        pre = bash_prefix(p["command"])
+        if pre and pre not in out:
+            out.append(pre)
+    return out
 
 
 def _bash_matches(match: str, command: str) -> bool:
@@ -373,9 +394,15 @@ def rule_matches(rule: dict, tool: str, args: dict) -> bool:
     return False
 
 
-def suggested_rule(tool: str, args: dict) -> dict:
+def suggested_rule(tool: str, args: dict, allows: list[dict] = ()) -> dict:
+    """What "always allow" saves. For bash, `matches`: a prefix per part not yet covered by
+    `allows` (the chat's and the global allow rules), and `match` the same joined for the prompt
+    ("cd, node, echo, cat"); a command that hides a command (`$(...)`, backticks) gets none, since
+    no rule may allow it."""
     if tool == "bash":
-        return {"tool": "bash", "match": bash_prefix(str(args.get("command") or ""))}
+        cmd = str(args.get("command") or "")
+        pres = bash_prefixes(cmd, allows) if _bash_parts(cmd) is not None else []
+        return {"tool": "bash", "match": ", ".join(pres), "matches": pres}
     if tool == "web_fetch":
         return {"tool": "web_fetch", "match": domain_of(str(args.get("url") or ""))}
     return {"tool": tool}
@@ -584,5 +611,5 @@ def html_to_text(doc: str) -> str:
 
 __all__ = ["Tool", "Result", "ToolError", "BUILTINS", "BY_NAME", "decide", "decide_mode", "MODES",
            "DEFAULT_MODE", "risky_rm", "leaves_sandbox", "rule_matches",
-           "suggested_rule", "summary", "bash_prefix", "for_model", "for_ui", "parse_args",
+           "suggested_rule", "summary", "bash_prefix", "bash_prefixes", "for_model", "for_ui", "parse_args",
            "html_to_text", "PathError", "ChangedError"]
