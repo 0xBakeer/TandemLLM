@@ -86,6 +86,8 @@
 
   --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--cobalt-hi);
   --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.45);
+  /* a sheet that rises from the bottom edge */
+  --shadow-sheet: 0 -8px 30px rgba(0, 0, 0, 0.35);
 }
 
 :root[data-theme='light'] {
@@ -141,4 +143,5 @@
 
   --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--cobalt);
   --shadow-pop: 0 8px 30px rgba(15, 22, 32, 0.18);
+  --shadow-sheet: 0 -8px 30px rgba(15, 22, 32, 0.14);
 }

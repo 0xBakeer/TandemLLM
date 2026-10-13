@@ -3030,7 +3030,7 @@ qse-wren-figure::before {
     font-size: var(--fs-lg);
   }
   .setup-nav {
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    bottom: var(--tabbar-space);
     padding: 10px 74px 10px 0; /* the floating Wren on the right */
     margin: 20px calc(var(--gutter) * -1) 0;
     padding-left: var(--gutter);
@@ -3058,7 +3058,7 @@ qse-wren-figure::before {
     display: none;
   }
   .wren-fab {
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 10px);
+    bottom: calc(var(--tabbar-space) + 10px);
     width: 58px;
     height: 58px;
   }

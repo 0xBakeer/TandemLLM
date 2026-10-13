@@ -249,17 +249,15 @@ textarea {
   background: var(--cobalt-wash);
   box-shadow: inset 3px 0 0 var(--cobalt);
 }
-.rail-short {
-  display: none;
-}
-@media (max-width: 768px) {
-  .rail-tab .rail-short {
-    display: inline;
-  }
-}
 .rail-tab .icon {
   width: 20px;
   height: 20px;
+}
+/* the phone's More slot and sheet: nothing of them above 768 px */
+.rail-more,
+.more-sheet,
+.more-scrim {
+  display: none;
 }
 .content {
   grid-area: main;
@@ -1632,9 +1630,15 @@ mark {
     grid-template-areas:
       'top'
       'main';
+    /* the room the bottom bar takes from the views: gone while a text field has focus (the
+       on-screen keyboard is up then), so the thread gets it back (2026-10-13) */
+    --tabbar-space: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+  }
+  .shell.is-typing {
+    --tabbar-space: 0px;
   }
   .content {
-    padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px);
+    padding-bottom: calc(var(--tabbar-space) + 16px);
   }
   .rail {
     position: fixed;
@@ -1645,29 +1649,28 @@ mark {
     height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
     flex-direction: row;
     justify-content: space-around;
-    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+    gap: 2px;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
     border-right: 0;
     border-top: 1px solid var(--rule);
     background: var(--bg-glass);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     z-index: 20;
+    transition: transform 0.18s ease-out;
+  }
+  .shell.is-typing .rail {
+    transform: translateY(110%);
+  }
+  /* four slots: Chat, Usage, Performance, More; the rest of the views live in the sheet */
+  .rail-tab:not([data-primary]) {
+    display: none;
   }
   .rail-tab {
     flex: 1;
-    /* seven tabs share 390 px: a label may shorten, the bar never scrolls */
     min-width: 0;
-    padding: 6px 1px 4px;
+    padding: 6px 2px 4px;
     min-height: 44px;
-  }
-  /* the full label stays the link's name for screen readers; the short one is what shows */
-  .rail-tab:has(.rail-short) > .rail-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
   }
   .rail-tab > span {
     max-width: 100%;
@@ -1677,6 +1680,126 @@ mark {
   }
   .rail-tab.is-on {
     box-shadow: inset 0 3px 0 var(--cobalt);
+  }
+  .rail-more {
+    display: flex;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .rail-more.is-open {
+    color: var(--ink);
+  }
+  .rail-more:focus-visible {
+    box-shadow: var(--focus);
+  }
+  /* the More sheet: the views behind the bar, as the instrument grid, with the box's readout the
+     phone's top bar has no room for */
+  .more-scrim {
+    display: block;
+    position: fixed;
+    inset: 0 0 var(--tabbar-space) 0;
+    z-index: 18;
+    background: rgba(8, 12, 17, 0.5);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.22s ease-out, visibility 0s linear 0.22s;
+  }
+  .shell.is-more .more-scrim {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 0.22s ease-out;
+  }
+  .more-sheet {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--tabbar-space);
+    z-index: 19;
+    max-height: calc(100dvh - var(--topbar-h) - var(--tabbar-space) - 24px);
+    overflow: auto;
+    background: var(--bg-2);
+    border-top: 1px solid var(--rule-strong);
+    box-shadow: var(--shadow-sheet);
+    transform: translateY(102%);
+    visibility: hidden;
+    transition: transform 0.22s ease-out, visibility 0s linear 0.22s;
+  }
+  .shell.is-more .more-sheet {
+    transform: translateY(0);
+    visibility: visible;
+    transition: transform 0.22s ease-out;
+  }
+  .more-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 8px 8px 16px;
+  }
+  .more-head h2 {
+    font-size: var(--fs-md);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .more-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .more-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-height: 74px;
+    padding: 14px 6px 12px;
+    color: var(--ink-2);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    text-decoration: none;
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .more-item:nth-child(3n) {
+    border-right: 0;
+  }
+  .more-item:nth-last-child(-n + 3) {
+    border-bottom: 0;
+  }
+  .more-item .icon {
+    width: 22px;
+    height: 22px;
+  }
+  .more-item:hover,
+  .more-item:focus-visible {
+    color: var(--ink);
+    background: var(--bg-3);
+    text-decoration: none;
+    outline: none;
+  }
+  .more-item.is-on {
+    color: var(--ink);
+    background: var(--cobalt-wash);
+    box-shadow: inset 0 3px 0 var(--cobalt);
+  }
+  .rail-tab.is-off,
+  .more-item.is-off {
+    opacity: 0.45;
+  }
+  .more-foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    min-height: 36px;
+    padding: 10px 16px;
+    font-size: var(--fs-xs);
+    color: var(--ink-3);
   }
   .topbar {
     padding: 0 10px 0 12px;
@@ -1777,7 +1900,10 @@ mark {
   }
   .heat-cell,
   .switch input,
-  .switch input::after {
+  .switch input::after,
+  .rail,
+  .more-sheet,
+  .more-scrim {
     transition: none;
   }
 }

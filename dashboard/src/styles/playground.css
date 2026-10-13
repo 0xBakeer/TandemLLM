@@ -1080,8 +1080,8 @@ qse-pg-setup {
 @media (max-width: 768px) {
   .pg {
     /* the shell pads the content by the gutter above and tab bar + 16 px below */
-    height: calc(100vh - var(--topbar-h) - var(--gutter) - var(--tabbar-h) - 16px - env(safe-area-inset-bottom));
-    height: calc(100dvh - var(--topbar-h) - var(--gutter) - var(--tabbar-h) - 16px - env(safe-area-inset-bottom));
+    height: calc(100vh - var(--topbar-h) - var(--gutter) - var(--tabbar-space) - 16px);
+    height: calc(100dvh - var(--topbar-h) - var(--gutter) - var(--tabbar-space) - 16px);
     min-height: 420px;
     gap: 8px;
   }
