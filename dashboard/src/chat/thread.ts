@@ -17,6 +17,7 @@ import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
 import { argsSummary, dividersByMessage, dividerWords, messageText } from './store';
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
+import { approvedTitle, approvedWord } from './permission';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -259,7 +260,7 @@ export class QseChatThread extends LightElement {
     return html`<section class="ch-call is-${t.status}" data-call=${t.id} data-tool=${t.name}>
       <button type="button" class="ch-call-head" aria-expanded=${open} @click=${() => this.toggleCall(t.id)}>
         <span class="ch-call-dot" aria-hidden="true"></span>
-        <code class="ch-call-name">${toolLabel(t.name)}</code>${t.risk ? html`<span class="ch-risk ch-risk-${t.risk}" title=${`${t.risk} tool`}>${t.risk}</span>` : nothing}
+        <code class="ch-call-name">${toolLabel(t.name)}</code>${t.risk ? html`<span class="ch-risk ch-risk-${t.risk}" title=${`${t.risk} tool`}>${t.risk}</span>` : nothing}${t.approved && t.approved !== 'user' ? html`<span class="ch-approved is-${t.approved}" title=${approvedTitle(t.approved)}>${approvedWord(t.approved)}</span>` : nothing}
         <span class="ch-call-args num">${args}</span>
         <span class="grow"></span>
         ${dur ? html`<span class="ch-call-dur num">${dur}</span>` : nothing}

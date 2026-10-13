@@ -11,6 +11,7 @@ import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
 import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
+import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
@@ -30,7 +31,7 @@ export class QseChatComposer extends LightElement {
   @state() private files: Attachment[] = [];
   /** the File behind each attachment chip, for the upload before a send (CONTRACT 8, request 9) */
   private blobs = new Map<string, File>();
-  @state() private pop: 'none' | 'model' | 'effort' | 'tools' = 'none';
+  @state() private pop: 'none' | 'model' | 'effort' | 'tools' | 'mode' = 'none';
   @state() private slash: { items: SlashCommand[]; index: number } | null = null;
   @state() private dragging = false;
   @state() private enterSends = !(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
@@ -270,6 +271,10 @@ export class QseChatComposer extends LightElement {
             <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'tools'} @click=${() => (this.pop = this.pop === 'tools' ? 'none' : 'tools')} title="tools, skills and MCP servers"><span class="ch-pill-main">${toolsOn} tool${toolsOn === 1 ? '' : 's'}</span>${mcpOn ? html`<span class="ch-pill-sub">${mcpOn} MCP</span>` : nothing}</button>
             ${this.pop === 'tools' && s ? this.renderToolsPop(s) : nothing}
           </span>
+          <span class="ch-pillwrap">
+            <button type="button" class="ch-pill ch-pill-mode ${modeOf(s) === 'yolo' ? 'is-yolo' : ''}" aria-haspopup="menu" aria-expanded=${this.pop === 'mode'} ?disabled=${!s} title="permissions: who allows a tool call" @click=${() => (this.pop = this.pop === 'mode' ? 'none' : 'mode')}><span class="ch-pill-main">${modeWord(modeOf(s))}</span></button>
+            ${this.pop === 'mode' && s ? this.renderModePop(s) : nothing}
+          </span>
           <button type="button" class="ch-pill ${s?.plan_mode ? 'is-on' : ''}" aria-pressed=${!!s?.plan_mode} ?disabled=${!s || model?.capabilities?.tools === false} title="Plan mode: the model reads and writes a plan, changes nothing until you approve it" @click=${() => s && this.patch({ plan_mode: !s.plan_mode })}><span class="ch-pill-main">plan</span>${s?.plan_mode ? html`<span class="ch-pill-sub">reads only</span>` : nothing}</button>
         </span>
         <span class="grow"></span>
@@ -303,6 +308,15 @@ export class QseChatComposer extends LightElement {
       </div>
       <div class="ch-pop-group"><div class="ch-pop-title">Effort</div>
         ${(this.caps?.efforts ?? EFFORTS).map((e) => html`<button type="button" role="menuitemradio" aria-checked=${s.effort === e} class="ch-pop-item ${s.effort === e ? 'is-on' : ''}" ?disabled=${!s.thinking} @click=${() => (this.patch({ effort: e }), (this.pop = 'none'))}><span class="ch-pop-name">${effortWord(e)}</span><span class="ch-pop-desc">${effortDesc(e)}</span></button>`)}
+      </div>
+    </div>`;
+  }
+
+  private renderModePop(s: ChatSettings): TemplateResult {
+    const cur = modeOf(s);
+    return html`<div class="ch-pop" role="menu">
+      <div class="ch-pop-group"><div class="ch-pop-title">Before a tool runs</div>
+        ${PERMISSION_MODES.map((m) => html`<button type="button" role="menuitemradio" aria-checked=${cur === m} class="ch-pop-item ${cur === m ? 'is-on' : ''} ${m === 'yolo' ? 'is-yolo' : ''}" @click=${() => (this.patch({ permission_mode: m }), (this.pop = 'none'))}><span class="ch-pop-name">${modeWord(m)}</span><span class="ch-pop-desc">${modeDesc(m)}</span></button>`)}
       </div>
     </div>`;
   }

@@ -6,9 +6,10 @@
 
 import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
+import { decideCall, modeOf } from './permission';
 import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, TOOLS, contextFor, iso, sandboxFor } from './mock-data';
 import { applyEvent } from './store';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit, ToolApproval, ToolRisk,} from './types';
 import { localId, planItems } from './types';
 
 // ---- the branch tree --------------------------------------------------------------------------
@@ -160,6 +161,8 @@ export class MockChatBackend implements ChatBackend {
     { id: 'f_everyday', name: 'Everyday' },
   ];
   private toolList: ToolInfo[] = TOOLS.map((t) => ({ ...t }));
+  /** the defaults for new chats (Capabilities.defaults); the settings page patches them */
+  defaults: ChatSettings = { ...DEFAULT_SETTINGS };
   private pkgs: PackageInfo[] = PACKAGES.map((p) => ({ ...p }));
   private kits: UserToolkit[] = [];
   private mcp: McpServer[] = MCP.map((m) => ({ ...m }));
@@ -389,7 +392,7 @@ export class MockChatBackend implements ChatBackend {
 
   async capabilities(): Promise<Capabilities> {
     const pw = this.scenario === 'signin';
-    return { ...CAPABILITIES, session: { ...CAPABILITIES.session, password_set: pw, signed_in: !pw || this.signedIn } };
+    return { ...CAPABILITIES, defaults: { ...this.defaults }, session: { ...CAPABILITIES.session, password_set: pw, signed_in: !pw || this.signedIn } };
   }
 
   /** the setup guide's sign-in card did the POST; the mock only remembers the result */
@@ -415,7 +418,7 @@ export class MockChatBackend implements ChatBackend {
   async createConversation(settings?: Partial<ChatSettings>): Promise<Conversation> {
     const id = localId('c');
     const now = new Date().toISOString();
-    const st: ConvState = { id, title: 'New chat', created_at: now, updated_at: now, pinned: false, archived: false, version: 1, ui: EMPTY_UI, folder_id: null, settings: { ...DEFAULT_SETTINGS, ...settings, policies: { ...(settings?.policies ?? {}) } }, nodes: new Map(), roots: [], rootActive: 0, run: null, runner: null, queue: [], compactions: [], sandbox: sandboxFor(false), events: [], seq: 0, subs: new Set(), seen: false, status: 'idle', now: null, clientIds: new Map() };
+    const st: ConvState = { id, title: 'New chat', created_at: now, updated_at: now, pinned: false, archived: false, version: 1, ui: EMPTY_UI, folder_id: null, settings: { ...this.defaults, ...settings, policies: { ...(settings?.policies ?? {}) } }, nodes: new Map(), roots: [], rootActive: 0, run: null, runner: null, queue: [], compactions: [], sandbox: sandboxFor(false), events: [], seq: 0, subs: new Set(), seen: false, status: 'idle', now: null, clientIds: new Map() };
     this.convs.set(id, st);
     return this.full(st);
   }
@@ -603,6 +606,11 @@ export class MockChatBackend implements ChatBackend {
     this.emit(st, { type: 'settings.changed', settings: st.settings });
     this.emit(st, { type: 'context.changed', context: this.context(st) });
     return st.settings;
+  }
+
+  async updateDefaults(patch: Partial<ChatSettings>): Promise<ChatSettings> {
+    this.defaults = { ...this.defaults, ...patch };
+    return { ...this.defaults };
   }
 
   async mcpPrompt(_serverId: string, name: string, args: Record<string, string>) {
@@ -897,6 +905,9 @@ export class MockChatBackend implements ChatBackend {
   policyFor(st: ConvState, tool: string): ToolPolicy {
     return st.settings.policies[tool] ?? this.toolList.find((t) => t.id === tool)?.policy ?? 'ask';
   }
+  riskOf(tool: string): ToolRisk | undefined {
+    return this.toolList.find((t) => t.id === tool)?.risk;
+  }
 }
 
 // ---- the runner: one scripted turn ------------------------------------------------------------
@@ -1052,7 +1063,7 @@ class Runner {
         const input = JSON.stringify(s.input, null, 2);
         const pane: PaneRef | null = s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? callId : s.pane.ref } : null;
         if (skipping) {
-          this.addPart({ type: 'tool_call', id: callId, name: s.name, input, output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-90_000), ended_at: iso(-80_000), permission: null, pane });
+          this.addPart({ type: 'tool_call', id: callId, name: s.name, input, output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-90_000), ended_at: iso(-80_000), permission: null, approved: seededApproval(s.name), pane });
           continue;
         }
         const call: ToolCallPart = { type: 'tool_call', id: callId, name: s.name, input: '', output: null, status: 'running', started_at: null, ended_at: null, permission: null, pane };
@@ -1065,15 +1076,16 @@ class Runner {
           this.mock.emit(this.st, { type: 'part.delta', message_id: this.msgId, index: idx, delta: input, field: 'input' });
         } else await this.stream(idx, input, 'input', false);
         if (this.cancelled || this.stopped) break;
-        const policy = this.mock.policyFor(this.st, s.name);
-        let allowed: 'allow' | 'deny' = 'allow';
-        if (policy === 'never') allowed = 'deny';
-        else if (policy === 'ask' && !partial) {
+        const decision = decideCall(modeOf(this.st.settings), this.mock.policyFor(this.st, s.name), this.mock.riskOf(s.name), this.st.settings.auto_accept_edits);
+        let allowed: 'allow' | 'deny' = decision.run === 'deny' ? 'deny' : 'allow';
+        let approved: ToolApproval | null = decision.approved;
+        if (decision.run === 'ask' && !partial) {
           this.phaseTps = null;
           this.phase('permission', `Waiting for permission: ${s.name}`, { tool: { call_id: callId, name: s.name } });
-          this.mock.emit(this.st, { type: 'tool.asking', message_id: this.msgId, call_id: callId, summary: permissionSummary(s.name, s.input) });
+          this.mock.emit(this.st, { type: 'tool.asking', message_id: this.msgId, call_id: callId, summary: permissionSummary(s.name, s.input), risk: this.mock.riskOf(s.name) });
           allowed = await new Promise<'allow' | 'deny'>((resolve) => (this.pending = { call, resolve }));
           this.pending = null;
+          approved = 'user';
           if (this.cancelled || this.stopped) break;
         }
         if (allowed === 'deny') {
@@ -1089,7 +1101,7 @@ class Runner {
         this.phaseTps = null;
         this.toolStart = Date.now();
         this.phase('tool', `Running ${s.name}${s.name === 'bash' ? `: ${String(s.input.command ?? '')}` : ''}`, { tool: { call_id: callId, name: s.name } });
-        this.mock.emit(this.st, { type: 'tool.started', message_id: this.msgId, call_id: callId, pane });
+        this.mock.emit(this.st, { type: 'tool.started', message_id: this.msgId, call_id: callId, pane, approved });
         const lines = s.output.join('\n').split('\n');
         const start = partial ? Math.min(lines.length, skip!.outputLines) : 0;
         if (start) this.mock.emit(this.st, { type: 'tool.output', message_id: this.msgId, call_id: callId, delta: lines.slice(0, start).join('\n') + '\n' });
@@ -1171,9 +1183,15 @@ function stepToPart(s: Step): Part {
   if (s.kind === 'text') return { type: 'text', text: s.text };
   if (s.kind === 'tool') {
     const id = localId('call');
-    return { type: 'tool_call', id, name: s.name, input: JSON.stringify(s.input, null, 2), output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-3_600_000), ended_at: iso(-3_600_000 + s.ms), permission: null, pane: s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? id : s.pane.ref } : null };
+    return { type: 'tool_call', id, name: s.name, input: JSON.stringify(s.input, null, 2), output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-3_600_000), ended_at: iso(-3_600_000 + s.ms), permission: null, approved: seededApproval(s.name), pane: s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? id : s.pane.ref } : null };
   }
   return { type: 'text', text: '' };
+}
+
+/** who allowed a seeded call: what the default mode (auto) decides for the tool, else the user */
+function seededApproval(name: string): ToolApproval {
+  const t = TOOLS.find((x) => x.id === name);
+  return decideCall(modeOf(DEFAULT_SETTINGS), t?.policy ?? 'ask', t?.risk).approved ?? 'user';
 }
 
 function statsFor(parts: Part[], finish: TurnStats['finish'] = 'stop'): TurnStats {

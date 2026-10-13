@@ -56,9 +56,10 @@ describe('the mock chat backend', () => {
     mock.deleteConversation('c_rename');
   });
 
-  it('a new chat: send runs the script, asks for bash, continues on allow, and finishes with figures', async () => {
+  it('a new chat in ask mode: send runs the script, asks for bash, continues on allow, and finishes with figures', async () => {
     const mock = new MockChatBackend();
-    const c = await mock.createConversation();
+    // ask mode: the default (auto) would run bash without a prompt (tests/chat-permission.test.ts)
+    const c = await mock.createConversation({ permission_mode: 'ask' });
     const { box, sub } = follow(mock, c.id, c);
     await flush(200);
     await mock.send(c.id, { text: 'Fix the flaky test', client_msg_id: 'cm_1' });
