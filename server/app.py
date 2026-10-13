@@ -6360,6 +6360,9 @@ class Handler(BaseHTTPRequestHandler):
         # request gets an inactive plan whose every step hands its input back unchanged.
         plan = None
         if STATE.get("conductor") is not None:
+            # 0.8.2: the Lanes view's queued line while the router's questions run (the wait
+            # loop sets its own reason after them)
+            rec.queue_why = OWN_WAIT["question"]
             try:
                 # the prompt's length is rendered only if the in-context stage asks for it
                 plan = rec.plan = STATE["conductor"].plan(
@@ -6652,6 +6655,7 @@ class Handler(BaseHTTPRequestHandler):
               # waiting line of a turn behind it says so
               "own": (self.headers.get("User-Agent") or "").startswith(CLASSIFY_UA),
               "rec": rec}                 # SRV-249: the holder's live work, for the estimate
+        rec.queue_why = _queue_why(par, par_why, side_need, 0.0, me)     # 0.8.2, the Lanes view
         with QUEUE:
             if INFLIGHT["waiting"] >= int(STATE.get("max_queue", 8)):
                 INFLIGHT["refused"] += 1

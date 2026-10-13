@@ -288,6 +288,25 @@ def test_without_the_bound_it_waits_behind_slot_0():
     assert line and line.startswith("slot 0 holds its conversation"), line
 
 
+def test_the_queued_line_while_the_router_asks():
+    """With the conductor on, a turn is queued while the router's questions run, before the wait
+    loop: its line says TandemLLM decides how to handle it (it said only "Queued", live)."""
+    from test_ui_states import _go, serve
+    cond, _ = serve("on")
+    seen = []
+    real = cond.plan
+
+    def plan(*a, **kw):
+        seen.extend(getattr(r, "queue_why", None) for r in A.live_registry()._live.values()
+                    if getattr(r, "t_lock", None) is None)
+        return real(*a, **kw)
+    cond.plan = plan
+    _go({"model": "TandemLLM", "stream": False, "max_tokens": 50,
+         "messages": [{"role": "user", "content": "Name two rivers."}]},
+        {"User-Agent": "Python/3.12 aiohttp/3.12.15"})
+    assert A.OWN_WAIT["question"] in seen, seen
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in list(globals().items()):
