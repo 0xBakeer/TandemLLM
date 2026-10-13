@@ -7,14 +7,12 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.models.lfm2_moe import kernels as K  # noqa: E402
 
-pytestmark = pytest.mark.skipif(not K.HAVE_TRITON or not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET")),
-                                reason="Triton on a GPU, or TRITON_INTERPRET=1")
+SKIP = None if (K.HAVE_TRITON and (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET"))) else "skipped: Triton on a GPU, or TRITON_INTERPRET=1 (the CPU interpreter)"
 DEV = "cuda" if torch.cuda.is_available() and not os.environ.get("TRITON_INTERPRET") else "cpu"
 G = torch.Generator(device="cpu").manual_seed(0)
 
@@ -32,6 +30,8 @@ def rnd(*shape, s=1.0, dtype=torch.bfloat16):
 
 
 def test_add_rms():
+    if SKIP:
+        return SKIP
     h, d, w = rnd(5, 256), rnd(5, 256), rnd(256, s=0.3) + 1
     hn, nn = K.add_rms(h, d, w, 1e-5)
     rh, rn = K.add_rms_reference(h, d, w, 1e-5)
@@ -42,6 +42,8 @@ def test_add_rms():
 
 
 def test_conv_rows_tree_and_decode():
+    if SKIP:
+        return SKIP
     H, KT = 256, 3
     parents = [-1, 0, 1, 0, 3]
     bcx, state, wc = rnd(5, 3 * H), rnd(KT - 1, H), rnd(H, KT, s=0.5)
@@ -63,6 +65,8 @@ def test_conv_rows_tree_and_decode():
 
 
 def test_qk_prep_and_attention_rows():
+    if SKIP:
+        return SKIP
     HQ, HK, D, cap = 8, 2, 64, 700
     pos = torch.tensor([600, 601, 602, 601], device=DEV)            # a tree: rows 1 and 3 children of 0
     slot = torch.tensor([600, 601, 602, 603], device=DEV)
@@ -87,6 +91,8 @@ def test_qk_prep_and_attention_rows():
 
 
 def test_router():
+    if SKIP:
+        return SKIP
     lg = (torch.randn(6, 16, generator=G) * 2).to(DEV)
     lg[2, 3] = lg[2, 7]                                    # a tie: the lower id first
     bias = (torch.randn(16, generator=G) * 0.1).to(DEV)
@@ -100,6 +106,8 @@ def test_router():
 
 
 def test_linear_rows_invariant():
+    if SKIP:
+        return SKIP
     x, w = rnd(20, 384), rnd(272, 384, s=0.1)
     y = K.linear_rows(x, w)
     assert (y.float() - (x.float() @ w.float().T)).abs().max() < 0.05
@@ -108,6 +116,8 @@ def test_linear_rows_invariant():
 
 
 def test_moe_bf16():
+    if SKIP:
+        return SKIP
     E, H, I = 4, 256, 128
     x, w13, w2 = rnd(3, H), rnd(E, 2 * I, H, s=0.1), rnd(E, H, I, s=0.1)
     ids = torch.tensor([[0, 2], [3, 0], [1, 1]], dtype=torch.int32, device=DEV)
@@ -115,3 +125,16 @@ def test_moe_bf16():
     ref = K.moe_bf16_reference(x, ids, w13, w2)
     assert (yd - ref).abs().max() <= (1e-2 if DEV == "cuda" else 3e-2) * ref.abs().max()
     assert torch.equal(K.moe_bf16(x[1:2], ids[1:2], w13, w2), yd[2:4])
+
+
+if __name__ == "__main__":
+    fails = 0
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    for name, fn in tests:
+        try:
+            print(f"  {name:<44} ok   {fn() or ''}")
+        except AssertionError as e:
+            fails += 1
+            print(f"  {name:<44} FAIL {e}")
+    print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
+    sys.exit(1 if fails else 0)

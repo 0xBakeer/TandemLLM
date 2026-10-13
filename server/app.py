@@ -54,8 +54,8 @@ from server.stream import (  # noqa: E402
     CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
     answer_stops, drop_stray_close, opens_think, split_full,
 )
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, schema_types, strip_blocks)
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_pythonic, schema_types, strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
@@ -7446,6 +7446,8 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         ended = bool(ids) and ids[-1] in eos
+                        if STATE.get("tool_format") == "pythonic":
+                            answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -7576,6 +7578,9 @@ class Handler(BaseHTTPRequestHandler):
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
                                    live=not any(stops))
                     if parse_calls else None)
+            # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
+            # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
+            pyc = PythonicCalls() if tbuf is not None and STATE.get("tool_format") == "pythonic" else None
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
@@ -7651,7 +7656,7 @@ class Handler(BaseHTTPRequestHandler):
                         # instead of being shown as raw XML; a recognised call streams
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
-                        for out_piece in tbuf.feed(piece):
+                        for out_piece in tbuf.feed(pyc.feed(piece) if pyc is not None else piece):
                             if voice is not None:
                                 voice.content(out_piece)       # v3: a plan in the answer
                             put(_chunk(cid, model, created, {"content": out_piece},
@@ -7897,6 +7902,11 @@ class Handler(BaseHTTPRequestHandler):
                     while cuts and len(ids) >= cuts[0]:
                         cuts.pop(0)                      # regenerated, and nothing came after
                         tbuf.cut()
+                    if pyc is not None:
+                        # SRV-425: a Pythonic block still open: a call at the end token, text if cut
+                        for out_piece in tbuf.feed(pyc.finish(eos=bool(ids) and ids[-1] in eos)):
+                            put(_chunk(cid, model, created, {"content": out_piece},
+                                       **(lp_take() if lpr is not None else NO_LP)))
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if tbuf.cut_live:
                         # 2026-10-05: the client holds the open call as it was streamed; its text is not

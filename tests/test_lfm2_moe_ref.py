@@ -14,7 +14,6 @@ import json
 import os
 import sys
 
-import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -101,11 +100,25 @@ def _official(cfg, W):
     return model
 
 
-@pytest.fixture(scope="module")
+_TINY = []
+
+
 def tiny():
-    cfg = config_from_dict(TINY, "tiny")
-    W = _random_weights(cfg)
-    return cfg, W, Lfm2MoeRef(cfg, W)
+    if not _TINY:
+        cfg = config_from_dict(TINY, "tiny")
+        W = _random_weights(cfg)
+        _TINY.append((cfg, W, Lfm2MoeRef(cfg, W)))
+    return _TINY[0]
+
+
+def _raises(fn, *needles):
+    try:
+        fn()
+    except ValueError as e:
+        for n in needles:
+            assert n in str(e), (n, str(e))
+        return
+    raise AssertionError(f"no ValueError (wanted {needles})")
 
 
 def test_architecture_selects_lfm2_moe():
@@ -114,10 +127,8 @@ def test_architecture_selects_lfm2_moe():
 
 
 def test_unknown_field_stops_the_load():
-    with pytest.raises(ValueError, match="does not know: shiny_new_switch"):
-        config_from_dict({**TINY, "shiny_new_switch": 1})
-    with pytest.raises(ValueError, match="conv_bias"):
-        config_from_dict({**TINY, "conv_bias": True})
+    _raises(lambda: config_from_dict({**TINY, "shiny_new_switch": 1}), "does not know: shiny_new_switch")
+    _raises(lambda: config_from_dict({**TINY, "conv_bias": True}), "conv_bias")
 
 
 def test_lfm25_24b_config():
@@ -132,16 +143,17 @@ def test_lfm25_24b_config():
     assert c.rope_theta == 1e7 and c.eos_token_ids == [124900]
 
 
-def test_prefill_and_decode_match_transformers(tiny):
-    cfg, W, ref = tiny
+def test_prefill_and_decode_match_transformers():
+    cfg, W, ref = tiny()
     model = _official(cfg, W)
     if model is None:
-        pytest.skip("transformers has no lfm2_moe here")
+        return "skipped: transformers has no lfm2_moe here"
     with torch.no_grad():
         want = model(PROMPT[None]).logits[0]
     st = ref.new_state(64)
     got = ref.prefill(PROMPT, st)
-    assert (got - want).abs().max().item() < BOUND
+    worst = (got - want).abs().max().item()
+    assert worst < BOUND, worst
     # decode three tokens one at a time against transformers' cache
     from transformers import DynamicCache
     cache = DynamicCache(config=model.config)
@@ -151,11 +163,14 @@ def test_prefill_and_decode_match_transformers(tiny):
         with torch.no_grad():
             out = model(torch.tensor([[tok]]), past_key_values=out.past_key_values, use_cache=True)
         got = ref.decode(tok, st)
-        assert (got[0] - out.logits[0, -1]).abs().max().item() < BOUND
+        d = (got[0] - out.logits[0, -1]).abs().max().item()
+        assert d < BOUND, d
+        worst = max(worst, d)
+    return f"max |ref - transformers| {worst:.1e} (prefill + 3 decode steps)"
 
 
-def test_verify_tree_equals_sequential_decode(tiny):
-    cfg, W, ref = tiny
+def test_verify_tree_equals_sequential_decode():
+    cfg, W, ref = tiny()
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     tokens = torch.tensor([7, 19, 23, 44, 31, 60])
@@ -171,8 +186,8 @@ def test_verify_tree_equals_sequential_decode(tiny):
         assert (lg[row] - want[0]).abs().max().item() < 1e-5, row
 
 
-def test_commit_of_a_path_continues_exactly(tiny):
-    cfg, W, ref = tiny
+def test_commit_of_a_path_continues_exactly():
+    cfg, W, ref = tiny()
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     alone = copy.deepcopy(st)
@@ -188,9 +203,9 @@ def test_commit_of_a_path_continues_exactly(tiny):
     assert (a - b).abs().max().item() < 1e-5
 
 
-def test_chain_kept_in_part(tiny):
+def test_chain_kept_in_part():
     """A chain block of 5 rows of which 2 are kept (the rollback of a partly accepted draft)."""
-    cfg, W, ref = tiny
+    cfg, W, ref = tiny()
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     alone = copy.deepcopy(st)
@@ -202,10 +217,22 @@ def test_chain_kept_in_part(tiny):
     assert (a - b).abs().max().item() < 1e-5
 
 
-def test_commit_refuses_a_non_path(tiny):
-    cfg, W, ref = tiny
+def test_commit_refuses_a_non_path():
+    cfg, W, ref = tiny()
     st = ref.new_state(64)
     ref.prefill(PROMPT, st)
     ref.rows(torch.tensor([7, 19, 23]), [-1, 0, 0], st)
-    with pytest.raises(ValueError, match="not a root path"):
-        ref.commit(st, [0, 1, 2])
+    _raises(lambda: ref.commit(st, [0, 1, 2]), "not a root path")
+
+
+if __name__ == "__main__":
+    fails = 0
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    for name, fn in tests:
+        try:
+            print(f"  {name:<44} ok   {fn() or ''}")
+        except AssertionError as e:
+            fails += 1
+            print(f"  {name:<44} FAIL {e}")
+    print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
+    sys.exit(1 if fails else 0)

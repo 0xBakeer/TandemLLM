@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,16 +17,19 @@ from engine.models.lfm2_moe.load import ExpertsBF16  # noqa: E402
 from engine.models.lfm2_moe.ref import Lfm2MoeRef, chain  # noqa: E402
 from tests.test_lfm2_moe_ref import TINY, _random_weights  # noqa: E402
 
-pytestmark = pytest.mark.skipif(not K.HAVE_TRITON or not (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET")),
-                                reason="Triton on a GPU, or TRITON_INTERPRET=1")
+SKIP = None if (K.HAVE_TRITON and (torch.cuda.is_available() or os.environ.get("TRITON_INTERPRET"))) else "skipped: Triton on a GPU, or TRITON_INTERPRET=1 (the CPU interpreter)"
 DEV = "cuda" if torch.cuda.is_available() and not os.environ.get("TRITON_INTERPRET") else "cpu"
 TINY_B = {**TINY, "vocab_size": 256, "hidden_size": 256, "intermediate_size": 256, "moe_intermediate_size": 128,
           "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 64, "num_experts": 4, "num_experts_per_tok": 2}
 PROMPT = torch.tensor([5, 9, 3, 17, 22, 3, 40, 41, 12, 7, 63, 2, 30, 88])
 
 
-@pytest.fixture(scope="module")
+_TINY = []
+
+
 def tiny():
+    if _TINY:
+        return _TINY[0]
     from engine.models.lfm2_moe.engine import Lfm2MoeEngine
     cfg = config_from_dict(TINY_B, "tiny")
     W0 = _random_weights(cfg)
@@ -50,7 +52,8 @@ def tiny():
     W["lm_head.weight"] = W["embed_tokens.weight"]
     eng = Lfm2MoeEngine(cfg, W, experts, device=DEV, max_len=128)
     ref = Lfm2MoeRef(cfg, {k: v.float().cpu() for k, v in W0.items()})
-    return cfg, eng, ref
+    _TINY.append((cfg, eng, ref))
+    return _TINY[0]
 
 
 def _decode(eng, st, toks):
@@ -63,8 +66,10 @@ def _decode(eng, st, toks):
     return torch.stack(out)
 
 
-def test_prefill_and_decode_near_the_reference(tiny):
-    cfg, eng, ref = tiny
+def test_prefill_and_decode_near_the_reference():
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
     st = eng.new_state(128)
     lg = eng.prefill(PROMPT, st)
     rs = ref.new_state(64)
@@ -76,8 +81,10 @@ def test_prefill_and_decode_near_the_reference(tiny):
         assert (got[i] - w).abs().max() < 0.08 * w.abs().max(), i
 
 
-def test_verify_rows_are_the_decode_steps(tiny):
-    cfg, eng, ref = tiny
+def test_verify_rows_are_the_decode_steps():
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
     st = eng.new_state(128)
     eng.prefill(PROMPT, st)
     L = st.length
@@ -99,8 +106,10 @@ def test_verify_rows_are_the_decode_steps(tiny):
     assert torch.equal(_decode(eng, s2, [7, 19, 44])[2], tree[3])
 
 
-def test_commit_a_moved_path_and_a_rollback(tiny):
-    cfg, eng, ref = tiny
+def test_commit_a_moved_path_and_a_rollback():
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
     st = eng.new_state(128)
     eng.prefill(PROMPT, st)
     alone = eng.new_state(128)
@@ -118,7 +127,22 @@ def test_commit_a_moved_path_and_a_rollback(tiny):
     assert torch.equal(_decode(eng, st, [60]), _decode(eng, alone, [60]))
 
 
-def test_self_check_passes(tiny):
-    cfg, eng, ref = tiny
+def test_self_check_passes():
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
     res = eng.self_check(PROMPT.tolist(), steps=6, log=None)
     assert res["ok"], res
+
+
+if __name__ == "__main__":
+    fails = 0
+    tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
+    for name, fn in tests:
+        try:
+            print(f"  {name:<44} ok   {fn() or ''}")
+        except AssertionError as e:
+            fails += 1
+            print(f"  {name:<44} FAIL {e}")
+    print(f"{len(tests) - fails} passed" + (f", {fails} FAILED" if fails else ""))
+    sys.exit(1 if fails else 0)
