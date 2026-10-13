@@ -2,7 +2,7 @@
 
 The live case (the UX2 run of 2026-10-07, A01 on a 0.4.0 test build): asked 'Create a new folder and
 create there a pagoda garden', the Open WebUI agent ran `mkdir -p /home/user/pagoda-garden` on a
-folder that existed with the owner's own page and wrote a new index.html over it without reading
+folder that existed with the user's own page and wrote a new index.html over it without reading
 it; the answer never said a file was replaced. The tools run in the client (Open WebUI's
 terminal), so the engine cannot stop the write; what it controls is what the model is told. Every
 class that writes files now carries the general package `files-care`, whose rules say what a new

@@ -51,7 +51,7 @@ number of texts, their sizes, what was cut, the answers' labels and probabilitie
 the time; the question as a hash and a length, never a text, as every row the journal keeps
 outside the router's own.
 
-DRIVER SESSIONS (X1, 2026-10-03). The owner's use of Laya: it PLAYS the software under test. A driver
+DRIVER SESSIONS (X1, 2026-10-03). The intended use of Laya: it PLAYS the software under test. A driver
 (the playtest kit, `GET /v1/laya/kit/<file>`: `laya_drive.py`, `laya-drive.js`) sends the state of a
 game, a UI, a CLI or an API every ~250 ms and applies the action Laya picks from a fixed set; its
 log goes back to Qwen. A call with `session` (a name of letters, digits and `_ . : -`, at most 64)

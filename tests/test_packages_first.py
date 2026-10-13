@@ -88,7 +88,7 @@ def test_the_router_lists_them():
     classes = {c["id"]: c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]}
     for cid, pk in classes.items():
         assert len(pk) <= 48, (cid, len(pk))
-        # summarize never; chat only with the owner's switch (schema.CHAT_CORE, PKG3)
+        # summarize never; chat only with the project's switch (schema.CHAT_CORE, PKG3)
         if cid == "summarize" or (cid == "chat" and not schema.CHAT_CORE):
             assert "tandem-core" not in pk, (cid, pk)
         else:

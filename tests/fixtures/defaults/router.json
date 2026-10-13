@@ -1,5 +1,5 @@
 {
- "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227); packages-first: the class lists carry tandem-core, render-tools and the first packages (OPS-39); PKG2 (2026-10-07): the everyday packages on writing, plan, research, summarize, chat, debug; PKG3: tandem-core off on chat until the owner's call; PKG3 2026-10-08: every prose class offers the whole everyday set (EVERYDAY_ALL)",
+ "from": "router v13, the box, 2026-10-03; FX6 (0.3.48-test, router v15 on the box): code_edit and debug core coding, three_d threejs-scene listed and core, the reading phrases, classifier.reading; 0.3.49-test: files-care on every class that writes files (SRV-227); packages-first: the class lists carry tandem-core, render-tools and the first packages (OPS-39); PKG2 (2026-10-07): the everyday packages on writing, plan, research, summarize, chat, debug; PKG3: tandem-core off on chat until a design decision; PKG3 2026-10-08: every prose class offers the whole everyday set (EVERYDAY_ALL)",
  "doc": {
   "classes": [
    {

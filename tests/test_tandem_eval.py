@@ -702,7 +702,7 @@ def _r1_t0(rec):
     return te._iso_ms(rec["started_at"]) / 1000.0
 
 
-# what round 1 really did, from the full exports and the owner's own checker runs at 18:00
+# what round 1 really did, from the full exports and a separate checker's runs at 18:00
 R1_TRUTH = {
     "minicalc-raw": {"turns": 14, "reasoning": 16063, "wall": 6.61, "minutes": 6.45},
     "minicalc-tandem": {"turns": 7, "reasoning": 17802, "wall": 7.49, "minutes": 7.38},

@@ -313,7 +313,7 @@ OUTCOME_SWITCHES = {"snapshots": ("off", "on"), "mode": ("off", "shadow", "act")
                     "judge": ("off", "shadow"), "retrieve": ("off", "shadow", "on")}
 # the router document's `outcomes` section over these (a router stored before J1 has none). The
 # patterns read the shape of a tool result (an exit code, a test runner's counts, a console
-# level, an OS error), never what anybody meant: the owner's rule against keyword intent routing
+# level, an OS error), never what anybody meant: the project's rule against keyword intent routing
 OUTCOMES: dict = {
     # one outcome a request: the first label whose facts matched, in the plan's table order;
     # `progress` only when nothing matched, `none` when there was nothing to read
@@ -461,7 +461,7 @@ LIBRARY: dict = {
 # `render-tools` (how to use SRV-105's render tool server, general, `requires_tools: [render]`)
 # on every class that builds something, so the tool fit leaves it out until a chat offers the tool
 CORE_PACKAGES = ["tandem-core"]
-# PKG3 (2026-10-07): tandem-core on the chat class waits for the owner's call (+~290 tokens a
+# PKG3 (2026-10-07): tandem-core on the chat class waits for a design decision (+~290 tokens a
 # plain chat turn); the one-line switch: CHAT_CORE = ["tandem-core"]. On a box, the router
 # document's chat class lists it or not (live, no restart)
 CHAT_CORE: list[str] = []
@@ -560,7 +560,7 @@ SHIPPED_ROUTER: dict = {
                     "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons",
                                                   "voxel-worlds", "creative-coding"],
                     "core": ["threejs-scene"], "rules": []}},
-        # 2026-10-03 10:12 (the owner's essay with "use max effort" fell back to code_edit and its
+        # 2026-10-03 10:12 (a user's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",
          "description": "Write prose in words, not code: an essay, an article, a story, an email, "
@@ -977,7 +977,7 @@ DECIDERS: dict = {
 }
 
 # SRV-137: the session transcripts on the NVMe (server/conductor/transcripts.py): `tools` writes
-# a block for a request with tools (and a compaction), counters for the rest (the owner's decision 2);
+# a block for a request with tools (and a compaction), counters for the rest (a design decision);
 # `all` writes every request, `none` nothing. Tool results and call arguments are clipped at
 # `clip_chars`, a loop the D1 guard cut keeps `loop_chars` of its start and end. The secret-pattern
 # refusal has no switch: it always runs
@@ -1744,7 +1744,7 @@ def _monitor_schema() -> dict:
 
 SCHEMAS["monitor"] = _monitor_schema()
 # OPS-47: the engine's memory limits the dashboard overrides (server/memlimits.py), by their
-# serve.env names; a key not set here is the flag's. MAX_LEN is not among them (the owner's hard rule).
+# serve.env names; a key not set here is the flag's. MAX_LEN is not among them (a fixed project limit).
 _GIB_LIMIT = {"type": "number", "minimum": 0, "maximum": 128}
 ENGINE_LIMITS = _obj({
     "MEM_CEILING_GIB": _GIB_LIMIT, "MEM_PEAK_GIB": _GIB_LIMIT,

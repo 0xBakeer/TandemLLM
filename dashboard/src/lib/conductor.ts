@@ -115,7 +115,7 @@ export function suitePairs(rows: SuiteRow[]): { suite: string; raw: SuiteRow | n
 /** The speed guard for the build that serves now, as the header line and the Compare screen say
  * it. `warn`: no report for this build, a report that resolved worse, or one recorded for the
  * same version but other code. `note`: a short gate of one run a side, whose noise is unknown
- * (the owner's one-pair rule): the deltas as measured, and that they decide nothing. `ok`: the
+ * (the project's one-pair rule): the deltas as measured, and that they decide nothing. `ok`: the
  * never-worse gate passed with a noise estimate. */
 export interface GuardState {
   tone: 'warn' | 'note' | 'ok';
@@ -147,7 +147,7 @@ function guardStats(stats: GuardStat[]): string {
  * user can act on, so it is never a warning banner. Its result is one neutral line in the build
  * information (System → Engine, the Dev tab's model card, the Compare screen): "passed for 0.4.0 ·
  * 7 Oct 2026", "not run for this build". A short gate (one run a side, `no_noise_estimate`) reads
- * as passed when no decode statistic dropped more than `SHORT_GATE_TOLERANCE_PCT` (the owner's
+ * as passed when no decode statistic dropped more than `SHORT_GATE_TOLERANCE_PCT` (the project's
  * ~5 % stop rule for a candidate); the numbers stay in the line's title. A release tree ships its
  * own report (`release/speed-guard.json`, tools/speed_guard.py `ship`), so a release reads
  * "passed" out of the box. */

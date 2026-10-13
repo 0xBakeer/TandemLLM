@@ -36,8 +36,8 @@ never into the answer. A project-scoped add in a conversation without a working 
 Open WebUI chat) is written at user scope (`rescoped: project`). A write is one journal row (`kind: memory_notes`, task `write`): op, id, scope,
 kind, why, the redaction counts. Never a title or a body: they stay in the files.
 
-A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (the owner's ruling,
-2026-10-06: every client is the owner), so a "remember ..." from any client goes into the owner's
+A REQUEST'S OWN SWITCH (SRV-173, 2026-10-06). TandemLLM serves one user (a design decision,
+2026-10-06: every client is the user `owner`), so a "remember ..." from any client goes into that user's
 notes, as it should. A test or a script that must not touch them sends `X-Tandem-Memory`: `off`
 (nothing read, nothing written, no card: the journal row says `memory: off, why: header`) or `read`
 (the reads as `on` gives them, no card, and a block the model writes anyway is hidden and dropped,

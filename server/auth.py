@@ -1,7 +1,7 @@
 """Who may read what: the OpenAI API stays open; the rest is open too until an admin password is set.
 
-THE ADMIN PASSWORD (AU1, 2026-10-06, the owner's ruling: "remove the password prompt from the ui
-from everywhere; we will define later when we set the password"). The one switch is the admin
+THE ADMIN PASSWORD (AU1, 2026-10-06, a design decision: no password
+prompt anywhere in the UI until a password is set). The one switch is the admin
 token, `QSE_ADMIN_TOKEN` (`TANDEM_ADMIN_TOKEN` for the standalone proxy), from secrets.env:
 
     not set (the default)   every route below answers anyone: the dashboard's reads, the conductor's

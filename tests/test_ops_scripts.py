@@ -431,7 +431,7 @@ def test_a_profile_of_another_model_replaces_the_27b_model_flags():
 
 
 def test_the_served_memory_limits_are_the_owners():
-    """The owner's decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
+    """The design decisions of 2026-10-01 (OPS-47), and the context window stays 262,144."""
     env = dict(line.split("=", 1) for line in open(os.path.join(OPS, "serve.env")).read().splitlines()
                if "=" in line and not line.startswith("#"))
     want = {"MAX_LEN": "262144", "MEM_CEILING_GIB": "70", "MEM_PEAK_GIB": "77",

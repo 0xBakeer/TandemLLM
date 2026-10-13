@@ -4,8 +4,8 @@ Two kinds of signal, both read without judging what anybody meant:
 
   * `shape(body)`: roles, tools, message counts, the last user message's text and whether the turn
     only carries tool results (a tool's media in a user message after them included, SRV-161),
-    whether it is opencode's compaction request, which skills the client already loaded. These are structural facts; no word list decides anything here (the owner's
-    standing rule: intent comes from a model, never from keyword routing).
+    whether it is opencode's compaction request, which skills the client already loaded. These are structural facts; no word list decides anything here (the project's
+    rule: intent comes from a model, never from keyword routing).
   * `side_shape(body)`: whether the request is a client's side request (S1): no tools, and the
     client's fixed title or summary instruction opening the system message.
   * `context_line(...)`: the one structured line the router adds to the classifier's digest

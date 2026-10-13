@@ -587,7 +587,7 @@ def test_notify_on_sends_one_push_with_the_token_from_its_file():
 
 
 def test_notify_url_comes_from_the_environment_when_the_policy_names_none():
-    """The shipped policy names no topic URL (a public repository holds no host of the owner's):
+    """The shipped policy names no topic URL (a public repository holds no private host):
     `$TANDEM_NOTIFY_URL` gives it, and with neither nothing leaves."""
     sent = []
 

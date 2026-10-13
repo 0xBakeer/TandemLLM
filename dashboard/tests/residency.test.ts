@@ -88,7 +88,7 @@ describe('the limits', () => {
   it('says when a change applies, and when the engine still runs the old value', () => {
     expect(appliesWords(lim({}))).toBe('applies at the next request');
     expect(appliesWords(lim({ applies: 'restart' }))).toBe('needs a restart');
-    expect(appliesWords(lim({ applies: 'locked', locked: "the context window is 262,144 tokens (the owner's hard rule)" }))).toContain('262,144');
+    expect(appliesWords(lim({ applies: 'locked', locked: "the context window is 262,144 tokens (a fixed project limit)" }))).toContain('262,144');
     const chunk = lim({ key: 'PREFIX_CHUNK', unit: 'tokens', applies: 'restart', value: 512, running: 1024, pending_restart: true });
     expect(pendingWords(chunk)).toBe('set to 512 tokens; the engine runs 1,024 tokens until it restarts');
     expect(pendingWords(lim({}))).toBeNull();

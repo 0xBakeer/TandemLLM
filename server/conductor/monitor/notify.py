@@ -1,4 +1,4 @@
-"""NOTIFY: one push to the owner's phone through the ntfy stack, out of band.
+"""NOTIFY: one push to the operator's phone through the ntfy stack, out of band.
 
 The one action that leaves the box. It is off unless the policy's `notify.enabled` says so (the
 stall watchdog's setting; the owner allowed it on 2026-09-30, off by default and on only in the

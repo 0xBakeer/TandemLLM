@@ -54,7 +54,7 @@ PREFIX = {"tandem-core": "core", "render-tools": "rt", "eval-judge": "judge", "c
           "charts": "ch", "voxel-worlds": "vw", "explainer-video": "ev"}
 # text that must not be in a public package: a home path, a LAN address, a box's host name, a
 # client's name (a skill names no client the request did not come from), and the words the
-# operator lists in TANDEM_PRIVATE_WORDS (comma-separated: the owner's names, hosts, domains),
+# operator lists in TANDEM_PRIVATE_WORDS (comma-separated: personal names, hosts, domains),
 # which stay out of the repository
 _WORDS = [w.strip() for w in os.environ.get("TANDEM_PRIVATE_WORDS", "").split(",") if w.strip()]
 PRIVATE = re.compile("|".join([r"/Users/\w", r"/home/\w", r"192\.168\.\d", r"10\.\d+\.\d+\.\d+",
@@ -187,7 +187,7 @@ def check(tokenizer_dir: str | None = None) -> tuple[list[str], list[dict]]:
                 out.append(f"{name}: INDEX.md classes {index[name]} differ from the manifest's {m['classes']}")
         for c in m.get("classes", []):
             listed = name in classes[c]["policy"]["packages"] if c in classes else False
-            # PKG3: tandem-core on chat waits for the owner's call (schema.CHAT_CORE, off)
+            # PKG3: tandem-core on chat waits for a design decision (schema.CHAT_CORE, off)
             switched = c == "chat" and name in schema.CORE_PACKAGES and not schema.CHAT_CORE
             if m.get("general") and not listed and not switched:
                 out.append(f"{name}: general, but class {c} does not list it")

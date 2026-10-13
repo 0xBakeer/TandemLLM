@@ -243,7 +243,7 @@ def test_the_shipped_documents_validate():
 
 
 def test_a_box_with_its_own_documents_keeps_them():
-    """The owner's box: a router and a coding profile of its own stay as they are; what it never had
+    """A box with documents of its own: a router and a coding profile of its own stay as they are; what it never had
     (the hermes and general profiles) is stored; a second start stores nothing."""
     from server.conductor import schema, shipped
     from server.conductor.store import Store

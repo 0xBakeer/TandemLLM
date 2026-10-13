@@ -86,7 +86,7 @@ export class QseCondMonitor extends LightElement {
         <summary>Session tasks <span class="sec-sub">${session.join(', ') || 'none'}: across turns, one hidden note at the end of the prompt</span></summary>
         <div class="sec-body">
           <p class="muted small" data-session-order>A request carries at most one session note, in this order: ${session.join(', ') || '—'}; the others keep their state for the next request. They stay silent on a request without tools and in a project whose system prompt does not match <code>requires</code>.</p>
-          <p class="small" data-notify-state>${notify?.enabled ? html`<span class="badge badge-warn">NOTIFY on</span> without a profile, a push goes out when a client has gone.` : html`<span class="badge">NOTIFY off</span> without a profile nothing is pushed; a profile's Context section turns it on (the overnight profile does, the owner's ruling of 2026-09-30). The token is a file on the box, never in this document.`}</p>
+          <p class="small" data-notify-state>${notify?.enabled ? html`<span class="badge badge-warn">NOTIFY on</span> without a profile, a push goes out when a client has gone.` : html`<span class="badge">NOTIFY off</span> without a profile nothing is pushed; a profile's Context section turns it on (the overnight profile does, a design decision of 2026-09-30). The token is a file on the box, never in this document.`}</p>
           ${session.map((t) => this.renderTask(t, d.tasks[t]))}
         </div>
       </details>

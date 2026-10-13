@@ -136,7 +136,7 @@ test.describe('the Performance page holds still', () => {
   }
 });
 
-// VIS-66 (the owner's phone, 2026-10-07): on #/conductor → Deciders at 390 px the editor's save bar
+// VIS-66 (a user report on a phone, 2026-10-07): on #/conductor → Deciders at 390 px the editor's save bar
 // ("live v0 · reloaded 08:02:01", the change note, Save, Reset, Diff, Versions) floated over the
 // stat cards ("a load now: refused"). The bar is sticky above the phone's tab bar so unsaved edits
 // keep their Save in view; with nothing to save it now sits in the page's flow (`is-idle`), as the

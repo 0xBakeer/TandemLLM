@@ -23,8 +23,8 @@ drops the item and counts it. Every text is stored once in `conductor_texts`, by
 live feed reads two rings (the last 500 router rows, the last 2,000 monitor rows), which also hold
 the requests still running. Rows older than `retention_days` (30) go at start and nightly at
 04:00, and the texts no younger row used with them. The user's text (`digest`) is kept only for
-requests with tools unless the settings widen it; chats without tools keep counters (the owner's
-decision 2).
+requests with tools unless the settings widen it; chats without tools keep counters (a design
+decision).
 """
 
 from __future__ import annotations

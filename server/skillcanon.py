@@ -20,7 +20,7 @@ seen for `STALE_DAYS` gives way to the one seen now (a sync folder that was remo
 in the message changes.
 
 Measured (four first requests of fresh sessions captured from opencode 1.18.34 on
-the owner's Mac, two per opencode process): within one process the head is the same; across two
+a Mac, two per opencode process): within one process the head is the same; across two
 processes it parted at character 24,970, on two entries this file did not touch, because the
 second copy was not under `synced/`: `~/.claude/skills/.trash/<n>/<name>/SKILL.md` (a removed
 skill's copy the Claude app keeps) against the synced one. So every entry with a path location is

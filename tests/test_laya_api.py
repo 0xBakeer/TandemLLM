@@ -5,7 +5,7 @@ The real server with the fake engine and the fake decision model "other-decider"
 directory. The fake model is steered by words in the state (engine/decision/fake.py): a label
 that appears as a word is picked at 0.91, else the first at 0.2; FAKE_TRUE makes a yes-no 0.9.
 
-The test matrix (the owner's ask: the model reaches Laya through the provider from its scripts):
+The test matrix (the requirement: the model reaches Laya through the provider from its scripts):
 
   1  the card: GET /v1/laya says the route, the limits and the window   test_1_the_card
   2  open like the chat API: through the proxy, no token, a bearer ignored; a choice as a list

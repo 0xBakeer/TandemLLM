@@ -305,7 +305,7 @@ export class QseCondProfiles extends LightElement {
           <label class="field"><span>S4: minutes without progress before the note, and of silence before the client counts as gone <span class="hint">minutes, default 20</span></span><input type="number" min="1" max="600" ?disabled=${ro} data-context="s4_minutes" .value=${String(d.context.s4_minutes)} @input=${(e: Event) => this.ctx('s4_minutes', 'S4', 'minutes', Math.round(Number((e.target as HTMLInputElement).value)))} /></label>
           <label class="switch" data-context="notify"><input type="checkbox" ?disabled=${ro} .checked=${d.context.notify} @change=${(e: Event) => this.upd(['context', 'notify'], (e.target as HTMLInputElement).checked)} /> NOTIFY: a push through ntfy to the phone when the client has gone <span class="badge ${d.context.notify ? 'badge-warn' : ''}">${d.context.notify ? 'on' : 'off'}</span></label>
         </div>
-        <p class="muted small" data-notify-rule>Allowed by the owner on 2026-09-30: off by default, on in the overnight profile. Only S4 in act pushes, never in shadow, once a turn end; the token is a file on the box. S2 (re-read after a compaction) has no number here: its texts and state files are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
+        <p class="muted small" data-notify-rule>A design decision of 2026-09-30: off by default, on in the overnight profile. Only S4 in act pushes, never in shadow, once a turn end; the token is a file on the box. S2 (re-read after a compaction) has no number here: its texts and state files are on the <a href="#/conductor?screen=monitor">Monitor</a> screen.</p></div>
       </details>
       ${this.renderUi(d, ro)}
       <details class="sec" data-sec="hints">

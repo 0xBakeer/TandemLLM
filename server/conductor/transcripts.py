@@ -17,7 +17,7 @@ runtime section: every hidden note with the journal row it is in, the notes repl
 the checker's RESULT line. opencode's compaction request gets one block: tokens in and out, and
 the summary. The format is fixed by golden files (tests/fixtures/transcripts/).
 
-Scope (the owner's decision 2, confirmed 2026-10-01): a request with tools is written in full; a chat
+Scope (a design decision, confirmed 2026-10-01): a request with tools is written in full; a chat
 without tools changes the session's counters only. `settings.memory.transcripts.scope` says
 `tools` (the default), `all` or `none`. A raw request (`X-Tandem: raw`) is never seen here.
 

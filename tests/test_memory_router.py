@@ -213,8 +213,8 @@ def test_fresh_session_recall():
 
 
 def test_a_request_can_keep_out_of_memory():
-    """SRV-173 (UT1, 2026-10-06; the owner's ruling the same day: one user, every client is the
-    owner). A curl test's "remember ..." went into the owner's notes, which is right for the one
+    """SRV-173 (UT1, 2026-10-06; a design decision the same day: one user, every client is the
+    user `owner`). A curl test's "remember ..." went into that user's notes, which is right for the one
     user; a test or a script that must not touch them says so per request. `X-Tandem-Memory: off`:
     no card, no read, no write (the journal row says why); `read`: the reads, no card, and a block
     the model writes anyway is hidden and dropped; no header: the profile's switch, as before."""
