@@ -18,6 +18,10 @@ const SHOTS = process.env.PW_SHOTS ?? 'e2e-live-shots';
 const SLOTS = process.env.PW_SLOTS ?? '3';
 const DESKTOP = { width: 1440, height: 900 };
 const LONG = 'Write a story of about 900 words about a lighthouse keeper who learns to repair clocks. Plain prose in paragraphs: no headings, no lists, no Markdown.';
+// a name new to each run: the engine's lookup store has every earlier run's story, and an answer it
+// already knows ends in seconds, before the other chat's turn has started (live, 2026-10-13)
+const NAMES = ['Ada', 'Bruno', 'Clara', 'Dmitri', 'Elif', 'Farid', 'Greta', 'Hugo', 'Ines', 'Jonas'];
+const fresh = (s: string) => `${s} The main character is called ${NAMES[Math.floor(Math.random() * NAMES.length)]} ${Date.now() % 100000}.`;
 
 test.skip(!process.env.PW_LIVE, 'the live tier runs on the Spark with PW_LIVE=1');
 
@@ -96,8 +100,8 @@ test('two chats stream at once and the engine decodes them together', async ({ b
   await c.page.goto('./#/performance?tab=parallel');
   const a = await openChat(browser, '#/chat');
   const b = await openChat(browser, '#/chat');
-  const one = await start(a.page, request, LONG);
-  const two = await start(b.page, request, LONG.replace('lighthouse keeper', 'baker'));
+  const one = await start(a.page, request, fresh(LONG));
+  const two = await start(b.page, request, fresh(LONG.replace('lighthouse keeper', 'baker')));
   let together = 0;
   await expect
     .poll(
