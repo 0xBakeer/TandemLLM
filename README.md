@@ -123,15 +123,15 @@ Start with [docs/architecture.md](docs/architecture.md), a one-page tour. [docs/
 On a new DGX Spark, install in setup mode and then switch to a profile ([docs/setup.md](docs/setup.md)):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.8.1/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.8.2/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5; --list prints every profile
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.8.1` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.8.2` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
 
-Where the tag `v0.8.1` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.8.1'". Pass `--repo` and `--ref` to install from another repository or release. Early-access testers clone from their own repository ([EARLY-ACCESS.md](EARLY-ACCESS.md)).
+Where the tag `v0.8.2` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.8.2'". Pass `--repo` and `--ref` to install from another repository or release. Early-access testers clone from their own repository ([EARLY-ACCESS.md](EARLY-ACCESS.md)).
 
 Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.
 
@@ -140,7 +140,7 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 | `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.8.1`; `v0.2.0-staircut` is the paper's |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.8.2`; `v0.2.0-staircut` is the paper's |
 | `--repo URL` | the git repository to clone, default `https://github.com/0xBakeer/TandemLLM.git` |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |

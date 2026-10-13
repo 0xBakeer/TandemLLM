@@ -4,7 +4,7 @@ Each entry is a symptom, what causes it, and what to do. The dashboard's Dev vie
 
 \section{Installing}\label{sec:trouble-install}
 
-\paragraph{The installer stops: no tag, branch or commit 'v0.8.1'.} The repository it clones has no such tag. The installer clones the repository \code{--repo} names, the public one by default, at the tag \code{--ref} names, \code{v0.8.1} by default. A tester installs from the early-access repository: pass its address with \code{--repo} (Section~\ref{sec:early-access}). The same missing tag makes \code{curl} answer 404 for the installer's own URL.
+\paragraph{The installer stops: no tag, branch or commit 'v0.8.2'.} The repository it clones has no such tag. The installer clones the repository \code{--repo} names, the public one by default, at the tag \code{--ref} names, \code{v0.8.2} by default. A tester installs from the early-access repository: pass its address with \code{--repo} (Section~\ref{sec:early-access}). The same missing tag makes \code{curl} answer 404 for the installer's own URL.
 
 \paragraph{Cloning the early-access repository says \enquote{Repository not found}.} GitHub answers that way for a private repository your login cannot read. Check that the account you use has accepted the invitation, and that git uses that account: an SSH key on it, or \code{gh auth login} followed by \code{gh auth setup-git} for HTTPS.
 
