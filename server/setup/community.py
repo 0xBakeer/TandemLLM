@@ -1,0 +1,360 @@
+"""Community weight packs (docs/community-weights.md): the index, its sync from GitHub, the profile.
+
+    models/<model>/community/<id>.json   one pack a file; the public repository's main is the source
+    models/community-index.json          the bundle: every entry of those folders (`--index`), shipped
+                                         with the release
+    ~/.tandemllm/community/index.json    the index last fetched from QSE_COMMUNITY_URL, and beside it
+                                         index.meta.json (its URL, ETag and when it came)
+    ~/.tandemllm/community/<id>/         a pack's download (ops/use-profile.sh community/<id>)
+    REPO/run/community/<id>.env          the weight profile ops/serve.env reads for community/<id>
+                                         (`env`, written by use-profile.sh before every switch)
+
+THE SYNC. Nothing fetches on a timer or at the start. The setup guide's community section asks for a
+sync when it opens and on its Refresh button (POST /v1/setup/community/sync): one GET of
+QSE_COMMUNITY_URL (default: the index on the public repository's main) with the cached ETag, so an
+unchanged index is a 304, a 10 s timeout and a 2 MiB cap. Calls that arrive while one runs wait for
+its answer instead of fetching again. `QSE_COMMUNITY_URL=off` never fetches. The entries come from,
+in this order: the index fetched (`github`, from the cache file once it is written), the cache file
+from an earlier fetch when this one failed (`cache`), the index shipped in models/ (`bundled`).
+
+The fetched index is untrusted: an index whose outer shape is wrong is not written over the cache,
+and every entry passes the registry's checks (registry.community_errors: the strict schema, the
+pinned revision, https links); one that does not is dropped and listed with the reason.
+
+    python -m server.setup.community --index [--check]       write (check) models/community-index.json
+    python -m server.setup.community env community/<id> [--out FILE]   the profile, from the registry
+    python -m server.setup.community sync                    fetch now; the sync state as JSON
+"""
+
+from __future__ import annotations
+
+import glob
+import hashlib
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from server.conductor.schema import validate
+from server.setup import registry
+
+DEFAULT_URL = "https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/models/community-index.json"
+REPO = "0xBakeer/TandemLLM"                 # where "Add yours" opens its issue form
+GENERATOR = "server.setup.community 1"
+INDEX_SCHEMA_VERSION = 1
+TIMEOUT_S = 10.0
+MAX_BYTES = 2 * 1024 * 1024
+INDEX_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["schema", "generator", "entries"],
+    "properties": {
+        "schema": {"const": INDEX_SCHEMA_VERSION},
+        "generator": {"type": "string", "maxLength": 80},
+        "entries": {"type": "array", "maxItems": 2000, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["model", "id", "path", "sha256", "entry"],
+            "properties": {"model": {"type": "string", "pattern": registry.MODEL_ID},
+                           "id": {"type": "string", "maxLength": 80, "pattern": registry.COMMUNITY_SLUG},
+                           "path": {"type": "string", "maxLength": 200,
+                                    "pattern": r"^models/[a-z0-9.-]+/community/[a-z0-9.-]+\.json$"},
+                           "sha256": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+                           "entry": {"type": "object"}}}}}}
+
+
+def home() -> str:
+    return os.environ.get("QSE_COMMUNITY_DIR") or os.path.expanduser("~/.tandemllm/community")
+
+
+def cache_path() -> str:
+    return os.path.join(home(), "index.json")
+
+
+def meta_path() -> str:
+    return os.path.join(home(), "index.meta.json")
+
+
+def bundled_path(models_dir: str | None = None) -> str:
+    return os.path.join(models_dir or registry.MODELS_DIR, "community-index.json")
+
+
+def url() -> str | None:
+    """QSE_COMMUNITY_URL, else the public repository's; None for `off`."""
+    u = (os.environ.get("QSE_COMMUNITY_URL") or DEFAULT_URL).strip()
+    return None if u == "off" else u
+
+
+def pack_dir(cid: str) -> str:
+    """Where community/<cid>'s files go (the profile's QSE_WEIGHTS_DIR)."""
+    return os.path.join(home(), cid)
+
+
+# ---------------------------------------------------------------------- the index
+def build_index(models_dir: str | None = None) -> dict:
+    """The bundle from the folders: every models/<model>/community/<id>.json as written, with its
+    sha256, sorted by model and id. A file that is not JSON stops it (the check names it)."""
+    d = models_dir or registry.MODELS_DIR
+    entries = []
+    for p in sorted(glob.glob(os.path.join(d, "*", "community", "*.json"))):
+        with open(p, "rb") as fh:
+            raw = fh.read()
+        model = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        entries.append({"model": model, "id": os.path.basename(p)[:-len(".json")],
+                        "path": f"models/{model}/community/{os.path.basename(p)}",
+                        "sha256": hashlib.sha256(raw).hexdigest(), "entry": json.loads(raw)})
+    return {"schema": INDEX_SCHEMA_VERSION, "generator": GENERATOR, "entries": entries}
+
+
+def render_index(doc: dict) -> str:
+    return json.dumps(doc, indent=1, ensure_ascii=False) + "\n"
+
+
+def _read_index(path: str) -> dict | None:
+    """A valid index document at `path`, else None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if not validate(doc, INDEX_SCHEMA) else None
+
+
+def entries(doc: dict, models: dict[str, dict]) -> tuple[dict[str, list[dict]], list[dict]]:
+    """model id -> its entries as the API gives them (newest first), and the dropped ones:
+    [{model, id, path, reason}]."""
+    out: dict[str, list[dict]] = {}
+    dropped = []
+    seen = set()
+    for r in doc.get("entries") or []:
+        errs = registry.community_errors(r["entry"], r["id"], r["model"], models)
+        if not errs and (r["model"], r["id"]) in seen:
+            errs = ["$.id: listed twice in the index"]
+        if errs:
+            dropped.append({"model": r["model"], "id": r["id"], "path": r["path"],
+                            "reason": "; ".join(errs[:8])})
+            continue
+        seen.add((r["model"], r["id"]))
+        out.setdefault(r["model"], []).append(registry.community_entry(r["entry"], models[r["model"]]))
+    for lst in out.values():
+        lst.sort(key=lambda c: c["id"])
+        lst.sort(key=lambda c: c["added"], reverse=True)
+    return out, dropped
+
+
+# ---------------------------------------------------------------------- the sync
+_STATE: dict = {"fetched": False, "checked_at": None, "error": None}
+_GUARD = threading.Lock()
+_INFLIGHT: dict | None = None
+
+
+def current(models_dir: str | None = None) -> tuple[dict, str, tuple]:
+    """The index in use, where it came from (github | cache | bundled) and a key that moves when
+    either changes (registry.load_all's cache)."""
+    cp = cache_path()
+    doc = _read_index(cp)
+    if doc is not None:
+        src = "github" if _STATE["fetched"] else "cache"
+        return doc, src, (cp, os.path.getmtime(cp), src)
+    bp = bundled_path(models_dir)
+    doc = _read_index(bp) or {"schema": INDEX_SCHEMA_VERSION, "generator": "", "entries": []}
+    return doc, "bundled", (bp, os.path.getmtime(bp) if os.path.isfile(bp) else 0.0, "bundled")
+
+
+def _meta() -> dict:
+    try:
+        with open(meta_path()) as fh:
+            m = json.load(fh)
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(path + ".tmp", path)
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _fetch(timeout: float) -> None:
+    """One conditional GET of url() into the cache; the outcome in _STATE."""
+    u = url()
+    _STATE["checked_at"] = _now()
+    if u is None:
+        _STATE.update(fetched=False, error="QSE_COMMUNITY_URL is off: nothing is fetched")
+        return
+    meta = _meta()
+    headers = {"Accept": "application/json", "User-Agent": "TandemLLM-setup"}
+    if meta.get("etag") and meta.get("url") == u and _read_index(cache_path()) is not None:
+        headers["If-None-Match"] = meta["etag"]
+    try:
+        with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=timeout) as r:
+            body = r.read(MAX_BYTES + 1)
+            etag = r.headers.get("ETag")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            _STATE.update(fetched=True, error=None)
+            return
+        _STATE.update(fetched=False, error=f"{u}: HTTP {exc.code}")
+        return
+    except (OSError, ValueError) as exc:          # URLError, a timeout, a refused connection
+        _STATE.update(fetched=False, error=f"{u}: {getattr(exc, 'reason', None) or exc}")
+        return
+    if len(body) > MAX_BYTES:
+        _STATE.update(fetched=False, error=f"{u}: larger than {MAX_BYTES // 1024} KiB")
+        return
+    try:
+        doc = json.loads(body.decode("utf-8"))
+    except ValueError as exc:
+        _STATE.update(fetched=False, error=f"{u}: not JSON ({exc})")
+        return
+    bad = validate(doc, INDEX_SCHEMA)
+    if bad:
+        _STATE.update(fetched=False, error=f"{u}: not a community index ({'; '.join(bad[:3])})")
+        return
+    _write(cache_path(), render_index(doc))
+    _write(meta_path(), json.dumps({"url": u, "etag": etag, "fetched_at": _now()}, indent=1) + "\n")
+    _STATE.update(fetched=True, error=None)
+
+
+def sync(timeout: float = TIMEOUT_S) -> dict:
+    """Fetch now (the page opened, or Refresh), then the state. A call that arrives while another
+    fetches waits for that one."""
+    global _INFLIGHT
+    with _GUARD:
+        job, lead = (_INFLIGHT, False) if _INFLIGHT is not None else (None, True)
+        if lead:
+            job = _INFLIGHT = {"done": threading.Event()}
+    if not lead:
+        job["done"].wait(timeout + 5)
+        return state()
+    try:
+        _fetch(timeout)
+    finally:
+        with _GUARD:
+            _INFLIGHT = None
+        job["done"].set()
+    return state()
+
+
+def add_url(model_id: str | None = None) -> str:
+    """The "Add yours" link: the repository's issue form, its base model filled in (GitHub takes a
+    form field's value from the query parameter of its id)."""
+    q = {"template": "community-quant.yml", "title": "community: <name of the pack>"}
+    if model_id:
+        q["base_model"] = model_id
+    return f"https://github.com/{REPO}/issues/new?{urllib.parse.urlencode(q)}"
+
+
+def state(model_id: str | None = None) -> dict:
+    """CommunitySync: where the entries come from, when the index was fetched and checked, the last
+    error, the dropped entries (of `model_id` only, when given)."""
+    _doc, src, _key = current()
+    dropped = registry.community_dropped()
+    if model_id is not None:
+        dropped = [d for d in dropped if d["model"] == model_id]
+    return {"source": src, "url": url(), "fetched_at": _meta().get("fetched_at") if src != "bundled" else None,
+            "checked_at": _STATE["checked_at"], "error": _STATE["error"], "dropped": dropped,
+            "add_url": add_url(model_id)}
+
+
+# ---------------------------------------------------------------------- the profile
+def env(m: dict, c: dict) -> str:
+    """The weight profile of community entry `c` (registry.community_entry) of model `m`, as
+    ops/serve.env sources it: the pack in its own folder, standalone (the pack is the model,
+    QWEN38_MODEL, as --model; #1's loader) or an EXL3 overlay over the base (QWEN38_EXL3); the
+    drafters; the vision tower only where the entry says images work; its own disk-tier folder.
+    Every value comes from a checked field (the registry's patterns: no quote, space or $)."""
+    d = f"${{HOME}}/.tandemllm/community/{c['id']}"
+    lines = [f"# Weight profile {c['profile']}: {c['name']} by @{c['author']['github']}, "
+             f"{c['format']} {c['bpw']:g} bpw, {c['load']},",
+             f"# {c['hf']['repo']}@{c['hf']['revision']}. Generated by server/setup/community.py from",
+             f"# models/{m['id']}/community/{c['id']}.json; ops/use-profile.sh {c['profile']} writes it again "
+             f"before every switch.",
+             f"QSE_WEIGHTS='{c['profile']}'",
+             f"QSE_WEIGHTS_HF='{c['hf']['repo']}'",
+             f"QSE_WEIGHTS_REVISION='{c['hf']['revision']}'",
+             f'QSE_WEIGHTS_DIR="{d}"',
+             f"QSE_WEIGHTS_GB='{c['size_gb']:g}'",
+             "QSE_WEIGHTS_FILES=",
+             "unset QWEN38_EXL3 QWEN38_DRAFT_EXL3 QWEN38_DRAFT_HEAD_EXL3 QSE_ENGINE_FLAGS QSE_ASSETS"]
+    if c["load"] == "standalone":
+        lines.append('QWEN38_MODEL="${QSE_WEIGHTS_DIR}"')
+    else:
+        lines.append('QWEN38_EXL3="${QSE_WEIGHTS_DIR}"')
+    if c["drafters"] == "tandem-exl3":
+        lines += ['QWEN38_DRAFT_EXL3="${HOME}/.qwen38-spark-engine/weights/exl3-drafters-k3"',
+                  'QWEN38_DRAFT_HEAD_EXL3="${HOME}/.qwen38-spark-engine/weights/exl3-draft-head-k4"']
+    if c["drafters"] in ("tandem-exl3", "dflash2"):
+        lines += ['CKPT8="${REPO}/train/ft-b8-v2"', 'CKPT16="${REPO}/train/ft-b16"']
+    else:
+        # no drafter: start.sh's model flags in place of the 27B's drafter flags
+        lines.append('QSE_ENGINE_FLAGS="' + ("--model ${QSE_WEIGHTS_DIR} " if c["load"] == "standalone"
+                                             else "") + '--drafter none"')
+    lines += ["QWEN38_SAMPLE_NUCLEUS=1",
+              f"VISION={'on' if c['modalities']['image'] else 'off'}",
+              f'QSE_DISK_CACHE="${{HOME}}/.qwen38-spark-engine/cache/disk-community-{c["id"]}"']
+    return "\n".join(lines) + "\n"
+
+
+def find(pid: str) -> tuple[dict, dict] | None:
+    """(model, entry) of profile community/<id>, from the index in use."""
+    for m in registry.load_all()[0].values():
+        c = registry.community(m, pid)
+        if c is not None:
+            return m, c
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m server.setup.community")
+    ap.add_argument("--index", action="store_true", help="write models/community-index.json")
+    ap.add_argument("--check", action="store_true", help="with --index: exit 1 when it differs")
+    ap.add_argument("cmd", nargs="?", choices=("env", "sync"))
+    ap.add_argument("profile", nargs="?")
+    ap.add_argument("--out")
+    a = ap.parse_args(argv)
+    if a.index:
+        text, path = render_index(build_index()), bundled_path()
+        if a.check:
+            try:
+                same = open(path, encoding="utf-8").read() == text
+            except OSError:
+                same = False
+            if not same:
+                print(f"FAIL {os.path.relpath(path, registry.ROOT)} is not the folders' index: "
+                      f"python -m server.setup.community --index")
+                return 1
+            print(f"ok   {os.path.relpath(path, registry.ROOT)}")
+            return 0
+        _write(path, text)
+        print(f"wrote {os.path.relpath(path, registry.ROOT)}")
+        return 0
+    if a.cmd == "sync":
+        print(json.dumps(sync(), indent=1))
+        return 0
+    if a.cmd == "env":
+        hit = find(a.profile or "") if (a.profile or "").startswith(registry.COMMUNITY_PREFIX) else None
+        if hit is None:
+            print(f"no community entry {a.profile!r} (models/<model>/community/<id>.json; "
+                  f"python -m server.setup.registry --check)", file=sys.stderr)
+            return 2
+        text = env(*hit)
+        if a.out:
+            _write(a.out, text)
+        else:
+            sys.stdout.write(text)
+        return 0
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

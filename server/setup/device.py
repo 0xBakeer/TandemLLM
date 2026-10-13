@@ -147,6 +147,16 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
                    if not registry.asset_present(registry.asset(m, a), repo)]
         out[p["id"]] = {"weights": weights_present(d), "dir": (d or {}).get("dir") or None,
                         "assets_missing": missing, "repo": repo}
+    # a community pack's profile is written at its first switch, so its folder is the one the
+    # profile will name (community.pack_dir), not serve.env's; ${REPO} is the box's
+    from server.setup import community as community_mod
+    repo = next((v["repo"] for v in out.values() if v["repo"]), None)
+    for c in m.get("community") or []:
+        d = {"dir": community_mod.pack_dir(c["id"]), "files": []}
+        missing = [a for a in registry.community_assets(c)
+                   if not registry.asset_present(registry.asset(m, a), repo)]
+        out[c["profile"]] = {"weights": weights_present(d), "dir": d["dir"],
+                             "assets_missing": missing, "repo": repo}
     with _lock:
         _cache["disk_at"] = now
         _cache["disk"][m["id"]] = out

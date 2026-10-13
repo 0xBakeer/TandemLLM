@@ -67,9 +67,26 @@ def find(pack: str | None, models_dir: str | None = None) -> dict | None:
     """The card whose `packs` match the served pack's name."""
     if not pack:
         return None
+    if pack.startswith("community/"):
+        return _community_card(pack, models_dir)
     for c in cards(models_dir):
         if any(fnmatch.fnmatch(pack, str(g)) for g in c["packs"]):
             return c
+    return None
+
+
+def _community_card(pack: str, models_dir: str | None = None) -> dict | None:
+    """A community pack (QSE_WEIGHTS community/<id>, docs/community-weights.md) serves under its
+    base model's card with the entry's name as the label (the identity note names it) and vision
+    only where the entry says images work."""
+    from server.setup import registry
+    for m in registry.load_all(models_dir)[0].values():
+        e = registry.community(m, pack)
+        if e is None:
+            continue
+        base = next((c for c in cards(models_dir) if c.get("model") == m["id"]), {})
+        caps = dict(base.get("capabilities") or {}, vision=e["modalities"]["image"])
+        return dict(base, model=m["id"], label=e["name"], packs=[pack], capabilities=caps)
     return None
 
 

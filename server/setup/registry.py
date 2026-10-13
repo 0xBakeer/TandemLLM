@@ -23,6 +23,14 @@ or the scripts read (`unregistered_keys`), and every ops/profiles/<name>.env has
 
     python -m server.setup.registry --check [model.yaml ...]   exit 1 and the problems when one fails
     python -m server.setup.registry --schema                   print models/schema/model.schema.json
+    python -m server.setup.registry --community-schema         print models/schema/community.schema.json
+
+Community packs (models/<id>/community/<pack>.json, docs/community-weights.md) are checked by
+community_errors: COMMUNITY_SCHEMA, the file's name is the id, the folder is the base model, the
+revision is a commit, the format has a load path, and the modalities are ones that load path serves
+(standalone: text only, ENG-271). `--check` reads them from the folders and checks that
+models/community-index.json is their index; the API reads the index in use (server/setup/community.py)
+and gives each model its `community` list, with the profiles community/<pack> (`profile`).
 """
 
 from __future__ import annotations
@@ -168,6 +176,73 @@ SCHEMA = _obj({
 }, required=("schema", "id", "name", "family", "params", "pitch", "architecture", "license",
              "links", "devices", "assets", "profiles", "measurements", "memory", "components",
              "parallelism", "methods", "advanced"))
+
+# A community weight pack (docs/community-weights.md): models/<model>/community/<id>.json, one file a
+# pack, schema 1. Fetched entries (server/setup/community.py) pass the same checks: the data is
+# untrusted, so every string has a pattern or a length, every link is https and the avatar is
+# GitHub's own. What the schema cannot say is in community_errors.
+COMMUNITY_SCHEMA_VERSION = 1
+COMMUNITY_SLUG = r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+COMMUNITY_FORMATS = ("exl3", "nvfp4", "fp8", "gguf")
+COMMUNITY_SUPPORTED = ("exl3",)            # a format with a load path here; the others are refused
+# the base models a community pack loads on: #1's standalone loader and the EXL3 overlay are the
+# 27B family's (engine/loader.py); Flash-Next's packs load through their own --model path only
+COMMUNITY_BASES = ("qwen3.8-27b",)
+# what the engine reads on each load path today: the standalone path is text only (ENG-271); the
+# overlay keeps the base checkpoint's vision tower; no path takes audio or video
+COMMUNITY_LOADS = {"standalone": ("text",), "overlay": ("text", "image")}
+MODALITIES = ("text", "image", "audio", "video")
+# the files under ~/.tandemllm/community/ that are not a pack's folder (community.py)
+_RESERVED_SUFFIXES = (".json", ".partial", ".env", ".tmp")
+_HTTPS = {"type": "string", "pattern": r"^https://[^\s\"'<>`]{1,400}$"}
+_HF_ID = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"}
+_DATE = {"type": "string", "pattern": r"^20[0-9]{2}-[01][0-9]-[0-3][0-9]$"}
+_LINE = {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[^\x00-\x1f<>]+$"}
+_SOCIAL = {"type": "object", "additionalProperties": False, "required": [], "properties": {
+    "x": {"type": "string", "pattern": r"^[A-Za-z0-9_]{1,15}$"},
+    "huggingface": {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"},
+    "bluesky": {"type": "string", "maxLength": 253,
+                "pattern": r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$"},
+    "mastodon": {"type": "string", "pattern": r"^https://[a-z0-9.-]{1,253}/@[A-Za-z0-9_]{1,30}$"},
+    "website": _HTTPS}}
+_TASK_NUMS = {k: _NUM0 for k in ("prose", "code", "chat", "plain")}
+COMMUNITY_SCHEMA = _obj({
+    "schema": {"const": COMMUNITY_SCHEMA_VERSION},
+    "id": {"type": "string", "maxLength": 80, "pattern": COMMUNITY_SLUG},
+    "name": _LINE,
+    "base_model": {"type": "string", "pattern": MODEL_ID},
+    "finetune_of": {"type": ["string", "null"], "pattern": _HF_ID["pattern"]},
+    "author": _obj({"github": {"type": "string",
+                               "pattern": r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$"},
+                    "name": {"type": ["string", "null"], "maxLength": 80, "pattern": r"^[^\x00-\x1f<>]*$"},
+                    "social": _SOCIAL}, required=("github",)),
+    "hf": _obj({"repo": _HF_ID, "revision": {"type": "string", "pattern": r"^[0-9a-f]{40}$"}}),
+    "format": {"enum": list(COMMUNITY_FORMATS)},
+    "bpw": {"type": "number", "minimum": 1, "maximum": 16},
+    "size_gb": {"type": "number", "minimum": 0.1, "maximum": 2000},
+    "load": {"enum": list(COMMUNITY_LOADS)},
+    "modalities": _obj({k: {"type": "boolean"} for k in MODALITIES}),
+    "modalities_in_pack": {"type": "array", "maxItems": 4, "items": {"enum": list(MODALITIES)}},
+    "drafters": {"enum": ["tandem-exl3", "dflash2", "none"]},
+    "license": _LINE,
+    "license_url": {"type": ["string", "null"], "pattern": _HTTPS["pattern"]},
+    "description": {"type": "string", "maxLength": 500, "pattern": r"^[^\x00-\x08\x0b-\x1f<>]*$"},
+    "tags": {"type": "array", "maxItems": 12,
+             "items": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9-]{0,31}$"}},
+    "added": _DATE,
+    "status": {"enum": ["submitted", "verified", "broken"]},
+    "verified": {"type": ["object", "null"], "additionalProperties": False,
+                 "required": ["build", "device", "date"],
+                 "properties": {"build": {"type": "string", "pattern": r"^[0-9][0-9A-Za-z.+-]{0,31}$"},
+                                "device": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9-]{0,39}$"},
+                                "date": _DATE,
+                                "tok_s": _obj(_TASK_NUMS, required=()),
+                                "tokens_per_round": _obj(_TASK_NUMS, required=()),
+                                "notes": {"type": ["string", "null"], "maxLength": 300,
+                                          "pattern": r"^[^\x00-\x1f<>]*$"}}},
+    "links": {"type": "object", "additionalProperties": _HTTPS},
+}, required=("schema", "id", "name", "base_model", "author", "hf", "format", "bpw", "size_gb", "load",
+             "modalities", "drafters", "license", "added", "status"))
 
 
 class RegistryError(ValueError):
@@ -363,15 +438,19 @@ def load(path: str, root: str | None = None) -> dict:
     return m
 
 
-_CACHE: dict = {"key": None, "models": {}, "errors": []}
+_CACHE: dict = {"key": None, "models": {}, "errors": [], "dropped": []}
 _LOCK = threading.Lock()
 
 
 def load_all(models_dir: str | None = None) -> tuple[dict[str, dict], list[dict]]:
-    """id -> model, and [{path, message}] for the files that did not load."""
+    """id -> model, and [{path, message}] for the files that did not load. Each model carries its
+    community packs (`community`, from the index in use: server/setup/community.py); the entries
+    that did not check are community_dropped()."""
+    from server.setup import community as community_mod
     d = models_dir or MODELS_DIR
     paths = sorted(glob.glob(os.path.join(d, "*", "model.yaml")))
-    key = (d, tuple((p, os.path.getmtime(p)) for p in paths))
+    doc, _src, ckey = community_mod.current(d)
+    key = (d, tuple((p, os.path.getmtime(p)) for p in paths), ckey)
     with _LOCK:
         if _CACHE["key"] == key:
             return _CACHE["models"], _CACHE["errors"]
@@ -384,8 +463,40 @@ def load_all(models_dir: str | None = None) -> tuple[dict[str, dict], list[dict]
                 errors.append({"path": os.path.relpath(p, root), "message": str(exc)})
                 continue
             models[m["id"]] = m
-        _CACHE.update(key=key, models=models, errors=errors)
+        packs, dropped = community_mod.entries(doc, models)
+        for m in models.values():
+            m["community"] = packs.get(m["id"], [])
+        _CACHE.update(key=key, models=models, errors=errors, dropped=dropped)
         return models, errors
+
+
+def community_dropped(models_dir: str | None = None) -> list[dict]:
+    """The community entries of the index in use that did not check: [{model, id, path, reason}]."""
+    load_all(models_dir)
+    return _CACHE["dropped"]
+
+
+def community_file_errors(models_dir: str | None = None) -> list[tuple[str, list[str]]]:
+    """(path, problems) of every models/<model>/community/<id>.json that does not check, read
+    from the folders themselves (the --check of a pull request)."""
+    d = models_dir or MODELS_DIR
+    models = load_all(d)[0]
+    out = []
+    for p in sorted(glob.glob(os.path.join(d, "*", "community", "*"))):
+        folder = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        if not p.endswith(".json"):
+            out.append((p, ["only <id>.json files belong in a community folder"]))
+            continue
+        try:
+            with open(p, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            out.append((p, [f"cannot read: {exc}"]))
+            continue
+        errs = community_errors(data, os.path.basename(p)[:-len(".json")], folder, models)
+        if errs:
+            out.append((p, errs))
+    return out
 
 
 def get(model_id: str, models_dir: str | None = None) -> dict | None:
@@ -397,6 +508,10 @@ def recommended_profile(m: dict) -> dict:
 
 
 def profile(m: dict, pid: str) -> dict | None:
+    """The profile `pid`: one of the model's own, or community/<id> (community_profile)."""
+    if isinstance(pid, str) and pid.startswith(COMMUNITY_PREFIX):
+        c = community(m, pid)
+        return community_profile(m, c) if c is not None else None
     return next((p for p in m["profiles"] if p["id"] == pid), None)
 
 
@@ -462,7 +577,7 @@ def wizard_fields(m: dict) -> list[dict]:
     p = m["parallelism"]
     per_step = {
         "weights": [{"field": "profile", "label": "Weight profile", "type": "enum",
-                     "options": [x["id"] for x in m["profiles"]]}],
+                     "options": [x["id"] for x in profiles(m)]}],
         "components": [{"field": c["id"], "label": c["label"], "type": "bool"}
                        for c in m["components"]],
         "parallelism": [
@@ -575,6 +690,157 @@ def asset_present(a: dict, repo: str | None = None) -> bool:
     return all(glob.glob(expand(p, repo)) for p in [a["path"], *a.get("also", [])])
 
 
+# ---------------------------------------------------------------------- community packs
+COMMUNITY_PREFIX = "community/"
+# the base model's assets a community pack reads besides its own folder, by its drafters and its
+# load path (the K3 files are named after the BF16 drafter folders, which give the rest of each arm)
+_COMMUNITY_ASSETS = {"tandem-exl3": ["exl3-drafters-k3", "exl3-draft-head-k4", "nvfp4-drafters"],
+                     "dflash2": ["nvfp4-drafters"], "none": []}
+_SOCIAL_URL = (("x", "X", "https://x.com/{}"), ("huggingface", "Hugging Face", "https://huggingface.co/{}"),
+               ("bluesky", "Bluesky", "https://bsky.app/profile/{}"), ("mastodon", "Mastodon", "{}"),
+               ("website", "Website", "{}"))
+
+
+def _date_ok(s: str) -> bool:
+    import datetime
+    try:
+        datetime.date.fromisoformat(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _like(m: dict, fmt: str, bpw: float) -> dict | None:
+    """The model's own profile of `fmt` nearest to `bpw` (the lower one on a tie): the memory a
+    community pack of that size is estimated with."""
+    same = [p for p in m["profiles"] if p["format"] == fmt and p["bpw"] is not None]
+    return min(same, key=lambda p: (abs(p["bpw"] - bpw), p["bpw"])) if same else None
+
+
+def community_assets(e: dict) -> list[str]:
+    return _COMMUNITY_ASSETS[e["drafters"]] + (["base-fp8"] if e["load"] == "overlay" else [])
+
+
+def community_errors(data, slug: str | None, folder: str | None, models: dict[str, dict]) -> list[str]:
+    """Why a community entry does not load, one line a problem with its field: the schema, then
+    what the schema cannot say. `slug`: the file's name without .json; `folder`: the model folder
+    it sits in (an index entry's `model`); `models`: id -> the models that loaded."""
+    if isinstance(data, dict) and data.get("schema") != COMMUNITY_SCHEMA_VERSION:
+        return [f"$.schema: {data.get('schema')!r}; this server reads community schema "
+                f"{COMMUNITY_SCHEMA_VERSION} only (a newer file needs a newer TandemLLM)"]
+    errs = validate(data, COMMUNITY_SCHEMA)
+    if errs:
+        return errs
+    e = data
+    if slug is not None and e["id"] != slug:
+        errs.append(f"$.id: {e['id']!r} is not the file's name {slug!r}")
+    if e["id"].endswith(_RESERVED_SUFFIXES):
+        errs.append(f"$.id: may not end in {', '.join(_RESERVED_SUFFIXES)}")
+    if folder is not None and e["base_model"] != folder:
+        errs.append(f"$.base_model: {e['base_model']!r} is not the folder's model {folder!r}")
+    m = models.get(e["base_model"])
+    if m is None:
+        errs.append(f"$.base_model: no model {e['base_model']!r} in models/")
+    elif e["base_model"] not in COMMUNITY_BASES:
+        errs.append(f"$.base_model: community packs load on {', '.join(COMMUNITY_BASES)} only")
+    if e["format"] not in COMMUNITY_SUPPORTED:
+        errs.append(f"$.format: TandemLLM has no load path for {e['format']} packs yet "
+                    f"({', '.join(COMMUNITY_SUPPORTED)} only)")
+    mods = e["modalities"]
+    if not mods["text"]:
+        errs.append("$.modalities.text: a pack serves text")
+    for k in MODALITIES:
+        if mods[k] and k not in COMMUNITY_LOADS[e["load"]]:
+            errs.append(f"$.modalities.{k}: the {e['load']} load path does not serve {k} yet"
+                        + (" (ENG-271)" if e["load"] == "standalone" and k == "image" else ""))
+    pack = e.get("modalities_in_pack")
+    if pack is not None:
+        if len(set(pack)) != len(pack):
+            errs.append("$.modalities_in_pack: a modality is listed twice")
+        for k in MODALITIES:
+            if mods[k] and k not in pack:
+                errs.append(f"$.modalities_in_pack: {k} works but the pack does not list it")
+    if len(set(e.get("tags") or [])) != len(e.get("tags") or []):
+        errs.append("$.tags: a tag is listed twice")
+    if not _date_ok(e["added"]):
+        errs.append(f"$.added: {e['added']!r} is not a date")
+    v = e.get("verified")
+    if e["status"] == "verified" and not v:
+        errs.append("$.verified: a verified entry says what was measured (build, device, date)")
+    if v and not _date_ok(v["date"]):
+        errs.append(f"$.verified.date: {v['date']!r} is not a date")
+    if m is not None and e["base_model"] in COMMUNITY_BASES:
+        have = {a["id"] for a in m["assets"]}
+        for a in community_assets(e):
+            if a not in have:
+                errs.append(f"$.drafters: {e['base_model']} has no asset {a!r} for "
+                            f"{e['drafters']} on the {e['load']} path")
+        if e["format"] in COMMUNITY_SUPPORTED and _like(m, e["format"], e["bpw"]) is None:
+            errs.append(f"$.format: {e['base_model']} has no {e['format']} profile to estimate "
+                        f"the memory from")
+    return errs
+
+
+def community_entry(e: dict, m: dict) -> dict:
+    """A checked entry as the API gives it: every key filled, and the computed ones (the
+    profile's name, the avatar, the links, the memory the estimate counts)."""
+    a = e["author"]
+    social = dict(a.get("social") or {})
+    like = _like(m, e["format"], e["bpw"])
+    mods = e["modalities"]
+    return dict(
+        e, finetune_of=e.get("finetune_of"),
+        author={"github": a["github"], "name": a.get("name"), "social": social},
+        modalities_in_pack=list(e.get("modalities_in_pack") or [k for k in MODALITIES if mods[k]]),
+        license_url=e.get("license_url"), description=e.get("description") or "",
+        tags=list(e.get("tags") or []),
+        verified=None if not e.get("verified") else {
+            "build": e["verified"]["build"], "device": e["verified"]["device"],
+            "date": e["verified"]["date"], "tok_s": dict(e["verified"].get("tok_s") or {}),
+            "tokens_per_round": dict(e["verified"].get("tokens_per_round") or {}),
+            "notes": e["verified"].get("notes")},
+        links=dict(e.get("links") or {}),
+        profile=COMMUNITY_PREFIX + e["id"],
+        avatar_url=f"https://github.com/{a['github']}.png?size=96",
+        author_url=f"https://github.com/{a['github']}",
+        social_links=[{"network": k, "label": label, "url": fmt.format(social[k])}
+                      for k, label, fmt in _SOCIAL_URL if social.get(k)],
+        hf_url=f"https://huggingface.co/{e['hf']['repo']}/tree/{e['hf']['revision']}",
+        memory={"weights_gib": like["weights_gib"],
+                "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" else 0.0,
+                "like": like["id"]})
+
+
+def community_profile(m: dict, c: dict) -> dict:
+    """An API entry (community_entry) as a weight profile: what the selection, the estimate, the
+    plan and the apply job read of `profile`. Its memory is its `like` profile's; its disk the
+    entry's download."""
+    like = profile(m, c["memory"]["like"])
+    v = c["verified"]
+    return {"id": c["profile"], "label": c["name"], "format": c["format"], "bpw": c["bpw"],
+            "disk_gb": c["size_gb"], "weights_gib": c["memory"]["weights_gib"],
+            "drafters_gib": c["memory"]["drafters_gib"], "hf_repo": c["hf"]["repo"],
+            "hf_private": False, "hf_revision": c["hf"]["revision"], "recommended": False,
+            "badges": ["community"],
+            "quality": {"kl_vs_bf16": None, "top1_pct": None, "ppl": None,
+                        "date": v["date"] if v else c["added"],
+                        "source": f"community entry {c['profile']} ({c['status']})"},
+            "assets_required": community_assets(c), "note": c["description"] or None,
+            "components_gib": dict(like.get("components_gib") or {}),
+            "community": c["id"], "vision": c["modalities"]["image"]}
+
+
+def community(m: dict, cid: str) -> dict | None:
+    """The model's community entry `cid` (its id, or its profile name community/<id>)."""
+    cid = cid[len(COMMUNITY_PREFIX):] if cid.startswith(COMMUNITY_PREFIX) else cid
+    return next((c for c in m.get("community") or [] if c["id"] == cid), None)
+
+
+def profiles(m: dict) -> list[dict]:
+    """The model's own profiles, then its community packs as profiles."""
+    return m["profiles"] + [community_profile(m, c) for c in m.get("community") or []]
+
+
 def json_schema() -> dict:
     """SCHEMA as models/schema/model.schema.json."""
     return {"$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -582,15 +848,28 @@ def json_schema() -> dict:
             "title": "TandemLLM model registry entry, schema 1 (models/<id>/model.yaml)", **SCHEMA}
 
 
+def community_json_schema() -> dict:
+    """COMMUNITY_SCHEMA as models/schema/community.schema.json."""
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://github.com/0xBakeer/TandemLLM/models/schema/community.schema.json",
+            "title": "TandemLLM community weight pack, schema 1 (models/<model>/community/<id>.json)",
+            **COMMUNITY_SCHEMA}
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m server.setup.registry")
     ap.add_argument("--check", action="store_true", help="check model.yaml files (default: all)")
     ap.add_argument("--schema", action="store_true", help="print the JSON Schema")
+    ap.add_argument("--community-schema", action="store_true",
+                    help="print the community pack's JSON Schema")
     ap.add_argument("paths", nargs="*")
     a = ap.parse_args(argv)
     if a.schema:
         print(json.dumps(json_schema(), indent=2, sort_keys=True))
+        return 0
+    if a.community_schema:
+        print(json.dumps(community_json_schema(), indent=2, sort_keys=True))
         return 0
     paths = a.paths or sorted(glob.glob(os.path.join(MODELS_DIR, "*", "model.yaml")))
     bad = 0
@@ -616,6 +895,25 @@ def main(argv: list[str] | None = None) -> int:
         for n in unlisted_profiles(models):
             bad += 1
             print(f"FAIL ops/profiles/{n}.env: no model lists this profile")
+        # the community packs, from their files (docs/community-weights.md), and the bundled index
+        for p, problems in community_file_errors():
+            bad += 1
+            print(f"FAIL {os.path.relpath(p, os.path.dirname(MODELS_DIR))}")
+            for line in problems:
+                print(f"  {line}")
+        n = len(glob.glob(os.path.join(MODELS_DIR, "*", "community", "*.json")))
+        from server.setup import community as community_mod
+        try:
+            same = community_mod.render_index(community_mod.build_index()) == \
+                open(community_mod.bundled_path(), encoding="utf-8").read()
+        except (OSError, ValueError):
+            same = False
+        if not same:
+            bad += 1
+            print("FAIL models/community-index.json is not the folders' index: "
+                  "python -m server.setup.community --index")
+        else:
+            print(f"ok   models/*/community: {n} packs, models/community-index.json matches")
     return 1 if bad else 0
 
 

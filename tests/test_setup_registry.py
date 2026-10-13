@@ -52,6 +52,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml  # noqa: E402
 
+# the community packs from the bundled index, never a box's fetched copy (tests/test_community_weights.py)
+os.environ["QSE_COMMUNITY_DIR"] = tempfile.mkdtemp(prefix="registry-community-")
+os.environ["QSE_COMMUNITY_URL"] = "off"
+
 from server.setup import registry  # noqa: E402
 
 ROOT = registry.ROOT

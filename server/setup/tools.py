@@ -40,7 +40,7 @@ def step_ids(m: dict, step) -> list[str]:
     """The ids a call may name on step `step`: the profiles on weights, the tools on components,
     the fields on parallelism and methods; none on the others."""
     if step == "weights":
-        return [p["id"] for p in m["profiles"]]
+        return [p["id"] for p in registry.profiles(m)]
     for s in registry.wizard_fields(m):
         if s["id"] == step and s["id"] != "weights":
             return [f["field"] for f in s["fields"]]
@@ -72,7 +72,7 @@ def definitions(m: dict) -> list[dict]:
            {"component": {"type": "string", "enum": comps}, "on": {"type": "boolean"}},
            ("component", "on")),
         fn("select_profile", "Pick the weight profile.",
-           {"id": {"type": "string", "enum": [p["id"] for p in m["profiles"]]}}, ("id",)),
+           {"id": {"type": "string", "enum": [p["id"] for p in registry.profiles(m)]}}, ("id",)),
         fn("go_to_step", "Open a step by its number: "
            + ", ".join(f"{s['index']} {s['label'].lower()}" for s in steps) + ".",
            {"n": {"type": "integer", "minimum": 0, "maximum": len(steps) - 1}}, ("n",)),

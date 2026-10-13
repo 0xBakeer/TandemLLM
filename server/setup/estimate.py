@@ -103,6 +103,12 @@ def check(m: dict, body) -> dict:
         if not isinstance(on, bool):
             raise SelectionError(422, "invalid_selection", f"components.{cid}: true or false")
         comps[cid] = on
+    # a community pack whose entry says images do not work on its load path (ENG-271): the vision
+    # tower stays off whatever was sent, so the overlay writes VISION=off and the estimate counts none
+    if registry.profile(m, pid).get("vision") is False:
+        for c in m["components"]:
+            if "VISION" in c["knobs"]:
+                comps[c["id"]] = False
     bad = []
     for c in m["components"]:
         if c["required"] and not comps[c["id"]]:

@@ -6,6 +6,9 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/models/{id}/current    what the box runs now, as a selection (the wizard's seed)
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
+    GET  /v1/setup/community              the community packs of every model and the sync state
+    POST /v1/setup/community/sync {}      fetch the community index now (the page opened, Refresh;
+                                          server/setup/community.py), then the same answer
     POST /v1/setup/estimate {selection}   the memory estimate (server/setup/estimate.py)
     POST /v1/setup/plan {selection}       the review step's facts (server/setup/apply.py)
     POST /v1/setup/apply {selection, dry_run?}   202 and a job (dry_run: the plan); 409 while
@@ -143,14 +146,18 @@ def _get(h, app, parts: list[str]) -> None:
     if parts == ["models"]:
         models, errors = registry.load_all()
         return h._json(200, {"contract_version": CONTRACT,
-                             "models": [registry.tile(m) for m in models.values()],
+                             "models": [dict(registry.tile(m), community_count=len(m["community"]))
+                                        for m in models.values()],
                              "errors": errors}, extra_headers=NO_STORE)
     if len(parts) == 2 and parts[0] == "models":
         m = _model(h, parts[1])
         if m is None:
             return None
-        return h._json(200, dict(m, contract_version=CONTRACT,
+        from server.setup import community
+        return h._json(200, dict(m, contract_version=CONTRACT, community_sync=community.state(m["id"]),
                                  wizard_fields=registry.wizard_fields(m)), extra_headers=NO_STORE)
+    if parts == ["community"]:
+        return h._json(200, community_body(), extra_headers=NO_STORE)
     if len(parts) == 3 and parts[0] == "models" and parts[2] == "current":
         m = _model(h, parts[1])
         if m is None:
@@ -178,6 +185,15 @@ def _get(h, app, parts: list[str]) -> None:
     return _err(h, 404, "not_found", f"no route /v1/setup/{'/'.join(parts)}")
 
 
+def community_body() -> dict:
+    """GET /v1/setup/community and POST /v1/setup/community/sync: the sync state and every
+    model's community packs from the index in use."""
+    from server.setup import community
+    models, _ = registry.load_all()
+    return {"contract_version": CONTRACT, "sync": community.state(),
+            "models": {mid: m["community"] for mid, m in models.items()}}
+
+
 def selection_model(body) -> dict:
     """The model a selection names, or SelectionError (400 unknown_model)."""
     mid = body.get("model") if isinstance(body, dict) else None
@@ -196,6 +212,10 @@ def _post(h, app, parts: list[str], body) -> None:
                                     available_gb=round(mem["MemAvailable"], 2)
                                     if "MemAvailable" in mem else None)
         return h._json(200, out, extra_headers=NO_STORE)
+    if parts == ["community", "sync"]:
+        from server.setup import community
+        community.sync()
+        return h._json(200, community_body(), extra_headers=NO_STORE)
     if parts in (["plan"], ["apply"]):
         return apply_route(h, app, parts[0], body)
     if parts == ["reset"]:

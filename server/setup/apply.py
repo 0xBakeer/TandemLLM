@@ -92,6 +92,15 @@ STEPS = (("check", "Check the selection, the disk and the box"),
 LABELS = dict(STEPS)
 
 
+def profile_ok(pid: str, ops: str | None = None) -> bool:
+    """`pid` is a profile ops/use-profile.sh takes: ops/profiles/<pid>.env, or community/<id> of an
+    entry in the index in use (use-profile.sh writes its profile from the entry)."""
+    if isinstance(pid, str) and pid.startswith(registry.COMMUNITY_PREFIX):
+        return any(registry.community(m, pid) for m in registry.load_all()[0].values())
+    return bool(PROFILE_ID.match(pid or "")) and os.path.isfile(
+        os.path.join(device_mod.repo_ops(ops), "profiles", pid + ".env"))
+
+
 class PlanError(ValueError):
     """apply refused before anything changed: `status` 409 or 412, `code`, the plan."""
 
@@ -809,9 +818,9 @@ class Runner:
             sel = estimate_mod.check(m, spec["selection"])
         except estimate_mod.SelectionError as exc:
             return self._fail("check", f"the selection does not check: {exc}")
-        if not PROFILE_ID.match(sel["profile"]) or not os.path.isfile(
-                os.path.join(device_mod.repo_ops(self.ops), "profiles", sel["profile"] + ".env")):
-            return self._fail("check", f"no ops/profiles/{sel['profile']}.env on this box")
+        if not profile_ok(sel["profile"], self.ops):
+            return self._fail("check", f"no profile {sel['profile']} on this box (ops/profiles/, "
+                                       f"or a community pack in the index)")
         prev = self._previous()
         p = plan(m, sel, setup_mode=spec["setup_mode"], password_set=True)
         if p["errors"]:
@@ -884,8 +893,7 @@ class Runner:
 
     def _previous(self) -> str | None:
         prev = self.spec.get("previous")
-        if prev is not None and (not PROFILE_ID.match(prev) or not os.path.isfile(
-                os.path.join(device_mod.repo_ops(self.ops), "profiles", prev + ".env"))):
+        if prev is not None and not profile_ok(prev, self.ops):
             return None
         return prev
 
