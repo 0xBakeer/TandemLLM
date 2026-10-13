@@ -54,7 +54,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-from test_ui_states import TOOLS, _go, lines, serve  # noqa: E402  (first: the CPU environment)
+from test_ui_states import TOOLS, _go, lines, opencode, serve  # noqa: E402  (first: the CPU environment)
 from test_memory_router import setup as mem_setup  # noqa: E402
 
 from server import app, dashboard_api as D, ledger, live as live_mod, usage  # noqa: E402
@@ -198,14 +198,15 @@ def test_identity_note_once_and_replayed():
     a = owui("Who are you?")
     p1 = list(seen[-1])
     t1 = _prompt_text(seen)
-    assert "you are Qwen3.8-27B, running in TandemLLM" in t1 and t1.count("running in TandemLLM") == 1
+    assert "you are TandemLLM, running the Qwen3.8-27B model on the user's own machine" in t1
+    assert t1.count("you are TandemLLM, running") == 1
     hist = [{"role": "user", "content": "Who are you?"},
             {"role": "assistant", "content": a["content"].split("</think>")[-1].strip()}]
     owui("And what can you do?", history=hist)
     p2 = list(seen[-1])
     t2 = _prompt_text(seen)
-    assert t2.count("running in TandemLLM") == 1, "replayed once, not added again"
-    k = t1.index("running in TandemLLM")
+    assert t2.count("you are TandemLLM, running") == 1, "replayed once, not added again"
+    k = t1.index("you are TandemLLM, running")
     assert t2[:k] == t1[:k]                                  # the note sits where it sat
     end = t1.index("<|im_end|>", k)
     n = len(app.STATE["tok"](t1[:end], add_special_tokens=False).input_ids)
@@ -217,19 +218,77 @@ def test_identity_note_absent_under_raw():
     seen_before = []
     _, seen = serve("on")
     owui("Who are you?", headers={"X-Tandem-Profile": "raw"})
-    assert "running in TandemLLM" not in _prompt_text(seen)
+    assert "you are TandemLLM, running" not in _prompt_text(seen)
 
 
 def test_identity_model_name():
-    assert schema.identity_text().startswith("About you: you are Qwen3.8-27B, running in TandemLLM")
+    assert schema.identity_text().startswith(
+        "About you: you are TandemLLM, running the Qwen3.8-27B model on the user's own machine.")
     os.environ["QWEN38_MODEL_NAME"] = "Qwen3.8-27B-FP8"
     try:
-        assert "you are Qwen3.8-27B-FP8, running" in schema.identity_text()
+        assert "you are TandemLLM, running the Qwen3.8-27B-FP8 model" in schema.identity_text()
         cond, _ = serve("on")
         card = cond.models("qwen38-spark-engine", 0)[0]
         assert card["description"].startswith("Qwen3.8-27B-FP8 with the conductor")
     finally:
         del os.environ["QWEN38_MODEL_NAME"]
+
+
+def test_identity_note_for_every_client():
+    """0.8.2: every client the conductor serves gets the note on the turn that asks: Open WebUI
+    (with its tools), opencode, the Chat tab (chatd, `chat-app`) and a plain SDK client (the
+    default profile)."""
+    sends = {
+        "open-webui": lambda: owui("Who are you?", tools=True),
+        "opencode": lambda: opencode("Who are you?"),
+        "chat-app": lambda: _go({"model": "TandemLLM", "stream": True, "max_tokens": 2000,
+                                 "messages": [{"role": "user", "content": "Who are you?"}]},
+                                {"X-QSE-Client": "chat-app", "x-session-id": "chat-id082"}),
+        "openai-sdk": lambda: _go({"model": "TandemLLM", "stream": False, "max_tokens": 2000,
+                                   "messages": [{"role": "user", "content": "who are you"}]},
+                                  {"User-Agent": SDK_UA}),
+    }
+    for client, send in sends.items():
+        _, seen = serve("on")
+        send()
+        assert "you are TandemLLM, running" in _prompt_text(seen), client
+
+
+def test_identity_names_the_served_pack_and_no_other_maker():
+    """0.8.2: on a Flash-Next pack the note names Qwen3.8-Flash-Next (its model card's label), not
+    the 27B; it says TandemLLM on the user's own machine and that it is not made by Anthropic or
+    OpenAI (Flash-Next, served raw, said "I'm Fable, an AI made by Anthropic", 2026-10-13)."""
+    was = (os.environ.get("QSE_WEIGHTS"), schema.SERVED_NAME)
+    try:
+        for pack, label in (("flashnext-3.05", "Qwen3.8-Flash-Next"), ("exl3-4.5", "Qwen3.8-27B"),
+                            ("nvfp4", "Qwen3.8-27B")):
+            os.environ["QSE_WEIGHTS"] = pack
+            assert app._identity_name() == label, pack
+        os.environ["QSE_WEIGHTS"] = "no-such-pack"
+        assert app._identity_name() is None
+        schema.SERVED_NAME = "Qwen3.8-Flash-Next"
+        t = schema.identity_text()
+        assert t.startswith("About you: you are TandemLLM, running the Qwen3.8-Flash-Next model "
+                            "on the user's own machine."), t
+        assert "not made by Anthropic or OpenAI" in t and "Qwen3.8-27B" not in t
+        assert "you are TandemLLM running Qwen3.8-Flash-Next on their own machine" in t
+        # the env name still wins (a box that serves another checkpoint)
+        os.environ["QWEN38_MODEL_NAME"] = "Qwen3.8-Other"
+        try:
+            assert "running the Qwen3.8-Other model" in schema.identity_text()
+        finally:
+            del os.environ["QWEN38_MODEL_NAME"]
+        # and the note reaches an Open WebUI turn that asks, with the served name
+        serve("on")
+        _, seen = serve("on")
+        owui("WHO are you?")
+        assert "you are TandemLLM, running the Qwen3.8-Flash-Next model" in _prompt_text(seen)
+    finally:
+        if was[0] is None:
+            os.environ.pop("QSE_WEIGHTS", None)
+        else:
+            os.environ["QSE_WEIGHTS"] = was[0]
+        schema.SERVED_NAME = was[1]
 
 
 # ------------------------------------------------------------------ VIS-58

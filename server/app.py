@@ -9883,6 +9883,8 @@ def _serve(a, led) -> None:
               f"{days} days", flush=True)
     if root is not None:
         from server.conductor.hook import Conductor
+        from server.conductor import schema as cond_schema
+        cond_schema.SERVED_NAME = _identity_name()
         cond = STATE["conductor"] = Conductor(
             root, state=STATE, journal=journal,
             monitor_seed=STATE["monitor"].policy.data if STATE["monitor"] is not None else None)
@@ -10060,6 +10062,19 @@ def identity() -> dict:
     if prof and out["version"]:
         out["version"] = f"{out['version']}+{prof}"
     return out
+
+
+def _identity_name() -> str | None:
+    """0.8.2: the served model's name for the identity note (server/conductor/schema.py
+    `model_name`): the label of the model card whose packs match the weight profile
+    (models/<model>/card.json; "Qwen3.8-27B" for exl3-4.5 or nvfp4, the second model's label for its
+    packs); None when no card matches (the note's default name)."""
+    w = weights_profile()
+    try:
+        c = model_card.find(w.get("name") or w.get("format"))
+    except Exception:                                              # noqa: BLE001
+        return None
+    return (c or {}).get("label") or None
 
 
 def weights_profile() -> dict:

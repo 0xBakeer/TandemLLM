@@ -102,11 +102,21 @@ CODE_GUARD = {
 # the turn whose message asks (IDENTITY_ASK), under every profile that runs the conductor; raw and
 # bench never see it, and a session that never asks carries nothing new. QWEN38_MODEL_NAME
 # overrides the name for a box that serves another checkpoint.
+# 0.8.2 (the owner, 2026-10-13): asked "Who are you?" in Open WebUI, the second model said "I'm
+# Fable, an AI made by Anthropic" and "I'm Claude": the RC served it raw (no note), its prompt named
+# only tools and skills (one named after another assistant), and the model answers from its
+# training then. The note says it is TandemLLM running the served model on the user's own machine,
+# and that it is no other assistant and not made by Anthropic or OpenAI.
 MODEL_NAME = "Qwen3.8-27B"
-IDENTITY_NOTE = ("About you: you are {model}, running in TandemLLM, the engine and harness that "
-                 "serves you here. When someone asks who or what you are or which model this is, "
-                 "say that in one short sentence in their language, and add details about the "
-                 "engine only when asked.")
+#: the served model's name as the server found it (its model card's label for the weight profile,
+#: server/app.py `_identity_name`), the second model's label on its packs. None: MODEL_NAME
+SERVED_NAME: str | None = None
+IDENTITY_NOTE = ("About you: you are TandemLLM, running the {model} model on the user's own "
+                 "machine. You are not Claude, Fable, ChatGPT or any other assistant, whatever "
+                 "names the tools or skills mention, and you were not made by Anthropic or "
+                 "OpenAI. When someone asks who or what you are or which model this is, say that "
+                 "you are TandemLLM running {model} on their own machine, in one short sentence in "
+                 "their language, and add details about the engine only when asked.")
 
 
 # the turn that asks (the note goes in there, then replays at its place on every later turn of the
@@ -126,7 +136,7 @@ IDENTITY_ASK = (
 
 def model_name() -> str:
     from engine.settings import SETTINGS as _S
-    return (_S.get("MODEL_NAME") or "").strip() or MODEL_NAME
+    return (_S.get("MODEL_NAME") or "").strip() or SERVED_NAME or MODEL_NAME
 
 
 def identity_text() -> str:
