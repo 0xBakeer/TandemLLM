@@ -29,6 +29,10 @@ Then pick a model. The first command shows what it would download; the second do
 
 Open the dashboard at `http://<your-spark>:8000/dashboard/`. The Chat tab is in beta; its known limitations are in [docs/chat.md](docs/chat.md) and `CHANGELOG.md`.
 
+Since 0.8.2 each chat in the Chat tab has a permission mode, picked from the pill in the composer. Auto, the default, runs what stays inside the chat's sandbox without asking. Ask prompts before every risky call, as before, and YOLO asks nothing.
+
+The setup guide's weights step also lists community packs, weights other people published; `use-profile.sh community/<id>` runs one. The first is ThinkingCap Qwen3.8-27B Kearuga by 0xWhiteMage. Until the public repository publishes its list, the step shows the note "no published list yet" and the list that came with your release. [docs/community-weights.md](docs/community-weights.md) says how to add your own pack.
+
 ## The manual
 
 Read the book as a PDF: [manual/tandemllm-manual.pdf](manual/tandemllm-manual.pdf). You need no LaTeX for it. Chapter 3, "Installing TandemLLM", repeats these steps in its section "Installing from the early-access repository", and explains what each download is for. Every weight file is public on Hugging Face; the README's model table lists each profile with its size.

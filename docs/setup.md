@@ -53,7 +53,7 @@ Each model the guide offers is a folder under `models/` with a `model.yaml` ([mo
 
 Memory is in GiB (2^30 bytes) and disk in GB (10^9 bytes) everywhere in the registry and the API. `python -m server.setup.registry --check` checks a file.
 
-Packs that other people published sit beside our profiles as community packs, one JSON file each under `models/<model>/community/`. The weights step lists them after our own, as profiles named `community/<id>`. The page fetches the list from GitHub when it opens and when you press Refresh, never on a timer, and an unchanged list costs one 304 answer. Without the network it shows the last list it fetched, or the one that came with the release. [docs/community-weights.md](community-weights.md) says how to add a pack.
+Packs that other people published sit beside our profiles as community packs, one JSON file each under `models/<model>/community/`. The weights step lists them after our own, as profiles named `community/<id>`. The page fetches the list from GitHub when it opens and when you press Refresh, never on a timer, and an unchanged list costs one 304 answer. Without the network it shows the last list it fetched, or the one that came with the release. A 404 from GitHub means the public repository has published no list yet: the section shows the note "no published list yet" and the release's list, with no error. A real failure is one short line, such as "GitHub could not be reached", and the server's log has the URL. On the command line, `ops/use-profile.sh community/<id>` runs a pack as it runs our profiles, with `--dry-run` and the same disk, memory and smoke checks. [docs/community-weights.md](community-weights.md) says how to add a pack.
 
 ### The KV bytes a token
 

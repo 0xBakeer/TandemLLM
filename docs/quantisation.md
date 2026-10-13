@@ -140,7 +140,7 @@ The 27B also has weight profiles in EXL3 (`ops/profiles/exl3-<bpw>.env`, switche
 
 ### Standalone 27B EXL3 checkpoints
 
-A complete BF16-origin, `mul1` EXL3 checkpoint of the supported 27B family can be passed directly as `--model`.
+A complete BF16-origin, `mul1` EXL3 checkpoint of the supported 27B family can be passed directly as `--model`. 0xWhiteMage wrote this path in pull request #1 (0.8.2), and the first community pack runs on it ([community-weights.md](community-weights.md)).
 The loader recognises `quantization_config.quant_method: exl3` in its config; a separate BF16/FP8
 base download is not needed when the pack includes the embedding, norms and GDN auxiliary tensors.
 For example, for a text-only run without speculation:

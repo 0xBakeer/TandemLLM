@@ -44,6 +44,10 @@ Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Q
 
 The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
 
+### Community weights
+
+Since 0.8.2 the setup guide also lists packs other people published, each as one JSON file under `models/<model>/community/`, and `ops/use-profile.sh community/<id>` runs one with our drafters. The first is ThinkingCap Qwen3.8-27B Kearuga by 0xWhiteMage, an EXL3 pack at 4.0 bits a weight (16.38 GB, text only): 39.6 tok/s on prose and 95.9 on code, measured on 0.8.2. [docs/community-weights.md](docs/community-weights.md) says how to run a pack, how to add yours with one pull request, and how a maintainer verifies it.
+
 ## See it
 
 | StairCut sizes the draft tree each round | the speed follows the kind of text |
@@ -222,6 +226,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 - [The manual](manual/tandemllm-manual.pdf), the whole book as one PDF; its source is in `manual/`
 - [Setup](docs/setup.md): a new box, the setup guide in the dashboard, the model registry
+- [Community weights](docs/community-weights.md): running packs other people published, and adding yours
 - [Architecture](docs/architecture.md): the model, the byte budget, the decode loop
 - [Quantisation and profiles](docs/quantisation.md)
 - [Kernels](docs/kernels.md)
@@ -230,7 +235,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 - [Caches](docs/caches.md)
 - [Server and API](docs/server.md)
 - [Dashboard](docs/dashboard.md)
-- [The Chat tab](docs/chat.md), in beta, with its known limitations
+- [The Chat tab](docs/chat.md), in beta: the sandbox, the permission modes, the known limitations
 - [Parallel requests](docs/parallel-requests.md)
 - [The proxy](docs/proxy.md): the dashboard in front of other engines and cloud APIs (vLLM, SGLang, any OpenAI-compatible server, OpenAI, DeepSeek), routed by model id, with or without this engine (`pip install .` gives `tandem-dash`, no GPU needed), the host collector, the docker image
 - [Operations](docs/operations.md)
@@ -240,7 +245,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 ## Status
 
-The current release is `v0.8.1`. It lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95); the engine's modules are the bytes of 0.8.0. `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of two models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
+The current release is `v0.8.2`. It adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of two models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Credits
 
