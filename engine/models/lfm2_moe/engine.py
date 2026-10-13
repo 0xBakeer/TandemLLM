@@ -137,6 +137,14 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             return K.linear_rows(x2, w).view(*x.shape[:-1], w.shape[0])
         return F.linear(x2, w).view(*x.shape[:-1], w.shape[0])
 
+    def _fused(self, x: torch.Tensor, p: str, name: str, parts: tuple) -> torch.Tensor:
+        """The fused projection `p + name` (one launch), or its parts one after the other where the
+        loader could not fuse them (EXL3 members at different bit widths)."""
+        w = self.W.get(p + name)
+        if w is not None:
+            return self.lin(x, w)
+        return torch.cat([self.lin(x, self.W[p + q + ".weight"]) for q in parts], -1)
+
     def head(self, n: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         """Logits [M, vocab] fp32 of the final normed rows (a static `out` in a graph)."""
         from tools import fn_kernels as FK
@@ -302,7 +310,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
             p = self.pre(li)
             if c.is_attention(li):
                 a = p + "self_attn."
-                qkv = self.lin(n, self.W[a + "qkv"])
+                qkv = self._fused(n, a, "qkv", ("q_proj", "k_proj", "v_proj"))
                 o = torch.empty(R, c.num_attention_heads, c.head_dim, dtype=self.dtype, device=self.device)
                 for (st, rb, M, ns), r in zip(parts, sl):
                     d = rb["d"]
@@ -322,7 +330,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 m = self.moe_rows(n, li)
             else:
                 f = p + "feed_forward."
-                gu = self.lin(n, self.W[f + "w13"])
+                gu = self._fused(n, f, "w13", ("w1", "w3"))
                 I = c.intermediate_size
                 m = self.lin(F.silu(gu[:, :I]) * gu[:, I:], self.W[f + "w2.weight"])
             nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
@@ -520,7 +528,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                 m = FK.moe_combine(yd, ids, wts) if dev.type == "cuda" else K.combine_reference(yd, ids, wts)
             else:
                 f = p + "feed_forward."
-                gu = self.lin(n, self.W[f + "w13"])
+                gu = self._fused(n, f, "w13", ("w1", "w3"))
                 I = c.intermediate_size
                 m = self.lin(F.silu(gu[:, :I]) * gu[:, I:], self.W[f + "w2.weight"])
             nxt = self.W[self.pre(li + 1) + "operator_norm.weight"] if li + 1 < c.num_hidden_layers \
@@ -540,7 +548,7 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         c = self.cfg
         a = self.pre(li) + "self_attn."
         T, L = n.shape[0], int(pos[0])
-        qkv = self.lin(n, self.W[a + "qkv"])
+        qkv = self._fused(n, a, "qkv", ("q_proj", "k_proj", "v_proj"))
         q = K.qk_prep(qkv, pos, pos, self.W[a + "q_layernorm.weight"], self.W[a + "k_layernorm.weight"],
                       self.rope_cos, self.rope_sin, st.k[li], st.v[li], c.num_attention_heads,
                       c.num_key_value_heads, c.rms_norm_eps)
