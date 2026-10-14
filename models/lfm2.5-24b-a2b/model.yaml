@@ -207,8 +207,8 @@ measurements:
     one slot, max_len 32,768. 4.0 as its profile serves it: the lookup alone cut by StairCut, with the suffix
     store off so no earlier answer is in it, the dense splits of ops/lfm25-dense-splits.json; BF16 plain
     (--drafter none). One run a cell.
-  source: 'SPD-107 window runs, 2026-10-14 06:52 (4.0, default-calibration pack) and 05:10 (BF16); raw data spark
-    ~/lfm25/runs/dbg/ab-look.json, ~/lfm25/runs/w7/ab-none-bf16.json'
+  source: 'SPD-107 window runs on the reference Spark, 2026-10-14 06:52 (4.0, default-calibration pack) and 05:10
+    (BF16); the tools/fn_lookup_ab.py JSON of each run'
   rows:
   - profile: lfm25-exl3-4.0
     build: 0.8.3
