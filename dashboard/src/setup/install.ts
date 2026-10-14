@@ -13,26 +13,10 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi, setupUnauthorized } from './api';
+import { applyJobEvent, isFinal } from './job-view';
 import { S } from './strings';
 
 const LOG_KEEP = 300;
-
-/** Fold one job event into the job (pure; tests/setup-install.test.ts). */
-export function applyJobEvent(job: SetupJob | null, ev: SetupJobEvent): SetupJob | null {
-  if (ev.type === 'job') return ev.job;
-  if (!job) return job;
-  if (ev.type === 'step') {
-    const i = job.steps.findIndex((s) => s.id === ev.step.id);
-    const steps = i >= 0 ? job.steps.map((s, j) => (j === i ? ev.step : s)) : [...job.steps, ev.step];
-    return { ...job, steps };
-  }
-  if (ev.type === 'done') return { ...job, state: ev.state, message: ev.message, ended_at: job.ended_at ?? Date.now() / 1000 };
-  return job;
-}
-
-export function isFinal(job: SetupJob | null): boolean {
-  return !!job && (job.state === 'done' || job.state === 'failed' || job.state === 'rolled_back');
-}
 
 @customElement('qse-install-progress')
 export class QseInstallProgress extends LightElement {

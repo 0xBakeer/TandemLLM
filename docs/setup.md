@@ -105,7 +105,7 @@ On the reference box (2026-10-11, `tests/gpu/setup_wren_gpu.py`) Wren's own copy
 
 ## The install job
 
-`POST /v1/setup/plan` returns the review step's facts: what is wrong, what changes against `ops/serve.env`, the commands that will run and the estimate. `POST /v1/setup/apply` checks the selection again and starts a job; `GET /v1/setup/jobs/{id}` streams its steps and log lines (SSE; `Last-Event-ID` resumes, `?format=json` gives the job).
+`POST /v1/setup/plan` returns the review step's facts: what is wrong, what changes against `ops/serve.env`, the commands that will run and the estimate. `POST /v1/setup/apply` checks the selection again and starts a job; `GET /v1/setup/jobs/{id}` streams it (SSE): the log lines on disk, the job as it is now, then each event as it comes; `Last-Event-ID` resumes, `?format=json` gives the job.
 
 The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a client sends becomes a command:
 

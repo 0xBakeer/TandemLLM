@@ -3,8 +3,9 @@ list of steps in this file and the repository's own scripts. Nothing a client se
 
     POST /v1/setup/plan {selection}             the review step's facts; nothing changes
     POST /v1/setup/apply {selection, dry_run?}  dry_run: the plan; else 202 and a job
-    GET  /v1/setup/jobs/{id}                    SSE of the job's events (`id:` = sequence,
-                                                Last-Event-ID resumes); ?format=json: the job
+    GET  /v1/setup/jobs/{id}                    SSE: the log on disk, the job now, then its events
+                                                (`id:` = sequence, Last-Event-ID resumes);
+                                                ?format=json: the job
 
 THE STEPS (STEPS below; the argv of every command is built here from the registry's ids and the
 selection's checked numbers, `shell=False`, a minimal environment, a timeout each):

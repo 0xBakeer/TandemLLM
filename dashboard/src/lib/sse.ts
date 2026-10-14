@@ -96,6 +96,8 @@ export interface StreamOptions {
 export class ResumableStream {
   private ctrl: AbortController | null = null;
   private closed = false;
+  /** VIS-149: each start() is a run; a run that close() or a later start() ended dispatches nothing */
+  private run = 0;
   private backoff: number;
   lastId: string | null = null;
   state: StreamState = 'closed';
@@ -112,19 +114,22 @@ export class ResumableStream {
 
   start(): void {
     this.closed = false;
-    void this.loop();
+    this.ctrl?.abort();
+    void this.loop(++this.run);
   }
 
   close(): void {
     this.closed = true;
+    this.run++;
     this.ctrl?.abort();
     this.ctrl = null;
     this.setState('closed');
   }
 
-  private async loop(): Promise<void> {
+  private async loop(run: number): Promise<void> {
     const f = this.opts.fetchImpl ?? fetch;
-    while (!this.closed) {
+    const live = () => !this.closed && run === this.run;
+    while (live()) {
       this.ctrl = new AbortController();
       this.setState(this.attempts === 0 ? 'connecting' : 'reconnecting');
       try {
@@ -150,18 +155,20 @@ export class ResumableStream {
         const dec = new TextDecoder();
         for (;;) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (done || !live()) break;
+          // the rest of a chunk after close() is not handed on (one read can hold many events)
           for (const ev of parser.feed(dec.decode(value, { stream: true }))) {
+            if (!live()) return;
             if (ev.id) this.lastId = ev.id;
             if (ev.retry) this.backoff = Math.max(250, ev.retry);
             this.opts.onEvent(ev);
           }
         }
-        if (this.closed) return;
+        if (!live()) return;
         // The server ended the stream: say so at once, then reconnect after the backoff.
         this.setState('reconnecting');
       } catch (e) {
-        if (this.closed || (e as Error).name === 'AbortError') return;
+        if (!live() || (e as Error).name === 'AbortError') return;
         this.setState('error', (e as Error).message);
       }
       this.attempts++;

@@ -26,8 +26,8 @@ The test matrix:
      hostile profile or name is refused; dry_run is the plan and no job; busy and job_running are
      409, a missing asset 412; a good apply is 202, unloads Wren and starts the runner
                                                          test_the_routes
-  7  the job route: ?format=json the job; SSE replays the events with their ids, and Last-Event-ID
-     resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
+  7  the job route: ?format=json the job; SSE sends the log on disk, the job as it is now and its
+     done event, with their ids, and Last-Event-ID resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
      offset, each line once, a half-written line on the next read   test_the_job_route
   8  no secret in the log: the HF token, an hf_ token and a bearer token are cut out of every
      line the runner writes                              test_secrets_are_redacted
@@ -802,20 +802,22 @@ def test_the_job_route():
         frames = [f for f in raw.split("\n\n") if f.strip()]
         evs = [json.loads(f.split("data: ", 1)[1]) for f in frames]
         ids = [int(f.split("\n")[0][4:]) for f in frames if f.startswith("id: ")]
-        assert evs[0]["type"] == "job" and evs[-1]["type"] == "done", evs[-1]
-        assert ids == sorted(ids) and ids[0] == 1
+        # VIS-149: the log on disk, the job as it is now, its done event
+        assert [e["type"] for e in evs[-2:]] == ["job", "done"], evs[-2:]
+        assert evs[-2]["job"]["state"] == "done" and {e["type"] for e in evs[:-2]} == {"log"}
+        assert ids == sorted(ids) and ids[-1] == len(apply.events(jid))
         assert any(e["type"] == "log" and e["line"] == "a line" for e in evs)
-        assert any(e["type"] == "step" and e["step"]["id"] == "smoke" for e in evs)
         code, _, raw = Req("GET", f"/v1/setup/jobs/{jid}", None,
                            {"Accept": "text/event-stream", "Last-Event-ID": str(ids[-2])}).go()
         again = [f for f in raw.split("\n\n") if f.strip()]
-        assert len(again) == 1 and again[0].startswith(f"id: {ids[-1]}"), again
+        assert len(again) == 2 and again[1].startswith(f"id: {ids[-1]}"), again
+        assert json.loads(again[0].split("data: ", 1)[1])["job"]["state"] == "done"
         for bad in ("0123456789abcdef", "../../etc", "nope"):
             code, _ = _api("GET", f"/v1/setup/jobs/{bad}?format=json")
             assert code == 404, bad
         # a follower reads each line once from its offset; a half-written line waits
         recs, off = apply.events_from(jid)
-        assert [r["seq"] for r in recs] == ids and off == os.path.getsize(
+        assert [r["seq"] for r in recs] == list(range(1, ids[-1] + 1)) and off == os.path.getsize(
             os.path.join(apply.job_dir(jid), "events.jsonl"))
         with open(os.path.join(apply.job_dir(jid), "events.jsonl"), "a") as fh:
             fh.write('{"seq": 999, "event": {"type": "lo')

@@ -2,6 +2,12 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+### Fixes
+
+- Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
+
 ## 0.9.0, 2026-10-14
 
 A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. The Qwen models' text and speed do not change. The shared EXL3 kernels' bytes changed (half-integer rates); `SAME_ROWS` maps them to the old bytes, so the first Qwen start adopts its saved conversations once. Reference: [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md).

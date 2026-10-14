@@ -473,7 +473,25 @@ export class MockSetup {
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const last = Number(req.headers['last-event-id'] ?? 0) || 0;
+    // VIS-149, as server/setup_api.py: the log lines so far, the job as it is now, then the rest
+    const el0 = Date.now() - j.created;
     let sent = last;
+    let done = -1;
+    for (let i = last; i < j.timeline.length; i++) {
+      const e = j.timeline[i];
+      if (e.at > el0) break;
+      if (e.ev.type === 'done') {
+        done = i;
+        break;
+      }
+      sent = i + 1;
+      if (e.ev.type === 'log') res.write(`id: ${i + 1}\ndata: ${JSON.stringify(e.ev)}\n\n`);
+    }
+    res.write(`${sent > last ? `id: ${sent}\n` : ''}data: ${JSON.stringify({ type: 'job', job: this.jobNow(id) })}\n\n`);
+    if (done >= 0) {
+      res.end(`id: ${done + 1}\ndata: ${JSON.stringify(j.timeline[done].ev)}\n\n`);
+      return;
+    }
     this.streams.add(res);
     const pump = () => {
       const el = Date.now() - j.created;
