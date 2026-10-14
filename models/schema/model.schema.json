@@ -908,6 +908,10 @@
       "maxLength": 2000,
       "type": "string"
     },
+    "order": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "parallelism": {
       "additionalProperties": false,
       "properties": {

@@ -5,6 +5,7 @@
  "family": "LFM2.5",
  "params": "~24B, ~2B active a token",
  "recommended": false,
+ "order": 10,
  "pitch": "LiquidAI's fast chat model, a mixture of 64 experts with short convolutions, about 2B parameters a token.",
  "architecture": "40 layers, 30 double-gated short convolutions and 10 grouped-query attention layers, with a mixture of 64 experts of which 4 run a token in 38 of them (two dense layers first); it always thinks before it answers and calls tools in a Pythonic list.",
  "license": "The model's license (LFM Open License v1.0) is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.",
