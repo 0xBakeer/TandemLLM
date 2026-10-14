@@ -388,6 +388,18 @@ def cmd_config(a) -> None:
                       "mtp_moe": c.mtp_moe}))
     for row in c.table():
         print(json.dumps(row))
+    if a.against:
+        # the release-day checklist: every field and layer-table row that differs from a known config
+        from engine.models.nemotron_h.config import config_from_dict
+        b = config_from_dict(json.load(open(a.against)), a.against)
+        fields = ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim", "vocab_size", "rms_norm_eps",
+                  "max_position_embeddings", "mamba_num_heads", "mamba_head_dim", "ssm_state_size", "n_groups",
+                  "conv_kernel", "chunk_size", "moe_latent_size", "shared_ffn", "routed_scaling_factor",
+                  "tie_word_embeddings", "eos_token_ids", "mtp_layer_types", "mtp_moe", "omni")
+        diff = {f: [getattr(c, f), getattr(b, f)] for f in fields if getattr(c, f) != getattr(b, f)}
+        rows = [(x, y) for x, y in zip(c.table(), b.table()) if x != y]
+        print(json.dumps({"against": a.against, "fields_differ": diff, "layers": [len(c.layer_types), len(b.layer_types)],
+                          "rows_differ": len(rows) + abs(len(c.layer_types) - len(b.layer_types)), "first_rows": rows[:6]}))
 
 
 def cmd_audit(a) -> None:
@@ -464,6 +476,7 @@ def main() -> None:
     mt.add_argument("--json")
     cf = sub.add_parser("config")
     cf.add_argument("--model", required=True)
+    cf.add_argument("--against", help="a known config.json (Puzzle 75B-A9B's): the fields and rows that differ")
     b = sub.add_parser("bench")
     b.add_argument("--model", required=True)
     b.add_argument("--tokens", type=int, default=256)
