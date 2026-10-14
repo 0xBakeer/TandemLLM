@@ -79,6 +79,29 @@ def test_tiny_checkpoint_round_trip():
             assert db["parts"]["kv_read"] == 1000 * cfg.kv_bytes_per_token()
 
 
+def test_omni_checkpoint_reads_its_text_trunk():
+    """An Omni checkpoint: the trunk under `language_model.` with the config in `llm_config`, a vision
+    tower beside it; the reader takes the trunk's tensors and skips the tower's by name."""
+    from safetensors.torch import save_file
+    cfg = config_from_dict(TINY, "tiny")
+    W = random_weights(cfg)
+    raw = {"architectures": ["NemotronH_Omni_Reasoning_V3"], "model_type": "NemotronH_Omni_Reasoning_V3",
+           "eos_token_id": 11, "llm_config": dict(TINY, eos_token_id=11), "vision_config": {"patch_size": 16},
+           "img_context_token_id": 18}
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump(raw, f)
+        part = {("language_model.backbone." + k if not k.startswith("lm_head") else "language_model." + k):
+                v.to(torch.float32 if k.endswith("e_score_correction_bias") else torch.bfloat16).contiguous()
+                for k, v in W.items()}
+        part["vision_model.radio_model.blocks.0.attn.qkv.weight"] = torch.zeros(4, 4, dtype=torch.bfloat16)
+        part["mlp1.0.weight"] = torch.zeros(4, dtype=torch.bfloat16)
+        save_file(part, os.path.join(d, "model.safetensors"))
+        idx = PackIndex.open(d)
+        idx.audit()
+        assert idx.cfg.omni and idx.cfg.eos_token_id == 11 and idx.skipped == 2 and len(idx.tensors) == len(W)
+
+
 def test_audit_stops_by_name():
     cfg = config_from_dict(TINY, "tiny")
     W = random_weights(cfg)
