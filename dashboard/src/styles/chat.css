@@ -2397,6 +2397,17 @@ qse-chat-panes {
   flex: 1;
   min-height: 0;
 }
+/* the element is light DOM: it passes the pane's height on to the player */
+.ch-mediapane qse-media-view,
+.ch-file-view qse-media-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ch-media-video {
+  object-fit: contain;
+}
 .ch-media-name {
   overflow: hidden;
   text-overflow: ellipsis;
