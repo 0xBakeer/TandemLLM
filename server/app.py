@@ -9931,6 +9931,9 @@ def _serve(a, led) -> None:
         from server.conductor.hook import Conductor
         from server.conductor import schema as cond_schema
         cond_schema.SERVED_NAME = _identity_name()
+        from server.conductor import modelfit as cond_fit
+        _caps = getattr(STATE.get("engine"), "caps", None)
+        print(cond_fit.install(getattr(_caps, "conductor", None)), flush=True)
         cond = STATE["conductor"] = Conductor(
             root, state=STATE, journal=journal,
             monitor_seed=STATE["monitor"].policy.data if STATE["monitor"] is not None else None)
