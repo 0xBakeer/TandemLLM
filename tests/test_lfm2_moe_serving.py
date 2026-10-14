@@ -163,6 +163,26 @@ def test_kv_length_and_restart():
     _raises(lambda: s.forward_tree(torch.tensor([1, 2]), [-1, 0], start=3), "forward at 3", "holds 0 rows")
 
 
+def test_no_head_long_matches_calibrate_apart():
+    """With no draft head a copy (a match at the longest order) has a higher confidence than a passing
+    phrase (the shortest), so misses of short matches leave the copy's calibration as it was."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    d = MTPTreeDrafter(eng, NoHead(), StairCut(PriceModel(), siblings=False),
+                       NgramDrafter(corpus_path="", min_order=3, max_depth=16))
+    text = list(range(500, 520))
+    d.reset()
+    d.prime(text + [700] + text[:10])
+    _, long_conf = d._look(text + [700] + text[:10])
+    d.reset()
+    d.prime([1, 2, 3, 9, 1, 2, 3])
+    _, short_conf = d._look([1, 2, 3, 9, 1, 2, 3])
+    assert long_conf > 0.8 and short_conf < 0.7 and int(long_conf * 10) != int(short_conf * 10), (long_conf, short_conf)
+    for _ in range(8):
+        d.cut.cal.learn("look", short_conf, False)
+    assert d.cut.cal.q("look", long_conf) == long_conf          # the copy's bin learned nothing
+    return f"conf {long_conf:.2f} (a copy) against {short_conf:.2f} (a short match)"
+
+
 def test_reading_the_length_commits_nothing():
     """kv.length while a joint plain step waits for its slot's commit_tree (another thread's read, the
     health report): the length it will hold, and the commit still counts the row once."""

@@ -340,12 +340,19 @@ class MTPTreeDrafter:
         tree is), or None when nothing matches."""
         if self.ngram is None:
             return None
-        _, cands = self.ngram.candidates(context, self.look_depth)
+        order, cands = self.ngram.candidates(context, self.look_depth)
         if not cands:
             return None
         self.stats["looked"] += 1
         total = sum(w for _, w in cands)
-        return cands[0][0], cands[0][1] / (total + self.ngram.alpha)
+        share = cands[0][1] / (total + self.ngram.alpha)
+        if not self.head.depth and order:
+            # no draft head: the match's length goes into the confidence (a copy matches at the longest
+            # order, a passing phrase at the shortest), so the cut's calibration learns them apart and a
+            # run of short matches that missed does not stop a copy from drafting (LFM2.5 BF16,
+            # 2026-10-14: four missed prose rounds held every later round below the cut, a copy ask too)
+            share = 1.0 - (1.0 - share) * min(1.0, self.ngram.min_order / order)
+        return cands[0][0], share
 
     # --- the caches (ENG-157) -------------------------------------------------------------------
     def kv_views(self) -> list:
