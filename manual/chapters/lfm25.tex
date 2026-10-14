@@ -31,7 +31,7 @@ The tokenizer is LiquidAI's own (128,000 ids). The lookup corpus and the suffix 
 
 \begin{table}[htbp]
 \centering\small
-\caption[The LFM2.5 profiles]{The LFM2.5 profiles, \measured{} 2026-10-14: the download, the weights on the device at load, the decode step from its graph (tok/s), chat through the server plain / with the lookup (tok/s), and against BF16 on oasst1 chat the KL divergence and the top-1 agreement (exllamav3's model_diff).}\label{tab:lfm-profiles}
+\caption[The LFM2.5 profiles]{The LFM2.5 profiles, \measured{} 2026-10-14: the download, the weights on the device at load, the decode step from its graph (tok/s), chat through the server plain / with the lookup (tok/s), and against BF16 on oasst1 chat the KL divergence and the top-1 agreement (exllamav3's \code{model_diff}).}\label{tab:lfm-profiles}
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 \hd{profile} & \hd{disk} & \hd{weights} & \hd{step} & \hd{chat} & \hd{KL} & \hd{top-1} \\
@@ -47,7 +47,7 @@ The tokenizer is LiquidAI's own (128,000 ids). The lookup corpus and the suffix 
 \end{tabular}
 \end{table}
 
-Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers are exllamav3's model_diff against the BF16 checkpoint on 20 rows of 2,048 tokens of oasst1 chat; this engine's own comparison (\code{tools/lfm_quality.py}, 100 rows) agrees within 0.02. They are high next to exllamav3 conversions of other models at the same rates: the same recipe on the 8B sibling at 4.10 bits came within 0.01 of a reference conversion, so the 24B is harder at the same rate, for reasons not tested yet. The default is \code{lfm25-exl3-3.5}: the fastest profile in chat whose chat top-1 agreement is at least 85~\% (86.7~\% at 150.9~tok/s; 3.0 is faster at 83.6~\%).
+Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers are exllamav3's \code{model_diff} against the BF16 checkpoint on 20 rows of 2,048 tokens of oasst1 chat; this engine's own comparison (\code{tools/lfm_quality.py}, 100 rows) agrees within 0.02. They are high next to exllamav3 conversions of other models at the same rates: the same recipe on the 8B sibling at 4.10 bits came within 0.01 of a reference conversion, so the 24B is harder at the same rate, for reasons not tested yet. The default is \code{lfm25-exl3-3.5}: the fastest profile in chat as it serves (the lookup on) whose chat top-1 agreement is at least 85~\% (86.7~\% at 143.7~tok/s; 3.0 is faster at 83.6~\%).
 
 Below 4 bits a weight, exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is $16K + 8$ int16 wide). In such a tile an odd weight takes one bit more than an even one, so weight $i$'s 16-bit window ends at bit $(i+1)K_a + \lfloor (i+1)/2 \rfloor$ of the tile's ring, $K_a$ the whole part of the rate. The engine's kernels decode these tiles as exllamav3 does, in the decode step, a verify block and the prefill.
 

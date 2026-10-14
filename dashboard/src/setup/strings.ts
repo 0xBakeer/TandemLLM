@@ -97,6 +97,7 @@ export const S = {
   resetHeading: 'Reset',
 
   // tiles
+  tileSpeedTitle: 'The fastest measured cell of the recommended weights: one greedy request, 512 tokens, as those weights serve (speculation on where they use it). The same rule for every model.',
   tileParams: (p: string) => `${p} parameters`,
   tileBest: (tok: number, task: string, profile: string) => `${tok.toFixed(1)} tok/s on ${task} with ${profile}`,
   tileOpen: 'Set up',

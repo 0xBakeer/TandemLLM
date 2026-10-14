@@ -146,7 +146,7 @@
     "source": "exllamav3's model_diff, the pack against the BF16 checkpoint, 20 rows of 2,048 tokens of oasst1 validation chat (KL 0.1364, top-1 86.65 %; wikitext-2 KL 0.2256, top-1 79.04 %); this engine's own comparison on 100 rows (tools/lfm_quality.py): chat KL 0.1506, top-1 86.14 %"
    },
    "assets_required": [],
-   "note": "The default: the fastest in chat whose chat top-1 agreement with BF16 is at least 85 %. Measured 2026-10-14: 11.16 GB, 10.56 GiB at load; the decode step 153.52 tok/s; through the server plain prose / chat / code 151.35 / 150.93 / 150.91 tok/s, with the lookup 147.54 / 143.68 / 147.25, edit and copy asks 268.66 and 286.58. The Hugging Face repository is private until it is published: a download needs a token with access to it.",
+   "note": "The default: the fastest in chat as it serves (the measured row, the lookup on: 143.7 tok/s) whose chat top-1 agreement with BF16 is at least 85 %. Measured 2026-10-14: 11.16 GB, 10.56 GiB at load; the decode step 153.52 tok/s; through the server plain prose / chat / code 151.35 / 150.93 / 150.91 tok/s, with the lookup 147.54 / 143.68 / 147.25, edit and copy asks 268.66 and 286.58. The Hugging Face repository is private until it is published: a download needs a token with access to it.",
    "hf_revision": "416806bafd1e2bc175934c391cb427738a69f00c",
    "max_window": 131072
   },
