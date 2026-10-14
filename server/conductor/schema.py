@@ -1147,8 +1147,18 @@ SHIPPED_PROFILES["chat-app"] = copy.deepcopy(SHIPPED_PROFILES["coding"])
 SHIPPED_PROFILES["chat-app"].update(
     description="The Chat tab's agent loop (chatd): coding's routing, tasks and packages, no "
                 "state lines in the answer.",
-    clients=["chat-app"], ui={"states": "off", "states_channel": "content"})
+    clients=["chat-app"], ui={"states": "off", "states_channel": "content"},
+    # SRV-471: the memory notes, set here and not inherited (absent is off, and the Chat tab ran
+    # without them while Open WebUI and opencode had them)
+    memory="on")
 del _n
+# A shipped profile derived from another: its parent and the top-level keys it sets itself. Every
+# other top-level key is the parent's (tests/test_conductor_derived.py), so a switch the parent
+# gains cannot miss the derived profile again. `general` is no derived profile: it serves scripts
+# and SDK clients, whose requests stay the release's (memory absent, off)
+DERIVED_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "chat-app": ("coding", ("description", "clients", "ui", "memory")),
+}
 
 
 def monitor_seed(path: str | None = None) -> dict:

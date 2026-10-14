@@ -512,7 +512,10 @@ def test_the_peek_replays_the_sessions_notes_and_the_harness_names_the_packages(
                                  session=types.SimpleNamespace(notes=[note]), injected=[],
                                  spans=[(10, 30, ["packages", "rules"], ["coding"])])
     assert app._harness_of(fake) == {"class": "code_edit", "effort": "xhigh",
-                                     "packages": [{"name": "coding", "tokens": 6}]}
+                                     "packages": [{"name": "coding", "tokens": 6}],
+                                     "memory": {"mode": "off", "why": "unset", "index_notes": 0,
+                                                "index_tokens": 0, "bodies": 0,
+                                                "body_tokens": 0, "card_tokens": 0}}
     msgs2 = s.step(("bash", {"command": "ls"}, "a.txt"))
     client2 = app.build_prompt(body(msgs2), count="ids")
     n_sessions = len(cond.router._sessions)

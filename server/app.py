@@ -4816,9 +4816,27 @@ def _harness_of(plan) -> dict | None:
         for name in span[3]:
             if name not in names:
                 names.append(name)
-    return {"class": row.get("class_id"), "effort": row.get("effort"),
-            "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
-                         for n in names]}
+    out = {"class": row.get("class_id"), "effort": row.get("effort"),
+           "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
+                        for n in names]}
+    out["memory"] = _memory_part((row.get("extra") or {}).get("memory"))
+    return out
+
+
+def _memory_part(info) -> dict:
+    """SRV-471, `harness.memory`: the memory notes' part of the turn for the Context panel, from
+    the decision row's `extra.memory`: the mode and why it is off, the index's notes and tokens,
+    the bodies sent with the message and their tokens, the card's tokens. A row without it (the
+    profile has no memory switch: the release's request) is off, why `unset`; an engine before
+    SRV-471 sends no `memory` key at all."""
+    if not isinstance(info, dict) or not info.get("mode"):
+        info = {"mode": "off", "why": "unset"}
+    idx = info.get("index") or {}
+    bodies = info.get("bodies") or []
+    return {"mode": info["mode"], "why": info.get("why"),
+            "index_notes": int(idx.get("notes") or 0), "index_tokens": int(idx.get("tokens") or 0),
+            "bodies": len(bodies), "body_tokens": int(info.get("body_tokens") or 0),
+            "card_tokens": int(info.get("card_tokens") or 0)}
 
 
 #: (package name, text hash) -> tokens, for the packages a replayed note holds
@@ -10005,6 +10023,9 @@ def _serve(a, led) -> None:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         cond.router.session_tokens = STATE["session_tokens"]
+        # stored documents a fix must reach (a shipped default reaches only a box without one)
+        from server.conductor import migrations as cond_migrations
+        cond_migrations.run(cond.store, cond.journal)
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
               f"{len(cond.store.names())} profiles); model TandemLLM, {STATE['model']} a hidden "

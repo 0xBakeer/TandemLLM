@@ -14,8 +14,9 @@ diff and its undo, artifacts and the preview. Mixed into `chatd.service.Service`
     POST   /conversations/{id}/sandbox/undo {run_id}      the run's files back as they were
     GET    /conversations/{id}/artifacts/{ref}            what a pane shows: `file:<path>`,
                                                           `diff:<run>`, `port:<n>`
-    GET    /conversations/{id}/sandbox/view/<path>        a workspace file for the preview iframe,
-                                                          with the preview CSP (CONTRACT 5)
+    GET    /conversations/{id}/sandbox/view/<path>        a workspace file for the preview iframe
+                                                          (the preview CSP, CONTRACT 5) or a media
+                                                          player: streamed, with byte ranges
 
 Paths are resolved by chatd/workspace.py (no `..`, nothing outside /workspace, no symlink on the
 way). Files are read on the host; nothing here needs the container running.
@@ -25,6 +26,8 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
+import urllib.parse
 
 from chatd.ids import ulid
 from chatd.workspace import ChangedError, PathError
@@ -32,10 +35,28 @@ from chatd.workspace import ChangedError, PathError
 PREVIEW_CSP = ("default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' "
                "'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; "
                "connect-src 'self' https: wss:; frame-ancestors 'self'")
+# VIS-159: video, audio, PDFs and other binaries play or download from the view route; their
+# answer never runs a script. A PDF keeps `object-src 'self'` for the browser's own viewer
+MEDIA_CSP = ("default-src 'none'; media-src 'self'; img-src 'self' data:; "
+             "style-src 'unsafe-inline'; frame-ancestors 'self'")
+PDF_CSP = "script-src 'none'; object-src 'self'; frame-ancestors 'self'"
 TEXT_LIMIT = 2 * 1024 * 1024
+UNSATISFIABLE = "unsatisfiable"
+_RANGE = re.compile(r"\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*")
+
+
+# the system's table differs by host: `.ts` is video/mp2t on one and a Qt file on another, `.m4a`
+# audio/mp4a-latm, which no browser plays by that name
+_FIXED = {".ts": "text/plain", ".m4a": "audio/mp4", ".wav": "audio/wav", ".flac": "audio/flac",
+          ".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm",
+          ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+          ".opus": "audio/ogg", ".pdf": "application/pdf"}
 
 
 def mime_of(path: str) -> str:
+    fixed = _FIXED.get(os.path.splitext(path)[1].lower())
+    if fixed:
+        return fixed
     m, _ = mimetypes.guess_type(path)
     if m:
         return m
@@ -48,6 +69,65 @@ def mime_of(path: str) -> str:
 def is_text(mime: str) -> bool:
     return mime.startswith("text/") or mime in ("application/json", "application/javascript",
                                                 "application/xml", "image/svg+xml")
+
+
+def media_kind(mime: str) -> str | None:
+    """The pane kind of a file the player or viewer shows: video, audio, pdf; None for others."""
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime == "application/pdf":
+        return "pdf"
+    return None
+
+
+def kind_of(mime: str, path: str) -> str:
+    """The pane kind for a file: image, preview (HTML), markdown, video, audio, pdf, file (text)
+    or binary (a size and Download)."""
+    if mime.startswith("image/"):
+        return "image"
+    if mime == "text/html":
+        return "preview"
+    if mime == "text/markdown" or path.endswith(".md"):
+        return "markdown"
+    return media_kind(mime) or ("file" if is_text(mime) else "binary")
+
+
+def view_csp(mime: str, path: str = "") -> str:
+    """The view route's CSP: the preview's for pages, images and text, else one without scripts."""
+    k = kind_of(mime, path)
+    if k == "pdf":
+        return PDF_CSP
+    return MEDIA_CSP if k in ("video", "audio", "binary") else PREVIEW_CSP
+
+
+def byte_range(header: str | None, size: int):
+    """A `Range: bytes=` header as (first, last) for a file of `size` bytes; None to answer the
+    whole file (no header, another unit, several ranges, a malformed or reversed one), or
+    UNSATISFIABLE (a 416): a first byte at or past the end, a suffix of 0, an empty file."""
+    m = _RANGE.fullmatch(header or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    a, b = m.groups()
+    if not a:
+        n = int(b)
+        if n == 0 or size == 0:
+            return UNSATISFIABLE
+        return max(0, size - n), size - 1
+    first = int(a)
+    if first >= size:
+        return UNSATISFIABLE
+    last = min(int(b), size - 1) if b else size - 1
+    if last < first:
+        return None
+    return first, last
+
+
+def stream_etag(st) -> str:
+    """A streamed file's validator: inode, size and mtime (a write replaces the inode), so a file
+    still growing between two range requests gets a new one without a read of its bytes."""
+    return f'"{st.st_ino:x}-{st.st_size:x}-{st.st_mtime_ns:x}"'
 
 
 class PanesMixin:
@@ -102,7 +182,8 @@ class PanesMixin:
             st = ws.stat(path)
             if os.path.isdir(ws.resolve(path)):
                 raise self._api_error(400, "bad_path", "a directory")
-            data = ws.read(path, limit=TEXT_LIMIT + 1)
+            # the JSON view holds text up to TEXT_LIMIT; bigger files stream from the view route
+            data = ws.read(path, limit=TEXT_LIMIT + 1) if st.st_size <= TEXT_LIMIT else b""
         except PathError as exc:
             raise self._api_error(400 if "no such" not in str(exc) else 404, "bad_path",
                                   str(exc)) from None
@@ -110,10 +191,34 @@ class PanesMixin:
             raise self._api_error(404, "not_found", "no such file") from None
         mime = mime_of(path)
         meta = {"mime": mime, "bytes": int(st.st_size), "etag": etag(data)
-                if st.st_size <= TEXT_LIMIT else None}
+                if st.st_size <= TEXT_LIMIT else None, "kind": kind_of(mime, path),
+                "url": self.view_url(cid, path)}
         if is_text(mime) and st.st_size <= TEXT_LIMIT and b"\0" not in data[:4096]:
             meta["content"] = data.decode("utf-8", "replace")
+        elif meta["kind"] == "file":
+            meta["kind"] = "binary"          # text by its name, binary by its bytes or size
         return meta, data
+
+    def view_url(self, cid: str, path: str) -> str:
+        rel = self.workspace(cid).rel(path)
+        return (f"/v1/chat-app/conversations/{cid}/sandbox/view/"
+                f"{urllib.parse.quote(rel, safe='/')}")
+
+    def open_file(self, cid: str, path: str):
+        """(file object, {mime, bytes, etag, mtime}) for the view and download routes, which
+        stream it; the caller closes the file."""
+        ws = self._ws_for(cid)
+        try:
+            fh, st = ws.open(path)
+        except PathError as exc:
+            raise self._api_error(400 if "no such" not in str(exc) else 404, "bad_path",
+                                  str(exc)) from None
+        except IsADirectoryError:
+            raise self._api_error(400, "bad_path", "a directory") from None
+        except FileNotFoundError:
+            raise self._api_error(404, "not_found", "no such file") from None
+        return fh, {"mime": mime_of(path), "bytes": int(st.st_size), "etag": stream_etag(st),
+                    "mtime": st.st_mtime}
 
     def put_file(self, cid: str, path: str, data: bytes, if_match: str | None) -> None:
         ws = self._ws_for(cid)
@@ -194,7 +299,10 @@ class PanesMixin:
         mime = meta["mime"]
         rel = self.workspace(cid).rel(path)
         title = os.path.basename(rel) or "workspace"
-        url = f"{base}/sandbox/view/{rel}"
+        url = meta["url"]
+        if meta["kind"] in ("video", "audio", "pdf", "binary"):
+            return {"kind": meta["kind"], "content": "", "mime": mime, "title": title, "url": url,
+                    "bytes": meta["bytes"]}
         if mime.startswith("image/"):
             return {"kind": "image", "content": url, "mime": mime, "title": title, "url": url}
         if mime == "text/html":

@@ -613,6 +613,8 @@ def conductor_of(args, led, env) -> tuple:
                      journal=journal)
     tokens = st_mod.SessionTokens(os.path.join(root, "session-tokens.json"))
     cond.router.session_tokens = tokens
+    from server.conductor import migrations
+    migrations.run(cond.store, cond.journal)
     base = None
     try:
         from server.conductor.monitor import policy as policy_mod

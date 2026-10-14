@@ -31,6 +31,7 @@ from chatd.service import ApiError, Service, device_label
 PREFIX = "/v1/chat-app"
 MAX_JSON = 1 << 20
 MAX_UPLOAD = 51 * 1024 * 1024
+FILE_CHUNK = 256 * 1024
 _ID = r"([A-Za-z0-9_.:-]{1,80})"
 
 # (method, pattern, handler name)
@@ -149,6 +150,58 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
+
+    def _send_file(self, fh, meta: dict, headers: tuple = ()) -> None:
+        """A file streamed in FILE_CHUNK pieces (VIS-159): the whole of it, or one byte range
+        (206 with Content-Range; 416 for a range past the end). `If-Range` with another validator
+        gets the whole file; `If-None-Match` with this one a 304. A file that shrank while it was
+        read ends the connection, so the client sees a short body, not a hang."""
+        from email.utils import formatdate
+        from chatd.panes import UNSATISFIABLE, byte_range
+        size, tag = meta["bytes"], meta["etag"]
+        modified = formatdate(meta["mtime"], usegmt=True)
+        common = [("Accept-Ranges", "bytes"), ("ETag", tag), ("Last-Modified", modified),
+                  ("Cache-Control", "no-cache"), *headers]
+        if tag in [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]:
+            return self._head(304, None, common, 0)
+        want = self.headers.get("Range")
+        cond = (self.headers.get("If-Range") or "").strip()
+        if want and cond and cond not in (tag, modified):
+            want = None
+        rng = byte_range(want, size) if want else None
+        if rng == UNSATISFIABLE:
+            return self._head(416, meta["mime"], common + [("Content-Range", f"bytes */{size}")],
+                              0)
+        first, last = rng if rng else (0, size - 1)
+        n = max(0, last - first + 1)
+        extra = common + ([("Content-Range", f"bytes {first}-{last}/{size}")] if rng else [])
+        if not self._head(206 if rng else 200, meta["mime"], extra, n):
+            return
+        try:
+            fh.seek(first)
+            while n > 0:
+                chunk = fh.read(min(FILE_CHUNK, n))
+                if not chunk:
+                    self.close_connection = True
+                    return
+                self.wfile.write(chunk)
+                n -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
+    def _head(self, code: int, ctype: str | None, headers, length: int) -> bool:
+        try:
+            self.send_response(code)
+            if ctype:
+                self.send_header("Content-Type", ctype)
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(length))
+            self.end_headers()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            return False
 
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode())
@@ -479,10 +532,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self.svc.files(cid, self.query.get("path") or "/workspace"))
 
     def r_file(self, cid):
-        meta, data = self.svc.file(cid, self.query.get("path") or "")
+        path = self.query.get("path") or ""
         if self.query.get("raw") in ("1", "true"):
-            return self._send(200, data, meta["mime"], (("X-Content-Type-Options", "nosniff"),
-                                                        ("Content-Disposition", "attachment")))
+            fh, meta = self.svc.open_file(cid, path)
+            with fh:
+                return self._send_file(fh, meta, (("X-Content-Type-Options", "nosniff"),
+                                                  ("Content-Disposition", "attachment")))
+        meta, _ = self.svc.file(cid, path)
         if "content" not in meta:
             meta["content"] = None
         self._json(200, meta)
@@ -515,10 +571,11 @@ class Handler(BaseHTTPRequestHandler):
         self._json(202, self.svc.undo(cid, str(self._body().get("run_id") or "")))
 
     def r_view(self, cid, path):
-        from chatd.panes import PREVIEW_CSP
-        meta, data = self.svc.file(cid, path)
-        self._send(200, data, meta["mime"], (("Content-Security-Policy", PREVIEW_CSP),
-                                              ("X-Content-Type-Options", "nosniff")))
+        from chatd.panes import view_csp
+        fh, meta = self.svc.open_file(cid, path)
+        with fh:
+            self._send_file(fh, meta, (("Content-Security-Policy", view_csp(meta["mime"], path)),
+                                       ("X-Content-Type-Options", "nosniff")))
 
     def r_artifact(self, cid, ref):
         self._json(200, self.svc.artifact(cid, ref))

@@ -5,6 +5,8 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ## Unreleased
 
 - Chat tab: a built-in `web_search` tool with DuckDuckGo and SearXNG providers, set in the chat settings (SRV-469, VIS-157). Reference: [docs/chat.md](docs/chat.md#web-search).
+- Chat tab: video, audio, PDF and other binary files open in a player, the browser's PDF viewer or a size line with Download, in the Files pane and the `present` card; chatd's view route streams a file with byte ranges (206, 416, ETag) and no 2 MiB cap (VIS-159).
+- Conductor: the shipped `chat-app` profile has `memory: on`, and a one-time migration adds it to a stored chat-app profile without the switch (an explicit value stays); the memory card says the notes are the model's memory between chats, and a profile with `memory: off` tells the model so; the Context panel shows a turn's memory notes (SRV-471). Memory-on prompts change by the card's new sentence.
 
 ### Fixes
 

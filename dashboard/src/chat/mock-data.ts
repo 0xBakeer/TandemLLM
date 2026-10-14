@@ -138,7 +138,7 @@ export function contextFor(messageTokens: number, opts: { tools: boolean; files:
     parts,
     compact_at: Math.round(262_144 * 0.8),
     cache: { warm: used - cold, cold, cold_eta_ms: cold ? Math.round(cold * 1.33) : null, source: cold === used ? 'none' : 'resident', slot: opts.slot },
-    harness: { class: opts.profile === 'coding' ? 'coding' : opts.profile === 'chat' ? 'chat' : 'answer', effort: opts.effort === 'auto' ? 'high' : opts.effort, packages: opts.packages.map((p) => ({ name: p, tokens: 460 })) },
+    harness: { class: opts.profile === 'coding' ? 'coding' : opts.profile === 'chat' ? 'chat' : 'answer', effort: opts.effort === 'auto' ? 'high' : opts.effort, packages: opts.packages.map((p) => ({ name: p, tokens: 460 })), memory: { mode: 'on', why: null, index_notes: 10, index_tokens: 407, bodies: 0, body_tokens: 0, card_tokens: 190 } },
     memory: { kv_bytes: used * 109_056, resident_bytes: 2.4e9, sandbox_disk_bytes: 186e6, available_bytes: 38.4e9, floor_bytes: 15 * 1024 ** 3, sandbox_bytes: 412e6 },
     model: { name: MODEL, profile: opts.profile, weights: 'EXL3 4.5 bpw', drafter: 'MTP head', max_len: 262_144, effort: opts.effort, thinking: opts.thinkingOn, backend: 'engine' },
   };

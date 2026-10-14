@@ -95,6 +95,17 @@ class Workspace:
         with os.fdopen(fd, "rb") as fh:
             return fh.read(limit) if limit else fh.read()
 
+    def open(self, path: str):
+        """(binary file object, its fstat) for a streamed read; the caller closes it. The stat is
+        the open file's, so a file replaced after the open is read as it was."""
+        full = self.resolve(path, must_exist=True)
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            raise PathError(f"{path}: not a file")
+        return os.fdopen(fd, "rb"), st
+
     def stat(self, path: str) -> os.stat_result:
         return os.lstat(self.resolve(path, must_exist=True))
 

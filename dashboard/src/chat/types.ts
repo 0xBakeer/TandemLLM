@@ -244,6 +244,19 @@ export interface ContextPart {
   tokens: number;
 }
 
+/** SRV-471: the memory notes' part of a turn (the usage frame's `tandem.harness.memory`); an
+ *  engine before it sends none */
+export interface HarnessMemory {
+  mode: 'on' | 'shadow' | 'off' | string;
+  /** why it is off: profile, model_fit, backend, header */
+  why: string | null;
+  index_notes: number;
+  index_tokens: number;
+  /** the notes sent with this message in full */
+  bodies: number;
+  body_tokens: number;
+  card_tokens: number;
+}
 export interface ContextReport {
   window: number;
   used: number;
@@ -267,7 +280,7 @@ export interface ContextReport {
   /** the engine's split of the last prompt (its usage frame); null before the first frame */
   split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
   /** what the harness decided for this chat; never inside the answer text */
-  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;
+  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[]; memory?: HarnessMemory | null } | null;
   memory: {
     kv_bytes: number | null;
     /** the chat's rows the engine holds: in its slot or parked beside it (`kv_where`) */
@@ -575,10 +588,21 @@ export interface SandboxFile {
   modified_at?: string;
   etag?: string;
 }
+/** `GET .../sandbox/file`: the text, or null for a binary or a file over 2 MiB (VIS-159) */
+export interface SandboxFileView {
+  content: string | null;
+  mime: string;
+  bytes: number;
+  etag?: string;
+  /** the pane kind: file (text), binary, image, preview, markdown, video, audio, pdf */
+  kind?: string;
+  /** the view route, streamed with byte ranges */
+  url?: string;
+}
 
 // ---- panes ------------------------------------------------------------------------------------
 
-export type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'context' | 'plan';
+export type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'video' | 'audio' | 'binary' | 'context' | 'plan';
 export interface PaneRef {
   /** set by the server when the pane is in the layout */
   id?: string;
