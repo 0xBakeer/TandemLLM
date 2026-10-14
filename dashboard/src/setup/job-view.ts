@@ -1,7 +1,7 @@
 // The install page's job, folded from GET /v1/setup/jobs/{id} (pure; tests/setup-install.test.ts;
 // the element is install.ts).
 
-import type { SetupJob, SetupJobEvent } from '../api/types';
+import type { SetupEnvChange, SetupJob, SetupJobEvent } from '../api/types';
 
 /** Fold one job event into the job. A final job stays final
  *  (VIS-149): a job or step event that would take it back to running is not applied. */
@@ -53,4 +53,11 @@ export function streamAction(state: string, detail: string | undefined, job: Set
   if (state === 'reconnecting' && streamFinished(null, job)) return 'close';
   if ((state === 'reconnecting' || state === 'error') && !isFinal(job)) return 'away';
   return null;
+}
+
+/** VIS-155: one changed setting as words, old -> new; a key the new setup drops says so and what
+ *  the engine then runs with (`unset`: the engine's own default). */
+export function changeText(c: SetupEnvChange, unset = 'unset'): { from: string; to: string } {
+  const to = c.next ?? unset;
+  return { from: c.current ?? unset, to: c.removed ? `removed, ${to === unset ? "the engine's default" : to}` : to };
 }

@@ -385,19 +385,27 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         error("secrets_exist", "secrets.env already exists. ops/make-secrets.sh --rotate --admin "
               "would replace the metrics token too, so run it on the box yourself.")
     keys = list(overlay_values(m, sel))
-    current = resolve_env(keys + ["REPO"])
+    # VIS-155: the keys the run/setup.env on the box sets and the new one does not (the previous
+    # model's own knobs) are compared too: the rewrite drops them
+    gone = [k for k in overlay_keys(overlay_path()) if k not in keys]
+    current = resolve_env(keys + gone + ["REPO"])
     repo = current.pop("REPO", None)
     if repo and os.path.realpath(repo) != os.path.realpath(ROOT):
         error("repo_mismatch", f"ops/serve.env's REPO is {repo}, but this server runs from "
                                f"{ROOT}; the overlay would not be read.")
-    with_overlay = _preview(m, sel, keys)
+    with_overlay = _preview(m, sel, keys + gone)
     changes = []
-    for k in keys:
+    for k in keys + gone:
         cur, nxt = current.get(k), with_overlay.get(k)
         # unset is what the engine runs with then (the overlay leaves such a key out)
         if (cur if cur is not None else _unset_default(k)) != \
                 (nxt if nxt is not None else _unset_default(k)):
-            changes.append({"key": k, "current": cur, "next": nxt, "from": _source(m, k)})
+            c = {"key": k, "current": cur, "next": nxt,
+                 "from": _source(m, k) or ("run/setup.env" if k in gone else ""),
+                 "removed": k in gone}
+            if SECRET_KEY.search(k):
+                c.update(current=cur and "[redacted]", next=nxt and "[redacted]")
+            changes.append(c)
     for c in changes:
         why = CLIENT_FACING.get(c["key"])
         if why:
@@ -445,6 +453,20 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
                         "next": prof["id"], "on_disk": on_disk, "download_gb": download_gb},
             "changes": changes, "restart": True, "commands": commands, "estimate": est,
             "ports": {"current": old_port, "next": new_port}}
+
+
+# a key whose value the plan never shows (a hand-edited run/setup.env can hold one)
+SECRET_KEY = re.compile(r"TOKEN|PASSWORD|SECRET|PASSWD|_KEY$")
+
+
+def overlay_keys(path: str) -> list[str]:
+    """The keys a run/setup.env sets, in its order (none when there is no file)."""
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    return list(dict.fromkeys(re.findall(r"^([A-Za-z_][A-Za-z0-9_]*)=", text, re.M)))
 
 
 def _assets_missing(m: dict, disk: dict) -> tuple[list[dict], list[dict]]:
@@ -498,11 +520,13 @@ def reset_plan(m: dict, *, setup_mode: bool) -> dict:
         errors.append(f"{prof['hf_repo']} is private and no Hugging Face token is set.")
         codes.append("missing_token")
     keys = list(overlay_values(m, sel))
+    keys += [k for k in overlay_keys(overlay_path()) if k not in keys]      # VIS-155
     extra = ["PORT", "SERVED_MODEL", "QSE_CONDUCTOR_CONFIG"]
     now = resolve_env(keys + extra)
     base = resolve_env(keys + extra, profile=prof["id"], overlay=os.path.join(run_dir(), ".none"))
-    changes = [{"key": k, "current": now.get(k), "next": base.get(k), "from": "reset level 2"}
-               for k in keys if now.get(k) != base.get(k)]
+    changes = [{"key": k, "current": now.get(k), "next": base.get(k), "from": "reset level 2",
+                "removed": base.get(k) is None}
+               for k in keys if now.get(k) != base.get(k) and not SECRET_KEY.search(k)]
     port = lambda d: int(d["PORT"]) if (d.get("PORT") or "").isdigit() else 8000  # noqa: E731
     cond = base.get("QSE_CONDUCTOR_CONFIG") or "off"
     smoke = "TandemLLM" if cond not in ("", "off") else (base.get("SERVED_MODEL") or

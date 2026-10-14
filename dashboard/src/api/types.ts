@@ -1473,6 +1473,9 @@ export interface SetupEnvChange {
   next: string | null;
   /** the component or field that sets it */
   from: string;
+  /** VIS-155: the run/setup.env on the box sets it and the new one does not; `next` is what
+   *  serve.env and the profile then give (null: the engine's own default) */
+  removed?: boolean;
 }
 export interface SetupPlan {
   contract_version: SetupContract;

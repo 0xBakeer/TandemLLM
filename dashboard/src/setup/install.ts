@@ -13,7 +13,7 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi, setupUnauthorized } from './api';
-import { appendLog, applyJobEvent, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
+import { appendLog, applyJobEvent, changeText, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
 
 @customElement('qse-install-progress')
@@ -130,6 +130,19 @@ export class QseInstallProgress extends LightElement {
     return html`<span class="inst-dot" aria-hidden="true"></span>`;
   }
 
+  /** VIS-155: the plan's settings under the check step, old -> new, collapsed with the count */
+  private changeList(j: SetupJob) {
+    return html`<details class="inst-changes" data-job-changes>
+      <summary class="muted small">${S.jobChanges(j.changes.length)}</summary>
+      <ul>
+        ${j.changes.map((c) => {
+          const t = changeText(c, S.reviewUnset);
+          return html`<li data-env=${c.key} class=${c.removed ? 'is-removed' : ''}><code>${c.key}</code> <span class="num">${t.from} → ${t.to}</span></li>`;
+        })}
+      </ul>
+    </details>`;
+  }
+
   render() {
     void this.tick;
     const j = this.job;
@@ -162,6 +175,7 @@ export class QseInstallProgress extends LightElement {
             <span class="inst-label">${s.label}</span>
             <span class="inst-state muted small">${S.stepState[s.state]}${s.started_at && s.ended_at ? html` <span class="num">${Math.max(0, s.ended_at - s.started_at).toFixed(1)} s</span>` : nothing}</span>
             ${s.detail ? html`<span class="inst-detail muted small">${s.detail}</span>` : nothing}
+            ${s.id === 'check' && j?.changes?.length ? this.changeList(j) : nothing}
           </li>`,
         )}
       </ol>

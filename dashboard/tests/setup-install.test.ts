@@ -1,9 +1,10 @@
-// The install page's job stream (VIS-149, VIS-151): their Gherkin as the test matrix. The server's
+// The install page's job stream (VIS-149, VIS-151) and its change list (VIS-155): their Gherkin
+// as the test matrix. The server's
 // half (the order it sends the job in) is tests/test_setup_job_stream.py.
 import { describe, expect, it } from 'vitest';
-import type { SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
+import type { SetupEnvChange, SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
-import { appendLog, applyJobEvent, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
+import { appendLog, applyJobEvent, changeText, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
 
 const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
 
@@ -242,5 +243,36 @@ describe('VIS-151: the log of a finished install stays readable', () => {
     expect(streamAction('reconnecting', undefined, DONE)).toBe('close');
     expect(streamAction('reconnecting', undefined, job('running'))).toBe('away');
     expect(streamAction('error', 'HTTP 404', DONE)).toBe('lost');
+  });
+});
+
+// VIS-155: the change list shows every effective change (the plan's half: tests/test_setup_change_list.py)
+describe('VIS-155: the change list shows every effective change', () => {
+  // the 16 changes of the LFM2.5 lfm25-exl3-2.5 to Qwen3.8-27B exl3-6.0 switch
+  const kept: [string, string | null, string][] = [
+    ['QSE_PARALLEL', '3', '4'], ['MAX_LEN', '131072', '262144'], ['QSE_SIDE_MAX_LEN', '131072', '98304'], ['QSE_KV_POOL', 'off', 'on'],
+    ['QSE_PARALLEL_FLOOR_GB', '15', '10'], ['QSE_SIDE_GRAPHS', null, 'off'], ['QSE_SIDE_SLOT_CONST_GB', null, '1.5'], ['QSE_KV_HARD_FLOOR_GB', null, '10'],
+    ['QSE_BARRIER_IDLE_OWNER', null, 'on'], ['QWEN38_SUFFIX_STORE', '', '/x/suffix'], ['QWEN38_SHADOW_MODEL', null, 'qwen3.5-0.8b'], ['VISION', null, 'on'], ['SERVED_MODEL', 'qwen38-spark-engine', 'TandemLLM'],
+  ];
+  const changes: SetupEnvChange[] = [
+    ...kept.map(([key, current, next]) => ({ key, current, next, from: 'parallelism', removed: false })),
+    { key: 'TEMPERATURE', current: '0.1', next: null, from: 'run/setup.env', removed: true },
+    { key: 'TOP_K', current: '50', next: null, from: 'run/setup.env', removed: true },
+    { key: 'REP_PENALTY', current: '1.05', next: null, from: 'run/setup.env', removed: true },
+  ];
+
+  it('Switching from LFM2.5 to Qwen3.8', () => {
+    expect(changeText(changes[13])).toEqual({ from: '0.1', to: "removed, the engine's default" });
+    expect(changeText({ key: 'X', current: '1', next: '2', from: 'run/setup.env', removed: true })).toEqual({ from: '1', to: 'removed, 2' });
+  });
+
+  it('The job page lists the changes', () => {
+    const lines = changes.map((c) => changeText(c));
+    expect(lines).toHaveLength(16);
+    expect(lines[0]).toEqual({ from: '3', to: '4' });
+    expect(lines[5]).toEqual({ from: 'unset', to: 'off' });
+    expect(lines.filter((l) => l.to.startsWith('removed'))).toHaveLength(3);
+    // a plan from a server without `removed` reads as before
+    expect(changeText({ key: 'PORT', current: '8000', next: '8124', from: 'advanced.port' })).toEqual({ from: '8000', to: '8124' });
   });
 });

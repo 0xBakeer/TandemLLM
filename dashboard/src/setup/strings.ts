@@ -233,6 +233,7 @@ export const S = {
   reviewAfter: 'After',
   reviewFrom: 'Set by',
   reviewUnset: 'unset',
+  jobChanges: (n: number) => `${n} setting${n === 1 ? '' : 's'} change`,
   reviewWeights: 'Weights',
   reviewWeightsSame: (p: string) => `${p}, already running.`,
   reviewWeightsSwitch: (from: string | null, to: string) => (from ? `${from} to ${to}.` : `${to}.`),

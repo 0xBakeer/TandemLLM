@@ -27,6 +27,7 @@ import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
 import { MINI_WREN, reducedMotion } from './figure';
 import './install';
+import { changeText } from './job-view';
 import './measure-table';
 import './memory-bar';
 import './reset';
@@ -923,7 +924,7 @@ export class QseSetup extends LightElement {
           ? ready.changes.length
             ? html`<div class="table-scroll"><table class="table rv-table">
                 <thead><tr><th scope="col">${S.reviewKey}</th><th scope="col">${S.reviewNow}</th><th scope="col">${S.reviewAfter}</th><th scope="col">${S.reviewFrom}</th></tr></thead>
-                <tbody>${ready.changes.map((c) => html`<tr data-env=${c.key}><th scope="row"><code>${c.key}</code></th><td class="rv-old">${c.current ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="rv-new">${c.next ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="muted small">${c.from}</td></tr>`)}</tbody>
+                <tbody>${ready.changes.map((c) => html`<tr data-env=${c.key}><th scope="row"><code>${c.key}</code></th><td class="rv-old">${c.current ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="rv-new">${c.removed ? html`<span class="rv-removed" data-removed>${changeText(c, S.reviewUnset).to}</span>` : c.next ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="muted small">${c.from}</td></tr>`)}</tbody>
               </table></div>`
             : html`<p class="muted">${S.reviewNoChanges}</p>`
           : nothing}
