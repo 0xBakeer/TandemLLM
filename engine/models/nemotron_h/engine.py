@@ -76,7 +76,9 @@ class NemotronHEngine(NemotronHRef):
         m = {li: self.pre(li) + "mixer." for li in range(c.num_hidden_layers)}
         self._wc = {li: W[m[li] + "conv1d.weight"].reshape(c.conv_dim, -1).to(torch.bfloat16).contiguous()
                     for li in c.mamba_layers}
-        self._A = {li: (-torch.exp(W[m[li] + "A_log"].float())).contiguous() for li in c.mamba_layers}
+        # A itself where the loader gave it (a GGUF stores -exp(A_log)), else from A_log
+        self._A = {li: (W[m[li] + "A"].float() if m[li] + "A" in W else -torch.exp(W[m[li] + "A_log"].float())).contiguous()
+                   for li in c.mamba_layers}
         self._f32 = {(li, n): W[m[li] + n].float().contiguous() for li in c.mamba_layers for n in ("dt_bias", "D")}
         self._f32.update({(li, "bias"): W[m[li] + "gate.e_score_correction_bias"].float().contiguous()
                           for li in c.moe_layers})
@@ -122,6 +124,14 @@ class NemotronHEngine(NemotronHRef):
             return K.linear_rows(x2, w, out=out).view(*x.shape[:-1], w.shape[0])
         y = F.linear(x2, w)
         return y if out is None else out.copy_(y)
+
+    def qkv(self, n: torch.Tensor, m: str, mul) -> torch.Tensor:
+        """q | k | v of an attention block: the fused weight in one launch, or the three where the loader
+        could not fuse them (packed weights)."""
+        w = self.W.get(m + "qkv")
+        if w is not None:
+            return mul(n, w)
+        return torch.cat([mul(n, self.W[m + f"{x}_proj.weight"]) for x in "qkv"], -1)
 
     @staticmethod
     def mm(x: torch.Tensor, w) -> torch.Tensor:
@@ -317,7 +327,7 @@ class NemotronHEngine(NemotronHRef):
                 g = K.gated_norm(y, P[:, :I], self.W[m + "norm.weight"], c.n_groups, eps)
                 out = self.lin(g, self.W[m + "out_proj.weight"])
             elif t == "attention":
-                qkv = self.lin(n, self.W[m + "qkv"])
+                qkv = self.qkv(n, m, self.lin)
                 Hq, Hk, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
                 q = qkv[:, :Hq * D].reshape(R, Hq, D).contiguous()     # a view would keep qkv's row stride
                 o = torch.empty(R, Hq, D, dtype=self.dtype, device=self.device)
@@ -582,7 +592,7 @@ class NemotronHEngine(NemotronHRef):
         m = self.pre(li) + "mixer."
         T = n.shape[0]
         Hq, Hk, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        qkv = self.mm(n, self.W[m + "qkv"])
+        qkv = self.qkv(n, m, self.mm)
         q = qkv[:, :Hq * D].reshape(T, Hq, D)
         st.k[li][:, L:L + T] = qkv[:, Hq * D:(Hq + Hk) * D].reshape(T, Hk, D).transpose(0, 1)
         st.v[li][:, L:L + T] = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
