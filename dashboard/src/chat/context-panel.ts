@@ -171,9 +171,9 @@ export class QseChatContext extends LightElement {
       <h3 class="ch-ctx-h">Memory on the box</h3>
       <dl class="kv ch-kv">
         <div data-mem="kv"><dt>KV for this chat</dt><dd>${kvWords(mem, c.context.model.backend)}</dd></div>
-        <div data-mem="resident"><dt>resident prefix</dt><dd class="num">${residentWords(mem, c.context.model.backend)}</dd></div>
+        <div data-mem="resident"><dt>resident prefix</dt><dd class=${mem.resident_owner === 'this' ? 'num' : ''}>${residentWords(mem, c.context.model.backend)}</dd></div>
         <div><dt>slot</dt><dd>${c.context.cache.slot ?? 'none held'}</dd></div>
-        <div data-mem="sandbox"><dt>sandbox</dt><dd class="num">${sandboxWords(sb)}</dd></div>
+        <div data-mem="sandbox"><dt>sandbox</dt><dd class=${sb.memory_bytes != null ? 'num' : ''}>${sandboxWords(sb)}</dd></div>
         <div><dt>sandbox disk</dt><dd class="num">${bytes(sb.disk_bytes, 0)} of ${bytes(sb.disk_limit_bytes, 0)}</dd></div>
       </dl>
       <div class="ch-ctx-row"><button type="button" class="linkish" @click=${() => this.fire('ch-open-settings', { section: 'sandbox' })}>Sandbox settings</button></div>

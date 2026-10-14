@@ -26,15 +26,15 @@ export function kvWords(mem: Mem, backend: Backend): string {
   if (mem.kv_tokens != null && mem.kv_where === 'park') return `${exact(mem.kv_tokens)} tokens, parked in RAM`;
   switch (mem.kv_where) {
     case 'nvme_spill':
-      return 'on the NVMe; the next turn reads it back';
+      return 'on the NVMe, read back next turn';
     case 'disk_tier':
-      return 'in the disk tier; the next turn reads it back';
+      return 'in the disk tier, read back next turn';
     case 'ram_snapshot':
-      return 'a snapshot in RAM; the next turn starts from it';
+      return 'a snapshot in RAM';
     case 'other':
-      return 'another chat holds the slot; the next turn reads this one again';
+      return 'another chat holds the slot';
     case 'none':
-      return 'none held; the next turn reads the prompt';
+      return 'none held';
     default:
       return 'the engine does not report its caches';
   }
