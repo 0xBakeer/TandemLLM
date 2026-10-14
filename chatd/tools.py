@@ -224,13 +224,19 @@ def _render(ctx, a):
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
 
 
-PANE_KINDS = ("preview", "files", "diff", "markdown", "image", "terminal", "editor")
+PANE_KINDS = ("preview", "files", "diff", "markdown", "image", "terminal", "editor", "video",
+              "audio", "pdf")
+# a file's own kind wins over these: a video presented as a preview plays in the player (VIS-159)
+_BY_FILE = ("preview", "markdown", "image", "video", "audio", "pdf")
 
 
 def _present(ctx, a):
+    from chatd.panes import media_kind, mime_of
     kind = str(a.get("kind") or "preview")
     if kind not in PANE_KINDS:
         raise ToolError(f"kind must be one of {', '.join(PANE_KINDS)}")
+    if kind in _BY_FILE and not a.get("port") and a.get("path"):
+        kind = media_kind(mime_of(str(a["path"]))) or kind
     if a.get("port"):
         ref = f"port:{int(a['port'])}"
     elif kind == "diff":
@@ -316,7 +322,8 @@ BUILTINS = [
          _obj({"path": _S, "port": _I, "width": _I, "height": _I}, []), sandbox=True,
          executor=_render),
     Tool("present", "Show the user something in a pane beside the chat: a preview of an HTML file "
-         "or a port, a file, the diff of this run, a Markdown file, an image, or the terminal.",
+         "or a port, a file, the diff of this run, a Markdown file, an image, a video, an audio "
+         "file, a PDF, or the terminal.",
          _obj({"kind": {"type": "string", "enum": list(PANE_KINDS)}, "path": _S, "port": _I,
                "title": _S}, ["kind"]), executor=_present),
     Tool("library_search", "Search TandemLLM's skill library for a how-to before unfamiliar "
