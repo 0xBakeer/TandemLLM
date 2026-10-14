@@ -853,6 +853,11 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
                     conv.live["parts"].append({"type": "error", "message": run.error or "failed",
                                                "retryable": True})
                 self._persist_live(conv)
+            # the harness's picks and the prompt's split stay with the answer, so the Context
+            # panel still has them after chatd restarts (they lived in memory only)
+            frame = (run.usage or {}).get("tandem") or {}
+            if frame.get("harness") or frame.get("parts"):
+                stats["tandem"] = {"harness": frame.get("harness"), "parts": frame.get("parts")}
             self.store.run("UPDATE messages SET stats = ? WHERE id = ?",
                            (dumps(stats), run.message_id))
             self.store.run("UPDATE runs SET state = ?, ended = ?, error = ?, step = ? WHERE id = ?",
@@ -1157,6 +1162,11 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
             harness = conv.context.get("harness")
         if split is None and conv.context is not None:
             split = conv.context.get("split")
+        kept = (stats or {}).get("tandem") or {}
+        if harness is None:
+            harness = kept.get("harness")
+        if split is None:
+            split = kept.get("parts")
         peek = conv.peek[1] if conv.peek is not None else None
         out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
                              files_tokens=files, stats=stats,

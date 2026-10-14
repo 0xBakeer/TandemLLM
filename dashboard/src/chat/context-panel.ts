@@ -14,7 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
-import { kvWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
+import { HARNESS_PENDING, kvWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -158,6 +158,7 @@ export class QseChatContext extends LightElement {
         <div><dt>mode</dt><dd>${sk.mode === 'auto' ? 'the harness picks' : sk.mode === 'manual' ? 'pins only' : 'the model reads them'}</dd></div>
         ${sk.pinned.map((p) => html`<div data-pin=${p.name}><dt>pinned</dt><dd>${p.name} ${p.missing ? html`<span class="warn-ink">no longer in the library</span>` : html`<span class="num muted">${skillTokens(p.tokens ?? picked.find((x) => x.name === p.name)?.tokens)}</span>`}</dd></div>`)}
         ${picked.filter((p) => !sk.pinned.some((x) => x.name === p.name)).map((p) => html`<div data-harness=${p.name}><dt>harness</dt><dd>${p.name} <span class="num muted">${skillTokens(p.tokens)}</span></dd></div>`)}
+        ${sk.mode === 'auto' && !c.context.harness && (c.context.model.backend ?? 'engine') === 'engine' ? html`<div data-harness="none"><dt>harness</dt><dd class="muted">${HARNESS_PENDING}</dd></div>` : nothing}
         ${!sk.pinned.length && !picked.length ? html`<div><dt>pinned</dt><dd class="muted">none</dd></div>` : nothing}
       </dl>
     </section>`;

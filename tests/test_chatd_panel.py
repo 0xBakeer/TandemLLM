@@ -10,6 +10,7 @@ write_file of 7.8 KB and seven edit_file calls, "KV for this chat —", "residen
      owner's tag (or its short key from an engine without tags), else the tier the next turn reads
   4  a running sandbox's memory is the runtime's figure (usage less the inactive file cache),
      read at most every 5 s, and null when the runtime does not say
+  5  the harness's picks and the prompt's split outlive a chatd restart (SRV-455)
 
 CPU only. Run: python -m pytest -q tests/test_chatd_panel.py
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 
 from chatd_util import Chat
 from test_chatd_agent import calls
@@ -138,3 +140,29 @@ def test_a_running_sandbox_reports_its_memory_in_use(tmp_path):
     t[0] += 10
     eng.answer = (200, {"memory_stats": {}})
     assert boxes.memory_used(b) is None, "a runtime that does not say"
+
+
+def test_the_harness_and_the_split_outlive_a_chatd_restart():
+    """SRV-455: the usage frame's `tandem` (the harness's picks, the system and tool tokens) lived
+    in chatd's memory only; after a restart the panel lost the skills and showed the system prompt
+    and the tool schemas as 0 until the next turn. The answer's stats keep them now."""
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "FAKE_TANDEM hi there")
+        s = c.wait_idle(cid)
+        want = s["context"]["harness"]
+        assert want and want["packages"][0]["name"] == "coding", want
+        assert s["messages"][-1]["stats"]["tandem"]["harness"] == want
+        c.owned_fake = False                       # the same fake engine serves the restart
+        c.close(keep_data=True)
+        again = Chat(data=c.data, fake=(c.fake_srv, c.fake_port))
+        try:
+            ctx = again.snap(cid)["context"]
+            parts = {p["kind"]: p["tokens"] for p in ctx["parts"]}
+            assert ctx["harness"] == want and parts["system"] == 2 and parts["tools"] == 3, ctx
+        finally:
+            again.close()
+    finally:
+        c.fake_srv.shutdown()
+        shutil.rmtree(c.data, ignore_errors=True)

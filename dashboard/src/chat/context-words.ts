@@ -7,6 +7,8 @@ import type { ContextReport, SandboxStatus } from './types';
 export const NOT_TRACKED = 'not tracked for this model';
 export const AFTER_TURN = 'measured after the first turn';
 export const NEXT_TURN = 'counted on its next turn';
+/** no usage frame from the engine yet (a new chat, another server) */
+export const HARNESS_PENDING = 'its picks arrive with the next turn';
 
 type Mem = ContextReport['memory'];
 type Backend = ContextReport['model']['backend'];
