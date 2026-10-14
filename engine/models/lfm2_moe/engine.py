@@ -45,8 +45,8 @@ PREFILL_CHUNK = 4096
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
-#: the bit widths tools/fn_kernels.dense decodes
-DENSE_K = (2, 3, 4, 5, 6, 8)
+#: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
+DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
 
 
 def _is_exl3(w) -> bool:

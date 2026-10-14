@@ -130,7 +130,7 @@ template <int KB, int MT, bool OF32>
 __device__ __forceinline__ void group_gemm_body(const __half* __restrict__ xh, int Kin,
         const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SVH, int cb, int nr,
         void* __restrict__ Yv, int ldy, int r0, int col0, const int* __restrict__ DST, uint32_t* smem) {
-    constexpr int TW = 8 * KB;
+    constexpr int TW = tile_u32(KB);
     constexpr int SW = GG_NTW * TW;
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int wn = warp % GG_WN, wk = warp / GG_WN;
@@ -272,6 +272,10 @@ __global__ void __launch_bounds__(256) group_gemm_kernel(const __half* __restric
         case 5: group_gemm_body<5, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
         case 6: group_gemm_body<6, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
         case 8: group_gemm_body<8, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
+        case 7: group_gemm_body<7, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
+        case 15: group_gemm_body<15, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
+        case 25: group_gemm_body<25, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
+        case 35: group_gemm_body<35, MT, OF32>(xh, Kin, T, ldt, svh, cb, nr, Y, ldy, r0, jm * N, DST, smem); break;
         default: break;
     }
 }
@@ -339,7 +343,7 @@ template <int MT, bool OF32>
 static void gg_launch(const torch::Tensor& xh, int P, int Kin, int N, const torch::Tensor& cnt, const torch::Tensor& pstart,
                       const torch::Tensor& iend, int G, Bank a, int mat0, int nmat, torch::Tensor& y,
                       const int* dst, int items, int kbmax, cudaStream_t st) {
-    const size_t smem = (size_t)GG_WN * GG_WK * GG_ST * GG_NTW * 8 * kbmax * 4 + (size_t)16 * MT * GG_RP * 4;
+    const size_t smem = (size_t)GG_WN * GG_WK * GG_ST * GG_NTW * tile_u32(kbmax) * 4 + (size_t)16 * MT * GG_RP * 4;
     auto kern = group_gemm_kernel<MT, OF32>;
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
     kern<<<dim3(items * nmat * (N / 128)), 256, smem, st>>>((const __half*)xh.data_ptr(), P, Kin, N,
@@ -356,7 +360,8 @@ void pre_group_gemm(torch::Tensor xh, torch::Tensor cnt, torch::Tensor pstart, t
     const int nmat = xh.size(0), P = xh.size(1), Kin = xh.size(2), G = cnt.numel();
     TORCH_CHECK(cnt.dtype() == torch::kInt && pstart.dtype() == torch::kInt && iend.dtype() == torch::kInt
                 && pstart.numel() == G && iend.numel() == G, "cnt, pstart, iend int32 [G]");
-    TORCH_CHECK(Kin % 128 == 0 && N % 128 == 0 && kbmax >= 2 && kbmax <= 8, "shapes");
+    TORCH_CHECK(Kin % 128 == 0 && N % 128 == 0 && ((kbmax >= 2 && kbmax <= 8) || kbmax == 15 || kbmax == 25 || kbmax == 35),
+                "shapes (K 2..8, or 15 / 25 / 35 for 1.5 / 2.5 / 3.5)");
     TORCH_CHECK(y.stride(1) == 1 && y.size(1) >= nmat * N, "y [rows, >= nmat N]");
     TORCH_CHECK(P % 16 == 0, "rows a matrix: a multiple of 16 (fragment order)");
     TORCH_CHECK(!dst.has_value() || (dst->dtype() == torch::kInt && dst->numel() == P), "dst int32 [P]");

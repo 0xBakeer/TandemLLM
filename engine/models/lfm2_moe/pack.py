@@ -14,8 +14,8 @@ A projection is BF16 (`X.weight`) or EXL3 (`X.trellis`, ...) per tensor, so a pa
 projection unquantised (exllamav3's 16-bit head) is described as it is (`formats`). The canonical name
 is the stored one without its `model.` prefix. K is read from each trellis' own shape: exllamav3 1.6.0
 allocates half-integer rates (1.5, 2.5, 3.5 bits; a tile 16 K + 8 int16 wide) below 4 bpw with the mul1
-codebook, which the engine's kernels do not decode yet, so `audit()` stops on such a tensor by name,
-as on any other codebook (`mcg`, `3inst`: no `mul1`).
+codebook, which the kernels decode too (tools/exl3_linear.py `dq8_frac`). `audit()` stops by name on a
+rate the kernels do not take and on any other codebook (`mcg`, `3inst`: no `mul1`).
 
 `decode_bytes()` is what one decode token reads, from the headers: the k routed experts of every MoE
 layer at that layer's mean expert size, every other projection, the router, one embedding row and the
@@ -39,6 +39,8 @@ from engine.models.lfm2_moe.config import Lfm2MoeConfig, config_from_dict
 PREFIX = "model."
 MUL1 = 0x83DCD12D
 EXPERT_RE = re.compile(r"^layers\.(\d+)\.feed_forward\.experts\.(\d+)\.(w1|w2|w3)\.(\w+)$")
+#: the bits a weight the EXL3 kernels decode (tools/exl3_linear.py KS and HALF_KS)
+RATES = (1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8)
 EXL3_SUFFIX = ("trellis", "suh", "svh", "su", "sv", "mul1", "mcg")
 DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I16": torch.int16,
       "I32": torch.int32, "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8}
@@ -224,12 +226,9 @@ class PackIndex:
             if base + ".mul1" not in self.tensors:
                 raise ValueError(f"{base}: no mul1 tensor (the 3inst codebook); the engine decodes mul1 only")
             k = t.k
-            if k != int(k):
-                raise ValueError(f"{base}: a half-integer rate ({k} bits a weight, trellis {t.shape}); the "
-                                 "engine's EXL3 kernels decode integer rates 2..8 only (convert with integer "
-                                 "rates, or wait for the half-rate decode, ENG-285)")
-            if not 2 <= k <= 8:
-                raise ValueError(f"{base}: {k} bits a weight; the kernels take 2..8")
+            if k not in RATES:
+                raise ValueError(f"{base}: {k} bits a weight (trellis {t.shape}); the kernels take 2..8, "
+                                 "1.5, 2.5 and 3.5")
             if len(t.shape) != 3 or (t.shape[0] * 16, t.shape[1] * 16) != (Kin, N):
                 raise ValueError(f"{base}.trellis {t.shape} does not fit {(N, Kin)}")
             for s, alt, n in (("suh", "su", Kin), ("svh", "sv", N)):

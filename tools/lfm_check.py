@@ -188,6 +188,7 @@ def cmd_xcheck(a) -> None:
     from exllamav3.modules.quant.exl3 import LinearEXL3
 
     from engine.models.lfm2_moe.pack import PackIndex
+    from tools import exl3_linear as X
     idx = PackIndex.open(a.pack)
     idx.audit()
     c = idx.cfg
@@ -210,7 +211,7 @@ def cmd_xcheck(a) -> None:
                          trellis=blk.t.contiguous(), mul1=idx.read(b + ".mul1", "cuda"))
         inner_eq = bool(torch.equal(blk.inner(), lin.get_inner_weight_tensor().to(torch.float16)))
         w, tw = blk.dequant().float(), lin.get_weight_tensor().float().T
-        r = {"tensor": b, "K": blk.kb, "shape": [blk.N, blk.K], "inner_bit_equal": inner_eq,
+        r = {"tensor": b, "K": X.rate(blk.kb), "shape": [blk.N, blk.K], "inner_bit_equal": inner_eq,
              "weight_rel": ((w - tw).abs().max() / tw.abs().max()).item()}
         rows.append(r)
         print(json.dumps(r), flush=True)

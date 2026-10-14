@@ -8,6 +8,8 @@
   * the MoE bank kernels with LFM's experts (hidden 2048, expert 1536, 4 slots a row, no shared
     expert): the one-row output against the fixed-order torch reference, and row invariance with rows
     sharing experts;
+  * ENG-285: the half-integer rates (1.5, 2.5, 3.5 bits) decoded as exllamav3 decodes them, through
+    the dense, MoE and prefill kernels, and 7-bit experts;
   * the tiny-model engine tests of tests/test_lfm2_moe_engine.py and the row kernels of
     tests/test_lfm2_moe_kernels.py, here on the GPU.
 
@@ -72,6 +74,69 @@ def test_moe_bank_at_lfm_shapes():
         alone = FK.moe_experts(x[m:m + 1], ids[m:m + 1], bank, order=torch.empty(0, dtype=torch.int32, device="cuda"))
         assert torch.equal(full[4 * m:4 * m + 4], alone), m
     return f"one row vs reference {rel:.1e}; 16 rows each its one-row bits"
+
+
+def test_half_rates_decode_as_exllamav3():
+    """ENG-285: 1.5, 2.5 and 3.5 bits a weight (tiles 16 K + 8 int16 wide): the device decode
+    (exl3_recon) equals the torch reference decode bit for bit, and exllamav3's own LinearEXL3 where
+    its package imports (tools/lfm_check.py xcheck runs it on a real pack)."""
+    try:
+        from exllamav3.modules.quant.exl3 import LinearEXL3
+    except Exception:                                              # noqa: BLE001
+        LinearEXL3 = None
+    out = []
+    for kb in (15, 25, 35, 2, 3, 4):
+        w = X.random_block(512, 256, kb, seed=kb)
+        dev = w.inner()
+        ref = X.decode_trellis(w.t.cpu()).to(dev.device)
+        assert torch.equal(dev, ref), kb
+        if LinearEXL3 is not None:
+            mul1 = torch.tensor([X.MUL1 - (1 << 32)], dtype=torch.int32, device="cuda")
+            lin = LinearEXL3(None, w.K, w.N, suh=w.suh[0].contiguous(), svh=w.svh.contiguous(),
+                             trellis=w.t.contiguous(), mul1=mul1)
+            assert torch.equal(dev, lin.get_inner_weight_tensor().to(torch.float16)), kb
+        out.append(f"{X.rate(kb):g}")
+    return f"rates {', '.join(out)}: recon = reference" + (" = LinearEXL3" if LinearEXL3 else " (no exllamav3 here)")
+
+
+def test_dense_and_experts_at_half_rates():
+    out = []
+    for N, Kin, kb in ((6144, 2048, 25), (3072, 2048, 35), (2048, 2048, 15), (2048, 11776, 25)):
+        w = X.random_block(N, Kin, kb, seed=N + Kin + kb)
+        x = (torch.randn(32, Kin, device="cuda") * 0.5).to(torch.bfloat16)
+        rel = _rel(FK.dense(x[:1], w), X.reference_matmul(x[:1], w))
+        assert rel < BOUND, (N, Kin, kb, rel)
+        for M in (2, 5, 16, 32):
+            assert torch.equal(FK.dense(x[:M], w)[M - 1], FK.dense(x[M - 1:M], w)[0]), (N, Kin, kb, M)
+        # rows past the row kernels' 32 take the slab (the skinny GEMM decodes whole rates)
+        x64 = (torch.randn(64, Kin, device="cuda") * 0.5).to(torch.bfloat16)
+        assert _rel(X.exl3_matmul(x64, w), X.reference_matmul(x64, w)) < BOUND, (N, Kin, kb)
+        out.append(f"{N}x{Kin}@{X.rate(kb):g} {rel:.1e}")
+    E = 8
+    experts = [tuple(X.random_block(n, k, kb, seed=100 * e + j) for j, (n, k) in enumerate(((I, H), (I, H), (H, I))))
+               for e, kb in zip(range(E), (25, 3, 35, 15, 2, 4, 25, 7))]
+    bank = FK.MoEBank([tuple((b.t, b.suh[0], b.svh) for b in ex) for ex in experts], "cuda")
+    assert bank.ks[-1] == 7, bank.ks                          # the widest tile sizes the stages
+    x = (torch.randn(16, H, device="cuda") * 0.5).to(torch.bfloat16)
+    g = torch.Generator().manual_seed(2)
+    ids = torch.stack([torch.randperm(E, generator=g)[:4] for _ in range(16)]).to(torch.int32).cuda()
+    wts = torch.rand(16, 4, generator=g).cuda()
+    wts = (wts / wts.sum(1, keepdim=True)).to(torch.bfloat16).float()
+    none = torch.empty(0, dtype=torch.int32, device="cuda")
+    rel = _rel(FK.moe_combine(FK.moe_experts(x[:1], ids[:1], bank, order=none), ids[:1], wts[:1]),
+               FK.moe_reference(x[:1], ids[:1], wts[:1], experts))
+    assert rel < BOUND, rel
+    full = FK.moe_experts(x, ids, bank)
+    for m in range(16):
+        assert torch.equal(full[4 * m:4 * m + 4], FK.moe_experts(x[m:m + 1], ids[m:m + 1], bank, order=none)), m
+    from tools import fn_prefill_kernels as PK
+    xp = (torch.randn(64, H, device="cuda") * 0.5).to(torch.bfloat16)
+    idp = torch.stack([torch.randperm(E, generator=g)[:4] for _ in range(64)]).to(torch.int32).cuda()
+    wp = torch.full((64, 4), 0.25, device="cuda")
+    prel = _rel(FK.moe_combine(PK.moe_grouped(xp, idp, bank), idp, wp), FK.moe_reference(xp, idp, wp, experts))
+    assert prel < BOUND, prel
+    out.append(f"experts at 1.5..3.5 and 7: one row {rel:.1e}, 16 rows each its one-row bits, prefill {prel:.1e}")
+    return "; ".join(out)
 
 
 def test_tiny_engine_and_kernels_on_the_gpu():

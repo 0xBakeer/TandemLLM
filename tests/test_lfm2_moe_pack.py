@@ -65,7 +65,7 @@ def _bf16_ckpt(d):
     return cfg, W
 
 
-def _exl3_pack(d, half: str | None = None, codebook: str = "mul1"):
+def _exl3_pack(d, half: str | None = None, codebook: str = "mul1", halves: bool = False):
     from tools.exl3_linear import random_block
     cfg = config_from_dict(TINY_EXL3)
     plain = {k: v for k, v in _random_weights(cfg).items()
@@ -75,12 +75,15 @@ def _exl3_pack(d, half: str | None = None, codebook: str = "mul1"):
     for i, (base, N, K) in enumerate(projections(cfg) + [("lm_head", cfg.vocab_size, cfg.hidden_size)]):
         # q, k and v at one rate (one fused launch); the rest mixed 2..4
         kb = 4 if base == "lm_head" else (3 if base.endswith(("q_proj", "k_proj", "v_proj")) else 2 + i % 3)
+        if halves and base != "lm_head":
+            # exllamav3 1.6.0's half-integer rates beside whole ones (1.5, 2.5 and 3.5 as 15, 25, 35)
+            kb = 35 if base.endswith(("q_proj", "k_proj", "v_proj")) else (15, 25, 35, 2, 3, 4)[i % 6]
         b = random_block(N, K, kb, device="cpu", seed=i)
         blocks[base] = b
         key = base if base == "lm_head" else "model." + base
         t = b.t
         if base == half:
-            t = torch.zeros(t.shape[0], t.shape[1], 16 * 2 + 8, dtype=torch.int16)
+            t = torch.zeros(t.shape[0], t.shape[1], 16 * 4 + 8, dtype=torch.int16)        # 4.5: no kernel
         out[key + ".trellis"] = t
         out[key + ".suh"] = b.suh.view(-1)
         out[key + ".svh"] = b.svh
@@ -131,8 +134,31 @@ def test_exl3_pack_audits_and_runs():
     return f"EXL3 pack vs its dequantised weights: max rel {rel:.3f}"
 
 
+def test_half_integer_rates_audit_and_run():
+    """ENG-285: a pack with 1.5, 2.5 and 3.5 bits a weight beside whole rates (exllamav3 1.6.0 below
+    4 bpw) loads, and runs as its dequantised weights (the reference decode of the 16 K + 8 tiles)."""
+    d = os.path.join(_tmp(), "exl3-half")
+    cfg, plain, blocks = _exl3_pack(d, halves=True)
+    idx = PackIndex.open(d)
+    idx.audit()
+    h = idx.k_histogram()
+    rates = {k for v in h.values() for k in v}
+    assert {1.5, 2.5, 3.5} <= rates, h
+    _, LW, experts, _ = load(d, device="cpu", dtype=torch.float32, log=None, idx=idx)
+    assert LW["layers.1.self_attn.qkv"].kb == 35
+    W = {k: v.float() for k, v in plain.items()}
+    for base, b in blocks.items():
+        W[base + ".weight"] = b.dequant().float()
+    a = Lfm2MoeRef(cfg, W)
+    b = Lfm2MoeRef(cfg, LW, experts=experts)
+    la, lb = a.prefill(PROMPT, a.new_state(32)), b.prefill(PROMPT, b.new_state(32))
+    rel = float((la - lb).abs().max() / la.abs().max())
+    assert rel < 0.05, rel
+    return f"rates {sorted(rates)}: max rel {rel:.3f}"
+
+
 def test_exl3_pack_the_kernels_cannot_decode():
-    for what, match in (("half", "half-integer rate"), ("mcg", "mcg codebook"), ("3inst", "3inst codebook")):
+    for what, match in (("half", "4.5 bits a weight"), ("mcg", "mcg codebook"), ("3inst", "3inst codebook")):
         d = os.path.join(_tmp(), what)
         if what == "half":
             _exl3_pack(d, half="layers.2.conv.in_proj")
