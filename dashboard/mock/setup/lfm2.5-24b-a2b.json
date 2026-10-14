@@ -104,8 +104,8 @@
    "label": "EXL3 3.0 bpw",
    "format": "exl3",
    "bpw": 3.0,
-   "disk_gb": 9.5,
-   "weights_gib": 8.85,
+   "disk_gb": 9.68,
+   "weights_gib": 9.4,
    "drafters_gib": 0.0,
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.0",
    "hf_private": true,
@@ -116,10 +116,10 @@
     "top1_pct": null,
     "ppl": null,
     "date": "2026-10-14",
-    "source": "not measured yet (ENG-285)"
+    "source": "not measured on the engine's chat comparison yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Every tensor at 3 bits, the head at 6 (measured 2026-10-14: 9.68 GB, 9.4 GiB at load); the decode step from its graph 158.7 tok/s, without dense splits of its own yet. The box's exllamav3 model_diff: KL 0.195 on chat text against BF16 (4.0: 0.098). Not public yet.",
    "max_window": 131072
   },
   {
@@ -161,14 +161,14 @@
     "provisional"
    ],
    "quality": {
-    "kl_vs_bf16": 0.0267,
-    "top1_pct": 95.61,
+    "kl_vs_bf16": 0.0326,
+    "top1_pct": 94.73,
     "ppl": null,
     "date": "2026-10-14",
-    "source": "tools/lfm_check.py cmp: the engine on this pack teacher-forced on the BF16 run's tokens against transformers' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions), the trace-calibrated pack of 2026-10-14"
+    "source": "tools/lfm_check.py cmp: the engine on this pack teacher-forced on the BF16 run's tokens against transformers' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions); the pack with exllamav3's default calibration (a trace-calibrated one gave 95.61 % and 0.0267 on the same tokens)"
    },
    "assets_required": [],
-   "note": "The default for now, provisional: chosen before any measured run, when the kernels here decoded whole-bit rates only (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).",
+   "note": "The default for now, provisional until every pack is measured: 3.0 decodes 9 % faster (158.7 against 145.8 tok/s, the step from its graph) for about twice the KL on chat text (0.195 against 0.098, the box's exllamav3 model_diff). In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).",
    "max_window": 131072
   },
   {
