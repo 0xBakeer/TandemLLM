@@ -32,13 +32,13 @@ DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768
 | decode step from its graph (`nh_check.py bench`, 256 tokens) | 33.63 tok/s (29.73 ms) | | |
 | prose / chat / code, 512 greedy tokens, thinking off (`fn_lookup_ab.py`) | 34.14 / 33.77 / 33.97 | 33.08 / 34.13 / 36.21 | 34.17 / 34.16 / 34.15 (no drafted round: the cut chose the plain step every turn) |
 | edit / copy asks | 33.85 / 33.74 | 105.77 / 140.74 (9.83 / 14.19 tokens a block) | 34.01 / 34.06 |
-| `fn_server_check.py` set (thinking on, tools, JSON), per request | 32.3-33.9 | 1.0-1.28 tokens a block | 35.7-53.3 tok/s, 2.6-4.3 tokens a block |
+| `fn_server_check.py` set (thinking on, tools, JSON), per request | 32.3-33.9 tok/s | 1.0-1.28 tokens a block | 34.2-53.3 tok/s, 1.0-4.3 tokens a block |
 | 1 / 2 / 3 requests at once, 256 tokens each, total (`lfm_parallel.py`, lookup drafter) | | 33.73 / 44.73 / 50.65 tok/s, 2 and 3 slots decoding together (254 joint rounds), each text its request's alone | |
 
 - Same weights in llama.cpp (5ecbe1ac1, `llama-bench -ngl 99 -p 0 -n 256`, the BF16 GGUF of ggml-org at 8a08a1c8, same board): 33.31 tok/s against the engine's 33.63.
 - Every answer of the lookup and the MTP runs is the plain run's text. Through `fn_server_check.py`, 15 of 20 MTP answers equal the plain ones; the other 5 differ only from the reasoning budget's close on, which lands at the end of the verified block (2 to 3 tokens later than the plain step's), one of the output changes docs/exactness.md lists.
 - The MTP head runs eagerly (no graph) and reads the 0.70 GB head once a depth; with thinking off StairCut priced its rounds above the plain step and took plain steps. Not the profile's default until its rounds are captured and priced.
-- Prefill (`nh_check.py staircase`, one expert GEMM pair an expert): 545 tok/s at 1,024 tokens, 2,537 at 8,192. The batched expert GEMMs (`experts_grouped`) are not measured yet.
+- Prefill (`nh_check.py staircase`, one expert GEMM pair an expert): 545 tok/s at 1,024 tokens, 2,537 at 8,192. Two batched GEMMs padded to the busiest expert measured 359 and 1,248 and were dropped.
 
 ## Arithmetic
 
