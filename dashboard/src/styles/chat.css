@@ -2389,6 +2389,44 @@ qse-chat-panes {
   width: 100%;
   background: var(--bg-inset);
 }
+/* a video, audio file, PDF or binary from the sandbox (VIS-159) */
+.ch-mediapane,
+.ch-media {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ch-media-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ch-media-video {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  max-height: 100%;
+  background: #000;
+}
+.ch-media-audio {
+  width: 100%;
+  margin: 12px 0;
+}
+.ch-media-note {
+  padding: 12px;
+}
+.ch-media.is-compact .ch-media-video {
+  max-height: 260px;
+  border-radius: var(--r-sm, 6px);
+}
+.ch-call-media {
+  padding: 0 10px 8px;
+}
+.ch-call-media qse-media-view {
+  display: block;
+  width: 100%;
+}
 .ch-ctxpane qse-chat-context {
   flex: 1;
   min-height: 0;

@@ -575,10 +575,21 @@ export interface SandboxFile {
   modified_at?: string;
   etag?: string;
 }
+/** `GET .../sandbox/file`: the text, or null for a binary or a file over 2 MiB (VIS-159) */
+export interface SandboxFileView {
+  content: string | null;
+  mime: string;
+  bytes: number;
+  etag?: string;
+  /** the pane kind: file (text), binary, image, preview, markdown, video, audio, pdf */
+  kind?: string;
+  /** the view route, streamed with byte ranges */
+  url?: string;
+}
 
 // ---- panes ------------------------------------------------------------------------------------
 
-export type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'context' | 'plan';
+export type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'video' | 'audio' | 'binary' | 'context' | 'plan';
 export interface PaneRef {
   /** set by the server when the pane is in the layout */
   id?: string;
