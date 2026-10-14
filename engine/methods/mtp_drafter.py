@@ -266,6 +266,16 @@ class MTPTreeDrafter:
             return None
         if not self._feed(int(context[-1])) or k < 1:
             return None
+        look = None
+        if self.head.depth == 0:
+            # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
+            # one, so the drafted rounds' price is learned from rounds that drafted (LFM2.5, 2026-10-14:
+            # its rounds with no match priced drafting above the plain step, and the edit and copy asks
+            # after three chat ones took plain turns throughout)
+            look = self._look(context)
+            if look is None:
+                self.pending = None
+                return None
         rows, nexts = self.pending
         self.pending = None
         c0 = getattr(self.head, "captures", 0)
@@ -275,7 +285,8 @@ class MTPTreeDrafter:
         host = time.perf_counter() - t0
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()
-        look = self._look(context)
+        if self.head.depth:
+            look = self._look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
         tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)

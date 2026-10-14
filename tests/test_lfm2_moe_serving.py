@@ -109,8 +109,35 @@ def test_no_head_drafts_the_lookup_alone():
     d.prime([1, 2, 3, 4])
     d.sync([1, 2, 3, 4], _rows(0, 4), 0)
     tree = d.propose_tree([1, 2, 3, 4], 32)
-    assert tree is None or tree.n_draft == 0, tree.tokens              # no match: the plain step
+    assert tree is None, tree.tokens                                   # no match: the plain step
     return "a copy of the request's text as the whole block; no match, no draft"
+
+
+def test_no_head_rounds_without_a_match_are_plain_steps():
+    """A NoHead round the lookup has nothing for is priced as a plain step, so a run of them does not
+    teach StairCut that drafting loses: the copy that comes after them still drafts."""
+    eng = types.SimpleNamespace(captured=False, commit_ms=0.0)
+    d = MTPTreeDrafter(eng, NoHead(), StairCut(PriceModel(), siblings=False),
+                       NgramDrafter(corpus_path="", min_order=3, max_depth=16))
+    d.reset()
+    ctx = [1, 2, 3, 4]
+    d.prime(ctx)
+    d.sync(ctx, _rows(0, len(ctx)), 0)
+    for t in range(10, 40):                          # thirty rounds with nothing to copy
+        assert d.propose_tree(ctx, 32) is None
+        d.on_plain(7.3)
+        ctx = ctx + [t]
+        d.observe([t])
+        d.sync([t], _rows(len(ctx) - 1, 1), len(ctx) - 1)
+    assert d.cut.spec_ms(0) is None, d.cut.spec_ms(0)   # nothing learned about drafted rounds
+    assert d.stats["rounds"] == 0 and d.stats["plain"] == 30
+    text = list(range(500, 512))
+    ctx = ctx + text + [700] + text[:4]
+    d.observe(text + [700] + text[:4])
+    d.sync(text + [700] + text[:4], _rows(len(ctx) - 17, 17), len(ctx) - 17)
+    tree = d.propose_tree(ctx, 32)
+    assert tree is not None and tree.n_draft >= 8, tree and tree.tokens
+    return f"30 rounds with no match priced as plain steps; then a copy of {tree.n_draft} tokens"
 
 
 def test_kv_length_and_restart():
