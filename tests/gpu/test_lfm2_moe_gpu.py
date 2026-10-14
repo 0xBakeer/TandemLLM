@@ -10,6 +10,7 @@
     sharing experts;
   * ENG-285: the half-integer rates (1.5, 2.5, 3.5 bits) decoded as exllamav3 decodes them, through
     the dense, MoE and prefill kernels, and 7-bit experts;
+  * ENG-288: the decode step is one CUDA graph replay a token, its logits the eager step's;
   * the tiny-model engine tests of tests/test_lfm2_moe_engine.py and the row kernels of
     tests/test_lfm2_moe_kernels.py, here on the GPU.
 
@@ -152,6 +153,37 @@ def test_tiny_engine_and_kernels_on_the_gpu():
                 assert not (r and "skipped" in r), name
                 n += 1
     return f"{n} tests"
+
+
+def test_the_decode_step_is_one_graph():
+    """ENG-288 "the decode step is one graph": on a warm DecodeGraph each decoded token is one replay of
+    one captured CUDA graph (no capture after the first inside an attention class, no other launch path),
+    and its logits are the eager step's bit for bit."""
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import test_lfm2_moe_engine as E
+
+    from engine.models.lfm2_moe.engine import DecodeGraph
+    cfg, eng, _ = E.tiny()
+    a, b = eng.new_state(128), eng.new_state(128)
+    eng.prefill(E.PROMPT, a)
+    eng.prefill(E.PROMPT, b)
+    toks = [11, 50, 3, 7, 19]
+    want = E._decode(eng, b, toks)
+    dg = DecodeGraph(eng, a)
+    dg(toks[0])                                   # warm: the class's capture
+    assert dg.captures == 1 and len(dg.graphs) == 1
+    replays = []
+    orig = torch.cuda.CUDAGraph.replay
+    torch.cuda.CUDAGraph.replay = lambda g: (replays.append(g), orig(g))[1]
+    try:
+        got = [dg(t)[0].clone() for t in toks[1:]]
+    finally:
+        torch.cuda.CUDAGraph.replay = orig
+    torch.cuda.synchronize()
+    assert len(replays) == len(toks) - 1 and len({id(g) for g in replays}) == 1, len(replays)
+    assert dg.captures == 1, dg.captures
+    assert torch.equal(torch.stack(got), want[1:]), "graph logits differ from the eager step's"
+    return f"{len(replays)} tokens, {len(replays)} replays of 1 graph, logits = eager"
 
 
 if __name__ == "__main__":
