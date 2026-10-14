@@ -2,6 +2,19 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+### NemotronH (Nemotron 3.5 Lightning, Bolt)
+
+A fourth model family: NVIDIA's NemotronH hybrid (ENG-E12), Mamba2, NoPE attention and mixture-of-experts blocks with an MTP head, built on Nemotron 3.5 Lightning 30B-A3B BF16 for Nemotron 3.5 Bolt 74B-A9B. The other models' text and speed do not change. Reference: [docs/nemotron-h.md](docs/nemotron-h.md).
+
+- `engine/models/nemotron_h/`: configuration (`hybrid_override_pattern`, `layers_block_type`, `block_configs` with per-block top k, width and expert count, Omni `llm_config`), reference forward, BF16 and GGUF readers, Triton row kernels, board engine, MTP head, serving adapter.
+- Correctness: reference within 2e-5 of transformers' NemotronH (three tiny models, fp32). Lightning BF16 against transformers BF16: top token 98.63 % of 1,024 chat positions, all 14 differences near ties.
+- Exactness: a verify row equals the decode step's row bit for bit; a commit walks each SSM state along the kept path with the decode kernel, so the committed state equals the decode steps'; load-time self-check over 24 rows and the states.
+- GGUF: `nemotron_h_moe` files, IQ2_XXS weights and expert banks decoded on the fly (`tools/iq2_linear.py`, twin equal to gguf-py bit for bit), Q8_0 dequantised at load; other types refused by name.
+- Profile `nemotron-lightning-bf16` (test model, Setup Guide order 90): decode step 33.63 tok/s (llama.cpp on the same BF16 weights 33.31); edit and copy asks with the lookup 105.8 and 140.7 tok/s; 1, 2 and 3 requests at once 33.7, 44.7 and 50.7 tok/s in total. DGX Spark, 2026-10-15.
+- The checkpoint's MTP head as a draft head (`QSE_NH_HEAD=mtp`, off in the profile): its draft is the trunk's greedy token at depth 1, 2, 3 in 91.9, 80.6, 69.5 % of 1,000 chat positions.
+
 ## 0.9.1, 2026-10-14
 
 0.9.1 adds web search and media playback to the Chat tab, turns on the loop guard, the loop escape and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page and the EXL3 base download. The decode path does not change: under `engine/` only the small models' slot changed (VIS-153).
