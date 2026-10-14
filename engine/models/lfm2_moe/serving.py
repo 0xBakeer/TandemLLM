@@ -38,8 +38,12 @@ MODEL_ID = "lfm2.5-24b-a2b"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
+#: the tables the arithmetic reads (a dense split is a summation order)
+TABLES = ("ops/lfm25-dense-splits.json",)
+
+
 def manifest() -> Manifest:
-    return Manifest(arch="lfm2_moe", modules=MODULES)
+    return Manifest(arch="lfm2_moe", modules=MODULES, data=TABLES)
 
 
 def _tensors(o) -> list:

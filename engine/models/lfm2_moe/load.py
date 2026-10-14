@@ -16,6 +16,7 @@ reference adds it in fp32).
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -76,6 +77,28 @@ def _proj(idx: PackIndex, base: str, device, dtype, out_fp32: bool = False):
     return _plain(idx, base + ".weight", device, dtype)
 
 
+#: LFM2.5's own splits of tools/fn_kernels.dense for its EXL3 shapes (tools/fn_tiles.py --dense; a shape not in
+#: the file takes the kernel's default split). Flash-Next's shapes are not among them, so its table is untouched.
+DENSE_SPLITS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                            "ops", "lfm25-dense-splits.json")
+
+
+def apply_splits(path: str = DENSE_SPLITS) -> int:
+    """The dense splits of the file into tools/fn_kernels.DENSE_SPLIT; returns the entries applied."""
+    import json
+    if not os.path.isfile(path):
+        return 0
+    from tools import fn_kernels as FK
+    n = 0
+    for k, v in json.load(open(path)).items():
+        if k.startswith("_"):
+            continue
+        N, Kin, kb = (int(x) for x in k.split("x"))
+        FK.DENSE_SPLIT[(N, Kin, kb)] = (int(v["S"]), int(v["warps"]))
+        n += 1
+    return n
+
+
 def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackIndex | None = None):
     """(idx, W, experts, timing) of the checkpoint or pack at `path`."""
     from tools.exl3_linear import EXL3Block
@@ -86,6 +109,8 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackInd
         idx.check_mul1()
     c = idx.cfg
     timing = {"index_s": round(time.time() - t0, 2), "notes": list(idx.notes)}
+    if idx.is_exl3 and str(device).startswith("cuda"):
+        timing["dense_splits"] = apply_splits()
     W: dict = {}
     t1 = time.time()
     for base, _, _ in projections(c, experts=False):
