@@ -1315,7 +1315,11 @@ class Router:
         # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
         try:
             if not modelfit.FIT["memory"]:
-                row["extra"]["memory"] = {"mode": "off", "why": "model_fit"}
+                if schema.profile_memory(prof) != "off" and plan.res.mode != "raw" and \
+                        getattr(plan, "memory_opt", None) != "off":
+                    memory_mod.off_note(plan, sh, row, "model_fit", dry)
+                else:
+                    row["extra"]["memory"] = {"mode": "off", "why": "model_fit"}
                 raise _Skip
             memory_mod.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row,
                               dry, plan.user, (plan.caps or {}).get("memory"),

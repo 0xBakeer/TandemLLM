@@ -91,6 +91,14 @@ INDEX_HEAD_NO_SHELL = ("Your memory: notes the runtime keeps for this user{proje
                        "user. The notes that match a message are given to you in full with it; "
                        "there is no tool to read or search them here, so when no note answers a "
                        "question, say that you have no note about it.")
+# SRV-471: a profile that turns the memory off on purpose (`memory: off`), a model it does not fit
+# (modelfit), or a backend whose harness switch has it off (proxy caps): one line once a session, so the model says memory is off here instead of the generic "I do
+# not carry memories between conversations". An absent switch adds nothing (the release's request)
+OFF_NOTE = ("Memory: TandemLLM keeps notes about the user between conversations, but memory is "
+            "off {where}, so you have no notes here. When asked what you remember, say that "
+            "memory is off {where}; do not say that you cannot have a memory.")
+OFF_WHERE = {"profile": "in this profile", "model_fit": "for this model",
+             "backend": "for this backend"}
 BODIES_HEAD = ("Notes from your memory that match this message. When one answers it, answer from "
                "the note and say it comes from your notes; a ratified note is confirmed by the "
                "user. Read files only for what the notes do not say, and when they disagree with "
@@ -259,13 +267,35 @@ def opt_of(headers) -> str | None:
     return v if v in OPT_OUT else None
 
 
+def off_note(plan, sh, row, why: str, dry: bool) -> None:
+    """OFF_NOTE as a tail note, once a session (its own decision type, so it replays where it
+    sat); the decision row says `off` and why."""
+    row["extra"]["memory"] = {"mode": "off", "why": why}
+    if plan.res.mode != "on":
+        return
+    plan.decisions["memory_off"] = "on"
+    if dry or sh.compaction:
+        return
+    text = OFF_NOTE.replace("{where}", OFF_WHERE.get(why, "here"))
+    plan.extras.append({"key": f"memory_off:{_h(text)}", "text": text,
+                        "parts": [{"kind": "memory_off", "name": why}],
+                        "kinds": {"memory_off"}, "reason": f"memory off ({why})",
+                        "unless": ("memory_off", why)})
+
+
 def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls, row,
            dry: bool, user: str | None, cap: str | None = None, opt: str | None = None) -> None:
-    """The memory's part of a plan (the module's header). Nothing at all with the switch off."""
+    """The memory's part of a plan (the module's header). Nothing at all with the switch absent;
+    with it `off` on purpose, or the model's cap off, the off note."""
     mem = getattr(router, "memory", None)
     if mem is None:
         return
     mode = schema.profile_memory(prof)
+    if opt != "off" and plan.res.mode != "raw":
+        if prof.get("memory") == "off":
+            return off_note(plan, sh, row, "profile", dry)
+        if mode != "off" and cap in ("off", "raw"):
+            return off_note(plan, sh, row, "backend", dry)
     if opt == "off" and mode != "off":
         row["extra"]["memory"] = {"mode": "off", "why": "header"}     # SRV-173
         return
