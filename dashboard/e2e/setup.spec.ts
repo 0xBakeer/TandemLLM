@@ -236,9 +236,14 @@ test('setup mode: #/ goes to #/setup and the other views are off with a reason',
   await page.goto('./#/usage');
   await expect(page).toHaveURL(/#\/setup$/);
   await expect(page.locator('[data-setup-mode]')).toBeVisible();
-  const off = page.locator('.rail .rail-tab.is-off');
-  await expect(off).toHaveCount(7);
-  await expect(off.first()).toHaveAttribute('title', 'Not available while the box is in setup mode');
+  // VIS-161: every view but Setup is off with the reason, the Chat tab included
+  const on = page.locator('.rail a.rail-tab:not(.is-off)');
+  await expect(on).toHaveCount(1);
+  await expect(on).toHaveAttribute('href', '#/setup');
+  const off = page.locator('.rail a.rail-tab.is-off');
+  await expect(off).toHaveCount(8);
+  for (const tab of await off.all()) await expect(tab).toHaveAttribute('title', 'Not available while the box is in setup mode');
+  await expect(off.filter({ hasText: 'Chat' })).toHaveAttribute('aria-disabled', 'true');
   await page.evaluate(() => (location.hash = '#/system'));
   await expect(page).toHaveURL(/#\/setup$/);
 });

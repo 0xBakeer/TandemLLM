@@ -441,7 +441,7 @@ test('@setupmode a box in setup mode: /health says so, the page opens on the gui
   await expect(page.locator(`.mtile[data-model="${MODEL}"]`)).toBeVisible();
   await expect(page.locator('.topbar .pill')).toHaveText('setup');
   await expect(page.locator('[data-setup-mode]')).toBeVisible();
-  if (!isPhone(page)) await expect(page.locator('.rail .rail-tab.is-off')).toHaveCount(7);
+  if (!isPhone(page)) await expect(page.locator('.rail a.rail-tab.is-off')).toHaveCount(8); // VIS-161: Chat included
   await shot(page, 'setupmode-0-tiles');
   await page.locator(`.mtile[data-model="${MODEL}"]`).click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'overview');
