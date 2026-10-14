@@ -13,10 +13,8 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi, setupUnauthorized } from './api';
-import { applyJobEvent, isFinal } from './job-view';
+import { appendLog, applyJobEvent, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
-
-const LOG_KEEP = 300;
 
 @customElement('qse-install-progress')
 export class QseInstallProgress extends LightElement {
@@ -29,7 +27,7 @@ export class QseInstallProgress extends LightElement {
   @property({ type: Boolean }) compact = false;
 
   @state() private job: SetupJob | null = null;
-  @state() private log: { line: string; ts: number }[] = [];
+  @state() private log: JobLog = { lines: [], dropped: 0 };
   @state() private conn: StreamState = 'closed';
   @state() private awaySince: number | null = null;
   @state() private lost = false;
@@ -38,6 +36,7 @@ export class QseInstallProgress extends LightElement {
   private stream: ResumableStream | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private seenIds = new Set<string>();
+  private finalSent = false;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -69,6 +68,8 @@ export class QseInstallProgress extends LightElement {
     this.stream = null;
     this.lost = false;
     this.seenIds.clear();
+    this.log = { lines: [], dropped: 0 };
+    this.finalSent = false;
     if (!this.jobId) return;
     const id = this.jobId;
     this.stream = new ResumableStream({
@@ -87,8 +88,7 @@ export class QseInstallProgress extends LightElement {
           return;
         }
         if (data.type === 'log') {
-          const next = [...this.log, { line: data.line, ts: data.ts }];
-          this.log = next.length > LOG_KEEP ? next.slice(-LOG_KEEP) : next;
+          this.log = appendLog(this.log, { line: data.line, ts: data.ts });
           void this.updateComplete.then(() => {
             const el = this.querySelector('.inst-log');
             if (el) el.scrollTop = el.scrollHeight;
@@ -96,25 +96,27 @@ export class QseInstallProgress extends LightElement {
           return;
         }
         this.job = applyJobEvent(this.job, data);
-        if (isFinal(this.job)) {
-          this.stream?.close();
+        if (isFinal(this.job) && !this.finalSent) {
+          this.finalSent = true;
           this.dispatchEvent(new CustomEvent('job-final', { detail: this.job, bubbles: true }));
         }
+        // VIS-151: read on to the server's done event, which follows the log and the final job
+        if (streamFinished(data, this.job)) this.stream?.close();
       },
       onState: (s, detail) => {
         this.conn = s;
-        if (s === 'unauthorized') {
+        const act = streamAction(s, detail, this.job);
+        if (act === 'signin') {
           this.signIn = true;
           this.awaySince = null;
           setupUnauthorized();
-        } else if (s === 'open') this.awaySince = null;
-        else if ((s === 'reconnecting' || s === 'error') && !isFinal(this.job)) {
-          this.awaySince ??= Date.now();
-          if (detail && /HTTP 404/.test(detail)) {
-            this.lost = true;
-            this.stream?.close();
-          }
-        }
+        } else if (act === 'open') this.awaySince = null;
+        else if (act === 'lost') {
+          this.lost = true;
+          this.awaySince = null;
+          this.stream?.close();
+        } else if (act === 'close') this.stream?.close();
+        else if (act === 'away') this.awaySince ??= Date.now();
       },
     });
     this.stream.start();
@@ -164,8 +166,9 @@ export class QseInstallProgress extends LightElement {
         )}
       </ol>
       <details class="inst-logbox" ?open=${!!failedStep || !final}>
-        <summary>${S.logTail} <span class="muted small num">${this.log.length}</span></summary>
-        <pre class="inst-log" tabindex="0">${this.log.map((l) => l.line).join('\n')}</pre>
+        <summary>${S.logTail} <span class="muted small num" data-log-count>${this.log.lines.length + this.log.dropped}</span></summary>
+        ${this.log.dropped ? html`<p class="muted small" data-log-dropped>${S.logDropped(this.log.dropped)}</p>` : nothing}
+        <pre class="inst-log" tabindex="0">${this.log.lines.map((l) => l.line).join('\n')}</pre>
       </details>
       ${final
         ? html`<div class="inst-actions">

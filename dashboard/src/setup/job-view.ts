@@ -21,3 +21,36 @@ export function applyJobEvent(job: SetupJob | null, ev: SetupJobEvent): SetupJob
 export function isFinal(job: SetupJob | null): boolean {
   return !!job && (job.state === 'done' || job.state === 'failed' || job.state === 'rolled_back');
 }
+
+/** the log lines the page keeps (the runner's job keeps them all in events.jsonl) */
+export const LOG_KEEP = 300;
+
+export interface JobLog {
+  lines: { line: string; ts: number }[];
+  /** lines dropped from the top to stay at LOG_KEEP */
+  dropped: number;
+}
+
+/** VIS-151: one more log line, the oldest dropped past `keep` and counted. */
+export function appendLog(log: JobLog, line: { line: string; ts: number }, keep = LOG_KEEP): JobLog {
+  const lines = [...log.lines, line];
+  const over = Math.max(0, lines.length - keep);
+  return { lines: over ? lines.slice(over) : lines, dropped: log.dropped + over };
+}
+
+/** VIS-151: the stream is done with once the server's `done` event arrived (it comes after the
+ *  log and the final job), or once a final job's stream ended (a server that sends no `done`). */
+export function streamFinished(ev: SetupJobEvent | null, job: SetupJob | null): boolean {
+  return ev ? ev.type === 'done' : isFinal(job);
+}
+
+/** What the page does on a stream state: sign in, open, lost (404: the job's folder is gone,
+ *  VIS-151), close (a final job's stream ended), away (the engine restarts), else nothing. */
+export function streamAction(state: string, detail: string | undefined, job: SetupJob | null): 'signin' | 'open' | 'lost' | 'close' | 'away' | null {
+  if (state === 'unauthorized') return 'signin';
+  if (state === 'open') return 'open';
+  if (state === 'error' && detail && /HTTP 404/.test(detail)) return 'lost';
+  if (state === 'reconnecting' && streamFinished(null, job)) return 'close';
+  if ((state === 'reconnecting' || state === 'error') && !isFinal(job)) return 'away';
+  return null;
+}

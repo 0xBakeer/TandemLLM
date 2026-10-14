@@ -1,9 +1,9 @@
-// The install page's job stream (VIS-149): the Gherkin of VIS-149 as the test matrix. The server's
+// The install page's job stream (VIS-149, VIS-151): their Gherkin as the test matrix. The server's
 // half (the order it sends the job in) is tests/test_setup_job_stream.py.
 import { describe, expect, it } from 'vitest';
 import type { SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
-import { applyJobEvent, isFinal } from '../src/setup/job-view';
+import { appendLog, applyJobEvent, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
 
 const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
 
@@ -148,5 +148,99 @@ describe('VIS-149: the install page shows the job as it is on the box', () => {
     await new Promise((r) => setTimeout(r, 60));
     s.close();
     expect(seen).toEqual(['run2']);
+  });
+});
+
+// VIS-151: the log of a finished install stays readable (the Gherkin of VIS-151)
+
+/** the page's fold (install.ts onEvent) over the server's frames, cut into `chunks` */
+function page(chunks: string[]): Promise<{ job: SetupJob | null; log: JobLog; lost: boolean }> {
+  return new Promise((resolve) => {
+    let j: SetupJob | null = null;
+    let log: JobLog = { lines: [], dropped: 0 };
+    let lost = false;
+    const seen = new Set<string>();
+    const s: ResumableStream = new ResumableStream({
+      url: () => '/v1/setup/jobs/1e1ecbede39315c9',
+      fetchImpl: chunks.length ? fetchOf(chunks) : ((async () => new Response('{"error":{"code":"not_found"}}', { status: 404 })) as typeof fetch),
+      minBackoffMs: 5,
+      maxBackoffMs: 5,
+      onEvent: (ev) => {
+        if (ev.id) {
+          if (seen.has(ev.id)) return;
+          seen.add(ev.id);
+        }
+        const d = JSON.parse(ev.data) as SetupJobEvent;
+        if (d.type === 'log') {
+          log = appendLog(log, { line: d.line, ts: d.ts });
+          return;
+        }
+        j = applyJobEvent(j, d);
+        if (streamFinished(d, j)) s.close();
+      },
+      onState: (st, detail) => {
+        const act = streamAction(st, detail, j);
+        if (act === 'lost') lost = true;
+        if (act === 'lost' || act === 'close' || act === 'away') s.close();
+        if (st === 'closed') resolve({ job: j, log, lost });
+      },
+    });
+    s.start();
+  });
+}
+
+const finished = (n: number) =>
+  Array.from({ length: n }, (_, i) => frame(i + 6, { type: 'log', line: `line ${i}`, ts: i })).join('') +
+  frame(n + 21, { type: 'job', job: DONE }) +
+  frame(n + 22, { type: 'done', state: 'done', message: 'exl3-6.0 is live on port 8000.' });
+
+describe('VIS-151: the log of a finished install stays readable', () => {
+  it('Reload a finished job', async () => {
+    const all = finished(236);
+    // the 18:56 reload: frame 0 alone in the first chunk; and other splits
+    for (const cut of [all.indexOf('\n\n') + 2, 9596, all.length - 1]) {
+      const r = await page([all.slice(0, cut), all.slice(cut)]);
+      expect(r.job?.state).toBe('done');
+      expect(r.log.lines).toHaveLength(236);
+      expect(r.log.lines[0].line).toBe('line 0');
+      expect(r.log.lines[235].line).toBe('line 235');
+    }
+  });
+
+  it('Live job turns final', async () => {
+    const running = job('running', { check: 'done', unload_assistant: 'done', fetch: 'running' });
+    const first = Array.from({ length: 120 }, (_, i) => frame(i + 6, { type: 'log', line: `line ${i}`, ts: i })).join('') + frame(130, { type: 'job', job: running });
+    const later =
+      Array.from({ length: 30 }, (_, i) => frame(131 + i, { type: 'log', line: `later ${i}`, ts: i })).join('') +
+      frame(161, { type: 'step', step: step('smoke', 'done') }) +
+      frame(162, { type: 'done', state: 'done', message: 'exl3-6.0 is live on port 8000.' });
+    const r = await page([first, later]);
+    expect(r.job?.state).toBe('done');
+    expect(r.log.lines).toHaveLength(150);
+    expect(r.log.lines[119].line).toBe('line 119');
+    expect(r.log.lines[149].line).toBe('later 29');
+  });
+
+  it('Job folder gone', async () => {
+    const r = await page([]);
+    expect(r.lost).toBe(true);
+    expect(r.log.lines).toHaveLength(0);
+  });
+
+  it('a log past the page\'s 300 lines says how many were dropped from the top', async () => {
+    const r = await page([finished(412)]);
+    expect(r.log.lines).toHaveLength(LOG_KEEP);
+    expect(r.log.dropped).toBe(112);
+    expect(r.log.lines[0].line).toBe('line 112');
+    expect(appendLog({ lines: [], dropped: 0 }, { line: 'a', ts: 0 }, 1)).toEqual({ lines: [{ line: 'a', ts: 0 }], dropped: 0 });
+  });
+
+  it('the stream of a final job ends at its done event, not at the final job before it', () => {
+    expect(streamFinished({ type: 'job', job: DONE }, DONE)).toBe(false);
+    expect(streamFinished({ type: 'done', state: 'done', message: null }, DONE)).toBe(true);
+    // a server that sends no done event: the final job's stream ending closes it
+    expect(streamAction('reconnecting', undefined, DONE)).toBe('close');
+    expect(streamAction('reconnecting', undefined, job('running'))).toBe('away');
+    expect(streamAction('error', 'HTTP 404', DONE)).toBe('lost');
   });
 });

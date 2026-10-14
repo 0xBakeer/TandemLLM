@@ -7,6 +7,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Fixes
 
 - Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
+- Setup Guide, install page (VIS-151): a finished job keeps its whole log after a reload (the stream ends at the job's `done` event); past 300 lines the log box says how many it dropped from the top; a job whose folder is gone says so instead of an empty log.
 
 ## 0.9.0, 2026-10-14
 
