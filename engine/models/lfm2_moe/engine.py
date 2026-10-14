@@ -325,7 +325,10 @@ class Lfm2MoeEngine(Lfm2MoeRef):
                     q = K.qk_prep(qkv[r], d["pos"], d["slot"], self.W[a + "q_layernorm.weight"],
                                   self.W[a + "k_layernorm.weight"], self.rope_cos, self.rope_sin, st.k[li], st.v[li],
                                   c.num_attention_heads, c.num_key_value_heads, eps)
-                    K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"], out=o[r])
+                    # the split buffers of this class: a graph of another class holds its own, so a
+                    # capture never frees what an earlier graph replays into
+                    K.attn_rows(q, st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"].setdefault(ns, {}),
+                                out=o[r])
                 out = self.lin(o.view(R, -1), self.W[a + "out_proj.weight"])
             else:
                 bcx = self.lin(n, self.W[p + "conv.in_proj.weight"])
@@ -493,11 +496,14 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         """A prompt (any length) in chunks of PREFILL_CHUNK: the state advances. Logits of the last row
         [1, vocab] fp32 (`head="all"`: of every row of the last chunk; "none": None)."""
         tokens = tokens.view(-1).to(self.device)
-        out = None
+        out, rows = None, []
         for a in range(0, tokens.numel(), PREFILL_CHUNK):
             chunk = tokens[a:a + PREFILL_CHUNK]
             last = a + PREFILL_CHUNK >= tokens.numel()
             out = self.forward_chunk(chunk, st, head=head if last else "none")
+            rows.append(self.prompt_hidden)
+        # every row's final normed state (what a drafter syncs from), not the last chunk's alone
+        self.prompt_hidden = rows[0] if len(rows) == 1 else torch.cat(rows)
         return out
 
     def forward_chunk(self, tokens: torch.Tensor, st: LfmState, head: str = "last") -> torch.Tensor | None:
