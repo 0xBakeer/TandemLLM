@@ -1149,6 +1149,9 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         for m in branch:
             for a in m.get("attachments") or []:
                 files += int(a.get("tokens") or 0)
+        cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
+        files += ctx_mod.file_tokens(branch, cp[1] if cp else 0,
+                                     (cp[2][0], cp[2][1]) if cp and cp[2] else None)
         tokens = _branch_tokens(branch)
         if harness is None and conv.context is not None:
             harness = conv.context.get("harness")
@@ -1160,7 +1163,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
                              run=run.as_dict() if run is not None else None, row=live_row,
                              facts=self.facts(), peek=peek,
                              harness=harness if isinstance(harness, dict) else None,
-                             split=split if isinstance(split, dict) else None)
+                             split=split if isinstance(split, dict) else None,
+                             session=render.session_id(conv.id))
         out["skills"] = self.skills_report(settings)
         return out
 
@@ -1602,7 +1606,11 @@ def _usage(branch: list[dict]) -> dict:
     wall = 0.0
     for m in branch:
         s = m.get("stats")
-        if m["role"] != "assistant" or not s:
+        if m["role"] != "assistant":
+            continue
+        # every call the model made, whatever became of it (a stopped turn has no stats)
+        out["tool_calls"] += sum(1 for p in m.get("parts") or [] if p.get("type") == "tool_call")
+        if not s:
             continue
         out["turns"] += 1
         for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens"):
