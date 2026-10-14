@@ -306,7 +306,7 @@ components:
   group: features
   what: Gives each request the right instructions and helper packages, and watches long sessions so they do not
     get stuck.
-  default: false
+  default: true
   required: false
   memory_gib: 0.0
   memory_max_gib: null
@@ -323,15 +323,16 @@ components:
       'off': 'off'
   assets: []
   docs: docs/server.md
-  note: 'Off by default for this model (measured on 4.0, 2026-10-14): on four short chat asks its notes (1,241 to
-    2,714 hidden tokens) made the model think 856 to 1,437 tokens where it thought 99 to 902 without them, and with
-    thinking off it reasoned in the answer instead of answering. Off, clients talk to the raw engine and the small
-    models below have nothing to do.'
+  note: 'On by default, with the model fit its adapter declares (SRV-441): Laya alone answers the class
+    question, a turn nobody classified thinks at the profile''s default level with nothing added, and a class sets
+    the level and budget with only its core skill in the note: no other package, rule, effort sentence or memory
+    note. Measured on 2.5, 2026-10-14: four short chat asks thought 2,234 tokens against 2,155 raw (the router as
+    written: 9,098); seven Chat-tab tasks, two runs each, succeeded 14 of 14 as raw did.'
 - id: narrator
   label: Narrator
   group: roles
   what: A small model that writes short status lines while the big model thinks, so you can see what it is doing.
-  default: false
+  default: true
   required: false
   memory_gib: 3.6
   memory_max_gib: null
@@ -357,7 +358,7 @@ components:
   group: roles
   what: Three tiny classifiers that answer the conductor's quick questions, like what kind of request this is, in
     milliseconds.
-  default: false
+  default: true
   required: false
   memory_gib: 1.6
   memory_max_gib: null
@@ -373,7 +374,8 @@ components:
   assets:
   - laya
   docs: docs/server.md
-  note: Without them the big model answers those questions itself, which costs a turn each time.
+  note: The class question's only answer on this model (its own one-word answers are no class); without them
+    every turn falls back to the profile's default level.
 - id: response_cache
   label: Response cache
   group: caches

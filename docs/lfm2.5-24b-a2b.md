@@ -51,7 +51,38 @@ Switch: `ops/use-profile.sh lfm25-exl3-3.5`, or the Setup Guide (`#/setup`).
 - Thinking off (`chat_template_kwargs: {"enable_thinking": false}`, or the conductor's): the server closes the block right after the generation prompt.
 - Tool calls: a Python list between `<|tool_call_start|>` and `<|tool_call_end|>`, for example `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`. `server/toolcall.py` (`PythonicCalls`) rewrites each block into the JSON tool tier as the text arrives; the client gets OpenAI `tool_calls`. Values are Python literals (and `true`, `false`, `null`), read with `ast.literal_eval`, never run. A block that is not a list of keyword calls stays text.
 - Sampling default when a request names none: temperature 0.1, top_k 50, repetition penalty 1.05 (`TEMPERATURE`, `TOP_K`, `REP_PENALTY`).
-- Conductor: off by default in the Setup Guide. With its notes (1,241 to 2,714 hidden tokens), four short chat asks reasoned for 856 to 1,437 tokens against 99 to 902 without them.
+- Conductor: on by default, with the model fit below ([Conductor](#conductor)).
+
+## Conductor
+
+The conductor (Laya's three decision models, the narrator, the session monitor) is on by default. The router's documents target Qwen3.8; LFM2.5's adapter declares how the router fits it (`Capabilities.conductor` in `engine/models/lfm2_moe/serving.py`, read by `server/conductor/modelfit.py`; [server.md](server.md#the-model-fit)):
+
+| key | LFM2.5 | effect |
+|-|-|-|
+| `served_classifier` | false | Laya alone answers the class question, also where the router document leaves its stage off |
+| `fallback` | `lean` | a turn no stage classified at its bar thinks at the profile's default level, with nothing added, and its tool turns too |
+| `packages` | `core` | a class's core skill and the client's pins; no general package, no package question |
+| `no_package_classes` | `chat` | no package on the chat class |
+| `effort_notes`, `rules`, `memory` | false | the level sets the switch and the budget alone; no rules, no memory card or index |
+
+Why, measured on `lfm25-exl3-2.5`, 2026-10-14 (`models/lfm2.5-24b-a2b/measurements/conductor-0.9.0.json`):
+
+- With thinking off the model answers the router's class prompt as a chat request. Its one-id answers were right on 0 to 2 of 8 labelled requests at confidence 0.08 to 0.44 or wrong at up to 0.99. Laya stays under its 0.8 bar on short chats, so a short chat fell back to the profile's default class: `chat` through curl (everyday packages and memory notes, 2,036 to 2,347 hidden tokens), `code_edit` at xhigh in the Chat tab (coding packages, 5,825 to 6,022).
+- The router puts its notes at the tail of the user's message. The same note texts on the raw path, 4 short asks, greedy: 5,817 reasoning tokens at the tail, 2,969 as the system message, 2,155 without them. The package note alone at the tail: 7,363; the memory notes alone: 2,614. The reasoning follows the package's checklist line by line; with thinking off it moves into the answer.
+- Chat-tab tasks (5 tasks, 2 runs each, reasoning tokens): the fit with the class rules as its only note (75 to 84 tokens) 3,083 and 6,416 in two windows; with the effort sentences added 8,343; with the general packages added 12,934 (5,788 to 7,654 hidden tokens a turn); the router as written 13,426. The raw path in the same windows: 2,748 to 3,670. Runs at temperature 0.1 vary.
+
+The model fit against the raw path and the router as written (`QWEN38_CONDUCTOR_FIT=off`). Same server, one request at a time; short asks greedy at 8,192 tokens at most; tasks at the sampling defaults (temperature 0.1), each run twice:
+
+| set | raw | router as written | model fit |
+|-|-|-|-|
+| 4 short asks, thinking on: reasoning tokens (right) | 2,155 (4/4) | 9,098 (4/4) | 2,234 (4/4) |
+| 4 short asks, thinking off: answer tokens (right) | 541 (3/4) | 679 (3/4) | 553 (3/4) |
+| 4 short asks in the Chat tab, 10 tools: reasoning tokens (right) | 525 (3/4) | 2,665 (3/4) | 553 (3/4) |
+| 7 Chat-tab tasks x 2: success, reasoning tokens, tool errors | 14/14, 7,535, 1 | 12/14, 68,170, 9 | 14/14, 9,850, 0 |
+
+The raw column is the model fit's window; in the router's window the raw tasks gave 14/14, 7,352, 0. Rates in the model fit's window (no other request on the box): 171.6 tok/s on the short asks against 166.7 raw, 161.1 on the tasks against 165.7. The tasks: files, a Python script, a search, an HTML canvas animation, an analog clock, a landing page, a JSON edit; the check reads the files each run wrote.
+
+Not yet: the packages, the memory notes and the effort sentences at a place this model does not read as part of the request (the system message cost 1.38 times the raw thinking where the tail cost 2.7 times); Laya's class question on short chats (below its bar, so they fall back).
 
 ## How the engine runs it
 
