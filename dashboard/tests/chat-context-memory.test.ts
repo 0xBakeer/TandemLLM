@@ -14,11 +14,12 @@ describe("the Context panel's memory notes", () => {
     expect(memoryWords(h({ index_notes: 1, index_tokens: 40, bodies: 2, body_tokens: 180 }), 'engine')).toBe('1 note in the index, 40 tokens; 2 in full for this message, 180 tokens');
     expect(memoryWords(h({}), 'engine')).toBe('on, no notes yet');
   });
-  it('says why it is off, and that a profile without the switch has it off', () => {
+  it('says why it is off: a profile without the switch has it off', () => {
     expect(memoryWords(h({ mode: 'off', why: 'profile' }), 'engine')).toBe('off in this profile');
     expect(memoryWords(h({ mode: 'off', why: 'model_fit' }), 'engine')).toBe('off for this model');
     expect(memoryWords(h({ mode: 'off', why: 'header' }), 'engine')).toBe('off for this request');
-    expect(memoryWords(h(null), 'engine')).toBe('off in this profile');
+    expect(memoryWords(h({ mode: 'off', why: 'unset' }), 'engine')).toBe('off in this profile');
+    expect(memoryWords(h(null), 'engine')).toBe('not reported by this engine');
     expect(memoryWords(h({ mode: 'shadow' }), 'engine')).toMatch(/^shadow/);
   });
   it('waits for the first turn, and is not tracked on another backend', () => {

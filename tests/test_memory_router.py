@@ -363,7 +363,7 @@ def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
     text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
     assert memory_mod.OFF_NOTE[:40] not in text and "<tandem_memory op=" not in text
     assert (_row(cond, "chat-d1").get("extra") or {}).get("memory") is None
-    assert "memory" not in (out["usage"]["tandem"]["harness"] or {})
+    assert out["usage"]["tandem"]["harness"]["memory"]["why"] == "unset"
 
 
 if __name__ == "__main__":
