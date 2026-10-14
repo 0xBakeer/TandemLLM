@@ -4532,7 +4532,17 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     text = body.get("prompt")
     if isinstance(text, list):
         text = text[0]
-    return _as_ids(tok(text or "", return_tensors="pt")), "text", False
+    ids = _as_ids(tok(text or "", return_tensors="pt"))
+    # SRV-443: a text prompt answers every `count` as a chat prompt does (`_par_side_need` asks
+    # for the host ids before it picks a slot; a tensor there was a 500 on every
+    # /v1/completions request with parallel slots)
+    if count == "ids":
+        return [int(t) for t in ids.tolist()]
+    if count == "think":
+        return int(ids.numel()), False
+    if count:
+        return int(ids.numel())
+    return ids, "text", False
 
 
 def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
@@ -9970,6 +9980,9 @@ def _serve(a, led) -> None:
         from server.conductor.hook import Conductor
         from server.conductor import schema as cond_schema
         cond_schema.SERVED_NAME = _identity_name()
+        from server.conductor import modelfit as cond_fit
+        _caps = getattr(STATE.get("engine"), "caps", None)
+        print(cond_fit.install(getattr(_caps, "conductor", None)), flush=True)
         cond = STATE["conductor"] = Conductor(
             root, state=STATE, journal=journal,
             monitor_seed=STATE["monitor"].policy.data if STATE["monitor"] is not None else None)

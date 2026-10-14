@@ -116,6 +116,16 @@ class Lfm2CacheState(SectionState):
         return out
 
 
+# ENG-E10 / SRV-441: the conductor's router on this model (server/conductor/modelfit.py), measured on 2.5,
+# 2026-10-14 (models/lfm2.5-24b-a2b/measurements/conductor-0.9.0.json). With thinking off the model answers a
+# class prompt as a chat request (its one-id answers 0 to 2 of 8 right), so a short chat fell back to the
+# default class and its notes; and a note at the tail of the user's message is read as part of the request:
+# the same note texts cost 2.7x the raw thinking there and 1.38x as a system message. Every part that goes
+# there (packages, effort sentences, rules, memory) raised the thinking; the class still sets the level
+CONDUCTOR_FIT = {"served_classifier": False, "fallback": "lean", "packages": "core",
+                 "no_package_classes": ("chat",), "effort_notes": False, "memory": False, "rules": False}
+
+
 class Lfm2MoeServing:
     """`Lfm2MoeEngine` with one state and its graphs, in the server's engine interface."""
 
@@ -124,7 +134,7 @@ class Lfm2MoeServing:
     # round (`joint_plain`: no draft head, so most rounds are plain steps); the shadow reader was
     # validated on Qwen text; the side lane copies the 27B's pending commit
     caps = Capabilities(caches=True, side_slots=True, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=True,
-                        side_lane=False, joint_plain=True)
+                        side_lane=False, joint_plain=True, conductor=CONDUCTOR_FIT)
 
     def __init__(self, eng: Lfm2MoeEngine, max_len: int, slot=None):
         self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len

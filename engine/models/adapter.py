@@ -36,6 +36,9 @@ class Capabilities:
     # so N slots taking plain steps read the weights once a round (ENG-241; a model with no draft head,
     # LFM2.5); False: a plain step runs alone, as before
     joint_plain: bool = False
+    # ENG-E10: how the conductor's router fits this model (server/conductor/modelfit.py DEFAULTS
+    # names the keys); None: the router as its documents say, written for Qwen3.8
+    conductor: dict | None = None
 
 
 @dataclass(frozen=True)

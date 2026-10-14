@@ -192,6 +192,8 @@ KNOBS: dict[str, tuple] = {
     # (a shell, a file write) stay out of the turn, their `fallback` goes in, and the note says
     # which tools the chat has (`on`); `off` keeps the packages whatever the tools
     'TOOL_FIT': ('on', 'server/conductor/router.py'),
+    # ENG-E10: the router's fit to the served model (server/conductor/modelfit.py): model, off, k=v,...
+    'CONDUCTOR_FIT': ('model', 'server/conductor/modelfit.py'),
     # SRV-239 (2026-10-07): the end alignment's second pass, for a copy that left an answer's
     # reasoning out (Open WebUI sends none back): `on` serves the rows' reasoning and resumes at
     # the end anchor; `off` re-reads from the grid line below the answer

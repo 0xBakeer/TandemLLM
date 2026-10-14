@@ -28,7 +28,7 @@ DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Cha
 - No `-hq` profile: an exllamav3 `-hq` 4.0 served chat 9 % slower than 4.0 at a worse KL than 4.5 (0.082 against 0.063).
 - Dense splits per pack (`ops/lfm25-dense-splits.json`). Decode step without / with, tok/s: 2.5 171.2 / 188.2, 3.0 159.1 / 175.0, 3.5 143.4 / 153.5, 4.0 136.1 / 145.9, 4.5 121.6 / 128.8, 6.0 106.9 / 106.9.
 - Server: the checkpoint's chat template. Thinking off, from a client or the conductor, closes the `<think>` block the template always opens. Pythonic tool calls (`<|tool_call_start|>[f(a=1)]<|tool_call_end|>`) become OpenAI `tool_calls`; values are parsed as Python literals, never run. Default sampling when a request names none: temperature 0.1, top_k 50, repetition penalty 1.05.
-- Setup Guide: conductor off by default. With its notes, four short chat asks reasoned for 856 to 1,437 tokens against 99 to 902.
+- Conductor, Laya and the narrator on by default, with the model's fit to the router (SRV-441, [docs](docs/lfm2.5-24b-a2b.md#conductor)): Laya alone answers the class question, a turn nobody classified gets nothing added, and a class sets the level and budget with only its core skill in the note. On 2.5, four short chat asks thought 2,234 reasoning tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks run twice succeeded 14 of 14, as raw did.
 - Three slots: 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8 tok/s in total on 4.0; each text equals its request alone. When every slot takes a plain step, one joint graph reads the weights once.
 - Disk tier and session spill: 12,288 tokens restored from the disk in 0.96 s against 2.6 s cold, with the cold answer.
 
@@ -49,6 +49,7 @@ Effect: prose, chat and code within 5 % of plain; edit and copy asks 1.8 to 3.6 
 - Attention split buffers are kept per attention class. Before, a verify graph captured at a new class freed buffers an older graph replays into (illegal memory access past 2,048 keys).
 - A suffix store written by another tokenizer turns the store off instead of stopping the start.
 - The dashboard's disk tier default is 16 GB, as the server's since 0.4.3 (it showed 50).
+- `/v1/completions` with a text prompt and two or more slots answers. Before, the slot choice read the prompt as a tensor and the request failed with 500 (SRV-443).
 
 ### Shared EXL3 kernels
 
