@@ -157,7 +157,7 @@ interface ContextReport {
   };
   harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[];
              memory?: { mode: 'on' | 'shadow' | 'off'; why: string | null; index_notes: number; index_tokens: number;
-                        bodies: number; body_tokens: number; card_tokens: number } | null } | null;   // v0.2; tokens null: not counted yet; memory: the notes' part of the turn, absent when the profile has no memory switch (why: profile, model_fit, backend, header)
+                        bodies: number; body_tokens: number; card_tokens: number } | null } | null;   // v0.2; tokens null: not counted yet; memory: the notes' part of the turn (why it is off: profile, unset, model_fit, backend, header); an older engine sends none
   memory: {
     kv_bytes: number | null; resident_bytes: number | null; sandbox_disk_bytes: number | null;
     kv_tokens?: number | null;                   // the chat's rows the engine holds (kv_where slot or park)

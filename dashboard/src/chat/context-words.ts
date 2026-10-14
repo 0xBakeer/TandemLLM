@@ -67,7 +67,7 @@ export function partWords(kind: string, tokens: number, split: ContextReport['sp
   return exact(tokens);
 }
 
-const MEMORY_OFF: Record<string, string> = { profile: 'off in this profile', model_fit: 'off for this model', backend: 'off for this backend', header: 'off for this request' };
+const MEMORY_OFF: Record<string, string> = { profile: 'off in this profile', unset: 'off in this profile', model_fit: 'off for this model', backend: 'off for this backend', header: 'off for this request' };
 
 /** the memory notes in the last turn (SRV-471): how many the index named and what they cost, the
  *  notes sent in full with the message, or why the memory is off */
@@ -75,7 +75,7 @@ export function memoryWords(harness: ContextReport['harness'], backend: Backend)
   if (backend && backend !== 'engine') return NOT_TRACKED;
   if (!harness) return HARNESS_PENDING;
   const m: HarnessMemory | null | undefined = harness.memory;
-  if (!m) return MEMORY_OFF.profile;
+  if (!m) return 'not reported by this engine';
   if (m.mode === 'off') return MEMORY_OFF[m.why ?? ''] ?? 'off';
   if (m.mode === 'shadow') return 'shadow: the model may write notes, none is read back';
   const idx = m.index_notes ? `${exact(m.index_notes)} note${m.index_notes === 1 ? '' : 's'} in the index, ${exact(m.index_tokens)} tokens` : 'on, no notes yet';

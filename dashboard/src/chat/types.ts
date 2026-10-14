@@ -244,8 +244,8 @@ export interface ContextPart {
   tokens: number;
 }
 
-/** SRV-471: the memory notes' part of a turn (the usage frame's `tandem.harness.memory`); absent
- *  when the profile has no memory switch */
+/** SRV-471: the memory notes' part of a turn (the usage frame's `tandem.harness.memory`); an
+ *  engine before it sends none */
 export interface HarnessMemory {
   mode: 'on' | 'shadow' | 'off' | string;
   /** why it is off: profile, model_fit, backend, header */
