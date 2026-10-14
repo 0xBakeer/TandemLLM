@@ -9,7 +9,8 @@
                    under ("mtp", J)
 
 Each expert is copied into its stack slot straight from the file, so the host holds one expert at a
-time beside the device copy.
+time beside the device copy, and the shards' page cache is dropped after every layer (a 66 GB
+checkpoint's cache beside its device copy does not fit a unified-memory board).
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
         t = idx.read(name)
         want = torch.float32 if name.endswith(FP32) else dtype
         W[name] = t.to(device=device, dtype=want).contiguous()
+    idx.drop_cache()
     if c.tie_word_embeddings:
         W["lm_head.weight"] = W["embeddings.weight"]
     for li in c.attention_layers:
@@ -73,11 +75,13 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
     experts: dict = {}
     for n, li in enumerate(c.moe_layers):
         experts[li] = _experts(idx, f"layers.{li}.mixer.", c.moe_experts[li], c.moe_ffn[li], c.expert_in, device, dtype)
+        idx.drop_cache()
         if log and n % 8 == 7:
             log(f"[nh-load] experts through layer {li}: {time.time() - t1:.1f} s")
     if mtp:
         for j, (k, ffn, E) in c.mtp_moe.items():
             experts[("mtp", j)] = _experts(idx, f"mtp.layers.{j}.mixer.", E, ffn, c.expert_in, device, dtype)
+        idx.drop_cache()
         m = "mtp.layers.0.mixer."
         if m + "q_proj.weight" in W:
             W[m + "qkv"] = torch.cat([W[m + f"{x}_proj.weight"] for x in "qkv"]).contiguous()

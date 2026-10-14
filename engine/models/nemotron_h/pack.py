@@ -245,6 +245,22 @@ class PackIndex:
         return sum(t.nbytes for n, t in self.tensors.items() if mtp or not n.startswith("mtp."))
 
     # --------------------------------------------------------------------------- reading
+    def drop_cache(self) -> None:
+        """Drop the shards' page cache (posix_fadvise DONTNEED): on a unified-memory board the cache
+        of a 66 GB checkpoint beside its device copy exceeds the memory, and the GPU's allocations do
+        not wait for the kernel to reclaim it (tools/drop_page_cache.py)."""
+        if not hasattr(os, "posix_fadvise"):
+            return
+        for fn in self.files:
+            try:
+                fd = os.open(os.path.join(self.path, fn), os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+
     def read(self, name: str, device=None) -> torch.Tensor:
         """One tensor as stored (a CPU copy, or on `device`)."""
         t = self.tensors[name]
