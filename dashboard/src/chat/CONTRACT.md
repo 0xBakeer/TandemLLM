@@ -313,6 +313,8 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/mcp/servers/{sid}/resources/read` | `{uri, conversation_id?}` | `Attachment` (stored; it goes into a send's attachments as it is) | `mcpResource()` | v2 |
 | GET / POST / DELETE | `/prompts[/{pid}]` | `Prompt` | | `prompts()`, `savePrompt()`, `deletePrompt()` | v2 |
 | GET / POST / DELETE | `/presets[/{pid}]` | `Preset` | | `presets()`, `savePreset()`, `deletePreset()` | v2 |
+| GET / PUT | `/web-search` | `WebSearchPatch` (partial; `searxng_auth_value: null` clears it) | `WebSearchView`; 400 with `field`; the auth value never comes back (`searxng_auth_set`) | `webSearch()`, `saveWebSearch()` | v2 |
+| POST | `/web-search/test` | `{settings?: WebSearchPatch, query?}` | `WebSearchTest` `{ok, provider, message, count, ms, results}`; nothing is stored | `testWebSearch()` | v2 |
 | GET / DELETE | `/permissions/rules[/{rid}]` | | `{id, tool, match?, decision, scope, created_at}[]` | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox` | | `SandboxStatus` | `sandbox()` | v2 |
 | POST | `/conversations/{id}/sandbox/reset` / `start` / `stop` | | `SandboxStatus` | `resetSandbox()` | v2 |

@@ -102,6 +102,31 @@ MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are calle
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.
 
+## Web search
+
+`web_search(query, max_results?)` is a built-in tool. It answers a numbered list of results: title, URL, snippet, and date and engine when the provider gives them. The model cites the URLs and reads a page with `web_fetch`. The search runs in chatd on the host, not in the sandbox.
+
+| provider | request | setup |
+|-|-|-|
+| `duckduckgo` (default) | `POST https://html.duckduckgo.com/html/` with `q`, `kl` (region), `kp` (safe search), `df` (time) | none |
+| `searxng` | `GET <base>/search?format=json` with `categories=general`, `language`, `safesearch`, `time_range` | an instance URL with `json` in `search.formats`; an optional auth header |
+| `off` | the tool is not offered | |
+
+- Egress: `chatd/egress.py` `request()` with a host list. DuckDuckGo reaches `html.duckduckgo.com` on public addresses only. SearXNG reaches the configured host and port only, a private address included. chatd refuses a redirect to another host.
+- Errors are tool results: DuckDuckGo's rate limit or bot check (HTTP 202), SearXNG's 403 (JSON format off), 401, 429 (limiter), a timeout, an unreachable instance, an answer that is not JSON. No results is not an error.
+- Settings (Chat settings, Web search): provider, `searxng_url`, `searxng_auth_header` and its value, `max_results` (1 to 20, default 8), `safe_search` (off, moderate, strict; default moderate), `language` (empty for any, or `de`, `de-DE`), `time_range` (empty, day, week, month, year), `timeout_s` (2 to 30, default 10). chatd seals the auth value with the secrets vault (`proxy/secrets.py`) and never answers it; answers carry `searxng_auth_set`.
+- A chat's `web_search` setting overrides `provider`, `max_results`, `safe_search`, `language` and `time_range`; `null` follows the global settings.
+- The tool's default policy is always: the user picks the provider in the settings. Set it to ask in the tools list for a prompt per search. The Now line reads `Searching the web for "<query>"`.
+- A new chat gets `web_search` in its tools; an existing chat turns it on in the composer's tools menu.
+- OpenAI's `web_search_options` field stays refused by the API (docs/server.md): the engine has no search backend of its own.
+
+```text
+GET  /v1/chat-app/web-search                 {settings, providers, safe_search, time_ranges, max_results_limit}
+PUT  /v1/chat-app/web-search                 partial settings; searxng_auth_value null clears it
+POST /v1/chat-app/web-search/test            {settings?, query?} -> {ok, provider, message, count, ms, results}
+PATCH /v1/chat-app/conversations/{id}/settings  {web_search: {provider?, ...} | null}
+```
+
 ## Permission modes
 
 Each chat has a permission mode, and the chat settings hold the default that a new chat gets. A test run on a phone (2026-10-13) asked six times for bash commands such as `grep` and `cp`, which cost 20 s of tapping, and every one of them ran inside the chat's own sandbox. The three modes:
