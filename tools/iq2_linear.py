@@ -147,6 +147,76 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
 
+if HAVE_TRITON:
+
+    @triton.jit
+    def _iq2_bank(X, s_x, IDS, D, QS, G, KS, Y, N, S: tl.constexpr, NB: tl.constexpr, BN: tl.constexpr,
+                  RELU2: tl.constexpr):
+        # one (row, slot) pair p: y[p] = W[e] x[p // S] over expert e = IDS[p], K in order, fp32; RELU2:
+        # bf16(relu(bf16(y))^2) as the expert's hidden (the up projection), else bf16-rounded fp32 (down)
+        p = tl.program_id(0)
+        pn = tl.program_id(1)
+        row = p // S
+        e = tl.load(IDS + p).to(tl.int64)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        k32 = tl.arange(0, 32)
+        grp = k32 // 8
+        el = k32 % 8
+        base = e * N * NB
+        acc = tl.zeros([BN], dtype=tl.float32)
+        for b in range(0, NB):
+            d = tl.load(D + base + cols * NB + b, mask=cm, other=0.0).to(tl.float32)
+            for j in tl.static_range(8):
+                q0 = tl.load(QS + (base + cols * NB + b) * 16 + 2 * j, mask=cm, other=0)
+                q1 = tl.load(QS + (base + cols * NB + b) * 16 + 2 * j + 1, mask=cm, other=0)
+                db = (d * (0.5 + ((q1 >> 28) & 0xF).to(tl.float32))) * 0.25
+                idx = (q0[:, None] >> (8 * grp[None, :])) & 0xFF
+                w = db[:, None] * tl.load(G + idx * 8 + el[None, :])
+                ks = tl.load(KS + ((q1[:, None] >> (7 * grp[None, :])) & 0x7F))
+                w = tl.where(((ks >> el[None, :]) & 1) == 1, -w, w)
+                x = tl.load(X + row * s_x + b * 256 + j * 32 + k32).to(tl.float32)
+                acc += tl.sum(w * x[None, :], 1)
+        if RELU2:
+            u = tl.maximum(acc.to(tl.bfloat16).to(tl.float32), 0.0)
+            tl.store(Y + p * N + cols, (u * u).to(tl.bfloat16), mask=cm)
+        else:
+            tl.store(Y + p * N + cols, acc.to(tl.bfloat16).to(tl.float32), mask=cm)
+
+
+class IQ2Bank:
+    """The routed experts of one MoE layer as packed IQ2_XXS banks: up [E, I, X] and down [E, X, I] (GGUF's
+    ffn_up_exps / ffn_down_exps), for `moe_relu2` with the same pair order and roundings as the BF16
+    experts (engine/models/nemotron_h/kernels.py)."""
+
+    def __init__(self, up_raw: np.ndarray, down_raw: np.ndarray, E: int, I: int, X: int, device="cuda"):
+        for name, k in (("up", X), ("down", I)):
+            if k % QK:
+                raise ValueError(f"IQ2_XXS {name} experts need K a multiple of {QK}, not {k}")
+        self.E, self.I, self.X = E, I, X
+        du, qu = split_blocks(up_raw, E * I, X)
+        dd, qd = split_blocks(down_raw, E * X, I)
+        self.ud, self.uq = torch.from_numpy(du).to(device), torch.from_numpy(qu).to(device)
+        self.dd, self.dq = torch.from_numpy(dd).to(device), torch.from_numpy(qd).to(device)
+        self._g = torch.from_numpy(GRID.reshape(-1)).to(device)
+        self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
+        self.nbytes = (E * I * (X // QK) + E * X * (I // QK)) * BLOCK_BYTES
+
+    def moe_relu2(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """x [M, X] bf16, ids int32 [M, S] -> yd [M S, X] fp32 (bf16 values, unweighted, pair order)."""
+        M, S = ids.shape
+        P = M * S
+        flat = ids.reshape(-1).contiguous()
+        a = torch.empty(P, self.I, dtype=torch.bfloat16, device=x.device)
+        yd = torch.empty(P, self.X, dtype=torch.float32, device=x.device)
+        _iq2_bank[(P, triton.cdiv(self.I, 32))](x, x.stride(0), flat, self.ud, self.uq, self._g, self._ks, a, self.I, S=S,
+                                                NB=self.X // QK, BN=32, RELU2=True, num_warps=2)
+        _iq2_bank[(P, triton.cdiv(self.X, 32))](a, a.stride(0), flat,
+                                                self.dd, self.dq, self._g, self._ks, yd, self.X, S=1, NB=self.I // QK, BN=32,
+                                                RELU2=False, num_warps=2)
+        return yd
+
+
 class IQ2Linear:
     """A packed IQ2_XXS weight [N, K] on the device: d fp16 [N, K / 256], qs int32 [N, K / 256, 16]."""
 

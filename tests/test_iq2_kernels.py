@@ -73,6 +73,30 @@ def test_gemm_near_the_twin_and_row_invariant():
     return f"rel err {err:.1e}; rows 1..33 bit for bit"
 
 
+def test_expert_bank_near_the_twin_and_pair_invariant():
+    if not KERNELS:
+        return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
+    E, I, X, M, S = 4, 256, 512, 5, 2
+    up, down = random_iq2(E * I, X, seed=11), random_iq2(E * X, I, seed=12)
+    bank = Q.IQ2Bank(up, down, E, I, X, device=DEV)
+    wu = Q.dequant_iq2_xxs(up, E * I, X).view(E, I, X)
+    wd = Q.dequant_iq2_xxs(down, E * X, I).view(E, X, I)
+    g = torch.Generator().manual_seed(1)
+    x = (torch.randn(M, X, generator=g) * 0.5).to(torch.bfloat16)
+    ids = torch.stack([torch.randperm(E, generator=g)[:S] for _ in range(M)]).to(torch.int32)
+    yd = bank.moe_relu2(x.to(DEV), ids.to(DEV)).cpu()
+    for p, e in enumerate(ids.reshape(-1).tolist()):
+        u = (wu[e] @ x[p // S].float()).to(torch.bfloat16).float()
+        a = torch.relu(u).square().to(torch.bfloat16).float()
+        want = (wd[e] @ a).to(torch.bfloat16).float()
+        err = ((yd[p] - want).abs().max() / (want.abs().max() + 1e-6)).item()
+        assert err < 2e-2, (p, err)                    # one bf16 step where the sum orders differ
+    for r in range(M):
+        y1 = bank.moe_relu2(x[r:r + 1].to(DEV), ids[r:r + 1].to(DEV)).cpu()
+        assert torch.equal(y1, yd[r * S:(r + 1) * S]), r
+    return f"{M * S} pairs; each row's pairs = its lone call bit for bit"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
