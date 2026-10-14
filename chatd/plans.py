@@ -2,7 +2,7 @@
 `chatd.service.Service`.
 
 PLAN MODE is a chat setting (`plan_mode`). The model gets the read tools (read_file, glob, grep,
-web_fetch, the library, present) and `todo_write`, a line in the system block that asks for a plan
+web_search, web_fetch, the library, present) and `todo_write`, a line in the system block that asks for a plan
 and no changes, and effort high unless the chat chose more. A call to any other tool is refused
 with "plan mode: read tools only" and the run goes on. Approve (`POST .../plan/approve`) takes the
 plan's items (the numbered or bulleted lines of the answer, or the list the user edited), makes
@@ -30,8 +30,8 @@ import re
 
 from chatd.ids import iso, now_ms, ulid
 
-PLAN_TOOLS = ("read_file", "glob", "grep", "web_fetch", "library_search", "library_read",
-              "present", "todo_write")
+PLAN_TOOLS = ("read_file", "glob", "grep", "web_search", "web_fetch", "library_search",
+              "library_read", "present", "todo_write")
 PLAN_REFUSAL = "plan mode: read tools only. Write the plan; the user approves it before any change."
 PLAN_RULE = ("Plan mode is on: investigate with the read tools, change nothing, and answer with a "
              "numbered plan of concrete steps the user can approve. Do not carry it out yet.")

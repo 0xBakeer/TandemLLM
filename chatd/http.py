@@ -72,6 +72,9 @@ ROUTES = [
     ("GET", r"/tools", "tools"),
     ("PATCH", rf"/tools/{_ID}", "set_tool"),
     ("GET", r"/permissions/rules", "rules"),
+    ("GET", r"/web-search", "web_search"),
+    ("PUT", r"/web-search", "put_web_search"),
+    ("POST", r"/web-search/test", "test_web_search"),
     ("PATCH", r"/defaults", "patch_defaults"),
     ("GET", r"/permissions/mode", "permission_modes"),
     ("PUT", r"/permissions/mode", "set_permission_default"),
@@ -425,6 +428,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_set_tool(self, name):
         self._json(200, self.svc.set_tool(name, self._body()))
+
+    def r_web_search(self):
+        self._json(200, self.svc.web_search_view())
+
+    def r_put_web_search(self):
+        self._json(200, self.svc.set_web_search(self._body()))
+
+    def r_test_web_search(self):
+        self._json(200, self.svc.test_web_search(self._body()))
 
     def r_rules(self):
         self._json(200, self.svc.rules())

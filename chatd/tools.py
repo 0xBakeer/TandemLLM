@@ -9,7 +9,8 @@ byte-stable and the prefix cache holds. MCP tools reach the model as `mcp__<serv
 THE EXECUTORS run on the host where nothing executes (read_file, write_file, edit_file, glob,
 grep: chatd/workspace.py, symlink-safe), in the sandbox where something does (bash, render_page),
 and through the egress filter where the network is touched (web_fetch: the same private-range
-refusal as the sandbox's proxy, chatd/egress.py). A result for the model is at most 16,000 tokens:
+refusal as the sandbox's proxy, chatd/egress.py; web_search: the configured provider's host only,
+chatd/websearch.py). A result for the model is at most 16,000 tokens:
 a longer one is written to /workspace/.tandem/outputs/<call>.txt and the model gets its first and
 last 4,000 tokens and the path. The part the UI keeps is cut at 30,000 characters (CONTRACT 5).
 
@@ -68,12 +69,13 @@ class Tool:
 
 class Result:
     def __init__(self, content: str = "", *, is_error=False, exit_code=None, images=None,
-                 pane=None):
+                 pane=None, data=None):
         self.content = content
         self.is_error = is_error
         self.exit_code = exit_code
         self.images = images or []      # [(mime, bytes)]
         self.pane = pane
+        self.data = data                # structured output for the UI (`output.data`)
 
 
 class ToolError(Exception):
@@ -179,6 +181,16 @@ def _fetch(ctx, a):
     if "html" in ctype:
         text = html_to_text(text)
     return Result(f"HTTP {status} {ctype}\n\n{text}", is_error=status >= 400)
+
+
+def _search(ctx, a):
+    from chatd.websearch import SearchError, as_text
+    try:
+        res = ctx.search(a.get("query"), a.get("max_results"))
+    except SearchError as exc:
+        raise ToolError(str(exc)) from None
+    return Result(as_text(res), data={"provider": res["provider"], "query": res["query"],
+                                      "results": res["results"]})
 
 
 def _render(ctx, a):
@@ -291,6 +303,11 @@ BUILTINS = [
     Tool("grep", "Search file contents in /workspace with a regular expression; answers "
          "path:line: text.", _obj({"pattern": _S, "path": _S, "include": _S, "ignore_case": _B},
                                   ["pattern"]), executor=_grep),
+    Tool("web_search", "Search the web; answers a numbered list of results (title, URL, snippet, "
+         "date when known). Cite the URLs you use, and read a page in full with web_fetch. "
+         "max_results: 1 to 20, default from the chat settings.",
+         _obj({"query": _S, "max_results": _I}, ["query"]), risk="network", executor=_search,
+         needs="web_search"),
     Tool("web_fetch", "Fetch a public web page or file (http or https) and return its text. Local "
          "network addresses are refused.", _obj({"url": _S}, ["url"]), risk="network",
          default="ask", executor=_fetch),
@@ -515,6 +532,8 @@ def summary(tool: str, args: dict) -> str:
         return f"Run: {str(args.get('command') or '')[:300]}"
     if tool == "web_fetch":
         return f"Fetch {str(args.get('url') or '')[:300]}"
+    if tool == "web_search":
+        return f"Search the web for \"{str(args.get('query') or '')[:300]}\""
     if tool == "write_file":
         n = len(str(args.get("content") or "").encode())
         return f"Write {args.get('path')} ({n:,} bytes)"
