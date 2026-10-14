@@ -856,6 +856,192 @@
    "built_on": "HF Jobs"
   }
  },
+ "4.0-hq": {
+  "decode_step": {
+   "tok_s": 133.81,
+   "ms_token": 7.473,
+   "decode_bytes": 1481945088,
+   "allocated_gib": 12.23,
+   "tok_s_without_splits": 133.73
+  },
+  "rows": {
+   "plain": {
+    "prose": {
+     "tok_s": 131.83,
+     "per_block": 1.0,
+     "n": 430
+    },
+    "code": {
+     "tok_s": 131.66,
+     "per_block": 1.0,
+     "n": 512
+    },
+    "chat": {
+     "tok_s": 132.0,
+     "per_block": 1.0,
+     "n": 512
+    },
+    "edit": {
+     "tok_s": 130.2,
+     "per_block": 1.0,
+     "n": 512
+    },
+    "copy": {
+     "tok_s": 130.42,
+     "per_block": 1.0,
+     "n": 512
+    }
+   },
+   "lookup": {
+    "prose": {
+     "tok_s": 127.9,
+     "per_block": 1.01,
+     "n": 430
+    },
+    "code": {
+     "tok_s": 131.38,
+     "per_block": 1.16,
+     "n": 512
+    },
+    "chat": {
+     "tok_s": 126.12,
+     "per_block": 1.01,
+     "n": 512
+    },
+    "edit": {
+     "tok_s": 329.72,
+     "per_block": 10.65,
+     "n": 512
+    },
+    "copy": {
+     "tok_s": 348.65,
+     "per_block": 13.81,
+     "n": 512
+    }
+   },
+   "same_text": {
+    "prose": true,
+    "code": true,
+    "chat": true,
+    "edit": true,
+    "copy": true
+   },
+   "files": [
+    "ab2-none.json",
+    "ab2-mtp.json"
+   ]
+  },
+  "quality": {
+   "wikitext": {
+    "rows": 100,
+    "positions": 204800,
+    "kl": 0.12064603365957736,
+    "top1_pct": 84.73
+   },
+   "oasst1": {
+    "rows": 100,
+    "positions": 204800,
+    "kl": 0.08606417512521147,
+    "top1_pct": 89.37
+   },
+   "self": {
+    "rows": 48,
+    "positions": 19951,
+    "kl": 0.047595479137574635,
+    "top1_pct": 92.99
+   }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.11869756,
+    "top1_pct": 84.6,
+    "ppl_pack": 21.12996159,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-hq-4.0.log"
+   },
+   "oasst1": {
+    "kl": 0.0823083,
+    "top1_pct": 89.7,
+    "ppl_pack": 7.45772001,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-hq-4.0.log"
+   }
+  },
+  "convert": {
+   "bpw": "4.0",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c",
+   "built_on": "HF Jobs"
+  }
+ },
+ "same_window_4.0_4.0hq_4.5": {
+  "method": "one window, the order 4.0 4.0-hq 4.5 4.5 4.0-hq 4.0: tools/lfm_check.py bench (256 tokens) and one fresh server, tools/fn_lookup_ab.py plain",
+  "runs": [
+   {
+    "order": 1,
+    "profile": "4.0",
+    "graph_tok_s": 146.24,
+    "served_plain": {
+     "prose": 143.82,
+     "chat": 144.01,
+     "code": 143.79
+    }
+   },
+   {
+    "order": 2,
+    "profile": "4.0-hq",
+    "graph_tok_s": 132.88,
+    "served_plain": {
+     "prose": 131.57,
+     "chat": 131.17,
+     "code": 131.06
+    }
+   },
+   {
+    "order": 3,
+    "profile": "4.5",
+    "graph_tok_s": 129.4,
+    "served_plain": {
+     "prose": 128.02,
+     "chat": 127.53,
+     "code": 127.67
+    }
+   },
+   {
+    "order": 4,
+    "profile": "4.5",
+    "graph_tok_s": 129.2,
+    "served_plain": {
+     "prose": 127.84,
+     "chat": 127.72,
+     "code": 127.54
+    }
+   },
+   {
+    "order": 5,
+    "profile": "4.0-hq",
+    "graph_tok_s": 132.78,
+    "served_plain": {
+     "prose": 131.25,
+     "chat": 131.14,
+     "code": 131.19
+    }
+   },
+   {
+    "order": 6,
+    "profile": "4.0",
+    "graph_tok_s": 145.8,
+    "served_plain": {
+     "prose": 144.04,
+     "chat": 143.95,
+     "code": 143.79
+    }
+   }
+  ]
+ },
  "4.0-tracecal": {
   "quality": {
    "wikitext": {

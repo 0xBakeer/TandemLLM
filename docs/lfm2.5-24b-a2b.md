@@ -35,6 +35,8 @@ These KL values are high next to exllamav3 conversions of other models at the sa
 
 The default is `lfm25-exl3-3.5`: speed comes first for this model, and the rule is the fastest profile in chat whose top-1 agreement with BF16 on chat text is at least 85 %. 3.5 decodes chat at 150.9 tok/s with 86.7 % (this engine's check: 86.1 %); 3.0 is faster (171.3 tok/s) at 83.6 %, below the floor, and 4.0 slower (143.7 tok/s) at 88.5 %.
 
+A high-quality variant of 4.0 (exllamav3's `-hq`: the attention and convolution projections 2 bits higher, the dense MLPs 1, 4.06 bits a weight, 12.81 GB) was measured against 4.0 and 4.5 in one window, in the order 4.0, 4.0-hq, 4.5, 4.5, 4.0-hq, 4.0: the decode step ran at 146.0, 132.8 and 129.3 tok/s and served chat at 144.0, 131.2 and 127.6 (each pair of runs within 0.3 %). Its chat KL is 0.082 and top-1 89.7 %, against 0.098 and 88.5 % for 4.0 and 0.063 and 91.2 % for 4.5. It is 2.8 % faster than 4.5 for a clearly worse KL, and 9 % slower than 4.0, so no `-hq` profile is offered.
+
 The repositories are private until they are published: a download needs a Hugging Face token with access to them. The 2.5 and 3.5 packs hold half-integer rates throughout: below 4 bits a weight, exllamav3 1.6.0 gives tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is 16 K + 8 int16 wide, and an odd weight of a tile takes one bit more than an even one). The engine's EXL3 kernels decode them as exllamav3 does (`tools/exl3_linear.py`, `dq8_frac`; the kernels name them 15, 25 and 35), in the decode step, a verify block and the prefill. The pack reader stops by name on a rate the kernels do not take.
 
 Switch to a profile with `ops/use-profile.sh lfm25-exl3-3.5`, or choose the model in the Setup Guide (`#/setup`).
