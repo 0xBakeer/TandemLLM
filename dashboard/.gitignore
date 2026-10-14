@@ -4,3 +4,5 @@ e2e-report/
 e2e-results.json
 .vite/
 screenshots/
+e2e-chat-panes-artifacts/
+e2e-chat-panes-results.json
