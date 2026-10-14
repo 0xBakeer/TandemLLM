@@ -18,7 +18,8 @@ import { noHorizontalOverflow } from './helpers';
 
 test.skip(process.env.PW_LIVE !== '1', 'the live tier: PW_LIVE=1 on the box');
 
-const MODEL = 'qwen3.8-27b';
+// the model the box serves (PW_MODEL; the 27B when unset)
+const MODEL = process.env.PW_MODEL ?? 'qwen3.8-27b';
 const SHOTS = process.env.PW_SHOTS ?? 'e2e-live-shots';
 const STEPS = ['overview', 'weights', 'components', 'parallelism', 'methods', 'review'];
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 768;
@@ -80,9 +81,12 @@ test('@read the tiles and every step with the box data, from what the box runs n
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'overview');
   await expect(page.locator('.mt-table tbody tr.mt-row').first()).toBeVisible();
   await expect(page.locator(`.mt-row[data-profile="${current.selection.profile}"]`)).toHaveCount(1);
-  // the box runs another profile than the recommended one: the page says it starts from the box
+  // a box that runs another profile than the recommended one: the page says it starts from the box
   // (shown where the model opens; any step change clears it)
-  await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
+  const recommended = (model.profiles as { id: string; recommended: boolean }[]).find((p) => p.recommended)?.id;
+  if (current.selection.profile !== recommended) {
+    await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
+  }
   await shot(page, '1-overview');
 
   await page.locator('.setup-next').click();
