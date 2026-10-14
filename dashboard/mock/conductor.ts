@@ -1119,7 +1119,7 @@ export class MockConductor {
     if (head === 'memory' && parts[1] === 'disk') {
       const list = this.docs.get('settings')!;
       const d = ((list.at(-1)!.doc as { memory?: { disk_cache?: Record<string, unknown> } }).memory?.disk_cache ?? {});
-      return diskRoute(this.disk, method, parts.slice(1), { mode: 'on', budget_gb: 50, ttl_days: 7, admit_after: 2, min_free_gb: 50, ...d }, list.at(-1)!.version);
+      return diskRoute(this.disk, method, parts.slice(1), { mode: 'on', budget_gb: 16, ttl_days: 7, admit_after: 2, min_free_gb: 50, ...d }, list.at(-1)!.version);
     }
     if (head === 'memory') {
       const t = ((this.cur('settings').doc as { memory?: { transcripts?: Record<string, unknown> } }).memory?.transcripts ?? {});
