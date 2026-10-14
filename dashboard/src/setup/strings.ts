@@ -139,7 +139,7 @@ export const S = {
   weightsDisk: 'Download',
   onDisk: 'On this box',
   toDownload: (gb: number) => `${gb.toFixed(1)} GB`,
-  privateRepo: 'The EXL3 weights are in private repositories. This box has a Hugging Face token, so it can download them.',
+  privateRepo: 'Some of these weights are in private repositories that are not public yet. This box has a Hugging Face token, and a download works when that token has access to them.',
   privateNoToken: 'This box has no Hugging Face token, so it cannot download these weights. Add one with huggingface-cli login on the box, or pick weights that are already here.',
   activeNow: 'Running now',
   privateNoTokenShort: 'Needs a Hugging Face token, and this box has none.',

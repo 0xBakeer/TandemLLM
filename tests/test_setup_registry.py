@@ -31,6 +31,10 @@ The test matrix:
  12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next, LFM2.5) are what
      GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
 
+ 13  LFM2.5's card is its runs' own numbers: per profile the disk size and commit of its Hugging Face
+     repository, the weights at load, the chat KL and top-1, every measured cell, and its profile file's
+     size and revision equal measurements/0.8.3-summary.json   test_the_lfm25_card_is_the_raw_data
+
 Run: python tests/test_setup_registry.py
 """
 
@@ -128,6 +132,35 @@ def test_the_table_is_the_raw_data():
         assert p["weights_gib"] == float(stages["weights"]), (size, p["weights_gib"])
         assert p["drafters_gib"] == float(stages["drafters"]), (size, p["drafters_gib"])
     assert n == 6 * (4 * 3 + 2 * 2), n
+
+
+def test_the_lfm25_card_is_the_raw_data():
+    m = registry.load(os.path.join(ROOT, "models", "lfm2.5-24b-a2b", "model.yaml"))
+    with open(os.path.join(ROOT, "models", "lfm2.5-24b-a2b", "measurements", "0.8.3-summary.json")) as fh:
+        raw = json.load(fh)
+    n = 0
+    for size in ("bf16", "2.5", "3.0", "3.5", "4.0", "4.5", "6.0"):
+        d = raw[size]
+        pid = "lfm25-bf16" if size == "bf16" else f"lfm25-exl3-{size}"
+        p = registry.profile(m, pid)
+        assert p["weights_gib"] == d["decode_step"]["allocated_gib"] or size == "bf16", (pid, p["weights_gib"])
+        row = next(r for r in m["measurements"]["rows"] if r["profile"] == pid)
+        assert row["build"] == "0.8.3" and row["comparable"] and all(d["rows"]["same_text"].values()), pid
+        for task in ("prose", "chat", "code"):
+            c, got = d["rows"]["lookup"][task], row["cells"]["greedy_512"][task]
+            assert got == {"tok_s": c["tok_s"], "min": c["tok_s"], "ms_round": round(1000 * c["per_block"] / c["tok_s"], 2),
+                           "tok_round": c["per_block"], "n": 1}, (pid, task, got)
+            n += 1
+        if size == "bf16":
+            continue
+        assert d["hub"]["local_match"] and p["hf_repo"] == d["hub"]["repo"], pid   # the measured pack is the repo's
+        assert p["hf_revision"] == d["hub"]["revision"] and p["disk_gb"] == round(d["hub"]["bytes"] / 1e9, 2), pid
+        q = d["quality"]["oasst1"]
+        assert p["quality"]["kl_vs_bf16"] == round(q["kl"], 4) and p["quality"]["top1_pct"] == q["top1_pct"], pid
+        env = open(os.path.join(ROOT, "ops", "profiles", f"{pid}.env")).read()
+        assert f"QSE_WEIGHTS_REVISION={d['hub']['revision']}\n" in env, pid
+        assert f"QSE_WEIGHTS_GB={round(d['hub']['bytes'] / 1e9, 2)}\n" in env, pid
+    assert n == 7 * 3, n
 
 
 def test_every_knob_is_registered():

@@ -77,8 +77,8 @@ profiles:
   label: EXL3 2.5 bpw
   format: exl3
   bpw: 2.5
-  disk_gb: 8.1
-  weights_gib: 7.54
+  disk_gb: 8.2
+  weights_gib: 7.64
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-2.5
   hf_private: true
@@ -86,13 +86,14 @@ profiles:
   badges:
   - smallest
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.3364
+    top1_pct: 78.71
     ppl: null
     date: '2026-10-14'
-    source: 'not measured yet (ENG-285)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.3364, top-1 78.71 %); wikitext-2 KL 0.4193, top-1 71.88 %; the model''s own answers KL 0.2399, top-1 83.42 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Measured 2026-10-14: 8.2 GB, 7.64 GiB at load; the decode step 188.22 tok/s; through the server plain prose / chat / code 185.61 / 185.37 / 185.13 tok/s, with the lookup 177.0 / 175.57 / 179.34, edit and copy asks 350.52 and 271.3. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: 62ee041060eadb5081c3306c7629c7919b187b11
   max_window: 131072
 - id: lfm25-exl3-3.0
   label: EXL3 3.0 bpw
@@ -106,40 +107,42 @@ profiles:
   recommended: false
   badges: []
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.2175
+    top1_pct: 83.13
     ppl: null
     date: '2026-10-14'
-    source: 'not measured on the engine''s chat comparison yet (ENG-285)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.2175, top-1 83.13 %); wikitext-2 KL 0.3042, top-1 75.97 %; the model''s own answers KL 0.1389, top-1 87.33 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'Every tensor at 3 bits, the head at 6 (measured 2026-10-14: 9.68 GB, 9.4 GiB at load); the decode step from its graph 158.7 tok/s, without dense splits of its own yet. The box''s exllamav3 model_diff: KL 0.195 on chat text against BF16 (4.0: 0.098). Not public yet.'
+  note: 'Measured 2026-10-14: 9.68 GB, 9.4 GiB at load; the decode step 175.02 tok/s; through the server plain prose / chat / code 171.71 / 171.31 / 171.28 tok/s, with the lookup 165.72 / 168.47 / 169.18, edit and copy asks 327.82 and 413.83. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: 42b0a5b1cf10a53c95b996afe9762288f6731397
   max_window: 131072
 - id: lfm25-exl3-3.5
   label: EXL3 3.5 bpw
   format: exl3
   bpw: 3.5
-  disk_gb: 11.0
-  weights_gib: 10.24
+  disk_gb: 11.16
+  weights_gib: 10.56
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.5
   hf_private: true
   recommended: false
   badges: []
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.1506
+    top1_pct: 86.14
     ppl: null
     date: '2026-10-14'
-    source: 'not measured yet (ENG-285)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.1506, top-1 86.14 %); wikitext-2 KL 0.2208, top-1 79.53 %; the model''s own answers KL 0.0902, top-1 90.1 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Measured 2026-10-14: 11.16 GB, 10.56 GiB at load; the decode step 153.52 tok/s; through the server plain prose / chat / code 151.35 / 150.93 / 150.91 tok/s, with the lookup 147.54 / 143.68 / 147.25, edit and copy asks 268.66 and 286.58. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: 416806bafd1e2bc175934c391cb427738a69f00c
   max_window: 131072
 - id: lfm25-exl3-4.0
   label: EXL3 4.0 bpw
   format: exl3
   bpw: 4.0
   disk_gb: 12.64
-  weights_gib: 12.05
+  weights_gib: 12.06
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.0
   hf_private: true
@@ -148,90 +151,132 @@ profiles:
   - recommended
   - provisional
   quality:
-    kl_vs_bf16: 0.0326
-    top1_pct: 94.73
+    kl_vs_bf16: 0.1083
+    top1_pct: 88.3
     ppl: null
     date: '2026-10-14'
-    source: 'tools/lfm_check.py cmp: the engine on this pack teacher-forced on the BF16 run''s tokens against
-      transformers'' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions); the pack with
-      exllamav3''s default calibration (a trace-calibrated one gave 95.61 % and 0.0267 on the same tokens)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.1083, top-1 88.3 %); wikitext-2 KL 0.1760, top-1 81.88 %; the model''s own answers KL 0.0610, top-1 91.93 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'The default for now, provisional until every pack is measured: 3.0 decodes 9 % faster (158.7 against 145.8 tok/s, the step from its graph) for about twice the KL on chat text (0.195 against 0.098, the box''s exllamav3 model_diff). In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).'
+  note: 'The default for now, provisional until the conversion check is in. Measured 2026-10-14: 12.64 GB, 12.06 GiB at load; the decode step 145.91 tok/s; through the server plain prose / chat / code 143.59 / 143.67 / 143.8 tok/s, with the lookup 140.08 / 139.41 / 139.23, edit and copy asks 291.14 and 326.4. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: de1cd3de6d2b022c78abca956f1d3618a525c414
   max_window: 131072
 - id: lfm25-exl3-4.5
   label: EXL3 4.5 bpw
   format: exl3
   bpw: 4.5
-  disk_gb: 13.9
-  weights_gib: 12.95
+  disk_gb: 14.12
+  weights_gib: 13.31
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.5
   hf_private: true
   recommended: false
   badges: []
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.0697
+    top1_pct: 90.62
     ppl: null
     date: '2026-10-14'
-    source: 'not measured yet (ENG-285)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.0697, top-1 90.62 %); wikitext-2 KL 0.1012, top-1 86.17 %; the model''s own answers KL 0.0378, top-1 93.85 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Measured 2026-10-14: 14.12 GB, 13.31 GiB at load; the decode step 128.79 tok/s; through the server plain prose / chat / code 128.45 / 128.18 / 128.02 tok/s, with the lookup 123.33 / 124.65 / 124.55, edit and copy asks 281.25 and 339.37. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: caad63d339465867d8134bd150648560b2a80f41
   max_window: 131072
 - id: lfm25-exl3-6.0
   label: EXL3 6.0 bpw
   format: exl3
   bpw: 6.0
-  disk_gb: 18.3
-  weights_gib: 17.04
+  disk_gb: 18.63
+  weights_gib: 17.37
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-6.0
   hf_private: true
   recommended: false
   badges: []
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.0479
+    top1_pct: 92.62
     ppl: null
     date: '2026-10-14'
-    source: 'not measured yet (ENG-285)'
+    source: 'tools/lfm_quality.py on the Spark, 2026-10-14: this engine on the pack against the BF16 checkpoint, oasst1 validation chat, 100 rows of 2,048 tokens (KL 0.0479, top-1 92.62 %); wikitext-2 KL 0.0797, top-1 88.01 %; the model''s own answers KL 0.0227, top-1 95.58 %. Provisional: whether the conversion recipe raises the KL is being checked'
   assets_required: []
-  note: 'Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Measured 2026-10-14: 18.63 GB, 17.37 GiB at load; the decode step 106.9 tok/s; through the server plain prose / chat / code 105.37 / 105.24 / 105.01 tok/s, with the lookup 104.25 / 103.45 / 105.54, edit and copy asks 209.97 and 280.11. The Hugging Face repository is private until it is published: a download needs a token with access to it.'
+  hf_revision: 9c7deb4e44a82b5b7dbdeff608f801f0e970e058
   max_window: 131072
 measurements:
   build: 0.8.3
   date: '2026-10-14'
   method: >-
-    tools/fn_lookup_ab.py through one fresh server a run on the Spark, the GPU to itself (the conversion queue
-    paused): prompts prose / chat / code, one greedy request each, thinking off, 512 new tokens, conductor raw,
-    one slot, max_len 32,768. 4.0 as its profile serves it: the lookup alone cut by StairCut, with the suffix
-    store off so no earlier answer is in it, the dense splits of ops/lfm25-dense-splits.json; BF16 plain
-    (--drafter none). One run a cell.
-  source: 'SPD-107 window runs on the reference Spark, 2026-10-14 06:52 (4.0, default-calibration pack) and 05:10
-    (BF16); the tools/fn_lookup_ab.py JSON of each run'
+    tools/fn_lookup_ab.py through one fresh server a run on the Spark, the GPU to itself: prompts prose / chat /
+    code, one greedy request each, thinking off, 512 new tokens, conductor raw, one slot, max_len 32,768; each
+    profile as it serves: the lookup alone cut by StairCut (its price file), the suffix store off so no earlier
+    answer is in it, the dense splits of ops/lfm25-dense-splits.json. One run a cell; the plain runs in each row's
+    note. Raw data: models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json.
+  source: models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json
   rows:
+  - profile: lfm25-exl3-2.5
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 185.61 / 185.37 / 185.13 tok/s; edit and copy asks 350.52 and 271.3 (181.12 and 181.88 plain); every text the plain run''s.'
+    cells:
+      greedy_512: {prose: [177.0, 177.0, 5.71, 1.01, 1], chat: [175.57, 175.57, 5.81, 1.02, 1], code: [179.34, 179.34, 6.25, 1.12, 1]}
+    ttft_s: {}
+    lossless: null
+  - profile: lfm25-exl3-3.0
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 171.71 / 171.31 / 171.28 tok/s; edit and copy asks 327.82 and 413.83 (168.22 and 168.76 plain); every text the plain run''s.'
+    cells:
+      greedy_512: {prose: [165.72, 165.72, 6.09, 1.01, 1], chat: [168.47, 168.47, 6.0, 1.01, 1], code: [169.18, 169.18, 6.74, 1.14, 1]}
+    ttft_s: {}
+    lossless: null
+  - profile: lfm25-exl3-3.5
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 151.35 / 150.93 / 150.91 tok/s; edit and copy asks 268.66 and 286.58 (146.95 and 148.77 plain); every text the plain run''s.'
+    cells:
+      greedy_512: {prose: [147.54, 147.54, 6.78, 1.0, 1], chat: [143.68, 143.68, 7.03, 1.01, 1], code: [147.25, 147.25, 7.61, 1.12, 1]}
+    ttft_s: {}
+    lossless: null
   - profile: lfm25-exl3-4.0
     build: 0.8.3
     date: '2026-10-14'
     comparable: true
-    note: 'Each text equal to the plain run''s (143.7 / 142.3 / 143.4 tok/s plain). The same run''s edit and copy
-      asks (a file back with a name renamed, a text back unchanged) took 222.0 and 292.2 tok/s, 3.43 and 10.65 tokens
-      a block, against 141.5 and 141.6 plain.'
+    note: 'The lookup, store off; plain prose / chat / code 143.59 / 143.67 / 143.8 tok/s; edit and copy asks 291.14 and 326.4 (141.31 and 141.85 plain); every text the plain run''s.'
     cells:
-      greedy_512: {prose: [139.37, 139.37, 7.25, 1.01, 1], chat: [142.59, 142.59, 7.08, 1.01, 1], code: [145.29, 145.29,
-          7.36, 1.07, 1]}
+      greedy_512: {prose: [140.08, 140.08, 7.21, 1.01, 1], chat: [139.41, 139.41, 7.24, 1.01, 1], code: [139.23, 139.23, 7.97, 1.11, 1]}
+    ttft_s: {}
+    lossless: null
+  - profile: lfm25-exl3-4.5
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 128.45 / 128.18 / 128.02 tok/s; edit and copy asks 281.25 and 339.37 (126.51 and 126.9 plain); every text the plain run''s.'
+    cells:
+      greedy_512: {prose: [123.33, 123.33, 8.11, 1.0, 1], chat: [124.65, 124.65, 8.1, 1.01, 1], code: [124.55, 124.55, 8.75, 1.09, 1]}
+    ttft_s: {}
+    lossless: null
+  - profile: lfm25-exl3-6.0
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 105.37 / 105.24 / 105.01 tok/s; edit and copy asks 209.97 and 280.11 (104.07 and 102.77 plain); every text the plain run''s.'
+    cells:
+      greedy_512: {prose: [104.25, 104.25, 9.69, 1.01, 1], chat: [103.45, 103.45, 9.86, 1.02, 1], code: [105.54, 105.54, 10.61, 1.12, 1]}
     ttft_s: {}
     lossless: null
   - profile: lfm25-bf16
     build: 0.8.3
     date: '2026-10-14'
     comparable: true
-    note: Plain decode (--drafter none); the BF16 projections run on the 16-row tile GEMM, the experts a pair at a time.
+    note: 'The lookup, store off; plain prose / chat / code 44.61 / 44.52 / 44.53 tok/s; edit and copy asks 153.74 and 157.8 (44.3 and 44.25 plain); every text the plain run''s.'
     cells:
-      greedy_512: {prose: [43.35, 43.35, 23.07, 1.0, 1], chat: [43.29, 43.29, 23.1, 1.0, 1], code: [43.32, 43.32, 23.08,
-          1.0, 1]}
+      greedy_512: {prose: [43.35, 43.35, 23.07, 1.0, 1], chat: [43.3, 43.3, 23.33, 1.01, 1], code: [44.55, 44.55, 24.92, 1.11, 1]}
     ttft_s: {}
     lossless: null
+
 memory:
   parts:
   - id: engine

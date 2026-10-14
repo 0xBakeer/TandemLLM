@@ -153,7 +153,7 @@ describe('the third model (VIS-125)', () => {
     const ms = new MockSetup();
     const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; best_speed: unknown; pitch: string }[];
     expect(tiles[2].id).toBe('lfm2.5-24b-a2b');
-    expect(tiles[2].best_speed).toMatchObject({ tok_s: 145.29, task: 'code' });
+    expect(tiles[2].best_speed).toMatchObject({ tok_s: 140.08, task: 'prose' });     // the recommended 4.0's best cell
     const m = (await call(ms, 'GET', '/v1/setup/models/lfm2.5-24b-a2b')).body as SetupModel;
     expect(m.profiles.map((p) => p.id)).toEqual(['lfm25-bf16', 'lfm25-exl3-2.5', 'lfm25-exl3-3.0', 'lfm25-exl3-3.5',
       'lfm25-exl3-4.0', 'lfm25-exl3-4.5', 'lfm25-exl3-6.0']);
