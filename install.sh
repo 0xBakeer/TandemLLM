@@ -31,7 +31,8 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.9.0 adds LFM2.5-24B-A2B (the lfm25-* profiles); v0.8.3 is 0.8.2's code with the repository cleaned for the public release;
+# The engine release. v0.9.1 adds web search and media playback to the Chat tab and the loop guard;
+# v0.9.0 adds LFM2.5-24B-A2B (the lfm25-* profiles); v0.8.3 is 0.8.2's code with the repository cleaned for the public release;
 # v0.8.2 adds community packs and permission modes; v0.8.1 fetches every file a weight profile reads (OPS-95), so --setup and then
 # ops/use-profile.sh exl3-<size> or flashnext-<size> work on a new box; v0.8.0 added Qwen3.8-Flash-Next
 # and the Chat tab; v0.4.8 two chats beside each other and the moved-block alignment; v0.4.7 the
@@ -39,7 +40,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.9.0}"
+TANDEM_REF="${TANDEM_REF:-v0.9.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace

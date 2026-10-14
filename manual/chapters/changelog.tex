@@ -31,9 +31,22 @@
 0.8.2 & 10-13 & community weight packs; permission modes in the Chat tab; standalone EXL3 packs of the 27B family; a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
 0.8.3 & 10-13 & repository hygiene for the public release; no code change \\
 0.9.0 & 10-14 & a third model, LFM2.5-24B-A2B: six EXL3 sizes and BF16, the default 3.5 by a stated rule, the lookup drafting without a draft head; Wren beside it \\
+0.9.1 & 10-14 & web search and media playback in the Chat tab; the loop guard, the loop escape and memory notes on in the shipped conductor profiles; Setup Guide fixes; the 27B's EXL3 profiles fetch only the base tensors they read \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.9.1, web search, media and the loop guard}\label{sec:changelog-091}
+
+0.9.1 changes the Chat tab, the conductor's shipped profiles and the Setup Guide. The decode path does not change: under \code{engine/} only the small models' slot changed, so that a failed load is tried again.
+
+\paragraph{Chat tab.} A built-in \code{web_search} tool with DuckDuckGo and SearXNG providers, set in the chat settings. Video, audio and PDF files open in a player or the browser's PDF viewer, in the Files pane and the \code{present} card; any other binary file shows its size and a Download button. chatd streams a workspace file with byte ranges (206, 416, ETag) and no 2~MiB cap.
+
+\paragraph{The loop guard.} The same-call guard (C3) is on in the shipped \code{coding}, \code{chat-app}, \code{hermes}, \code{overnight} and \code{chat} profiles. It counts only the current user turn, treats a tool result that took the client 10~s or more as a wait, and holds calls only on a request whose turn already ends with the repeat. After a repeated or near-repeated call the session samples with the model card's settings (the checkpoint's \code{generation_config.json}, a fresh seed) until it makes progress, then decodes greedy again; a client's own sampling wins. Output changes on those turns only. \code{--reasoning-effort none} and \code{off} turn thinking off for every request that says nothing about thinking.
+
+\paragraph{Memory notes.} The shipped \code{chat}, \code{coding}, \code{hermes} and \code{chat-app} profiles have \code{memory: on}. A one-time migration adds the switch to each stored profile without it; an explicit value stays. The memory card tells the model the notes are its memory between chats, a profile with memory off tells it so, and the Context panel shows a turn's notes.
+
+\paragraph{Fixes.} The Setup Guide's install page keeps a finished job final and its whole log after a reload. The change list names the keys a model switch drops from \code{run/setup.env}. The fetch step downloads the models of the tools the selection turns on, and a failed shadow reader load is tried again after 300~s in an idle window. The 27B's EXL3 profiles read their base from \code{base-plain}, fetched by HTTP range requests: 3.54~GB instead of 30.41, so a fresh \code{exl3-6.0} downloads 36.48~GB, not 63.34. The dashboard's service worker shows the cached shell when the reverse proxy answers 502, 503 or 504, and reloads once \code{/health} answers.
 
 \section{0.9.0, LFM2.5-24B-A2B}\label{sec:changelog-090}
 

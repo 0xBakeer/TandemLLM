@@ -54,7 +54,7 @@
 \texttt{-{}-conductor-\allowbreak{}watch-\allowbreak{}s} & \texttt{30} & with -\kern0pt-conductor shadow or on, how often the stall watchdog's watch looks for sessions whose client has gone. \\
 \texttt{-{}-think-\allowbreak{}budget} & \texttt{0} & default cap on reasoning tokens per request, 0 = uncapped. \\
 \texttt{-{}-answer-\allowbreak{}reserve} & \texttt{auto (QSE\_\allowbreak{}ANSWER\_\allowbreak{}RESERVE)} & tokens of the output limit kept for the answer when a client asks for a thinking budget in any shape (server/thinking.py): its reasoning closes early enough to leave them. auto = min(2048, a quarter of the limit), 0 = none ... \\
-\texttt{-{}-reasoning-\allowbreak{}effort} & \texttt{none; served:\allowbreak{} medium} & default \texttt{reasoning\_\allowbreak{}effort} for the chat template. One of: low, medium, xhigh. \\
+\texttt{-{}-reasoning-\allowbreak{}effort} & \texttt{none; served:\allowbreak{} medium} & default \texttt{reasoning\_\allowbreak{}effort} for the chat template. One of: none, off, low, medium, xhigh. \\
 \texttt{-{}-cache-\allowbreak{}budget-\allowbreak{}gb} & \texttt{2} & RAM budget for the state cache, in GiB (CACHE\_GB). \\
 \texttt{-{}-store-\allowbreak{}entry-\allowbreak{}gb} & \texttt{1} & GiB one state-store snapshot may take (STORE\_ENTRY\_GB), whatever budget is free: 1 GiB is about 7k tokens. \\
 \texttt{-{}-no-\allowbreak{}session-\allowbreak{}cache} & \texttt{off (a switch)} & do not keep a conversation's state after its turn. \\

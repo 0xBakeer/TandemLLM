@@ -2,7 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.9.1, 2026-10-14
+
+0.9.1 adds web search and media playback to the Chat tab, turns on the loop guard, the loop escape and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page and the EXL3 base download. The decode path does not change: under `engine/` only the small models' slot changed (VIS-153).
 
 - Chat tab: a built-in `web_search` tool with DuckDuckGo and SearXNG providers, set in the chat settings (SRV-469, VIS-157). Reference: [docs/chat.md](docs/chat.md#web-search).
 - Chat tab: video, audio, PDF and other binary files open in a player, the browser's PDF viewer or a size line with Download, in the Files pane and the `present` card; chatd's view route streams a file with byte ranges (206, 416, ETag) and no 2 MiB cap (VIS-159).
@@ -11,7 +13,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - `--reasoning-effort none` and `off`: thinking off for every request that says nothing about thinking (SRV-477).
 - Conductor: the shipped `chat`, `coding`, `hermes` and `chat-app` profiles have `memory: on`, and a one-time migration adds it to each stored one without the switch (an explicit value stays; `general` keeps none); the memory card says the notes are the model's memory between chats, and a profile with `memory: off` tells the model so; the Context panel shows a turn's memory notes (SRV-471). Memory-on prompts change by the card's new sentence.
 
-### Fixes
+### Fixed
 
 - Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
 - Setup Guide, install page (VIS-151): a finished job keeps its whole log after a reload (the stream ends at the job's `done` event); past 300 lines the log box says how many it dropped from the top; a job whose folder is gone says so instead of an empty log.
