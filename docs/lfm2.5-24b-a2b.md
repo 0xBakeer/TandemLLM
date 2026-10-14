@@ -29,6 +29,10 @@ A decode token reads 4.9 GB of the BF16 weights (the pack index's `decode_bytes`
 | `lfm25-exl3-6.0` | 18.63 GB | 17.37 GiB | 106.9 | 105.2 / 103.5 | 0.039 | 93.4 % | 0.080 | 0.048 |
 | `lfm25-bf16` | 47.9 GB | 44.95 GiB | 44.8 | 44.5 / 43.3 | 0 (the reference) | 100 % | 0 | 0 |
 
+![Chat decode speed against chat top-1 agreement with BF16 for every size: 2.5 bpw fastest at 185 tok/s and 78.9 %, the default 3.5 bpw at 151 tok/s and 86.7 %, 6.0 bpw at 105 tok/s and 93.4 %, BF16 at 45 tok/s](media/lfm25-speed-vs-quality.png)
+
+![Chat KL divergence and top-1 agreement against BF16 by size: KL from 0.313 at 2.5 bpw down to 0.039 at 6.0 bpw, top-1 from 78.9 % up to 93.4 %](media/lfm25-quality-by-size.png)
+
 The EXL3 packs are exllamav3 1.6.0 conversions with the mul1 codebook and the head at 6 bits, one private Hugging Face repository a size (`0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`), each profile pinned to the repository's commit (`QSE_WEIGHTS_REVISION`); the download checks every file against the hub's sha256, and the measured packs' own checksums equal the hub's. The decode step is `tools/lfm_check.py bench` from its graph with the dense splits; the chat rows are the Setup Guide's (`tools/fn_lookup_ab.py`, one greedy request, 512 tokens); the quality is exllamav3's `model_diff` (the pack against the BF16 checkpoint, KL and top-1 agreement on 20 rows of 2,048 tokens of oasst1 validation chat and of wikitext-2), and as a second check `tools/lfm_quality.py`: this engine on the pack against the BF16 checkpoint in the same process, on 100 rows of each set (and 48 of the model's own answers); the two agree within 0.02 KL on chat. All runs of 2026-10-14 are in `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
 
 These KL values are high next to exllamav3 conversions of other models at the same rates. The same conversion recipe on LFM2.5's 8B sibling at 4.10 bits gave a KL of 0.0955 against 0.0862 for a reference conversion, and 0.0880 with the reference's layer layout for the high-quality layers, so the recipe is not the cause: the 24B is harder at the same rate, for reasons not tested yet. The two 4.0 calibrations differ on wikitext only (this engine: KL 0.176 for exllamav3's default calibration, which the profile serves, against 0.189 for a trace calibration, 95 % interval of the difference 0.002 to 0.024) and not on chat or the model's own text.
@@ -76,6 +80,8 @@ One request, greedy, through the server (`tools/fn_lookup_ab.py`, one fresh serv
 | `lfm25-exl3-4.5` | 128.4 / 123.3 | 128.2 / 124.7 | 128.0 / 124.5 | 126.5 / 281.2 | 126.9 / 339.4 |
 | `lfm25-exl3-6.0` | 105.4 / 104.2 | 105.2 / 103.5 | 105.0 / 105.5 | 104.1 / 210.0 | 102.8 / 280.1 |
 | `lfm25-bf16` | 44.6 / 43.4 | 44.5 / 43.3 | 44.5 / 44.5 | 44.3 / 153.7 | 44.2 / 157.8 |
+
+![Chat plain against edit and copy asks with the lookup, tok/s, for every size: the lookup takes edit and copy to 2 to 3.5 times the plain chat rate](media/lfm25-lookup-edit-copy.png)
 
 Each cell is plain / lookup, tok/s. The lookup costs 1 to 5 % in prose and chat, where it rarely matches, and takes edit and copy asks to 2 to 3.5 times the plain rate.
 

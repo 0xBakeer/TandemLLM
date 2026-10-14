@@ -49,6 +49,10 @@ The tokenizer is LiquidAI's own (128,000 ids). The lookup corpus and the suffix 
 
 Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers are exllamav3's \code{model_diff} against the BF16 checkpoint on 20 rows of 2,048 tokens of oasst1 chat; this engine's own comparison (\code{tools/lfm_quality.py}, 100 rows) agrees within 0.02. They are high next to exllamav3 conversions of other models at the same rates: the same recipe on the 8B sibling at 4.10 bits came within 0.01 of a reference conversion, so the 24B is harder at the same rate, for reasons not tested yet. The default is \code{lfm25-exl3-3.5}: the fastest profile in chat as it serves (the lookup on) whose chat top-1 agreement is at least 85~\% (86.7~\% at 143.7~tok/s; 3.0 is faster at 83.6~\%).
 
+\screenshot{lfm25-speed-vs-quality}{Chat decode speed against chat top-1 agreement with BF16, every size (\measured, 2026-10-14; one request, 512 greedy tokens; the data of Table~\ref{tab:lfm-profiles}). The default, 3.5, is the fastest at 85~\% or more.}{fig:lfm-speed-quality}
+
+\screenshot{lfm25-quality-by-size}{Chat KL divergence and top-1 agreement against BF16 by size (exllamav3's \texttt{model\_diff} on oasst1 chat).}{fig:lfm-quality}
+
 Below 4 bits a weight, exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is $16K + 8$ int16 wide). In such a tile an odd weight takes one bit more than an even one, so weight $i$'s 16-bit window ends at bit $(i+1)K_a + \lfloor (i+1)/2 \rfloor$ of the tile's ring, $K_a$ the whole part of the rate. The engine's kernels decode these tiles as exllamav3 does, in the decode step, a verify block and the prefill.
 
 \section{One row path and exact rollback}
@@ -92,6 +96,8 @@ experts & 152 & 259 & 333 & 391 & 491 & 563 & 664 & 735 \\
 \end{table}
 
 The model has no draft layer, and Liquid will publish a drafter for it. Until then the server drafts with the lookup alone, through the shared tree drafter with no head (\code{NoHead}) and cut by StairCut with the staircase as its prior. With no head, each round's own lookup match decides through the cut's calibrated acceptance: a round with no match is the plain step and is priced as one, and the class-wide skip that a head needs is not consulted. On 4.0 with the store off, an edit ask ran at 291.1~tok/s (11.1 tokens a block) and a copy ask at 326.4~tok/s (13.5), against 141.3 and 141.9 plain, while the other three asks ran as plain, every text equal to the plain run's (\measured). Before the no-head pricing, the same asks in one server never drafted. Through the server on 4.0 the lookup also gave the same answer as plain decoding for all 20 requests of \code{tools/fn_server_check.py}, with a largest logprob difference of 0.0.
+
+\screenshot{lfm25-lookup-edit-copy}{Chat plain against edit and copy asks with the lookup, every size (\measured, 2026-10-14).}{fig:lfm-lookup}
 
 \section{Serving}
 
