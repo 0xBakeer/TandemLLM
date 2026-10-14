@@ -53,9 +53,10 @@ FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # Opencode's word is ignored (the deploy stores it on the live box too)
           # The shadow reader's block (the deploy stores it on the live box too)
-          "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow"},
+          # SRV-471: the memory switch (the live box set it on in both, coding v20 and chat v5)
+          "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow", "memory"},
           "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
-          "profiles/chat": {"thinking.by_size", "ui"},
+          "profiles/chat": {"thinking.by_size", "ui", "memory"},
           # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)
           "packages": {"packages.tandem-memory", "packages.memory"}}
 HERMES_TOOLS = ["terminal", "process", "read_file", "write_file", "patch", "search_files", "todo",
