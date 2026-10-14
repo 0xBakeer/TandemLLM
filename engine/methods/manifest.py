@@ -39,8 +39,18 @@ FORMULA = "fp4"
 #: #1 (0xWhiteMage, a6f2142c): engine/loader.py loads a standalone EXL3 pack as --model (its
 #: config.json says exl3 and no QWEN38_EXL3 overlay is set); a 27B profile sets QWEN38_EXL3 or serves
 #: NVFP4 and takes the path it took before, reading the same tensors (the shards now opened at once)
+#: ENG-285 (LFM2.5): the shared EXL3 kernels decode half-integer rates (1.5, 2.5, 3.5 bits) beside the whole
+#: ones; a whole rate's code is the same (its tile width 8 K words, no new branch taken), and on the Spark
+#: every dense, skinny-GEMM, slab, MoE and prefill-MoE output at rates 2..8 equalled the tree before's bit
+#: for bit (the same random blocks and inputs through both trees)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
-             "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441"}
+             "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441",
+             ("tools/exl3_linear.py", "a75b6a3f1fd36ff9ecafe79c09cb797106ce48f53edc73b10d4ef19a0fe3c40f"):
+             "5078b33c3d03eac42706d3b05650b0604f2ae96d267db2c996f59409929a3a48",
+             ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
+             "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
+             ("tools/fn_prefill_kernels.py", "653b447087545778f29eb856e12681d0d1229847ada9ec7291477aeda8c54106"):
+             "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987"}
 
 
 def adoption() -> str:
