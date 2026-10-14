@@ -3,7 +3,7 @@
 // runs them one at a time around the shell's own measurements:
 //   @read     the tiles and every step with the box's data, from what the box runs now; the memory
 //             bar against the live split; a reload keeps the step (desktop and 390 px)
-//   @wren-on  Wren loads (borrowing the narrator's copy), answers, ticks a box; stays loaded
+//   @wren-on  Wren loads (borrowing the narrator's copy where there is one), answers, ticks a box; stays loaded
 //   @wren-off Wren goes to sleep from its panel
 //   @csrf     a page on another site cannot post to /v1/setup (its request in the browser and the
 //             same request's answer); the page's own posts pass
@@ -158,7 +158,7 @@ test('@read the tiles and every step with the box data, from what the box runs n
   }
 });
 
-test('@wren-on Wren loads borrowing the narrator, answers from the docs, changes the page', async ({ page }) => {
+test('@wren-on Wren loads (borrowing the narrator where it runs the same model), answers from the docs, changes the page', async ({ page }) => {
   test.skip(isPhone(page), 'one Wren at a time: the desktop run');
   const log: Record<string, unknown> = {};
   await fresh(page);
@@ -179,17 +179,22 @@ test('@wren-on Wren loads borrowing the narrator, answers from the docs, changes
 
   log.q1 = await askWren(page, 'What does the narrator do, in one or two sentences?');
   await shot(page, 'wren-3-answer');
-  log.q2 = await askWren(page, 'How much memory do the weights of exl3-4.5 take?');
+  // the 27B's questions, or the served model's own (PW_MODEL): its default weights, a tool it has on
+  const is27 = MODEL === 'qwen3.8-27b';
+  const model = await (await page.request.get(`/v1/setup/models/${MODEL}`)).json();
+  const rec = (model.profiles as { id: string; recommended: boolean }[]).find((x) => x.recommended)?.id ?? '';
+  log.q2 = await askWren(page, `How much memory do the weights of ${is27 ? 'exl3-4.5' : rec} take?`);
   log.sources = await p.locator('.wren-sources').last().innerText().catch(() => null);
 
   // a tool call: Wren turns a tool off, the page changes, the bar drops
-  const vision = page.locator('[data-component="vision"] input');
+  const [tool, label, ask] = is27 ? ['vision', 'Vision', 'Please turn off the vision tower.'] : ['response_cache', 'Response cache', 'Please turn off the response cache.'];
+  const vision = page.locator(`[data-component="${tool}"] input`);
   await expect(vision).toBeChecked();
   const before = Number(await page.locator('.membar').getAttribute('data-total'));
-  log.q3 = await askWren(page, 'Please turn off the vision tower.');
+  log.q3 = await askWren(page, ask);
   await expect(vision).not.toBeChecked({ timeout: 30_000 });
   const chip = p.locator('[data-tool-chip]').last();
-  await expect(chip).toContainText('Wren turned off Vision');
+  await expect(chip).toContainText(`Wren turned off ${label}`);
   log.bar_drop_gib = before - Number(await page.locator('.membar').getAttribute('data-total'));
   await shot(page, 'wren-4-tool-call');
   await chip.locator('button', { hasText: 'Undo' }).click();

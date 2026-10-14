@@ -364,7 +364,7 @@ export const S = {
     models: ['Which model should I pick?', 'What does this guide do?'],
     overview: ['What do these numbers mean?', 'What is greedy vs sampled?'],
     weights: ['Which size is best for my memory?', 'What is KL?'],
-    components: ['What is the narrator?', 'Turn off vision'],
+    components: ['What is the narrator?', 'Which tools can I turn off?'],
     parallelism: ['How many parallel chats do I need?', 'Use 2 slots'],
     methods: ['What does det mean?', 'What is the thinking effort?'],
     review: ['Is this setup safe?', 'Why does it restart?'],
