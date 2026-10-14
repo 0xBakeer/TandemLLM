@@ -29,6 +29,12 @@ The test matrix:
      the note and name it), and the stats count it as a body (they read body_notes 0 before)
                                                         test_fresh_session_recall
 
+ 10  SRV-471 (QA SRV-472): the Chat tab (client `chat-app`, the shipped profile): the turn's row
+     and its usage frame carry the memory part (mode on, the index's notes); the card says the
+     notes are its memory between chats and never to deny one; "remember ..." writes a note a
+     new chat's index names; `memory: off` on purpose: the off note, once; absent: nothing
+                                                        test_chat_tab_*
+
 Run: python tests/test_memory_router.py
 """
 
@@ -274,6 +280,90 @@ def test_the_cache_peek_renders_the_memory_notes_the_next_turn_carries():
         hist += [{"role": "user", "content": q},
                  {"role": "assistant", "content": out["content"],
                   "reasoning_content": out["reasoning"]}]
+
+
+# ---------------------------------------------------------------------- SRV-471: the Chat tab
+CHAT_APP = {"X-QSE-Client": "chat-app", "User-Agent": "tandemllm-chatd/0.9"}
+
+
+def _chat_app(memory=...):
+    """The engine with the shipped chat-app profile (memory as given; `...`: as shipped)."""
+    import copy
+    from server.conductor import schema
+    cond, seen = setup(memory=None)
+    doc = copy.deepcopy(schema.SHIPPED_PROFILES["chat-app"])
+    if memory is None:
+        doc.pop("memory", None)
+    elif memory is not ...:
+        doc["memory"] = memory
+    cond.store.put("profiles", "chat-app", doc, note="shipped chat-app", author="test")
+    return cond, seen
+
+
+def chat_ask(text, sid, history=()):
+    body = {"model": "TandemLLM", "stream": True, "max_tokens": 2000,
+            "reasoning_effort": "medium", "reasoning_format": "reasoning_content",
+            "messages": [{"role": "system", "content": "You are a helpful assistant."}, *history,
+                         {"role": "user", "content": text}]}
+    return _go(body, {**CHAT_APP, "x-session-id": sid})
+
+
+def _row(cond, sid):
+    cond.journal.flush()
+    return cond.journal.rows(session="c:" + sid, limit=1)[0]
+
+
+def test_chat_tab_turn_sees_the_memory_index_and_reports_it():
+    cond, seen = _chat_app()
+    for t in ("garden: tomatoes in the south bed", "units: metric"):
+        cond.notes.write("owner", {"op": "add", "scope": "user", "kind": "reference",
+                                   "title": t, "body": f"The user noted {t}."}, writer="human")
+    out = chat_ask("Do you know that I have a daughter?", "chat-a1")
+    row = _row(cond, "chat-a1")
+    assert row["profile"] == "chat-app", row
+    mem = (row.get("extra") or {}).get("memory") or {}
+    assert mem.get("mode") == "on" and mem["index"]["notes"] == 2, row.get("extra")
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "Your memory: notes the runtime keeps" in text and "garden: tomatoes" in text, \
+        "the index went in"
+    assert "your memory between conversations" in text and \
+        "never say that you have no memory between chats" in text, "the card's memory line"
+    part = out["usage"]["tandem"]["harness"]["memory"]
+    assert part["mode"] == "on" and part["index_notes"] == 2 and part["index_tokens"] > 0, part
+    assert part["card_tokens"] > 0 and part["why"] is None
+
+
+def test_chat_tab_remember_then_a_new_chat_finds_it():
+    cond, seen = _chat_app()
+    out = chat_ask("Remember that I like short answers. FAKE_MEMORY", "chat-b1")
+    assert BLOCK_OPEN not in out["content"]
+    ns = cond.notes.notes("owner")
+    assert [n.title for n in ns] == ["short answers"] and ns[0].status == "provisional"
+    chat_ask("How should you answer me?", "chat-b2")
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "short answers" in text.split("How should you answer me?")[-1], "the new chat's index"
+
+
+def test_chat_tab_memory_off_says_so_once_and_absent_adds_nothing():
+    from server.conductor import memory as memory_mod
+    cond, seen = _chat_app(memory="off")
+    out = chat_ask("Do you remember my name?", "chat-c1")
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert "memory is off in this profile" in text and "<tandem_memory op=" not in text
+    assert (_row(cond, "chat-c1").get("extra") or {}).get("memory") == \
+        {"mode": "off", "why": "profile"}
+    assert out["usage"]["tandem"]["harness"]["memory"]["why"] == "profile"
+    hist = [{"role": "user", "content": "Do you remember my name?"},
+            {"role": "assistant", "content": out["content"]}]
+    chat_ask("And my city?", "chat-c1", hist)
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert text.count(memory_mod.OFF_NOTE[:40]) == 1, "the note once a session, replayed"
+    cond, seen = _chat_app(memory=None)
+    out = chat_ask("Do you remember my name?", "chat-d1")
+    text = app.STATE["tok"].decode(seen[-1], skip_special_tokens=False)
+    assert memory_mod.OFF_NOTE[:40] not in text and "<tandem_memory op=" not in text
+    assert (_row(cond, "chat-d1").get("extra") or {}).get("memory") is None
+    assert "memory" not in (out["usage"]["tandem"]["harness"] or {})
 
 
 if __name__ == "__main__":
