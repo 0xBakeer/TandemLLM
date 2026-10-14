@@ -137,6 +137,31 @@ def _switch(v, name: str) -> bool:
     return v
 
 
+def said(body: dict) -> bool:
+    """The request says anything about thinking: a switch, an effort word or a budget, in any of
+    the shapes `read` takes (an empty value counts as not said)."""
+    if not isinstance(body, dict):
+        return False
+    keys = [(None, "enable_thinking"), ("chat_template_kwargs", "enable_thinking"),
+            ("reasoning", "enabled"), *EFFORTS, *NUMBERS]
+    if any(_field(body, w, k) not in (None, "") for w, k in keys):
+        return True
+    t = body.get("thinking")
+    return isinstance(t, bool) or (isinstance(t, dict) and t.get("type") is not None)
+
+
+def server_default_off(body: dict) -> dict:
+    """SRV-477 (`--reasoning-effort none|off`): the body with thinking off when it says nothing
+    about thinking, as the template's own switch (`chat_template_kwargs.enable_thinking: false`);
+    a body that says anything is returned as it is."""
+    if said(body):
+        return body
+    out = dict(body)
+    out["chat_template_kwargs"] = dict(body.get("chat_template_kwargs") or {},
+                                       enable_thinking=False)
+    return out
+
+
 def read(body: dict, levels: dict | None = None, strict: bool = True) -> Client:
     """The client's thinking request. `levels`: the effort levels' caps (`caps()`). `strict`:
     a value of the wrong type or out of range is a `Refusal` naming the field; the router reads

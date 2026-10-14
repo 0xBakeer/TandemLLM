@@ -4967,7 +4967,8 @@ def _system() -> dict:
                    if STATE.get("drafter") is not None else None,
                    "tree": bool(STATE.get("tree")),
                    "reasoning_format": STATE.get("reasoning_format"),
-                   "reasoning_effort": STATE.get("reasoning_effort"),
+                   "reasoning_effort": STATE.get("reasoning_effort")
+                   or ("off" if STATE.get("thinking_default") == "off" else None),
                    "status": _live()["status"]},
         "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
                   "env": dashboard_api.redact_env(dict(os.environ))},
@@ -6350,6 +6351,10 @@ class Handler(BaseHTTPRequestHandler):
             compat.request_shape(body, chat)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
+        # SRV-477: `--reasoning-effort none|off`, thinking off for a request that says nothing
+        # about thinking (one that does keeps what it says)
+        if chat and STATE.get("thinking_default") == "off":
+            body = thinking_mod.server_default_off(body)
         # TandemLLM's state lines that a client sends back in its earlier reasoning are taken out
         # before anything reads the messages (server/conductor/states.py): Qwen never sees them,
         # and the prompt is the one the request would have without them
@@ -8730,10 +8735,14 @@ def parser() -> argparse.ArgumentParser:
                          "closes early enough to leave them. auto = min(2048, a quarter of the "
                          "limit), 0 = none (QSE_ANSWER_RESERVE). A request that asks for no "
                          "budget is never touched")
-    ap.add_argument("--reasoning-effort", default=None, choices=("low", "medium", "xhigh"),
+    ap.add_argument("--reasoning-effort", default=None,
+                    choices=("none", "off", "low", "medium", "xhigh"),
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
-                         "assumptions and weigh alternatives before answering")
+                         "assumptions and weigh alternatives before answering. `none` or `off`: "
+                         "thinking off for a request that says nothing about thinking (no switch, "
+                         "effort word or budget in any shape), as `reasoning_effort: none` in the "
+                         "body does")
     ap.add_argument("--cache-budget-gb", type=float, default=2.0,
                     help="RAM budget for the state cache, in GiB (CACHE_GB). One snapshot is the "
                          "48 recurrent states (~150 MB on this model, whatever the prefix length) "
@@ -9159,9 +9168,18 @@ def conductor_root(a) -> str | None:
     return val
 
 
+def _thinking_default(a) -> None:
+    """SRV-477: `--reasoning-effort none|off` is a server default of thinking off
+    (`a.thinking_default`); the template gets no effort word then."""
+    a.thinking_default = "off" if a.reasoning_effort in ("none", "off") else "on"
+    if a.thinking_default == "off":
+        a.reasoning_effort = None
+
+
 def main() -> None:
     ap = parser()
     a = ap.parse_args()
+    _thinking_default(a)
     # argparse does not check a default against `choices`, and a typo in QSE_DASHBOARD_LOGIN
     # ("true", "ON") must not quietly decide who reads the dashboard
     if a.dashboard_login not in ("on", "off"):
@@ -10018,6 +10036,7 @@ def _serve(a, led) -> None:
     """What every server does once its engine is loaded, the real one or the fake one."""
     STATE.update(identity())
     STATE["args"] = vars(a)
+    STATE["thinking_default"] = getattr(a, "thinking_default", "on")     # SRV-477
     # The side lane (server/preempt.py); the fake engine brings its own runner
     side = getattr(a, "side_lane", "off")
     STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run, room=_lane_room,

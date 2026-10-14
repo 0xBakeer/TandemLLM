@@ -65,7 +65,7 @@ Open WebUI's terminal tools end `run_command`'s description with the terminal's 
 
 *Recorded against the served engine (published NVFP4 weights, StairCut on); sped-up parts are marked in the clip.*
 
-The chat template opens the block in the prompt, so the model only ever writes `</think>`. Our server re-emits `<think>` as the first delta so that clients which fold on a matched pair see one. `reasoning_effort` (low, medium, xhigh) goes into the chat template, and the served default is `medium`. At `xhigh`, one request spent all 8,192 of its tokens thinking and never answered.
+The chat template opens the block in the prompt, so the model only ever writes `</think>`. Our server re-emits `<think>` as the first delta so that clients which fold on a matched pair see one. `reasoning_effort` (low, medium, xhigh) goes into the chat template, and the served default is `medium`. At `xhigh`, one request spent all 8,192 of its tokens thinking and never answered. `--reasoning-effort none` (or `off`, SRV-477) turns thinking off for every request that says nothing about thinking (no switch, effort word or budget in any shape): such a request gets `chat_template_kwargs.enable_thinking: false` before anything reads it, and one that says anything keeps it. `/health` then reports `reasoning_effort: off` and `sampling.thinking_default: off`.
 
 ### Thinking budgets from the client
 
