@@ -482,7 +482,9 @@ def load(app, a) -> None:
         temperature=a.temperature, top_p=a.top_p, top_k=a.top_k, pattern_stop=None,
         state_store=None, session_cache=False, prefix_cache=False, prefix_chunk=0,
         response_cache=None, suffix_store=None, suffix_scope="all",
-        usage_default=(a.usage_default == "on"))
+        usage_default=(a.usage_default == "on"),
+        # SRV-475: a test's checkpoint sampling (a directory with a generation_config.json)
+        card_sampling=app.loopescape_mod.card_sampling(os.environ.get("QSE_FAKE_CARD_DIR")))
     app.generate_stream = generate_stream
     app.context_choice = context_choice
     if int(getattr(a, "parallel", 1) or 1) > 1:

@@ -15,6 +15,12 @@ migration never runs twice: a switch the owner removes after it ran stays remove
     2026-10-14-chat-memory       SRV-471: the same for the chat, coding and hermes profiles
     2026-10-14-coding-memory
     2026-10-14-hermes-memory
+    2026-10-14-<name>-loop-guard SRV-473, SRV-475: in coding, chat-app, hermes, overnight and chat,
+                                 `toolgate.same_call` on when it is off or absent and no stored
+                                 version of the profile ever had it on (a profile someone turned
+                                 off after it was on stays off); chat's C3 to act by the same rule
+                                 on its mode; `sampling` (greedy, loop escape on) when the
+                                 document has none. The record lists what changed
 """
 
 from __future__ import annotations
@@ -32,13 +38,77 @@ def _memory_on(doc: dict) -> dict | None:
     return dict(doc, memory="on")
 
 
-# (id, kind, name, change)
+def _ever(past: list, get) -> set:
+    """The values `get` reads from each earlier stored version (version 0, the built-in seed, is
+    the code's default and no one's choice: not among them)."""
+    out = set()
+    for d in past:
+        try:
+            out.add(get(d))
+        except (KeyError, TypeError, AttributeError):
+            out.add(None)
+    return out
+
+
+def _loop_guard(doc: dict, past: list, c3: bool = False):
+    """SRV-473/SRV-475: the same-call guard on and the sampling section, as the shipped profile
+    has them. `past`: the profile's stored versions, oldest first. `toolgate.same_call` false and
+    true-never-stored is the old shipped default (absent: the same), so it is turned on; a profile
+    that was on in any stored version was turned off by someone, and stays as it is. With `c3`
+    (chat), C3's mode goes from off to act by the same rule. Returns (document, changes) or None."""
+    if not isinstance(doc, dict):
+        return None
+    new, changes = dict(doc), []
+    gate = dict(doc.get("toolgate") or {})
+    if gate.get("same_call") is not True and True not in _ever(
+            past, lambda d: d["toolgate"]["same_call"]):
+        gate["same_call"] = True
+        new["toolgate"] = gate
+        changes.append("toolgate.same_call=true")
+    tasks = doc.get("tasks") or {}
+    if c3 and (tasks.get("C3") or {}).get("mode") == "off" and _ever(
+            past, lambda d: d["tasks"]["C3"]["mode"]) <= {"off"}:
+        new["tasks"] = dict(tasks, C3=dict(tasks["C3"], mode="act"))
+        changes.append("tasks.C3.mode=act")
+    if "sampling" not in doc:
+        new["sampling"] = {"agentic_default": "greedy", "loop_escape": "on"}
+        changes.append("sampling={agentic_default: greedy, loop_escape: on}")
+    return (new, changes) if changes else None
+
+
+def _guard(c3: bool = False):
+    def change(doc, past):
+        return _loop_guard(doc, past, c3=c3)
+    change.history = True                    # `run` passes the stored versions
+    return change
+
+
+# (id, kind, name, change): `change(doc)`, or `change(doc, past)` when it has `history`; it
+# returns the new document, (the document, [what changed]), or None
 MIGRATIONS = [
     ("2026-10-14-chat-app-memory", "profiles", "chat-app", _memory_on),
     ("2026-10-14-chat-memory", "profiles", "chat", _memory_on),
     ("2026-10-14-coding-memory", "profiles", "coding", _memory_on),
     ("2026-10-14-hermes-memory", "profiles", "hermes", _memory_on),
+    ("2026-10-14-coding-loop-guard", "profiles", "coding", _guard()),
+    ("2026-10-14-chat-app-loop-guard", "profiles", "chat-app", _guard()),
+    ("2026-10-14-hermes-loop-guard", "profiles", "hermes", _guard()),
+    ("2026-10-14-overnight-loop-guard", "profiles", "overnight", _guard()),
+    ("2026-10-14-chat-loop-guard", "profiles", "chat", _guard(c3=True)),
 ]
+
+
+def _past(store, kind: str, name: str, current: int) -> list:
+    """The stored versions below `current`, oldest first (unreadable ones left out)."""
+    out = []
+    for meta in sorted(store.versions(kind, name), key=lambda m: m.get("version") or 0):
+        v = meta.get("version") or 0
+        if 0 < v < current:
+            try:
+                out.append(store.version(kind, name, v))
+            except Exception:                                      # noqa: BLE001
+                continue
+    return out
 
 
 def _state(root: str) -> dict:
@@ -76,7 +146,10 @@ def run(store, journal=None, migrations=None) -> list[dict]:
         try:
             if store._pointer(store._dir(kind, name)) is not None:
                 v, doc = store.get(kind, name)
-                new = change(doc)
+                new = (change(doc, _past(store, kind, name, v)) if getattr(change, "history", False)
+                       else change(doc))
+                if isinstance(new, tuple):
+                    new, rec["changes"] = new
                 if new is None:
                     rec.update(result="unchanged", version=v)
                 else:
@@ -96,14 +169,19 @@ def run(store, journal=None, migrations=None) -> list[dict]:
             continue
         state["applied"][mid] = {"at": _dt.datetime.now(_dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"), "result": rec["result"], "version": rec["version"]}
+        if rec.get("changes"):
+            state["applied"][mid]["changes"] = rec["changes"]
         _save(store.root, state)
         print(f"[conductor] migration {mid}: {kind}{'/' + name if name else ''} "
-              f"{rec['result']}" + (f" (v{rec['version']})" if rec["version"] else ""), flush=True)
+              f"{rec['result']}" + (f" (v{rec['version']})" if rec["version"] else "")
+              + (f": {'; '.join(rec['changes'])}" if rec.get("changes") else ""), flush=True)
         if journal is not None:
             try:
                 journal.note("config", kind, decision="migration",
                              detail={"id": mid, "name": name, "result": rec["result"],
-                                     "version": rec["version"]})
+                                     "version": rec["version"],
+                                     **({"changes": rec["changes"]} if rec.get("changes")
+                                        else {})})
             except Exception:                                      # noqa: BLE001
                 pass
         done.append(rec)

@@ -167,7 +167,12 @@
     "You ran `{name}` with these arguments {count} times and got the same result each time (first line: {first_line}). This call was not run. Do something different: read what the result says, change the approach, or fix the cause first.",
     "This was `{name}` with the same arguments again, and it was not run either. Take a different step now."
    ],
-   "first_line_chars": 160
+   "first_line_chars": 160,
+   "wait_s": 10,
+   "escape_texts": [
+    "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first.",
+    "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
+   ]
   },
   "C1": {
    "rule": "risk_floor",

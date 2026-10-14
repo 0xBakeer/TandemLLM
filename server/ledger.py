@@ -72,7 +72,9 @@ among them since SRV-233); `forwarded_tokens`, what the prefill forwarded, hidde
 
 SCHEMA VERSION 9 (SRV-241): `sampling`, how the request sampled: null for greedy (the default),
 `client` when the client sent its own temperature, `regenerate` when TandemLLM sampled a regenerate
-(server/regenerate.py). The dashboard's speed sample leaves the regenerate rows out.
+(server/regenerate.py), `loop_escape` or `card` when it sampled with the model card's settings
+(server/conductor/loopescape.py, SRV-475). The dashboard's speed sample leaves the regenerate,
+loop-escape and card rows out.
 
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online

@@ -37,6 +37,7 @@ from server.conductor.store import Store  # noqa: E402
 
 MID = "2026-10-14-chat-app-memory"
 ONLY_CHAT_APP = [m for m in migrations.MIGRATIONS if m[0] == MID]
+MEMORY = [m for m in migrations.MIGRATIONS if m[0].endswith("-memory")]
 
 
 def drift(profiles: dict, derived: dict) -> list[str]:
@@ -79,6 +80,26 @@ def test_a_switch_the_parent_gains_is_caught():
     profs = copy.deepcopy(schema.SHIPPED_PROFILES)
     del profs["chat-app"]["memory"]                      # the pre-fix document
     assert drift(profs, DERIVED) == ["chat-app.memory: declared but not set"]
+
+
+def test_the_agent_profiles_ship_the_loop_guard_and_the_escape():
+    """SRV-473 / SRV-475: chat-app gets both from coding (no own key), hermes, overnight and chat
+    set them, general keeps neither."""
+    assert drift(schema.SHIPPED_PROFILES, DERIVED) == []
+    for name in ("coding", "chat-app", "hermes", "overnight", "chat"):
+        p = schema.SHIPPED_PROFILES[name]
+        assert p["toolgate"]["same_call"] is True, name
+        assert p["tasks"]["C3"]["mode"] == "act", name
+        assert p["sampling"] == {"agentic_default": "greedy", "loop_escape": "on"}, name
+        assert not schema.check("profiles", p, name=name, router=schema.SHIPPED_ROUTER,
+                                packages=schema.SHIPPED_PACKAGES,
+                                profiles=schema.SHIPPED_PROFILES), name
+    g = schema.SHIPPED_PROFILES["general"]
+    assert g["toolgate"]["same_call"] is False and "sampling" not in g
+    # the other packs stay as they were
+    for name in ("coding", "chat-app", "hermes", "overnight", "chat", "general"):
+        tg = schema.SHIPPED_PROFILES[name]["toolgate"]
+        assert (tg["risk"], tg["project"], tg["malformed"]) == (False, False, False), name
 
 
 def test_general_has_no_memory_switch():
@@ -177,18 +198,18 @@ def test_the_profile_migrations_on_a_live_box():
             doc["memory"] = "on"
         st.put("profiles", name, doc, note="as stored", author="test")
     j = _Journal()
-    got = {r["name"]: (r["result"], r["version"]) for r in migrations.run(st, j)}
+    got = {r["name"]: (r["result"], r["version"]) for r in migrations.run(st, j, MEMORY)}
     assert got == {"chat-app": ("unchanged", 1), "chat": ("unchanged", 1),
                    "coding": ("unchanged", 1), "hermes": ("changed", 2)}
     assert st.get("profiles", "hermes")[1]["memory"] == "on"
     assert st.get("profiles", "general")[0] == 1 and "memory" not in st.get("profiles",
                                                                             "general")[1]
-    assert len(j.rows) == 4 and migrations.run(st, j) == []
+    assert len(j.rows) == 4 and migrations.run(st, j, MEMORY) == []
     # an explicit off in a stored coding document stays
     st = Store(tempfile.mkdtemp(prefix="cond-mig-"))
     st.put("profiles", "coding", dict(copy.deepcopy(schema.SHIPPED_PROFILES["coding"]),
                                       memory="off"), note="off", author="owner")
-    rec = [r for r in migrations.run(st) if r["name"] == "coding"][0]
+    rec = [r for r in migrations.run(st, migrations=MEMORY) if r["name"] == "coding"][0]
     assert rec["result"] == "unchanged" and st.get("profiles", "coding")[1]["memory"] == "off"
 
 
