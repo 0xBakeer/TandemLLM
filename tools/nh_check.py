@@ -11,6 +11,8 @@
     $PY tools/nh_check.py bench --model <dir>                     single-stream decode tok/s, graph on/off
     $PY tools/nh_check.py staircase --model <dir>                 verify ms for 1..16 rows at 1k and 8k
                                                                    context, and the experts a block reads
+    $PY tools/nh_check.py mtp --model <dir> --depth 3                the checkpoint's MTP head against the
+                                                                   trunk's greedy text: agreement a depth
     $PY tools/nh_check.py prices --stair s.json --bench b.json --out <price file>
 
 A comparison reports, over every decode position: the argmax agreement, the positions where the two
@@ -125,9 +127,51 @@ def _compare(run: dict, ref_logits: list) -> dict:
             "mean_rel_diff": round(sum(mean) / max(len(mean), 1), 5), "disagreements": bad}
 
 
+def _hf_from_engine_weights(model_dir: str):
+    """transformers' NemotronHForCausalLM built on the meta device and given the engine loader's device
+    tensors (no second copy, no host staging): its arithmetic on the same bytes. transformers' own loader
+    stages the stacked experts on the host and does not fit beside the device copy on a 121 GiB board."""
+    from transformers import AutoConfig
+    from transformers.models.nemotron_h import modeling_nemotron_h as hm
+
+    from engine.models.nemotron_h.load import load
+    idx, W, experts, _ = load(model_dir, "cuda", mtp=False, log=None)
+    cfg = AutoConfig.from_pretrained(model_dir)
+    cfg.use_mamba_kernels = False
+    cfg._attn_implementation = "sdpa"
+    with torch.device("meta"):
+        model = hm.NemotronHForCausalLM(cfg)
+    sd = {}
+    for k, v in W.items():
+        if k.endswith("qkv"):
+            continue
+        sd[k if k.startswith("lm_head") else "model." + k] = v
+    for li, e in experts.items():
+        sd[f"model.layers.{li}.mixer.experts.up_proj"] = e.up
+        sd[f"model.layers.{li}.mixer.experts.down_proj"] = e.down
+    for k in list(sd):
+        if k.endswith(("A_log", "dt_bias", ".D")):
+            sd[k] = sd[k].to(torch.bfloat16)
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    missing = [m for m in missing if not m.endswith("inv_freq")]
+    if missing or unexpected:
+        raise ValueError(f"missing {missing[:4]}, unexpected {unexpected[:4]}")
+    for name, buf in list(model.named_buffers()):
+        if buf.is_meta:
+            raise ValueError(f"buffer {name} left on meta")
+    return model.eval()
+
+
 def cmd_hf(a) -> None:
     from transformers import AutoModelForCausalLM
     run = torch.load(a.inp, weights_only=False)
+    if a.shared:
+        model = _hf_from_engine_weights(a.model)
+        longest = max(len(r["ids"]) + len(r["gen"]) for r in run["runs"])
+        for m in model.modules():
+            if hasattr(m, "chunk_size") and hasattr(m, "A_log"):
+                m.chunk_size = max(m.chunk_size, 1 << (longest - 1).bit_length())
+        return _hf_run(a, run, model)
     # the torch Mamba path (mamba_ssm is not on the box), one SSD chunk per sequence: transformers'
     # multi-chunk torch path disagrees with its own one-chunk result (tests/test_nemotron_h_ref.py)
     model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, device_map="cuda",
@@ -136,6 +180,10 @@ def cmd_hf(a) -> None:
     for m in model.modules():
         if hasattr(m, "chunk_size") and hasattr(m, "A_log"):
             m.chunk_size = max(m.chunk_size, 1 << (longest - 1).bit_length())
+    return _hf_run(a, run, model)
+
+
+def _hf_run(a, run, model) -> None:
     refs = []
     with torch.no_grad():
         for r in run["runs"]:
@@ -146,6 +194,58 @@ def cmd_hf(a) -> None:
         torch.save([r.to(torch.bfloat16) for r in refs], a.save)
     res = {"rung": "b", "reference": "transformers NemotronHForCausalLM bf16 sdpa", **_compare(run, refs)}
     print(json.dumps(res, indent=1), flush=True)
+    if a.json:
+        json.dump(res, open(a.json, "w"), indent=1)
+
+
+def cmd_mtp(a) -> None:
+    """The checkpoint's MTP head against the trunk's own greedy text: per prompt the greedy decode,
+    then at every decode position the head fed the trunk's row and the next token, its `depth` drafts
+    against the tokens the trunk wrote: the agreement at each depth and the mean accepted run."""
+    from transformers import AutoTokenizer
+
+    from engine.models.nemotron_h.engine import DecodeGraph, NemotronHEngine
+    from engine.models.nemotron_h.load import load
+    from engine.models.nemotron_h.mtp import NemotronHMTPHead
+    tok = AutoTokenizer.from_pretrained(a.model)
+    idx, W, experts, timing = load(a.model, "cuda", mtp=True, log=None)
+    eng = NemotronHEngine(idx.cfg, W, experts, device="cuda", max_len=a.max_len)
+    agree = [0] * a.depth
+    runs, tot, accepted = [], 0, 0
+    for p in PROMPTS[:a.prompts]:
+        ids = _ids(tok, p)
+        st = eng.new_state(a.max_len)
+        lg = eng.prefill(torch.tensor(ids), st)
+        rows = [eng.prompt_hidden.clone()]
+        gen = [int(lg[0].argmax())]
+        dg = DecodeGraph(eng, st)
+        for _ in range(a.tokens):
+            gen.append(dg.greedy(gen[-1]))
+            rows.append(dg.rb["hidden"].clone())
+        H = torch.cat(rows)                         # the row of every position 0 .. P + tokens - 1
+        seq = ids + gen
+        head = NemotronHMTPHead(eng, a.depth, a.max_len)
+        P = len(ids)
+        head.prime(H[:P - 1], seq[1:P])
+        n_ok = []
+        for t in range(P - 1, P - 1 + a.tokens - a.depth):
+            head.launch(H[t:t + 1], [seq[t + 1]])
+            drafts, _ = head.read()
+            run = 0
+            for d in range(a.depth):
+                ok = drafts[d][0] == seq[t + 2 + d]
+                agree[d] += ok
+                if ok and run == d:
+                    run += 1
+            n_ok.append(run)
+            tot += 1
+        accepted += sum(n_ok)
+        runs.append({"prompt": p[:40], "mean_run": round(sum(n_ok) / max(len(n_ok), 1), 3)})
+        print(json.dumps(runs[-1]), flush=True)
+    res = {"model": a.model, "depth": a.depth, "positions": tot,
+           "agree_at_depth": [round(x / max(tot, 1), 4) for x in agree],
+           "mean_accepted_run": round(accepted / max(tot, 1), 3), "runs": runs}
+    print(json.dumps(res), flush=True)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 
@@ -349,10 +449,19 @@ def main() -> None:
         r.add_argument("--inp", required=True)
         r.add_argument("--json")
         r.add_argument("--save", help="the reference's logits, for a closer look")
+        r.add_argument("--shared", action="store_true",
+                       help="transformers' modules on the engine loader's device tensors (no host staging)")
     cp = sub.add_parser("cmp")
     cp.add_argument("--a", required=True)
     cp.add_argument("--b", required=True)
     cp.add_argument("--json")
+    mt = sub.add_parser("mtp")
+    mt.add_argument("--model", required=True)
+    mt.add_argument("--depth", type=int, default=3)
+    mt.add_argument("--tokens", type=int, default=128)
+    mt.add_argument("--prompts", type=int, default=8)
+    mt.add_argument("--max-len", type=int, default=8192)
+    mt.add_argument("--json")
     cf = sub.add_parser("config")
     cf.add_argument("--model", required=True)
     b = sub.add_parser("bench")
@@ -375,7 +484,7 @@ def main() -> None:
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
     a = ap.parse_args()
-    {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "config": cmd_config,
+    {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "config": cmd_config, "mtp": cmd_mtp,
      "bench": cmd_bench, "staircase": cmd_staircase}[a.cmd](a)
 
 
