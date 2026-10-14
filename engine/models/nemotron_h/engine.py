@@ -115,14 +115,24 @@ class NemotronHEngine(NemotronHRef):
         x2 = x.reshape(-1, x.shape[-1])
         if not x2.is_contiguous():
             x2 = x2.contiguous()
+        if not torch.is_tensor(w):
+            # a packed weight (tools/iq2_linear.IQ2Linear): its own row-invariant kernel at any row count
+            return w.matmul(x2, out=out).view(*x.shape[:-1], w.shape[0])
         if x2.shape[0] <= ROWS_MAX:
             return K.linear_rows(x2, w, out=out).view(*x.shape[:-1], w.shape[0])
         y = F.linear(x2, w)
         return y if out is None else out.copy_(y)
 
+    @staticmethod
+    def mm(x: torch.Tensor, w) -> torch.Tensor:
+        """A prompt chunk's projection: cuBLAS for a bf16 weight, the packed weight's own kernel else."""
+        return F.linear(x, w) if torch.is_tensor(w) else w.matmul(x)
+
     def head(self, n: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         """Logits [M, vocab] fp32 of the final normed rows (a static `out` in a graph)."""
         w = self.head_weight()
+        if not torch.is_tensor(w):
+            return w.matmul(n, out=out, f32=True)
         if n.shape[0] <= ROWS_MAX:
             return K.linear_rows(n, w, out=out, f32=True)
         y = F.linear(n, w).float()
@@ -146,7 +156,7 @@ class NemotronHEngine(NemotronHRef):
         ids, wts = K.router(logits, bias, k, c.routed_scaling_factor)
         x = self.lin(n, self.W[p + "fc1_latent_proj.weight"]) if c.moe_latent_size else n
         e = self.experts[li]
-        yd = K.moe_relu2(x, ids, e.up, e.down)
+        yd = e.moe_relu2(x, ids) if hasattr(e, "moe_relu2") else K.moe_relu2(x, ids, e.up, e.down)
         m = K.combine(yd, ids, wts)
         if c.moe_latent_size:
             m = self.lin(m, self.W[p + "fc2_latent_proj.weight"])
@@ -541,7 +551,7 @@ class NemotronHEngine(NemotronHRef):
         m = self.pre(li) + "mixer."
         T = n.shape[0]
         I, CD, Hh, P, N, G = c.intermediate, c.conv_dim, c.mamba_num_heads, c.mamba_head_dim, c.ssm_state_size, c.n_groups
-        proj = F.linear(n, self.W[m + "in_proj.weight"])
+        proj = self.mm(n, self.W[m + "in_proj.weight"])
         z, xr, dtr = proj[:, :I], proj[:, I:I + CD], proj[:, I + CD:]
         S_ = c.conv_state_len
         win = torch.cat([st.conv[li], xr], 0)                               # [S + T, CD]
@@ -562,7 +572,7 @@ class NemotronHEngine(NemotronHRef):
         g = (y.float() * F.silu(z.float())).view(T, G, -1)
         g = g * torch.rsqrt(g.pow(2).mean(-1, keepdim=True) + c.rms_norm_eps)
         g = (g.view(T, I) * self.W[m + "norm.weight"].float()).to(self.dtype)
-        return F.linear(g, self.W[m + "out_proj.weight"])
+        return self.mm(g, self.W[m + "out_proj.weight"])
 
     def _attn_chunk(self, n, li, st, L):
         """Attention of a prompt chunk: q|k|v, the chunk's K and V into the cache at their positions,
@@ -572,7 +582,7 @@ class NemotronHEngine(NemotronHRef):
         m = self.pre(li) + "mixer."
         T = n.shape[0]
         Hq, Hk, D = c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        qkv = F.linear(n, self.W[m + "qkv"])
+        qkv = self.mm(n, self.W[m + "qkv"])
         q = qkv[:, :Hq * D].reshape(T, Hq, D)
         st.k[li][:, L:L + T] = qkv[:, Hq * D:(Hq + Hk) * D].reshape(T, Hk, D).transpose(0, 1)
         st.v[li][:, L:L + T] = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
@@ -580,7 +590,7 @@ class NemotronHEngine(NemotronHRef):
         v = st.v[li][:, :L + T].unsqueeze(0)
         o = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k.repeat_interleave(c.gqa, 1),
                                            v.repeat_interleave(c.gqa, 1), attn_mask=causal_lower_right(T, L + T))
-        return F.linear(o[0].transpose(0, 1).reshape(T, -1), self.W[m + "o_proj.weight"])
+        return self.mm(o[0].transpose(0, 1).reshape(T, -1), self.W[m + "o_proj.weight"])
 
     def _moe_chunk(self, n, li):
         """A prompt chunk's MoE block: fp32 router logits, the router kernel, each expert once over its
@@ -590,9 +600,16 @@ class NemotronHEngine(NemotronHRef):
         logits = F.linear(n.float(), self.W[m + "gate.weight"].float())
         bias = self._f32[(li, "bias")]
         ids, wts = K.router(logits, bias, c.moe_k[li], c.routed_scaling_factor)
-        x = F.linear(n, self.W[m + "fc1_latent_proj.weight"]) if c.moe_latent_size else n
+        x = self.mm(n, self.W[m + "fc1_latent_proj.weight"]) if c.moe_latent_size else n
         e = self.experts[li]
         T, S = ids.shape
+        if hasattr(e, "moe_relu2"):
+            # packed experts (tools/iq2_linear.IQ2Bank): every pair on the bank kernel
+            out = K.combine(e.moe_relu2(x, ids), ids, wts)
+            if c.moe_latent_size:
+                out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])
+            return out + self.mm(F.relu(self.mm(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
+                                 self.W[m + "shared_experts.down_proj.weight"])
         flat = ids.reshape(-1).long()
         yd = torch.empty(T * S, x.shape[1], dtype=torch.float32, device=n.device)
         order = torch.argsort(flat, stable=True)
@@ -607,9 +624,9 @@ class NemotronHEngine(NemotronHRef):
             yd[pairs] = F.linear(F.relu(F.linear(xe, e.up[ex])).square(), e.down[ex]).float()
         out = K.combine(yd, ids, wts)
         if c.moe_latent_size:
-            out = F.linear(out, self.W[m + "fc2_latent_proj.weight"])
-        s = F.linear(F.relu(F.linear(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
-                     self.W[m + "shared_experts.down_proj.weight"])
+            out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])
+        s = self.mm(F.relu(self.mm(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
+                    self.W[m + "shared_experts.down_proj.weight"])
         return out + s
 
     # ------------------------------------------------------------------------- the load-time check
