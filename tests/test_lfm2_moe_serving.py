@@ -163,6 +163,17 @@ def test_kv_length_and_restart():
     _raises(lambda: s.forward_tree(torch.tensor([1, 2]), [-1, 0], start=3), "forward at 3", "holds 0 rows")
 
 
+def test_reading_the_length_commits_nothing():
+    """kv.length while a joint plain step waits for its slot's commit_tree (another thread's read, the
+    health report): the length it will hold, and the commit still counts the row once."""
+    s = Lfm2MoeServing(_Eng(), 64)
+    s.st.length = 10
+    s._plain_pending = True
+    assert s.kv.length == 11 and s._plain_pending and s.st.length == 10
+    s.commit_tree([0])
+    assert s.kv.length == 11 and s.st.length == 11 and not s._plain_pending
+
+
 def test_cost_and_cache_state():
     s = Lfm2MoeServing(_Eng(), 64)
     c = s.cfg
@@ -185,8 +196,9 @@ def test_chain_block_pending_and_trim():
     e = _Eng()
     s = Lfm2MoeServing(e, 64)
     s.forward_block(torch.tensor([7, 8, 9, 10]), start=0)
-    assert s.kv.length == 4 and e.commits == [[0, 1, 2, 3]]          # the next read lands it
+    assert s.kv.length == 4 and e.commits == []                       # a read commits nothing
     s.forward_block(torch.tensor([1, 2, 3]), start=4)
+    assert e.commits == [[0, 1, 2, 3]]                                # the next forward lands it
     assert not s.trim_pending(9) and s.trim_pending(6) and e.commits[-1] == [0, 1]
     assert s.st.length == 6
     s.forward_block(torch.tensor([1, 2, 3]), start=6)

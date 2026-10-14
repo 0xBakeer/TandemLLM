@@ -73,8 +73,13 @@ class _KV:
 
     @property
     def length(self) -> int:
-        self._s._settle_chain()
-        return self._s.st.length
+        # what the state holds once its pending work commits (a chain block's rows, a joint plain
+        # step's row), read without committing it: another thread reads it too (the health report,
+        # the slot placement), and a commit from there while the slot's own loop sat between a
+        # joint pass and its commit_tree counted the row twice (2026-10-14, three slots: "LFM2
+        # forward at 53, the state holds 54 rows")
+        s = self._s
+        return s.st.length + (s._chain or 0) + (1 if s._plain_pending else 0)
 
     @length.setter
     def length(self, v: int) -> None:
