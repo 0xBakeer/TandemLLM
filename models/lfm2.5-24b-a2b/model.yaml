@@ -6,9 +6,8 @@
 # other packs' from the parameter count (the 0.26 B embedding at 16 bits, the head at 6, the rest at the
 # pack's rate) until each pack is measured. max_window: the model's whole context, 131,072 tokens: its KV is 20,480
 # bytes a token (10 attention layers, 8 KV heads of 64), 2.5 GiB at the full window, so every profile fits
-# the Spark preset at it. No drafter yet (Liquid will publish one); no vision tower (the model reads text);
-# the conversation caches and side slots come with SPD-107. Rows of the measured table come from real runs
-# only.
+# the Spark preset at it. No draft head yet (Liquid will publish one): the lookup alone drafts; no vision tower
+# (the model reads text). Rows of the measured table come from real runs only.
 schema: 1
 id: lfm2.5-24b-a2b
 name: LFM2.5-24B-A2B
@@ -93,7 +92,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-3.0
   label: EXL3 3.0 bpw
@@ -113,7 +112,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-3.5
   label: EXL3 3.5 bpw
@@ -133,7 +132,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5, 3.5 bits), which the EXL3 kernels here decode as exllamav3 does. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-4.0
   label: EXL3 4.0 bpw
@@ -157,7 +156,7 @@ profiles:
       transformers'' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions), the trace-calibrated
       pack of 2026-10-14'
   assets_required: []
-  note: 'The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).'
+  note: 'The default for now, provisional: chosen before any measured run, when the kernels here decoded whole-bit rates only (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).'
   max_window: 131072
 - id: lfm25-exl3-4.5
   label: EXL3 4.5 bpw
@@ -203,10 +202,36 @@ measurements:
   build: 0.8.3
   date: '2026-10-14'
   method: >-
-    Not measured yet: rows are added from recorded runs on the Spark only (SPD-107), one greedy request a cell,
-    thinking off, a fresh server, every limit knob recorded.
-  source: none yet
-  rows: []
+    tools/fn_lookup_ab.py through one fresh server a run on the Spark, the GPU to itself (the conversion queue
+    paused): prompts prose / chat / code, one greedy request each, thinking off, 512 new tokens, conductor raw,
+    one slot, max_len 32,768. 4.0 as its profile serves it: the lookup alone cut by StairCut, with the suffix
+    store off so no earlier answer is in it, the dense splits of ops/lfm25-dense-splits.json; BF16 plain
+    (--drafter none). One run a cell.
+  source: 'SPD-107 window runs, 2026-10-14 06:52 (4.0, default-calibration pack) and 05:10 (BF16); raw data spark
+    ~/lfm25/runs/dbg/ab-look.json, ~/lfm25/runs/w7/ab-none-bf16.json'
+  rows:
+  - profile: lfm25-exl3-4.0
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: 'Each text equal to the plain run''s (143.7 / 142.3 / 143.4 tok/s plain). The same run''s edit and copy
+      asks (a file back with a name renamed, a text back unchanged) took 222.0 and 292.2 tok/s, 3.43 and 10.65 tokens
+      a block, against 141.5 and 141.6 plain.'
+    cells:
+      greedy_512: {prose: [139.37, 139.37, 7.25, 1.01, 1], chat: [142.59, 142.59, 7.08, 1.01, 1], code: [145.29, 145.29,
+          7.36, 1.07, 1]}
+    ttft_s: {}
+    lossless: null
+  - profile: lfm25-bf16
+    build: 0.8.3
+    date: '2026-10-14'
+    comparable: true
+    note: Plain decode (--drafter none); the BF16 projections run on the 16-row tile GEMM, the experts a pair at a time.
+    cells:
+      greedy_512: {prose: [43.35, 43.35, 23.07, 1.0, 1], chat: [43.29, 43.29, 23.1, 1.0, 1], code: [43.32, 43.32, 23.08,
+          1.0, 1]}
+    ttft_s: {}
+    lossless: null
 memory:
   parts:
   - id: engine
@@ -384,10 +409,12 @@ components:
   docs: docs/caches.md
   note: null
 parallelism:
+  # three sequence slots (SPD-107, measured on 4.0, 2026-10-14): 1, 2 and 3 requests at once decoded 139.9, 169.1
+  # and 177.8 tok/s in total, each text its request's alone
   slots:
     min: 1
-    max: 1
-    default: 1
+    max: 3
+    default: 3
   window:
     min: 8192
     max: 131072
