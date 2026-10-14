@@ -1,32 +1,25 @@
 {
- "_about": "LFM2.5-24B-A2B's dense EXL3 splits for tools/fn_kernels.dense at the 4.0 pack's shapes (tools/fn_tiles.py --dense, M = 1, cold ring, CUDA graph), on one DGX Spark, 2026-10-14 05:07; us_exl3 = exl3_matmul with its rot_in at its own best split; applied by engine/models/lfm2_moe/load.py. With them the 4.0 decode step ran at 145.8 tok/s from its graph, 136.1 without (tools/lfm_check.py bench, 256 tokens).",
- "6144x2048x4": {
-  "S": 2,
-  "warps": 8,
-  "us": 30.43,
-  "us_exl3": 32.51,
-  "gb_s": 207.3
- },
- "3072x2048x4": {
-  "S": 1,
-  "warps": 8,
-  "us": 16.55,
-  "us_exl3": 19.74,
-  "gb_s": 190.7
- },
- "2048x2048x4": {
-  "S": 1,
-  "warps": 8,
-  "us": 13.01,
-  "us_exl3": 15.45,
-  "gb_s": 161.8
- },
- "23552x2048x4": {
+ "_about": "LFM2.5-24B-A2B's dense EXL3 splits for tools/fn_kernels.dense, one entry a (N, Kin, bits) its packs multiply by (tools/fn_tiles.py --dense, M = 1, cold ring, CUDA graph), on one DGX Spark, 2026-10-14; us_exl3 = exl3_matmul with its rot_in at its own best split; applied by engine/models/lfm2_moe/load.py. The decode step from its graph with them / without: 2.5 188.2 / 171.2, 3.0 175.0 / 159.1, 4.0 145.8 / 136.1 tok/s (tools/lfm_check.py bench, 256 tokens).",
+ "128000x2048x6": {
   "S": 1,
   "warps": 4,
-  "us": 102.85,
-  "us_exl3": 114.36,
-  "gb_s": 235.0
+  "us": 821.75,
+  "us_exl3": 847.99,
+  "gb_s": 239.6
+ },
+ "2048x11776x25": {
+  "S": 2,
+  "warps": 8,
+  "us": 43.51,
+  "us_exl3": 397.78,
+  "gb_s": 173.8
+ },
+ "2048x11776x3": {
+  "S": 2,
+  "warps": 8,
+  "us": 48.8,
+  "us_exl3": 45.2,
+  "gb_s": 185.9
  },
  "2048x11776x4": {
   "S": 2,
@@ -35,11 +28,88 @@
   "us_exl3": 57.31,
   "gb_s": 203.9
  },
- "128000x2048x6": {
-  "S": 4,
+ "2048x2048x25": {
+  "S": 2,
   "warps": 8,
-  "us": 820.0,
-  "us_exl3": 818.7,
-  "gb_s": 240.1
+  "us": 11.69,
+  "us_exl3": 43.91,
+  "gb_s": 112.8
+ },
+ "2048x2048x3": {
+  "S": 2,
+  "warps": 8,
+  "us": 12.66,
+  "us_exl3": 13.49,
+  "gb_s": 124.9
+ },
+ "2048x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 13.01,
+  "us_exl3": 15.45,
+  "gb_s": 161.8
+ },
+ "23552x2048x25": {
+  "S": 1,
+  "warps": 4,
+  "us": 68.13,
+  "us_exl3": 833.78,
+  "gb_s": 222.0
+ },
+ "23552x2048x3": {
+  "S": 1,
+  "warps": 4,
+  "us": 78.87,
+  "us_exl3": 92.27,
+  "gb_s": 230.0
+ },
+ "23552x2048x4": {
+  "S": 1,
+  "warps": 4,
+  "us": 102.85,
+  "us_exl3": 114.36,
+  "gb_s": 235.0
+ },
+ "3072x2048x25": {
+  "S": 2,
+  "warps": 4,
+  "us": 14.25,
+  "us_exl3": 79.48,
+  "gb_s": 138.7
+ },
+ "3072x2048x3": {
+  "S": 1,
+  "warps": 8,
+  "us": 14.78,
+  "us_exl3": 16.95,
+  "gb_s": 160.3
+ },
+ "3072x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 16.55,
+  "us_exl3": 19.74,
+  "gb_s": 190.7
+ },
+ "6144x2048x25": {
+  "S": 1,
+  "warps": 8,
+  "us": 21.04,
+  "us_exl3": 173.89,
+  "gb_s": 187.6
+ },
+ "6144x2048x3": {
+  "S": 1,
+  "warps": 8,
+  "us": 23.41,
+  "us_exl3": 26.06,
+  "gb_s": 202.3
+ },
+ "6144x2048x4": {
+  "S": 2,
+  "warps": 8,
+  "us": 30.43,
+  "us_exl3": 32.51,
+  "gb_s": 207.3
  }
 }
