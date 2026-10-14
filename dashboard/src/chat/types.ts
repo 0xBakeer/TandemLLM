@@ -244,6 +244,19 @@ export interface ContextPart {
   tokens: number;
 }
 
+/** SRV-471: the memory notes' part of a turn (the usage frame's `tandem.harness.memory`); absent
+ *  when the profile has no memory switch */
+export interface HarnessMemory {
+  mode: 'on' | 'shadow' | 'off' | string;
+  /** why it is off: profile, model_fit, backend, header */
+  why: string | null;
+  index_notes: number;
+  index_tokens: number;
+  /** the notes sent with this message in full */
+  bodies: number;
+  body_tokens: number;
+  card_tokens: number;
+}
 export interface ContextReport {
   window: number;
   used: number;
@@ -267,7 +280,7 @@ export interface ContextReport {
   /** the engine's split of the last prompt (its usage frame); null before the first frame */
   split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
   /** what the harness decided for this chat; never inside the answer text */
-  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;
+  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[]; memory?: HarnessMemory | null } | null;
   memory: {
     kv_bytes: number | null;
     /** the chat's rows the engine holds: in its slot or parked beside it (`kv_where`) */

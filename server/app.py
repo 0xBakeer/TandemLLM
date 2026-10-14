@@ -4805,9 +4805,28 @@ def _harness_of(plan) -> dict | None:
         for name in span[3]:
             if name not in names:
                 names.append(name)
-    return {"class": row.get("class_id"), "effort": row.get("effort"),
-            "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
-                         for n in names]}
+    out = {"class": row.get("class_id"), "effort": row.get("effort"),
+           "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
+                        for n in names]}
+    mem = _memory_part((row.get("extra") or {}).get("memory"))
+    if mem is not None:
+        out["memory"] = mem
+    return out
+
+
+def _memory_part(info) -> dict | None:
+    """SRV-471, `harness.memory`: the memory notes' part of the turn for the Context panel, from
+    the decision row's `extra.memory`: the mode and why it is off, the index's notes and tokens,
+    the bodies sent with the message and their tokens, the card's tokens. None: the profile has
+    no memory switch (absent, the release's request)."""
+    if not isinstance(info, dict) or not info.get("mode"):
+        return None
+    idx = info.get("index") or {}
+    bodies = info.get("bodies") or []
+    return {"mode": info["mode"], "why": info.get("why"),
+            "index_notes": int(idx.get("notes") or 0), "index_tokens": int(idx.get("tokens") or 0),
+            "bodies": len(bodies), "body_tokens": int(info.get("body_tokens") or 0),
+            "card_tokens": int(info.get("card_tokens") or 0)}
 
 
 #: (package name, text hash) -> tokens, for the packages a replayed note holds

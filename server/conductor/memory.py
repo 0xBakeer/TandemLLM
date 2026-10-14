@@ -324,6 +324,7 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
     mem.seen(sess.key, user, project)
     card = None if opt == "read" else _text(router, packages, CARD)
     if card:
+        info["card_tokens"] = _tokens(card)
         plan.extras.append({"key": f"memory_card:{_h(card)}", "text": card,
                             "parts": [{"kind": "memory_card", "name": CARD}],
                             "kinds": {"memory"}, "reason": "memory card",
@@ -366,6 +367,7 @@ def attach(router, plan, body, router_doc, prof, packages, roles, sh, sess, cls,
                                 "kinds": {"memory"}, "reason": f"memory ({len(used)} notes)",
                                 "wrapper": BODIES_WRAPPER})
             plan.memory["body_ids"] = used
+            info["body_tokens"] = _tokens(text)
     info["search_ms"] = round((time.perf_counter() - t0) * 1e3, 3)
     if not plan.memory.get("read_only"):            # SRV-173: no skill to write with
         _intent(router, plan, packages, roles, router_doc, sh, row, cfg, info)

@@ -2,7 +2,7 @@
 // nothing (2026-10-14: "KV for this chat —", "resident prefix —", "running, 0 B", "— tokens").
 
 import { bytes, exact } from '../lib/format';
-import type { ContextReport, SandboxStatus } from './types';
+import type { ContextReport, HarnessMemory, SandboxStatus } from './types';
 
 export const NOT_TRACKED = 'not tracked for this model';
 export const AFTER_TURN = 'measured after the first turn';
@@ -65,4 +65,19 @@ export function skillTokens(tokens: number | null | undefined): string {
 export function partWords(kind: string, tokens: number, split: ContextReport['split'], backend: Backend): string {
   if ((kind === 'system' || kind === 'tools') && !split && !tokens) return backend && backend !== 'engine' ? 'not tracked' : 'next turn';
   return exact(tokens);
+}
+
+const MEMORY_OFF: Record<string, string> = { profile: 'off in this profile', model_fit: 'off for this model', backend: 'off for this backend', header: 'off for this request' };
+
+/** the memory notes in the last turn (SRV-471): how many the index named and what they cost, the
+ *  notes sent in full with the message, or why the memory is off */
+export function memoryWords(harness: ContextReport['harness'], backend: Backend): string {
+  if (backend && backend !== 'engine') return NOT_TRACKED;
+  if (!harness) return HARNESS_PENDING;
+  const m: HarnessMemory | null | undefined = harness.memory;
+  if (!m) return MEMORY_OFF.profile;
+  if (m.mode === 'off') return MEMORY_OFF[m.why ?? ''] ?? 'off';
+  if (m.mode === 'shadow') return 'shadow: the model may write notes, none is read back';
+  const idx = m.index_notes ? `${exact(m.index_notes)} note${m.index_notes === 1 ? '' : 's'} in the index, ${exact(m.index_tokens)} tokens` : 'on, no notes yet';
+  return m.bodies ? `${idx}; ${exact(m.bodies)} in full for this message, ${exact(m.body_tokens)} tokens` : idx;
 }

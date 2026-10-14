@@ -14,7 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
-import { HARNESS_PENDING, kvWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
+import { HARNESS_PENDING, kvWords, memoryWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -160,6 +160,7 @@ export class QseChatContext extends LightElement {
         ${picked.filter((p) => !sk.pinned.some((x) => x.name === p.name)).map((p) => html`<div data-harness=${p.name}><dt>harness</dt><dd>${p.name} <span class="num muted">${skillTokens(p.tokens)}</span></dd></div>`)}
         ${sk.mode === 'auto' && !c.context.harness && (c.context.model.backend ?? 'engine') === 'engine' ? html`<div data-harness="none"><dt>harness</dt><dd class="muted">${HARNESS_PENDING}</dd></div>` : nothing}
         ${!sk.pinned.length && !picked.length ? html`<div><dt>pinned</dt><dd class="muted">none</dd></div>` : nothing}
+        <div data-harness="memory"><dt>memory notes</dt><dd>${memoryWords(c.context.harness, c.context.model.backend)}</dd></div>
       </dl>
     </section>`;
   }
