@@ -67,12 +67,13 @@ def cmd_engine(a) -> None:
     idx, eng, info = _engine(a.model, a.max_len)
     print(json.dumps({"load": info, "notes": idx.notes}), flush=True)
     out = {"model": a.model, "tokens": a.tokens, "runs": [], "info": info}
-    for p in PROMPTS[:a.prompts]:
-        ids = _ids(tok, p)
+    forced = torch.load(a.force, weights_only=False)["runs"] if a.force else None
+    for j, p in enumerate(PROMPTS[:a.prompts]):
+        ids = forced[j]["ids"] if forced else _ids(tok, p)
         st = eng.new_state(a.max_len)
         lg = eng.prefill(torch.tensor(ids), st)
         rows = [lg[0].to(torch.bfloat16).cpu()]
-        gen = [int(lg[0].argmax())]
+        gen = [forced[j]["gen"][0] if forced else int(lg[0].argmax())]
         dg = DecodeGraph(eng, st) if a.graph == "on" else None
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -85,6 +86,8 @@ def cmd_engine(a) -> None:
                 st.length += 1
             rows.append(lg[0].to(torch.bfloat16).cpu())
             gen.append(int(lg[0].argmax()))
+            if forced:
+                gen[-1] = forced[j]["gen"][len(gen) - 1]           # teacher-forced: the other run's tokens
         torch.cuda.synchronize()
         dt = time.perf_counter() - t0
         r = {"prompt": p, "ids": ids, "gen": gen, "decode_tok_s": round((a.tokens - 1) / dt, 2),
@@ -156,6 +159,27 @@ def cmd_exl3(a) -> None:
             refs.append(lg[0, len(r["ids"]) - 1:, :config.vocab_size].float().cpu())
     res = {"rung": "c", "reference": "exllamav3 1.6.0 forward (flash_attn_nc)", **_compare(run, refs)}
     print(json.dumps(res, indent=1), flush=True)
+    if a.json:
+        json.dump(res, open(a.json, "w"), indent=1)
+
+
+def cmd_cmp(a) -> None:
+    """Two runs on the same tokens: `--a` an engine run, `--b` an engine run or a reference's saved logits
+    (hf/exl3 --save): the comparison of `_compare` with b as the reference (a quality figure when b is
+    BF16 and a is a pack)."""
+    run = torch.load(a.a, weights_only=False)
+    b = torch.load(a.b, weights_only=False)
+    refs = [r["logits"] for r in b["runs"]] if isinstance(b, dict) else b
+    res = _compare(run, refs)
+    kls = []
+    for r, ref in zip(run["runs"], refs):
+        p = torch.log_softmax(ref.float(), -1)
+        q = torch.log_softmax(r["logits"].float(), -1)
+        kls.append((p.exp() * (p - q)).sum(-1))
+    k = torch.cat(kls)
+    res["kl_ref_to_a"] = {"mean": round(float(k.mean()), 5), "median": round(float(k.median()), 5),
+                          "p90": round(float(k.quantile(0.9)), 4)}
+    print(json.dumps(res, indent=1))
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 
@@ -356,12 +380,17 @@ def main() -> None:
     e.add_argument("--prompts", type=int, default=8)
     e.add_argument("--graph", default="on", choices=("on", "off"))
     e.add_argument("--max-len", type=int, default=8192)
+    e.add_argument("--force", help="a run whose prompts and tokens are fed instead of the greedy ones (teacher-forced)")
     for name in ("hf", "exl3"):
         r = sub.add_parser(name)
         r.add_argument("--model", required=True)
         r.add_argument("--inp", required=True)
         r.add_argument("--json")
         r.add_argument("--save", help="the reference's logits, for a closer look")
+    cp = sub.add_parser("cmp")
+    cp.add_argument("--a", required=True)
+    cp.add_argument("--b", required=True)
+    cp.add_argument("--json")
     x = sub.add_parser("xcheck")
     x.add_argument("--pack", required=True)
     b = sub.add_parser("bench")
@@ -384,7 +413,7 @@ def main() -> None:
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
     a = ap.parse_args()
-    {"audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
+    {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "exl3": cmd_exl3, "xcheck": cmd_xcheck, "bench": cmd_bench,
      "staircase": cmd_staircase}[a.cmd](a)
 
 
