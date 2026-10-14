@@ -140,6 +140,7 @@ class Lfm2MoeServing:
         self.plain_captured = False
         self.heads: dict = {}
         self.sides: list = []
+        self._plain_pending = False        # a joint plain step ran; its commit_tree([0]) moves the length
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
 
     # --- the loop's interface -------------------------------------------------------------------
@@ -208,10 +209,13 @@ class Lfm2MoeServing:
 
     def discard_pending(self) -> None:
         self._chain = None
+        self._plain_pending = False
         self.picks = None
 
     def trim_pending(self, n: int) -> bool:
         """Back to length `n` inside work not committed yet (a chain block whose commit waits)."""
+        if self._plain_pending:
+            self.commit_tree([0])
         n, L = int(n), self.st.length
         if self._chain is None:
             return n == L
@@ -231,6 +235,7 @@ class Lfm2MoeServing:
     def restart(self) -> None:
         """A new sequence in the same buffers: the conv states zeroed, the length 0 (KV rows stay)."""
         self._chain = None
+        self._plain_pending = False
         self.picks = None
         self.st.reset_inplace()
 
@@ -290,6 +295,22 @@ class Lfm2MoeServing:
         logits, picks and final rows as its `forward_tree` leaves them, its block committed by its
         `commit_tree`."""
         fn = items[0][0].fn
+        if all(block.numel() == 1 for _, block, _, _ in items):
+            # every slot takes a plain step (no draft this round, `joint_plain`): one joint decode
+            # step from a graph, each state advanced at once; its commit_tree([0]) moves the length
+            for s, block, _, start in items:
+                s._settle_chain()
+                s._at(start)
+                s._ensure(start + 1 + CAPTURE_ROWS)
+            rbs = fn.decode_multi([(int(block.view(-1)[0]), s.st, s.slot) for s, block, _, _ in items],
+                                  graphs=fn.__dict__.setdefault("joint_graphs", {}))
+            out = []
+            for (s, block, _, _), rb in zip(items, rbs):
+                s.picks, s._hidden = rb["next"][:1], rb["hidden"][:1].unsqueeze(0)
+                s.captured, s._width, s._plain_pending = False, 1, True
+                s.stats["decode_steps"] += 1
+                out.append(rb["logits"][:1])
+            return out
         jobs = []
         for s, block, parents, start in items:
             s._settle_chain()
@@ -333,6 +354,14 @@ class Lfm2MoeServing:
 
     @torch.no_grad()
     def commit_tree(self, path: list[int]) -> None:
+        if self._plain_pending:
+            # a joint plain step (`forward_tree_multi`): the state advanced in the pass itself
+            if [int(p) for p in path] != [0]:
+                raise ValueError(f"a plain step keeps its one row, not {path}")
+            self._plain_pending = False
+            self.st.length += 1
+            self.commit_ms = 0.0
+            return
         t0 = time.perf_counter()
         n_graphs = len(self.cgraphs)
         self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
@@ -354,6 +383,8 @@ class Lfm2MoeServing:
 
     # --- internals -------------------------------------------------------------------------------
     def _settle_chain(self) -> None:
+        if self._plain_pending:
+            self.commit_tree([0])
         if self._chain is not None:
             n, self._chain = self._chain, None
             self.commit_tree(list(range(n)))

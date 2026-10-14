@@ -71,6 +71,11 @@ class _Eng:
         self._rb[self._key(slot, M)] = {"next": torch.arange(M), "logits": torch.zeros(M, 8), "hidden": torch.zeros(M, 4)}
         return list(range(M))
 
+    def decode_multi(self, items, graphs=None):
+        self.decoded = [(t, st.length, slot) for t, st, slot in items]
+        return [{"next": torch.tensor([t + 1]), "logits": torch.full((1, 8), float(t)), "hidden": torch.zeros(1, 4)}
+                for t, _, _ in items]
+
     def verify_multi(self, items):
         self.joint = [(list(t), list(p), st.length) for t, p, st in items]
         return [{"next": torch.arange(len(t)) + 100 * j, "logits": torch.full((len(t), 8), float(j)),
@@ -170,6 +175,22 @@ def test_side_slots_and_a_joint_pass():
     assert s0.tree_batchable(list(range(32))) and not s0.tree_batchable(list(range(33)))
     per_token, const = s0.side_slot_bytes(32, paged=True)
     assert per_token == 0 and const > s0.cost().section_bytes
+
+
+def test_a_joint_plain_step():
+    """Every slot with a one-row block: one joint decode step; each slot's commit_tree([0]) moves its
+    length (the pass advanced the state), and a pending step is landed before anything reads the length."""
+    e = _Eng()
+    s0 = Lfm2MoeServing(e, 64)
+    s1, _ = s0.side_slot(32)
+    s0.st.length, s1.st.length = 5, 3
+    out = Lfm2MoeServing.forward_tree_multi([(s0, torch.tensor([9]), [-1], 5), (s1, torch.tensor([4]), [-1], 3)])
+    assert e.decoded == [(9, 5, None), (4, 3, s1.slot)] and float(out[1][0, 0]) == 4.0
+    assert s0.picks.tolist() == [10] and s1.picks.tolist() == [5]
+    s0.commit_tree([0])
+    assert s0.st.length == 6 and e.commits == []
+    assert s1.kv.length == 4                                    # landed on read
+    _raises(lambda: (setattr(s0, "_plain_pending", True), s0.commit_tree([0, 1])), "keeps its one row")
 
 
 if __name__ == "__main__":

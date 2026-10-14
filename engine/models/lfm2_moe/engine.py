@@ -414,6 +414,29 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         return [rb for _, rb, _, _ in parts]
 
     @torch.no_grad()
+    def decode_multi(self, items: list, graphs: dict | None = None) -> list:
+        """One decode token of each of several states [(token, state, slot)] in one pass (`_rows`, the
+        weights read once), every state advanced in place as by its own decode step (its conv states
+        shift, its KV row lands at its length; `st.length` is the caller's), each row the bits of that
+        state's lone decode step. From `graphs` ((slot, class) of every state -> JointDecodeGraph), else
+        eager. Returns each state's row buffers (logits, next, hidden)."""
+        parts = []
+        for token, st, slot in items:
+            self.stage(token, st, slot)
+            parts.append((st, self._rows_buffers(1, self._key(slot, 1)), 1, K.class_of(st.length + 1, st.cap)))
+        if graphs is not None:
+            key = tuple((slot, ns) for (_, _, slot), (_, _, _, ns) in zip(items, parts))
+            g = graphs.get(key)
+            if g is None:
+                g = graphs[key] = JointDecodeGraph(self, parts)
+                g.capture()                            # its warm-ups read the rows staged above
+            g.graph.replay()
+        else:
+            self._rows(parts, write=True)
+        _sync(self.device)
+        return [rb for _, rb, _, _ in parts]
+
+    @torch.no_grad()
     def commit(self, st: LfmState, path: list[int], graphs: dict | None = None) -> None:
         """Keep the rows `path` (row 0 first, each the next one's parent) of the last verify block: each
         conv state from its last inputs along the path, the path's KV rows moved to their positions,
@@ -678,6 +701,32 @@ class DecodeGraph:
         self(token)
         torch.cuda.current_stream().synchronize()
         return int(self.rb["next_h"][0])
+
+
+class JointDecodeGraph:
+    """`Lfm2MoeEngine._rows` of several states' decode tokens (write=True, a row each) captured once for
+    that set of states and their attention classes; each state's tokens are staged in its own decode
+    buffers, so a replay reads them where its lone DecodeGraph does. The warm-up runs shift the conv
+    states and write KV rows: each state is saved and restored around them."""
+
+    def __init__(self, eng: Lfm2MoeEngine, parts: list):
+        self.eng, self.parts = eng, parts
+        self.graph = None
+
+    def capture(self) -> None:
+        eng, parts = self.eng, self.parts
+        saved = [x for st, _, _, _ in parts for x in _state_saved(eng, st)]
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                eng._rows(parts, write=True)
+        torch.cuda.current_stream().wait_stream(s)
+        self.graph = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(self.graph):
+            eng._rows(parts, write=True)
+        torch.cuda.synchronize()
+        _state_restore(saved)
 
 
 class VerifyGraph:

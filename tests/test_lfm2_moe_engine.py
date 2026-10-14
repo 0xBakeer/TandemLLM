@@ -156,6 +156,27 @@ def test_a_joint_pass_is_each_states_lone_verify():
     return "7 rows of 2 states: each its lone bits; each commit its own block"
 
 
+def test_a_joint_decode_step_is_each_states_own():
+    """Several states' decode tokens in one pass (`decode_multi`, eager here): each row is that state's
+    lone decode step bit for bit, and each state advances as its own step would move it."""
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
+    states, alone = [eng.new_state(128) for _ in range(3)], [eng.new_state(128) for _ in range(3)]
+    for st, al, n in zip(states, alone, (14, 9, 5)):
+        eng.prefill(PROMPT[:n], st)
+        eng.prefill(PROMPT[:n], al)
+    for tok in (7, 19):
+        rbs = eng.decode_multi([(tok, st, f"s{j}") for j, st in enumerate(states)])
+        for j, (st, al, rb) in enumerate(zip(states, alone, rbs)):
+            want = _decode(eng, al, [tok])
+            assert torch.equal(rb["logits"][:1], want), j
+            st.length += 1
+    for st, al in zip(states, alone):
+        assert st.length == al.length and all(torch.equal(st.conv[i], al.conv[i]) for i in st.conv)
+    return "3 states, 2 steps: each its own decode step's bits and state"
+
+
 def test_self_check_passes():
     if SKIP:
         return SKIP
