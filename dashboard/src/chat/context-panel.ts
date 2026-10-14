@@ -14,6 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
+import { kvWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -113,14 +114,14 @@ export class QseChatContext extends LightElement {
     return html`<section class="ch-ctx-sec ${r ? 'is-live' : 'is-idle'}" data-sec="now">
       <h3 class="ch-ctx-h">${r ? 'Now' : 'Last turn'}</h3>
       <div class="ch-fig">
-        <div class="ch-fig-value num">${tps != null ? fixed(tps, 1) : '—'}<span class="ch-fig-unit">tok/s</span></div>
+        <div class="ch-fig-value num">${tps != null ? html`${fixed(tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${turnFigure(null, String, !!r || !!last)}</span>`}</div>
         ${hist.length > 1 ? html`<qse-spark .values=${hist} mode="ribbon" .height=${36} .format=${(v: number) => v.toFixed(1)} unit=" tok/s" aria-label="decode tok/s, last minute"></qse-spark>` : html`<div class="ch-fig-flat"></div>`}
       </div>
       <dl class="kv ch-kv">
         <div><dt>phase</dt><dd>${r ? r.phase : last ? last.finish : 'idle'}</dd></div>
         ${r && elapsed != null ? html`<div><dt>running for</dt><dd class="num">${elapsedWords(elapsed)}</dd></div>` : nothing}
-        <div><dt>tokens per round</dt><dd class="num">${fixed(r ? r.tokens_per_round : last?.tokens_per_round, 2)}</dd></div>
-        <div><dt>accepted</dt><dd class="num">${pct(r ? r.acceptance : last?.acceptance, 0)}</dd></div>
+        <div><dt>tokens per round</dt><dd class="num">${turnFigure(r ? r.tokens_per_round : last?.tokens_per_round, (v) => fixed(v, 2), !!r || !!last)}</dd></div>
+        <div><dt>accepted</dt><dd class="num">${turnFigure(r ? r.acceptance : last?.acceptance, (v) => pct(v, 0), !!r || !!last)}</dd></div>
         ${r?.prefill ? html`<div><dt>prefill</dt><dd class="num">${exact(r.prefill.done)} / ${exact(r.prefill.total)}</dd></div>` : nothing}
         ${r?.tool ? html`<div><dt>tool</dt><dd><code>${r.tool.name}</code></dd></div>` : nothing}
       </dl>
@@ -138,9 +139,9 @@ export class QseChatContext extends LightElement {
       <dl class="kv ch-kv">
         <div><dt>model</dt><dd>${m.name}</dd></div>
         <div><dt>profile</dt><dd>${m.profile ?? 'none'}</dd></div>
-        <div><dt>weights</dt><dd>${m.weights}</dd></div>
+        <div><dt>weights</dt><dd>${m.weights || 'not reported by this backend'}</dd></div>
         <div><dt>drafter</dt><dd>${m.drafter ?? 'none'}</dd></div>
-        <div><dt>window</dt><dd class="num">${exact(m.max_len)}</dd></div>
+        <div><dt>window</dt><dd class="num">${m.max_len ? exact(m.max_len) : 'not reported by this backend'}</dd></div>
         <div><dt>effort</dt><dd>${m.thinking ? effortWord(m.effort) : 'thinking off'}</dd></div>
       </dl>
     </section>`;
@@ -155,8 +156,8 @@ export class QseChatContext extends LightElement {
       <h3 class="ch-ctx-h">Skills</h3>
       <dl class="kv ch-kv">
         <div><dt>mode</dt><dd>${sk.mode === 'auto' ? 'the harness picks' : sk.mode === 'manual' ? 'pins only' : 'the model reads them'}</dd></div>
-        ${sk.pinned.map((p) => html`<div data-pin=${p.name}><dt>pinned</dt><dd>${p.name} ${p.missing ? html`<span class="warn-ink">no longer in the library</span>` : html`<span class="num muted">${p.tokens != null ? `${exact(p.tokens)} tokens` : ''}</span>`}</dd></div>`)}
-        ${picked.map((p) => html`<div><dt>harness</dt><dd>${p.name} <span class="num muted">${exact(p.tokens)} tokens</span></dd></div>`)}
+        ${sk.pinned.map((p) => html`<div data-pin=${p.name}><dt>pinned</dt><dd>${p.name} ${p.missing ? html`<span class="warn-ink">no longer in the library</span>` : html`<span class="num muted">${skillTokens(p.tokens ?? picked.find((x) => x.name === p.name)?.tokens)}</span>`}</dd></div>`)}
+        ${picked.filter((p) => !sk.pinned.some((x) => x.name === p.name)).map((p) => html`<div data-harness=${p.name}><dt>harness</dt><dd>${p.name} <span class="num muted">${skillTokens(p.tokens)}</span></dd></div>`)}
         ${!sk.pinned.length && !picked.length ? html`<div><dt>pinned</dt><dd class="muted">none</dd></div>` : nothing}
       </dl>
     </section>`;
@@ -168,10 +169,10 @@ export class QseChatContext extends LightElement {
     return html`<section class="ch-ctx-sec" data-sec="memory">
       <h3 class="ch-ctx-h">Memory on the box</h3>
       <dl class="kv ch-kv">
-        <div><dt>KV for this chat</dt><dd class="num">${bytes(mem.kv_bytes)}</dd></div>
-        <div><dt>resident prefix</dt><dd class="num">${bytes(mem.resident_bytes)}</dd></div>
+        <div data-mem="kv"><dt>KV for this chat</dt><dd>${kvWords(mem, c.context.model.backend)}</dd></div>
+        <div data-mem="resident"><dt>resident prefix</dt><dd class="num">${residentWords(mem, c.context.model.backend)}</dd></div>
         <div><dt>slot</dt><dd>${c.context.cache.slot ?? 'none held'}</dd></div>
-        <div><dt>sandbox</dt><dd>${sb.state}${sb.state === 'running' ? html`, <span class="num">${bytes(sb.memory_bytes, 0)}</span>` : ''}</dd></div>
+        <div data-mem="sandbox"><dt>sandbox</dt><dd class="num">${sandboxWords(sb)}</dd></div>
         <div><dt>sandbox disk</dt><dd class="num">${bytes(sb.disk_bytes, 0)} of ${bytes(sb.disk_limit_bytes, 0)}</dd></div>
       </dl>
       <div class="ch-ctx-row"><button type="button" class="linkish" @click=${() => this.fire('ch-open-settings', { section: 'sandbox' })}>Sandbox settings</button></div>
