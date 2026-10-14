@@ -5,7 +5,7 @@
 import { apiBase } from '../api/client';
 import { ResumableStream } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 
 const PREFIX = '/v1/chat-app';
 
@@ -222,6 +222,15 @@ export class RemoteChatBackend implements ChatBackend {
   }
   restartMcpServer(sid: string) {
     return post<McpServer>(`/mcp/servers/${enc(sid)}/restart`);
+  }
+  webSearch() {
+    return call<WebSearchView>('/web-search');
+  }
+  saveWebSearch(p: WebSearchPatch) {
+    return call<WebSearchView>('/web-search', { method: 'PUT', body: JSON.stringify(p) });
+  }
+  testWebSearch(draft: WebSearchPatch) {
+    return post<WebSearchTest>('/web-search/test', { settings: draft });
   }
   prompts() {
     return call<Prompt[]>('/prompts');

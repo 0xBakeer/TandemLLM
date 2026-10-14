@@ -12,6 +12,7 @@ import { icon } from '../ui/bits';
 import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
 import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
+import { chatProvider, providerWord } from './websearch';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
@@ -321,6 +322,12 @@ export class QseChatComposer extends LightElement {
     </div>`;
   }
 
+  /** VIS-157: the provider this chat searches with, and the way to the settings */
+  private renderSearchWord(s: ChatSettings): TemplateResult {
+    const p = chatProvider(this.caps, s);
+    return html`<span class="ch-pop-desc" data-search-provider=${p ?? ''}>${p ? html`with <strong>${providerWord(p)}</strong>${s.web_search?.provider ? ' in this chat' : ''}` : 'web search'} <button type="button" class="linkish" @click=${(e: Event) => (e.preventDefault(), this.fire('ch-open-settings', { section: 'search' }), (this.pop = 'none'))}>change</button></span>`;
+  }
+
   private renderToolsPop(s: ChatSettings): TemplateResult {
     const builtin = this.tools.filter((t) => t.source.kind !== 'mcp' && t.enabled);
     const servers = [...new Set(this.tools.filter((t) => t.source.kind === 'mcp').map((t) => (t.source as { id: string }).id))];
@@ -328,7 +335,7 @@ export class QseChatComposer extends LightElement {
     const toggleMcp = (id: string) => this.patch({ mcp: s.mcp.includes(id) ? s.mcp.filter((x) => x !== id) : [...s.mcp, id] });
     return html`<div class="ch-pop ch-pop-wide" role="menu">
       <div class="ch-pop-group"><div class="ch-pop-title">Tools in this chat</div>
-        ${builtin.map((t) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.tools.includes(t.id)} @change=${() => toggle(t.id)} /><code>${toolLabel(t.name)}</code><span class="ch-pop-desc">${t.description}</span><span class="ch-policy">${s.policies[t.id] ?? t.policy}</span></label>`)}
+        ${builtin.map((t) => html`<label class="ch-pop-check" data-pop-tool=${t.id}><input type="checkbox" .checked=${s.tools.includes(t.id)} @change=${() => toggle(t.id)} /><code>${toolLabel(t.name)}</code>${t.id === 'web_search' ? this.renderSearchWord(s) : html`<span class="ch-pop-desc">${t.description}</span>`}<span class="ch-policy">${s.policies[t.id] ?? t.policy}</span></label>`)}
       </div>
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}

@@ -7,10 +7,11 @@
 import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import { decideCall, modeOf } from './permission';
-import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, TOOLS, contextFor, iso, sandboxFor } from './mock-data';
+import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, SEARCH_RESULTS, TOOLS, WEB_SEARCH, contextFor, iso, sandboxFor } from './mock-data';
 import { applyEvent } from './store';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit, ToolApproval, ToolRisk,} from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit, ToolApproval, ToolRisk, ToolOutput, WebSearchData, WebSearchPatch, WebSearchSettings, WebSearchTest, WebSearchView } from './types';
 import { localId, planItems } from './types';
+import { draftErrors, draftOf, providerWord } from './websearch';
 
 // ---- the branch tree --------------------------------------------------------------------------
 
@@ -67,7 +68,7 @@ type Step =
   | { kind: 'prefill'; total: number }
   | { kind: 'thinking'; text: string }
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; input: Record<string, unknown>; output: string[]; ms: number; pane?: PaneRef; error?: boolean; denied?: string }
+  | { kind: 'tool'; name: string; input: Record<string, unknown>; output: string[]; ms: number; pane?: PaneRef; error?: boolean; denied?: string; data?: WebSearchData }
   | { kind: 'done'; finish?: TurnStats['finish'] };
 
 const WORD_MS = 34;
@@ -77,6 +78,7 @@ function script(text: string, longChat: boolean): Step[] {
   const pre: Step[] = longChat ? [{ kind: 'prefill', total: 12_000 + Math.round(text.length * 1.3) }] : [];
   if (/\b(fix|flaky|test|bug|fail)/.test(t)) return [...pre, ...CODING_SCRIPT];
   if (/\b(page|site|html|landing|design|shop)/.test(t)) return [...pre, ...WEB_SCRIPT];
+  if (/\b(search|look up|latest|news|sources?)\b/.test(t)) return [...pre, ...SEARCH_SCRIPT];
   if (/\b(plan|meal|week|list|schedule)/.test(t)) return [...pre, ...PLAN_SCRIPT];
   if (/\b(diff|rename|refactor|edit|change)/.test(t)) return [...pre, ...EDIT_SCRIPT];
   if (/\b(hi|hello|hey)\b/.test(t)) return [...pre, { kind: 'text', text: 'Hi. The engine is up, the drafter is warm, and this chat has a sandbox of its own. Ask away.' }, { kind: 'done' }];
@@ -94,6 +96,13 @@ const EXPLAIN_SCRIPT = (q: string): Step[] => {
     { kind: 'done' },
   ];
 };
+
+const SEARCH_Q = 'speculative decoding tokens per round';
+const SEARCH_SCRIPT: Step[] = [
+  { kind: 'tool', name: 'web_search', input: { query: SEARCH_Q }, output: SEARCH_RESULTS.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}`), ms: 900, data: { provider: 'duckduckgo', query: SEARCH_Q, results: SEARCH_RESULTS } },
+  { kind: 'text', text: 'The large model verifies a drafted block in one pass; the accepted run sets the speed-up ([notes](https://example.org/notes/spec-decoding)).' },
+  { kind: 'done' },
+];
 
 const CODING_SCRIPT: Step[] = [
   { kind: 'thinking', text: 'A flaky test is usually a timing assumption. Read the test and the worker before running anything, then run the one test many times to see how often it fails and with which value.' },
@@ -394,7 +403,7 @@ export class MockChatBackend implements ChatBackend {
 
   async capabilities(): Promise<Capabilities> {
     const pw = this.scenario === 'signin';
-    return { ...CAPABILITIES, defaults: { ...this.defaults }, session: { ...CAPABILITIES.session, password_set: pw, signed_in: !pw || this.signedIn } };
+    return { ...CAPABILITIES, defaults: { ...this.defaults }, session: { ...CAPABILITIES.session, password_set: pw, signed_in: !pw || this.signedIn }, web_search: { provider: this.webSearchStored.provider, providers: ['off', 'duckduckgo', 'searxng'] } };
   }
 
   /** the setup guide's sign-in card did the POST; the mock only remembers the result */
@@ -732,6 +741,32 @@ export class MockChatBackend implements ChatBackend {
   async removeMcpServer(serverId: string): Promise<void> {
     this.mcp = this.mcp.filter((m) => m.id !== serverId);
   }
+  // ---- web search (VIS-157): the stored settings, a Test that answers the made-up list
+  webSearchStored: WebSearchSettings & { auth_value?: string } = { ...WEB_SEARCH };
+  async webSearch(): Promise<WebSearchView> {
+    const { auth_value: v, ...shown } = this.webSearchStored;
+    return { settings: { ...shown, searxng_auth_set: !!v }, providers: ['off', 'duckduckgo', 'searxng'], safe_search: ['off', 'moderate', 'strict'], time_ranges: ['', 'day', 'week', 'month', 'year'], max_results_limit: 20 };
+  }
+  private wsMerge({ searxng_auth_value: v, ...rest }: WebSearchPatch): WebSearchSettings & { auth_value?: string } {
+    const next = { ...this.webSearchStored, ...rest, searxng_url: (rest.searxng_url ?? this.webSearchStored.searxng_url).replace(/\/+$/, '') };
+    if (v === null) delete next.auth_value;
+    else if (v) next.auth_value = v;
+    const bad = Object.entries(draftErrors(draftOf({ ...next, searxng_auth_set: !!next.auth_value }), !!next.auth_value))[0];
+    if (bad) throw new Error(bad.join(': '));
+    return next;
+  }
+  async saveWebSearch(patch: WebSearchPatch): Promise<WebSearchView> {
+    this.webSearchStored = this.wsMerge(patch);
+    return this.webSearch();
+  }
+  async testWebSearch(draft: WebSearchPatch): Promise<WebSearchTest> {
+    await tick(600);
+    const { provider: p, searxng_url: u, max_results: n } = this.wsMerge(draft);
+    const results = SEARCH_RESULTS.slice(0, Math.min(3, n));
+    if (p === 'off' || /json-off/.test(u)) return { ok: false, provider: p, message: p === 'off' ? 'web search is off' : 'the instance refuses format=json (HTTP 403): add json to search.formats', count: 0, ms: 0, results: [] };
+    return { ok: true, provider: p, message: `${providerWord(p)} answered ${results.length} results in 412 ms`, count: results.length, ms: 412, results };
+  }
+
   async testMcpServer(draft: McpServerDraft) {
     await tick(700);
     if (draft.transport === 'stdio' && !(draft.command ?? '').trim()) return { ok: false, message: 'no command given', tools: [] };
@@ -1065,7 +1100,7 @@ class Runner {
         const input = JSON.stringify(s.input, null, 2);
         const pane: PaneRef | null = s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? callId : s.pane.ref } : null;
         if (skipping) {
-          this.addPart({ type: 'tool_call', id: callId, name: s.name, input, output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-90_000), ended_at: iso(-80_000), permission: null, approved: seededApproval(s.name), pane });
+          this.addPart({ type: 'tool_call', id: callId, name: s.name, input, output: stepOutput(s), status: s.error ? 'failed' : 'done', started_at: iso(-90_000), ended_at: iso(-80_000), permission: null, approved: seededApproval(s.name), pane });
           continue;
         }
         const call: ToolCallPart = { type: 'tool_call', id: callId, name: s.name, input: '', output: null, status: 'running', started_at: null, ended_at: null, permission: null, pane };
@@ -1102,7 +1137,7 @@ class Runner {
         }
         this.phaseTps = null;
         this.toolStart = Date.now();
-        this.phase('tool', `Running ${s.name}${s.name === 'bash' ? `: ${String(s.input.command ?? '')}` : ''}`, { tool: { call_id: callId, name: s.name } });
+        this.phase('tool', s.name === 'web_search' ? `Searching the web for "${String(s.input.query ?? '')}"` : `Running ${s.name}${s.name === 'bash' ? `: ${String(s.input.command ?? '')}` : ''}`, { tool: { call_id: callId, name: s.name } });
         this.mock.emit(this.st, { type: 'tool.started', message_id: this.msgId, call_id: callId, pane, approved });
         const lines = s.output.join('\n').split('\n');
         const start = partial ? Math.min(lines.length, skip!.outputLines) : 0;
@@ -1112,7 +1147,7 @@ class Runner {
           await this.later(per, () => this.mock.emit(this.st, { type: 'tool.output', message_id: this.msgId, call_id: callId, delta: lines[k] + (k < lines.length - 1 ? '\n' : '') }));
         }
         if (this.cancelled || this.stopped) break;
-        this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: callId, status: s.error ? 'failed' : 'done', is_error: !!s.error });
+        this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: callId, status: s.error ? 'failed' : 'done', is_error: !!s.error, ...(s.data ? { output: stepOutput(s) } : {}) });
         this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
       } else if (s.kind === 'done') {
         this.finish(s.finish ?? 'stop');
@@ -1180,12 +1215,17 @@ class Runner {
 
 // ---- helpers ----------------------------------------------------------------------------------
 
+function stepOutput(s: Extract<Step, { kind: 'tool' }>): ToolOutput {
+  const content = s.output.join('\n');
+  return { content, is_error: !!s.error, bytes: content.length, ...(s.data ? { data: s.data } : {}) };
+}
+
 function stepToPart(s: Step): Part {
   if (s.kind === 'thinking') return { type: 'thinking', text: s.text, tokens: Math.round(s.text.length / 4), done: true };
   if (s.kind === 'text') return { type: 'text', text: s.text };
   if (s.kind === 'tool') {
     const id = localId('call');
-    return { type: 'tool_call', id, name: s.name, input: JSON.stringify(s.input, null, 2), output: { content: s.output.join('\n'), is_error: !!s.error, bytes: s.output.join('\n').length }, status: s.error ? 'failed' : 'done', started_at: iso(-3_600_000), ended_at: iso(-3_600_000 + s.ms), permission: null, approved: seededApproval(s.name), pane: s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? id : s.pane.ref } : null };
+    return { type: 'tool_call', id, name: s.name, input: JSON.stringify(s.input, null, 2), output: stepOutput(s), status: s.error ? 'failed' : 'done', started_at: iso(-3_600_000), ended_at: iso(-3_600_000 + s.ms), permission: null, approved: seededApproval(s.name), pane: s.pane ? { ...s.pane, ref: s.pane.ref === 'call' ? id : s.pane.ref } : null };
   }
   return { type: 'text', text: '' };
 }

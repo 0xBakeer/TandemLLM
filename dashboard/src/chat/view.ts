@@ -30,7 +30,7 @@ import type { QseChatComposer } from './composer';
 import { defaultPane, type OpenPane, type Dock } from './panes';
 import type { SettingsSection } from './settings';
 import { SECTIONS } from './settings';
-import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type PackageInfo, type Prompt, type StampedEvent, type ToolInfo } from './types';
+import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type PackageInfo, type Prompt, type StampedEvent, type ToolInfo, type WebSearchProvider } from './types';
 
 const LS = {
   rail: 'qse.chat.rail',
@@ -793,6 +793,7 @@ export class QseChat extends LightElement {
       @ch-reset-sandbox=${() => this.conv && void this.guard(() => this.backend!.resetSandbox(this.conv!.id).then((s) => (this.conv = this.conv ? { ...this.conv, sandbox: s } : this.conv)), 'Reset sandbox')}
       @ch-settings-patch=${(e: CustomEvent<{ patch: Partial<ChatSettings> }>) => void this.patchSettings(e.detail.patch)}
       @ch-defaults-patch=${(e: CustomEvent<{ patch: Partial<ChatSettings> }>) => void this.patchDefaults(e.detail.patch)}
+      @ch-web-search-saved=${(e: CustomEvent<{ provider: WebSearchProvider }>) => this.caps && (this.caps = { ...this.caps, web_search: { providers: ['off', 'duckduckgo', 'searxng'], ...this.caps.web_search, provider: e.detail.provider } })}
     ></qse-chat-settings>`;
   }
 

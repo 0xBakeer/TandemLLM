@@ -1200,6 +1200,46 @@ qse-chat-thread {
 .ch-call-open {
   padding: 0 10px 8px;
 }
+/* web_search: the results under the head, open or folded (VIS-157) */
+.ch-search {
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 10px 10px 26px;
+  list-style: decimal;
+  color: var(--ink-3);
+}
+.ch-search-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ch-search-title {
+  color: var(--cobalt-hi);
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+.ch-search-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.ch-search-host {
+  color: var(--ch-tool);
+  overflow-wrap: anywhere;
+}
+.ch-search-snip {
+  color: var(--ink-2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.ch-search-err {
+  padding: 0 10px 8px;
+  margin: 0;
+}
 
 /* the queue */
 .ch-queue {
@@ -2589,6 +2629,41 @@ qse-chat-panes {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* the settings' Web search section (VIS-157) */
+.ch-ws {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+}
+.ch-ws-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 14px;
+}
+.ch-ws-field input,
+.ch-ws-field select {
+  width: 100%;
+  min-width: 0;
+}
+.ch-fieldset.ch-ws-sx {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.ch-ws-err {
+  white-space: normal;
+}
+.ch-ws-sample {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
 .ch-test-result {
   display: inline-flex;
   align-items: center;
@@ -3022,6 +3097,8 @@ qse-chat-panes {
   .ch-toast {
     bottom: calc(var(--tabbar-space) + 20px);
   }
+  .ch-ws-field input,
+  .ch-ws-field select,
   .ch-add-mcp .field input,
   .ch-edit-form .field input,
   .ch-inline-form input,

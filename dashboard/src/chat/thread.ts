@@ -19,6 +19,7 @@ import { argsSummary, dividersByMessage, dividerWords, messageText } from './sto
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 import { approvedTitle, approvedWord } from './permission';
 import { callPane } from './file-panes';
+import { hostOf, resultsWord, searchResults } from './websearch';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -259,7 +260,9 @@ export class QseChatThread extends LightElement {
     // the page or Markdown file a write or an edit left opens from the card, folded or not
     const pane = callPane(t);
     const dur = t.started_at && t.ended_at ? ms(Date.parse(t.ended_at) - Date.parse(t.started_at)) : t.started_at && t.status === 'running' ? ms(this.now - Date.parse(t.started_at)) : null;
-    const word = t.status === 'asking' ? 'asking' : t.status === 'done' && t.output?.exit_code ? `exit ${t.output.exit_code}` : t.status;
+    // web_search: the results as links under the head, open or folded (SRV-469, VIS-157)
+    const found = searchResults(t);
+    const word = t.status === 'asking' ? 'asking' : t.status === 'done' && found ? resultsWord(found.length) : t.status === 'done' && t.output?.exit_code ? `exit ${t.output.exit_code}` : t.status;
     return html`<section class="ch-call is-${t.status}" data-call=${t.id} data-tool=${t.name}>
       <button type="button" class="ch-call-head" aria-expanded=${open} @click=${() => this.toggleCall(t.id)}>
         <span class="ch-call-dot" aria-hidden="true"></span>
@@ -270,6 +273,8 @@ export class QseChatThread extends LightElement {
         <span class="ch-call-word">${word}</span>
         <span class="ch-call-chev" aria-hidden="true"></span>
       </button>
+      ${found?.length ? renderResults(found) : nothing}
+      ${t.name === 'web_search' && t.status === 'failed' && t.output?.content ? html`<p class="ch-call-row ch-search-err err-ink small" role="alert">${t.output.content.split('\n')[0]}</p>` : nothing}
       ${pane ? html`<div class="ch-call-row ch-call-open"><button type="button" class="btn btn-sm" @click=${() => this.fire('ch-open-pane', { pane })}>${icon(paneIcon(pane.kind))} Open in ${paneWord(pane.kind)}</button></div>` : nothing}
       ${open
         ? html`<div class="ch-call-body">
@@ -306,6 +311,13 @@ export class QseChatThread extends LightElement {
 }
 
 // ---- words and helpers ------------------------------------------------------------------------
+
+/** a web search's results: the title links out (a new tab, no referrer), the host and snippet */
+function renderResults(rs: ReturnType<typeof searchResults> & object): TemplateResult {
+  return html`<ol class="ch-call-row ch-search" aria-label="search results">${rs.map(
+    (r) => html`<li class="ch-search-item"><a class="ch-search-title" href=${r.url} target="_blank" rel="noopener noreferrer">${r.title}</a><span class="ch-search-meta"><span class="ch-search-host">${hostOf(r.url)}</span>${r.date ? html`<span class="num">${r.date}</span>` : nothing}${r.engine ? html`<span>${r.engine}</span>` : nothing}</span>${r.snippet ? html`<span class="ch-search-snip">${r.snippet}</span>` : nothing}</li>`,
+  )}</ol>`;
+}
 
 export function figsLine(s: TurnStats): string {
   const parts: string[] = [];

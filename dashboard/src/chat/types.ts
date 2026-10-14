@@ -133,6 +133,8 @@ export interface ToolOutput {
   truncated?: boolean;
   exit_code?: number | null;
   images?: Attachment[];
+  /** structured output for the card: web_search's results (SRV-469) */
+  data?: WebSearchData | null;
 }
 export interface ToolCallPart {
   type: 'tool_call';
@@ -353,6 +355,8 @@ export interface ChatSettings {
   plan_mode?: boolean;
   /** who approves a tool call (chat/permission.ts); absent on an older server = auto */
   permission_mode?: PermissionMode;
+  /** SRV-469: null = the global web search settings; else this chat's own choices */
+  web_search?: WebSearchOverride | null;
 }
 /** ask: every tool asks unless its policy says always; auto (the default): what stays in the
  *  sandbox runs (commands, reads, workspace writes), the internet asks; yolo: nothing asks */
@@ -488,6 +492,57 @@ export interface Capabilities {
   defaults: ChatSettings;
   /** the sign-in screen shows only when a password is set and this device is not signed in */
   session: { password_set: boolean; signed_in: boolean; sandbox: 'ready' | 'not_installed' | 'error' };
+  /** the global web search provider (absent on an older server) */
+  web_search?: { provider: WebSearchProvider; providers: WebSearchProvider[] };
+}
+
+// ---- web search (SRV-469, VIS-157) -------------------------------------------------------------
+
+export type WebSearchProvider = 'off' | 'duckduckgo' | 'searxng';
+export type SafeSearch = 'off' | 'moderate' | 'strict';
+export type TimeRange = '' | 'day' | 'week' | 'month' | 'year';
+/** GET /web-search's settings: the auth value never comes back, only whether one is stored */
+export interface WebSearchSettings {
+  provider: WebSearchProvider;
+  searxng_url: string;
+  searxng_auth_header: string;
+  searxng_auth_set: boolean;
+  max_results: number;
+  safe_search: SafeSearch;
+  /** '' = any, else de or de-DE */
+  language: string;
+  time_range: TimeRange;
+  timeout_s: number;
+}
+/** PUT /web-search: a partial update; searxng_auth_value null clears it, absent keeps it */
+export type WebSearchPatch = Partial<Omit<WebSearchSettings, 'searxng_auth_set'>> & { searxng_auth_value?: string | null };
+export interface WebSearchView {
+  settings: WebSearchSettings;
+  providers: WebSearchProvider[];
+  safe_search: SafeSearch[];
+  time_ranges: TimeRange[];
+  max_results_limit: number;
+}
+export interface WebSearchTest {
+  ok: boolean;
+  provider: WebSearchProvider;
+  message: string;
+  count: number;
+  ms: number;
+  results: WebSearchResult[];
+}
+export type WebSearchOverride = Partial<Pick<WebSearchSettings, 'provider' | 'max_results' | 'safe_search' | 'language' | 'time_range'>>;
+export interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  date?: string;
+  engine?: string;
+}
+export interface WebSearchData {
+  provider: WebSearchProvider;
+  query: string;
+  results: WebSearchResult[];
 }
 
 // ---- the sandbox ------------------------------------------------------------------------------

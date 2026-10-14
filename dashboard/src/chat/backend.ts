@@ -3,7 +3,7 @@
 // backend. pickBackend() probes the server once and falls back to the mock with a badge.
 
 import { apiBase } from '../api/client';
-import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 import type { StreamState } from '../lib/sse';
 
 export interface Subscription {
@@ -110,6 +110,11 @@ export interface ChatBackend {
   prompts(): Promise<Prompt[]>;
   savePrompt(p: Omit<Prompt, 'id'> & { id?: string }): Promise<Prompt>;
   deletePrompt(promptId: string): Promise<void>;
+  /** SRV-469: the global web search settings (the auth value never comes back) */
+  webSearch(): Promise<WebSearchView>;
+  saveWebSearch(patch: WebSearchPatch): Promise<WebSearchView>;
+  /** one sample search with the draft over the stored settings; nothing is stored */
+  testWebSearch(draft: WebSearchPatch): Promise<WebSearchTest>;
   presets(): Promise<Preset[]>;
   savePreset(p: Omit<Preset, 'id'> & { id?: string }): Promise<Preset>;
   deletePreset(presetId: string): Promise<void>;
