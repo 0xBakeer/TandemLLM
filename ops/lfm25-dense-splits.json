@@ -1,0 +1,45 @@
+{
+ "_about": "LFM2.5-24B-A2B's dense EXL3 splits for tools/fn_kernels.dense at the 4.0 pack's shapes (tools/fn_tiles.py --dense, M = 1, cold ring, CUDA graph), on one DGX Spark, 2026-10-14 05:07; us_exl3 = exl3_matmul with its rot_in at its own best split; applied by engine/models/lfm2_moe/load.py. With them the 4.0 decode step ran at 145.8 tok/s from its graph, 136.1 without (tools/lfm_check.py bench, 256 tokens).",
+ "6144x2048x4": {
+  "S": 2,
+  "warps": 8,
+  "us": 30.43,
+  "us_exl3": 32.51,
+  "gb_s": 207.3
+ },
+ "3072x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 16.55,
+  "us_exl3": 19.74,
+  "gb_s": 190.7
+ },
+ "2048x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 13.01,
+  "us_exl3": 15.45,
+  "gb_s": 161.8
+ },
+ "23552x2048x4": {
+  "S": 1,
+  "warps": 4,
+  "us": 102.85,
+  "us_exl3": 114.36,
+  "gb_s": 235.0
+ },
+ "2048x11776x4": {
+  "S": 2,
+  "warps": 8,
+  "us": 59.29,
+  "us_exl3": 57.31,
+  "gb_s": 203.9
+ },
+ "128000x2048x6": {
+  "S": 4,
+  "warps": 8,
+  "us": 820.0,
+  "us_exl3": 818.7,
+  "gb_s": 240.1
+ }
+}
