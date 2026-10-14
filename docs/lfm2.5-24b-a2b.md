@@ -1,6 +1,6 @@
 # LFM2.5-24B-A2B
 
-LiquidAI's LFM2.5-24B-A2B is the third model TandemLLM runs, beside Qwen3.8-27B and Qwen3.8-Flash-Next. It has 24B parameters, and about 2B of them run for each token: a mixture of 64 experts with 4 active, in 38 of its 40 layers. It is a chat model first. On this engine it is the fast one, and its profiles trade quality for speed down to 2.5 bits a weight.
+LiquidAI's LFM2.5-24B-A2B is the third model TandemLLM runs, beside Qwen3.8-27B and Qwen3.8-Flash-Next, and its support ships in release 0.9.0. It has 24B parameters, and about 2B of them run for each token: a mixture of 64 experts with 4 active, in 38 of its 40 layers. It is a chat model first. On this engine it is the fast one, and its profiles trade quality for speed down to 2.5 bits a weight.
 
 The engine's code for it is `engine/models/lfm2_moe/` (registry name `lfm2_moe`, selected by `Lfm2MoeForCausalLM` in the checkpoint's `config.json`). The Setup Guide's entry is [models/lfm2.5-24b-a2b/model.yaml](../models/lfm2.5-24b-a2b/model.yaml).
 

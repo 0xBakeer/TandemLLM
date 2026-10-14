@@ -1,6 +1,6 @@
 \chapter{Roadmap}\label{ch:roadmap}
 
-Today the engine serves two main models, one at a time (Qwen3.8-27B and Qwen3.8-Flash-Next), with small models beside them, it is measured on one board (the DGX Spark, Section~\ref{sec:test-env}), and it decodes up to four requests at once. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
+Today the engine serves three main models, one at a time (Qwen3.8-27B, Qwen3.8-Flash-Next and, from 0.9.0, LFM2.5-24B-A2B), with small models beside them, it is measured on one board (the DGX Spark, Section~\ref{sec:test-env}), and it decodes up to four requests at once. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception, and no measured number gets worse. The steps are listed in the order they are planned. Nothing here is a promise of dates, and nothing here is measured unless it says so.
 
 \section{A mixture-of-experts model, and what is left}
 
