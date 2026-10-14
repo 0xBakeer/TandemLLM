@@ -18,8 +18,8 @@ step as a CUDA graph.
                      order: the decode steps' state bit for bit), the path's KV rows moved down, the
                      length moved (`commit_dev` is capturable)
   prefill(tokens)    a prompt in chunks of PREFILL_CHUNK on batched kernels (cuBLAS, the chunked SSD
-                     form in fp32 torch matmuls, SDPA with a lower-right causal mask, the experts
-                     grouped): the next token agrees with the row path, the bits do not
+                     form in fp32 torch matmuls, SDPA with a lower-right causal mask, the experts in
+                     two batched GEMMs): the next token agrees with the row path, the bits do not
 
 `DecodeGraph` captures the decode step once per attention class (kernels.classes) and `VerifyGraph` an
 M-row block.
@@ -603,8 +603,8 @@ class NemotronHEngine(NemotronHRef):
         return self.mm(o[0].transpose(0, 1).reshape(T, -1), self.W[m + "o_proj.weight"])
 
     def _moe_chunk(self, n, li):
-        """A prompt chunk's MoE block: fp32 router logits, the router kernel, each expert once over its
-        rows (cuBLAS), the ordered combine, the latent pair, the shared expert."""
+        """A prompt chunk's MoE block: fp32 router logits, the router kernel, the experts in two batched
+        GEMMs (`experts_grouped`), the ordered combine, the latent pair, the shared expert."""
         c = self.cfg
         m = self.pre(li) + "mixer."
         logits = F.linear(n.float(), self.W[m + "gate.weight"].float())
@@ -620,19 +620,7 @@ class NemotronHEngine(NemotronHRef):
                 out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])
             return out + self.mm(F.relu(self.mm(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
                                  self.W[m + "shared_experts.down_proj.weight"])
-        flat = ids.reshape(-1).long()
-        yd = torch.empty(T * S, x.shape[1], dtype=torch.float32, device=n.device)
-        order = torch.argsort(flat, stable=True)
-        counts = torch.bincount(flat, minlength=e.E).tolist()
-        o = 0
-        for ex, cnt in enumerate(counts):
-            if not cnt:
-                continue
-            pairs = order[o:o + cnt]
-            o += cnt
-            xe = x.index_select(0, pairs // S)
-            yd[pairs] = F.linear(F.relu(F.linear(xe, e.up[ex])).square(), e.down[ex]).float()
-        out = K.combine(yd, ids, wts)
+        out = K.combine(experts_grouped(x, ids, e.up, e.down), ids, wts)
         if c.moe_latent_size:
             out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])
         s = self.mm(F.relu(self.mm(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
@@ -724,6 +712,52 @@ def ssd_chunked(x, dt, A, B, C, S0, rep: int, Q: int):
     Ch = C.repeat_interleave(rep, 2)                                  # [c, Q, H, N]
     y = y + torch.einsum("cihn,chpn->cihp", Ch, Sin) * torch.exp(acum)[..., None]
     return y.reshape(nc * Q, H, P)[:T], S
+
+
+#: the batched expert GEMMs' largest operand; a chunk whose busiest expert would make it larger loops instead
+GROUPED_MAX_BYTES = 1 << 31
+
+
+def experts_looped(x, ids, up, down, order, counts) -> torch.Tensor:
+    """Each expert once over its rows (one GEMM pair an expert)."""
+    T, S = ids.shape
+    yd = torch.empty(T * S, x.shape[1], dtype=torch.float32, device=x.device)
+    o = 0
+    for ex, cnt in enumerate(counts.tolist()):
+        if not cnt:
+            continue
+        pairs = order[o:o + cnt]
+        o += cnt
+        yd[pairs] = F.linear(F.relu(F.linear(x.index_select(0, pairs // S), up[ex])).square(), down[ex]).float()
+    return yd
+
+
+def experts_grouped(x: torch.Tensor, ids: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> torch.Tensor:
+    """A prompt chunk's routed experts in two batched GEMMs: every (row, slot) pair placed in its expert's
+    rows of an [E, cap, X] batch (cap the busiest expert's count, the rest zeros), relu^2 between, the
+    pairs taken back in their own order -> yd [T S, X] fp32 (bf16 values)."""
+    T, S = ids.shape
+    E = up.shape[0]
+    flat = ids.reshape(-1).long()
+    P = flat.numel()
+    order = torch.argsort(flat, stable=True)
+    counts = torch.bincount(flat, minlength=E)
+    starts = torch.cumsum(counts, 0) - counts
+    cap = int(counts.max())
+    if E * cap * max(x.shape[1], up.shape[1]) * 2 > GROUPED_MAX_BYTES:
+        return experts_looped(x, ids, up, down, order, counts)
+    se = flat[order]
+    rank = torch.arange(P, device=x.device) - starts[se]
+    slot = torch.full((E, cap), P, dtype=torch.long, device=x.device)
+    slot[se, rank] = order
+    xp = torch.cat([x.index_select(0, torch.div(torch.arange(P, device=x.device), S, rounding_mode="floor")),
+                    torch.zeros(1, x.shape[1], dtype=x.dtype, device=x.device)])
+    xe = xp[slot]                                                     # [E, cap, X]
+    a = F.relu(torch.bmm(xe, up.transpose(1, 2))).square()             # [E, cap, I]
+    ye = torch.bmm(a, down.transpose(1, 2))                           # [E, cap, X]
+    yd = torch.empty(P + 1, x.shape[1], dtype=torch.float32, device=x.device)
+    yd[slot.reshape(-1)] = ye.reshape(-1, x.shape[1]).float()
+    return yd[:P]
 
 
 class DecodeGraph:
