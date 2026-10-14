@@ -1,7 +1,7 @@
 // The Context panel's words for a figure it has no value for (VIS-137): a value, or why there is
 // none, never a bare dash.
 import { describe, expect, it } from 'vitest';
-import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, kvWords, residentWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
+import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, kvWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
 import type { ContextReport, SandboxStatus } from '../src/chat/types';
 
 describe('the Context panel says why a figure is missing', () => {
@@ -35,5 +35,12 @@ describe('the Context panel says why a figure is missing', () => {
     expect(turnFigure(4.21, (v) => v.toFixed(2), true)).toBe('4.21');
     expect(turnFigure(null, String, false)).toBe(AFTER_TURN);
     expect(turnFigure(null, String, true)).toBe(NOT_TRACKED);
+  });
+  it('says when the system prompt and the tools are counted', () => {
+    const split = { system: 115, tools: 1187, history: 30000, injected: 7698, images: 0 };
+    expect(partWords('system', 115, split, 'engine')).toBe('115');
+    expect(partWords('system', 0, null, 'engine')).toBe('next turn');
+    expect(partWords('tools', 0, undefined, 'proxy')).toBe('not tracked');
+    expect(partWords('files', 0, null, 'engine')).toBe('0');
   });
 });

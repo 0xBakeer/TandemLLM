@@ -14,7 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
-import { HARNESS_PENDING, kvWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
+import { HARNESS_PENDING, kvWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -94,7 +94,7 @@ export class QseChatContext extends LightElement {
       <div class="ch-rib-line num"><b>${exact(ctx.used)}</b> of ${exact(ctx.window)}, ${pct(usedPct, 0)}</div>
       <p class="ch-rib-cache">${ctx.cache.warm ? html`<span class="ch-warm">${exact(ctx.cache.warm)} warm</span> from the ${ctx.cache.source === 'none' ? 'cache' : ctx.cache.source}` : 'nothing cached yet'}${ctx.cache.cold ? html`, <span class="ch-cold">${exact(ctx.cache.cold)} cold</span> to prefill` : ''}${pf ? html`, prefilling ${exact(pf.done)} of ${exact(pf.total)}` : ''}</p>
       <ul class="ch-legend" @mouseleave=${() => (this.hover = null)}>
-        ${ctx.parts.map((p) => html`<li class="${p.tokens ? '' : 'is-zero'}" @mouseenter=${() => (this.hover = p.kind)}><span class="swatch ${p.kind === 'reserved' ? 'swatch-outline' : ''}" style=${p.kind === 'reserved' ? '' : `background:${PART_COLOR[p.kind]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${exact(p.tokens)}</span></li>`)}
+        ${ctx.parts.map((p) => html`<li class="${p.tokens ? '' : 'is-zero'}" @mouseenter=${() => (this.hover = p.kind)}><span class="swatch ${p.kind === 'reserved' ? 'swatch-outline' : ''}" style=${p.kind === 'reserved' ? '' : `background:${PART_COLOR[p.kind]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${partWords(p.kind, p.tokens, ctx.split, c.context.model.backend)}</span></li>`)}
       </ul>
       <div class="ch-ctx-row"><button type="button" class="btn btn-sm" ?disabled=${!!c.run || ctx.used < 4_000} title="fold the older turns into a summary" @click=${() => this.fire('ch-compact')}>Compact now</button></div>
     </section>`;

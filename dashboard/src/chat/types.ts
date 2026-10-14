@@ -262,6 +262,8 @@ export interface ContextReport {
   };
   /** the chat's skill mode and pins (SRV-361); a pin the library lost is `missing` */
   skills?: { mode: 'auto' | 'manual' | 'model'; pinned: { name: string; tokens: number | null; missing: boolean }[]; blocked: string[] };
+  /** the engine's split of the last prompt (its usage frame); null before the first frame */
+  split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
   /** what the harness decided for this chat; never inside the answer text */
   harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;
   memory: {

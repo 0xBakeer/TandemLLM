@@ -59,3 +59,10 @@ export function sandboxWords(sb: SandboxStatus): string {
 export function skillTokens(tokens: number | null | undefined): string {
   return tokens != null ? `${exact(tokens)} tokens` : NEXT_TURN;
 }
+
+/** a part of the context bar: the engine counts the system prompt and the tool schemas in its
+ *  usage frame, so before the first frame (or on a server without one) they have no count yet */
+export function partWords(kind: string, tokens: number, split: ContextReport['split'], backend: Backend): string {
+  if ((kind === 'system' || kind === 'tools') && !split && !tokens) return backend && backend !== 'engine' ? 'not tracked' : 'next turn';
+  return exact(tokens);
+}
