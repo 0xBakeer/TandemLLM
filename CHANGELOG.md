@@ -28,7 +28,8 @@ DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Cha
 - No `-hq` profile: an exllamav3 `-hq` 4.0 served chat 9 % slower than 4.0 at a worse KL than 4.5 (0.082 against 0.063).
 - Dense splits per pack (`ops/lfm25-dense-splits.json`). Decode step without / with, tok/s: 2.5 171.2 / 188.2, 3.0 159.1 / 175.0, 3.5 143.4 / 153.5, 4.0 136.1 / 145.9, 4.5 121.6 / 128.8, 6.0 106.9 / 106.9.
 - Server: the checkpoint's chat template. Thinking off, from a client or the conductor, closes the `<think>` block the template always opens. Pythonic tool calls (`<|tool_call_start|>[f(a=1)]<|tool_call_end|>`) become OpenAI `tool_calls`; values are parsed as Python literals, never run. Default sampling when a request names none: temperature 0.1, top_k 50, repetition penalty 1.05.
-- Conductor, Laya and the narrator on by default, with the model's fit to the router (SRV-441, [docs](docs/lfm2.5-24b-a2b.md#conductor)): Laya alone answers the class question, a turn nobody classified gets nothing added, and a class sets the level and budget with only its core skill in the note. On 2.5, four short chat asks thought 2,234 reasoning tokens against 2,155 raw (the router as written: 9,098); seven Chat-tab tasks run twice succeeded 14 of 14, as raw did.
+- Conductor, Laya and the narrator on by default, with the model's fit to the router (SRV-441, [docs](docs/lfm2.5-24b-a2b.md#conductor)): Laya alone answers the class question, a turn nobody classified stays lean, and a class sets the level and budget with only its core skill in the note. On 2.5, raw / router as written / fit: four short chat asks 2,155 / 9,098 / 2,234 reasoning tokens; seven Chat-tab tasks run twice 14/14 / 12/14 / 14/14, 0 / 9 / 0 tool errors in the last two.
+- The Chat tab's `present` tool: asked to open a page it wrote, the model calls it again. The router's testing packages had it check pages through the shell (6 follow-ups: 145 tool calls, 15 shell calls in the follow-ups, 113,211 reasoning tokens); with the fit 20 calls, `present` in all 6 follow-ups, 7,228 tokens.
 - Three slots: 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8 tok/s in total on 4.0; each text equals its request alone. When every slot takes a plain step, one joint graph reads the weights once.
 - Disk tier and session spill: 12,288 tokens restored from the disk in 0.96 s against 2.6 s cold, with the cold answer.
 
@@ -50,6 +51,8 @@ Effect: prose, chat and code within 5 % of plain; edit and copy asks 1.8 to 3.6 
 - A suffix store written by another tokenizer turns the store off instead of stopping the start.
 - The dashboard's disk tier default is 16 GB, as the server's since 0.4.3 (it showed 50).
 - `/v1/completions` with a text prompt and two or more slots answers. Before, the slot choice read the prompt as a tensor and the request failed with 500 (SRV-443).
+- Chat tab: the plus menu draws outside the tab strip, which clipped it (VIS-133). A page a `write_file` or `edit_file` call left opens from its tool card, the plus menu's Preview and the Files viewer (VIS-135).
+- Chat tab, Context panel: it counts every tool call on the branch, the files the file tools carried, the routed packages' tokens, the chat's KV rows, the resident prefix and the sandbox's memory (SRV-445, SRV-447, SRV-449, SRV-451, SRV-453). A figure it cannot show names the reason instead of a dash (VIS-137). The packages and the prompt split survive a chatd restart (SRV-455).
 
 ### Shared EXL3 kernels
 

@@ -9007,5 +9007,331 @@
     }
    }
   ]
+ },
+ "present_follow_up": {
+  "method": "Three Chat-tab tasks with a follow-up turn that asks to see the result ('Open it', 'Show it to me', 'Open the html file you made'), through a test chatd of this tree (10 tools, yolo, temperature 0.1), each run twice. model_fit and raw: the :8000 server after the deploy (raw = the chat's profile raw); router_as_written: a side server of the same tree with QWEN38_CONDUCTOR_FIT=off and the router document with the decider stage on. follow_up_tools: the tool calls of the follow-up turn.",
+  "rows": [
+   {
+    "config": "model_fit",
+    "task": "clock-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 2,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 1823,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 20.0
+   },
+   {
+    "config": "model_fit",
+    "task": "page-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 4,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 432,
+    "hidden_tokens": 0,
+    "steps": 6,
+    "wall_s": 26.1
+   },
+   {
+    "config": "model_fit",
+    "task": "anim-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 779,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 12.0
+   },
+   {
+    "config": "model_fit",
+    "task": "clock-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 2,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 2912,
+    "hidden_tokens": 2,
+    "steps": 5,
+    "wall_s": 26.1
+   },
+   {
+    "config": "model_fit",
+    "task": "page-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 4,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 683,
+    "hidden_tokens": 0,
+    "steps": 6,
+    "wall_s": 24.1
+   },
+   {
+    "config": "model_fit",
+    "task": "anim-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 599,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 10.0
+   },
+   {
+    "config": "raw",
+    "task": "clock-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 1633,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 18.0
+   },
+   {
+    "config": "raw",
+    "task": "page-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 2306,
+    "hidden_tokens": 1,
+    "steps": 5,
+    "wall_s": 32.1
+   },
+   {
+    "config": "raw",
+    "task": "anim-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 306,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 10.0
+   },
+   {
+    "config": "raw",
+    "task": "clock-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 1,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 2795,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 26.1
+   },
+   {
+    "config": "raw",
+    "task": "page-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 4,
+    "tool_errors": 0,
+    "present_calls": 2,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 819,
+    "hidden_tokens": 0,
+    "steps": 6,
+    "wall_s": 24.1
+   },
+   {
+    "config": "raw",
+    "task": "anim-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 3,
+    "tool_errors": 0,
+    "present_calls": 2,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 768,
+    "hidden_tokens": 0,
+    "steps": 5,
+    "wall_s": 12.0
+   },
+   {
+    "config": "router_as_written",
+    "task": "clock-open",
+    "rep": 0,
+    "success": false,
+    "tool_calls": 29,
+    "tool_errors": 4,
+    "present_calls": 5,
+    "follow_up_tools": [
+     "bash",
+     "bash",
+     "present",
+     "bash",
+     "bash",
+     "present",
+     "bash",
+     "bash",
+     "bash"
+    ],
+    "reasoning_tokens": 18472,
+    "hidden_tokens": 7712,
+    "steps": 29,
+    "wall_s": 170.4
+   },
+   {
+    "config": "router_as_written",
+    "task": "page-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 69,
+    "tool_errors": 5,
+    "present_calls": 31,
+    "follow_up_tools": [
+     "write_file",
+     "write_file",
+     "write_file",
+     "present",
+     "present",
+     "present",
+     "bash",
+     "bash",
+     "bash",
+     "bash",
+     "bash",
+     "bash",
+     "present",
+     "present",
+     "present",
+     "present",
+     "present",
+     "present",
+     "present"
+    ],
+    "reasoning_tokens": 34443,
+    "hidden_tokens": 7725,
+    "steps": 69,
+    "wall_s": 264.8
+   },
+   {
+    "config": "router_as_written",
+    "task": "anim-open",
+    "rep": 0,
+    "success": true,
+    "tool_calls": 5,
+    "tool_errors": 0,
+    "present_calls": 4,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 8879,
+    "hidden_tokens": 5856,
+    "steps": 7,
+    "wall_s": 68.1
+   },
+   {
+    "config": "router_as_written",
+    "task": "clock-open",
+    "rep": 1,
+    "success": false,
+    "tool_calls": 14,
+    "tool_errors": 0,
+    "present_calls": 5,
+    "follow_up_tools": [
+     "present"
+    ],
+    "reasoning_tokens": 21478,
+    "hidden_tokens": 7776,
+    "steps": 16,
+    "wall_s": 210.5
+   },
+   {
+    "config": "router_as_written",
+    "task": "page-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 20,
+    "tool_errors": 2,
+    "present_calls": 5,
+    "follow_up_tools": [
+     "bash",
+     "present",
+     "present",
+     "write_file",
+     "present",
+     "present",
+     "web_fetch",
+     "bash"
+    ],
+    "reasoning_tokens": 24064,
+    "hidden_tokens": 7722,
+    "steps": 21,
+    "wall_s": 310.8
+   },
+   {
+    "config": "router_as_written",
+    "task": "anim-open",
+    "rep": 1,
+    "success": true,
+    "tool_calls": 8,
+    "tool_errors": 2,
+    "present_calls": 5,
+    "follow_up_tools": [
+     "render_page"
+    ],
+    "reasoning_tokens": 5875,
+    "hidden_tokens": 5830,
+    "steps": 9,
+    "wall_s": 60.1
+   }
+  ]
  }
 }

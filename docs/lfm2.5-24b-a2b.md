@@ -79,8 +79,9 @@ The model fit against the raw path and the router as written (`QWEN38_CONDUCTOR_
 | 4 short asks, thinking off: answer tokens (right) | 541 (3/4) | 679 (3/4) | 553 (3/4) |
 | 4 short asks in the Chat tab, 10 tools: reasoning tokens (right) | 525 (3/4) | 2,665 (3/4) | 553 (3/4) |
 | 7 Chat-tab tasks x 2: success, reasoning tokens, tool errors | 14/14, 7,535, 1 | 12/14, 68,170, 9 | 14/14, 9,850, 0 |
+| 3 Chat-tab tasks with an "open it" follow-up x 2: success, `present` in the follow-up, tool calls, reasoning tokens | 6/6, 6/6, 19, 8,627 | 4/6, 5/6, 145, 113,211 | 6/6, 6/6, 20, 7,228 |
 
-The raw column is the model fit's window; in the router's window the raw tasks gave 14/14, 7,352, 0. Rates in the model fit's window (no other request on the box): 171.6 tok/s on the short asks against 166.7 raw, 161.1 on the tasks against 165.7. The tasks: files, a Python script, a search, an HTML canvas animation, an analog clock, a landing page, a JSON edit; the check reads the files each run wrote.
+The follow-up rows ran on the :8000 server after the deploy (raw and fit) and on the side server (router as written); there the router's testing packages had the model check the page through the shell: 15 shell calls in the follow-ups and 13 tool errors over the 6 runs. The raw column is the model fit's window; in the router's window the raw tasks gave 14/14, 7,352, 0. Rates in the model fit's window (no other request on the box): 171.6 tok/s on the short asks against 166.7 raw, 161.1 on the tasks against 165.7. The tasks: files, a Python script, a search, an HTML canvas animation, an analog clock, a landing page, a JSON edit; the check reads the files each run wrote.
 
 Not yet: the packages, the memory notes and the effort sentences at a place this model does not read as part of the request (the system message cost 1.38 times the raw thinking where the tail cost 2.7 times); Laya's class question on short chats (below its bar, so they fall back).
 
