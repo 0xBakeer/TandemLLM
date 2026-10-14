@@ -277,7 +277,7 @@ def test_the_plan():
             "assets_required"]) | tools for e in a["fetch"])
         assert p["profile"]["on_disk"] is False and p["profile"]["download_gb"] == round(gb, 2), p
         fetch = [c for c in p["commands"] if "--fetch-only" in c]
-        assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base checkpoint" in fetch[0]
+        assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base tensors for EXL3" in fetch[0]
         assert "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5" not in fetch[0]   # the weights are here
         # VIS-153: the tools' models are downloads too, Qwen3.5-2B once for the narrator
         assert "Qwen3.5-2B (the narrator, and Wren)" in fetch[0], fetch
@@ -285,8 +285,8 @@ def test_the_plan():
         p = _plan(_sel(profile="exl3-3.0"))
         assert p["profile"]["download_gb"] == round(13.5 + gb, 2), p["profile"]
         # an asset nothing downloads is still refused before anything changes
-        p = apply.plan(_no_download(M, "base-fp8"), _sel(), setup_mode=False, password_set=False)
-        assert p["error_codes"][0] == "missing_assets" and "Base checkpoint" in p["errors"][0], p
+        p = apply.plan(_no_download(M, "base-plain"), _sel(), setup_mode=False, password_set=False)
+        assert p["error_codes"][0] == "missing_assets" and "Base tensors for EXL3" in p["errors"][0], p
         assert "Draft models (EXL3 K3)" not in p["errors"][0]
     with Box(hook=False):
         assert "no_overlay_hook" in _plan()["error_codes"]
@@ -783,7 +783,7 @@ def test_the_routes():
     with Box(assets=False):
         app.STATE.update(wren=FakeWren())
         real_get = registry.get
-        registry.get = lambda mid, d=None: _no_download(M, "base-fp8") if mid == M["id"] else real_get(mid, d)
+        registry.get = lambda mid, d=None: _no_download(M, "base-plain") if mid == M["id"] else real_get(mid, d)
         try:
             code, b = _api("POST", "/v1/setup/apply", {"selection": {"model": M["id"]}})
         finally:

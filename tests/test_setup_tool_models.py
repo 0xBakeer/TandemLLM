@@ -175,7 +175,7 @@ def test_fetch_weights_also():
     present = registry.asset_present
     with T.Box() as box:
         # the registry of this checkout; ${REPO} paths (the BF16 drafters) in the box's copy
-        registry.asset_present = lambda a, repo=None: present(a, box.root)
+        registry.asset_present = lambda a, repo=None, m=None: present(a, box.root, m)
         os.environ["HF_HUB_CACHE"] = os.path.join(box.home, ".cache", "huggingface", "hub")
         try:
             out = io.StringIO()

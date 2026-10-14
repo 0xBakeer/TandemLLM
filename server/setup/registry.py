@@ -79,10 +79,18 @@ _QUALITY = _obj({"kl_vs_bf16": {"type": ["number", "null"]}, "top1_pct": {"type"
                  "ppl": {"type": ["number", "null"]}, "date": _STR, "source": _STR})
 # OPS-95: `fetch`, optional, what ops/fetch_weights.py --assets downloads when the asset is missing:
 # each entry's files (names or globs of the repo) into `to` (${HOME}, ${REPO} or ${HF_HUB}: the HF cache)
-_FETCH = _obj({"repo": _STR, "files": {"type": "array", "items": _STR}, "to": _STR, "gb": _NUM0})
+# OPS-133: `skip_dtypes` / `skip_tensors`, optional: the safetensors files are fetched without the
+# tensors of those dtypes (and their `<name>_scale_inv`) and those names, by range requests
+_FETCH = _obj({"repo": _STR, "files": {"type": "array", "items": _STR}, "to": _STR, "gb": _NUM0,
+               "skip_dtypes": {"type": "array", "items": _STR},
+               "skip_tensors": {"type": "array", "items": _STR}},
+              required=("repo", "files", "to", "gb"))
+# OPS-133: `satisfied_by`, optional: other assets of the entry that serve for this one when present
+# (the full FP8 base for the EXL3 profiles' plain base)
 _ASSET = _obj({"id": _ID, "label": _STR, "path": _STR, "also": {"type": "array", "items": _STR},
                "fetchable": {"type": "boolean"}, "protected": {"type": "boolean"},
-               "hf_repo": _NOTE, "fetch": {"type": "array", "items": _FETCH}, "source": _STR},
+               "hf_repo": _NOTE, "fetch": {"type": "array", "items": _FETCH}, "source": _STR,
+               "satisfied_by": _IDS},
               required=("id", "label", "path", "also", "fetchable", "protected", "hf_repo", "source"))
 _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "drafters_gib", "hf_repo",
                      "hf_private", "recommended", "badges", "quality", "assets_required", "note")
@@ -319,6 +327,9 @@ def _cross(m: dict, root: str) -> list[str]:
     for i, a in enumerate(m["assets"]):
         if a.get("fetch") and not a["fetchable"]:
             errs.append(f"$.assets[{i}]: an asset with a fetch list is fetchable")
+        for b in a.get("satisfied_by") or []:
+            if b not in assets or b == a["id"]:
+                errs.append(f"$.assets[{i}].satisfied_by: no other asset {b!r}")
         for j, f in enumerate(a.get("fetch") or []):
             if not f["files"] or not re.match(r"^\$\{(HOME|REPO|HF_HUB)\}", f["to"]):
                 errs.append(f"$.assets[{i}].fetch[{j}]: files, and a `to` under ${{HOME}}, "
@@ -688,9 +699,13 @@ def expand(path: str, repo: str | None = None) -> str:
             .replace("${HF_HUB}", hf_hub()))
 
 
-def asset_present(a: dict, repo: str | None = None) -> bool:
-    """Every path of the asset exists (a glob matches)."""
-    return all(glob.glob(expand(p, repo)) for p in [a["path"], *a.get("also", [])])
+def asset_present(a: dict, repo: str | None = None, m: dict | None = None) -> bool:
+    """Every path of the asset exists (a glob matches), or (with the model `m`) an asset it names
+    in `satisfied_by` is present."""
+    if all(glob.glob(expand(p, repo)) for p in [a["path"], *a.get("also", [])]):
+        return True
+    return m is not None and any(asset_present(asset(m, b), repo) for b in
+                                 a.get("satisfied_by") or [] if asset(m, b) is not None)
 
 
 # ---------------------------------------------------------------------- community packs

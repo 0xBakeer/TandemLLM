@@ -35,7 +35,7 @@ Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installe
 | profile | downloads | size |
 |-|-|-|
 | `flashnext-3.05` | the pack's branch of `turboderp/Qwen3.8-Flash-Next-exl3` | 85.1 GB |
-| `exl3-4.5` | `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5`, the K3 drafters and the K4 draft head (`...-EXL3-drafters`, into `~/.qwen38-spark-engine/weights`), the BF16 drafters (`...-DFlash2-b8` and `-b16`, into `~/TandemLLM/src/train`) and the base checkpoint `Qwen/Qwen3.8-27B-FP8` (into the Hugging Face cache, without `mtp.safetensors`) | 18.4 + 1.9 + 7.7 + 30.4 GB |
+| `exl3-4.5` | `0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5`, the K3 drafters and the K4 draft head (`...-EXL3-drafters`, into `~/.qwen38-spark-engine/weights`), the BF16 drafters (`...-DFlash2-b8` and `-b16`, into `~/TandemLLM/src/train`) and the tensors of the base checkpoint `Qwen/Qwen3.8-27B-FP8` an EXL3 load reads (`base-plain`, into `~/.qwen38-spark-engine/weights/base-plain`; none when the full checkpoint is in the Hugging Face cache) | 18.4 + 1.9 + 7.7 + 3.54 GB |
 
 The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Before a download starts, the script checks that the disk keeps 60 GB free after it. It checks every weight file against the sha256 the hub lists, and a folder appears only when its files are all there. If a download stops, run the same command again: it continues and keeps the files that finished. The engine needs about 80 GiB free for a 27B profile and 70 GiB for `flashnext-3.05`. The switch stops setup mode first.
 
@@ -123,7 +123,7 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 
 The job runs as a process of its own, because the switch replaces the server that started it. Its state is in `run/setup-jobs/<id>/`, and the status page (`ops/engine_status.py`) answers `GET /v1/setup/jobs/{id}` while the engine restarts. Apply is refused while requests run (409 `busy`), while another job runs (409 `job_running`), when the selection does not fit (409 `over_budget`), and when the box lacks something (412 `missing_assets`, `missing_token`, `disk_full`, `no_overlay_hook`).
 
-On a new box the fetch step downloads the 27B's K3 drafters, K4 draft head, BF16 drafters and FP8 base checkpoint with the weights, and the plan's `download_gb` counts them (OPS-95). The review lists each download with its size (`downloads`), the tools' models too. Only a file nothing downloads fails the check with `missing_assets`, before anything changes; for a tool's model the error names the tool, and the fix is to turn it off in the Tools step.
+On a new box the fetch step downloads the 27B's K3 drafters, K4 draft head, BF16 drafters and base with the weights, and the plan's `download_gb` counts them (OPS-95). The NVFP4 profile's base is the FP8 checkpoint (30.4 GB). An EXL3 profile's is `base-plain` (OPS-133): the checkpoint's files fetched by range requests without the F8_E4M3 projections, their scales and `lm_head.weight`, which the EXL3 pack replaces, 3.54 GB; a box with the full checkpoint uses that. The review lists each download with its size (`downloads`), the tools' models too. Only a file nothing downloads fails the check with `missing_assets`, before anything changes; for a tool's model the error names the tool, and the fix is to turn it off in the Tools step.
 
 ## Benchmarks and the overlay
 

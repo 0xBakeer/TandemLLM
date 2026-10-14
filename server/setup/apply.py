@@ -501,7 +501,7 @@ def _tool_assets_missing(m: dict, sel: dict, repo: str | None, seen: set) -> tup
             continue
         for aid in c["assets"]:
             a = registry.asset(m, aid)
-            if a is None or aid in seen or registry.asset_present(a, repo):
+            if a is None or aid in seen or registry.asset_present(a, repo, m):
                 continue
             seen.add(aid)
             (out_fetched if a.get("fetch") else out_missing).append((c, a))
