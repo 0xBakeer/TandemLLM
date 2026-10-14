@@ -11,7 +11,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, apiBase, describeError, engineAway, onApi } from './api/client';
-import { awayText } from './lib/away';
+import { awayText, restartText, swAway, whenEngineUp } from './lib/away';
 import { config } from './api/config';
 import { perfEngineNote } from './lib/perf-note';
 import type { Summary, LiveStatus } from './api/types';
@@ -91,6 +91,9 @@ export class QseApp extends LightElement {
   @state() private theme: Theme = currentTheme();
   @state() private summary: Loadable<Summary> = { state: 'loading' };
   @state() private offline = false;
+  /** OPS-131: the service worker served this page from its cache while the engine was away */
+  @state() private restarting: { status: number; at: number } | null = null;
+  private stopRestart: (() => void) | null = null;
   @state() private version: string | null = null;
   @state() private codeHash: string | null = null;
   /** the engine's parallel sequences (/v1/config engine.parallel.n), read once for the subtitle */
@@ -119,6 +122,7 @@ export class QseApp extends LightElement {
     super.connectedCallback();
     watchSystemTheme();
     registerWorker((apply) => (this.newBuild = apply));
+    if (navigator.serviceWorker?.controller) void this.checkRestart();
     this.unsub.push(
       onRoute((r) => {
         this.route = r;
@@ -249,6 +253,19 @@ export class QseApp extends LightElement {
     void this.loadVersion();
   }
 
+  /** OPS-131: a page the worker served from its cache (the proxy answered 502, 503 or 504) says the
+   *  engine restarts and reloads once /health answers */
+  private async checkRestart(): Promise<void> {
+    const a = await swAway();
+    if (!a) return;
+    this.restarting = a;
+    this.stopRestart = whenEngineUp(
+      () => fetch(apiBase() + '/health', { cache: 'no-store', credentials: 'same-origin' }).then((r) => r.ok),
+      () => location.reload(),
+    );
+    this.unsub.push(() => this.stopRestart?.());
+  }
+
   /** /health says `mode: "setup"` on a box started by `ops/start.sh --setup`: open the guide, and
    *  ask again every 10 s until the box serves a model (an install ends with a restart) */
   private async checkSetupMode(): Promise<void> {
@@ -343,7 +360,8 @@ export class QseApp extends LightElement {
         </section>
         <main class="content" id="main">
           ${this.newBuild ? html`<div class="banner" role="status" data-update>${icon('refresh')} A new version of the dashboard is ready. <button type="button" class="btn btn-sm" @click=${() => this.newBuild?.()}>Reload</button></div>` : nothing}
-          ${this.offline ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
+          ${this.restarting ? html`<div class="banner banner-offline" role="status" data-engine-restarting>${icon('refresh')} ${restartText(this.restarting.status)}</div>` : nothing}
+          ${this.offline && !this.restarting ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
           ${this.refused && this.route.view !== 'setup' ? html`<div class="banner banner-offline" role="status" data-refused>${icon('warn')} The server answered 401: an admin password is set on it, and the dashboard has no sign-in yet. Unset QSE_ADMIN_TOKEN to open it again (docs/server.md).</div>` : nothing}
           ${this.setupMode ? html`<div class="banner setup-mode-banner" role="status" data-setup-mode>${icon('info')} ${S.setupModeBanner}</div>` : nothing}
           ${this.renderView()}

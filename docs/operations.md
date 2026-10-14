@@ -124,6 +124,8 @@ location @engine_away_fixed {
 
 The engine's own 503s (a drain, a full queue) pass through unchanged: nginx only replaces an answer it did not get (`proxy_intercept_errors` stays off).
 
+A browser that opened the dashboard before keeps working through a restart without the proxy's help (OPS-131): its service worker (`dashboard/pwa/sw.js`) answers a page load that gets 502, 503 or 504, or no answer, with the cached shell. The page then asks the worker (`./sw-away`), says the engine is restarting, polls `/health` every 3 s and reloads when it answers. API calls (`/v1/`) never go through the worker. A first visit has no worker yet and gets the proxy's answer.
+
 ## Roles beside the engine (residency)
 
 The engine loads first and holds most of the board. Anything else that should run beside it (a decision model, a librarian, a reader) loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable`, less what the engine may still take up to its declared peak (`MEM_PEAK_GIB`, 77, less what it holds now, from its `/health`; the whole peak when it does not answer), minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.
