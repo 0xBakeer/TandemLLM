@@ -255,7 +255,11 @@ class MTPTreeDrafter:
         if self._turn is False:
             self.stats["skipped"] += 1
             return None
-        if self.cut.skip(self.cls):
+        # with no draft head (NoHead) each round's own lookup match decides, through the cut's
+        # calibrated q: the class-wide skip, learned for a head that drafts every round, priced the
+        # lookup by the rounds that matched little (LFM2.5, 2026-10-14: three chat asks, then edit and
+        # copy asks the lookup matched throughout took the plain step)
+        if self.head.depth and self.cut.skip(self.cls):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -269,9 +273,7 @@ class MTPTreeDrafter:
         look = None
         if self.head.depth == 0:
             # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
-            # one, so the drafted rounds' price is learned from rounds that drafted (LFM2.5, 2026-10-14:
-            # its rounds with no match priced drafting above the plain step, and the edit and copy asks
-            # after three chat ones took plain turns throughout)
+            # one, so the drafted rounds' price is learned from rounds that drafted
             look = self._look(context)
             if look is None:
                 self.pending = None
@@ -313,7 +315,9 @@ class MTPTreeDrafter:
         # the graphs this class lacks: captured by the engine while the server is idle, so a turn that
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
-        self._turn = self.req["turn"] = bool(self.cut.turn(self.cls, unfed, self.answer, extra))
+        # no draft head: no backlog to read into it, and each round's match decides (above)
+        self._turn = self.req["turn"] = (not self.head.depth
+                                         or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
 

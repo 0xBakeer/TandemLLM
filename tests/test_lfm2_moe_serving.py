@@ -137,7 +137,17 @@ def test_no_head_rounds_without_a_match_are_plain_steps():
     d.sync(text + [700] + text[:4], _rows(len(ctx) - 17, 17), len(ctx) - 17)
     tree = d.propose_tree(ctx, 32)
     assert tree is not None and tree.n_draft >= 8, tree and tree.tokens
-    return f"30 rounds with no match priced as plain steps; then a copy of {tree.n_draft} tokens"
+    # a class whose drafted rounds were priced above the plain step (rounds that matched little):
+    # with no head the round's own match still decides, so a copy drafts
+    d.cut.spec[0], d.cut.plain[0] = 50.0, 7.3
+    assert d.cut.skip(0)                                      # what a head's round would take
+    d.reset()
+    d.prime(ctx)
+    d.sync(ctx, _rows(0, len(ctx)), 0)
+    again = d.propose_tree(ctx, 32)
+    assert again is not None and again.n_draft >= 8, again and again.tokens
+    return (f"30 rounds with no match priced as plain steps; then a copy of {tree.n_draft} tokens, and "
+            f"{again.n_draft} with drafting priced above the plain step")
 
 
 def test_kv_length_and_restart():
