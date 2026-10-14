@@ -264,6 +264,36 @@ def test_egress_reaches_only_the_listed_host_redirects_included():
         srv.shutdown()
 
 
+def test_a_reset_connection_is_a_tool_error_not_a_crash():
+    import struct
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def reset():
+        for _ in range(2):
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            c.recv(1024)
+            c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            c.close()                                   # RST instead of an answer
+    threading.Thread(target=reset, daemon=True).start()
+    try:
+        cfg = {**SX, "searxng_url": f"http://127.0.0.1:{port}", "timeout_s": 3}
+        try:
+            W.search(cfg, "x")
+        except W.SearchError as exc:
+            assert f"cannot reach the SearXNG instance at 127.0.0.1:{port}" in str(exc)
+            assert "connection to 127.0.0.1 failed" in str(exc), str(exc)
+        else:
+            raise AssertionError("no error")
+    finally:
+        srv.close()
+
+
 def test_duckduckgo_on_a_private_address_is_refused_before_connecting():
     real_gai, real_socket = socket.getaddrinfo, socket.socket
     opened = []

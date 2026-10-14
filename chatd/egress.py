@@ -109,7 +109,9 @@ def request(url: str, *, method: str = "GET", body: bytes | None = None,
         sock = connect(u.hostname, port, private_ok, min(CONNECT_TIMEOUT_S, timeout))
         try:
             if u.scheme == "https":
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=u.hostname)
+                ctx = ssl.create_default_context()
+                ctx.set_alpn_protocols(["http/1.1"])          # as http.client offers it
+                sock = ctx.wrap_socket(sock, server_hostname=u.hostname)
             sock.settimeout(timeout)
             conn = http.client.HTTPConnection(u.hostname, port)
             conn.sock = sock
@@ -127,6 +129,9 @@ def request(url: str, *, method: str = "GET", body: bytes | None = None,
             raise Refused(f"no answer from {host} within {timeout:g} s") from None
         except ssl.SSLError as exc:
             raise Refused(f"TLS with {host} failed ({exc.reason or type(exc).__name__})") from None
+        except (OSError, http.client.HTTPException) as exc:
+            # a reset in the handshake or mid-answer (a rate limit can look like this)
+            raise Refused(f"the connection to {host} failed ({type(exc).__name__})") from None
         finally:
             sock.close()
     raise Refused("too many redirects")
