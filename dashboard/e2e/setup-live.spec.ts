@@ -87,12 +87,25 @@ test('@read the tiles and every step with the box data, from what the box runs n
   if (current.selection.profile !== recommended) {
     await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
   }
+  // the measured table is the registry's rows, number for number (each comparable row's prose, chat, code)
+  for (const r of model.measurements.rows as { profile: string; comparable: boolean; cells: { greedy_512?: Record<string, { tok_s: number }> } }[]) {
+    if (!r.comparable || !r.cells.greedy_512) continue;
+    const vals = await page.locator(`.mt-row[data-profile="${r.profile}"] .mt-val`).allInnerTexts();
+    expect(vals, r.profile).toEqual(['prose', 'chat', 'code'].map((t) => r.cells.greedy_512![t].tok_s.toFixed(1)));
+  }
   await shot(page, '1-overview');
 
   await page.locator('.setup-next').click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'weights');
   // the box's own profile is the one picked
   await expect(page.locator('.wcard.is-selected')).toHaveAttribute('data-profile-card', current.selection.profile);
+  // every size is a card with its registry numbers: the KL and the top-1 agreement
+  for (const p of (model.profiles as { id: string; quality: { kl_vs_bf16: number | null; top1_pct: number | null } }[]).filter((x) => !x.id.startsWith('community/'))) {
+    const card = page.locator(`[data-profile-card="${p.id}"]`);
+    await expect(card, p.id).toBeVisible();
+    if (p.quality.kl_vs_bf16 != null) await expect(card.locator('.wcard-facts')).toContainText(p.quality.kl_vs_bf16.toFixed(4));
+    if (p.quality.top1_pct != null) await expect(card.locator('.wmeter-v').first()).toHaveText(`${p.quality.top1_pct.toFixed(1)} %`);
+  }
   // the bar is the server's estimate of that selection, and its "in use now" is the box's
   await expect(page.locator('.membar')).toHaveAttribute('data-total', est.total_gb.toFixed(2));
   const sys = await (await page.request.get('/v1/dashboard/system')).json();

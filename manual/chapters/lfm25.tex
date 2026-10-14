@@ -31,20 +31,23 @@ The tokenizer is LiquidAI's own (128,000 ids). The lookup corpus and the suffix 
 
 \begin{table}[htbp]
 \centering\small
-\caption[The LFM2.5 profiles]{The LFM2.5 profiles. Weights: the GiB on the device at load, \measured{} for BF16, 3.0 and 4.0; the other packs are estimated from the parameter count until each is measured.}\label{tab:lfm-profiles}
-\begin{tabularx}{\linewidth}{@{}L{.22\linewidth}L{.12\linewidth}L{.14\linewidth}Y@{}}
+\caption[The LFM2.5 profiles]{The LFM2.5 profiles, \measured{} 2026-10-14: the download, the weights on the device at load, the decode step from its graph (tok/s), chat through the server plain / with the lookup (tok/s), and against BF16 on 100 rows of oasst1 chat the KL divergence and the top-1 agreement (provisional, see the text).}\label{tab:lfm-profiles}
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-\hd{profile} & \hd{disk} & \hd{weights} & \hd{note} \\
+\hd{profile} & \hd{disk} & \hd{weights} & \hd{step} & \hd{chat} & \hd{KL} & \hd{top-1} \\
 \midrule
-\code{lfm25-bf16} & 47.9~GB & 44.95~GiB & the quality reference \\
-\code{lfm25-exl3-3.0} & 9.68~GB & 9.4~GiB & every tensor at 3 bits, the head at 6 \\
-\code{lfm25-exl3-4.0} & 12.64~GB & 12.05~GiB & the default, provisional \\
-\code{lfm25-exl3-2.5}, \code{-3.5}, \code{-4.5}, \code{-6.0} & 8.1 to 18.3~GB & & not measured yet \\
+\code{lfm25-exl3-2.5} & 8.20~GB & 7.64~GiB & 188.2 & 185.4 / 175.6 & 0.336 & 78.7~\% \\
+\code{lfm25-exl3-3.0} & 9.68~GB & 9.4~GiB & 175.0 & 171.3 / 168.5 & 0.217 & 83.1~\% \\
+\code{lfm25-exl3-3.5} & 11.16~GB & 10.56~GiB & 153.5 & 150.9 / 143.7 & 0.151 & 86.1~\% \\
+\code{lfm25-exl3-4.0} & 12.64~GB & 12.06~GiB & 145.9 & 143.7 / 139.4 & 0.108 & 88.3~\% \\
+\code{lfm25-exl3-4.5} & 14.12~GB & 13.31~GiB & 128.8 & 128.2 / 124.7 & 0.070 & 90.6~\% \\
+\code{lfm25-exl3-6.0} & 18.63~GB & 17.37~GiB & 106.9 & 105.2 / 103.5 & 0.048 & 92.6~\% \\
+\code{lfm25-bf16} & 47.9~GB & 44.95~GiB & 44.8 & 44.5 / 43.3 & 0 & 100~\% \\
 \bottomrule
-\end{tabularx}
+\end{tabular}
 \end{table}
 
-Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The default, \code{lfm25-exl3-4.0}, stays provisional until every pack is measured: the 3.0 pack decodes 9~\% faster for about twice the KL divergence on chat text (0.195 against 0.098 in the conversion's own exllamav3 comparison). On 8 chat prompts of 128 tokens, the 4.0 pack's top token agrees with transformers' BF16 model at 94.7~\% of the 1,024 positions, with a KL divergence of 0.033 (\measured, the engine teacher-forced on the BF16 run's tokens; the pack with exllamav3's default calibration, which the profile serves).
+Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers come from \code{tools/lfm_quality.py}: this engine on the pack against the BF16 checkpoint in the same process, KL(BF16 $\Vert$ pack) over the whole vocabulary, on 100 rows of 2,048 tokens each of oasst1 chat and of wikitext-2. They are provisional: they are high next to exllamav3 conversions of other models at the same rates, and whether the conversion recipe causes it is being checked. The two 4.0 calibrations differ on wikitext only (KL 0.176 against 0.189, a 95~\% interval of the difference of 0.002 to 0.024). The default stays \code{lfm25-exl3-4.0} until that check is in; the rule for the pick is the fastest profile in chat whose chat top-1 agreement is at least 85~\%, on these numbers 3.5.
 
 Below 4 bits a weight, exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is $16K + 8$ int16 wide). In such a tile an odd weight takes one bit more than an even one, so weight $i$'s 16-bit window ends at bit $(i+1)K_a + \lfloor (i+1)/2 \rfloor$ of the tile's ring, $K_a$ the whole part of the rate. The engine's kernels decode these tiles as exllamav3 does, in the decode step, a verify block and the prefill.
 
@@ -71,7 +74,7 @@ trellis decode against exllamav3's \code{LinearEXL3} & bit for bit \\
 
 \section{Speed}
 
-One request, greedy, the decode step from its CUDA graph: 145.8~tok/s on 4.0 (6.86~ms a token, 191~GB/s of the bytes a token reads), 158.7~tok/s on 3.0 (6.30~ms, 165~GB/s) and 44.7~tok/s in BF16 (22.4~ms, 220~GB/s). The 4.0 step runs with dense splits measured at its shapes (\code{ops/lfm25-dense-splits.json}); without them it ran at 136.1~tok/s. Launching the step's kernels one by one costs 5~\%. An 8,192-token prompt prefills at 7,360~tok/s on 4.0. Through the server, 512 greedy tokens with thinking off, 4.0 plain ran at 142.3 to 143.7~tok/s on the Setup Guide's three asks, and BF16 at 43.3 (\measured).
+One request, greedy, the decode step from its CUDA graph runs at 188.2~tok/s on 2.5, 145.9 on 4.0 (191~GB/s of the bytes a token reads) and 44.7 in BF16 (220~GB/s), with dense splits measured at each pack's shapes (\code{ops/lfm25-dense-splits.json}; 4.0 ran at 136.1 without them). Launching the step's kernels one by one costs 5~\%. An 8,192-token prompt prefills at 7,360~tok/s on 4.0 (\measured).
 
 A verify block costs about 3~ms a row more, because each row routes to its own experts and a block reads the union of them (Table~\ref{tab:lfm-stair}). A block pays only when it is accepted for about 1.4 tokens a row it adds.
 
@@ -88,18 +91,17 @@ experts & 152 & 259 & 333 & 391 & 491 & 563 & 664 & 735 \\
 \end{tabular}
 \end{table}
 
-The model has no draft layer, and Liquid will publish a drafter for it. Until then the server drafts with the lookup alone, through the shared tree drafter with no head (\code{NoHead}) and cut by StairCut with the staircase as its prior. With no head, each round's own lookup match decides through the cut's calibrated acceptance: a round with no match is the plain step and is priced as one, and the class-wide skip that a head needs is not consulted. On 4.0 with the store off, an edit ask ran at 222.0~tok/s (3.43 tokens a block) and a copy ask at 292.2~tok/s (10.65), against 141.5 and 141.6 plain, while the other three asks ran as plain, every text equal to the plain run's (\measured). Before the no-head pricing, the same asks in one server never drafted. Through the server on 4.0 the lookup also gave the same answer as plain decoding for all 20 requests of \code{tools/fn_server_check.py}, with a largest logprob difference of 0.0.
+The model has no draft layer, and Liquid will publish a drafter for it. Until then the server drafts with the lookup alone, through the shared tree drafter with no head (\code{NoHead}) and cut by StairCut with the staircase as its prior. With no head, each round's own lookup match decides through the cut's calibrated acceptance: a round with no match is the plain step and is priced as one, and the class-wide skip that a head needs is not consulted. On 4.0 with the store off, an edit ask ran at 291.1~tok/s (11.1 tokens a block) and a copy ask at 326.4~tok/s (13.5), against 141.3 and 141.9 plain, while the other three asks ran as plain, every text equal to the plain run's (\measured). Before the no-head pricing, the same asks in one server never drafted. Through the server on 4.0 the lookup also gave the same answer as plain decoding for all 20 requests of \code{tools/fn_server_check.py}, with a largest logprob difference of 0.0.
 
 \section{Serving}
 
 The chat template is the checkpoint's own and opens a reasoning block at the end of every prompt; a client that turns thinking off gets the block closed right after the generation prompt. Tool calls are a Python list between \code{<|tool_call_start|>} and \code{<|tool_call_end|>}; \code{server/toolcall.py} rewrites each block into the parser's JSON form as the text arrives, with values read as Python literals and never run, so a client gets OpenAI \code{tool_calls}. Liquid's recommended sampling is the default: temperature 0.1, \code{top_k} 50, repetition penalty 1.05. The Setup Guide turns the conductor off for this model: on four short chat asks its notes (1,241 to 2,714 hidden tokens) made the model think 856 to 1,437 tokens where it thought 99 to 902 without them, and with thinking off it reasoned in the answer instead of answering (\measured, 4.0).
 
-The resident prefix and the state store keep the state through the adapter. A warm server's answers, with the prefix resumed at 4,096 and 12,288 tokens, equalled a cold server's with equal logprobs (\code{tools/fn_cache_check.py}, \measured). The profiles serve three slots over the one copy of the weights, and a slot's plain step joins the other slots' round as one row, from a graph when every slot takes one. On 4.0, 1, 2 and 3 requests at once decoded 139.9, 169.1 and 177.8~tok/s in total, every answer equal to its request alone (\measured). The session spill drains the resident conversation at a stop and reads it back at the next start (13,650 tokens in 309 and 163~ms); the disk tier's restore is not checked yet, so the profiles keep the tier and the spill off.
+The resident prefix and the state store keep the state through the adapter. A warm server's answers, with the prefix resumed at 4,096 and 12,288 tokens, equalled a cold server's with equal logprobs (\code{tools/fn_cache_check.py}, \measured). The profiles serve three slots over the one copy of the weights, and a slot's plain step joins the other slots' round as one row, from a graph when every slot takes one. On 4.0, 1, 2 and 3 requests at once decoded 139.9, 169.1 and 177.8~tok/s in total, every answer equal to its request alone (\measured). The session spill drains the resident conversation at a stop and reads it back at the next start (13,650 tokens in 309 and 163~ms), and the disk tier restores a prefix written after two cold prefills (12,288 tokens in 0.96 against 2.6~s cold), each with the cold server's answer (\measured); the profiles serve both.
 
 \section{What is not measured}
 
 \begin{itemize}
-\item The 2.5, 3.5, 4.5 and 6.0 packs, and which profile becomes the default.
-\item The disk tier's restore on this model; the profiles turn it and the session spill off.
+\item Whether the conversion recipe raises the packs' KL, and with it the final default.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}

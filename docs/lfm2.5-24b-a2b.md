@@ -19,18 +19,23 @@ A decode token reads 4.9 GB of the BF16 weights (the pack index's `decode_bytes`
 
 ## Profiles
 
-| profile | weights | on disk | weights on the device |
-|-|-|-|-|
-| `lfm25-bf16` | Liquid's BF16 checkpoint, the quality reference | 47.9 GB | 44.95 GiB |
-| `lfm25-exl3-4.0` | our EXL3 pack at 4.0 bits a weight (exllamav3 1.6.0, the mul1 codebook, the head at 6 bits) | 12.64 GB | 12.05 GiB |
-| `lfm25-exl3-3.0` | the same at 3.0 bits a weight (every tensor at 3 bits, the head at 6) | 9.68 GB | 9.4 GiB |
-| `lfm25-exl3-2.5`, `-3.5`, `-4.5`, `-6.0` | our EXL3 packs at those rates | 8.1 to 18.3 GB, from the parameter count until each pack is measured | |
+| profile | on disk | weights at load | decode step, tok/s | chat, plain / lookup, tok/s | chat KL | chat top-1 | wikitext KL |
+|-|-|-|-|-|-|-|-|
+| `lfm25-exl3-2.5` | 8.20 GB | 7.64 GiB | 188.2 | 185.4 / 175.6 | 0.336 | 78.7 % | 0.419 |
+| `lfm25-exl3-3.0` | 9.68 GB | 9.4 GiB | 175.0 | 171.3 / 168.5 | 0.217 | 83.1 % | 0.304 |
+| `lfm25-exl3-3.5` | 11.16 GB | 10.56 GiB | 153.5 | 150.9 / 143.7 | 0.151 | 86.1 % | 0.221 |
+| `lfm25-exl3-4.0` | 12.64 GB | 12.06 GiB | 145.9 | 143.7 / 139.4 | 0.108 | 88.3 % | 0.176 |
+| `lfm25-exl3-4.5` | 14.12 GB | 13.31 GiB | 128.8 | 128.2 / 124.7 | 0.070 | 90.6 % | 0.101 |
+| `lfm25-exl3-6.0` | 18.63 GB | 17.37 GiB | 106.9 | 105.2 / 103.5 | 0.048 | 92.6 % | 0.080 |
+| `lfm25-bf16` | 47.9 GB | 44.95 GiB | 44.8 | 44.5 / 43.3 | 0 (the reference) | 100 % | 0 |
 
-The default is `lfm25-exl3-4.0`, and it stays provisional until every pack is measured. The 3.0 pack decodes 9 % faster (158.7 against 145.8 tok/s, the decode step from its graph) for about twice the KL divergence on chat text (0.195 against 0.098 in the conversion's own exllamav3 comparison), so 4.0 keeps the default for now.
+The EXL3 packs are exllamav3 1.6.0 conversions with the mul1 codebook and the head at 6 bits, one private Hugging Face repository a size (`0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`), each profile pinned to the repository's commit (`QSE_WEIGHTS_REVISION`); the download checks every file against the hub's sha256, and the measured packs' own checksums equal the hub's. The decode step is `tools/lfm_check.py bench` from its graph with the dense splits; the chat rows are the Setup Guide's (`tools/fn_lookup_ab.py`, one greedy request, 512 tokens); the quality is `tools/lfm_quality.py`: this engine on the pack against the BF16 checkpoint in the same process, KL(BF16 || pack) over the whole vocabulary and top-1 agreement, on 100 rows of 2,048 tokens of oasst1 validation chat and of wikitext-2 (and 48 of the model's own answers). All runs of 2026-10-14 are in `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
 
-On 8 chat prompts, 128 tokens each, the 4.0 pack's top token agrees with transformers' BF16 model at 94.7 % of the 1,024 positions, with a KL divergence of 0.033 (the engine teacher-forced on the BF16 run's tokens, `tools/lfm_check.py cmp`). That is the pack with exllamav3's default calibration, which the profile serves; a trace-calibrated 4.0 pack gave 95.6 % and 0.027 on the same tokens.
+The KL values are provisional: they are high next to exllamav3 conversions of other models at the same rates, and whether the conversion recipe causes it is being checked; the packs may be converted again. The two 4.0 calibrations differ on wikitext only (KL 0.176 for exllamav3's default calibration, which the profile serves, against 0.189 for a trace calibration, 95 % interval of the difference 0.002 to 0.024) and not on chat or the model's own text.
 
-The EXL3 packs are in a private Hugging Face repository and are not public yet. Below 4 bits a weight, exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is 16 K + 8 int16 wide, and an odd weight of a tile takes one bit more than an even one). The engine's EXL3 kernels decode them as exllamav3 does (`tools/exl3_linear.py`, `dq8_frac`; the kernels name them 15, 25 and 35), in the decode step, a verify block and the prefill. The pack reader stops by name on a rate the kernels do not take.
+The default is `lfm25-exl3-4.0` until the conversion check is in. On the measured numbers above, the rule for the pick is: the fastest profile in chat whose chat top-1 agreement with BF16 is at least 85 %. That is 3.5 (150.9 tok/s, 86.1 %); 3.0 (171.3 tok/s, 83.1 %) is below the floor.
+
+The repositories are private until they are published: a download needs a Hugging Face token with access to them. The 2.5 and 3.5 packs hold half-integer rates throughout: below 4 bits a weight, exllamav3 1.6.0 gives tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is 16 K + 8 int16 wide, and an odd weight of a tile takes one bit more than an even one). The engine's EXL3 kernels decode them as exllamav3 does (`tools/exl3_linear.py`, `dq8_frac`; the kernels name them 15, 25 and 35), in the decode step, a verify block and the prefill. The pack reader stops by name on a rate the kernels do not take.
 
 Switch to a profile with `ops/use-profile.sh lfm25-exl3-4.0`, or choose the model in the Setup Guide (`#/setup`).
 
@@ -58,23 +63,21 @@ A prompt runs in chunks of 4,096 tokens on batched kernels (cuBLAS or the EXL3 l
 
 ## Speed
 
-One request, greedy, the decode step from its CUDA graph, measured on one DGX Spark (`tools/lfm_check.py bench`, 256 tokens after a short prompt):
+One request, greedy, through the server (`tools/fn_lookup_ab.py`, one fresh server a run, 512 tokens, thinking off, the store off), plain and with the lookup the profiles serve; the edit ask gives a file back with a name renamed, the copy ask a text back unchanged. Every lookup text equalled the plain one.
 
-| profile | tok/s | ms a token | bytes a token | GB/s |
-|-|-|-|-|-|
-| `lfm25-exl3-3.0` | 158.7 | 6.30 | 1.04 GB | 165 |
-| `lfm25-exl3-4.0` | 145.8 | 6.86 | 1.31 GB | 191 |
-| `lfm25-bf16` | 44.7 | 22.4 | 4.92 GB | 220 |
+| profile | prose | chat | code | edit | copy |
+|-|-|-|-|-|-|
+| `lfm25-exl3-2.5` | 185.6 / 177.0 | 185.4 / 175.6 | 185.1 / 179.3 | 181.1 / 350.5 | 181.9 / 271.3 |
+| `lfm25-exl3-3.0` | 171.7 / 165.7 | 171.3 / 168.5 | 171.3 / 169.2 | 168.2 / 327.8 | 168.8 / 413.8 |
+| `lfm25-exl3-3.5` | 151.3 / 147.5 | 150.9 / 143.7 | 150.9 / 147.2 | 146.9 / 268.7 | 148.8 / 286.6 |
+| `lfm25-exl3-4.0` | 143.6 / 140.1 | 143.7 / 139.4 | 143.8 / 139.2 | 141.3 / 291.1 | 141.8 / 326.4 |
+| `lfm25-exl3-4.5` | 128.4 / 123.3 | 128.2 / 124.7 | 128.0 / 124.5 | 126.5 / 281.2 | 126.9 / 339.4 |
+| `lfm25-exl3-6.0` | 105.4 / 104.2 | 105.2 / 103.5 | 105.0 / 105.5 | 104.1 / 210.0 | 102.8 / 280.1 |
+| `lfm25-bf16` | 44.6 / 43.4 | 44.5 / 43.3 | 44.5 / 44.5 | 44.3 / 153.7 | 44.2 / 157.8 |
 
-The 4.0 row runs with the dense splits of `ops/lfm25-dense-splits.json` (`tools/fn_tiles.py --dense` at the pack's shapes); without them the step ran at 136.1 tok/s. The 3.0 pack has no splits of its own yet. The graph saves 5 % against launching the step's 460 kernels one by one. An 8,192-token prompt prefills at 7,360 tok/s on 4.0. The MoE kernels' warps and stages (4 or 8, 2 to 4) moved the 4.0 step by less than 1.3 %.
+Each cell is plain / lookup, tok/s. The lookup costs 1 to 5 % in prose and chat, where it rarely matches, and takes edit and copy asks to 2 to 3.5 times the plain rate.
 
-Through the server (`tools/fn_lookup_ab.py`, one fresh server a run, 512 greedy tokens, thinking off), the Setup Guide's measured rows:
-
-| profile | prose | chat | code |
-|-|-|-|-|
-| `lfm25-exl3-4.0`, the lookup | 139.4 | 142.6 | 145.3 |
-| `lfm25-exl3-4.0`, plain | 143.7 | 142.3 | 143.4 |
-| `lfm25-bf16`, plain | 43.4 | 43.3 | 43.3 |
+The decode step from its graph (`tools/lfm_check.py bench`, 256 tokens) with the dense splits of `ops/lfm25-dense-splits.json` (`tools/fn_tiles.py --dense` at each pack's shapes) and without them: 2.5 188.2 / 171.2, 3.0 175.0 / 159.1, 3.5 153.5 / 143.4, 4.5 128.8 / 121.5, 6.0 106.9 / 106.9, 4.0 145.9 / 136.1 tok/s. The graph saves 5 % against launching the step's 460 kernels one by one. An 8,192-token prompt prefills at 7,360 tok/s on 4.0. The MoE kernels' warps and stages (4 or 8, 2 to 4) moved the 4.0 step by less than 1.3 %.
 
 A verify block costs about 3 ms a row more on 4.0, because each row routes to its own experts and a block reads the union of them (`tools/lfm_check.py staircase`, chain blocks from their graphs, the median of 20 at 1k tokens of context, before the dense splits):
 
@@ -89,19 +92,18 @@ At 8k tokens of context the same blocks cost 0.5 to 3.5 ms more. A block pays on
 
 The model has no draft layer, and Liquid will publish a drafter for it. Until then the server drafts with the lookup alone (the request's own text and the suffix store), through the shared tree drafter with no head (`engine/methods/mtp_drafter.py` `NoHead`) and cut by StairCut, priced from `ops/prices/lfm2.5-24b-a2b/lfm25-exl3-4.0.dgx-spark.json` (the staircase above). With no head, each round's own lookup match decides through the cut's calibrated acceptance: a round with no match is the plain step and is priced as one, and StairCut's class-wide skip, which a head that drafts every round needs, is not consulted.
 
-On 4.0 with the store off, so that no earlier answer is in it, an edit ask (a file back with a name renamed) ran at 222.0 tok/s and 3.43 tokens a block, and a copy ask (a text back unchanged) at 292.2 tok/s and 10.65 tokens a block, against 141.5 and 141.6 plain; prose, chat and code ran as plain (the table above), and every text equalled the plain run's. Before the no-head pricing, the same five asks in one server never drafted: the rounds of the first three, which matched little, had priced drafting above the plain step. Through the server on 4.0, `tools/fn_server_check.py --compare` gave the same answer with the lookup and without it for all 20 requests (greedy, thinking, streaming, every `tool_choice`, JSON, penalties with `logit_bias`, logprobs, seeds, a stop string), and the largest logprob difference was 0.0.
+On 4.0 with the store off, so that no earlier answer is in it, an edit ask (a file back with a name renamed) ran at 291.1 tok/s and 11.1 tokens a block, and a copy ask (a text back unchanged) at 326.4 tok/s and 13.5 tokens a block, against 141.3 and 141.9 plain; prose, chat and code ran as plain (the table above), and every text equalled the plain run's. Before the no-head pricing, the same five asks in one server never drafted: the rounds of the first three, which matched little, had priced drafting above the plain step. Through the server on 4.0, `tools/fn_server_check.py --compare` gave the same answer with the lookup and without it for all 20 requests (greedy, thinking, streaming, every `tool_choice`, JSON, penalties with `logit_bias`, logprobs, seeds, a stop string), and the largest logprob difference was 0.0.
 
 ## Parallel requests and caches
 
 The profiles serve three sequence slots over the one copy of the weights. A slot that takes a plain step joins the other decoding slots' round as one row (`joint_plain`), and when every decoding slot does, the round is one joint decode step from a graph (`JointDecodeGraph`), so the round reads the weights once. On 4.0 with the lookup (store off), 1, 2 and 3 requests at once decoded 139.9, 169.1 and 177.8 tok/s in total (`tools/lfm_parallel.py`, 256 tokens each); the health report saw all of them decoding together, 253 rounds of the three were joint passes, and every text equalled its request alone.
 
-The resident prefix and the state store keep the state through the adapter: 30 convolution states (240 KiB) as sections, K and V of the 10 attention layers as views, on the prefill's 4,096-token grid. `tools/fn_cache_check.py` sent a sequence of conversations to a server with its caches on and each final request to a server with them off: every answer was the same, the logprobs equal, with the prefix resumed at 4,096 and 12,288 tokens. The session spill was checked too: a stop drained the resident conversation (13,650 tokens, 0.19 GB in 309 ms), the next start read it back in 163 ms, and the next turn resumed at 12,288 tokens with the cold server's answer. The disk tier's own restore was not reached in that check, so the profiles keep the tier, and with it the spill, off.
+The resident prefix and the state store keep the state through the adapter: 30 convolution states (240 KiB) as sections, K and V of the 10 attention layers as views, on the prefill's 4,096-token grid. `tools/fn_cache_check.py` sent a sequence of conversations to a server with its caches on and each final request to a server with them off: every answer was the same, the logprobs equal, with the prefix resumed at 4,096 and 12,288 tokens. The session spill was checked too: a stop drained the resident conversation (13,650 tokens, 0.19 GB in 309 ms), the next start read it back in 163 ms, and the next turn resumed at 12,288 tokens with the cold server's answer. The disk tier restores a prefix too: with the spill off, a document prefilled cold twice across two starts was written (12,288 tokens, 0.25 GB), and after a third start the next question on it resumed 12,288 tokens from the disk (0.96 s against 2.6 s cold) with the cold server's answer and equal logprobs. The profiles serve both, a folder of the tier's own a pack; on the live server a restart read the drained conversation back in 152 ms and the next turn equalled the cold answer.
 
 ## What is not there yet
 
 - A draft head: Liquid's drafter plugs in through the adapter's `draft_heads()`, in place of `NoHead`.
-- The disk tier's restore on this model, and with it the session spill in the profiles.
-- Measured rows for the 2.5, 3.5, 4.5 and 6.0 packs, and dense splits for packs other than 4.0.
+- The conversion check: the KL values stay provisional until it is in.
 - No vision: the model reads text only.
 
 ## The checks

@@ -86,7 +86,8 @@
    "hf_private": true,
    "recommended": false,
    "badges": [
-    "smallest"
+    "smallest",
+    "KL provisional"
    ],
    "quality": {
     "kl_vs_bf16": 0.3364,
@@ -111,7 +112,9 @@
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.0",
    "hf_private": true,
    "recommended": false,
-   "badges": [],
+   "badges": [
+    "KL provisional"
+   ],
    "quality": {
     "kl_vs_bf16": 0.2175,
     "top1_pct": 83.13,
@@ -135,7 +138,9 @@
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.5",
    "hf_private": true,
    "recommended": false,
-   "badges": [],
+   "badges": [
+    "KL provisional"
+   ],
    "quality": {
     "kl_vs_bf16": 0.1506,
     "top1_pct": 86.14,
@@ -161,7 +166,8 @@
    "recommended": true,
    "badges": [
     "recommended",
-    "provisional"
+    "provisional",
+    "KL provisional"
    ],
    "quality": {
     "kl_vs_bf16": 0.1083,
@@ -186,7 +192,9 @@
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.5",
    "hf_private": true,
    "recommended": false,
-   "badges": [],
+   "badges": [
+    "KL provisional"
+   ],
    "quality": {
     "kl_vs_bf16": 0.0697,
     "top1_pct": 90.62,
@@ -210,7 +218,9 @@
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-6.0",
    "hf_private": true,
    "recommended": false,
-   "badges": [],
+   "badges": [
+    "KL provisional"
+   ],
    "quality": {
     "kl_vs_bf16": 0.0479,
     "top1_pct": 92.62,
