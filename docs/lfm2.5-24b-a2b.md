@@ -36,7 +36,7 @@ DGX Spark, 2026-10-14. Decode step: `tools/lfm_check.py bench`, one request, 256
 
 ![Chat KL divergence and top-1 agreement against BF16 by size: KL from 0.313 at 2.5 bpw down to 0.039 at 6.0 bpw, top-1 from 78.9 % up to 93.4 %](media/lfm25-quality-by-size.png)
 
-- Packs: exllamav3 1.6.0, mul1 codebook, head 6 bits (8 for 6.0), default calibration. One Hugging Face repository a size, `0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`, pinned by commit (`QSE_WEIGHTS_REVISION`). The repositories are private until published; a download needs a token with access. Every file is checked against the hub's sha256.
+- Packs: exllamav3 1.6.0, mul1 codebook, head 6 bits (8 for 6.0), default calibration. One Hugging Face repository a size, `0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`, pinned by commit (`QSE_WEIGHTS_REVISION`). The repositories are public; a download needs no token. Every file is checked against the hub's sha256.
 - Default: `lfm25-exl3-3.5`. Rule: the fastest profile in chat as served (lookup on) with chat top-1 against BF16 of at least 85 %. 3.5: 143.7 tok/s at 86.7 %. 3.0: 168.5 tok/s at 83.6 %, below the floor.
 - Setup Guide tile: the fastest cell of the default profile's served row, 147.5 tok/s (3.5, prose).
 - `-hq` 4.0 (attention and convolution projections +2 bits, dense MLPs +1, 4.06 bpw, 12.81 GB): chat KL 0.082, top-1 89.7 %; served chat 131.2 tok/s against 144.0 for 4.0 and 127.6 for 4.5 in one window. Not offered.
@@ -139,6 +139,8 @@ Each row adds about 3 ms because a block reads the union of its rows' experts. A
 
 - A draft head (none published for this model).
 - Vision: the model reads text only.
+- The shadow reader: it reads Qwen's token ids and was validated on Qwen text; off on this model.
+- The KV pool: off in the profiles (`QSE_KV_POOL=off`), not verified on this model. Each slot reserves its window at load.
 
 ## Checks
 

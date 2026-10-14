@@ -113,4 +113,7 @@ Caches: with the prefix resumed at 4,096 and 12,288 tokens, warm answers equal c
 \begin{itemize}
 \item The cause of the 24B's higher KL than its 8B sibling at the same rate.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
+\item The KV pool on this model: off in its profiles (\code{QSE\_KV\_POOL=off}), so each slot reserves its window at load.
 \end{itemize}
+
+Not supported yet: a draft head (none is published for this model) and the shadow reader, which reads Qwen's token ids and stays off.

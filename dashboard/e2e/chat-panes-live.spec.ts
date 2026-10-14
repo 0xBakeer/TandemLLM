@@ -64,7 +64,7 @@ for (const phone of [true, false]) {
     // the last pane closed: the Panes button brings the strip back (on a phone the empty sheet the
     // report showed, "No pane open. Press + ...")
     await page.getByRole('button', { name: 'Close page.html' }).click();
-    await page.getByRole('button', { name: 'Panes' }).click();
+    await page.getByRole('button', { name: 'Panes', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Open a pane' })).toBeVisible();
     if (phone) await expect(page.locator('.ch-pane-empty')).toContainText('Press +');
 

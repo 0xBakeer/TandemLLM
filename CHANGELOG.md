@@ -10,7 +10,7 @@ A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 expe
 
 - `engine/models/lfm2_moe/`: configuration, reference forward, pack reader, Triton row kernels, board engine. Decode step, verify block (up to 32 rows) and commit run as CUDA graphs; a verify row has the decode step's bits, checked by a self-check at load.
 - Correctness: reference forward within 2.1e-5 of transformers' `Lfm2MoeForCausalLM` (tiny model, fp32). BF16 engine against transformers: top token 98.05 % of 1,024 chat positions, 19 of 20 differences near ties, KL 0.0064. 4.0 pack against exllamav3: 97.85 %, all 22 differences near ties. Trellis decode equals exllamav3 `LinearEXL3` bit for bit.
-- Profiles: `lfm25-bf16` (Liquid's checkpoint) and `lfm25-exl3-{2.5,3.0,3.5,4.0,4.5,6.0}` (exllamav3 1.6.0 packs, private Hugging Face repositories pinned by commit; a download needs a token with access). Each: 131,072-token context, three slots.
+- Profiles: `lfm25-bf16` (Liquid's checkpoint) and `lfm25-exl3-{2.5,3.0,3.5,4.0,4.5,6.0}` (exllamav3 1.6.0 packs, public Hugging Face repositories pinned by commit, no token needed). Each: 131,072-token context, three slots.
 
 DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Chat: one greedy request through the server, 512 tokens, thinking off, plain / lookup. Quality: exllamav3 `model_diff` against BF16 on oasst1 chat. Not the benchmark row. Raw runs: `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
 
@@ -32,6 +32,7 @@ DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Cha
 - The Chat tab's `present` tool: asked to open a page it wrote, the model calls it again. The router's testing packages had it check pages through the shell (6 follow-ups: 145 tool calls, 15 shell calls in the follow-ups, 113,211 reasoning tokens); with the fit 20 calls, `present` in all 6 follow-ups, 7,228 tokens.
 - Three slots: 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8 tok/s in total on 4.0; each text equals its request alone. When every slot takes a plain step, one joint graph reads the weights once.
 - Disk tier and session spill: 12,288 tokens restored from the disk in 0.96 s against 2.6 s cold, with the cold answer.
+- Not on LFM2.5 yet: a draft head (none published), the shadow reader (it reads Qwen's token ids), the KV pool (off in the profiles, not verified on this model).
 
 ### The lookup without a draft head
 

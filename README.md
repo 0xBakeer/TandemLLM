@@ -16,7 +16,7 @@ The manual is in [manual/tandemllm-manual.pdf](manual/tandemllm-manual.pdf), a P
 
 ## Models
 
-Every Qwen file below is public on Hugging Face. `ops/use-profile.sh <profile>` downloads what a profile needs, checks each weight file against the hub's sha256, and starts the engine on port 8000.
+Every file below is public on Hugging Face. `ops/use-profile.sh <profile>` downloads what a profile needs, checks each weight file against the hub's sha256, and starts the engine on port 8000.
 
 Qwen3.8-27B comes as NVFP4 or as one of six EXL3 sizes. The six EXL3 sizes and their drafters are one collection: [TandemLLM Qwen3.8-27B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4). Each EXL3 card has its KL against BF16 and a speed table; the KL column below comes from those cards.
 
@@ -44,7 +44,7 @@ Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Q
 
 The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
 
-LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs. The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs are in private repositories until published; a download needs a token with access. The BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) is public. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
+LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs, one collection: [TandemLLM LFM2.5-24B-A2B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-lfm25-24b-a2b-exl3-6acf468024dd5288750dd683). The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs and the BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) are public; a download needs no token. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
 
 | profile | download | chat plain, tok/s | chat top-1 vs BF16 |
 |-|-|-|-|
@@ -140,7 +140,7 @@ On a new DGX Spark, install in setup mode and then switch to a profile ([docs/se
 curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.9.0/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5; --list prints every profile
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, lfm25-exl3-3.5; --list prints every profile
 ```
 
 [install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.9.0` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
