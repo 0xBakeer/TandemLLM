@@ -2,9 +2,9 @@
 #
 # LiquidAI's 24B mixture-of-experts chat model (engine/models/lfm2_moe, ENG-E10), from its BF16 checkpoint or
 # one of our EXL3 packs (exllamav3 1.6.0, mul1 codebook, the same sizes as the 27B's), one profile each
-# (ops/profiles/lfm25-<variant>.env). weights_gib: the safetensors bytes of the BF16 checkpoint; the EXL3
-# packs' from the parameter count (the 0.26 B embedding at 16 bits, the head at 6, the rest at the pack's
-# rate) until each pack is measured. max_window: the model's whole context, 131,072 tokens: its KV is 20,480
+# (ops/profiles/lfm25-<variant>.env). weights_gib: allocated at load (BF16 and 4.0, measured 2026-10-14); the
+# other packs' from the parameter count (the 0.26 B embedding at 16 bits, the head at 6, the rest at the
+# pack's rate) until each pack is measured. max_window: the model's whole context, 131,072 tokens: its KV is 20,480
 # bytes a token (10 attention layers, 8 KV heads of 64), 2.5 GiB at the full window, so every profile fits
 # the Spark preset at it. No drafter yet (Liquid will publish one); no vision tower (the model reads text);
 # the conversation caches and side slots come with SPD-107. Rows of the measured table come from real runs
@@ -56,7 +56,7 @@ profiles:
   format: bf16
   bpw: 16
   disk_gb: 47.9
-  weights_gib: 44.65
+  weights_gib: 44.95
   drafters_gib: 0.0
   hf_repo: LiquidAI/LFM2.5-24B-A2B
   hf_private: false
@@ -71,7 +71,7 @@ profiles:
     source: the BF16 checkpoint is the reference
   assets_required: []
   note: 'The checkpoint as Liquid published it (revision 1769516a). The quality reference; a decode token reads
-    4.9 GB of it (the pack index''s decode bytes), so it is the slowest profile. Weights GiB: the safetensors bytes.'
+    4.9 GB of it (the pack index''s decode bytes), so it is the slowest profile. Weights GiB: allocated at load (measured).'
   hf_revision: 1769516ac588c4c558089c94f27d96b0dc67b183
   max_window: 131072
 - id: lfm25-exl3-2.5
@@ -93,7 +93,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-3.0
   label: EXL3 3.0 bpw
@@ -113,7 +113,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-3.5
   label: EXL3 3.5 bpw
@@ -133,14 +133,14 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-4.0
   label: EXL3 4.0 bpw
   format: exl3
   bpw: 4.0
-  disk_gb: 12.5
-  weights_gib: 11.64
+  disk_gb: 12.64
+  weights_gib: 12.05
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.0
   hf_private: true
@@ -149,13 +149,15 @@ profiles:
   - recommended
   - provisional
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
+    kl_vs_bf16: 0.0267
+    top1_pct: 95.61
     ppl: null
     date: '2026-10-14'
-    source: 'not measured yet (ENG-285)'
+    source: 'tools/lfm_check.py cmp: the engine on this pack teacher-forced on the BF16 run''s tokens against
+      transformers'' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions), the trace-calibrated
+      pack of 2026-10-14'
   assets_required: []
-  note: 'The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).'
   max_window: 131072
 - id: lfm25-exl3-4.5
   label: EXL3 4.5 bpw
@@ -175,7 +177,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 - id: lfm25-exl3-6.0
   label: EXL3 6.0 bpw
@@ -195,7 +197,7 @@ profiles:
     date: '2026-10-14'
     source: 'not measured yet (ENG-285)'
   assets_required: []
-  note: 'Not on the Hub yet. Sizes from the parameter count until the pack is measured.'
+  note: 'Not public yet. Sizes from the parameter count until the pack is measured.'
   max_window: 131072
 measurements:
   build: 0.8.3
@@ -209,10 +211,10 @@ memory:
   parts:
   - id: engine
     label: Engine state, the decode graphs and warm-up
-    gib: 3.0
+    gib: 1.6
     kind: fixed
-    source: 'an estimate until measured on the Spark (SPD-107): the decode and verify graphs of 40 layers at 2,048
-      wide, the row buffers, the conv states (240 KiB a sequence)'
+    source: 'measured on 4.0, 2026-10-14: the load stages engine, drafters and warm-up took 0.68, 0.67 and 0.27 GiB of
+      MemAvailable beyond the weights (server [memory] line); a decode run peaked 0.37 GiB allocated above them'
   - id: allocator
     label: Allocator reserve
     gib: 1.5
@@ -338,6 +340,46 @@ components:
   assets: []
   docs: docs/proxy.md
   note: You add the backends later, on the Backends screen.
+- id: prompt_cache
+  label: Conversation cache
+  group: caches
+  what: Keeps the conversation the model is in, so the next turn starts where the last one ended instead of reading
+    everything again.
+  default: true
+  required: false
+  memory_gib: 0.16
+  memory_max_gib: 2.5
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    RESIDENT_GB:
+      'on': '2.5'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: The resident prefix with its anchors every 4,096 tokens (the prefill's chunk), the end anchor, the pin and
+    the park; an anchor is 80.2 MiB (240 KiB of convolution inputs and 4,096 tokens of KV at 20,480 bytes).
+- id: state_store
+  label: State store
+  group: caches
+  what: Saves the model's state after short chats, so the same start a second time costs nothing.
+  default: true
+  required: false
+  memory_gib: 0.49
+  memory_max_gib: 2.0
+  elastic: true
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    CACHE_GB:
+      'on': '2'
+      'off': '0'
+  assets: []
+  docs: docs/caches.md
+  note: null
 parallelism:
   slots:
     min: 1

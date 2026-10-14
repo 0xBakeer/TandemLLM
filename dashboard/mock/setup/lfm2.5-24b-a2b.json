@@ -54,7 +54,7 @@
    "format": "bf16",
    "bpw": 16,
    "disk_gb": 47.9,
-   "weights_gib": 44.65,
+   "weights_gib": 44.95,
    "drafters_gib": 0.0,
    "hf_repo": "LiquidAI/LFM2.5-24B-A2B",
    "hf_private": false,
@@ -70,7 +70,7 @@
     "source": "the BF16 checkpoint is the reference"
    },
    "assets_required": [],
-   "note": "The checkpoint as Liquid published it (revision 1769516a). The quality reference; a decode token reads 4.9 GB of it (the pack index's decode bytes), so it is the slowest profile. Weights GiB: the safetensors bytes.",
+   "note": "The checkpoint as Liquid published it (revision 1769516a). The quality reference; a decode token reads 4.9 GB of it (the pack index's decode bytes), so it is the slowest profile. Weights GiB: allocated at load (measured).",
    "hf_revision": "1769516ac588c4c558089c94f27d96b0dc67b183",
    "max_window": 131072
   },
@@ -96,7 +96,7 @@
     "source": "not measured yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.",
    "max_window": 131072
   },
   {
@@ -119,7 +119,7 @@
     "source": "not measured yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.",
    "max_window": 131072
   },
   {
@@ -142,7 +142,7 @@
     "source": "not measured yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Below 4 bpw exllamav3 1.6.0 allocates half-integer rates, which the EXL3 kernels here do not decode yet; the loader names the tensor if this pack holds one. Not public yet. Sizes from the parameter count until the pack is measured.",
    "max_window": 131072
   },
   {
@@ -150,8 +150,8 @@
    "label": "EXL3 4.0 bpw",
    "format": "exl3",
    "bpw": 4.0,
-   "disk_gb": 12.5,
-   "weights_gib": 11.64,
+   "disk_gb": 12.64,
+   "weights_gib": 12.05,
    "drafters_gib": 0.0,
    "hf_repo": "0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.0",
    "hf_private": true,
@@ -161,14 +161,14 @@
     "provisional"
    ],
    "quality": {
-    "kl_vs_bf16": null,
-    "top1_pct": null,
+    "kl_vs_bf16": 0.0267,
+    "top1_pct": 95.61,
     "ppl": null,
     "date": "2026-10-14",
-    "source": "not measured yet (ENG-285)"
+    "source": "tools/lfm_check.py cmp: the engine on this pack teacher-forced on the BF16 run's tokens against transformers' Lfm2MoeForCausalLM in BF16, 8 chat prompts x 128 tokens (1,024 positions), the trace-calibrated pack of 2026-10-14"
    },
    "assets_required": [],
-   "note": "The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "The default for now, provisional: chosen before any measured run as the smallest pack with whole-bit rates (exllamav3 allocates half-integer rates below 4 bpw); the measured tok/s with a chat-quality floor decides it. In a private Hugging Face repository, not public yet. Disk and weights measured (12.64 GB, 12.05 GiB at load).",
    "max_window": 131072
   },
   {
@@ -191,7 +191,7 @@
     "source": "not measured yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Not public yet. Sizes from the parameter count until the pack is measured.",
    "max_window": 131072
   },
   {
@@ -214,7 +214,7 @@
     "source": "not measured yet (ENG-285)"
    },
    "assets_required": [],
-   "note": "Not on the Hub yet. Sizes from the parameter count until the pack is measured.",
+   "note": "Not public yet. Sizes from the parameter count until the pack is measured.",
    "max_window": 131072
   }
  ],
@@ -230,9 +230,9 @@
    {
     "id": "engine",
     "label": "Engine state, the decode graphs and warm-up",
-    "gib": 3.0,
+    "gib": 1.6,
     "kind": "fixed",
-    "source": "an estimate until measured on the Spark (SPD-107): the decode and verify graphs of 40 layers at 2,048 wide, the row buffers, the conv states (240 KiB a sequence)"
+    "source": "measured on 4.0, 2026-10-14: the load stages engine, drafters and warm-up took 0.68, 0.67 and 0.27 GiB of MemAvailable beyond the weights (server [memory] line); a decode run peaked 0.37 GiB allocated above them"
    },
    {
     "id": "allocator",
@@ -387,6 +387,52 @@
    "assets": [],
    "docs": "docs/proxy.md",
    "note": "You add the backends later, on the Backends screen."
+  },
+  {
+   "id": "prompt_cache",
+   "label": "Conversation cache",
+   "group": "caches",
+   "what": "Keeps the conversation the model is in, so the next turn starts where the last one ended instead of reading everything again.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.16,
+   "memory_max_gib": 2.5,
+   "elastic": true,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "RESIDENT_GB": {
+     "on": "2.5",
+     "off": "0"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": "The resident prefix with its anchors every 4,096 tokens (the prefill's chunk), the end anchor, the pin and the park; an anchor is 80.2 MiB (240 KiB of convolution inputs and 4,096 tokens of KV at 20,480 bytes)."
+  },
+  {
+   "id": "state_store",
+   "label": "State store",
+   "group": "caches",
+   "what": "Saves the model's state after short chats, so the same start a second time costs nothing.",
+   "default": true,
+   "required": false,
+   "memory_gib": 0.49,
+   "memory_max_gib": 2.0,
+   "elastic": true,
+   "disk_gb": 0.0,
+   "depends_on": [],
+   "conflicts": [],
+   "knobs": {
+    "CACHE_GB": {
+     "on": "2",
+     "off": "0"
+    }
+   },
+   "assets": [],
+   "docs": "docs/caches.md",
+   "note": null
   }
  ],
  "parallelism": {
@@ -662,6 +708,16 @@
     {
      "field": "proxy",
      "label": "Other backends",
+     "type": "bool"
+    },
+    {
+     "field": "prompt_cache",
+     "label": "Conversation cache",
+     "type": "bool"
+    },
+    {
+     "field": "state_store",
+     "label": "State store",
      "type": "bool"
     }
    ]
