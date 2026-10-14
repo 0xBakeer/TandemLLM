@@ -1,10 +1,10 @@
-// The install page's job stream (VIS-149, VIS-151) and its change list (VIS-155): their Gherkin
-// as the test matrix. The server's
+// The install page's job stream (VIS-149, VIS-151), its change list (VIS-155) and the tools that
+// did not load (VIS-153): their Gherkin as the test matrix. The server's
 // half (the order it sends the job in) is tests/test_setup_job_stream.py.
 import { describe, expect, it } from 'vitest';
 import type { SetupEnvChange, SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
-import { appendLog, applyJobEvent, changeText, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
+import { appendLog, applyJobEvent, changeText, doneMessage, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
 
 const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
 
@@ -274,5 +274,23 @@ describe('VIS-155: the change list shows every effective change', () => {
     expect(lines.filter((l) => l.to.startsWith('removed'))).toHaveLength(3);
     // a plan from a server without `removed` reads as before
     expect(changeText({ key: 'PORT', current: '8000', next: '8124', from: 'advanced.port' })).toEqual({ from: '8000', to: '8124' });
+  });
+});
+
+// VIS-153: a tool that fails after the restart (the runner's half: tests/test_setup_tool_models.py)
+describe('VIS-153: selected tools have their weights', () => {
+  it('A component fails after the restart', () => {
+    const w = 'Shadow reader did not load (FileNotFoundError: no config.json under /x/qwen3.5-0.8b).';
+    const j: SetupJob = { ...DONE, message: `exl3-6.0 is live on port 8000. ${w}`, warnings: [w], notes: [] };
+    expect(doneMessage(j)).toBe('exl3-6.0 is live on port 8000.');
+    // a job from a server without warnings reads as before
+    expect(doneMessage({ ...DONE, message: 'exl3-6.0 is live on port 8000.' })).toBe('exl3-6.0 is live on port 8000.');
+    // the job events carry them through to the final job: the snapshot of a reload, and the done
+    // event of a page that followed the job live
+    expect(applyJobEvent(job('running'), { type: 'job', job: j })?.warnings).toEqual([w]);
+    const live = applyJobEvent(job('running'), { type: 'done', state: 'done', message: j.message, warnings: [w], notes: ['Laya decision models is not loaded yet.'] });
+    expect(live?.warnings).toEqual([w]);
+    expect(live?.notes).toEqual(['Laya decision models is not loaded yet.']);
+    expect(doneMessage(live!)).toBe('exl3-6.0 is live on port 8000.');
   });
 });

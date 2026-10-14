@@ -913,6 +913,9 @@ export class QseSetup extends LightElement {
         <h2 class="rv-h">${S.reviewWeights}</h2>
         <p>${dev?.active_profile === prof.id ? S.reviewWeightsSame(prof.label) : S.reviewWeightsSwitch(dev?.active_profile ? (m.profiles.find((p) => p.id === dev.active_profile)?.label ?? dev.active_profile) : null, prof.label)}</p>
         ${ready && !ready.profile.on_disk ? html`<p class="muted">${S.reviewDownload(ready.profile.download_gb)}</p>` : nothing}
+        ${ready?.downloads?.length
+          ? html`<ul class="rv-downloads" data-review-downloads>${ready.downloads.map((d) => html`<li data-download=${d.id}><span>${d.label}</span> <span class="muted small">${d.for}</span> <span class="num">${d.gb.toFixed(2)} GB</span></li>`)}</ul>`
+          : nothing}
         ${ready ? html`<p class="muted small">${ready.restart ? S.reviewRestart : S.reviewNoRestart}</p>` : nothing}
       </section>
 

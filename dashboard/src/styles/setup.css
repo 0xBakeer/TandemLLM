@@ -2224,6 +2224,41 @@ a.ccard-license:hover {
 .inst-detail {
   grid-column: 2 / -1;
 }
+.inst-roles {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+.inst-roles li {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+.inst-roles li + li {
+  margin-top: 4px;
+}
+.inst-roles li.is-warn {
+  color: var(--warn);
+}
+.rv-downloads {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+.rv-downloads li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rv-downloads .num {
+  margin-left: auto;
+}
 .inst-changes {
   grid-column: 2 / -1;
   min-width: 0;

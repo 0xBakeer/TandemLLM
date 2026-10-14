@@ -3,7 +3,7 @@
     python ops/fetch_weights.py [--revision R] <repo> <dir> [file ...]   # files: only these (plus checksum lists)
     python ops/fetch_weights.py --plan [--revision R] <repo> <dir> [file ...]   # every URL and size; no download
     python ops/fetch_weights.py --verify <dir>                            # checksums of what is there
-    python ops/fetch_weights.py --assets <profile> --repo <dir> [--dry-run] [--extra-gb G] [--margin-gb G]
+    python ops/fetch_weights.py --assets <profile> --repo <dir> [--also "ID ..."] [--dry-run] [--extra-gb G] [--margin-gb G]
 
 Downloads into <dir>.partial with the token in ~/.cache/huggingface/token (HF_TOKEN wins; none is needed,
 every repository a profile reads is public), checks every file a checksum list names (crc32.txt: EXL3
@@ -19,8 +19,10 @@ besides its weights, each asset's `fetch` list, downloaded when the asset is not
 folder through a .partial-<asset> folder, or into the Hugging Face cache (`${HF_HUB}`, the base
 checkpoint), where ~/.qwen38-spark-engine/fetch/<asset>.json says whether the last download finished.
 The disk is checked first: what is still to download, --extra-gb (the profile's weights, fetched after)
-and --margin-gb left over, per filesystem. Exit 3: an asset has no download; 4: not enough disk; 5: a
-download or a checksum failed.
+and --margin-gb left over, per filesystem. --also (VIS-153): more assets of the same registry entry,
+the models of the tools a selection turns on (the shadow reader's, the narrator's, Laya's), fetched the
+same way; one that two tools share is fetched once. Exit 3: an asset has no download (or no such id);
+4: not enough disk; 5: a download or a checksum failed.
 """
 from __future__ import annotations
 
@@ -267,8 +269,10 @@ def _free_at(path: str) -> tuple[int, int]:
     return os.stat(path).st_dev, shutil.disk_usage(path).free
 
 
-def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0, margin_gb: float = 60.0) -> int:
-    """OPS-95: the profile's `assets_required` that are not on this box, fetched (see the module doc)."""
+def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0, margin_gb: float = 60.0,
+           also: list[str] | tuple = ()) -> int:
+    """OPS-95: the profile's `assets_required` and the `also` ids that are not on this box, fetched (see
+    the module doc)."""
     sys.path.insert(0, repo)
     try:
         from server.setup import registry
@@ -281,8 +285,13 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
         print(f"[fetch] no model registry entry lists {profile}: its files are checked as they are")
         return 0
     expand = lambda p: registry.expand(p, repo)  # noqa: E731  (${HF_HUB} is hf_hub() there too)
+    ids = list(dict.fromkeys([*registry.profile(m, profile)["assets_required"], *also]))
+    unknown = [aid for aid in ids if registry.asset(m, aid) is None]
+    if unknown:
+        print(f"[fetch] {m['id']} has no asset {' '.join(unknown)}")
+        return 3
     todo = []                       # (asset id, entry, its `to` expanded)
-    for aid in registry.profile(m, profile)["assets_required"]:
+    for aid in ids:
         a = registry.asset(m, aid)
         st = {}
         if os.path.isfile(state_path(aid)):
@@ -334,8 +343,7 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
             rc = fetch(e["repo"], to, list(e["files"]), part=to.rstrip("/") + ".partial-" + aid)
         if rc != 0:
             return 5
-    missing = [aid for aid in registry.profile(m, profile)["assets_required"]
-               if not registry.asset_present(registry.asset(m, aid), repo)]
+    missing = [aid for aid in ids if not registry.asset_present(registry.asset(m, aid), repo)]
     if missing:
         print(f"[fetch] still not on this box after the download: {' '.join(missing)}")
         return 5
@@ -355,8 +363,10 @@ if __name__ == "__main__":
         ap.add_argument("--dry-run", action="store_true")
         ap.add_argument("--extra-gb", type=float, default=0.0)
         ap.add_argument("--margin-gb", type=float, default=60.0)
+        ap.add_argument("--also", default="", help="more asset ids of the entry, space or comma separated")
         o = ap.parse_args(a)
-        sys.exit(assets(o.assets, o.repo, o.dry_run, o.extra_gb, o.margin_gb))
+        sys.exit(assets(o.assets, o.repo, o.dry_run, o.extra_gb, o.margin_gb,
+                        [x for x in o.also.replace(",", " ").split() if x]))
     dry = a[:1] == ["--plan"]
     a = a[1:] if dry else a
     rev = None

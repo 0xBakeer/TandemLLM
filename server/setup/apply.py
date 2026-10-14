@@ -14,7 +14,8 @@ selection's checked numbers, `shell=False`, a minimal environment, a timeout eac
                       the assets, the HF token, the overlay hook in serve.env, the box lock
     unload_assistant  Wren unloaded (the server does it before it starts the runner)
     fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when the weights and
-                      the assets are on disk; OPS-95: it fetches the missing assets too)
+                      the assets are on disk; OPS-95: it fetches the missing assets too; VIS-153:
+                      and the models of the tools the selection turns on, QSE_FETCH_ASSETS)
     (waiting)         write_config waits until no request runs or waits on the engine (its /health,
                       IDLE_WAIT_S at most; then nothing has changed and the job fails)
     write_config      run/setup.env from the registry's keys and the selection, the old one kept
@@ -24,7 +25,9 @@ selection's checked numbers, `shell=False`, a minimal environment, a timeout eac
     switch            bash ops/use-profile.sh <profile>: the box lock, stop, start, its smoke,
                       its own rollback of the profile (in setup mode the marker run/setup-pending
                       goes first, so start.sh starts the configured engine)
-    smoke             /health names the profile; one short chat answers
+    smoke             /health names the profile; one short chat answers; then (VIS-153) the
+                      tools with a model of their own: one that failed to load is a warning on
+                      the job (job.warnings), one waiting for memory a note (job.notes)
     rollback          on a failed switch or smoke: the old run/setup.env back, then
                       bash ops/use-profile.sh <previous profile> (setup mode: the marker back and
                       bash ops/start.sh --setup)
@@ -81,6 +84,11 @@ TIMEOUTS = {"fetch": 7200, "switch": 1800, "stop": 300, "secrets": 60, "start": 
 # before anything stops, the engine's requests finish: at most this long, asked this often
 IDLE_WAIT_S = 600
 IDLE_POLL_S = 2.0
+# VIS-153: the tools whose model is a role of the engine (`/health` roles; Laya: the decision
+# models of /v1/models), and how long the smoke step waits for them to load after the start
+ROLE_OF = {"narrator": "narrator", "shadow": "shadow", "laya": None}
+ROLE_POLL_S = 3.0
+ROLE_SETTLE_POLLS = 30
 JOB_ID = re.compile(r"^[a-f0-9]{16}$")
 PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 STEPS = (("check", "Check the selection, the disk and the box"),
@@ -362,10 +370,23 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
               "nothing here can download: " + "; ".join(
                   f"{a['label']} ({registry.expand(a['path'], disk.get('repo'))})"
                   for a in missing) + ". See docs/setup.md.")
+    # VIS-153: the models of the tools the selection turns on, as the profile's own assets
+    seen = {a["id"] for a in missing + fetched}
+    tools_missing, tools_fetched = _tool_assets_missing(m, sel, disk.get("repo"), seen)
+    for c, a in tools_missing:
+        error("missing_assets", f"{c['label']} is on, but {a['label']} is not on this box "
+              f"({registry.expand(a['path'], disk.get('repo'))}) and nothing here can download "
+              f"it. Turn {c['label']} off in the Tools step, or put its files there.")
+    fetched = fetched + [a for _, a in tools_fetched]
     weights_here = bool(disk.get("weights"))
     # OPS-95: the fetch step downloads the weights and the missing assets with a download list
     on_disk = weights_here and not fetched
     download_gb = round((0.0 if weights_here else prof["disk_gb"]) + _fetch_gb(fetched), 2)
+    downloads = ([] if weights_here else [{"id": prof["id"], "label": prof["hf_repo"],
+                                           "gb": prof["disk_gb"], "for": prof["label"]}]) + [
+        {"id": a["id"], "label": a["label"], "gb": round(_fetch_gb([a]), 2),
+         "for": next((c["label"] for c, x in tools_fetched if x is a), prof["label"])}
+        for a in fetched]
     if not weights_here and prof["hf_private"] and not device_mod.hf_token_present():
         error("missing_token", f"{prof['hf_repo']} is private and no Hugging Face token is set. "
               f"Add one with `hf auth login` on the box, or set HF_TOKEN, then try again.")
@@ -423,13 +444,6 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
                         "setup, apply it and reset the box. Generate one in the advanced step.")
     if est["fits"] and not est["fits_worst"]:
         warnings.append(est["notes"][0])
-    for c in m["components"]:
-        if sel["components"][c["id"]]:
-            for a in c["assets"]:
-                if not registry.asset_present(registry.asset(m, a), disk.get("repo")):
-                    where = registry.expand(registry.asset(m, a)["path"], disk.get("repo"))
-                    warnings.append(f"{c['label']} is on, but its model is not on this box "
-                                    f"({where}); the engine starts without it.")
     if mem_total_gb is not None and device_mod.preset(m, mem_total_gb, None) is None:
         warnings.append("These numbers were measured on a DGX Spark, not on this machine.")
     active = device_mod.active_profile()
@@ -451,6 +465,7 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
             "warnings": warnings,
             "profile": {"current": None if setup_mode and not active else active,
                         "next": prof["id"], "on_disk": on_disk, "download_gb": download_gb},
+            "downloads": downloads, "fetch_assets": [a["id"] for _, a in tools_fetched],
             "changes": changes, "restart": True, "commands": commands, "estimate": est,
             "ports": {"current": old_port, "next": new_port}}
 
@@ -474,6 +489,23 @@ def _assets_missing(m: dict, disk: dict) -> tuple[list[dict], list[dict]]:
     downloads: the ones with a fetch list, OPS-95)."""
     missing = [registry.asset(m, a) for a in disk.get("assets_missing", [])]
     return [a for a in missing if not a.get("fetch")], [a for a in missing if a.get("fetch")]
+
+
+def _tool_assets_missing(m: dict, sel: dict, repo: str | None, seen: set) -> tuple[list, list]:
+    """VIS-153: the assets of the tools the selection turns on that are not on this box, each once
+    (the narrator and Wren share Qwen3.5-2B), as (tool, asset) pairs: (those nothing downloads,
+    those the fetch step downloads)."""
+    out_missing, out_fetched = [], []
+    for c in m["components"]:
+        if not sel["components"].get(c["id"]):
+            continue
+        for aid in c["assets"]:
+            a = registry.asset(m, aid)
+            if a is None or aid in seen or registry.asset_present(a, repo):
+                continue
+            seen.add(aid)
+            (out_fetched if a.get("fetch") else out_missing).append((c, a))
+    return out_missing, out_fetched
 
 
 def _fetch_gb(assets: list[dict]) -> float:
@@ -823,7 +855,9 @@ class Runner:
             if s["state"] == "pending":
                 s["state"] = "skipped"
         self._save()
-        self._emit({"type": "done", "state": end, "message": self.job["message"]})
+        # VIS-153: the tools that did not load reach a page that follows the job live too
+        self._emit({"type": "done", "state": end, "message": self.job["message"],
+                    "warnings": self.job.get("warnings") or [], "notes": self.job.get("notes") or []})
         return 0 if end == "done" else 1
 
     def _fail(self, sid: str, why: str) -> bool:
@@ -859,8 +893,12 @@ class Runner:
             self.step("fetch", "skipped", "the weights are on this box")
         else:
             self.step("fetch", "running", f"about {p['profile']['download_gb']:g} GB")
+            extra = p.get("fetch_assets") or []
+            if any(not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", x) for x in extra):
+                return self._fail("fetch", "an asset id that is not an id")
             rc = self.run(self.argv("use-profile.sh", sel["profile"], "--fetch-only"),
-                          TIMEOUTS["fetch"])
+                          TIMEOUTS["fetch"], **({"QSE_FETCH_ASSETS": " ".join(extra)}
+                                                if extra else {}))
             if rc != 0:
                 return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
                                            f"else changed")
@@ -911,10 +949,71 @@ class Runner:
         if why:
             self._fail("smoke", why)
             return self._rollback(m, spec, backup, prev, old_port, new_port)
-        self.step("smoke", "done", f"{sel['profile']} answers on port {new_port}")
-        self.job["message"] = f"{sel['profile']} is live on port {new_port}."
+        failed, notes = self._roles(m, sel, new_port)
+        self.job.update(warnings=failed, notes=notes)
+        self.step("smoke", "done", f"{sel['profile']} answers on port {new_port}" + (
+            f"; {len(failed)} tool{'s' if len(failed) != 1 else ''} did not load" if failed else ""))
+        self.job["message"] = " ".join([f"{sel['profile']} is live on port {new_port}.", *failed])
         self._drop_marker_copy()
         return True
+
+    def _roles(self, m: dict, sel: dict, port: int) -> tuple[list[str], list[str]]:
+        """VIS-153: the tools the selection turns on that run a model of their own, as the new
+        engine reports them (`/health` roles, `/v1/models` decision_models), polled until none is
+        still loading or ROLE_SETTLE_POLLS have passed: (those that failed, each with its reason;
+        notes: waiting for memory, still loading). Nothing when the engine reports no roles."""
+        want = {c["id"]: c["label"] for c in m["components"]
+                if sel["components"].get(c["id"]) and c["id"] in ROLE_OF}
+        st: dict = {}
+        for i in range(ROLE_SETTLE_POLLS):
+            st = self._role_states(port, want)
+            if not any(v[0] == "pending" for v in st.values()):
+                break
+            if i + 1 < ROLE_SETTLE_POLLS:
+                self.sleep(ROLE_POLL_S)
+        failed = [f"{want[k]} did not load ({why or 'no reason given'})."
+                  for k, (state, why) in st.items() if state == "failed"]
+        notes = [f"{want[k]} waits for memory ({why}); it loads when memory frees up."
+                 for k, (state, why) in st.items() if state == "refused"]
+        notes += [f"{want[k]} is not loaded yet." for k, (state, _) in st.items()
+                  if state == "pending"]
+        for line in failed + notes:
+            self.log(f"[smoke] {line}")
+        return failed, notes
+
+    def _role_states(self, port: int, want: dict) -> dict:
+        """tool id -> (loaded | failed | refused | pending, why) for the tools the engine reports."""
+        base = f"http://127.0.0.1:{port}"
+        out = {}
+        try:
+            roles = ((self.http(base + "/health", timeout=10) or {}).get("roles") or {}).get(
+                "roles") or {}
+        except Exception:                                         # noqa: BLE001
+            roles = {}
+        for k in want:
+            if ROLE_OF[k] is None or ROLE_OF[k] not in roles:
+                continue
+            r = roles[ROLE_OF[k]]
+            state = str(r.get("state"))
+            if state == "loaded":
+                out[k] = ("loaded", None)
+            elif state == "failed":
+                out[k] = ("failed", r.get("error"))
+            elif state == "unloaded_for_memory" or r.get("refused") or r.get("refusal"):
+                out[k] = ("refused", r.get("refused") or r.get("refusal") or r.get("why") or
+                          "memory")
+            else:
+                out[k] = ("pending", None)
+        if "laya" in want:
+            try:
+                dm = (self.http(base + "/v1/models", timeout=10) or {}).get("decision_models")
+            except Exception:                                     # noqa: BLE001
+                dm = None
+            if isinstance(dm, list) and dm:
+                sts = [str(d.get("state")) for d in dm]
+                out["laya"] = (("failed", "a decision model failed to load") if "failed" in sts
+                               else ("loaded", None) if "loaded" in sts else ("pending", None))
+        return out
 
     def _previous(self) -> str | None:
         prev = self.spec.get("previous")

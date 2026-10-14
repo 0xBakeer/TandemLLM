@@ -14,7 +14,15 @@ export function applyJobEvent(job: SetupJob | null, ev: SetupJobEvent): SetupJob
     const steps = i >= 0 ? job.steps.map((s, j) => (j === i ? ev.step : s)) : [...job.steps, ev.step];
     return { ...job, steps };
   }
-  if (ev.type === 'done') return { ...job, state: ev.state, message: ev.message, ended_at: job.ended_at ?? Date.now() / 1000 };
+  if (ev.type === 'done')
+    return {
+      ...job,
+      state: ev.state,
+      message: ev.message,
+      ended_at: job.ended_at ?? Date.now() / 1000,
+      ...(ev.warnings ? { warnings: ev.warnings } : {}),
+      ...(ev.notes ? { notes: ev.notes } : {}),
+    };
   return job;
 }
 
@@ -60,4 +68,12 @@ export function streamAction(state: string, detail: string | undefined, job: Set
 export function changeText(c: SetupEnvChange, unset = 'unset'): { from: string; to: string } {
   const to = c.next ?? unset;
   return { from: c.current ?? unset, to: c.removed ? `removed, ${to === unset ? "the engine's default" : to}` : to };
+}
+
+/** VIS-153: a done job's message without the tool warnings the server appends to it (the page
+ *  lists `warnings` on their own). */
+export function doneMessage(job: SetupJob): string {
+  const msg = job.message ?? '';
+  const tail = (job.warnings ?? []).join(' ');
+  return tail && msg.endsWith(tail) ? msg.slice(0, msg.length - tail.length).trim() : msg;
 }

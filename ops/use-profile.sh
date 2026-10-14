@@ -85,10 +85,19 @@ weights_ok() {
 MISSING=""
 if pvset QSE_ASSETS; then
     for p in $(pv QSE_ASSETS); do [ -e "$p" ] || MISSING="$MISSING $p"; done
+    # the tools' models still come from the registry entry (VIS-153; its assets_required is empty)
+    if [ -n "${QSE_FETCH_ASSETS:-}" ] && [ "$MODE" != "--dry-run" ]; then
+        "$PY" "$HERE/fetch_weights.py" --assets "$NAME" --repo "$REPO_DIR" --extra-gb 0 \
+            --margin-gb "$DISK_MARGIN_GB" --also "$QSE_FETCH_ASSETS"
+        RC=$?
+        [ "$RC" -eq 0 ] || { say "REFUSING: the tools' models did not fetch (fetch_weights.py exit $RC)"; exit "$RC"; }
+    fi
 else
     if weights_ok; then EXTRA=0; else EXTRA="$GB"; fi
+    # QSE_FETCH_ASSETS (VIS-153): the models of the tools the setup guide's selection turns on
     "$PY" "$HERE/fetch_weights.py" --assets "$NAME" --repo "$REPO_DIR" --extra-gb "$EXTRA" \
-        --margin-gb "$DISK_MARGIN_GB" $([ "$MODE" = "--dry-run" ] && echo --dry-run)
+        --margin-gb "$DISK_MARGIN_GB" $([ "$MODE" = "--dry-run" ] && echo --dry-run) \
+        ${QSE_FETCH_ASSETS:+--also "$QSE_FETCH_ASSETS"}
     RC=$?
     [ "$RC" -eq 0 ] || { say "REFUSING: $NAME's files besides its weights did not fetch (fetch_weights.py exit $RC)"; exit "$RC"; }
     # the base snapshot as engine/config.py resolves it: QWEN38_MODEL, else the default HF cache folder

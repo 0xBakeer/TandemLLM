@@ -766,6 +766,10 @@ export interface RoleRow {
   reloads?: number;
   hold_s?: number;
   refusal?: string | null;
+  /** VIS-153: the load error of a failed role */
+  error?: string | null;
+  /** VIS-153: the planner's reason when its last load was refused */
+  refused?: string | null;
 }
 export interface RolesReport {
   dynamic: boolean;
@@ -1484,6 +1488,11 @@ export interface SetupPlan {
   errors: string[];
   warnings: string[];
   profile: { current: string | null; next: string; on_disk: boolean; download_gb: number };
+  /** VIS-153: what the fetch step downloads: the weights, the profile's assets and the models of
+   *  the tools the selection turns on, each with its size (GB) and what it is for */
+  downloads?: { id: string; label: string; gb: number; for: string }[];
+  /** VIS-153: the tools' asset ids the fetch step adds (QSE_FETCH_ASSETS) */
+  fetch_assets?: string[];
   changes: SetupEnvChange[];
   restart: boolean;
   /** what the job will run, for reading: the server runs its own fixed steps, never these strings */
@@ -1526,6 +1535,11 @@ export interface SetupJob {
   failed_step: SetupJobStepId | null;
   /** 1.0+: the dashboard after the job, `<this box>` for the host the browser knows */
   url: string;
+  /** VIS-153: the tools the selection turned on that did not load after the start, each with
+   *  its reason (the job is still done) */
+  warnings?: string[];
+  /** VIS-153: tools waiting for memory or not loaded yet */
+  notes?: string[];
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
@@ -1542,7 +1556,7 @@ export type SetupJobEvent =
   | { type: 'job'; job: SetupJob }
   | { type: 'step'; step: SetupJobStep }
   | { type: 'log'; line: string; ts: number }
-  | { type: 'done'; state: SetupJobState; message: string | null };
+  | { type: 'done'; state: SetupJobState; message: string | null; warnings?: string[]; notes?: string[] };
 
 /** GET /v1/setup/reset: the server-side levels (level 1, the browser's progress and chat, is the page's own). */
 export interface SetupResetItem {

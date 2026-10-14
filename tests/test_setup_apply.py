@@ -272,13 +272,16 @@ def test_the_plan():
         # OPS-95: the 27B's assets have a download: the fetch step gets them, with the weights
         p = _plan()
         assert p["ok"], p["errors"]
-        gb = sum(e["gb"] for a in M["assets"] if a["id"] in registry.profile(M, "exl3-4.5")[
-            "assets_required"] for e in a["fetch"])
+        tools = {"qwen3.5-2b", "laya", "qwen3.5-0.8b"}        # the default selection's tools
+        gb = sum(e["gb"] for a in M["assets"] if a["id"] in set(registry.profile(M, "exl3-4.5")[
+            "assets_required"]) | tools for e in a["fetch"])
         assert p["profile"]["on_disk"] is False and p["profile"]["download_gb"] == round(gb, 2), p
         fetch = [c for c in p["commands"] if "--fetch-only" in c]
         assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base checkpoint" in fetch[0]
         assert "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5" not in fetch[0]   # the weights are here
-        assert any("Narrator is on, but its model" in w for w in p["warnings"])
+        # VIS-153: the tools' models are downloads too, Qwen3.5-2B once for the narrator
+        assert "Qwen3.5-2B (the narrator, and Wren)" in fetch[0], fetch
+        assert p["fetch_assets"] == ["qwen3.5-2b", "laya", "qwen3.5-0.8b"], p["fetch_assets"]
         p = _plan(_sel(profile="exl3-3.0"))
         assert p["profile"]["download_gb"] == round(13.5 + gb, 2), p["profile"]
         # an asset nothing downloads is still refused before anything changes
@@ -323,7 +326,7 @@ def _job(sel, setup_mode=False, previous="exl3-6.0"):
 ALLOWED_ARGS = {"--fetch-only", "--setup", "--admin", "120"} | {p["id"] for p in M["profiles"]}
 ALLOWED_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "SMOKE_URL", "SMOKE_MODEL",
-               "QSE_NO_ROLLBACK"}
+               "QSE_NO_ROLLBACK", "QSE_FETCH_ASSETS"}
 
 
 def test_nothing_outside_the_allowlist():

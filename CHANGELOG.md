@@ -9,6 +9,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
 - Setup Guide, install page (VIS-151): a finished job keeps its whole log after a reload (the stream ends at the job's `done` event); past 300 lines the log box says how many it dropped from the top; a job whose folder is gone says so instead of an empty log.
 - Setup Guide, review and install page (VIS-155): the change list compares every key the current `run/setup.env` sets too, so a model switch lists the keys it drops (LFM2.5's TEMPERATURE, TOP_K and REP_PENALTY: 16 changes, not 13) as removed, with what the engine runs with then; the install page lists the changes under the check step.
+- Setup Guide, fetch and smoke steps (VIS-153): the fetch step downloads the models of the tools the selection turns on (Qwen3.5-0.8B for the shadow reader, Qwen3.5-2B for the narrator, Laya), and the review lists every download with its size; a tool model nothing downloads is a `missing_assets` error. After the start the smoke step reads the tools' states: a failed one is a warning on the job with its reason. A failed shadow reader load is tried again after 300 s in an idle window; `/health` `roles` carry the load error.
 
 ## 0.9.0, 2026-10-14
 

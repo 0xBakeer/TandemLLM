@@ -13,7 +13,7 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi, setupUnauthorized } from './api';
-import { appendLog, applyJobEvent, changeText, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
+import { appendLog, applyJobEvent, changeText, doneMessage, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
 
 @customElement('qse-install-progress')
@@ -152,12 +152,18 @@ export class QseInstallProgress extends LightElement {
     const failedStep = j?.steps.find((s) => s.state === 'failed');
     return html`<div class="inst ${j ? `is-${j.state}` : ''}" data-job-state=${j?.state ?? 'starting'}>
       <div class="inst-head" role="status" aria-live="polite">
-        <span class="inst-badge" aria-hidden="true">${j?.state === 'done' ? icon('check') : j && (j.state === 'failed' || j.state === 'rolled_back') ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
+        <span class="inst-badge" aria-hidden="true">${j?.state === 'done' ? icon(j.warnings?.length ? 'warn' : 'check') : j && (j.state === 'failed' || j.state === 'rolled_back') ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
         <div>
           <p class="inst-title">${stateWord}</p>
           ${j?.state === 'rolled_back' ? html`<p class="inst-sub" data-rolled-back>${S.rolledBackTo(this.previousProfile ?? S.previousSetup)}</p>` : nothing}
           ${(j?.state === 'failed' || j?.state === 'rolled_back') && j.message ? html`<p class="inst-sub" data-job-reason>${S.jobReason(j.message)}</p>` : nothing}
-          ${j?.state === 'done' && j.message ? html`<p class="inst-sub">${j.message}</p>` : nothing}
+          ${j?.state === 'done' && j.message ? html`<p class="inst-sub">${doneMessage(j)}</p>` : nothing}
+          ${j?.state === 'done' && (j.warnings?.length || j.notes?.length)
+            ? html`<ul class="inst-roles" data-job-warnings>
+                ${(j.warnings ?? []).map((w) => html`<li class="is-warn">${icon('warn')} <span>${w}</span></li>`)}
+                ${(j.notes ?? []).map((w) => html`<li>${icon('info')} <span>${w}</span></li>`)}
+              </ul>`
+            : nothing}
         </div>
       </div>
       ${away
