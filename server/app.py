@@ -9994,6 +9994,9 @@ def _serve(a, led) -> None:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         cond.router.session_tokens = STATE["session_tokens"]
+        # stored documents a fix must reach (a shipped default reaches only a box without one)
+        from server.conductor import migrations as cond_migrations
+        cond_migrations.run(cond.store, cond.journal)
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
               f"{len(cond.store.names())} profiles); model TandemLLM, {STATE['model']} a hidden "
