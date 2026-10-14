@@ -4761,12 +4761,30 @@ def _text_tokens(text: str | None) -> int | None:
 def _harness_of(plan) -> dict | None:
     """SRV-349, `usage.tandem.harness`: the router's class and effort level for this turn and the
     packages in its prompt (this turn's notes and the replayed ones, `plan.spans`), each with its
-    text's tokens. None for a request no active plan served."""
+    text's tokens. None for a request no active plan served.
+
+    A note keeps its parts as {kind, name} with one text hash each (`Plan._fresh_block`), not the
+    texts, so every package counted null (the Context panel's "— tokens", 2026-10-14). The count
+    comes from this turn's block (`plan.block["items"]` hold the texts), else from an earlier turn
+    that counted the same name and hash, else from the package library when its text has that
+    hash."""
     if plan is None or not getattr(plan, "active", False) or getattr(plan, "row", None) is None:
         return None
     row = plan.row
     texts: dict = {}
+    shas: dict = {}
     notes = list(getattr(getattr(plan, "session", None), "notes", None) or ())
+    for n in notes:
+        for p, h in zip(getattr(n, "parts", None) or (), getattr(n, "shas", None) or ()):
+            if p.get("kind") == "package" and h:
+                shas.setdefault(p.get("name"), h)
+    block = getattr(plan, "block", None) or {}
+    for it in block.get("items") or ():
+        part = it.get("part") or {}
+        if part.get("kind") == "package" and it.get("text"):
+            texts.setdefault(part.get("name"), it["text"])
+            if it.get("sha"):
+                shas[part.get("name")] = it["sha"]
     for parts in [getattr(n, "parts", None) for n in notes] + \
             [i.get("parts") for i in getattr(plan, "injected", None) or ()]:
         for p in parts or ():
@@ -4778,7 +4796,38 @@ def _harness_of(plan) -> dict | None:
             if name not in names:
                 names.append(name)
     return {"class": row.get("class_id"), "effort": row.get("effort"),
-            "packages": [{"name": n, "tokens": _text_tokens(texts.get(n))} for n in names]}
+            "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
+                         for n in names]}
+
+
+#: (package name, text hash) -> tokens, for the packages a replayed note holds
+_PKG_TOKENS: "collections.OrderedDict[tuple, int]" = collections.OrderedDict()
+
+
+def _package_tokens(name: str, text: str | None, sha: str | None) -> int | None:
+    n = _text_tokens(text)
+    if n is None and sha:
+        n = _PKG_TOKENS.get((name, sha))
+    if n is None:
+        lib = _library_text(name)
+        if lib and (not sha or hashlib.sha256(lib.encode()).hexdigest()[:12] == sha):
+            n = _text_tokens(lib)
+    if n is not None and sha:
+        _PKG_TOKENS[(name, sha)] = n
+        while len(_PKG_TOKENS) > 512:
+            _PKG_TOKENS.popitem(last=False)
+    return n
+
+
+def _library_text(name: str) -> str | None:
+    cond = STATE.get("conductor")
+    if cond is None:
+        return None
+    try:
+        text, _ = cond.library.text(cond.store.peek("packages")[1], name)
+    except Exception:                                              # noqa: BLE001
+        return None
+    return text
 
 
 def _account(rec: "usage_mod.RequestRecord") -> None:

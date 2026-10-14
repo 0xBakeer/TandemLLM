@@ -526,6 +526,56 @@ def test_the_peek_replays_the_sessions_notes_and_the_harness_names_the_packages(
     return f"{len(got) - len(client2)} note tokens replayed; harness {h['class']} {h['effort']}"
 
 
+def test_the_harness_counts_the_packages_of_notes_that_keep_no_text():
+    """2026-10-14 (a phone's Context panel: eight harness packages, each "— tokens"): a note keeps
+    its parts as {kind, name} with one text hash each, so `_harness_of` found no text and counted
+    every package null. The count comes from the turn's block, from an earlier count of the same
+    name and hash when the note is replayed, and from the library when its text has that hash."""
+    from test_snapshots import S, fresh, served
+    cond = fresh(None)
+    _, pk = cond.store.get("packages")
+    pk["packages"]["coding"] = {"title": "Coding", "kind": "package", "source": "inline",
+                                "description": "How programming work must happen.",
+                                "body": "# Coding core\n\nRun the tests after every step.",
+                                "max_tokens": 3000, "enabled": True, "general": True}
+    cond.store.put("packages", None, pk, note="a general package", author="t")
+    _, r = cond.store.get("router")
+    for c in r["classes"]:
+        if c["id"] == "code_edit":
+            c["policy"]["packages"] = ["coding"]
+    cond.store.put("router", None, r, note="coding on code_edit", author="t")
+    s = S()
+    p1, _ = served(cond, s.msgs, sid="chat-tokens")
+    assert p1.block and all("text" not in p for p in p1.block["parts"]), "the case: no texts"
+    h1 = app._harness_of(p1)
+    got1 = {x["name"]: x["tokens"] for x in h1["packages"]}
+    assert got1 and all(isinstance(n, int) and n > 0 for n in got1.values()), h1
+    for it in p1.block["items"]:
+        if it["part"]["kind"] == "package":
+            assert got1[it["part"]["name"]] == len(app.STATE["tok"](
+                it["text"], add_special_tokens=False).input_ids)
+    p2, _ = served(cond, s.step(("bash", {"command": "ls"}, "a.txt")), sid="chat-tokens")
+    replayed = {x["name"]: x["tokens"] for x in app._harness_of(p2)["packages"]}
+    assert {n: replayed[n] for n in got1 if n in replayed} == \
+        {n: got1[n] for n in got1 if n in replayed} and replayed, (got1, replayed)
+    # after a restart nothing is remembered: the library's text, when its hash is the note's
+    app._PKG_TOKENS.clear()
+    held = app.STATE.get("conductor")
+    app.STATE["conductor"] = cond
+    try:
+        again = {x["name"]: x["tokens"] for x in app._harness_of(p2)["packages"]}
+    finally:
+        app.STATE["conductor"] = held
+    assert again == replayed, (again, replayed)
+    app._PKG_TOKENS.clear()
+    assert app._package_tokens("nope", None, "0" * 12) is None
+    # the resident report's owner tag: chatd finds its chat in the slot without the key shown
+    import hashlib
+    assert cache.owner_tag("chat-01J9Z3K7Q2W5E8R4T6Y1U3I5O7") == hashlib.sha256(
+        b"chat-01J9Z3K7Q2W5E8R4T6Y1U3I5O7").hexdigest()[:16] and cache.owner_tag(None) is None
+    return f"{len(got1)} packages counted: {sorted(got1.items())}"
+
+
 # ------------------------------------------------------------------ 7. the record alone
 
 def test_the_usage_records_tandem_object():
