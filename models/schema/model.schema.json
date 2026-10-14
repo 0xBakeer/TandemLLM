@@ -135,6 +135,20 @@
                   "maxLength": 2000,
                   "type": "string"
                 },
+                "skip_dtypes": {
+                  "items": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "skip_tensors": {
+                  "items": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "to": {
                   "maxLength": 2000,
                   "type": "string"
@@ -174,6 +188,13 @@
           },
           "protected": {
             "type": "boolean"
+          },
+          "satisfied_by": {
+            "items": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+              "type": "string"
+            },
+            "type": "array"
           },
           "source": {
             "maxLength": 2000,

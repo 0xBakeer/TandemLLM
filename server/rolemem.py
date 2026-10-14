@@ -75,6 +75,15 @@ def _env_on(key: str, default: str) -> bool:
 
 
 # ------------------------------------------------------------------ the roles it can unload
+def slot_detail(slot) -> dict:
+    """VIS-153: why a slot is not loaded, for `/health` `roles`: its load error when it failed,
+    the planner's reason when its last load was refused."""
+    st = str(getattr(slot, "state", ""))
+    ref = getattr(slot, "refusal", None) or {}
+    return {"error": getattr(slot, "error", None) if st == "failed" else None,
+            "refused": ref.get("reason") if st == "not_loaded" else None}
+
+
 class SlotRole:
     """A generative role over its `engine/generative/slot.py` Slot (the narrator, the shadow
     reader). `release(why) -> bytes` gives the model's pool back its own way (the shadow parks its
@@ -102,6 +111,9 @@ class SlotRole:
 
     def state(self) -> str:
         return str(self.slot.state)
+
+    def detail(self) -> dict:
+        return slot_detail(self.slot)
 
     def loaded(self) -> bool:
         return self.slot.state == "loaded"
@@ -476,7 +488,8 @@ class RoleMemory:
                     "out_s": round(now - s["since"], 1) if s["out"] and s["since"] else None,
                     "why": s["why"] if s["out"] else None, "freed_gib": s["freed_gib"],
                     "unloads": s["unloads"], "reloads": s["reloads"], "hold_s": s["hold_s"],
-                    "refusal": s["refusal"]}
+                    "refusal": s["refusal"],
+                    **(r.detail() if hasattr(r, "detail") else {"error": None, "refused": None})}
             return {"dynamic": self.enabled, "order": [r.name for r in self.roles],
                     "reload_order": [r.name for r in reversed(self.roles)],
                     "policy": {"floor_gib": round(self.floor / GIB, 2),

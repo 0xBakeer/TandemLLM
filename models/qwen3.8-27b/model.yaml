@@ -89,7 +89,23 @@ assets:
         files: ["*.json", "*.jinja", merges.txt, LICENSE, layers-*.safetensors, outside.safetensors]
         to: ${HF_HUB}
         gb: 30.4
-    source: Public on Hugging Face. Every 27B profile reads its embeddings, norms, the tensors the quantised weights leave and the tokenizer; not mtp.safetensors (the 27B drafts with its own drafters). install.sh downloads it, except with --setup; use-profile.sh downloads it when it is missing.
+    source: Public on Hugging Face. Every 27B profile reads its embeddings, norms, the tensors the quantised weights leave and the tokenizer; not mtp.safetensors (the 27B drafts with its own drafters). install.sh downloads it, except with --setup; use-profile.sh downloads it when it is missing (NVFP4; the EXL3 profiles need base-plain, which it serves for).
+  - id: base-plain
+    label: Base tensors for EXL3 (Qwen3.8-27B-FP8 without its FP8 projections)
+    path: ${HOME}/.qwen38-spark-engine/weights/base-plain/config.json
+    also: ["${HOME}/.qwen38-spark-engine/weights/base-plain/outside.safetensors"]
+    satisfied_by: [base-fp8]
+    fetchable: true
+    protected: true
+    hf_repo: Qwen/Qwen3.8-27B-FP8
+    fetch:
+      - repo: Qwen/Qwen3.8-27B-FP8
+        files: ["*.json", "*.jinja", merges.txt, LICENSE, layers-*.safetensors, outside.safetensors]
+        to: ${HOME}/.qwen38-spark-engine/weights/base-plain
+        gb: 3.54
+        skip_dtypes: [F8_E4M3]
+        skip_tensors: [lm_head.weight]
+    source: "OPS-133: the tensors of Qwen/Qwen3.8-27B-FP8 an EXL3 load reads, fetched by range requests: the embedding, the norms, the GDN gates and convolutions, the vision tower, the config and the tokenizer (3.54 GB of 30.41). Left out: the F8_E4M3 projections with their scales (24.33 GB) and lm_head.weight (2.54 GB), which every EXL3 pack here quantises (tests/test_base_plain.py). A box with base-fp8 uses that instead."
   - id: nvfp4-drafters
     label: Draft models (DFlash2 b8 and b16, BF16)
     path: ${REPO}/train/ft-b8-v2
@@ -114,7 +130,12 @@ assets:
     fetchable: true
     protected: false
     hf_repo: Qwen/Qwen3.5-2B
-    source: Public on Hugging Face; install.sh --setup downloads it for Wren.
+    fetch:
+      - repo: Qwen/Qwen3.5-2B
+        files: ["*.json", "*.safetensors", "*.jinja", merges.txt, LICENSE]
+        to: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b
+        gb: 4.57
+    source: Public on Hugging Face; install.sh --setup downloads it for Wren, the fetch step when the narrator is on (VIS-153).
   - id: qwen3.5-0.8b
     label: Qwen3.5-0.8B (the shadow reader)
     path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b/config.json
@@ -122,7 +143,12 @@ assets:
     fetchable: true
     protected: false
     hf_repo: Qwen/Qwen3.5-0.8B
-    source: Public on Hugging Face.
+    fetch:
+      - repo: Qwen/Qwen3.5-0.8B
+        files: ["*.json", "*.safetensors", "*.jinja", merges.txt, LICENSE]
+        to: ${HOME}/.qwen38-spark-engine/models/qwen3.5-0.8b
+        gb: 1.77
+    source: Public on Hugging Face; the fetch step downloads it when the shadow reader is on (VIS-153).
   - id: laya
     label: Laya decision models
     path: ${HOME}/.qwen38-spark-engine/deciders/laya/model.safetensors
@@ -130,7 +156,12 @@ assets:
     fetchable: true
     protected: false
     hf_repo: convaiinnovations/laya
-    source: Public on Hugging Face (no token needed). Nothing here downloads it yet; the engine starts without it.
+    fetch:
+      - repo: convaiinnovations/laya
+        files: [config.json, rl_agent_config.json, model.safetensors, "encoder/*", "tokenizer/*", "multilingual/*", "typed-decisions/*"]
+        to: ${HOME}/.qwen38-spark-engine/deciders/laya
+        gb: 2.35
+    source: Public on Hugging Face (no token needed); the fetch step downloads its three models when Laya is on (VIS-153). Its Python files are not downloaded.
 
 # One entry per ops/profiles/<id>.env. weights_gib: the target's weights on the device (load stage
 # `weights`, GiB allocated); drafters_gib: the draft models, the draft head and their buffers (load
@@ -151,7 +182,7 @@ profiles:
     recommended: false
     badges: [fastest]
     quality: {kl_vs_bf16: 0.2121, top1_pct: 86.27, ppl: 3.1187, date: "2026-10-09", source: *qsrc}
-    assets_required: &exl3assets [exl3-drafters-k3, exl3-draft-head-k4, nvfp4-drafters, base-fp8]
+    assets_required: &exl3assets [exl3-drafters-k3, exl3-draft-head-k4, nvfp4-drafters, base-plain]
     note: The fastest, and the furthest from the original model.
   - id: exl3-3.0
     label: EXL3 3.0 bpw

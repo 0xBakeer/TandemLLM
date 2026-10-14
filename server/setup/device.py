@@ -148,7 +148,7 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
         d = dirs.get(p["id"])
         repo = (d or {}).get("repo") or None          # ${REPO} of an asset: serve.env's
         missing = [a for a in p["assets_required"]
-                   if not registry.asset_present(registry.asset(m, a), repo)]
+                   if not registry.asset_present(registry.asset(m, a), repo, m)]
         out[p["id"]] = {"weights": weights_present(d), "dir": (d or {}).get("dir") or None,
                         "assets_missing": missing, "repo": repo}
     # a community pack's profile is written at its first switch, so its folder is the one the
@@ -158,7 +158,7 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
     for c in m.get("community") or []:
         d = {"dir": community_mod.pack_dir(c["id"]), "files": []}
         missing = [a for a in registry.community_assets(c)
-                   if not registry.asset_present(registry.asset(m, a), repo)]
+                   if not registry.asset_present(registry.asset(m, a), repo, m)]
         out[c["profile"]] = {"weights": weights_present(d), "dir": d["dir"],
                              "assets_missing": missing, "repo": repo}
     with _lock:

@@ -13,6 +13,8 @@
 //   resetPartial: bool (two items fail), resetEmpty: bool (nothing to delete at level 3),
 //   shadowOn: bool (the shadow reader runs: its sessions are kept, `skip`, and reported in `failed`)
 //   waitIdle: bool (the next job's write_config first waits for 2 requests to finish)
+//   shadowMissing: bool (VIS-153: Qwen3.5-0.8B is not on the box; with the shadow reader on, the
+//   plan downloads it, and the next job ends installed with the shadow reader failed)
 //   estimateDown: bool, planDown: bool, models: ok | empty | error | broken
 //   active: <profile id> (what the box runs), secretsExist: bool (generate is refused, secrets_exist)
 //   communitySource: github | cache | bundled | error (what the next community sync answers:
@@ -98,6 +100,7 @@ interface Options {
   resetEmpty: boolean;
   shadowOn: boolean;
   waitIdle: boolean;
+  shadowMissing: boolean;
   secretsExist: boolean;
   estimateDown: boolean;
   planDown: boolean;
@@ -129,6 +132,7 @@ const START: Options = {
   resetEmpty: false,
   shadowOn: false,
   waitIdle: false,
+  shadowMissing: false,
   secretsExist: false,
   estimateDown: false,
   planDown: false,
@@ -321,6 +325,8 @@ export class MockSetup {
     const est = estimate(M, sel, this.memAvailable());
     const prof = M.profiles.find((p) => p.id === sel.profile)!;
     const onDisk = !!this.onDisk[prof.id];
+    // VIS-153: the tools' models the fetch step adds (apply.py _tool_assets_missing)
+    const tool = this.o.shadowMissing && sel.components.shadow ? [{ id: 'qwen3.5-0.8b', label: 'Qwen3.5-0.8B (the shadow reader)', gb: 1.77, for: 'Shadow reader' }] : [];
     const errors: string[] = [];
     const codes: string[] = [];
     if (!est.fits) {
@@ -352,7 +358,9 @@ export class MockSetup {
       errors,
       error_codes: codes,
       warnings: [...clientFacing(changes), ...(this.o.password ? [] : ['No admin password is set: anyone who can reach this port can run the setup, apply it and reset the box. Generate one in the advanced step.']), ...(est.fits && !est.fits_worst ? [est.notes[0]] : [])],
-      profile: { current: this.o.setupMode ? null : this.o.active, next: prof.id, on_disk: onDisk, download_gb: onDisk ? 0 : prof.disk_gb },
+      profile: { current: this.o.setupMode ? null : this.o.active, next: prof.id, on_disk: onDisk && !tool.length, download_gb: (onDisk ? 0 : prof.disk_gb) + tool.reduce((a, d) => a + d.gb, 0) },
+      downloads: [...(onDisk ? [] : [{ id: prof.id, label: prof.hf_repo, gb: prof.disk_gb, for: prof.label }]), ...tool],
+      fetch_assets: tool.map((d) => d.id),
       changes,
       restart: true,
       commands,
@@ -421,7 +429,10 @@ export class MockSetup {
     } else {
       step('smoke', 1400 * slow, ['[smoke] GET /health 200', '[smoke] chat request 200, 41.2 tok/s']);
       step('rollback', 0, [], 'skipped', null);
-      tl.push({ at: t + 100, ev: { type: 'done', state: 'done', message: kind === 'reset' ? `The shipped configuration runs, on ${prof}.` : `${prof} is live on port ${sel.advanced.port ?? 8000}.` } });
+      // VIS-153: a tool that did not load after the start is a warning on the job, which stays done
+      const warn = this.o.shadowMissing && sel.components.shadow && kind === 'apply' ? ['Shadow reader did not load (FileNotFoundError: no config.json under ~/.qwen38-spark-engine/models/qwen3.5-0.8b).'] : [];
+      const msg = kind === 'reset' ? `The shipped configuration runs, on ${prof}.` : `${prof} is live on port ${sel.advanced.port ?? 8000}.`;
+      tl.push({ at: t + 100, ev: { type: 'done', state: 'done', message: [msg, ...warn].join(' '), warnings: warn, notes: [] } });
       const finish = t + 100;
       setTimeout(() => {
         this.o.active = prof;
@@ -459,7 +470,7 @@ export class MockSetup {
       if (e.at > el) break;
       if (e.ev.type === 'job') job = e.ev.job;
       else if (e.ev.type === 'step') job = { ...job, steps: job.steps.map((s) => (s.id === (e.ev as { step: SetupJobStep }).step.id ? (e.ev as { step: SetupJobStep }).step : s)) };
-      else if (e.ev.type === 'done') job = { ...job, state: e.ev.state, message: e.ev.message, ended_at: (j.created + e.at) / 1000 };
+      else if (e.ev.type === 'done') job = { ...job, state: e.ev.state, message: e.ev.message, ended_at: (j.created + e.at) / 1000, warnings: e.ev.warnings ?? [], notes: e.ev.notes ?? [] };
     }
     return job;
   }
@@ -473,7 +484,25 @@ export class MockSetup {
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
     const last = Number(req.headers['last-event-id'] ?? 0) || 0;
+    // VIS-149, as server/setup_api.py: the log lines so far, the job as it is now, then the rest
+    const el0 = Date.now() - j.created;
     let sent = last;
+    let done = -1;
+    for (let i = last; i < j.timeline.length; i++) {
+      const e = j.timeline[i];
+      if (e.at > el0) break;
+      if (e.ev.type === 'done') {
+        done = i;
+        break;
+      }
+      sent = i + 1;
+      if (e.ev.type === 'log') res.write(`id: ${i + 1}\ndata: ${JSON.stringify(e.ev)}\n\n`);
+    }
+    res.write(`${sent > last ? `id: ${sent}\n` : ''}data: ${JSON.stringify({ type: 'job', job: this.jobNow(id) })}\n\n`);
+    if (done >= 0) {
+      res.end(`id: ${done + 1}\ndata: ${JSON.stringify(j.timeline[done].ev)}\n\n`);
+      return;
+    }
     this.streams.add(res);
     const pump = () => {
       const el = Date.now() - j.created;

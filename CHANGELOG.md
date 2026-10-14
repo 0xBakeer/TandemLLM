@@ -6,6 +6,15 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - Chat tab: a built-in `web_search` tool with DuckDuckGo and SearXNG providers, set in the chat settings (SRV-469, VIS-157). Reference: [docs/chat.md](docs/chat.md#web-search).
 
+### Fixes
+
+- Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
+- Setup Guide, install page (VIS-151): a finished job keeps its whole log after a reload (the stream ends at the job's `done` event); past 300 lines the log box says how many it dropped from the top; a job whose folder is gone says so instead of an empty log.
+- Setup Guide, review and install page (VIS-155): the change list compares every key the current `run/setup.env` sets too, so a model switch lists the keys it drops (LFM2.5's TEMPERATURE, TOP_K and REP_PENALTY: 16 changes, not 13) as removed, with what the engine runs with then; the install page lists the changes under the check step.
+- Setup Guide, fetch and smoke steps (VIS-153): the fetch step downloads the models of the tools the selection turns on (Qwen3.5-0.8B for the shadow reader, Qwen3.5-2B for the narrator, Laya), and the review lists every download with its size; a tool model nothing downloads is a `missing_assets` error. After the start the smoke step reads the tools' states: a failed one is a warning on the job with its reason. A failed shadow reader load is tried again after 300 s in an idle window; `/health` `roles` carry the load error.
+- EXL3 profiles of Qwen3.8-27B (OPS-133): their base is `base-plain`, the Qwen3.8-27B-FP8 tensors an EXL3 load reads (embedding, norms, GDN gates and convolutions, vision tower, config, tokenizer), fetched by HTTP range requests into `~/.qwen38-spark-engine/weights/base-plain`: 3.54 GB instead of 30.41 (the F8_E4M3 projections, their scales and `lm_head.weight` stay out). A fresh `exl3-6.0` downloads 36.48 GB, not 63.34. A box with the full FP8 snapshot uses it and downloads nothing; NVFP4 still needs the full base.
+- Dashboard service worker (OPS-131): a page load that the reverse proxy answers 502, 503 or 504 gets the cached shell, as a network error did; the page says the engine is restarting and reloads once `/health` answers.
+
 ## 0.9.0, 2026-10-14
 
 A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. The Qwen models' text and speed do not change. The shared EXL3 kernels' bytes changed (half-integer rates); `SAME_ROWS` maps them to the old bytes, so the first Qwen start adopts its saved conversations once. Reference: [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md).

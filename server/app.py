@@ -3844,6 +3844,9 @@ def _shadow_loop() -> None:
 # an idle window soon after the start, when no other model is loading and some profile has the
 # shadow on; once it has loaded, the first turn's start and the release's reload are as before.
 SHADOW_PRELOAD_S = 20.0
+# VIS-153: a failed shadow load (its weights not on the box yet, a load error) is tried again in an
+# idle window once this long has passed since it failed; before, `failed` stayed until a restart
+SHADOW_RETRY_S = 300.0
 
 
 def _shadow_profiles_on() -> bool:
@@ -3870,7 +3873,9 @@ def shadow_preload_once() -> str | None:
     narr = STATE.get("narrator")
     if narr is not None and slot is getattr(narr, "slot", None):
         return None                             # the narrator's slot: its keeper loads it
-    if getattr(slot, "loads", 0) or slot.state != "not_loaded":
+    since = slot.failed_for() if hasattr(slot, "failed_for") else None
+    retry = since is not None and since >= SHADOW_RETRY_S
+    if not retry and (getattr(slot, "loads", 0) or slot.state != "not_loaded"):
         return None                             # loaded once already, or a load in its course
     if getattr(slot, "memory_hold", False):
         return None                             # out for memory: the role governor reloads it
@@ -3881,6 +3886,10 @@ def shadow_preload_once() -> str | None:
         return None
     if not _shadow_profiles_on():
         return None
+    if retry and slot.reset_failed():
+        print(f"[shadow] {slot.model.name}: the load failed {since:.0f} s ago ({slot.error}); "
+              f"trying again", flush=True)
+        STATE["shadow_preload"] = None
     why = slot.ensure()
     got = "loading" if why == "loading" else "refused" if why == "refused" else why
     if got != STATE.get("shadow_preload"):
@@ -4225,9 +4234,11 @@ def roles_report() -> dict:
     out = {"dynamic": False, "roles": {}}
     nar, svc, reg = (dict.get(STATE, k) for k in ("narrator", "shadow", "deciders"))
     if svc is not None and getattr(svc, "slot", None) is not getattr(nar, "slot", None):
-        out["roles"]["shadow"] = {"models": [svc.slot.model.name], "state": svc.slot.state}
+        out["roles"]["shadow"] = {"models": [svc.slot.model.name], "state": svc.slot.state,
+                                  **rolemem.slot_detail(svc.slot)}
     if nar is not None:
-        out["roles"]["narrator"] = {"models": [nar.slot.model.name], "state": nar.slot.state}
+        out["roles"]["narrator"] = {"models": [nar.slot.model.name], "state": nar.slot.state,
+                                    **rolemem.slot_detail(nar.slot)}
     if reg is not None:
         out["roles"]["laya"] = {"models": reg.loaded(), "state": "loaded" if reg.ready()
                                 else "not_loaded"}

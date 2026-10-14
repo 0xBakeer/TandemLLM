@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 
@@ -330,14 +331,40 @@ class _Hub:
                                          "outside.safetensors", "mtp.safetensors", "README.md"]}.items():
             for n in names:
                 self.body[(repo, n)] = f"{repo}/{n}".encode() * 3
+        # the base's safetensors files are real ones (OPS-133: the EXL3 profiles' plain base reads
+        # their headers and the kept tensors by range requests)
+        for n, ts in {"layers-0.safetensors": [("model.language_model.layers.0.input_layernorm.weight", "BF16", 8),
+                                               ("model.language_model.layers.0.mlp.up_proj.weight_scale_inv", "BF16", 4),
+                                               ("model.language_model.layers.0.mlp.up_proj.weight", "F8_E4M3", 64)],
+                      "outside.safetensors": [("lm_head.weight", "BF16", 32),
+                                              ("model.language_model.embed_tokens.weight", "BF16", 32)],
+                      "mtp.safetensors": [("mtp.fc.weight", "BF16", 8)]}.items():
+            hdr, off = {}, 0
+            for name, dtype, nb in ts:
+                hdr[name] = {"dtype": dtype, "shape": [nb if dtype == "F8_E4M3" else nb // 2],
+                             "data_offsets": [off, off + nb]}
+                off += nb
+            h = json.dumps(hdr).encode()
+            h += b" " * (-len(h) % 8)
+            self.body[("Qwen/Qwen3.8-27B-FP8", n)] = struct.pack("<Q", len(h)) + h + os.urandom(off)
         self.sha = {k: hashlib.sha256(v).hexdigest() for k, v in self.body.items()}
-        self.saved = (fw.hub_files, huggingface_hub.snapshot_download)
+        self.saved = (fw.hub_files, huggingface_hub.snapshot_download, fw.open_range)
         fw.hub_files = self.hub_files
         huggingface_hub.snapshot_download = self.snapshot_download
+        fw.open_range = self.open_range
 
     def close(self):
         import huggingface_hub
-        self.fw.hub_files, huggingface_hub.snapshot_download = self.saved
+        self.fw.hub_files, huggingface_hub.snapshot_download, self.fw.open_range = self.saved
+
+    def open_range(self, url, start, end):
+        import io
+        repo, rest = url.split("://", 1)[1].split("/", 1)[1].split("/resolve/", 1)
+        name = rest.split("/", 1)[1]
+        self.calls.append((repo, "range", (name,)))
+        r = io.BytesIO(self.body[(repo, name)][start:end])
+        r.status = 206
+        return r
 
     def hub_files(self, repo, revision=None):
         files = {n: {"size": len(b), "sha256": self.sha[(r, n)] if n.endswith((".safetensors", ".json"))
@@ -390,8 +417,8 @@ def _fetch_box_close(tmp, old, hub=None):
 def test_assets_are_fetched_where_the_profile_reads_them():
     """OPS-95: fetch_weights.py --assets on a new box (no token): the K3 drafters and the K4 head into
     ~/.qwen38-spark-engine/weights (the repo's folders kept), the BF16 drafters into the checkout's
-    train/ft-b8-v2 and train/ft-b16, the base into the HF cache without mtp.safetensors; every LFS file
-    checked against the hub's sha256. Run again, nothing is downloaded; a Flash-Next profile needs no
+    train/ft-b8-v2 and train/ft-b16, the plain base (OPS-133) into ~/.qwen38-spark-engine/weights/base-plain
+    without mtp.safetensors; every LFS file checked against the hub's sha256. Run again, nothing is downloaded; a Flash-Next profile needs no
     asset; an asset that is gone (the K4 head) is the only one fetched again."""
     fw, tmp, home, repo, old = _fetch_box()
     hub = _Hub(fw, os.path.join(home, ".cache", "huggingface", "hub"))
@@ -405,12 +432,14 @@ def test_assets_are_fetched_where_the_profile_reads_them():
             d = os.path.join(repo, "train", arm)
             assert open(os.path.join(d, "model.safetensors"), "rb").read() == \
                 hub.body[(f"0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-{r}", "model.safetensors")]
-        snap = os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots/c0ffee")
-        assert os.path.isfile(os.path.join(snap, "outside.safetensors")) and not os.path.exists(
-            os.path.join(snap, "mtp.safetensors"))
-        assert json.load(open(fw.state_path("base-fp8")))["complete"] is True
+        # OPS-133: the EXL3 profile's base is the plain one, without mtp.safetensors and lm_head
+        plain = os.path.join(w, "base-plain")
+        assert os.path.isfile(os.path.join(plain, "outside.safetensors")) and not os.path.exists(
+            os.path.join(plain, "mtp.safetensors"))
+        assert not os.path.exists(os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8"))
         assert not glob.glob(os.path.join(home, ".qwen38-spark-engine", "weights.partial*")), "a .partial left"
-        assert len(hub.calls) == 5, hub.calls
+        assert not glob.glob(os.path.join(w, "*.partial*")), "a .partial left"
+        assert len([c for c in hub.calls if c[1] != "range"]) == 5, hub.calls
         hub.calls.clear()
         assert fw.assets("exl3-4.5", repo, margin_gb=0) == 0 and hub.calls == []
         assert fw.assets("flashnext-3.05", repo, margin_gb=0) == 0 and hub.calls == []
@@ -472,14 +501,14 @@ def test_the_disk_is_checked_before_any_download_and_a_dry_run_downloads_nothing
         shutil.copytree(os.path.join(ROOT, "models"), os.path.join(repo, "models"))
         y = os.path.join(repo, "models", "qwen3.8-27b", "model.yaml")
         text = open(y).read()
-        i = text.index("  - id: base-fp8")
+        i = text.index("  - id: base-plain")
         j = text.index("    source:", i)
         k = text.index("    fetch:", i)
         open(y, "w").write(text[:i] + text[i:k].replace("fetchable: true", "fetchable: false") + text[j:])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             assert fw.assets("exl3-4.5", repo, margin_gb=0) == 3
-        assert "base-fp8" in out.getvalue() and "has no download" in out.getvalue(), out.getvalue()
+        assert "base-plain" in out.getvalue() and "has no download" in out.getvalue(), out.getvalue()
         assert [c[0] for c in hub.calls] == [], hub.calls
     finally:
         _fetch_box_close(tmp, old, hub)

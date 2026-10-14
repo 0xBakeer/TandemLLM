@@ -61,6 +61,7 @@ class Slot:
         self.log, self.journal, self.mem_available, self.clock = log, journal, mem_available, clock
         self.state = "not_loaded"
         self.error: str | None = None
+        self.failed_at: float | None = None      # the clock when it last turned `failed`
         self.refusal: dict | None = None
         self.loaded_at: float | None = None
         self.load_s: float | None = None
@@ -146,6 +147,7 @@ class Slot:
             self._drop()
             with self._lock:
                 self.state = "failed"
+                self.failed_at = self.clock()
 
     def unload(self, block: bool = True) -> bool:
         """`block=False`: give up (False) when a call is in flight rather than wait for it (the
@@ -194,6 +196,21 @@ class Slot:
             d = self.load()
             return "loading" if d.get("allowed") else "refused"
         return st                               # loading, unloading, failed
+
+    def failed_for(self) -> float | None:
+        """Seconds since the slot turned `failed`; None when it is not failed."""
+        if self.state != "failed" or self.failed_at is None:
+            return None
+        return self.clock() - self.failed_at
+
+    def reset_failed(self) -> bool:
+        """A failed slot back to `not_loaded`, so the next `ensure` or `load` tries again (VIS-153:
+        the shadow reader's keeper, once a retry interval passed). False when it was not failed."""
+        with self._lock:
+            if self.state != "failed":
+                return False
+            self.state = "not_loaded"
+            return True
 
     # ------------------------------------------------------------------ calls
     def run(self, messages: list[dict], *, max_new: int, budget_ms: float, held: bool = True,
@@ -297,6 +314,7 @@ class Slot:
                 self.unload()
                 with self._lock:
                     self.state = "failed"
+                    self.failed_at = self.clock()
 
             threading.Thread(target=fail, name=f"{self.role}-fail", daemon=True).start()
 
