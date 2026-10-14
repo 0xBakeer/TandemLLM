@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 import torch  # noqa: E402
-from test_conductor_router import QTok, setup  # noqa: E402
+from test_conductor_router import QTok, body, by_label, setup, turn  # noqa: E402
 
 from server import app  # noqa: E402
 
@@ -77,6 +77,22 @@ def test_thinking_on_and_the_qwen_template_are_unchanged():
     assert text.endswith("<|im_start|>assistant\n<think>") and in_think
     text, in_think = _render(QTok(), {"messages": MSGS, "chat_template_kwargs": {"enable_thinking": False}})
     assert text.endswith("<think>\n\n</think>\n\n") and not in_think, repr(text[-40:])
+
+
+def test_the_router_closes_the_block_the_template_opened():
+    """A class the router serves with thinking off (a summary) closes the bare `<think>` the same
+    way, so the conductor's effort reaches a model whose template always opens the block."""
+    cond, _ = setup(decider=by_label("summarize", 0.88))
+    app.STATE["tok"] = AlwaysThinks()
+    msgs = [{"role": "user", "content": "Summarize the text below in five bullet points.\n\n"
+                                        + "The engine reads one sequence. " * 20}]
+    plan, ids, clean = turn(cond, body(msgs, tools=False))
+    tok = AlwaysThinks()
+    on, got = tok.decode(clean, skip_special_tokens=False), tok.decode(ids, skip_special_tokens=False)
+    assert on.endswith("assistant\n<think>"), repr(on[-40:])
+    assert plan.row["thinking"] == "off" and plan.in_think_after is False
+    assert got.endswith("assistant\n<think></think>"), repr(got[-40:])
+    assert "thinking_off:no_open_tail" not in plan.row["extra"].get("notes", [])
 
 
 if __name__ == "__main__":
