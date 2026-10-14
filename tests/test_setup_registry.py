@@ -32,7 +32,8 @@ The test matrix:
      GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
 
  13  LFM2.5's card is its runs' own numbers: per profile the disk size and commit of its Hugging Face
-     repository, the weights at load, the chat KL and top-1, every measured cell, and its profile file's
+     repository, the weights at load, the chat KL and top-1 (exllamav3's model_diff, the engine's own beside
+     it), every measured cell, and its profile file's
      size and revision equal measurements/0.8.3-summary.json   test_the_lfm25_card_is_the_raw_data
 
 Run: python tests/test_setup_registry.py
@@ -155,8 +156,9 @@ def test_the_lfm25_card_is_the_raw_data():
             continue
         assert d["hub"]["local_match"] and p["hf_repo"] == d["hub"]["repo"], pid   # the measured pack is the repo's
         assert p["hf_revision"] == d["hub"]["revision"] and p["disk_gb"] == round(d["hub"]["bytes"] / 1e9, 2), pid
-        q = d["quality"]["oasst1"]
+        q = d["model_diff"]["oasst1"]                       # exllamav3's model_diff on chat; the engine's own beside it
         assert p["quality"]["kl_vs_bf16"] == round(q["kl"], 4) and p["quality"]["top1_pct"] == q["top1_pct"], pid
+        assert f"top-1 {d['quality']['oasst1']['top1_pct']} %" in p["quality"]["source"], pid
         env = open(os.path.join(ROOT, "ops", "profiles", f"{pid}.env")).read()
         assert f"QSE_WEIGHTS_REVISION={d['hub']['revision']}\n" in env, pid
         assert f"QSE_WEIGHTS_GB={round(d['hub']['bytes'] / 1e9, 2)}\n" in env, pid

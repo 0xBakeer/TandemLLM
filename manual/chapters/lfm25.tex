@@ -31,23 +31,23 @@ The tokenizer is LiquidAI's own (128,000 ids). The lookup corpus and the suffix 
 
 \begin{table}[htbp]
 \centering\small
-\caption[The LFM2.5 profiles]{The LFM2.5 profiles, \measured{} 2026-10-14: the download, the weights on the device at load, the decode step from its graph (tok/s), chat through the server plain / with the lookup (tok/s), and against BF16 on 100 rows of oasst1 chat the KL divergence and the top-1 agreement (provisional, see the text).}\label{tab:lfm-profiles}
+\caption[The LFM2.5 profiles]{The LFM2.5 profiles, \measured{} 2026-10-14: the download, the weights on the device at load, the decode step from its graph (tok/s), chat through the server plain / with the lookup (tok/s), and against BF16 on oasst1 chat the KL divergence and the top-1 agreement (exllamav3's model_diff).}\label{tab:lfm-profiles}
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 \hd{profile} & \hd{disk} & \hd{weights} & \hd{step} & \hd{chat} & \hd{KL} & \hd{top-1} \\
 \midrule
-\code{lfm25-exl3-2.5} & 8.20~GB & 7.64~GiB & 188.2 & 185.4 / 175.6 & 0.336 & 78.7~\% \\
-\code{lfm25-exl3-3.0} & 9.68~GB & 9.4~GiB & 175.0 & 171.3 / 168.5 & 0.217 & 83.1~\% \\
-\code{lfm25-exl3-3.5} & 11.16~GB & 10.56~GiB & 153.5 & 150.9 / 143.7 & 0.151 & 86.1~\% \\
-\code{lfm25-exl3-4.0} & 12.64~GB & 12.06~GiB & 145.9 & 143.7 / 139.4 & 0.108 & 88.3~\% \\
-\code{lfm25-exl3-4.5} & 14.12~GB & 13.31~GiB & 128.8 & 128.2 / 124.7 & 0.070 & 90.6~\% \\
-\code{lfm25-exl3-6.0} & 18.63~GB & 17.37~GiB & 106.9 & 105.2 / 103.5 & 0.048 & 92.6~\% \\
+\code{lfm25-exl3-2.5} & 8.20~GB & 7.64~GiB & 188.2 & 185.4 / 175.6 & 0.313 & 78.9~\% \\
+\code{lfm25-exl3-3.0} & 9.68~GB & 9.4~GiB & 175.0 & 171.3 / 168.5 & 0.195 & 83.6~\% \\
+\code{lfm25-exl3-3.5} & 11.16~GB & 10.56~GiB & 153.5 & 150.9 / 143.7 & 0.136 & 86.7~\% \\
+\code{lfm25-exl3-4.0} & 12.64~GB & 12.06~GiB & 145.9 & 143.7 / 139.4 & 0.098 & 88.5~\% \\
+\code{lfm25-exl3-4.5} & 14.12~GB & 13.31~GiB & 128.8 & 128.2 / 124.7 & 0.063 & 91.2~\% \\
+\code{lfm25-exl3-6.0} & 18.63~GB & 17.37~GiB & 106.9 & 105.2 / 103.5 & 0.039 & 93.4~\% \\
 \code{lfm25-bf16} & 47.9~GB & 44.95~GiB & 44.8 & 44.5 / 43.3 & 0 & 100~\% \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers come from \code{tools/lfm_quality.py}: this engine on the pack against the BF16 checkpoint in the same process, KL(BF16 $\Vert$ pack) over the whole vocabulary, on 100 rows of 2,048 tokens each of oasst1 chat and of wikitext-2. They are provisional: they are high next to exllamav3 conversions of other models at the same rates, and whether the conversion recipe causes it is being checked. The two 4.0 calibrations differ on wikitext only (KL 0.176 against 0.189, a 95~\% interval of the difference of 0.002 to 0.024). The default stays \code{lfm25-exl3-4.0} until that check is in; the rule for the pick is the fastest profile in chat whose chat top-1 agreement is at least 85~\%, on these numbers 3.5.
+Every profile fits the Spark preset at the model's whole context: its KV is 2.5~GiB at 131,072 tokens. The quality numbers are exllamav3's model_diff against the BF16 checkpoint on 20 rows of 2,048 tokens of oasst1 chat; this engine's own comparison (\code{tools/lfm_quality.py}, 100 rows) agrees within 0.02. They are high next to exllamav3 conversions of other models at the same rates: the same recipe on the 8B sibling at 4.10 bits came within 0.01 of a reference conversion, so the 24B is harder at the same rate, for reasons not tested yet. The default is \code{lfm25-exl3-3.5}: the fastest profile in chat whose chat top-1 agreement is at least 85~\% (86.7~\% at 150.9~tok/s; 3.0 is faster at 83.6~\%).
 
 Below 4 bits a weight, exllamav3 1.6.0 gives some tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is $16K + 8$ int16 wide). In such a tile an odd weight takes one bit more than an even one, so weight $i$'s 16-bit window ends at bit $(i+1)K_a + \lfloor (i+1)/2 \rfloor$ of the tile's ring, $K_a$ the whole part of the rate. The engine's kernels decode these tiles as exllamav3 does, in the decode step, a verify block and the prefill.
 
@@ -102,6 +102,6 @@ The resident prefix and the state store keep the state through the adapter. A wa
 \section{What is not measured}
 
 \begin{itemize}
-\item Whether the conversion recipe raises the packs' KL, and with it the final default.
+\item Why the 24B loses more than its 8B sibling at the same rate.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}

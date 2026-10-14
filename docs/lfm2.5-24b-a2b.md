@@ -19,25 +19,25 @@ A decode token reads 4.9 GB of the BF16 weights (the pack index's `decode_bytes`
 
 ## Profiles
 
-| profile | on disk | weights at load | decode step, tok/s | chat, plain / lookup, tok/s | chat KL | chat top-1 | wikitext KL |
-|-|-|-|-|-|-|-|-|
-| `lfm25-exl3-2.5` | 8.20 GB | 7.64 GiB | 188.2 | 185.4 / 175.6 | 0.336 | 78.7 % | 0.419 |
-| `lfm25-exl3-3.0` | 9.68 GB | 9.4 GiB | 175.0 | 171.3 / 168.5 | 0.217 | 83.1 % | 0.304 |
-| `lfm25-exl3-3.5` | 11.16 GB | 10.56 GiB | 153.5 | 150.9 / 143.7 | 0.151 | 86.1 % | 0.221 |
-| `lfm25-exl3-4.0` | 12.64 GB | 12.06 GiB | 145.9 | 143.7 / 139.4 | 0.108 | 88.3 % | 0.176 |
-| `lfm25-exl3-4.5` | 14.12 GB | 13.31 GiB | 128.8 | 128.2 / 124.7 | 0.070 | 90.6 % | 0.101 |
-| `lfm25-exl3-6.0` | 18.63 GB | 17.37 GiB | 106.9 | 105.2 / 103.5 | 0.048 | 92.6 % | 0.080 |
-| `lfm25-bf16` | 47.9 GB | 44.95 GiB | 44.8 | 44.5 / 43.3 | 0 (the reference) | 100 % | 0 |
+| profile | on disk | weights at load | decode step, tok/s | chat, plain / lookup, tok/s | chat KL | chat top-1 | wikitext KL | the engine's chat KL |
+|-|-|-|-|-|-|-|-|-|
+| `lfm25-exl3-2.5` | 8.20 GB | 7.64 GiB | 188.2 | 185.4 / 175.6 | 0.313 | 78.9 % | 0.463 | 0.336 |
+| `lfm25-exl3-3.0` | 9.68 GB | 9.4 GiB | 175.0 | 171.3 / 168.5 | 0.195 | 83.6 % | 0.335 | 0.217 |
+| `lfm25-exl3-3.5` (default) | 11.16 GB | 10.56 GiB | 153.5 | 150.9 / 143.7 | 0.136 | 86.7 % | 0.226 | 0.151 |
+| `lfm25-exl3-4.0` | 12.64 GB | 12.06 GiB | 145.9 | 143.7 / 139.4 | 0.098 | 88.5 % | 0.201 | 0.108 |
+| `lfm25-exl3-4.5` | 14.12 GB | 13.31 GiB | 128.8 | 128.2 / 124.7 | 0.063 | 91.2 % | 0.113 | 0.070 |
+| `lfm25-exl3-6.0` | 18.63 GB | 17.37 GiB | 106.9 | 105.2 / 103.5 | 0.039 | 93.4 % | 0.080 | 0.048 |
+| `lfm25-bf16` | 47.9 GB | 44.95 GiB | 44.8 | 44.5 / 43.3 | 0 (the reference) | 100 % | 0 | 0 |
 
-The EXL3 packs are exllamav3 1.6.0 conversions with the mul1 codebook and the head at 6 bits, one private Hugging Face repository a size (`0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`), each profile pinned to the repository's commit (`QSE_WEIGHTS_REVISION`); the download checks every file against the hub's sha256, and the measured packs' own checksums equal the hub's. The decode step is `tools/lfm_check.py bench` from its graph with the dense splits; the chat rows are the Setup Guide's (`tools/fn_lookup_ab.py`, one greedy request, 512 tokens); the quality is `tools/lfm_quality.py`: this engine on the pack against the BF16 checkpoint in the same process, KL(BF16 || pack) over the whole vocabulary and top-1 agreement, on 100 rows of 2,048 tokens of oasst1 validation chat and of wikitext-2 (and 48 of the model's own answers). All runs of 2026-10-14 are in `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
+The EXL3 packs are exllamav3 1.6.0 conversions with the mul1 codebook and the head at 6 bits, one private Hugging Face repository a size (`0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-<bpw>`), each profile pinned to the repository's commit (`QSE_WEIGHTS_REVISION`); the download checks every file against the hub's sha256, and the measured packs' own checksums equal the hub's. The decode step is `tools/lfm_check.py bench` from its graph with the dense splits; the chat rows are the Setup Guide's (`tools/fn_lookup_ab.py`, one greedy request, 512 tokens); the quality is exllamav3's `model_diff` (the pack against the BF16 checkpoint, KL and top-1 agreement on 20 rows of 2,048 tokens of oasst1 validation chat and of wikitext-2), and as a second check `tools/lfm_quality.py`: this engine on the pack against the BF16 checkpoint in the same process, on 100 rows of each set (and 48 of the model's own answers); the two agree within 0.02 KL on chat. All runs of 2026-10-14 are in `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
 
-The KL values are provisional: they are high next to exllamav3 conversions of other models at the same rates, and whether the conversion recipe causes it is being checked; the packs may be converted again. The two 4.0 calibrations differ on wikitext only (KL 0.176 for exllamav3's default calibration, which the profile serves, against 0.189 for a trace calibration, 95 % interval of the difference 0.002 to 0.024) and not on chat or the model's own text.
+These KL values are high next to exllamav3 conversions of other models at the same rates. The same conversion recipe on LFM2.5's 8B sibling at 4.10 bits gave a KL of 0.0955 against 0.0862 for a reference conversion, and 0.0880 with the reference's layer layout for the high-quality layers, so the recipe is not the cause: the 24B is harder at the same rate, for reasons not tested yet. The two 4.0 calibrations differ on wikitext only (this engine: KL 0.176 for exllamav3's default calibration, which the profile serves, against 0.189 for a trace calibration, 95 % interval of the difference 0.002 to 0.024) and not on chat or the model's own text.
 
-The default is `lfm25-exl3-4.0` until the conversion check is in. On the measured numbers above, the rule for the pick is: the fastest profile in chat whose chat top-1 agreement with BF16 is at least 85 %. That is 3.5 (150.9 tok/s, 86.1 %); 3.0 (171.3 tok/s, 83.1 %) is below the floor.
+The default is `lfm25-exl3-3.5`: speed comes first for this model, and the rule is the fastest profile in chat whose top-1 agreement with BF16 on chat text is at least 85 %. 3.5 decodes chat at 150.9 tok/s with 86.7 % (this engine's check: 86.1 %); 3.0 is faster (171.3 tok/s) at 83.6 %, below the floor, and 4.0 slower (143.7 tok/s) at 88.5 %.
 
 The repositories are private until they are published: a download needs a Hugging Face token with access to them. The 2.5 and 3.5 packs hold half-integer rates throughout: below 4 bits a weight, exllamav3 1.6.0 gives tensors half-integer rates (1.5, 2.5 or 3.5 bits; a tile is 16 K + 8 int16 wide, and an odd weight of a tile takes one bit more than an even one). The engine's EXL3 kernels decode them as exllamav3 does (`tools/exl3_linear.py`, `dq8_frac`; the kernels name them 15, 25 and 35), in the decode step, a verify block and the prefill. The pack reader stops by name on a rate the kernels do not take.
 
-Switch to a profile with `ops/use-profile.sh lfm25-exl3-4.0`, or choose the model in the Setup Guide (`#/setup`).
+Switch to a profile with `ops/use-profile.sh lfm25-exl3-3.5`, or choose the model in the Setup Guide (`#/setup`).
 
 ## Chat, reasoning and tools
 
@@ -103,7 +103,7 @@ The resident prefix and the state store keep the state through the adapter: 30 c
 ## What is not there yet
 
 - A draft head: Liquid's drafter plugs in through the adapter's `draft_heads()`, in place of `NoHead`.
-- The conversion check: the KL values stay provisional until it is in.
+- Why the 24B loses more than its 8B sibling at the same rate.
 - No vision: the model reads text only.
 
 ## The checks

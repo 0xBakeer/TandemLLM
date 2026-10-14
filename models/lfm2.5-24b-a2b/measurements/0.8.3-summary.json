@@ -177,6 +177,30 @@
     "kl": 0.23988411792864403,
     "top1_pct": 83.42
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.46306422,
+    "top1_pct": 70.44,
+    "ppl_pack": 22.13787898,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-2.5.log"
+   },
+   "oasst1": {
+    "kl": 0.31279152,
+    "top1_pct": 78.87,
+    "ppl_pack": 7.67179841,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-2.5.log"
+   }
+  },
+  "convert": {
+   "bpw": "2.5",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c"
   }
  },
  "3.0": {
@@ -283,6 +307,30 @@
     "kl": 0.13886733849843344,
     "top1_pct": 87.33
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.33476696,
+    "top1_pct": 75.2,
+    "ppl_pack": 20.51300556,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-3.0.log"
+   },
+   "oasst1": {
+    "kl": 0.1945584,
+    "top1_pct": 83.6,
+    "ppl_pack": 7.51746891,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-3.0.log"
+   }
+  },
+  "convert": {
+   "bpw": "3.0",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c"
   }
  },
  "3.5": {
@@ -389,6 +437,31 @@
     "kl": 0.0901838040445,
     "top1_pct": 90.1
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.22563219,
+    "top1_pct": 79.04,
+    "ppl_pack": 20.78798755,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-3.5.log"
+   },
+   "oasst1": {
+    "kl": 0.1363606,
+    "top1_pct": 86.65,
+    "ppl_pack": 7.43844165,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-3.5.log"
+   }
+  },
+  "convert": {
+   "bpw": "3.5",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c",
+   "built_on": "HF Jobs"
   }
  },
  "4.0": {
@@ -494,6 +567,30 @@
     "kl": 0.061031135148368776,
     "top1_pct": 91.93
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.20104084,
+    "top1_pct": 80.73,
+    "ppl_pack": 19.57777004,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-4.0-defcal.log"
+   },
+   "oasst1": {
+    "kl": 0.09804273,
+    "top1_pct": 88.52,
+    "ppl_pack": 7.4954761,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-4.0-defcal.log"
+   }
+  },
+  "convert": {
+   "bpw": "4.0",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c"
   }
  },
  "4.5": {
@@ -600,6 +697,31 @@
     "kl": 0.037834958212139704,
     "top1_pct": 93.85
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.1130152,
+    "top1_pct": 85.43,
+    "ppl_pack": 21.29966021,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-4.5.log"
+   },
+   "oasst1": {
+    "kl": 0.06327293,
+    "top1_pct": 91.2,
+    "ppl_pack": 7.40746041,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-4.5.log"
+   }
+  },
+  "convert": {
+   "bpw": "4.5",
+   "head_bits": 6,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c",
+   "built_on": "HF Jobs"
   }
  },
  "6.0": {
@@ -707,6 +829,31 @@
     "kl": 0.022719642690693338,
     "top1_pct": 95.58
    }
+  },
+  "model_diff": {
+   "method": "exllamav3 eval/model_diff.py, the pack (A) against the BF16 checkpoint (B), 20 rows of 2,048 tokens",
+   "wikitext": {
+    "kl": 0.07956646,
+    "top1_pct": 88.25,
+    "ppl_pack": 21.00319861,
+    "ppl_bf16": 20.99609939,
+    "log": "model_diff-6.0.log"
+   },
+   "oasst1": {
+    "kl": 0.03940959,
+    "top1_pct": 93.39,
+    "ppl_pack": 7.43370265,
+    "ppl_bf16": 7.43122113,
+    "log": "model_diff-chat-6.0.log"
+   }
+  },
+  "convert": {
+   "bpw": "6.0",
+   "head_bits": 8,
+   "embed_bits": 16,
+   "calibration": "default",
+   "exllamav3": "1.6.0 @151539c",
+   "built_on": "HF Jobs"
   }
  },
  "4.0-tracecal": {
