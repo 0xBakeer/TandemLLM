@@ -12,6 +12,9 @@ migration never runs twice: a switch the owner removes after it ran stays remove
     2026-10-14-chat-app-memory   SRV-471: the chat-app profile's `memory` switch, "on" when the
                                  stored document has none (absent is off); an explicit value,
                                  "off" included, stays
+    2026-10-14-chat-memory       SRV-471: the same for the chat, coding and hermes profiles
+    2026-10-14-coding-memory
+    2026-10-14-hermes-memory
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import os
 STATE = "migrations.json"
 
 
-def _chat_app_memory(doc: dict) -> dict | None:
+def _memory_on(doc: dict) -> dict | None:
     if not isinstance(doc, dict) or "memory" in doc:
         return None
     return dict(doc, memory="on")
@@ -31,7 +34,10 @@ def _chat_app_memory(doc: dict) -> dict | None:
 
 # (id, kind, name, change)
 MIGRATIONS = [
-    ("2026-10-14-chat-app-memory", "profiles", "chat-app", _chat_app_memory),
+    ("2026-10-14-chat-app-memory", "profiles", "chat-app", _memory_on),
+    ("2026-10-14-chat-memory", "profiles", "chat", _memory_on),
+    ("2026-10-14-coding-memory", "profiles", "coding", _memory_on),
+    ("2026-10-14-hermes-memory", "profiles", "hermes", _memory_on),
 ]
 
 

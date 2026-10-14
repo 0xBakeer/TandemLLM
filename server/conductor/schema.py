@@ -1139,6 +1139,10 @@ SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router
 # 0.3.30 night pass: with the voice and the shadow both on, their one share of Qwen's time
 # (narrator.Share) at 3 % cost Qwen's decode 3.34 %, at 2.5 % 2.79 %; coding runs both
 SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], live={"share": 0.025})
+# SRV-471: the memory notes in the interactive profiles, set and not left absent (absent is off);
+# `general` serves scripts and SDK clients and keeps the release's request
+for _n in ("chat", "coding", "hermes"):
+    SHIPPED_PROFILES[_n]["memory"] = "on"
 # SRV-351 (plan note Chat 7): the Chat tab's agent loop (chatd, client kind `chat-app`) is
 # coding's policy without the state lines: the chat shows the harness's choices from the usage
 # frame, not as text in the answer. Open WebUI's status events go only to QWEN38_STATUS_CLIENTS'

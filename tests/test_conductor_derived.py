@@ -8,12 +8,16 @@ The test matrix (SRV-471's Gherkin, rows 4 and 5; rows 1 to 3 are in test_memory
                                                 test_derived_profiles_keep_the_parents_switches
   2  a switch the parent gains that the derived profile misses is caught
                                                 test_a_switch_the_parent_gains_is_caught
-  3  `general` keeps no memory switch (scripts and SDK clients: the release's request)
+  3  `general` keeps no memory switch (scripts and SDK clients: the release's request); chat,
+     coding and hermes ship memory "on" explicitly
                                                 test_general_has_no_memory_switch
   4  a stored chat-app document without the key: a new version with memory "on", journaled,
      run once; an explicit "off" stays; one that has it (the live box's v2) is left alone;
      no stored version: nothing written; a read-only store: nothing run
                                                 test_the_migration_*
+  5  the same for stored chat, coding and hermes documents; a box whose chat, coding and
+     chat-app have the switch changes only hermes, and general is never touched
+                                                test_the_profile_migrations_on_a_live_box
 
 Run: python tests/test_conductor_derived.py
 """
@@ -32,6 +36,7 @@ from server.conductor import migrations, schema  # noqa: E402
 from server.conductor.store import Store  # noqa: E402
 
 MID = "2026-10-14-chat-app-memory"
+ONLY_CHAT_APP = [m for m in migrations.MIGRATIONS if m[0] == MID]
 
 
 def drift(profiles: dict, derived: dict) -> list[str]:
@@ -79,6 +84,8 @@ def test_a_switch_the_parent_gains_is_caught():
 def test_general_has_no_memory_switch():
     assert "memory" not in schema.SHIPPED_PROFILES["general"]
     assert schema.profile_memory(schema.SHIPPED_PROFILES["general"]) == "off"
+    for name in ("chat", "coding", "hermes", "chat-app"):
+        assert schema.SHIPPED_PROFILES[name]["memory"] == "on", name
 
 
 # ---------------------------------------------------------------------- the migration
@@ -110,7 +117,7 @@ def _box(memory=...):
 def test_the_migration_adds_memory_on_once_and_journals_it():
     st = _box()
     j = _Journal()
-    got = migrations.run(st, j)
+    got = migrations.run(st, j, ONLY_CHAT_APP)
     assert got == [{"id": MID, "kind": "profiles", "name": "chat-app", "result": "changed",
                     "version": 2}]
     v, doc = st.get("profiles", "chat-app")
@@ -124,13 +131,13 @@ def test_the_migration_adds_memory_on_once_and_journals_it():
     # run once: the owner removes the switch afterwards, the next start leaves it removed
     doc.pop("memory")
     st.put("profiles", "chat-app", doc, note="memory as before", author="owner")
-    assert migrations.run(st, j) == [] and "memory" not in st.get("profiles", "chat-app")[1]
+    assert migrations.run(st, j, ONLY_CHAT_APP) == [] and "memory" not in st.get("profiles", "chat-app")[1]
 
 
 def test_the_migration_keeps_an_explicit_off_and_the_live_boxs_on():
     for value in ("off", "on", "shadow"):
         st = _box(memory=value)
-        got = migrations.run(st)
+        got = migrations.run(st, migrations=ONLY_CHAT_APP)
         assert got[0]["result"] == "unchanged" and got[0]["version"] == 1, (value, got)
         v, doc = st.get("profiles", "chat-app")
         assert (v, doc["memory"]) == (1, value)
@@ -139,8 +146,8 @@ def test_the_migration_keeps_an_explicit_off_and_the_live_boxs_on():
 def test_the_migration_writes_nothing_without_a_stored_version():
     st = Store(tempfile.mkdtemp(prefix="cond-mig-"))
     got = migrations.run(st)
-    assert got[0]["result"] == "absent" and not os.path.isdir(os.path.join(st.root, "profiles",
-                                                                             "chat-app"))
+    assert [r["result"] for r in got] == ["absent"] * len(migrations.MIGRATIONS)
+    assert not os.path.isdir(os.path.join(st.root, "profiles"))
     assert migrations.run(st) == []
 
 
@@ -153,10 +160,36 @@ def test_the_migration_passes_an_offline_role_and_skips_a_read_only_store():
     up, st.roles_up = st.roles_up, None
     st.put("profiles", "chat-app", doc, note="act", author="test")
     st.roles_up = up
-    assert migrations.run(st)[0]["result"] == "changed"
+    assert migrations.run(st, migrations=ONLY_CHAT_APP)[0]["result"] == "changed"
     assert st.roles_up is up
     ro = Store(_box().root, readonly=True)
     assert migrations.run(ro) == []
+
+
+def test_the_profile_migrations_on_a_live_box():
+    """The shape of a box that has run the Chat tab since 0.8.0: chat, coding and chat-app were
+    given the switch by hand, hermes and general were stored as shipped before it."""
+    st = Store(tempfile.mkdtemp(prefix="cond-mig-"))
+    for name in ("chat", "coding", "chat-app", "hermes", "general"):
+        doc = copy.deepcopy(schema.SHIPPED_PROFILES[name])
+        doc.pop("memory", None)
+        if name in ("chat", "coding", "chat-app"):
+            doc["memory"] = "on"
+        st.put("profiles", name, doc, note="as stored", author="test")
+    j = _Journal()
+    got = {r["name"]: (r["result"], r["version"]) for r in migrations.run(st, j)}
+    assert got == {"chat-app": ("unchanged", 1), "chat": ("unchanged", 1),
+                   "coding": ("unchanged", 1), "hermes": ("changed", 2)}
+    assert st.get("profiles", "hermes")[1]["memory"] == "on"
+    assert st.get("profiles", "general")[0] == 1 and "memory" not in st.get("profiles",
+                                                                            "general")[1]
+    assert len(j.rows) == 4 and migrations.run(st, j) == []
+    # an explicit off in a stored coding document stays
+    st = Store(tempfile.mkdtemp(prefix="cond-mig-"))
+    st.put("profiles", "coding", dict(copy.deepcopy(schema.SHIPPED_PROFILES["coding"]),
+                                      memory="off"), note="off", author="owner")
+    rec = [r for r in migrations.run(st) if r["name"] == "coding"][0]
+    assert rec["result"] == "unchanged" and st.get("profiles", "coding")[1]["memory"] == "off"
 
 
 def test_a_failed_migration_runs_again_next_start():
