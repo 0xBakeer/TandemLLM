@@ -19,7 +19,9 @@ is checked before anything is connected:
 This replaces the plan's nftables rule for the `tandem-sbx` user (that needs root, which this box's
 chatd does not have): the container cannot open a socket to anything but its own loopback, which is
 stricter than a rule that drops what it sends. `fetch()` is the same check for chatd's own
-web_fetch tool. Logs carry counts, never a host or a path.
+web_fetch tool. `request()` is the general form: a host list (only those hosts, redirects
+included), and for a host on that list the user configured (a SearXNG instance), a private address
+allowed. Logs carry counts, never a host or a path.
 """
 
 from __future__ import annotations
@@ -51,8 +53,9 @@ def allowed(addr: str) -> bool:
     return ip.is_global and not ip.is_multicast and not ip.is_reserved
 
 
-def resolve(host: str, port: int) -> list[tuple]:
-    """The addresses to connect to, every one checked; Refused when any is not public."""
+def resolve(host: str, port: int, private_ok: bool = False) -> list[tuple]:
+    """The addresses to connect to, every one checked; Refused when any is not public (unless
+    `private_ok`: a host the user named, such as their own SearXNG instance)."""
     if not host or port <= 0 or port > 65535:
         raise Refused("bad host or port")
     try:
@@ -62,17 +65,18 @@ def resolve(host: str, port: int) -> list[tuple]:
     if not infos:
         raise Refused(f"cannot resolve {host}")
     for fam, _, _, _, sa in infos:
-        if not allowed(sa[0]):
+        if not private_ok and not allowed(sa[0]):
             raise Refused(f"{host} is a local network address; only the public internet is "
                           f"reachable")
     return infos
 
 
-def connect(host: str, port: int) -> socket.socket:
+def connect(host: str, port: int, private_ok: bool = False,
+            timeout: float = CONNECT_TIMEOUT_S) -> socket.socket:
     last = None
-    for fam, typ, proto, _, sa in resolve(host, port):
+    for fam, typ, proto, _, sa in resolve(host, port, private_ok):
         s = socket.socket(fam, typ, proto)
-        s.settimeout(CONNECT_TIMEOUT_S)
+        s.settimeout(timeout)
         try:
             s.connect(sa)
             s.settimeout(None)
@@ -83,32 +87,61 @@ def connect(host: str, port: int) -> socket.socket:
     raise Refused(f"cannot connect to {host}:{port} ({type(last).__name__})")
 
 
-def fetch(url: str, max_bytes: int = MAX_FETCH, redirects: int = 5) -> tuple[int, str, bytes]:
-    """GET a public URL with the same check (web_fetch); redirects are checked again."""
+def _hostport(u: urllib.parse.SplitResult) -> tuple[str, int]:
+    return (u.hostname or "").lower(), u.port or (443 if u.scheme == "https" else 80)
+
+
+def request(url: str, *, method: str = "GET", body: bytes | None = None,
+            headers: dict | None = None, hosts: set | frozenset | None = None,
+            private_ok: bool = False, timeout: float = 30.0, max_bytes: int = MAX_FETCH,
+            redirects: int = 5) -> tuple[int, str, bytes]:
+    """One HTTP request through the check: (status, content type, body). `hosts`: the only
+    `host` or `host:port` names it may reach, redirects checked again; None: any public host.
+    `private_ok` (with `hosts` only): those hosts may resolve to a private address."""
+    private_ok = private_ok and hosts is not None
     for _ in range(redirects + 1):
         u = urllib.parse.urlsplit(url)
         if u.scheme not in ("http", "https") or not u.hostname:
             raise Refused("only http and https URLs")
-        port = u.port or (443 if u.scheme == "https" else 80)
-        sock = connect(u.hostname, port)
-        if u.scheme == "https":
-            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=u.hostname)
-        sock.settimeout(30)
-        conn = http.client.HTTPConnection(u.hostname, port)
-        conn.sock = sock
-        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        host, port = _hostport(u)
+        if hosts is not None and host not in hosts and f"{host}:{port}" not in hosts:
+            raise Refused(f"{host} is not a host this request may reach")
+        sock = connect(u.hostname, port, private_ok, min(CONNECT_TIMEOUT_S, timeout))
         try:
-            conn.request("GET", path, headers={"User-Agent": "TandemLLM-chat/0.1 (web_fetch)",
-                                               "Accept": "text/html,text/plain,*/*;q=0.8"})
+            if u.scheme == "https":
+                ctx = ssl.create_default_context()
+                ctx.set_alpn_protocols(["http/1.1"])          # as http.client offers it
+                sock = ctx.wrap_socket(sock, server_hostname=u.hostname)
+            sock.settimeout(timeout)
+            conn = http.client.HTTPConnection(u.hostname, port)
+            conn.sock = sock
+            path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+            conn.request(method, path, body=body, headers=headers or {})
             r = conn.getresponse()
             if r.status in (301, 302, 303, 307, 308) and r.getheader("Location"):
                 url = urllib.parse.urljoin(url, r.getheader("Location"))
+                if r.status in (301, 302, 303):
+                    method, body = "GET", None
                 continue
-            body = r.read(max_bytes)
-            return r.status, (r.getheader("Content-Type") or "").split(";")[0], body
+            data = r.read(max_bytes)
+            return r.status, (r.getheader("Content-Type") or "").split(";")[0], data
+        except (TimeoutError, socket.timeout):
+            raise Refused(f"no answer from {host} within {timeout:g} s") from None
+        except ssl.SSLError as exc:
+            raise Refused(f"TLS with {host} failed ({exc.reason or type(exc).__name__})") from None
+        except (OSError, http.client.HTTPException) as exc:
+            # a reset in the handshake or mid-answer (a rate limit can look like this)
+            raise Refused(f"the connection to {host} failed ({type(exc).__name__})") from None
         finally:
-            conn.close()
+            sock.close()
     raise Refused("too many redirects")
+
+
+def fetch(url: str, max_bytes: int = MAX_FETCH, redirects: int = 5) -> tuple[int, str, bytes]:
+    """GET a public URL with the same check (web_fetch); redirects are checked again."""
+    return request(url, headers={"User-Agent": "TandemLLM-chat/0.1 (web_fetch)",
+                                 "Accept": "text/html,text/plain,*/*;q=0.8"},
+                   max_bytes=max_bytes, redirects=redirects)
 
 
 class Proxy:

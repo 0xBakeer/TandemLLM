@@ -1190,6 +1190,25 @@
         "on"
       ]
     },
+    "sampling": {
+      "type": "object",
+      "properties": {
+        "agentic_default": {
+          "enum": [
+            "greedy",
+            "card"
+          ]
+        },
+        "loop_escape": {
+          "enum": [
+            "off",
+            "on"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "shadow": {
       "type": "object",
       "properties": {

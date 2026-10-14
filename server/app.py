@@ -105,6 +105,7 @@ from server.conductor import shadow as shadow_mod  # noqa: E402
 from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
+from server.conductor import loopescape as loopescape_mod  # noqa: E402
 from server.conductor.classify import USER_AGENT as CLASSIFY_UA  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
@@ -3844,6 +3845,9 @@ def _shadow_loop() -> None:
 # an idle window soon after the start, when no other model is loading and some profile has the
 # shadow on; once it has loaded, the first turn's start and the release's reload are as before.
 SHADOW_PRELOAD_S = 20.0
+# VIS-153: a failed shadow load (its weights not on the box yet, a load error) is tried again in an
+# idle window once this long has passed since it failed; before, `failed` stayed until a restart
+SHADOW_RETRY_S = 300.0
 
 
 def _shadow_profiles_on() -> bool:
@@ -3870,7 +3874,9 @@ def shadow_preload_once() -> str | None:
     narr = STATE.get("narrator")
     if narr is not None and slot is getattr(narr, "slot", None):
         return None                             # the narrator's slot: its keeper loads it
-    if getattr(slot, "loads", 0) or slot.state != "not_loaded":
+    since = slot.failed_for() if hasattr(slot, "failed_for") else None
+    retry = since is not None and since >= SHADOW_RETRY_S
+    if not retry and (getattr(slot, "loads", 0) or slot.state != "not_loaded"):
         return None                             # loaded once already, or a load in its course
     if getattr(slot, "memory_hold", False):
         return None                             # out for memory: the role governor reloads it
@@ -3881,6 +3887,10 @@ def shadow_preload_once() -> str | None:
         return None
     if not _shadow_profiles_on():
         return None
+    if retry and slot.reset_failed():
+        print(f"[shadow] {slot.model.name}: the load failed {since:.0f} s ago ({slot.error}); "
+              f"trying again", flush=True)
+        STATE["shadow_preload"] = None
     why = slot.ensure()
     got = "loading" if why == "loading" else "refused" if why == "refused" else why
     if got != STATE.get("shadow_preload"):
@@ -4225,9 +4235,11 @@ def roles_report() -> dict:
     out = {"dynamic": False, "roles": {}}
     nar, svc, reg = (dict.get(STATE, k) for k in ("narrator", "shadow", "deciders"))
     if svc is not None and getattr(svc, "slot", None) is not getattr(nar, "slot", None):
-        out["roles"]["shadow"] = {"models": [svc.slot.model.name], "state": svc.slot.state}
+        out["roles"]["shadow"] = {"models": [svc.slot.model.name], "state": svc.slot.state,
+                                  **rolemem.slot_detail(svc.slot)}
     if nar is not None:
-        out["roles"]["narrator"] = {"models": [nar.slot.model.name], "state": nar.slot.state}
+        out["roles"]["narrator"] = {"models": [nar.slot.model.name], "state": nar.slot.state,
+                                    **rolemem.slot_detail(nar.slot)}
     if reg is not None:
         out["roles"]["laya"] = {"models": reg.loaded(), "state": "loaded" if reg.ready()
                                 else "not_loaded"}
@@ -4805,9 +4817,27 @@ def _harness_of(plan) -> dict | None:
         for name in span[3]:
             if name not in names:
                 names.append(name)
-    return {"class": row.get("class_id"), "effort": row.get("effort"),
-            "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
-                         for n in names]}
+    out = {"class": row.get("class_id"), "effort": row.get("effort"),
+           "packages": [{"name": n, "tokens": _package_tokens(n, texts.get(n), shas.get(n))}
+                        for n in names]}
+    out["memory"] = _memory_part((row.get("extra") or {}).get("memory"))
+    return out
+
+
+def _memory_part(info) -> dict:
+    """SRV-471, `harness.memory`: the memory notes' part of the turn for the Context panel, from
+    the decision row's `extra.memory`: the mode and why it is off, the index's notes and tokens,
+    the bodies sent with the message and their tokens, the card's tokens. A row without it (the
+    profile has no memory switch: the release's request) is off, why `unset`; an engine before
+    SRV-471 sends no `memory` key at all."""
+    if not isinstance(info, dict) or not info.get("mode"):
+        info = {"mode": "off", "why": "unset"}
+    idx = info.get("index") or {}
+    bodies = info.get("bodies") or []
+    return {"mode": info["mode"], "why": info.get("why"),
+            "index_notes": int(idx.get("notes") or 0), "index_tokens": int(idx.get("tokens") or 0),
+            "bodies": len(bodies), "body_tokens": int(info.get("body_tokens") or 0),
+            "card_tokens": int(info.get("card_tokens") or 0)}
 
 
 #: (package name, text hash) -> tokens, for the packages a replayed note holds
@@ -4937,7 +4967,8 @@ def _system() -> dict:
                    if STATE.get("drafter") is not None else None,
                    "tree": bool(STATE.get("tree")),
                    "reasoning_format": STATE.get("reasoning_format"),
-                   "reasoning_effort": STATE.get("reasoning_effort"),
+                   "reasoning_effort": STATE.get("reasoning_effort")
+                   or ("off" if STATE.get("thinking_default") == "off" else None),
                    "status": _live()["status"]},
         "flags": {"args": dashboard_api.redact_args(STATE.get("args") or {}),
                   "env": dashboard_api.redact_env(dict(os.environ))},
@@ -5834,7 +5865,13 @@ class Handler(BaseHTTPRequestHandler):
                              # SRV-241: what a regenerate samples with, and how many there were
                              "regenerate": (STATE["regenerate"].report()
                                             if STATE.get("regenerate") is not None
-                                            else {"mode": "off"})},
+                                            else {"mode": "off"}),
+                             # SRV-475: the checkpoint's sampling and the loop escape's counts
+                             "card": STATE.get("card_sampling"),
+                             "loop_escape": (STATE["escapes"].report()
+                                             if STATE.get("escapes") is not None else None),
+                             # SRV-477: `--reasoning-effort none|off` turns thinking off
+                             "thinking_default": STATE.get("thinking_default", "on")},
                 "penalty": {"rep": STATE["pen_spec"].rep,
                             "presence": STATE["pen_spec"].presence,
                             "freq": STATE["pen_spec"].freq,
@@ -6100,6 +6137,71 @@ class Handler(BaseHTTPRequestHandler):
         with logbuf.serving(body):
             return self._complete_logged(body, path)
 
+    def _loop_escape(self, body: dict, plan, rec, sampler, cid: str):
+        """SRV-475: this request's sampling under the profile's `sampling` section. While the
+        session repeats one call (loopescape.signal) and the escape is on, the model card's
+        sampling with a fresh seed and C3's escape note (`rec.loop_escape`, for SP4); with
+        `agentic_default: card`, the card's sampling on every such turn. A client that names any
+        sampling parameter keeps its own. Journaled in the decision row (`loop_escape`, from which
+        turn, back at which turn; `sampling`) and in the usage frame (`tandem.sampling`).
+        Returns the sampler the request decodes with."""
+        prof = loopescape_mod.profile_sampling(plan.res.doc)
+        msgs = body.get("messages") or []
+        st = None
+        if prof["loop_escape"] == "on":
+            mon = STATE.get("monitor")
+            pol = STATE["conductor"].monitor_policy(plan, mon.policy if mon else None) \
+                if mon is not None else None
+            c3 = pol.tasks.get("C3") if pol is not None else None
+            repeats = int(c3["repeats"]) if c3 is not None else loopescape_mod.REPEATS
+            wait_s = float(c3.get("wait_s", 0.0) or 0.0) if c3 is not None \
+                else loopescape_mod.WAIT_S
+            key = (plan.session.key if plan.session is not None
+                   else regenerate_mod.session_of(body, self.headers))
+            sess = mon.sessions.get(key) if mon is not None else None
+            sig = loopescape_mod.signal(msgs, loopescape_mod.waits_now(sess, msgs, time.time()),
+                                        repeats=repeats, wait_s=wait_s)
+            st = STATE["escapes"].step(key, sig, loopescape_mod.turn_of(msgs))
+        mode = ("loop_escape" if st is not None and st["state"] == "on"
+                else "card" if prof["agentic_default"] == "card" else None)
+        if st is None and mode is None:
+            return sampler
+        info = dict(st or {})
+        if mode is not None:
+            info["mode"] = mode
+            if regenerate_mod.client_sampling(body):
+                info["client_params"] = True           # the client's own sampling, as sent
+            else:
+                regen = STATE.get("regenerate")
+                fallback = ({"temperature": regen.temperature, "top_p": regen.top_p,
+                             "top_k": regen.top_k} if regen is not None else None)
+                sp = loopescape_mod.sampling_of(STATE.get("card_sampling"), fallback)
+                if sp is None:
+                    info["no_sampling"] = True         # no card and no regenerate settings
+                else:
+                    sampler = Sampler(temperature=sp["temperature"], top_p=sp["top_p"],
+                                      top_k=sp["top_k"], seed=sp["seed"],
+                                      draft_temperature=sampler.draft_temperature)
+                    rec.temperature = sampler.temperature
+                    rec.sampling = mode
+                    info.update(sp)
+        if st is not None and st["state"] == "on":
+            rec.loop_escape = info                     # SP4: C3's escape note
+        rec.sampling_detail = {k: info.get(k) for k in (
+            "mode", "state", "why", "name", "since_turn", "turn", "back_at_turn", "temperature",
+            "top_p", "top_k", "seed", "source", "client_params") if info.get(k) is not None}
+        if plan.row is not None:
+            plan.row["extra"]["loop_escape" if st is not None else "sampling"] = info
+        print(f"[loop-escape] {cid} " + (
+            f"{st['state']} ({st['why']} {st['name']}, since turn {st['since_turn']}"
+            + (f", back at turn {st['back_at_turn']})" if st["state"] == "back" else ")")
+            if st is not None else "agentic default")
+            + (f": temperature {sampler.temperature} top_p {sampler.top_p} top_k {sampler.top_k} "
+               f"seed {sampler.seed}" if rec.sampling == mode and mode is not None
+               else ": the client's sampling, as sent" if info.get("client_params") else ""),
+            flush=True)
+        return sampler
+
     def _memory_user(self, rec) -> str | None:
         """Whose memory a request reads and writes (2026-10-05): the proxy key's label for a
         request the in-process proxy let in; `X-Tandem-User` from a trusted proxy address
@@ -6249,6 +6351,10 @@ class Handler(BaseHTTPRequestHandler):
             compat.request_shape(body, chat)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
+        # SRV-477: `--reasoning-effort none|off`, thinking off for a request that says nothing
+        # about thinking (one that does keeps what it says)
+        if chat and STATE.get("thinking_default") == "off":
+            body = thinking_mod.server_default_off(body)
         # TandemLLM's state lines that a client sends back in its earlier reasoning are taken out
         # before anything reads the messages (server/conductor/states.py): Qwen never sees them,
         # and the prompt is the one the request would have without them
@@ -6482,6 +6588,16 @@ class Handler(BaseHTTPRequestHandler):
                       + (f"temperature {sampler.temperature} top_p {sampler.top_p} "
                          f"top_k {sampler.top_k} seed {sampler.seed}" if rd.sample
                          else "the client's sampling, as sent"), flush=True)
+        # SRV-475: the loop escape and the profile's `sampling.agentic_default`
+        # (server/conductor/loopescape.py), on a turn that offers tools under an active plan;
+        # raw, bench, side requests, compactions and a regenerate are never looked at
+        if (STATE.get("escapes") is not None and chat and plan is not None and plan.active
+                and plan.side is None and not getattr(plan, "compaction", False)
+                and body.get("tools") and rec.sampling is None):
+            try:
+                sampler = self._loop_escape(body, plan, rec, sampler, cid)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()             # a bug here serves the request as sent
         if rec.sampling is None and sampler.on:
             rec.sampling = "client"
         # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
@@ -7141,6 +7257,8 @@ class Handler(BaseHTTPRequestHandler):
                     sup.evidence = (plan.outcome["so"]["evaluate"],
                                     conductor_outcomes.evidence_text(plan.outcome))
                 sup.memo["client_thinking_off"] = bool(client.off)
+                if getattr(rec, "loop_escape", None):
+                    sup.memo["loop_escape"] = rec.loop_escape       # SRV-475: the escape note
                 acts = sup.at_request(req_ev)
                 if sup.final_answer:
                     # A1's give-up after the retries (server/argloop.py): this answer is the
@@ -8617,10 +8735,14 @@ def parser() -> argparse.ArgumentParser:
                          "closes early enough to leave them. auto = min(2048, a quarter of the "
                          "limit), 0 = none (QSE_ANSWER_RESERVE). A request that asks for no "
                          "budget is never touched")
-    ap.add_argument("--reasoning-effort", default=None, choices=("low", "medium", "xhigh"),
+    ap.add_argument("--reasoning-effort", default=None,
+                    choices=("none", "off", "low", "medium", "xhigh"),
                     help="default `reasoning_effort` for the chat template. The template's own "
                          "default is xhigh, which is a paragraph asking the model to validate "
-                         "assumptions and weigh alternatives before answering")
+                         "assumptions and weigh alternatives before answering. `none` or `off`: "
+                         "thinking off for a request that says nothing about thinking (no switch, "
+                         "effort word or budget in any shape), as `reasoning_effort: none` in the "
+                         "body does")
     ap.add_argument("--cache-budget-gb", type=float, default=2.0,
                     help="RAM budget for the state cache, in GiB (CACHE_GB). One snapshot is the "
                          "48 recurrent states (~150 MB on this model, whatever the prefix length) "
@@ -9046,9 +9168,18 @@ def conductor_root(a) -> str | None:
     return val
 
 
+def _thinking_default(a) -> None:
+    """SRV-477: `--reasoning-effort none|off` is a server default of thinking off
+    (`a.thinking_default`); the template gets no effort word then."""
+    a.thinking_default = "off" if a.reasoning_effort in ("none", "off") else "on"
+    if a.thinking_default == "off":
+        a.reasoning_effort = None
+
+
 def main() -> None:
     ap = parser()
     a = ap.parse_args()
+    _thinking_default(a)
     # argparse does not check a default against `choices`, and a typo in QSE_DASHBOARD_LOGIN
     # ("true", "ON") must not quietly decide who reads the dashboard
     if a.dashboard_login not in ("on", "off"):
@@ -9311,6 +9442,11 @@ def _load(a) -> None:
     cfg_eos = None
     if os.path.isfile(gen_cfg):
         cfg_eos = json.load(open(gen_cfg)).get("eos_token_id")
+    # SRV-475: the checkpoint's own sampling, what the loop escape and `agentic_default: card`
+    # decode with (none: the regenerate's settings)
+    STATE["card_sampling"] = loopescape_mod.card_sampling(m["path"])
+    print(f"[sampling] the card's: {STATE['card_sampling'] or 'none (generation_config.json)'}",
+          flush=True)
     rcache = (cache.ResponseCache(int(a.response_cache_mb * (1 << 20)), a.response_cache_ttl)
               if a.response_cache else None)
     if eng.caps.caches:
@@ -9900,6 +10036,7 @@ def _serve(a, led) -> None:
     """What every server does once its engine is loaded, the real one or the fake one."""
     STATE.update(identity())
     STATE["args"] = vars(a)
+    STATE["thinking_default"] = getattr(a, "thinking_default", "on")     # SRV-477
     # The side lane (server/preempt.py); the fake engine brings its own runner
     side = getattr(a, "side_lane", "off")
     STATE["lane"] = (preempt.Lane(STATE.get("lane_run") or _lane_run, room=_lane_room,
@@ -9920,6 +10057,8 @@ def _serve(a, led) -> None:
     STATE["regenerate"] = (regenerate_mod.Regenerates(
         a.regenerate, a.regenerate_temperature, a.regenerate_top_p, a.regenerate_top_k)
         if a.regenerate != "off" else None)
+    # SRV-475: the loop escape's sessions (the card's sampling is read with the weights)
+    STATE["escapes"] = loopescape_mod.Escapes()
     STATE["dashboard_dir"] = a.dashboard_dir
     STATE["live_hz"] = live_mod.hz_from_env(os.environ.get("QSE_LIVE_HZ"))
     STATE["live_activity"] = getattr(a, "live_activity", "on") == "on" and STATE["live_hz"] > 0
@@ -9994,6 +10133,9 @@ def _serve(a, led) -> None:
                 f.write(f"{n} rows copied into {journal.path} on {time.ctime()}\n")
             print(f"[conductor] journal: {n} rows imported from {legacy}", flush=True)
         cond.router.session_tokens = STATE["session_tokens"]
+        # stored documents a fix must reach (a shipped default reaches only a box without one)
+        from server.conductor import migrations as cond_migrations
+        cond_migrations.run(cond.store, cond.journal)
         st = cond.store.status()["documents"]
         print(f"[conductor] on: {cond.root} (router v{st['router']['version']}, "
               f"{len(cond.store.names())} profiles); model TandemLLM, {STATE['model']} a hidden "

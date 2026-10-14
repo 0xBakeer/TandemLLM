@@ -44,6 +44,8 @@ from server.conductor.states import CHANNELS as STATE_CHANNELS, KINDS as STATE_K
 from server.conductor.voice import DEFAULTS as VOICE_DEFAULTS
 
 MODES3 = ("off", "shadow", "on")            # a routing decision type
+# SRV-475: how a profile's agent turns sample when the client names no sampling
+AGENTIC_SAMPLING = ("greedy", "card")
 TASK_MODES = ("off", "shadow", "act")       # a session-monitor task (SRV-109 wording)
 PROFILE_MODES = ("raw", "shadow", "on")     # the profile's master switch
 EFFORTS = ("off", "low", "medium", "high", "xhigh")
@@ -1139,6 +1141,22 @@ SHIPPED_PROFILES["coding"]["shadow"] = {"mode": "on", "narrator": "off", "router
 # 0.3.30 night pass: with the voice and the shadow both on, their one share of Qwen's time
 # (narrator.Share) at 3 % cost Qwen's decode 3.34 %, at 2.5 % 2.79 %; coding runs both
 SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], live={"share": 0.025})
+# SRV-471: the memory notes in the interactive profiles, set and not left absent (absent is off);
+# `general` serves scripts and SDK clients and keeps the release's request
+for _n in ("chat", "coding", "hermes"):
+    SHIPPED_PROFILES[_n]["memory"] = "on"
+# SRV-473: the same-call guard (C3, `toolgate.same_call`) on in every profile that serves an agent
+# loop; it holds calls only on a request whose turn already ends with the repeated call, so every
+# other turn streams as before. `general` (scripts, SDK clients) keeps the release's request. Open
+# WebUI's tool loop (chat) gets C3 acting too
+# SRV-475: the loop escape there as well: after a repeat the session samples with the model card's
+# settings until it makes progress; every agentic turn stays greedy (`agentic_default`) until an A/B
+for _n in ("chat", "coding", "hermes", "overnight"):
+    SHIPPED_PROFILES[_n]["toolgate"]["same_call"] = True
+    SHIPPED_PROFILES[_n]["sampling"] = {"agentic_default": "greedy", "loop_escape": "on"}
+SHIPPED_PROFILES["chat"]["tasks"]["C3"]["mode"] = "act"
+SHIPPED_PROFILES["chat"]["description"] = ("Open WebUI and the Playground: class-aware effort, the "
+                                           "same-call guard.")
 # SRV-351 (plan note Chat 7): the Chat tab's agent loop (chatd, client kind `chat-app`) is
 # coding's policy without the state lines: the chat shows the harness's choices from the usage
 # frame, not as text in the answer. Open WebUI's status events go only to QWEN38_STATUS_CLIENTS'
@@ -1147,8 +1165,18 @@ SHIPPED_PROFILES["chat-app"] = copy.deepcopy(SHIPPED_PROFILES["coding"])
 SHIPPED_PROFILES["chat-app"].update(
     description="The Chat tab's agent loop (chatd): coding's routing, tasks and packages, no "
                 "state lines in the answer.",
-    clients=["chat-app"], ui={"states": "off", "states_channel": "content"})
+    clients=["chat-app"], ui={"states": "off", "states_channel": "content"},
+    # SRV-471: the memory notes, set here and not inherited (absent is off, and the Chat tab ran
+    # without them while Open WebUI and opencode had them)
+    memory="on")
 del _n
+# A shipped profile derived from another: its parent and the top-level keys it sets itself. Every
+# other top-level key is the parent's (tests/test_conductor_derived.py), so a switch the parent
+# gains cannot miss the derived profile again. `general` is no derived profile: it serves scripts
+# and SDK clients, whose requests stay the release's (memory absent, off)
+DERIVED_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "chat-app": ("coding", ("description", "clients", "ui", "memory")),
+}
 
 
 def monitor_seed(path: str | None = None) -> dict:
@@ -1719,6 +1747,12 @@ SCHEMAS: dict[str, dict] = {
         "library": {"enum": list(MODES3)},
         # 2026-10-05: the memory notes (absent: off; server/conductor/memory.py)
         "memory": {"enum": list(MODES3)},
+        # SRV-475: the sampling of agent turns (server/conductor/loopescape.py; absent: greedy,
+        # escape off). `agentic_default`: a turn that offers tools and names no sampling decodes
+        # greedy or with the model card's sampling; `loop_escape`: after a repeat or near-repeat
+        # of one call the session samples with the card's settings until it makes progress
+        "sampling": _obj({"agentic_default": {"enum": list(AGENTIC_SAMPLING)},
+                          "loop_escape": {"enum": ["off", "on"]}}, required=()),
         # SR1: the shadow reader (server/conductor/shadow.py; absent: off): `mode` keeps the
         # session's state in the small model, `narrator` reads the thought summaries from it,
         # `router` asks it the router's class question and journals the agreement (shadow only)

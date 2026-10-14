@@ -26,8 +26,8 @@ The test matrix:
      hostile profile or name is refused; dry_run is the plan and no job; busy and job_running are
      409, a missing asset 412; a good apply is 202, unloads Wren and starts the runner
                                                          test_the_routes
-  7  the job route: ?format=json the job; SSE replays the events with their ids, and Last-Event-ID
-     resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
+  7  the job route: ?format=json the job; SSE sends the log on disk, the job as it is now and its
+     done event, with their ids, and Last-Event-ID resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
      offset, each line once, a half-written line on the next read   test_the_job_route
   8  no secret in the log: the HF token, an hf_ token and a bearer token are cut out of every
      line the runner writes                              test_secrets_are_redacted
@@ -272,18 +272,21 @@ def test_the_plan():
         # OPS-95: the 27B's assets have a download: the fetch step gets them, with the weights
         p = _plan()
         assert p["ok"], p["errors"]
-        gb = sum(e["gb"] for a in M["assets"] if a["id"] in registry.profile(M, "exl3-4.5")[
-            "assets_required"] for e in a["fetch"])
+        tools = {"qwen3.5-2b", "laya", "qwen3.5-0.8b"}        # the default selection's tools
+        gb = sum(e["gb"] for a in M["assets"] if a["id"] in set(registry.profile(M, "exl3-4.5")[
+            "assets_required"]) | tools for e in a["fetch"])
         assert p["profile"]["on_disk"] is False and p["profile"]["download_gb"] == round(gb, 2), p
         fetch = [c for c in p["commands"] if "--fetch-only" in c]
-        assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base checkpoint" in fetch[0]
+        assert len(fetch) == 1 and "Draft models (EXL3 K3)" in fetch[0] and "Base tensors for EXL3" in fetch[0]
         assert "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5" not in fetch[0]   # the weights are here
-        assert any("Narrator is on, but its model" in w for w in p["warnings"])
+        # VIS-153: the tools' models are downloads too, Qwen3.5-2B once for the narrator
+        assert "Qwen3.5-2B (the narrator, and Wren)" in fetch[0], fetch
+        assert p["fetch_assets"] == ["qwen3.5-2b", "laya", "qwen3.5-0.8b"], p["fetch_assets"]
         p = _plan(_sel(profile="exl3-3.0"))
         assert p["profile"]["download_gb"] == round(13.5 + gb, 2), p["profile"]
         # an asset nothing downloads is still refused before anything changes
-        p = apply.plan(_no_download(M, "base-fp8"), _sel(), setup_mode=False, password_set=False)
-        assert p["error_codes"][0] == "missing_assets" and "Base checkpoint" in p["errors"][0], p
+        p = apply.plan(_no_download(M, "base-plain"), _sel(), setup_mode=False, password_set=False)
+        assert p["error_codes"][0] == "missing_assets" and "Base tensors for EXL3" in p["errors"][0], p
         assert "Draft models (EXL3 K3)" not in p["errors"][0]
     with Box(hook=False):
         assert "no_overlay_hook" in _plan()["error_codes"]
@@ -323,7 +326,7 @@ def _job(sel, setup_mode=False, previous="exl3-6.0"):
 ALLOWED_ARGS = {"--fetch-only", "--setup", "--admin", "120"} | {p["id"] for p in M["profiles"]}
 ALLOWED_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "SMOKE_URL", "SMOKE_MODEL",
-               "QSE_NO_ROLLBACK"}
+               "QSE_NO_ROLLBACK", "QSE_FETCH_ASSETS"}
 
 
 def test_nothing_outside_the_allowlist():
@@ -780,7 +783,7 @@ def test_the_routes():
     with Box(assets=False):
         app.STATE.update(wren=FakeWren())
         real_get = registry.get
-        registry.get = lambda mid, d=None: _no_download(M, "base-fp8") if mid == M["id"] else real_get(mid, d)
+        registry.get = lambda mid, d=None: _no_download(M, "base-plain") if mid == M["id"] else real_get(mid, d)
         try:
             code, b = _api("POST", "/v1/setup/apply", {"selection": {"model": M["id"]}})
         finally:
@@ -802,20 +805,22 @@ def test_the_job_route():
         frames = [f for f in raw.split("\n\n") if f.strip()]
         evs = [json.loads(f.split("data: ", 1)[1]) for f in frames]
         ids = [int(f.split("\n")[0][4:]) for f in frames if f.startswith("id: ")]
-        assert evs[0]["type"] == "job" and evs[-1]["type"] == "done", evs[-1]
-        assert ids == sorted(ids) and ids[0] == 1
+        # VIS-149: the log on disk, the job as it is now, its done event
+        assert [e["type"] for e in evs[-2:]] == ["job", "done"], evs[-2:]
+        assert evs[-2]["job"]["state"] == "done" and {e["type"] for e in evs[:-2]} == {"log"}
+        assert ids == sorted(ids) and ids[-1] == len(apply.events(jid))
         assert any(e["type"] == "log" and e["line"] == "a line" for e in evs)
-        assert any(e["type"] == "step" and e["step"]["id"] == "smoke" for e in evs)
         code, _, raw = Req("GET", f"/v1/setup/jobs/{jid}", None,
                            {"Accept": "text/event-stream", "Last-Event-ID": str(ids[-2])}).go()
         again = [f for f in raw.split("\n\n") if f.strip()]
-        assert len(again) == 1 and again[0].startswith(f"id: {ids[-1]}"), again
+        assert len(again) == 2 and again[1].startswith(f"id: {ids[-1]}"), again
+        assert json.loads(again[0].split("data: ", 1)[1])["job"]["state"] == "done"
         for bad in ("0123456789abcdef", "../../etc", "nope"):
             code, _ = _api("GET", f"/v1/setup/jobs/{bad}?format=json")
             assert code == 404, bad
         # a follower reads each line once from its offset; a half-written line waits
         recs, off = apply.events_from(jid)
-        assert [r["seq"] for r in recs] == ids and off == os.path.getsize(
+        assert [r["seq"] for r in recs] == list(range(1, ids[-1] + 1)) and off == os.path.getsize(
             os.path.join(apply.job_dir(jid), "events.jsonl"))
         with open(os.path.join(apply.job_dir(jid), "events.jsonl"), "a") as fh:
             fh.write('{"seq": 999, "event": {"type": "lo')

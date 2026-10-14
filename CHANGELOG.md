@@ -2,6 +2,26 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.9.1, 2026-10-14
+
+0.9.1 adds web search and media playback to the Chat tab, turns on the loop guard, the loop escape and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page and the EXL3 base download. The decode path does not change: under `engine/` only the small models' slot changed (VIS-153).
+
+- Chat tab: a built-in `web_search` tool with DuckDuckGo and SearXNG providers, set in the chat settings (SRV-469, VIS-157). Reference: [docs/chat.md](docs/chat.md#web-search).
+- Chat tab: video, audio, PDF and other binary files open in a player, the browser's PDF viewer or a size line with Download, in the Files pane and the `present` card; chatd's view route streams a file with byte ranges (206, 416, ETag) and no 2 MiB cap (VIS-159).
+- Conductor: the same-call guard (C3) is on in the shipped `coding`, `chat-app`, `hermes`, `overnight` and `chat` profiles (`toolgate.same_call: true`; chat's C3 acts). C3 counts only the current user turn, a run whose result took the client 10 s or more is a wait (`wait_s`), and calls are held only on a request whose turn already ends with the repeat; every other turn streams its calls as before. A one-time migration turns it on in each stored profile whose versions never had it on (SRV-473).
+- Conductor: the loop escape. After a repeated or near-repeated tool call the session decodes with the model card's sampling (the checkpoint's `generation_config.json`, fresh seed) and C3's escape note until it makes progress, then greedy again; the client's own sampling wins. Profile section `sampling` (`loop_escape`, `agentic_default: greedy | card`; shipped greedy, escape on in the agent profiles). Ledger `sampling` `loop_escape` / `card`, usage `tandem.sampling`, `/health` `sampling.card` and `sampling.loop_escape` (SRV-475). Output changes on those turns only.
+- `--reasoning-effort none` and `off`: thinking off for every request that says nothing about thinking (SRV-477).
+- Conductor: the shipped `chat`, `coding`, `hermes` and `chat-app` profiles have `memory: on`, and a one-time migration adds it to each stored one without the switch (an explicit value stays; `general` keeps none); the memory card says the notes are the model's memory between chats, and a profile with `memory: off` tells the model so; the Context panel shows a turn's memory notes (SRV-471). Memory-on prompts change by the card's new sentence.
+
+### Fixed
+
+- Setup Guide, install page (VIS-149): a reload no longer shows a finished job as running. The job stream sends the log on disk, the job as it is now, then its events; the page keeps a final job final and handles no event after it closes the stream.
+- Setup Guide, install page (VIS-151): a finished job keeps its whole log after a reload (the stream ends at the job's `done` event); past 300 lines the log box says how many it dropped from the top; a job whose folder is gone says so instead of an empty log.
+- Setup Guide, review and install page (VIS-155): the change list compares every key the current `run/setup.env` sets too, so a model switch lists the keys it drops (LFM2.5's TEMPERATURE, TOP_K and REP_PENALTY: 16 changes, not 13) as removed, with what the engine runs with then; the install page lists the changes under the check step.
+- Setup Guide, fetch and smoke steps (VIS-153): the fetch step downloads the models of the tools the selection turns on (Qwen3.5-0.8B for the shadow reader, Qwen3.5-2B for the narrator, Laya), and the review lists every download with its size; a tool model nothing downloads is a `missing_assets` error. After the start the smoke step reads the tools' states: a failed one is a warning on the job with its reason. A failed shadow reader load is tried again after 300 s in an idle window; `/health` `roles` carry the load error.
+- EXL3 profiles of Qwen3.8-27B (OPS-133): their base is `base-plain`, the Qwen3.8-27B-FP8 tensors an EXL3 load reads (embedding, norms, GDN gates and convolutions, vision tower, config, tokenizer), fetched by HTTP range requests into `~/.qwen38-spark-engine/weights/base-plain`: 3.54 GB instead of 30.41 (the F8_E4M3 projections, their scales and `lm_head.weight` stay out). A fresh `exl3-6.0` downloads 36.48 GB, not 63.34. A box with the full FP8 snapshot uses it and downloads nothing; NVFP4 still needs the full base.
+- Dashboard service worker (OPS-131): a page load that the reverse proxy answers 502, 503 or 504 gets the cached shell, as a network error did; the page says the engine is restarting and reloads once `/health` answers.
+
 ## 0.9.0, 2026-10-14
 
 A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. The Qwen models' text and speed do not change. The shared EXL3 kernels' bytes changed (half-integer rates); `SAME_ROWS` maps them to the old bytes, so the first Qwen start adopts its saved conversations once. Reference: [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md).

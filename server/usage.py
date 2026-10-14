@@ -205,6 +205,10 @@ class RequestRecord:
         # SRV-241: how the request sampled -- None greedy, `client` the client's own sampling,
         # `regenerate` the regenerate's (server/regenerate.py); `regen` the detection's decision
         self.sampling: str | None = None
+        # SRV-475: `loop_escape` / `card` sampling's detail for the usage frame (`tandem.sampling`)
+        # and the escape record the session monitor's note reads (SP4)
+        self.sampling_detail: dict | None = None
+        self.loop_escape: dict | None = None
         self.regen = None
         # SRV-233: where the served prompt holds tokens the client did not send, as
         # `[(start, end)]` in served positions (the router's notes, the end anchor's replay, a
@@ -380,7 +384,8 @@ class RequestRecord:
                 "harness": self.harness,
                 "cache": {"tier": tier_of(self.cache_via or self.cache_source),
                           "source": self.cache_source,
-                          "cached": int(self.cached_tokens), "reread": int(self.forwarded)}}
+                          "cached": int(self.cached_tokens), "reread": int(self.forwarded)},
+                **({"sampling": self.sampling_detail} if self.sampling_detail else {})}
 
     @property
     def client_cached(self) -> int:

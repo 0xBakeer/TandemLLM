@@ -14,8 +14,9 @@ dashboard/src/api/types.ts `Setup*`).
     POST /v1/setup/apply {selection, dry_run?}   202 and a job (dry_run: the plan); 409 while
                                           requests are in flight or a job runs, 409/412 when the
                                           plan has errors (over_budget, missing_token, ...)
-    GET  /v1/setup/jobs/{id}              the job's events as SSE (`id:` its sequence, Last-Event-ID
-                                          resumes), ?format=json the job
+    GET  /v1/setup/jobs/{id}              SSE: the log lines on disk, the job as it is now, then its
+                                          events as they come (`id:` the sequence, Last-Event-ID
+                                          resumes); ?format=json the job
     GET  /v1/setup/reset                  the levels 2 to 5, what each removes and how big it is
     POST /v1/setup/reset {level, confirm, dry_run?}   one level (server/setup/reset.py); level 2
                                           starts a job; 409 while requests are in flight or a job runs
@@ -330,10 +331,11 @@ def job_route(h, jid: str) -> None:
         h.send_header("Connection", "close")
         h.end_headers()
         h.close_connection = True
-        if after == 0:
-            h.wfile.write(f"data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
+        after, offset, ended = _catch_up(h, jid, after)
+        if ended:
+            h.wfile.flush()
+            return None
         quiet = time.monotonic()
-        offset = 0
         while True:
             recs, offset = apply.events_from(jid, offset, after)
             for rec in recs:
@@ -359,6 +361,42 @@ def job_route(h, jid: str) -> None:
     except (BrokenPipeError, ConnectionResetError, OSError):
         h.close_connection = True
     return None
+
+
+def _catch_up(h, jid: str, after: int) -> tuple[int, int, bool]:
+    """VIS-149: the events after `after` that are on disk now, as the log lines among them and
+    then the job as it is now (`id:` the last of them), so a page never gets an older state after
+    a newer one: the steps and the job's first state (seq 1) are in that snapshot. A final job
+    ends with its `done` event. (the sequence followed, the byte offset, the stream ended)"""
+    import json
+    from server.setup import apply
+    recs, offset = apply.events_from(jid, 0, after)
+    done = None
+    last = after
+    for rec in recs:
+        ev = rec["event"]
+        if ev.get("type") == "done":
+            done = rec
+            continue
+        last = rec["seq"]
+        if ev.get("type") == "log":
+            h.wfile.write(f"id: {last}\ndata: {json.dumps(ev)}\n\n".encode())
+    # read after the events: the snapshot is as new as the last of them (state.json is saved
+    # before its event is written) or newer, and a later step event equals it or follows it
+    job = apply.read_job(jid)
+    if job is None:
+        return last, offset, True
+    head = f"id: {last}\n" if last > after else ""
+    h.wfile.write(f"{head}data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
+    if done is not None:
+        h.wfile.write(f"id: {done['seq']}\ndata: {json.dumps(done['event'])}\n\n".encode())
+        return done["seq"], offset, True
+    if job["state"] not in ("queued", "running"):
+        # a runner that died says so once
+        ev = {"type": "done", "state": job["state"], "message": job["message"]}
+        h.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+        return last, offset, True
+    return last, offset, False
 
 
 def clear_live(app, what: str) -> int:

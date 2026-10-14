@@ -104,3 +104,55 @@ test('This device: the notification switches', async ({ page }) => {
   await expect(page.locator('.ch-fieldset .ch-check')).toHaveCount(3);
   await expect(page.locator('[data-notify]')).toBeVisible();
 });
+
+// ---- web search (VIS-157, QA VIS-158) ----------------------------------------------------------
+
+test('web search settings: SearXNG fields, the checks, Test, Save, the stored value masked', async ({ page }) => {
+  await open(page, '#/chat/settings/search');
+  const form = page.locator('[data-ws-form]');
+  await expect(form.locator('[data-ws-searxng]')).toHaveCount(0);
+  await form.locator('[data-ws="provider"]').selectOption('searxng');
+  await expect(form.locator('[data-ws-searxng]')).toBeVisible();
+  await expect(form.locator('.ch-ws-err')).toContainText("SearXNG needs the instance's URL");
+  await expect(form.locator('[data-ws-save]')).toBeDisabled();
+  await form.locator('[data-ws="searxng_url"]').fill('https://search.example.org/');
+  await form.locator('[data-ws="searxng_auth_value"]').fill('Bearer k1');
+  await expect(form.locator('.ch-ws-err')).toContainText('name the header');
+  await form.locator('[data-ws="searxng_auth_header"]').fill('Authorization');
+  await expect(form.locator('.ch-ws-err')).toHaveCount(0);
+  await form.locator('[data-ws-test]').click();
+  await expect(form.locator('[data-ws-result]')).toContainText('SearXNG answered 3 results');
+  await expect(form.locator('.ch-ws-sample li')).toHaveCount(3);
+  await form.locator('[data-ws-save]').click();
+  await expect(form.locator('[data-ws="searxng_auth_value"]')).toHaveAttribute('placeholder', 'stored; type to replace');
+  await expect(form.locator('[data-ws="searxng_auth_value"]')).toHaveValue('');
+  await expect(form.locator('[data-ws="searxng_url"]')).toHaveValue('https://search.example.org');
+  await form.locator('[data-ws="searxng_url"]').fill('http://json-off.example:8888');
+  await form.locator('[data-ws-test]').click();
+  await expect(form.locator('[data-ws-result]')).toContainText('search.formats');
+  if (phone(page)) {
+    const wide = await page.evaluate(() => document.scrollingElement!.scrollWidth - window.innerWidth);
+    expect(wide).toBeLessThanOrEqual(0);
+    const cols = await form.locator('.ch-ws-grid').first().evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(' ').length);
+    expect(cols).toBe(1);
+  }
+  await page.screenshot({ path: test.info().outputPath('web-search-settings.png'), fullPage: true });
+});
+
+test('a web search card lists its results as links; the tools menu names the provider', async ({ page }) => {
+  await open(page, '#/chat');
+  await page.locator('#ch-input').fill('Search the latest on speculative decoding');
+  await page.locator('.ch-composer .ch-send').click();
+  const card = page.locator('.ch-call[data-tool="web_search"]');
+  await expect(card.locator('.ch-call-word')).toHaveText('3 results', { timeout: 30_000 });
+  await expect(card.locator('.ch-call-args')).toHaveText('speculative decoding tokens per round');
+  const links = card.locator('.ch-search a.ch-search-title');
+  await expect(links).toHaveCount(3);
+  await expect(links.first()).toHaveAttribute('target', '_blank');
+  await expect(links.first()).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(card.locator('.ch-search-host').first()).toHaveText('example.org');
+  await page.screenshot({ path: test.info().outputPath('web-search-card.png') });
+  await page.locator('.ch-pill', { hasText: /tools?/ }).first().click();
+  await expect(page.locator('[data-pop-tool="web_search"] [data-search-provider]')).toContainText('with DuckDuckGo');
+  if (phone(page)) expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+});

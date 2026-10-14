@@ -311,7 +311,19 @@ class Supervisor:
         """Hold tool calls until SP3 has seen them: only when a tool-call task can act, and never
         for a constrained request (the grammar writes its calls; SRV-35 stays as it is)."""
         return (self.mode == "on" and not self.req.constrained
-                and any(t.mode == "act" for t in self._at["SP3"]))
+                and any(t.mode == "act" and self._may_act(t) for t in self._at["SP3"]))
+
+    def _may_act(self, task) -> bool:
+        """A tool-call task that can act on this request. C3 (`repeated_call`) can only fire
+        when the turn's history already ends with the repeated call (SRV-473): on every other
+        request it cannot act, so it holds nothing and the calls stream live as before."""
+        if task.rule != "repeated_call":
+            return True
+        got = self.memo.get(("may_act", task.id))
+        if got is None:
+            from server.conductor.monitor.toolcheck import can_repeat
+            got = self.memo[("may_act", task.id)] = bool(can_repeat(self, task))
+        return got
 
     def _tool_meta(self) -> tuple:
         if self._tools is None:
@@ -349,6 +361,8 @@ class Supervisor:
         """SP4. The actions to apply to the prompt before it is prefilled."""
         out = []
         note = self._argloop_note(ev)
+        if note is None and not self.final_answer:
+            note = self._escape_note(ev)
         if note is not None:
             out.append(note)
         for task in self._at["SP4"]:
@@ -425,6 +439,34 @@ class Supervisor:
             return None
         act.ids = self.monitor.ids(self.policy.templates["tail_note"].replace("{text}", act.text))
         self.memo["session_note"] = "A1"
+        return act
+
+    # the loop escape's note when the policy's C3 has no `escape_texts` (a stored monitor
+    # document from before SRV-475)
+    ESCAPE_TEXTS = ("You ran `{name}` {count} times in a row and got the same result each time. "
+                    "Running it again will not change that. Try another approach: read what the "
+                    "result says, change the arguments or the tool, or fix the cause first.",)
+
+    def _escape_note(self, ev: RequestEvent) -> Action | None:
+        """SP4: the loop escape (SRV-475, server/conductor/loopescape.py) holds for this request
+        -> the hidden note at the end of the prompt with the sampled turn: which call repeated,
+        and to take another path. Set by the handler in `memo["loop_escape"]`; journaled as C3's
+        PROMPT_TAIL_NOTE with the escape's detail."""
+        esc = self.memo.get("loop_escape")
+        if not esc or not ev.tools_offered or ev.n != 1:
+            return None
+        task = self.policy.tasks.get("C3")
+        texts = (task.get("escape_texts") if task is not None else None) or self.ESCAPE_TEXTS
+        text = (texts[min(int(esc.get("nth", 0)), len(texts) - 1)]
+                .replace("{name}", str(esc.get("name") or "the tool"))
+                .replace("{count}", str(esc.get("count") or 2)))
+        act = Action(PROMPT_TAIL_NOTE, reason=f"loop_escape({esc.get('why')})", text=text,
+                     detail=dict(esc), task="C3")
+        if self.mode != "on":
+            self._write("SP4", None, act, "shadow")
+            return None
+        act.ids = self.monitor.ids(self.policy.templates["tail_note"].replace("{text}", act.text))
+        self.memo["session_note"] = "C3"
         return act
 
     def route_budget(self, budget: int, task: str = "route") -> bool:

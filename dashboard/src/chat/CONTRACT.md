@@ -155,7 +155,9 @@ interface ContextReport {
     source: CacheSource | string;                // where the cached part lives
     slot: string | null;
   };
-  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;   // v0.2; tokens null: not counted yet
+  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[];
+             memory?: { mode: 'on' | 'shadow' | 'off'; why: string | null; index_notes: number; index_tokens: number;
+                        bodies: number; body_tokens: number; card_tokens: number } | null } | null;   // v0.2; tokens null: not counted yet; memory: the notes' part of the turn (why it is off: profile, unset, model_fit, backend, header); an older engine sends none
   memory: {
     kv_bytes: number | null; resident_bytes: number | null; sandbox_disk_bytes: number | null;
     kv_tokens?: number | null;                   // the chat's rows the engine holds (kv_where slot or park)
@@ -248,7 +250,7 @@ interface SandboxStatus {
 interface SandboxFile { path: string; kind: 'file' | 'dir'; bytes: number; modified_at?: string; etag?: string }
 
 // ---- panes
-type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'context' | 'plan';   // v0.2 adds editor, pdf, context, plan
+type PaneKind = 'terminal' | 'preview' | 'files' | 'editor' | 'diff' | 'markdown' | 'image' | 'pdf' | 'video' | 'audio' | 'binary' | 'context' | 'plan';   // v0.2 adds editor, pdf, context, plan; video, audio, binary: a player or a size and Download
 interface PaneRef {
   id?: string;                                   // v0.2: set by the server when the pane is in the layout
   kind: PaneKind;
@@ -313,17 +315,20 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/mcp/servers/{sid}/resources/read` | `{uri, conversation_id?}` | `Attachment` (stored; it goes into a send's attachments as it is) | `mcpResource()` | v2 |
 | GET / POST / DELETE | `/prompts[/{pid}]` | `Prompt` | | `prompts()`, `savePrompt()`, `deletePrompt()` | v2 |
 | GET / POST / DELETE | `/presets[/{pid}]` | `Preset` | | `presets()`, `savePreset()`, `deletePreset()` | v2 |
+| GET / PUT | `/web-search` | `WebSearchPatch` (partial; `searxng_auth_value: null` clears it) | `WebSearchView`; 400 with `field`; the auth value never comes back (`searxng_auth_set`) | `webSearch()`, `saveWebSearch()` | v2 |
+| POST | `/web-search/test` | `{settings?: WebSearchPatch, query?}` | `WebSearchTest` `{ok, provider, message, count, ms, results}`; nothing is stored | `testWebSearch()` | v2 |
 | GET / DELETE | `/permissions/rules[/{rid}]` | | `{id, tool, match?, decision, scope, created_at}[]` | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox` | | `SandboxStatus` | `sandbox()` | v2 |
 | POST | `/conversations/{id}/sandbox/reset` / `start` / `stop` | | `SandboxStatus` | `resetSandbox()` | v2 |
 | GET | `/conversations/{id}/sandbox/files` | `?path=/workspace` | `SandboxFile[]` | `sandboxFiles()` | v2 |
-| GET | `/conversations/{id}/sandbox/file` | `?path=` | `{content, mime, bytes, etag}` (text) or bytes with `?raw=1` | `readFile()` | v2 |
+| GET | `/conversations/{id}/sandbox/file` | `?path=` | `{content, mime, bytes, etag, kind, url}` (`content` null for a binary or a file over 2 MiB; `kind` the pane kind: file, binary, image, preview, markdown, video, audio, pdf; `url` the view route) or the whole file with `?raw=1` (streamed, byte ranges) | `readFile()` | v2 |
+| GET | `/conversations/{id}/sandbox/view/<path>` | `Range: bytes=` | the file, streamed: 200 whole, 206 one range (`Content-Range`), 416 past the end; `Accept-Ranges: bytes`, `ETag`, `Last-Modified`, `If-Range`, `If-None-Match`; the preview CSP for pages, images and text, one without scripts for media, PDFs and binaries | (preview, players) | v2 |
 | PUT | `/conversations/{id}/sandbox/file` | `?path=`, body, `If-Match: etag` | 204; 412 when the file changed | (v0.2) | v2 |
 | POST | `/conversations/{id}/sandbox/upload` | `?dir=`, multipart | `SandboxFile[]` | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox/diff` | `?run_id=` | `{files: {path, status, additions, deletions, patch}[]}` | (v0.2, diff pane) | v2 |
 | POST | `/conversations/{id}/sandbox/undo` | `{run_id}` | 202 | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox/ports/{port}/...` | | reverse proxy into the sandbox (preview pane) | (v0.2) | v2 |
-| GET | `/conversations/{id}/artifacts/{ref}` | `?version=` | `{kind, content, mime, title}`; `?raw=1` serves it with the preview CSP | `artifact()` | v2 |
+| GET | `/conversations/{id}/artifacts/{ref}` | `?version=` | `{kind, content, mime, title, url?, bytes?}`; a video, audio, PDF or binary file: `content` "", `url` the view route; `?raw=1` serves it with the preview CSP | `artifact()` | v2 |
 | POST / GET | `/conversations/{id}/terminals` | | `{session, title, owner: 'user' \| 'agent', alive}` | (v0.2) | v2 |
 | WS | `/conversations/{id}/terminals/{session}/ws` | | binary frames = PTY bytes; text frames = JSON `{type:'resize', cols, rows}`; on attach the server sends the scrollback (max 1 MiB) first | `terminal()` | v2 |
 
@@ -395,6 +400,8 @@ after the first turn", "not tracked for this model"), never a bare dash.
   with `allow-same-origin`. Artifact (`?raw=1`) and port answers carry
   `Content-Security-Policy: default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:; frame-ancestors 'self'`.
   The preview's origin is opaque, so it cannot read the dashboard cookie or call this API.
+- A video, audio file, PDF or binary from the view route carries `default-src 'none'; media-src 'self'`
+  (a PDF: `script-src 'none'; object-src 'self'`): it plays or downloads, it never runs a script.
 - Tool output in events and parts is capped (30,000 characters per call); the full output is a file at
   `/workspace/.tandem/outputs/<call_id>.txt`.
 - MCP secrets never come back from the server (values are "").

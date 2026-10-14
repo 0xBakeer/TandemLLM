@@ -5,7 +5,7 @@
 import { apiBase } from '../api/client';
 import { ResumableStream } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 
 const PREFIX = '/v1/chat-app';
 
@@ -223,6 +223,15 @@ export class RemoteChatBackend implements ChatBackend {
   restartMcpServer(sid: string) {
     return post<McpServer>(`/mcp/servers/${enc(sid)}/restart`);
   }
+  webSearch() {
+    return call<WebSearchView>('/web-search');
+  }
+  saveWebSearch(p: WebSearchPatch) {
+    return call<WebSearchView>('/web-search', { method: 'PUT', body: JSON.stringify(p) });
+  }
+  testWebSearch(draft: WebSearchPatch) {
+    return post<WebSearchTest>('/web-search/test', { settings: draft });
+  }
   prompts() {
     return call<Prompt[]>('/prompts');
   }
@@ -252,13 +261,13 @@ export class RemoteChatBackend implements ChatBackend {
     return call<SandboxFile[]>(`/conversations/${enc(id)}/sandbox/files?path=${encodeURIComponent(path)}`);
   }
   readFile(id: string, path: string) {
-    return call<{ content: string; mime: string; bytes: number; etag?: string }>(`/conversations/${enc(id)}/sandbox/file?path=${encodeURIComponent(path)}`);
+    return call<SandboxFileView>(`/conversations/${enc(id)}/sandbox/file?path=${encodeURIComponent(path)}`);
   }
   async writeFile(id: string, path: string, content: string, etag?: string) {
     await call<void>(`/conversations/${enc(id)}/sandbox/file?path=${encodeURIComponent(path)}`, { method: 'PUT', body: content, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...(etag ? { 'If-Match': etag } : {}) } });
   }
   artifact(id: string, ref: string) {
-    return call<{ kind: string; content: string; mime: string; title: string; url?: string }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
+    return call<{ kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
   }
 
   terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession {

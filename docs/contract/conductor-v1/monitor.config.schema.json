@@ -1011,7 +1011,7 @@
               "repeats": {
                 "type": "integer",
                 "minimum": 2,
-                "description": "the call that would be the n-th in a row with the same name and arguments, after n-1 identical results"
+                "description": "the call that would be the n-th in a row with the same name and arguments, after n-1 identical results, in the current user turn"
               },
               "texts": {
                 "type": "array",
@@ -1025,6 +1025,20 @@
               "first_line_chars": {
                 "type": "integer",
                 "minimum": 8
+              },
+              "wait_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "an earlier run whose result came back after the client took this many seconds or more is a wait (a poll of a running job), not a loop; 0: no such exemption (absent: 0)"
+              },
+              "escape_texts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the loop escape's note (SRV-475): {name}, {count}; the n-th for the n-th escaped request of a streak"
               }
             },
             "required": [

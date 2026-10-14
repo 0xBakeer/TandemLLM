@@ -72,21 +72,27 @@ def _args(arguments) -> dict:
 
 def tool_history(messages) -> list[dict]:
     """Every call the session made, oldest first: `{name, args, args_hash, result_hash,
-    result_line}`, the result matched by `tool_call_id` (by position when a client sends none);
-    `result_hash` is None while a call has no result."""
+    result_line, id, turn}`, the result matched by `tool_call_id` (by position when a client sends
+    none); `result_hash` is None while a call has no result; `turn` counts the user messages before
+    the call, `id` is the call's id ("" when the client sent none)."""
     calls: list[dict] = []
     by_id: dict[str, dict] = {}
     pending: list[dict] = []
+    users = 0
     for m in messages or ():
         if not isinstance(m, dict):
             continue
-        if m.get("role") == "assistant":
+        if m.get("role") == "user":
+            users += 1
+        elif m.get("role") == "assistant":
             pending = []
             for c in m.get("tool_calls") or ():
                 fn = (c or {}).get("function") or {}
                 rec = {"name": str(fn.get("name") or ""), "args": _args(fn.get("arguments")),
                        "args_hash": args_hash(fn.get("arguments") or "{}"),
-                       "result_hash": None, "result_line": ""}
+                       "args_text": _canon(fn.get("arguments")),
+                       "result_hash": None, "result_line": "",
+                       "id": str(c.get("id") or ""), "turn": users}
                 calls.append(rec)
                 pending.append(rec)
                 if c.get("id"):
@@ -102,7 +108,83 @@ def tool_history(messages) -> list[dict]:
             rec["result_hash"] = _hash(content)
             rec["result_line"] = next((ln.strip() for ln in _text(content).splitlines()
                                        if ln.strip()), "")
+            if not rec["id"] and m.get("tool_call_id"):
+                rec["id"] = str(m["tool_call_id"])
     return calls
+
+
+def _canon(arguments) -> str:
+    """A call's arguments as canonical JSON (key order and whitespace do not count)."""
+    try:
+        obj = json.loads(arguments) if isinstance(arguments, str) else arguments
+        return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(arguments or "")
+
+
+def turn_history(messages) -> list[dict]:
+    """`tool_history` of the current user turn: the calls after the last user message. A new
+    user message starts every streak over ("run the tests again" is not a loop)."""
+    hist = tool_history(messages)
+    if not hist:
+        return hist
+    users = sum(1 for m in messages or () if isinstance(m, dict) and m.get("role") == "user")
+    return [c for c in hist if c["turn"] == users]
+
+
+# the share of difflib's ratio at or above which two calls' arguments are near-identical
+NEAR_RATIO = 0.8
+_NEAR_CHARS = 4000
+
+
+def _near(a: str, b: str, ratio: float) -> bool:
+    import difflib
+    if a == b:
+        return True
+    if len(a) > _NEAR_CHARS or len(b) > _NEAR_CHARS:      # long arguments: head and tail
+        h = _NEAR_CHARS // 2
+        a, b = a[:h] + a[-h:], b[:h] + b[-h:]
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return m.real_quick_ratio() >= ratio and m.quick_ratio() >= ratio and m.ratio() >= ratio
+
+
+def streak(hist: list[dict], need: int, waits: dict | None = None, wait_s: float = 0.0,
+           near: float | None = None) -> list[dict] | None:
+    """The last `need` calls of `hist` when they are one call repeated without progress, else
+    None. Repeated: the same tool, every one with a result and all results identical, and the
+    same arguments (canonical: key order and whitespace do not count) -- or, with `near`, each
+    earlier call's arguments at least `near` similar to the newest's (difflib's ratio on the
+    canonical JSON). A call whose result came back after the client took `wait_s` seconds or more
+    (`waits`: seconds by call id, the gap between the answer that issued it and the request that
+    carried its result) is a wait, a poll of something running: no streak."""
+    if need < 1 or len(hist) < need:
+        return None
+    last = hist[-need:]
+    head = last[-1]
+    if not head["name"] or any(c["name"] != head["name"] for c in last):
+        return None
+    results = {c["result_hash"] for c in last}
+    if None in results or len(results) != 1:
+        return None
+    if near is None:
+        if any(c["args_hash"] != head["args_hash"] for c in last):
+            return None
+    elif any(not _near(c["args_text"], head["args_text"], near) for c in last[:-1]):
+        return None
+    if wait_s > 0 and waits:
+        if any(c["id"] and waits.get(c["id"], 0.0) >= wait_s for c in last):
+            return None
+    return last
+
+
+def can_repeat(sup, task) -> bool:
+    """C3 can fire on this request: the current turn's history ends with `repeats - 1` runs of
+    one call with identical results. Only then are the answer's calls held for C3 (every other
+    request streams its calls live, as with the pack off)."""
+    need = int(task["repeats"]) - 1
+    hist = _memo(sup, "tool:turn", lambda: turn_history(sup.req.messages))
+    return streak(hist, need, waits=getattr(sup.session, "waits", None),
+                  wait_s=float(task.get("wait_s", 0.0) or 0.0)) is not None
 
 
 def system_text(messages) -> str:
@@ -289,26 +371,30 @@ def malformed_call(ev, task, sup):
 @register("repeated_call", "SP3", params={
     "repeats": {"type": "integer", "minimum": 2,
                 "description": "the call that would be the n-th in a row with the same name and "
-                               "arguments, after n-1 identical results"},
+                               "arguments, after n-1 identical results, in the current user turn"},
     "texts": dict(_TEXTS, description="the reminder: {name}, {count} (the earlier runs), "
                                       "{first_line} (of their result)"),
     "first_line_chars": {"type": "integer", "minimum": 8},
+    "wait_s": {"type": "number", "minimum": 0,
+               "description": "an earlier run whose result came back after the client took this "
+                              "many seconds or more is a wait (a poll of a running job), not a "
+                              "loop; 0: no such exemption (absent: 0)"},
+    "escape_texts": dict(_TEXTS, description="the loop escape's note (SRV-475): {name}, {count}; "
+                                             "the n-th for the n-th escaped request of a streak"),
 }, required=("repeats", "texts", "first_line_chars"))
 def repeated_call(ev, task, sup):
     """C3: the same call a third time after two identical results -> write something else.
-    A call whose earlier results differ (a screenshot, a file being written) passes."""
+    A call whose earlier results differ (a screenshot, a file being written), a streak broken by
+    another call (an edit before the test runs again) or by a user message, and a poll that waited
+    pass."""
     if ev.error is not None or not ev.name:
         return None
     need = task["repeats"] - 1
-    hist = _memo(sup, "tool:history", lambda: tool_history(sup.req.messages))
-    if len(hist) < need:
-        return None
-    last = hist[-need:]
-    h = args_hash(ev.arguments)
-    if any(c["name"] != ev.name or c["args_hash"] != h for c in last):
-        return None
-    results = {c["result_hash"] for c in last}
-    if None in results or len(results) != 1:
+    hist = _memo(sup, "tool:turn", lambda: turn_history(sup.req.messages))
+    last = streak(hist, need, waits=getattr(sup.session, "waits", None),
+                  wait_s=float(task.get("wait_s", 0.0) or 0.0))
+    if last is None or last[-1]["name"] != ev.name or last[-1]["args_hash"] != args_hash(
+            ev.arguments):
         return None
     line = last[-1]["result_line"][:task["first_line_chars"]]
     text = (_nth(task["texts"], sup.task_acts.get(task.id, 0)).replace("{name}", ev.name)

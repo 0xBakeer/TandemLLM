@@ -2,7 +2,8 @@
 // left (tabs on a phone). Tools (source, on or off, the policy: ask, always, never), skills and
 // packages (upload a SKILL.md zip, remove your own), MCP servers (status, tools, add stdio or HTTP
 // with a Test button, restart, remove), Open WebUI tools (import a Tools file, its valves), prompts
-// and presets (Open WebUI style), and this chat's sandbox (state, limits, network, reset).
+// and presets (Open WebUI style), web search (the provider, a SearXNG instance, Test; VIS-157), and
+// this chat's sandbox (state, limits, network, reset).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -10,16 +11,21 @@ import { bytes, duration } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { ChatBackend } from './backend';
-import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import type { Capabilities, Conversation, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SafeSearch, TimeRange, ToolInfo, ToolPolicy, UserToolkit, WebSearchProvider, WebSearchTest, WebSearchView } from './types';
+import { draftErrors, draftOf, draftPatch, hostOf, LANGUAGES, MAX_RESULTS, overrideOf, overridePatch, PROVIDERS, providerWord, SAFE_SEARCH, TIME_RANGES, timeWord, type WebSearchDraft } from './websearch';
 import { EFFORTS, effortWord, valveValues } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { NOTIFY_WORDS, notifyPrefs, notifyState, setNotifyPrefs, type NotifyKind } from './notify';
 
-export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'prompts' | 'sandbox' | 'device';
+/** a stored secret's field (an Open WebUI valve, the SearXNG auth value): masked, never prefilled */
+const SECRET_INPUT = 'password';
+
+export type SettingsSection = 'tools' | 'packages' | 'mcp' | 'search' | 'prompts' | 'sandbox' | 'device';
 export const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: 'tools', label: 'Tools' },
   { id: 'packages', label: 'Skills and packages' },
   { id: 'mcp', label: 'MCP servers' },
+  { id: 'search', label: 'Web search' },
   { id: 'prompts', label: 'Prompts and presets' },
   { id: 'sandbox', label: 'Sandbox' },
   { id: 'device', label: 'This device' },
@@ -49,6 +55,11 @@ export class QseChatSettings extends LightElement {
   @state() private editPreset: Partial<Preset> | null = null;
   @state() private confirmReset = false;
   @state() private notice: string | null = null;
+  /** web search: the stored settings (null: an older server without the routes), the form */
+  @state() private ws: WebSearchView | null = null;
+  @state() private wsDraft: WebSearchDraft | null = null;
+  @state() private wsTest: { state: 'idle' | 'running' | 'done'; r?: WebSearchTest; error?: string } = { state: 'idle' };
+  @state() private wsSaving = false;
 
   updated(changed: Map<string, unknown>): void {
     if (changed.has('backend') && this.backend) void this.load();
@@ -56,7 +67,9 @@ export class QseChatSettings extends LightElement {
 
   private async load(): Promise<void> {
     const b = this.backend!;
-    const [tools, pkgs, mcp, prompts, presets, kits] = await Promise.all([b.tools(), b.packages(), b.mcpServers(), b.prompts(), b.presets(), b.userToolkits().catch(() => [])]);
+    const [tools, pkgs, mcp, prompts, presets, kits, ws] = await Promise.all([b.tools(), b.packages(), b.mcpServers(), b.prompts(), b.presets(), b.userToolkits().catch(() => []), b.webSearch().catch(() => null)]);
+    this.ws = ws;
+    this.wsDraft = ws ? draftOf(ws.settings) : null;
     this.kits = kits;
     this.tools = tools;
     this.pkgs = pkgs;
@@ -98,6 +111,8 @@ export class QseChatSettings extends LightElement {
         return this.renderPackages();
       case 'mcp':
         return this.renderMcp();
+      case 'search':
+        return this.renderSearch();
       case 'prompts':
         return this.renderPrompts();
       case 'sandbox':
@@ -318,6 +333,101 @@ export class QseChatSettings extends LightElement {
       </div>
       ${this.test.state === 'done' && this.test.ok && this.test.tools?.length ? html`<ul class="ch-mcp-tools">${this.test.tools.map((t) => html`<li><code>${t.name}</code><span class="muted small">${t.description}</span></li>`)}</ul>` : nothing}
     </form>`;
+  }
+
+  // ---- web search (VIS-157) -------------------------------------------------------------------
+
+  private renderSearch(): TemplateResult {
+    const head = html`<h3 class="ch-settings-h">Web search</h3>
+      <p class="ch-settings-lead">The model's <code>web_search</code> tool. It runs on this box and reaches only the provider's host. DuckDuckGo needs no setup; SearXNG is an instance you name by its URL.</p>`;
+    const v = this.ws;
+    const d = this.wsDraft;
+    if (!v || !d) return html`${head}<p class="ch-settings-note">This chat server has no web search routes; update chatd.</p>`;
+    const errs = draftErrors(d, v.settings.searxng_auth_set);
+    const patch = draftPatch(v.settings, d);
+    const dirty = Object.keys(patch).length > 0;
+    const set = (p: Partial<WebSearchDraft>) => ((this.wsDraft = { ...d, ...p }), (this.wsTest = { state: 'idle' }));
+    const err = (k: string) => (errs[k] ? html`<span class="ch-ws-err err-ink small" role="alert">${errs[k]}</span>` : nothing);
+    const num = (e: Event) => Math.round(Number((e.target as HTMLInputElement).value));
+    const sel = (e: Event) => (e.target as HTMLSelectElement).value;
+    const langs = LANGUAGES.some((l) => l.id === d.language) ? LANGUAGES : [...LANGUAGES, { id: d.language, label: d.language }];
+    return html`${head}
+      <form class="ch-ws" data-ws-form @submit=${(e: Event) => (e.preventDefault(), void this.saveSearch())}>
+        <div class="ch-ws-grid">
+          <label class="field field-block ch-ws-field"><span>provider</span><select data-ws="provider" @change=${(e: Event) => set({ provider: sel(e) as WebSearchProvider })}>${PROVIDERS.map((p) => html`<option value=${p} ?selected=${d.provider === p}>${providerWord(p)}</option>`)}</select></label>
+          <label class="field field-block ch-ws-field"><span>results</span><input type="number" inputmode="numeric" min="1" max=${MAX_RESULTS} data-ws="max_results" .value=${String(d.max_results)} @input=${(e: Event) => set({ max_results: num(e) })} />${err('max_results')}</label>
+          <label class="field field-block ch-ws-field"><span>safe search</span><select data-ws="safe_search" @change=${(e: Event) => set({ safe_search: sel(e) as SafeSearch })}>${SAFE_SEARCH.map((x) => html`<option value=${x} ?selected=${d.safe_search === x}>${x}</option>`)}</select></label>
+          <label class="field field-block ch-ws-field"><span>language and region</span><select data-ws="language" @change=${(e: Event) => set({ language: sel(e) })}>${langs.map((l) => html`<option value=${l.id} ?selected=${d.language === l.id}>${l.label}</option>`)}</select>${err('language')}</label>
+          <label class="field field-block ch-ws-field"><span>time range</span><select data-ws="time_range" @change=${(e: Event) => set({ time_range: sel(e) as TimeRange })}>${TIME_RANGES.map((t) => html`<option value=${t} ?selected=${d.time_range === t}>${timeWord(t)}</option>`)}</select></label>
+          <label class="field field-block ch-ws-field"><span>timeout, seconds</span><input type="number" inputmode="numeric" min="2" max="30" data-ws="timeout_s" .value=${String(d.timeout_s)} @input=${(e: Event) => set({ timeout_s: num(e) })} />${err('timeout_s')}</label>
+        </div>
+        ${d.provider === 'searxng'
+          ? html`<fieldset class="ch-fieldset ch-ws-sx" data-ws-searxng><legend>SearXNG instance</legend>
+              <label class="field field-block ch-ws-field"><span>URL</span><input type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://search.example.org" data-ws="searxng_url" .value=${d.searxng_url} @input=${(e: Event) => set({ searxng_url: (e.target as HTMLInputElement).value.trim() })} />${err('searxng_url')}</label>
+              <div class="ch-ws-grid">
+                <label class="field field-block ch-ws-field"><span>auth header <span class="muted">optional</span></span><input type="text" autocomplete="off" spellcheck="false" placeholder="Authorization or X-API-Key" data-ws="searxng_auth_header" .value=${d.searxng_auth_header} @input=${(e: Event) => set({ searxng_auth_header: (e.target as HTMLInputElement).value.trim() })} />${err('searxng_auth_header')}</label>
+                <label class="field field-block ch-ws-field"><span>value</span><input type=${SECRET_INPUT} autocomplete="off" data-ws="searxng_auth_value" placeholder=${v.settings.searxng_auth_set && !d.clear_auth ? 'stored; type to replace' : 'not set'} .value=${d.searxng_auth_value} @input=${(e: Event) => set({ searxng_auth_value: (e.target as HTMLInputElement).value, clear_auth: false })} />${err('searxng_auth_value')}</label>
+              </div>
+              ${v.settings.searxng_auth_set ? html`<label class="ch-check"><input type="checkbox" data-ws="clear_auth" .checked=${d.clear_auth} @change=${(e: Event) => set({ clear_auth: (e.target as HTMLInputElement).checked, searxng_auth_value: '' })} /><span>remove the stored value</span></label>` : nothing}
+              <p class="ch-settings-note">The instance needs <code>json</code> in <code>search.formats</code> (settings.yml). The value is stored encrypted and never shown again.</p>
+            </fieldset>`
+          : nothing}
+        <div class="ch-add-row">
+          <button type="button" class="btn" data-ws-test ?disabled=${this.wsTest.state === 'running' || d.provider === 'off' || !!Object.keys(errs).length} @click=${() => void this.testSearch()}>${this.wsTest.state === 'running' ? html`<span class="pulse"></span> Testing` : 'Test'}</button>
+          ${this.wsTest.state === 'done' ? html`<span class="ch-test-result ${this.wsTest.r?.ok ? 'is-ok' : 'is-bad'}" role="status" data-ws-result>${this.wsTest.r?.ok ? icon('check') : icon('warn')} ${this.wsTest.r?.message ?? this.wsTest.error}</span>` : nothing}
+          <span class="grow"></span>
+          <button type="button" class="btn btn-ghost" ?disabled=${!dirty} @click=${() => ((this.wsDraft = draftOf(v.settings)), (this.wsTest = { state: 'idle' }))}>Revert</button>
+          <button type="submit" class="btn btn-primary" data-ws-save ?disabled=${!dirty || this.wsSaving || !!Object.keys(errs).length}>Save</button>
+        </div>
+        ${this.wsTest.state === 'done' && this.wsTest.r?.results.length ? html`<ul class="ch-ws-sample">${this.wsTest.r.results.map((r) => html`<li><a href=${r.url} target="_blank" rel="noopener noreferrer">${r.title}</a> <span class="muted small">${hostOf(r.url)}</span></li>`)}</ul>` : nothing}
+      </form>
+      ${this.renderSearchChat()}`;
+  }
+
+  /** a chat's own provider, over the default above */
+  private renderSearchChat(): TemplateResult {
+    const c = this.conv;
+    const def = providerWord(this.ws?.settings.provider);
+    if (!c) return html`<p class="ch-settings-note">Open a chat to give it its own provider; new chats use the one above (${def}).</p>`;
+    const cur = overrideOf(c.settings);
+    return html`<h4 class="ch-settings-h4">This chat: "${c.title}"</h4>
+      <div class="ch-add-row">
+        <label class="field ch-ws-field"><span class="sr-only">web search in this chat</span><select data-ws="chat" @change=${(e: Event) => this.fire('ch-settings-patch', { patch: { web_search: overridePatch(c.settings.web_search, (e.target as HTMLSelectElement).value as '' | WebSearchProvider) } })}>
+          <option value="" ?selected=${cur === ''}>the default (${def})</option>
+          ${PROVIDERS.map((p) => html`<option value=${p} ?selected=${cur === p}>${providerWord(p)}</option>`)}
+        </select></label>
+        <span class="small muted">off removes web_search from this chat's tools</span>
+      </div>`;
+  }
+
+  private async testSearch(): Promise<void> {
+    const v = this.ws;
+    const d = this.wsDraft;
+    if (!v || !d) return;
+    this.wsTest = { state: 'running' };
+    try {
+      this.wsTest = { state: 'done', r: await this.backend!.testWebSearch({ ...draftPatch(v.settings, d), provider: d.provider }) };
+    } catch (e) {
+      this.wsTest = { state: 'done', error: (e as Error).message };
+    }
+  }
+
+  private async saveSearch(): Promise<void> {
+    const v = this.ws;
+    const d = this.wsDraft;
+    if (!v || !d) return;
+    this.wsSaving = true;
+    try {
+      const next = await this.backend!.saveWebSearch(draftPatch(v.settings, d));
+      this.ws = next;
+      this.wsDraft = draftOf(next.settings);
+      this.fire('ch-web-search-saved', { provider: next.settings.provider });
+      this.say(`Saved: web search with ${providerWord(next.settings.provider)}.`);
+    } catch (e) {
+      this.say((e as Error).message);
+    } finally {
+      this.wsSaving = false;
+    }
   }
 
   // ---- prompts and presets --------------------------------------------------------------------

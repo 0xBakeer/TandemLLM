@@ -133,7 +133,8 @@ tasks:
     schema: shadow
     schema_text: "Your call to {name} was not run: {problem}. Write it again with the arguments its schema asks for."
     cut: give_up
-  # C3: the same call a third time after two identical results (the todowrite loop of SRV-45)
+  # C3: the same call a third time after two identical results in the current user turn (the
+  # todowrite loop of SRV-45)
   C3:
     rule: repeated_call
     mode: act
@@ -142,6 +143,13 @@ tasks:
       - "You ran `{name}` with these arguments {count} times and got the same result each time (first line: {first_line}). This call was not run. Do something different: read what the result says, change the approach, or fix the cause first."
       - "This was `{name}` with the same arguments again, and it was not run either. Take a different step now."
     first_line_chars: 160
+    # SRV-473: a run whose result came back after the client took 10 s or more is a wait (a poll
+    # of a running job), not a loop
+    wait_s: 10
+    # SRV-475: the loop escape's note, with the sampled turn after a repeat or a near-repeat
+    escape_texts:
+      - "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first."
+      - "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
   # C1: the risk floors (arbiter's guard_policy as a list). Shadow in wave 1: journaled only.
   C1:
     rule: risk_floor

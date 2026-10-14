@@ -3,7 +3,7 @@
 // backend. pickBackend() probes the server once and falls back to the mock with a badge.
 
 import { apiBase } from '../api/client';
-import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit } from './types';
+import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 import type { StreamState } from '../lib/sse';
 
 export interface Subscription {
@@ -110,6 +110,11 @@ export interface ChatBackend {
   prompts(): Promise<Prompt[]>;
   savePrompt(p: Omit<Prompt, 'id'> & { id?: string }): Promise<Prompt>;
   deletePrompt(promptId: string): Promise<void>;
+  /** SRV-469: the global web search settings (the auth value never comes back) */
+  webSearch(): Promise<WebSearchView>;
+  saveWebSearch(patch: WebSearchPatch): Promise<WebSearchView>;
+  /** one sample search with the draft over the stored settings; nothing is stored */
+  testWebSearch(draft: WebSearchPatch): Promise<WebSearchTest>;
   presets(): Promise<Preset[]>;
   savePreset(p: Omit<Preset, 'id'> & { id?: string }): Promise<Preset>;
   deletePreset(presetId: string): Promise<void>;
@@ -118,12 +123,13 @@ export interface ChatBackend {
   sandbox(id: string): Promise<SandboxStatus>;
   resetSandbox(id: string): Promise<SandboxStatus>;
   sandboxFiles(id: string, path: string): Promise<SandboxFile[]>;
-  readFile(id: string, path: string): Promise<{ content: string; mime: string; bytes: number; etag?: string }>;
+  /** `kind`: the pane kind (file, binary, image, preview, markdown, video, audio, pdf); `url`: the view route */
+  readFile(id: string, path: string): Promise<SandboxFileView>;
   /** PUT with If-Match; a changed file throws */
   writeFile(id: string, path: string, content: string, etag?: string): Promise<void>;
   /** an artifact the model produced (an html preview, a diff, an image) */
   /** `url`: a same-origin address the preview loads in its sandboxed iframe (the server's files) */
-  artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string; url?: string }>;
+  artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>;
   /** PTY bytes as they come (the mock sends text) */
   terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession;
 }

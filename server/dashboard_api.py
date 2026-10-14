@@ -69,13 +69,14 @@ CACHE_TTL_S = 60.0
 CLIENTS_JSON = "~/.qwen38-spark-engine/clients.json"
 
 # A request the conductor acted in is not a speed sample (SRV-115), nor a regenerate (SRV-241: it
-# samples, the speed sample is the greedy default's): its time holds hidden
+# samples, the speed sample is the greedy default's), nor a loop escape's or a profile's card
+# sampling (SRV-475): its time holds hidden
 # forwards its token counts leave out, and its prompt a note the client did not send.
 DECODED = ("status = 200 AND (finish_reason IS NULL OR finish_reason NOT IN ('error', 'refused')) "
            "AND (cache_source IS NULL OR cache_source NOT IN ('response', 'prepared')) "
            "AND decode_tps IS NOT NULL AND completion_tokens > 1 "
            "AND COALESCE(conductor_acted, 0) = 0 AND lane IS NULL "
-           "AND COALESCE(sampling, '') != 'regenerate'")
+           "AND COALESCE(sampling, '') NOT IN ('regenerate', 'loop_escape', 'card')")
 ERROR = ("(finish_reason = 'error' OR (status >= 500 AND (finish_reason IS NULL "
          "OR finish_reason != 'refused')))")
 

@@ -27,6 +27,7 @@ import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
 import { MINI_WREN, reducedMotion } from './figure';
 import './install';
+import { changeText } from './job-view';
 import './measure-table';
 import './memory-bar';
 import './reset';
@@ -912,6 +913,9 @@ export class QseSetup extends LightElement {
         <h2 class="rv-h">${S.reviewWeights}</h2>
         <p>${dev?.active_profile === prof.id ? S.reviewWeightsSame(prof.label) : S.reviewWeightsSwitch(dev?.active_profile ? (m.profiles.find((p) => p.id === dev.active_profile)?.label ?? dev.active_profile) : null, prof.label)}</p>
         ${ready && !ready.profile.on_disk ? html`<p class="muted">${S.reviewDownload(ready.profile.download_gb)}</p>` : nothing}
+        ${ready?.downloads?.length
+          ? html`<ul class="rv-downloads" data-review-downloads>${ready.downloads.map((d) => html`<li data-download=${d.id}><span>${d.label}</span> <span class="muted small">${d.for}</span> <span class="num">${d.gb.toFixed(2)} GB</span></li>`)}</ul>`
+          : nothing}
         ${ready ? html`<p class="muted small">${ready.restart ? S.reviewRestart : S.reviewNoRestart}</p>` : nothing}
       </section>
 
@@ -923,7 +927,7 @@ export class QseSetup extends LightElement {
           ? ready.changes.length
             ? html`<div class="table-scroll"><table class="table rv-table">
                 <thead><tr><th scope="col">${S.reviewKey}</th><th scope="col">${S.reviewNow}</th><th scope="col">${S.reviewAfter}</th><th scope="col">${S.reviewFrom}</th></tr></thead>
-                <tbody>${ready.changes.map((c) => html`<tr data-env=${c.key}><th scope="row"><code>${c.key}</code></th><td class="rv-old">${c.current ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="rv-new">${c.next ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="muted small">${c.from}</td></tr>`)}</tbody>
+                <tbody>${ready.changes.map((c) => html`<tr data-env=${c.key}><th scope="row"><code>${c.key}</code></th><td class="rv-old">${c.current ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="rv-new">${c.removed ? html`<span class="rv-removed" data-removed>${changeText(c, S.reviewUnset).to}</span>` : c.next ?? html`<span class="muted">${S.reviewUnset}</span>`}</td><td class="muted small">${c.from}</td></tr>`)}</tbody>
               </table></div>`
             : html`<p class="muted">${S.reviewNoChanges}</p>`
           : nothing}

@@ -39,6 +39,8 @@ from chatd.panes import PanesMixin
 from chatd.plans import PlansMixin
 from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
+from chatd import websearch
+from chatd.websearch import WebSearchMixin
 from chatd.engine import Engine, LiveTail
 from chatd.sandbox import Sandboxes
 from chatd.snapshots import Snapshots
@@ -56,6 +58,9 @@ DEFAULT_SETTINGS = {
     # SRV-387/SRV-391: ask | auto | yolo (chatd/tools.py decide_mode); null: the default mode
     # (GET/PUT /permissions/mode), which a new chat copies when it is created
     "permission_mode": None,
+    # SRV-469: null = the global web search settings; else some of provider, max_results,
+    # safe_search, language, time_range (chatd/websearch.py)
+    "web_search": None,
 }
 EFFORTS = ("auto", "low", "medium", "high", "xhigh")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
@@ -137,7 +142,7 @@ def device_label(ua: str | None) -> str | None:
     return browser or system or "another device"
 
 
-class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
+class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, WebSearchMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -1248,6 +1253,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin):
         caps["defaults"] = {**caps["defaults"],
                             "tools": [t.name for t in self.available_builtins()]}
         caps["commands"] = self.commands()
+        ws = self.web_search_global()
+        caps["web_search"] = {"provider": ws["provider"], "providers": list(websearch.PROVIDERS)}
         return caps
 
     def _build_caps(self, facts: dict) -> dict:
@@ -1568,6 +1575,11 @@ def _clean_settings(patch: dict) -> dict:
         out["max_steps"] = max(1, min(200, int(out["max_steps"] or 50)))
     if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):
         raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
+    if "web_search" in out:
+        try:
+            out["web_search"] = websearch.clean_override(out["web_search"])
+        except websearch.Invalid as exc:
+            raise ApiError(400, "bad_request", str(exc), {"field": exc.field}) from None
     return out
 
 

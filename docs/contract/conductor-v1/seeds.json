@@ -595,7 +595,12 @@
      "You ran `{name}` with these arguments {count} times and got the same result each time (first line: {first_line}). This call was not run. Do something different: read what the result says, change the approach, or fix the cause first.",
      "This was `{name}` with the same arguments again, and it was not run either. Take a different step now."
     ],
-    "first_line_chars": 160
+    "first_line_chars": 160,
+    "wait_s": 10,
+    "escape_texts": [
+     "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first.",
+     "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
+    ]
    },
    "C1": {
     "rule": "risk_floor",
@@ -4806,6 +4811,25 @@
        "on"
       ]
      },
+     "sampling": {
+      "type": "object",
+      "properties": {
+       "agentic_default": {
+        "enum": [
+         "greedy",
+         "card"
+        ]
+       },
+       "loop_escape": {
+        "enum": [
+         "off",
+         "on"
+        ]
+       }
+      },
+      "required": [],
+      "additionalProperties": false
+     },
      "shadow": {
       "type": "object",
       "properties": {
@@ -5870,7 +5894,7 @@
           "repeats": {
            "type": "integer",
            "minimum": 2,
-           "description": "the call that would be the n-th in a row with the same name and arguments, after n-1 identical results"
+           "description": "the call that would be the n-th in a row with the same name and arguments, after n-1 identical results, in the current user turn"
           },
           "texts": {
            "type": "array",
@@ -5884,6 +5908,20 @@
           "first_line_chars": {
            "type": "integer",
            "minimum": 8
+          },
+          "wait_s": {
+           "type": "number",
+           "minimum": 0,
+           "description": "an earlier run whose result came back after the client took this many seconds or more is a wait (a poll of a running job), not a loop; 0: no such exemption (absent: 0)"
+          },
+          "escape_texts": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "minLength": 1
+           },
+           "minItems": 1,
+           "description": "the loop escape's note (SRV-475): {name}, {count}; the n-th for the n-th escaped request of a streak"
           }
          },
          "required": [

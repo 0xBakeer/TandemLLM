@@ -10,6 +10,9 @@
 // CSS file would save 2.5 KB but load every view's CSS up front; the module-preload polyfill went.
 // 420 KB since 0.9.0 (2026-10-14: 415.1 KB as released, 416.4 KB with the panes' plus menu, the
 // pages a tool call wrote and the Context panel's reasons).
+// 423 KB since the media players (VIS-159, a 1.4 KB chunk loaded on first use) and the Context
+// panel's memory notes (SRV-471): 422.2 KB. 424 KB with the Setup Guide's job log and change list
+// (VIS-151, VIS-155) on top: 423.7 KB; a lazy install view measured 424.0 KB, so no split.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -28,8 +31,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 420 KB)`);
-if (total > 420 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 424 KB)`);
+if (total > 424 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

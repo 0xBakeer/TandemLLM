@@ -1930,6 +1930,10 @@ a.ccard-license:hover {
   font-family: var(--font-mono);
   background: color-mix(in srgb, var(--ok) 10%, transparent);
 }
+.rv-removed {
+  color: var(--warn);
+  font-family: var(--font-ui);
+}
 .rv-notes {
   margin: 10px 0 0;
   padding: 0;
@@ -2219,6 +2223,64 @@ a.ccard-license:hover {
 }
 .inst-detail {
   grid-column: 2 / -1;
+}
+.inst-roles {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+.inst-roles li {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  overflow-wrap: anywhere;
+}
+.inst-roles li + li {
+  margin-top: 4px;
+}
+.inst-roles li.is-warn {
+  color: var(--warn);
+}
+.rv-downloads {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+}
+.rv-downloads li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  align-items: baseline;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rv-downloads .num {
+  margin-left: auto;
+}
+.inst-changes {
+  grid-column: 2 / -1;
+  min-width: 0;
+}
+.inst-changes summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+.inst-changes ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.inst-changes li + li {
+  margin-top: 2px;
+}
+.inst-changes li.is-removed .num {
+  color: var(--warn);
 }
 .inst-dot {
   width: 8px;

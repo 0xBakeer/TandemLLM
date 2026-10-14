@@ -53,11 +53,34 @@ FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # Opencode's word is ignored (the deploy stores it on the live box too)
           # The shadow reader's block (the deploy stores it on the live box too)
-          "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow"},
-          "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word"},
-          "profiles/chat": {"thinking.by_size", "ui"},
+          # SRV-471: the memory switch (the live box set it on in both, coding v20 and chat v5)
+          # SRV-475: the sampling section (the migration stores it on the live box too)
+          "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow", "memory",
+                              "sampling"},
+          "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word", "sampling"},
+          "profiles/chat": {"thinking.by_size", "ui", "memory", "sampling"},
           # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)
           "packages": {"packages.tandem-memory", "packages.memory"}}
+# what the shipped documents changed on purpose since that day, keyed by the document: the path
+# and the value they ship. SRV-473: the same-call guard on (the live box: coding v21 by hand,
+# overnight and chat by the migration), chat's C3 acting, chat's description
+CHANGED = {"profiles/coding": {"toolgate.same_call": True},
+           "profiles/overnight": {"toolgate.same_call": True},
+           "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",
+                             "description": "Open WebUI and the Playground: class-aware effort, "
+                                            "the same-call guard."}}
+
+
+def _changed(want: dict, kind: str) -> dict:
+    out = json.loads(json.dumps(want))
+    for path, val in CHANGED.get(kind, {}).items():
+        node, keys = out, path.split(".")
+        for k in keys[:-1]:
+            node = node[k]
+        node[keys[-1]] = val
+    return out
+
+
 HERMES_TOOLS = ["terminal", "process", "read_file", "write_file", "patch", "search_files", "todo",
                 "memory", "session_search", "skills_list", "skill_view", "skill_manage",
                 "execute_code", "delegate_task", "clarify"]
@@ -122,7 +145,7 @@ def test_a_new_box_serves_the_live_configuration():
             st, _, got = _call(port, "GET", f"/v1/conductor/{kind}")
             assert st == 200, (kind, got)
             assert got["version"] == 1, (kind, got["version"])    # stored at the start
-            want = _fixture(fix)
+            want = _changed(_fixture(fix), kind)
             if kind == "settings":
                 assert got["doc"]["default_profile"] == "general"
                 want = dict(want, default_profile="general")

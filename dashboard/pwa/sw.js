@@ -5,9 +5,24 @@
 // anything under /v1/ goes to the network untouched, and a navigation asks the network first, so
 // a new build is never hidden behind an old one. The cache is named by the build and an old
 // build's cache goes when the new worker activates; the page offers a reload when one waits.
+// OPS-131: a navigation that the reverse proxy answers 502, 503 or 504 (the engine, which serves the
+// dashboard, restarts) gets the cached shell, as a network error does; the page then asks
+// `./sw-away` and, when the worker served it so, says the engine restarts and reloads once /health
+// answers (src/lib/pwa.ts).
 const BUILD = '__BUILD__';
 const SHELL = __SHELL__;
 const CACHE = 'tandem-shell-' + BUILD;
+const AWAY = [502, 503, 504];
+// the last navigation this worker answered from the cache: {status (0: network error), at (ms)}
+let away = null;
+
+function shell(status) {
+  return caches.match('./index.html', { ignoreSearch: true }).then((r) => {
+    if (!r) return null;
+    away = { status, at: Date.now() };
+    return r;
+  });
+}
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
@@ -32,8 +47,20 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.includes('/v1/')) return;
   const scope = new URL(self.registration.scope).pathname;
   if (!url.pathname.startsWith(scope)) return;
+  if (url.pathname === scope + 'sw-away') {
+    // what the page asks right after it loaded: was it the cached shell, and why
+    const body = JSON.stringify(away ? { away: true, status: away.status, at: away.at } : { away: false });
+    away = null;
+    e.respondWith(new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }));
+    return;
+  }
   if (req.mode === 'navigate') {
-    e.respondWith(fetch(req).catch(() => caches.match('./index.html', { ignoreSearch: true }).then((r) => r || Response.error())));
+    e.respondWith(
+      fetch(req).then(
+        (res) => (AWAY.includes(res.status) ? shell(res.status).then((r) => r || res) : res),
+        () => shell(0).then((r) => r || Response.error()),
+      ),
+    );
     return;
   }
   if (!url.pathname.startsWith(scope + 'assets/')) return;

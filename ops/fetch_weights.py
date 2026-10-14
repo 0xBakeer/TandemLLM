@@ -3,7 +3,7 @@
     python ops/fetch_weights.py [--revision R] <repo> <dir> [file ...]   # files: only these (plus checksum lists)
     python ops/fetch_weights.py --plan [--revision R] <repo> <dir> [file ...]   # every URL and size; no download
     python ops/fetch_weights.py --verify <dir>                            # checksums of what is there
-    python ops/fetch_weights.py --assets <profile> --repo <dir> [--dry-run] [--extra-gb G] [--margin-gb G]
+    python ops/fetch_weights.py --assets <profile> --repo <dir> [--also "ID ..."] [--dry-run] [--extra-gb G] [--margin-gb G]
 
 Downloads into <dir>.partial with the token in ~/.cache/huggingface/token (HF_TOKEN wins; none is needed,
 every repository a profile reads is public), checks every file a checksum list names (crc32.txt: EXL3
@@ -19,8 +19,10 @@ besides its weights, each asset's `fetch` list, downloaded when the asset is not
 folder through a .partial-<asset> folder, or into the Hugging Face cache (`${HF_HUB}`, the base
 checkpoint), where ~/.qwen38-spark-engine/fetch/<asset>.json says whether the last download finished.
 The disk is checked first: what is still to download, --extra-gb (the profile's weights, fetched after)
-and --margin-gb left over, per filesystem. Exit 3: an asset has no download; 4: not enough disk; 5: a
-download or a checksum failed.
+and --margin-gb left over, per filesystem. --also (VIS-153): more assets of the same registry entry,
+the models of the tools a selection turns on (the shadow reader's, the narrator's, Laya's), fetched the
+same way; one that two tools share is fetched once. Exit 3: an asset has no download (or no such id);
+4: not enough disk; 5: a download or a checksum failed.
 """
 from __future__ import annotations
 
@@ -260,6 +262,199 @@ def fetch_cache(aid: str, repo: str, files: list[str], m: dict) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- OPS-133: the tensors a load reads
+PLAIN_MANIFEST = "_plain_manifest.json"
+RANGE_TRIES = 6                 # a range request's attempts, each resumed where the last stopped
+
+
+def is_plain(e: dict) -> bool:
+    """A fetch entry that takes only some tensors of its safetensors files (`skip_dtypes`,
+    `skip_tensors`; the EXL3 profiles' base: the FP8 projections an EXL3 pack replaces left out)."""
+    return bool(e.get("skip_dtypes") or e.get("skip_tensors"))
+
+
+def hub_url(repo: str, commit: str, name: str) -> str:
+    return f"{os.environ.get('HF_ENDPOINT', 'https://huggingface.co')}/{repo}/resolve/{commit}/{name}"
+
+
+def open_range(url: str, start: int, end: int):
+    """bytes [start, end) of `url` (a public repository's file; the redirect to the hub's storage
+    keeps the Range header): the response, refused unless it is a 206 of exactly that range."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end - 1}",
+                                               "User-Agent": "tandemllm-fetch"})
+    r = urllib.request.urlopen(req, timeout=60)
+    if r.status != 206 or not (r.headers.get("Content-Range") or "").startswith(
+            f"bytes {start}-{end - 1}/"):
+        r.close()
+        raise OSError(f"{url}: no range answer (HTTP {r.status}, {r.headers.get('Content-Range')})")
+    return r
+
+
+def copy_range(url: str, start: int, end: int, fh) -> None:
+    """bytes [start, end) of `url` appended to `fh`, resumed where a dropped connection stopped."""
+    import time
+    pos = start
+    tries = RANGE_TRIES
+    for attempt in range(tries):
+        try:
+            with open_range(url, pos, end) as r:
+                while pos < end:
+                    b = r.read(min(1 << 23, end - pos))
+                    if not b:
+                        raise OSError(f"{url}: the answer ended at byte {pos} of {end}")
+                    fh.write(b)
+                    pos += len(b)
+            return
+        except OSError as exc:
+            if attempt == tries - 1:
+                raise
+            print(f"[fetch] {url}: {exc}; again from byte {pos}", flush=True)
+            time.sleep(min(30, 2 ** attempt))
+
+
+def read_header(url: str) -> tuple[int, dict]:
+    """A safetensors file's header over two range requests: (its length, the header)."""
+    import io
+    import struct
+    b = io.BytesIO()
+    copy_range(url, 0, 8, b)
+    n = struct.unpack("<Q", b.getvalue())[0]
+    if not 0 < n < 1 << 28:
+        raise OSError(f"{url}: a header length of {n} bytes is not a safetensors file")
+    b = io.BytesIO()
+    copy_range(url, 8, 8 + n, b)
+    return n, json.loads(b.getvalue())
+
+
+def kept_tensors(header: dict, skip_dtypes, skip_tensors) -> dict:
+    """name -> info of the tensors a plain fetch keeps: not of `skip_dtypes`, not named in
+    `skip_tensors`, and not the `<name>_scale_inv` of a tensor left out (an FP8 block's scales)."""
+    t = {k: v for k, v in header.items() if k != "__metadata__"}
+    out = {k: v for k, v in t.items() if v["dtype"] not in set(skip_dtypes or ()) and
+           k not in set(skip_tensors or ())}
+    return {k: v for k, v in out.items()
+            if not (k.endswith("_scale_inv") and k[: -len("_scale_inv")] in t and
+                    k[: -len("_scale_inv")] not in out)}
+
+
+def runs_of(kept: dict) -> list[list[int]]:
+    """The kept tensors' byte ranges of the data section, merged where they touch."""
+    out: list[list[int]] = []
+    for a, b in sorted(tuple(v["data_offsets"]) for v in kept.values()):
+        if out and out[-1][1] == a:
+            out[-1][1] = b
+        else:
+            out.append([a, b])
+    return out
+
+
+def write_plain(url: str, n: int, header: dict, kept: dict, path: str) -> int:
+    """`path`: a safetensors file of the `kept` tensors of `url`, their bytes fetched run by run;
+    its size."""
+    runs = runs_of(kept)
+    base, where = 0, {}
+    for a, b in runs:
+        where[(a, b)] = base
+        base += b - a
+    new = {}
+    for k, v in sorted(kept.items(), key=lambda kv: kv[1]["data_offsets"][0]):
+        a, b = v["data_offsets"]
+        (ra, rb), off = next(((r[0], r[1]), where[tuple(r)]) for r in runs if r[0] <= a and b <= r[1])
+        new[k] = {"dtype": v["dtype"], "shape": v["shape"],
+                  "data_offsets": [off + a - ra, off + b - ra]}
+    if "__metadata__" in header:
+        new["__metadata__"] = header["__metadata__"]
+    raw = json.dumps(new, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) % 8)
+    import struct
+    with open(path + ".tmp", "wb") as fh:
+        fh.write(struct.pack("<Q", len(raw)) + raw)
+        for a, b in runs:
+            copy_range(url, 8 + n + a, 8 + n + b, fh)
+    if os.path.getsize(path + ".tmp") != 8 + len(raw) + base:
+        raise OSError(f"{path}: {os.path.getsize(path + '.tmp')} bytes, not {8 + len(raw) + base}")
+    os.replace(path + ".tmp", path)
+    return 8 + len(raw) + base
+
+
+def fetch_plain(aid: str, repo: str, to: str, e: dict, m: dict) -> int:
+    """OPS-133: `e`'s files of `repo` at m's commit into `to`, the safetensors files with only the
+    tensors `kept_tensors` keeps (range requests on each file's header and the kept bytes), the
+    others whole; the index's weight map cut to the tensors kept. Each file's header must add up to
+    the hub's size for it. Built in <to>.partial-<aid> (a stopped fetch resumes file by file), then
+    moved into place, so `to` exists only complete."""
+    from huggingface_hub import snapshot_download
+    part = to.rstrip("/") + ".partial-" + aid
+    os.makedirs(part, exist_ok=True)
+    mp = os.path.join(part, PLAIN_MANIFEST)
+    man = json.load(open(mp)) if os.path.isfile(mp) else {}
+    if man.get("commit") != m["commit"]:
+        man = {"repo": repo, "commit": m["commit"], "skip_dtypes": e.get("skip_dtypes") or [],
+               "skip_tensors": e.get("skip_tensors") or [], "files": {}}
+    names = sorted(n for n in m["files"] if _matches(n, e["files"]))
+    whole = [n for n in names if not n.endswith(".safetensors")]
+    print(f"[fetch] {repo}@{m['commit']} -> {part}: {len(whole)} files whole, "
+          f"{len(names) - len(whole)} safetensors files without "
+          f"{', '.join((e.get('skip_dtypes') or []) + (e.get('skip_tensors') or []))}", flush=True)
+    if whole:
+        snapshot_download(repo_id=repo, revision=m["commit"], local_dir=part, allow_patterns=whole,
+                          token=_token())
+        short = [n for n in whole if not os.path.isfile(os.path.join(part, n)) or
+                 os.path.getsize(os.path.join(part, n)) != m["files"][n]["size"]]
+        if short:
+            print(f"[fetch] not the hub's size: {' '.join(short)}")
+            return 1
+    kept_names: dict[str, str] = {}
+    for name in names:
+        if name in whole:
+            continue
+        url = hub_url(repo, m["commit"], name)
+        out = os.path.join(part, name)
+        rec = man["files"].get(name)
+        try:
+            n, header = read_header(url)
+            data = max((v["data_offsets"][1] for k, v in header.items() if k != "__metadata__"),
+                       default=0)
+            if 8 + n + data != m["files"][name]["size"]:
+                print(f"[fetch] {name}: its header says {8 + n + data} bytes, the hub "
+                      f"{m['files'][name]['size']}")
+                return 1
+            kept = kept_tensors(header, e.get("skip_dtypes"), e.get("skip_tensors"))
+            if not (rec and os.path.isfile(out) and os.path.getsize(out) == rec["size"]):
+                size = write_plain(url, n, header, kept, out)
+                rec = {"hub_size": m["files"][name]["size"], "hub_sha256": m["files"][name]["sha256"],
+                       "size": size, "sha256": _sha256(out), "tensors": len(kept)}
+                man["files"][name] = rec
+                _write_json(mp, man)
+        except OSError as exc:
+            print(f"[fetch] {name}: {exc}")
+            return 1
+        kept_names.update({k: name for k in kept})
+    idx = os.path.join(part, "model.safetensors.index.json")
+    if os.path.isfile(idx):
+        doc = json.load(open(idx))
+        doc["weight_map"] = {k: v for k, v in doc.get("weight_map", {}).items() if k in kept_names}
+        doc.setdefault("metadata", {})["total_size"] = sum(
+            r["size"] for r in man["files"].values())
+        _write_json(idx, doc)
+    shutil.rmtree(os.path.join(part, ".cache"), ignore_errors=True)
+    total = sum(r["size"] for r in man["files"].values())
+    if os.path.exists(to):
+        _merge(part, to)
+    else:
+        os.makedirs(os.path.dirname(to.rstrip("/")) or ".", exist_ok=True)
+        os.rename(part, to)
+    print(f"[fetch] {to} complete: {len(kept_names)} tensors, {total / 1e9:.2f} GB", flush=True)
+    return 0
+
+
+def _write_json(path: str, data: dict) -> None:
+    with open(path + ".tmp", "w") as fh:
+        json.dump(data, fh, indent=1)
+    os.replace(path + ".tmp", path)
+
+
 def _free_at(path: str) -> tuple[int, int]:
     """(device, free bytes) of the filesystem `path` is or would be on."""
     while not os.path.exists(path):
@@ -267,8 +462,10 @@ def _free_at(path: str) -> tuple[int, int]:
     return os.stat(path).st_dev, shutil.disk_usage(path).free
 
 
-def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0, margin_gb: float = 60.0) -> int:
-    """OPS-95: the profile's `assets_required` that are not on this box, fetched (see the module doc)."""
+def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0, margin_gb: float = 60.0,
+           also: list[str] | tuple = ()) -> int:
+    """OPS-95: the profile's `assets_required` and the `also` ids that are not on this box, fetched (see
+    the module doc)."""
     sys.path.insert(0, repo)
     try:
         from server.setup import registry
@@ -281,13 +478,27 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
         print(f"[fetch] no model registry entry lists {profile}: its files are checked as they are")
         return 0
     expand = lambda p: registry.expand(p, repo)  # noqa: E731  (${HF_HUB} is hf_hub() there too)
-    todo = []                       # (asset id, entry, its `to` expanded)
-    for aid in registry.profile(m, profile)["assets_required"]:
+    ids = list(dict.fromkeys([*registry.profile(m, profile)["assets_required"], *also]))
+    unknown = [aid for aid in ids if registry.asset(m, aid) is None]
+    if unknown:
+        print(f"[fetch] {m['id']} has no asset {' '.join(unknown)}")
+        return 3
+    def state(aid: str) -> dict:
+        return json.load(open(state_path(aid))) if os.path.isfile(state_path(aid)) else {}
+
+    def here(aid: str) -> bool:
+        """on the box and its last download finished (the HF cache's base), or (OPS-133) an asset
+        it names in `satisfied_by` is"""
         a = registry.asset(m, aid)
-        st = {}
-        if os.path.isfile(state_path(aid)):
-            st = json.load(open(state_path(aid)))
-        if registry.asset_present(a, repo) and st.get("complete", True):
+        if registry.asset_present(a, repo) and state(aid).get("complete", True):
+            return True
+        return any(registry.asset(m, b) is not None and here(b) for b in a.get("satisfied_by") or [])
+
+    todo = []                       # (asset id, entry, its `to` expanded)
+    for aid in ids:
+        a = registry.asset(m, aid)
+        st = state(aid)
+        if here(aid):
             print(f"[fetch] {aid}: on this box")
             continue
         if not a.get("fetch"):
@@ -307,6 +518,12 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
     for aid, e, to in todo:
         print(f"[fetch] {aid}: {e['repo']} ({' '.join(e['files'])}) -> {to}")
         hm, left = plan(e["repo"], to, e["files"])
+        if is_plain(e):
+            # OPS-133: only the tensors kept; the plan's sizes are the whole files
+            left = int(e["gb"] * 1e9)
+            print(f"[fetch] {aid}: the safetensors files without "
+                  f"{', '.join((e.get('skip_dtypes') or []) + (e.get('skip_tensors') or []))}, "
+                  f"about {e['gb']:g} GB")
         plans.append(hm)
         dev, fr = _free_at(to)
         need[dev] = need.get(dev, 0) + left
@@ -328,14 +545,15 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
         print("[fetch] dry run: nothing downloaded")
         return 0
     for (aid, e, to), hm in zip(todo, plans):
-        if to == hf_hub():
+        if is_plain(e):
+            rc = fetch_plain(aid, e["repo"], to, e, hm)
+        elif to == hf_hub():
             rc = fetch_cache(aid, e["repo"], e["files"], hm)
         else:
             rc = fetch(e["repo"], to, list(e["files"]), part=to.rstrip("/") + ".partial-" + aid)
         if rc != 0:
             return 5
-    missing = [aid for aid in registry.profile(m, profile)["assets_required"]
-               if not registry.asset_present(registry.asset(m, aid), repo)]
+    missing = [aid for aid in ids if not here(aid)]
     if missing:
         print(f"[fetch] still not on this box after the download: {' '.join(missing)}")
         return 5
@@ -355,8 +573,10 @@ if __name__ == "__main__":
         ap.add_argument("--dry-run", action="store_true")
         ap.add_argument("--extra-gb", type=float, default=0.0)
         ap.add_argument("--margin-gb", type=float, default=60.0)
+        ap.add_argument("--also", default="", help="more asset ids of the entry, space or comma separated")
         o = ap.parse_args(a)
-        sys.exit(assets(o.assets, o.repo, o.dry_run, o.extra_gb, o.margin_gb))
+        sys.exit(assets(o.assets, o.repo, o.dry_run, o.extra_gb, o.margin_gb,
+                        [x for x in o.also.replace(",", " ").split() if x]))
     dry = a[:1] == ["--plan"]
     a = a[1:] if dry else a
     rev = None

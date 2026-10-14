@@ -3,21 +3,23 @@
 // demand from xterm-pane.ts, attached to the sandbox's shell or a tool call's output; on a phone a
 // key row with Esc, Tab, Ctrl and the arrows), Preview (a sandboxed
 // iframe for an html or svg artifact, with a 390 px and a 1200 px width), Files (the sandbox's tree
-// and a viewer), Diff (unified, coloured), Markdown and Image. On a phone the view wraps this in a
-// full-screen sheet.
+// and a viewer), Diff (unified, coloured), Markdown, Image, and a video, audio, PDF or binary file in
+// <qse-media-view> (its own chunk, loaded on first use; VIS-159). On a phone the view wraps this in
+// a full-screen sheet.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { bytes } from '../lib/format';
 import { renderMarkdown } from '../playground/markdown';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
 import { LightElement } from '../ui/base';
 import { copyButton, icon } from '../ui/bits';
 import type { ChatBackend, TerminalSession } from './backend';
 import { diffCounts, parseDiff, type DiffRow } from './terminal';
 import type { XtermHandle } from './xterm-pane';
 import { paneIcon, paneWord } from './thread';
-import { filePane, latestPage } from './file-panes';
+import { MEDIA_KINDS, filePane, latestPage, loadMediaView } from './file-panes';
 import type { Conversation, PaneKind, PaneRef, SandboxFile } from './types';
 import './context-panel';
 
@@ -28,6 +30,9 @@ export interface OpenPane extends PaneRef {
 }
 
 export type Dock = 'bottom' | 'right';
+
+/** the file the Files pane shows; `kind` and `url` from chatd (VIS-159) */
+type FileView = { path: string; content: string; mime: string; bytes: number; etag?: string; kind?: string; url?: string };
 
 @customElement('qse-chat-panes')
 export class QseChatPanes extends LightElement {
@@ -41,9 +46,9 @@ export class QseChatPanes extends LightElement {
   /** the plus menu's left edge in the panes box: under the plus button, inside the box */
   @state() private plusLeft = 6;
   @state() private plusTop = 40;
-  @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string; url?: string }>();
+  @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>();
   @state() private files = new Map<string, SandboxFile[]>();
-  @state() private file: { path: string; content: string; mime: string; bytes: number; etag?: string } | null = null;
+  @state() private file: FileView | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
   @state() private ctrlArmed = false;
   @state() private editText = '';
@@ -125,7 +130,7 @@ export class QseChatPanes extends LightElement {
   updated(changed: Map<string, unknown>): void {
     const p = this.panes.find((x) => x.id === this.active);
     if (!p || !this.backend || !this.convId) return;
-    if (p.kind === 'preview' || p.kind === 'diff' || p.kind === 'markdown' || p.kind === 'image') {
+    if (p.kind === 'preview' || p.kind === 'diff' || p.kind === 'markdown' || p.kind === 'image' || (MEDIA_KINDS.has(p.kind) && p.ref.startsWith('file:'))) {
       if (!p.inline && !this.artifacts.has(p.ref)) void this.loadArtifact(p.ref);
     } else if (p.kind === 'files') {
       if (!this.files.has(this.root)) void this.loadDir(this.root);
@@ -156,8 +161,9 @@ export class QseChatPanes extends LightElement {
   private async openFile(path: string): Promise<void> {
     try {
       const f = await this.backend!.readFile(this.convId!, path);
-      this.file = { path, ...f };
-      this.editText = f.content;
+      this.file = { path, ...f, content: f.content ?? '' };
+      this.editText = f.content ?? '';
+      if (f.kind && (MEDIA_KINDS.has(f.kind as PaneKind) || f.kind === 'image')) void loadMediaView();
     } catch (e) {
       this.file = { path, content: (e as Error).message, mime: 'text/plain', bytes: 0 };
       this.editText = '';
@@ -266,7 +272,11 @@ export class QseChatPanes extends LightElement {
       case 'context':
         return html`<div class="ch-ctxpane"><qse-chat-context .conv=${this.conv} .now=${Date.now()}></qse-chat-context></div>`;
       case 'pdf':
-        return this.renderPdf(p);
+        return p.ref.startsWith('file:') ? this.renderMedia(p) : this.renderPdf(p);
+      case 'video':
+      case 'audio':
+      case 'binary':
+        return this.renderMedia(p);
     }
   }
 
@@ -304,6 +314,15 @@ export class QseChatPanes extends LightElement {
   private renderPdf(p: OpenPane): TemplateResult {
     const url = p.ref.startsWith('/') || p.ref.startsWith('http') ? p.ref : `/v1/chat-app/attachments/${p.ref}`;
     return html`<div class="ch-pdf"><div class="ch-pane-bar"><span class="muted small">${p.title ?? 'PDF'}</span><span class="grow"></span><a class="btn btn-ghost btn-sm" href=${url} target="_blank" rel="noopener">${icon('external')} Open</a></div><iframe class="ch-pdf-frame" title=${p.title ?? 'PDF'} src=${url}></iframe></div>`;
+  }
+
+  /** a sandbox file in its player or viewer (VIS-159) */
+  private renderMedia(p: OpenPane): TemplateResult {
+    const a = this.artifacts.get(p.ref);
+    if (!a) return html`<p class="muted small ch-pane-empty">loading</p>`;
+    if (a.kind === 'error') return html`<p class="ch-pane-empty err-ink">${a.content}</p>`;
+    void loadMediaView();
+    return html`<div class="ch-mediapane"><qse-media-view kind=${a.kind} src=${a.url ?? ''} name=${a.title} size=${ifDefined(a.bytes)}></qse-media-view></div>`;
   }
 
   private renderTerminal(p: OpenPane): TemplateResult {
@@ -380,11 +399,19 @@ export class QseChatPanes extends LightElement {
     return html`<div class="ch-files">
       <ul class="ch-file-list ch-file-root" aria-label="sandbox files"><li><div class="ch-file is-root">${icon('folder')}<span>${root}</span></div><ul class="ch-file-list">${tree(root, 1)}</ul></li></ul>
       <div class="ch-file-view">
-        ${this.file
-          ? html`<div class="ch-pane-bar"><code class="small">${this.file.path}</code><span class="muted small num">${bytes(this.file.bytes, 0)}</span><span class="grow"></span>${filePane(this.file.path) ? html`<button type="button" class="btn btn-ghost btn-sm" title="Open in a pane" @click=${() => this.fire('ch-pane-open', { pane: filePane(this.file!.path) })}>${icon(paneIcon(filePane(this.file.path)!.kind))} ${paneWord(filePane(this.file.path)!.kind)}</button>` : nothing}<button type="button" class="btn btn-ghost btn-sm" title="Edit" @click=${() => this.fire('ch-pane-open', { pane: { kind: 'editor', ref: this.file!.path, title: this.file!.path.split('/').pop() } })}>${icon('edit')} Edit</button>${copyButton(this.file.content, 'Copy file')}</div><pre class="ch-code"><code>${this.file.content}</code></pre>`
-          : html`<p class="muted small ch-pane-empty">Pick a file.</p>`}
+        ${this.file ? this.renderFileView(this.file) : html`<p class="muted small ch-pane-empty">Pick a file.</p>`}
       </div>
     </div>`;
+  }
+
+  /** the Files pane's viewer: text with Edit and Copy, a media file in its player, a binary as its
+   *  size and Download (VIS-159: a video showed an empty viewer) */
+  private renderFileView(f: FileView): TemplateResult {
+    const pane = filePane(f.path);
+    const open = pane ? html`<button type="button" class="btn btn-ghost btn-sm" title="Open in a pane" @click=${() => this.fire('ch-pane-open', { pane })}>${icon(paneIcon(pane.kind))} ${paneWord(pane.kind)}</button>` : nothing;
+    const media = f.kind && (MEDIA_KINDS.has(f.kind as PaneKind) || f.kind === 'image') && f.url;
+    if (media) return html`<div class="ch-pane-bar"><code class="small">${f.path}</code><span class="grow"></span>${open}</div><qse-media-view kind=${f.kind!} src=${f.url!} name=${f.path.split('/').pop() ?? f.path} size=${f.bytes}></qse-media-view>`;
+    return html`<div class="ch-pane-bar"><code class="small">${f.path}</code><span class="muted small num">${bytes(f.bytes, 0)}</span><span class="grow"></span>${open}<button type="button" class="btn btn-ghost btn-sm" title="Edit" @click=${() => this.fire('ch-pane-open', { pane: { kind: 'editor', ref: f.path, title: f.path.split('/').pop() } })}>${icon('edit')} Edit</button>${copyButton(f.content, 'Copy file')}</div><pre class="ch-code"><code>${f.content}</code></pre>`;
   }
 
   private renderDiff(p: OpenPane): TemplateResult {

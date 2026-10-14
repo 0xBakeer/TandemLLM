@@ -57,6 +57,10 @@ class SessionState:
         self.ended_at: float | None = None        # the last request's end
         self.watch: dict | None = None
         self.gone_at: float | None = None         # the turn end a client_gone was journaled for
+        # tool call id -> seconds the client took to send its result back: from the end of the
+        # answer that issued the call to the request that carried the result (the tool's run and
+        # the client's own time); C3 and the loop escape read a long one as a wait, not a loop
+        self.waits: OrderedDict = OrderedDict()
 
     def idle(self, now: float) -> float | None:
         """Seconds since the last turn ended, None while a request runs or before the first
@@ -81,11 +85,22 @@ class SessionState:
             if not isinstance(m, dict) or m.get("role") != "tool":
                 break
             tail.append(m)
+        gap = self.gap(now)
         for m in reversed(tail):
             c = m.get("content")
             if isinstance(c, list):
                 c = "".join(p.get("text", "") for p in c if isinstance(p, dict))
-            self.results.append((now, str(m.get("tool_call_id") or ""), _h(c or "")))
+            cid = str(m.get("tool_call_id") or "")
+            self.results.append((now, cid, _h(c or "")))
+            if cid and gap is not None and cid not in self.waits:
+                self.waits[cid] = gap
+        while len(self.waits) > 64:
+            self.waits.popitem(last=False)
+
+    def gap(self, now: float) -> float | None:
+        """Seconds since the session's last request ended (the client's time on the results this
+        request carries), None before any request ended."""
+        return None if self.ended_at is None else max(0.0, now - self.ended_at)
 
 
 class Sessions:

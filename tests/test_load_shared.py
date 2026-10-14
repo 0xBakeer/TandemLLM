@@ -126,7 +126,9 @@ def test_an_engine_with_caches_gets_the_policy_the_store_and_its_old_keys():
     assert any(x.startswith("[cache] session=on") for x in lines)
     assert any("verify graphs: 3 captured" in x for x in lines)
     assert KEYS_27B <= written, sorted(KEYS_27B - written)
-    extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem"}
+    # SRV-475: the checkpoint's sampling (generation_config.json), read for every model
+    extra = written - KEYS_27B - {"load_ledger", "tokenizer_sha", "weights_key", "segments", "mem",
+                                  "card_sampling"}
     assert not extra, sorted(extra)
     return f"memory policy, state store, side slots from the builder's cfg and weights; {len(KEYS_27B)} keys as before"
 

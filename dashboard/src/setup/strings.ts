@@ -233,6 +233,7 @@ export const S = {
   reviewAfter: 'After',
   reviewFrom: 'Set by',
   reviewUnset: 'unset',
+  jobChanges: (n: number) => `${n} setting${n === 1 ? '' : 's'} change`,
   reviewWeights: 'Weights',
   reviewWeightsSame: (p: string) => `${p}, already running.`,
   reviewWeightsSwitch: (from: string | null, to: string) => (from ? `${from} to ${to}.` : `${to}.`),
@@ -303,7 +304,8 @@ export const S = {
   backToReview: 'Back to Review',
   installStarting: 'Starting the install',
   installError: 'The box did not start the install.',
-  jobLost: 'The box does not know this install any more. It may have restarted without its job file.',
+  jobLost: 'This install and its log are no longer on the box (it has no job folder there).',
+  logDropped: (n: number) => `${n.toLocaleString('en-US')} earlier line${n === 1 ? '' : 's'} not kept here (the page keeps the last 300).`,
 
   // memory bar
   memTitle: 'Memory',

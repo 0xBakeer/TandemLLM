@@ -61,6 +61,12 @@ class ToolCtx:
             except ValueError:
                 cmd = ""
             return f"Running bash: {cmd[:120]}"
+        if name == "web_search":
+            try:
+                q = json.loads(self.part.get("input") or "{}").get("query") or ""
+            except ValueError:
+                q = ""
+            return f"Searching the web for \"{str(q)[:120]}\""
         return f"Running {name}"
 
     def output(self, text: str) -> None:
@@ -73,6 +79,9 @@ class ToolCtx:
 
     def fetch(self, url: str):
         return egress.fetch(url)
+
+    def search(self, query, max_results=None) -> dict:
+        return self.svc.run_web_search(self.cid, query, max_results)
 
     def present(self, pane: dict) -> None:
         self.svc.emit(self.run.conv, {"type": "pane.open", "pane": pane}, run_id=self.run_id)
@@ -241,6 +250,10 @@ class AgentMixin:
             enabled.add("todo_write")
         out = [t for t in self.available_builtins() if t.name in enabled and
                (prefs.get(t.name) is None or prefs[t.name]["enabled"] in (None, 1))]
+        if any(t.needs == "web_search" for t in out) and \
+                self.web_search_settings(settings)["provider"] == "off":
+            # SRV-469: no provider for this chat, no search tool in its request
+            out = [t for t in out if t.needs != "web_search"]
         if settings.get("plan_mode"):
             # SRV-363: the read tools and the todo list, nothing that changes the world
             return [t for t in out if t.name in PLAN_TOOLS]
@@ -527,6 +540,8 @@ class AgentMixin:
             part["status"], part["ended_at"] = st, iso(now_ms())
             if res.pane:
                 part["pane"] = res.pane
+            if out is not None and res.data is not None:
+                out["data"] = res.data
             self.emit(conv, {"type": "tool.done", "message_id": run.message_id,
                              "call_id": part["id"], "status": st,
                              "is_error": bool(out and out["is_error"]), "output": out},

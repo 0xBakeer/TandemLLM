@@ -13,26 +13,8 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { setupApi, setupUnauthorized } from './api';
+import { appendLog, applyJobEvent, changeText, doneMessage, isFinal, type JobLog, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
-
-const LOG_KEEP = 300;
-
-/** Fold one job event into the job (pure; tests/setup-install.test.ts). */
-export function applyJobEvent(job: SetupJob | null, ev: SetupJobEvent): SetupJob | null {
-  if (ev.type === 'job') return ev.job;
-  if (!job) return job;
-  if (ev.type === 'step') {
-    const i = job.steps.findIndex((s) => s.id === ev.step.id);
-    const steps = i >= 0 ? job.steps.map((s, j) => (j === i ? ev.step : s)) : [...job.steps, ev.step];
-    return { ...job, steps };
-  }
-  if (ev.type === 'done') return { ...job, state: ev.state, message: ev.message, ended_at: job.ended_at ?? Date.now() / 1000 };
-  return job;
-}
-
-export function isFinal(job: SetupJob | null): boolean {
-  return !!job && (job.state === 'done' || job.state === 'failed' || job.state === 'rolled_back');
-}
 
 @customElement('qse-install-progress')
 export class QseInstallProgress extends LightElement {
@@ -45,7 +27,7 @@ export class QseInstallProgress extends LightElement {
   @property({ type: Boolean }) compact = false;
 
   @state() private job: SetupJob | null = null;
-  @state() private log: { line: string; ts: number }[] = [];
+  @state() private log: JobLog = { lines: [], dropped: 0 };
   @state() private conn: StreamState = 'closed';
   @state() private awaySince: number | null = null;
   @state() private lost = false;
@@ -54,6 +36,7 @@ export class QseInstallProgress extends LightElement {
   private stream: ResumableStream | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private seenIds = new Set<string>();
+  private finalSent = false;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -85,6 +68,8 @@ export class QseInstallProgress extends LightElement {
     this.stream = null;
     this.lost = false;
     this.seenIds.clear();
+    this.log = { lines: [], dropped: 0 };
+    this.finalSent = false;
     if (!this.jobId) return;
     const id = this.jobId;
     this.stream = new ResumableStream({
@@ -103,8 +88,7 @@ export class QseInstallProgress extends LightElement {
           return;
         }
         if (data.type === 'log') {
-          const next = [...this.log, { line: data.line, ts: data.ts }];
-          this.log = next.length > LOG_KEEP ? next.slice(-LOG_KEEP) : next;
+          this.log = appendLog(this.log, { line: data.line, ts: data.ts });
           void this.updateComplete.then(() => {
             const el = this.querySelector('.inst-log');
             if (el) el.scrollTop = el.scrollHeight;
@@ -112,25 +96,27 @@ export class QseInstallProgress extends LightElement {
           return;
         }
         this.job = applyJobEvent(this.job, data);
-        if (isFinal(this.job)) {
-          this.stream?.close();
+        if (isFinal(this.job) && !this.finalSent) {
+          this.finalSent = true;
           this.dispatchEvent(new CustomEvent('job-final', { detail: this.job, bubbles: true }));
         }
+        // VIS-151: read on to the server's done event, which follows the log and the final job
+        if (streamFinished(data, this.job)) this.stream?.close();
       },
       onState: (s, detail) => {
         this.conn = s;
-        if (s === 'unauthorized') {
+        const act = streamAction(s, detail, this.job);
+        if (act === 'signin') {
           this.signIn = true;
           this.awaySince = null;
           setupUnauthorized();
-        } else if (s === 'open') this.awaySince = null;
-        else if ((s === 'reconnecting' || s === 'error') && !isFinal(this.job)) {
-          this.awaySince ??= Date.now();
-          if (detail && /HTTP 404/.test(detail)) {
-            this.lost = true;
-            this.stream?.close();
-          }
-        }
+        } else if (act === 'open') this.awaySince = null;
+        else if (act === 'lost') {
+          this.lost = true;
+          this.awaySince = null;
+          this.stream?.close();
+        } else if (act === 'close') this.stream?.close();
+        else if (act === 'away') this.awaySince ??= Date.now();
       },
     });
     this.stream.start();
@@ -144,6 +130,19 @@ export class QseInstallProgress extends LightElement {
     return html`<span class="inst-dot" aria-hidden="true"></span>`;
   }
 
+  /** VIS-155: the plan's settings under the check step, old -> new, collapsed with the count */
+  private changeList(j: SetupJob) {
+    return html`<details class="inst-changes" data-job-changes>
+      <summary class="muted small">${S.jobChanges(j.changes.length)}</summary>
+      <ul>
+        ${j.changes.map((c) => {
+          const t = changeText(c, S.reviewUnset);
+          return html`<li data-env=${c.key} class=${c.removed ? 'is-removed' : ''}><code>${c.key}</code> <span class="num">${t.from} → ${t.to}</span></li>`;
+        })}
+      </ul>
+    </details>`;
+  }
+
   render() {
     void this.tick;
     const j = this.job;
@@ -153,12 +152,18 @@ export class QseInstallProgress extends LightElement {
     const failedStep = j?.steps.find((s) => s.state === 'failed');
     return html`<div class="inst ${j ? `is-${j.state}` : ''}" data-job-state=${j?.state ?? 'starting'}>
       <div class="inst-head" role="status" aria-live="polite">
-        <span class="inst-badge" aria-hidden="true">${j?.state === 'done' ? icon('check') : j && (j.state === 'failed' || j.state === 'rolled_back') ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
+        <span class="inst-badge" aria-hidden="true">${j?.state === 'done' ? icon(j.warnings?.length ? 'warn' : 'check') : j && (j.state === 'failed' || j.state === 'rolled_back') ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
         <div>
           <p class="inst-title">${stateWord}</p>
           ${j?.state === 'rolled_back' ? html`<p class="inst-sub" data-rolled-back>${S.rolledBackTo(this.previousProfile ?? S.previousSetup)}</p>` : nothing}
           ${(j?.state === 'failed' || j?.state === 'rolled_back') && j.message ? html`<p class="inst-sub" data-job-reason>${S.jobReason(j.message)}</p>` : nothing}
-          ${j?.state === 'done' && j.message ? html`<p class="inst-sub">${j.message}</p>` : nothing}
+          ${j?.state === 'done' && j.message ? html`<p class="inst-sub">${doneMessage(j)}</p>` : nothing}
+          ${j?.state === 'done' && (j.warnings?.length || j.notes?.length)
+            ? html`<ul class="inst-roles" data-job-warnings>
+                ${(j.warnings ?? []).map((w) => html`<li class="is-warn">${icon('warn')} <span>${w}</span></li>`)}
+                ${(j.notes ?? []).map((w) => html`<li>${icon('info')} <span>${w}</span></li>`)}
+              </ul>`
+            : nothing}
         </div>
       </div>
       ${away
@@ -176,12 +181,14 @@ export class QseInstallProgress extends LightElement {
             <span class="inst-label">${s.label}</span>
             <span class="inst-state muted small">${S.stepState[s.state]}${s.started_at && s.ended_at ? html` <span class="num">${Math.max(0, s.ended_at - s.started_at).toFixed(1)} s</span>` : nothing}</span>
             ${s.detail ? html`<span class="inst-detail muted small">${s.detail}</span>` : nothing}
+            ${s.id === 'check' && j?.changes?.length ? this.changeList(j) : nothing}
           </li>`,
         )}
       </ol>
       <details class="inst-logbox" ?open=${!!failedStep || !final}>
-        <summary>${S.logTail} <span class="muted small num">${this.log.length}</span></summary>
-        <pre class="inst-log" tabindex="0">${this.log.map((l) => l.line).join('\n')}</pre>
+        <summary>${S.logTail} <span class="muted small num" data-log-count>${this.log.lines.length + this.log.dropped}</span></summary>
+        ${this.log.dropped ? html`<p class="muted small" data-log-dropped>${S.logDropped(this.log.dropped)}</p>` : nothing}
+        <pre class="inst-log" tabindex="0">${this.log.lines.map((l) => l.line).join('\n')}</pre>
       </details>
       ${final
         ? html`<div class="inst-actions">
