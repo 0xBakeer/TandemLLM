@@ -985,7 +985,7 @@ class Runner {
       this.mock.node(this.st, msg, this.parentId);
     }
     this.run = { id: runId, conversation_id: this.st.id, message_id: msg.id, started_at: msg.created_at, started_by: this.opts.startedBy ?? null, phase: 'queued', now: 'Queued', step: 0, max_steps: this.st.settings.max_steps, queue_position: null, tool: null, prefill: null, decode_tps: null, tokens_per_round: null, acceptance: null, thinking: { used: 0, budget: this.st.settings.thinking ? 8_192 : 0 }, tokens: 0, tps_history: [] };
-    this.st.sandbox = { ...this.st.sandbox, state: 'running', uptime_s: Math.max(this.st.sandbox.uptime_s, 1), memory_bytes: Math.max(this.st.sandbox.memory_bytes, 412e6) };
+    this.st.sandbox = { ...this.st.sandbox, state: 'running', uptime_s: Math.max(this.st.sandbox.uptime_s, 1), memory_bytes: Math.max(this.st.sandbox.memory_bytes ?? 0, 412e6) };
     this.mock.emit(this.st, { type: 'run.started', run: this.run });
     if (!this.opts.replaceId) this.mock.emit(this.st, { type: 'message.created', message: msg });
     this.mock.emit(this.st, { type: 'sandbox.changed', sandbox: this.st.sandbox });

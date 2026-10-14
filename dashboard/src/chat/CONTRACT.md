@@ -155,9 +155,12 @@ interface ContextReport {
     source: CacheSource | string;                // where the cached part lives
     slot: string | null;
   };
-  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number }[] } | null;   // v0.2
+  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;   // v0.2; tokens null: not counted yet
   memory: {
     kv_bytes: number | null; resident_bytes: number | null; sandbox_disk_bytes: number | null;
+    kv_tokens?: number | null;                   // the chat's rows the engine holds (kv_where slot or park)
+    kv_where?: 'slot' | 'park' | 'nvme_spill' | 'disk_tier' | 'ram_snapshot' | 'other' | 'none' | null;   // null: no cache report
+    resident_owner?: 'this' | 'other' | 'none' | null;   // whose rows the resident prefix holds
     available_bytes?: number | null;             // v0.2: MemAvailable
     floor_bytes?: number | null;                 // v0.2: 15 GiB, the engine's admission floor
     sandbox_bytes?: number | null;               // v0.2: RAM the sandboxes use
@@ -171,7 +174,7 @@ interface ContextReport {
 interface Compaction { id: string; at: string; before_tokens: number; after_tokens: number; summary: string; duration_ms?: number; boundary_id?: string }   // boundary_id: the first message the model still reads in full; the thread's divider sits above it
 interface ConversationUsage {
   turns: number; prompt_tokens: number; completion_tokens: number; reasoning_tokens: number;
-  cached_tokens: number; tool_calls: number; wall_s: number; cost_usd?: number | null;
+  cached_tokens: number; tool_calls: number; wall_s: number; cost_usd?: number | null;   // tool_calls: every call on the branch
 }
 
 // ---- settings
@@ -235,7 +238,7 @@ interface Capabilities {
 type SandboxState = 'running' | 'stopped' | 'creating' | 'error' | 'waiting_memory';   // waiting_memory: v0.2
 interface SandboxStatus {
   state: SandboxState; image: string; cwd: string;            // cwd = /workspace
-  cpus: number; memory_bytes: number; memory_limit_bytes: number; disk_bytes: number; disk_limit_bytes: number;
+  cpus: number; memory_bytes: number | null; memory_limit_bytes: number; disk_bytes: number; disk_limit_bytes: number;   // memory_bytes: in use while running, null when the runtime does not say
   network: 'off' | 'allowlist' | 'on';           // 'on' = internet, never the LAN; 'allowlist' is later (mock it disabled)
   allowlist: string[];
   uptime_s: number; error: string | null;
@@ -377,8 +380,12 @@ Rules:
 `window` and `model.*` from the model card (`/v1/models`, SRV-347); `parts` and `harness` from the
 usage frame's `tandem` object (SRV-349) plus chatd's own counts; `cache` from the engine's cache peek
 (before a send) and `cache_source` (after one); live run figures from `/v1/dashboard/live`, matched by
-conversation id; `memory` from `/v1/dashboard/system` and chatd's sandbox guard. Live rates follow the
-dashboard's NOW rule: `null` (shown as a dash) when idle; decode rates skip the first 50 tokens.
+conversation id; `memory` from `/v1/dashboard/system` (the resident report's `owner_tag` names the
+chat in the slot) and the sandbox runtime's stats. The `files` part is what the file tools carried
+(a write's content, an edit's old and new text, a read's result) plus the attachments, estimated,
+from the first message a compaction kept. Live rates follow the dashboard's NOW rule: `null` when
+idle; decode rates skip the first 50 tokens. A figure without a value says why in words ("measured
+after the first turn", "not tracked for this model"), never a bare dash.
 
 ## 5. Rules the UI can rely on
 

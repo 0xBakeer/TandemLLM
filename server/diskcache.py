@@ -26,7 +26,8 @@ DEFAULT_ROOT = "~/.qwen38-spark-engine/cache/disk"
 # what an operator acts on goes to the log as well as the journal; a hit is the request's own line
 _LOGGED = ("write", "evict", "drop", "restore_failed", "error", "clear")
 # the settings environment that cannot change a prefill's rows: left out of the fingerprint
-_NOT_ARITHMETIC = ("QWEN38_DECIDER", "QWEN38_NARRATOR", "QWEN38_PROBE", "QWEN38_DRAFT_TEMP")
+_NOT_ARITHMETIC = ("QWEN38_DECIDER", "QWEN38_NARRATOR", "QWEN38_PROBE", "QWEN38_DRAFT_TEMP",
+                   "QWEN38_CONDUCTOR_FIT")
 # rc-0.8.0: nor can the shadow reader's (server/conductor/shadow.py: a second model's own states).
 # The extra by path, which 0.7.2 hashed, keeps them, so its files can be adopted
 _NOT_ROWS = _NOT_ARITHMETIC + ("QWEN38_SHADOW",)

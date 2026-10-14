@@ -262,11 +262,20 @@ export interface ContextReport {
   };
   /** the chat's skill mode and pins (SRV-361); a pin the library lost is `missing` */
   skills?: { mode: 'auto' | 'manual' | 'model'; pinned: { name: string; tokens: number | null; missing: boolean }[]; blocked: string[] };
+  /** the engine's split of the last prompt (its usage frame); null before the first frame */
+  split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
   /** what the harness decided for this chat; never inside the answer text */
-  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number }[] } | null;
+  harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[] } | null;
   memory: {
     kv_bytes: number | null;
+    /** the chat's rows the engine holds: in its slot or parked beside it (`kv_where`) */
+    kv_tokens?: number | null;
+    /** slot, park; else the tier the next turn reads from (nvme_spill, disk_tier, ram_snapshot),
+     *  other (another chat has the slot), none; null: the engine does not report its caches */
+    kv_where?: 'slot' | 'park' | 'nvme_spill' | 'disk_tier' | 'ram_snapshot' | 'other' | 'none' | null;
+    /** the resident prefix's snapshots of this chat (its anchors, end and stash) */
     resident_bytes: number | null;
+    resident_owner?: 'this' | 'other' | 'none' | null;
     sandbox_disk_bytes: number | null;
     available_bytes?: number | null;
     /** the engine's admission floor */
@@ -489,7 +498,8 @@ export interface SandboxStatus {
   image: string;
   cwd: string;
   cpus: number;
-  memory_bytes: number;
+  /** in use (the runtime's figure, page cache left out); null when the runtime does not say */
+  memory_bytes: number | null;
   memory_limit_bytes: number;
   disk_bytes: number;
   disk_limit_bytes: number;

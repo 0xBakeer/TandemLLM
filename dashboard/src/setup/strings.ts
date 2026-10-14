@@ -97,6 +97,7 @@ export const S = {
   resetHeading: 'Reset',
 
   // tiles
+  tileSpeedTitle: 'The fastest measured cell of the recommended weights: one greedy request, 512 tokens, as those weights serve (speculation on where they use it). The same rule for every model.',
   tileParams: (p: string) => `${p} parameters`,
   tileBest: (tok: number, task: string, profile: string) => `${tok.toFixed(1)} tok/s on ${task} with ${profile}`,
   tileOpen: 'Set up',
@@ -139,7 +140,7 @@ export const S = {
   weightsDisk: 'Download',
   onDisk: 'On this box',
   toDownload: (gb: number) => `${gb.toFixed(1)} GB`,
-  privateRepo: 'The EXL3 weights are in private repositories. This box has a Hugging Face token, so it can download them.',
+  privateRepo: 'Some of these weights are in private repositories that are not public yet. This box has a Hugging Face token, and a download works when that token has access to them.',
   privateNoToken: 'This box has no Hugging Face token, so it cannot download these weights. Add one with huggingface-cli login on the box, or pick weights that are already here.',
   activeNow: 'Running now',
   privateNoTokenShort: 'Needs a Hugging Face token, and this box has none.',
@@ -363,7 +364,7 @@ export const S = {
     models: ['Which model should I pick?', 'What does this guide do?'],
     overview: ['What do these numbers mean?', 'What is greedy vs sampled?'],
     weights: ['Which size is best for my memory?', 'What is KL?'],
-    components: ['What is the narrator?', 'Turn off vision'],
+    components: ['What is the narrator?', 'Which tools can I turn off?'],
     parallelism: ['How many parallel chats do I need?', 'Use 2 slots'],
     methods: ['What does det mean?', 'What is the thinking effort?'],
     review: ['Is this setup safe?', 'Why does it restart?'],

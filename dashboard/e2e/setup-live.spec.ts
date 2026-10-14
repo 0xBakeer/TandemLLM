@@ -3,7 +3,7 @@
 // runs them one at a time around the shell's own measurements:
 //   @read     the tiles and every step with the box's data, from what the box runs now; the memory
 //             bar against the live split; a reload keeps the step (desktop and 390 px)
-//   @wren-on  Wren loads (borrowing the narrator's copy), answers, ticks a box; stays loaded
+//   @wren-on  Wren loads (borrowing the narrator's copy where there is one), answers, ticks a box; stays loaded
 //   @wren-off Wren goes to sleep from its panel
 //   @csrf     a page on another site cannot post to /v1/setup (its request in the browser and the
 //             same request's answer); the page's own posts pass
@@ -18,7 +18,8 @@ import { noHorizontalOverflow } from './helpers';
 
 test.skip(process.env.PW_LIVE !== '1', 'the live tier: PW_LIVE=1 on the box');
 
-const MODEL = 'qwen3.8-27b';
+// the model the box serves (PW_MODEL; the 27B when unset)
+const MODEL = process.env.PW_MODEL ?? 'qwen3.8-27b';
 const SHOTS = process.env.PW_SHOTS ?? 'e2e-live-shots';
 const STEPS = ['overview', 'weights', 'components', 'parallelism', 'methods', 'review'];
 const isPhone = (page: Page) => (page.viewportSize()?.width ?? 1440) <= 768;
@@ -80,15 +81,31 @@ test('@read the tiles and every step with the box data, from what the box runs n
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'overview');
   await expect(page.locator('.mt-table tbody tr.mt-row').first()).toBeVisible();
   await expect(page.locator(`.mt-row[data-profile="${current.selection.profile}"]`)).toHaveCount(1);
-  // the box runs another profile than the recommended one: the page says it starts from the box
+  // a box that runs another profile than the recommended one: the page says it starts from the box
   // (shown where the model opens; any step change clears it)
-  await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
+  const recommended = (model.profiles as { id: string; recommended: boolean }[]).find((p) => p.recommended)?.id;
+  if (current.selection.profile !== recommended) {
+    await expect(page.locator('[data-setup-notice]')).toContainText('starts from what this box runs now');
+  }
+  // the measured table is the registry's rows, number for number (each comparable row's prose, chat, code)
+  for (const r of model.measurements.rows as { profile: string; comparable: boolean; cells: { greedy_512?: Record<string, { tok_s: number }> } }[]) {
+    if (!r.comparable || !r.cells.greedy_512) continue;
+    const vals = await page.locator(`.mt-row[data-profile="${r.profile}"] .mt-val`).allInnerTexts();
+    expect(vals, r.profile).toEqual(['prose', 'chat', 'code'].map((t) => r.cells.greedy_512![t].tok_s.toFixed(1)));
+  }
   await shot(page, '1-overview');
 
   await page.locator('.setup-next').click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'weights');
   // the box's own profile is the one picked
   await expect(page.locator('.wcard.is-selected')).toHaveAttribute('data-profile-card', current.selection.profile);
+  // every size is a card with its registry numbers: the KL and the top-1 agreement
+  for (const p of (model.profiles as { id: string; quality: { kl_vs_bf16: number | null; top1_pct: number | null } }[]).filter((x) => !x.id.startsWith('community/'))) {
+    const card = page.locator(`[data-profile-card="${p.id}"]`);
+    await expect(card, p.id).toBeVisible();
+    if (p.quality.kl_vs_bf16 != null) await expect(card.locator('.wcard-facts')).toContainText(p.quality.kl_vs_bf16.toFixed(4));
+    if (p.quality.top1_pct != null) await expect(card.locator('.wmeter-v').first()).toHaveText(`${p.quality.top1_pct.toFixed(1)} %`);
+  }
   // the bar is the server's estimate of that selection, and its "in use now" is the box's
   await expect(page.locator('.membar')).toHaveAttribute('data-total', est.total_gb.toFixed(2));
   const sys = await (await page.request.get('/v1/dashboard/system')).json();
@@ -141,7 +158,7 @@ test('@read the tiles and every step with the box data, from what the box runs n
   }
 });
 
-test('@wren-on Wren loads borrowing the narrator, answers from the docs, changes the page', async ({ page }) => {
+test('@wren-on Wren loads (borrowing the narrator where it runs the same model), answers from the docs, changes the page', async ({ page }) => {
   test.skip(isPhone(page), 'one Wren at a time: the desktop run');
   const log: Record<string, unknown> = {};
   await fresh(page);
@@ -162,17 +179,22 @@ test('@wren-on Wren loads borrowing the narrator, answers from the docs, changes
 
   log.q1 = await askWren(page, 'What does the narrator do, in one or two sentences?');
   await shot(page, 'wren-3-answer');
-  log.q2 = await askWren(page, 'How much memory do the weights of exl3-4.5 take?');
+  // the 27B's questions, or the served model's own (PW_MODEL): its default weights, a tool it has on
+  const is27 = MODEL === 'qwen3.8-27b';
+  const model = await (await page.request.get(`/v1/setup/models/${MODEL}`)).json();
+  const rec = (model.profiles as { id: string; recommended: boolean }[]).find((x) => x.recommended)?.id ?? '';
+  log.q2 = await askWren(page, `How much memory do the weights of ${is27 ? 'exl3-4.5' : rec} take?`);
   log.sources = await p.locator('.wren-sources').last().innerText().catch(() => null);
 
   // a tool call: Wren turns a tool off, the page changes, the bar drops
-  const vision = page.locator('[data-component="vision"] input');
+  const [tool, label, ask] = is27 ? ['vision', 'Vision', 'Please turn off the vision tower.'] : ['response_cache', 'Response cache', 'Please turn off the response cache.'];
+  const vision = page.locator(`[data-component="${tool}"] input`);
   await expect(vision).toBeChecked();
   const before = Number(await page.locator('.membar').getAttribute('data-total'));
-  log.q3 = await askWren(page, 'Please turn off the vision tower.');
+  log.q3 = await askWren(page, ask);
   await expect(vision).not.toBeChecked({ timeout: 30_000 });
   const chip = p.locator('[data-tool-chip]').last();
-  await expect(chip).toContainText('Wren turned off Vision');
+  await expect(chip).toContainText(`Wren turned off ${label}`);
   log.bar_drop_gib = before - Number(await page.locator('.membar').getAttribute('data-total'));
   await shot(page, 'wren-4-tool-call');
   await chip.locator('button', { hasText: 'Undo' }).click();

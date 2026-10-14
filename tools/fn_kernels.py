@@ -339,7 +339,7 @@ __global__ void __launch_bounds__(32) router_kernel(const float* __restrict__ L,
 // `run` waits for XH and finishes. RED [8][128].
 template <int KB, int ST, int WARPS>
 struct RowGemm {
-    static constexpr int TW = 8 * KB, NTW = 8, SW = NTW * TW;
+    static constexpr int TW = tile_u32(KB), NTW = 8, SW = NTW * TW;
     const uint32_t* T; int ldt, nt0, k0, k1, lane, warp;
     uint32_t* stage;
 
@@ -485,6 +485,10 @@ __global__ void __launch_bounds__(256) moe_gu_kernel(const __nv_bfloat16* __rest
         case 5: moe_gu_body<5, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
         case 6: moe_gu_body<6, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
         case 8: moe_gu_body<8, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 7: moe_gu_body<7, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 15: moe_gu_body<15, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 25: moe_gu_body<25, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
+        case 35: moe_gu_body<35, ST, WARPS>(X, ldx, m, p, e, mat, cb, a, Y, H, I, smem); break;
         default: break;
     }
 }
@@ -555,6 +559,10 @@ __global__ void __launch_bounds__(256) moe_down_kernel(const __nv_bfloat16* __re
         case 5: moe_down_body<5, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
         case 6: moe_down_body<6, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
         case 8: moe_down_body<8, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 7: moe_down_body<7, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 15: moe_down_body<15, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 25: moe_down_body<25, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
+        case 35: moe_down_body<35, ST, WARPS>(YGU, p, e, cb, a, YD, H, I, smem); break;
         default: pdl_wait(); pdl_trigger(); break;
     }
 }
@@ -718,6 +726,10 @@ __global__ void __launch_bounds__(256) moe_gu_group_kernel(const __nv_bfloat16* 
         case 5: moe_gu_group_body<5, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
         case 6: moe_gu_group_body<6, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
         case 8: moe_gu_group_body<8, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 7: moe_gu_group_body<7, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 15: moe_gu_group_body<15, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 25: moe_gu_group_body<25, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
+        case 35: moe_gu_group_body<35, ST, WARPS>(X, ldx, S, grp, mat, cb, a, Y, H, I, smem); break;
         default: break;
     }
 }
@@ -788,6 +800,10 @@ __global__ void __launch_bounds__(256) moe_down_group_kernel(const __nv_bfloat16
         case 5: moe_down_group_body<5, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
         case 6: moe_down_group_body<6, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
         case 8: moe_down_group_body<8, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 7: moe_down_group_body<7, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 15: moe_down_group_body<15, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 25: moe_down_group_body<25, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
+        case 35: moe_down_group_body<35, ST, WARPS>(YGU, grp, cb, a, YD, H, I, smem); break;
         default: break;
     }
 }
@@ -1157,7 +1173,7 @@ template <int KB, int ST, int WARPS, bool OF32>
 static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const torch::Tensor& suh,
                          const torch::Tensor& svh, torch::Tensor& y, int M, int Kin, int N, int b1, int b2,
                          int S, cudaStream_t st) {
-    constexpr int TW = 8 * KB;
+    constexpr int TW = tile_u32(KB);
     const int per_r = Kin / 16 / S;
     const size_t smem = (size_t)(per_r * 8 + WARPS * 128) * 4 + (size_t)WARPS * ST * 8 * TW * 4;
     auto kern = dense_kernel<KB, ST, WARPS, OF32>;
@@ -1181,7 +1197,9 @@ static void dense_launch(const torch::Tensor& x, const torch::Tensor& t, const t
         case 2: { DENSE_W(2, OF32) break; } case 3: { DENSE_W(3, OF32) break; }                     \
         case 4: { DENSE_W(4, OF32) break; } case 5: { DENSE_W(5, OF32) break; }                     \
         case 6: { DENSE_W(6, OF32) break; } case 8: { DENSE_W(8, OF32) break; }                     \
-        default: TORCH_CHECK(false, "fn_dense: K 2..6 and 8");                                    \
+        case 15: { DENSE_W(15, OF32) break; } case 25: { DENSE_W(25, OF32) break; }                 \
+        case 35: { DENSE_W(35, OF32) break; }                                                     \
+        default: TORCH_CHECK(false, "fn_dense: K 2..6 and 8, 1.5, 2.5 and 3.5");                  \
     }
 
 void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y,
@@ -1191,7 +1209,9 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
     TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
     TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3 && t.stride(2) == 1 && t.stride(1) == t.size(2),
                 "trellis [Kin/16, N/16, 16 K] with dense tiles (a group member may be a view)");
-    const int kb = t.size(2) / 16, M = x.size(0), Kin = x.size(1), N = t.size(1) * 16;
+    // a tile 16 K int16 wide, or 16 K + 8 for a half-integer rate (the kernels' 10 K + 5)
+    const int kb = t.size(2) % 16 ? 10 * (int)(t.size(2) / 16) + 5 : (int)(t.size(2) / 16);
+    const int M = x.size(0), Kin = x.size(1), N = t.size(1) * 16;
     TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
     TORCH_CHECK(S >= 1 && S <= 8 && (Kin / 16) % (8 * S) == 0, "a rank's K slice must be whole 128 blocks");
     TORCH_CHECK(suh.dtype() == torch::kHalf && suh.is_contiguous() && suh.size(-1) == Kin, "suh fp16 [G, Kin]");
@@ -1444,9 +1464,9 @@ void fn_set_moe_st(int64_t st) { TORCH_CHECK(st >= 2 && st <= 4, "MoE stages 2..
 void fn_set_moe_warps(int64_t w) { TORCH_CHECK(w == 4 || w == 8, "MoE warps 4 or 8"); g_moe_warps = (int)w; }
 
 // the input row (fp16), the eight warps' partial rows, and 8 warps x stages x 8 tiles of the bank's
-// widest trellis tile (8 kbmax words)
+// widest trellis tile (tile_u32(kbmax) words)
 static size_t moe_smem(int kin, int kbmax) {
-    return (size_t)(kin / 2 + 8 * 128) * 4 + (size_t)g_moe_warps * g_moe_st * 8 * 8 * kbmax * 4;
+    return (size_t)(kin / 2 + 8 * 128) * 4 + (size_t)g_moe_warps * g_moe_st * 8 * tile_u32(kbmax) * 4;
 }
 
 #define MOE_PICK(KERN) (g_moe_warps == 4                                                            \
@@ -1490,7 +1510,7 @@ void fn_moe_down(torch::Tensor ygu, torch::Tensor ids, torch::Tensor order, torc
 // them (gate|up lays them over the rows), then the stages
 static size_t moe_group_smem(int kin, int kbmax, bool red_apart) {
     const size_t rows = (size_t)MOE_GR * kin * 2, red = (size_t)g_moe_warps * MOE_GR * 128 * 4;
-    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st * 8 * 8 * kbmax * 4;
+    return (red_apart ? rows + red : (rows > red ? rows : red)) + (size_t)g_moe_warps * g_moe_st * 8 * tile_u32(kbmax) * 4;
 }
 
 void fn_moe_groups(torch::Tensor ids, torch::Tensor order, torch::Tensor g, torch::Tensor ng) {
@@ -1622,7 +1642,7 @@ class MoEBank:
                 assert t.dtype == torch.int16 and t.is_contiguous() and t.data_ptr() % 16 == 0
                 assert s_u.dtype == torch.float16 and s_v.dtype == torch.float16
                 tr.append(t.data_ptr())
-                kb.append(t.shape[2] // 16)
+                kb.append(X.kb_of(t.shape[2]))
                 su.append(s_u.data_ptr())
                 sv.append(s_v.data_ptr())
                 keep += [t, s_u, s_v]
@@ -1635,9 +1655,10 @@ class MoEBank:
         g = experts[0][0]
         self.H = g[0].shape[0] * 16
         self.I = g[0].shape[1] * 16
-        self.ks = sorted(set(kb))
-        if not set(self.ks) <= {2, 3, 4, 5, 6, 8}:
-            raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..6 and 8")
+        # by tile width: the launch sizes its stages for the widest (ks[-1])
+        self.ks = sorted(set(kb), key=X.tile_width)
+        if not set(self.ks) <= set(MOE_K):
+            raise ValueError(f"expert K {self.ks}: the MoE kernels take K 2..8, 1.5, 2.5 and 3.5 (15, 25, 35)")
 
     @property
     def nbytes(self) -> int:
@@ -1844,6 +1865,8 @@ def moe_experts(x: torch.Tensor, ids: torch.Tensor, bank: MoEBank, order: torch.
 #: the A/B of tools/fn_moe_group_check.py)
 MOE_GROUP = False
 MOE_GR = 8
+#: the experts' bits the MoE kernels decode (the half-integer rates as ten times the rate)
+MOE_K = (2, 3, 4, 5, 6, 7, 8, 15, 25, 35)
 
 
 def moe_combine(yd: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:

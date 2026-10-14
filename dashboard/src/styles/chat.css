@@ -1196,6 +1196,10 @@ qse-chat-thread {
   display: flex;
   gap: 6px;
 }
+/* a folded card's way to the page it wrote */
+.ch-call-open {
+  padding: 0 10px 8px;
+}
 
 /* the queue */
 .ch-queue {
@@ -2029,9 +2033,20 @@ qse-chat-panes {
 .ch-pane-plus {
   position: relative;
 }
-.ch-pane-menu {
+.ch-panes {
+  position: relative;
+}
+/* the plus menu: a child of the panes box, below the tab strip (which scrolls sideways and would
+   clip it), at the plus button's left (an inline style), on a phone as on a desktop */
+.ch-panes > .ch-pane-menu.ch-pop {
+  position: absolute;
+  top: 40px;
   bottom: auto;
-  top: calc(100% + 4px);
+  right: auto;
+  z-index: 40;
+  min-width: min(220px, calc(100% - 12px));
+  max-width: calc(100% - 12px);
+  max-height: calc(100% - 48px);
 }
 .ch-pane-body {
   flex: 1;

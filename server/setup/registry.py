@@ -89,7 +89,7 @@ _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "
 # SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
 # that fits the device preset (null: none fits), a lookup table beside the weights (warm: in the page
 # cache; cold: read past it through a row cache), a tool's memory under this profile
-_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4"]},
+_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4", "bf16"]},
                  "bpw": {"type": ["number", "null"]}, "disk_gb": _NUM0, "weights_gib": _NUM0,
                  "drafters_gib": _NUM0, "hf_repo": _STR, "hf_private": {"type": "boolean"},
                  "recommended": {"type": "boolean"}, "badges": {"type": "array", "items": _STR},
@@ -137,6 +137,8 @@ SCHEMA = _obj({
     "id": {"type": "string", "pattern": MODEL_ID},
     "name": _STR, "family": _STR, "params": _STR, "pitch": _STR, "architecture": _STR,
     "license": _STR, "icon": _NOTE, "recommended": {"type": "boolean"},
+    # the tile's place on the models step (lower first; a file without one is 0), then the folder's name
+    "order": {"type": "integer", "minimum": 0},
     "links": {"type": "array", "items": _obj({"label": _STR, "url": _STR})},
     "devices": {"type": "array", "items": _obj({"id": _ID, "label": _STR, "total_gib": _NUM0,
                                                 "reserved_gib": _NUM0, "note": _NOTE})},
@@ -463,6 +465,7 @@ def load_all(models_dir: str | None = None) -> tuple[dict[str, dict], list[dict]
                 errors.append({"path": os.path.relpath(p, root), "message": str(exc)})
                 continue
             models[m["id"]] = m
+        models = dict(sorted(models.items(), key=lambda kv: int(kv[1].get("order") or 0)))
         packs, dropped = community_mod.entries(doc, models)
         for m in models.values():
             m["community"] = packs.get(m["id"], [])

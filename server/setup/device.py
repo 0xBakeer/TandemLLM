@@ -114,15 +114,19 @@ def profile_dirs(names: list[str], ops: str | None = None, timeout: float = 10.0
 
 def weights_present(d: dict | None) -> bool:
     """The profile's weights are complete in its folder, as ops/use-profile.sh `weights_ok` reads
-    them (the listed files, else config.json and the index's shards)."""
+    them (the listed files, else config.json and the index's shards, or model.safetensors alone)."""
     if not d or not d["dir"] or not os.path.isdir(d["dir"]):
         return False
     if d["files"]:
         paths = [os.path.join(d["dir"], f) for f in d["files"]]
         return all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in paths)
     idx = os.path.join(d["dir"], "model.safetensors.index.json")
-    if not os.path.isfile(os.path.join(d["dir"], "config.json")) or not os.path.isfile(idx):
+    if not os.path.isfile(os.path.join(d["dir"], "config.json")):
         return False
+    if not os.path.isfile(idx):
+        # a pack in one file has no index (LFM2.5's 2.5 pack: model.safetensors alone)
+        one = os.path.join(d["dir"], "model.safetensors")
+        return os.path.isfile(one) and os.path.getsize(one) > 0
     import json
     try:
         with open(idx) as fh:

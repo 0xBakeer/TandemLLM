@@ -30,9 +30,22 @@
 0.8.1 & 10-13 & a new box downloads every file a weight profile needs, with no token; the EXL3 weights public; the engine unchanged \\
 0.8.2 & 10-13 & community weight packs; permission modes in the Chat tab; standalone EXL3 packs of the 27B family; a chat no longer waits minutes for slot 0 while a side slot is free; the model says it is TandemLLM when asked \\
 0.8.3 & 10-13 & repository hygiene for the public release; no code change \\
+0.9.0 & 10-14 & a third model, LFM2.5-24B-A2B: six EXL3 sizes and BF16, the default 3.5 by a stated rule, the lookup drafting without a draft head; Wren beside it \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.9.0, LFM2.5-24B-A2B}\label{sec:changelog-090}
+
+0.9.0 adds a third model, LiquidAI's LFM2.5-24B-A2B, the first here that is not a Qwen (Chapter~\ref{ch:lfm25}). The Qwen models' text and speed do not change: the shared EXL3 kernels learned half-integer rates, and \code{SAME_ROWS} names their new bytes as the old ones, so the first Qwen start adopts its saved conversations once.
+
+\paragraph{Profiles.} Liquid's BF16 checkpoint and six EXL3 sizes of our own, 2.5 to 6.0 bits a weight, each at the model's whole 131,072-token context with three slots. The decode step runs at 188.2~tok/s on 2.5, 153.5 on 3.5, 106.9 on 6.0 and 44.8 in BF16 (\measured, 2026-10-14), with each pack's own dense splits. The default is \code{lfm25-exl3-3.5}: the fastest profile in chat as it serves whose chat top-1 agreement with BF16 is at least 85~\% (143.7~tok/s at 86.7~\%; 3.0 is faster at 83.6~\%). An exllamav3 \code{-hq} 4.0 was slower than 4.0 and worse than 4.5, and is not offered.
+
+\paragraph{The lookup without a draft head.} A round with no lookup match is the plain step, priced as one; the lookup's confidence carries its match length; every profile has its own StairCut price file. With the store off, edit and copy asks on 4.0 ran at 291.1 and 326.4~tok/s against 141.3 and 141.9 plain, every text equal.
+
+\paragraph{The conductor.} On for LFM2.5 by default, with Laya and the narrator, through the model's fit to the router: Laya alone answers the class question, a turn nobody classified gets nothing added, and a class sets the level and budget with only its core skill in the note. On 2.5, four short chat asks thought 2,234 reasoning tokens against 2,155 raw and 9,098 under the router as written; seven Chat-tab tasks run twice succeeded 14 of 14, as raw did, against 12 of 14 (Section~\ref{sec:lfm25-conductor}).
+
+\paragraph{Fixes.} A pack stored as one \code{model.safetensors} counts as complete in \code{ops/use-profile.sh} and the Setup Guide. Reading a slot's \code{kv.length} commits nothing. Attention's split buffers are kept per attention class. A suffix store of another tokenizer turns the store off instead of stopping the start. The dashboard's disk tier default reads 16~GB, as the server's. Wren loads its own Qwen3.5-2B beside LFM2.5 (20~s, 3.62~GiB).
 
 \section{0.8.3, repository hygiene}\label{sec:changelog-083}
 

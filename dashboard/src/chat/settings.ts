@@ -429,7 +429,7 @@ export class QseChatSettings extends LightElement {
         </div>
         <span class="ch-net-later">on means the internet without the LAN; the allow-list comes later</span>
       </div>
-      <div class="meter-block"><div class="meter-head"><span>memory</span><span class="num">${bytes(s.memory_bytes, 0)} of ${bytes(s.memory_limit_bytes, 0)}</span></div><div class="meter"><span class="meter-fill" style="width:${((s.memory_bytes / s.memory_limit_bytes) * 100).toFixed(1)}%"></span></div></div>
+      <div class="meter-block"><div class="meter-head"><span>memory</span><span class="num">${s.memory_bytes != null ? bytes(s.memory_bytes, 0) : s.state === 'running' ? 'not reported' : '0 B'} of ${bytes(s.memory_limit_bytes, 0)}</span></div><div class="meter"><span class="meter-fill" style="width:${(((s.memory_bytes ?? 0) / s.memory_limit_bytes) * 100).toFixed(1)}%"></span></div></div>
       <div class="meter-block"><div class="meter-head"><span>disk</span><span class="num">${bytes(s.disk_bytes, 0)} of ${bytes(s.disk_limit_bytes, 0)}</span></div><div class="meter"><span class="meter-fill" style="width:${((s.disk_bytes / s.disk_limit_bytes) * 100).toFixed(1)}%"></span></div></div>
       <div class="ch-add-row">
         <button type="button" class="btn" @click=${() => this.fire('ch-open-pane', { pane: { kind: 'terminal', ref: 'shell', title: 'Terminal' } })}>${icon('terminal')} Open terminal</button>

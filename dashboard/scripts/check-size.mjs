@@ -8,6 +8,8 @@
 // GitHub sync state and six inline glyphs for the networks). Room looked for first: terser is
 // larger than oxc here, top-level mangling is already on, no CSS rule is dead, and one combined
 // CSS file would save 2.5 KB but load every view's CSS up front; the module-preload polyfill went.
+// 420 KB since 0.9.0 (2026-10-14: 415.1 KB as released, 416.4 KB with the panes' plus menu, the
+// pages a tool call wrote and the Context panel's reasons).
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -26,8 +28,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 415 KB)`);
-if (total > 415 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 420 KB)`);
+if (total > 420 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

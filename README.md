@@ -6,7 +6,7 @@
   <a href="https://github.com/0xBakeer/TandemLLM/releases/latest"><img src="https://img.shields.io/github/v/release/0xBakeer/TandemLLM?color=3987e5" alt="release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="license"></a>
   <img src="https://img.shields.io/badge/hardware-DGX%20Spark%20(GB10)-76b900" alt="DGX Spark">
-  <img src="https://img.shields.io/badge/models-Qwen3.8--27B%20%7C%20Flash--Next-f7a24f" alt="models">
+  <img src="https://img.shields.io/badge/models-Qwen3.8--27B%20%7C%20Flash--Next%20%7C%20LFM2.5--24B-f7a24f" alt="models">
   <a href="https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4"><img src="https://img.shields.io/badge/%F0%9F%A4%97-EXL3%20weights-yellow" alt="weights"></a>
   <a href="manual/tandemllm-manual.pdf"><img src="https://img.shields.io/badge/manual-PDF-lightgrey" alt="manual"></a>
   <a href="https://doi.org/10.5281/zenodo.23045275"><img src="https://img.shields.io/badge/paper-StairCut-informational" alt="paper"></a>
@@ -14,11 +14,11 @@
   <img src="https://img.shields.io/github/stars/0xBakeer/TandemLLM?style=social" alt="stars">
 </p>
 
-TandemLLM is an inference engine for Qwen3.8-27B on one NVIDIA DGX Spark. With the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
+TandemLLM is an inference engine for one NVIDIA DGX Spark, and it runs three models: Qwen3.8-27B, Qwen3.8-Flash-Next and, from 0.9.0, LiquidAI's LFM2.5-24B-A2B. The box serves one at a time, and all three share one server and one setup guide. LFM2.5 is the fast one. Its default pack decodes 153.5 tok/s for one request.
+
+On Qwen3.8-27B with the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
 TandemLLM is a working name, and it says how the engine works. Small drafters guess the next tokens, and the big model checks all the guesses in one pass. A guess the model agrees with is a free token. At the first wrong guess the model puts in its own token, so nothing a drafter does reaches the output.
-
-Since 0.8.0 the same engine also serves Qwen3.8-Flash-Next, a mixture-of-experts model, from turboderp's EXL3 packs. The box runs one of the two models at a time.
 
 ## Start here
 
@@ -55,6 +55,20 @@ Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Q
 | `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | does not fit |
 
 The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
+
+LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs, one collection: [TandemLLM LFM2.5-24B-A2B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-lfm25-24b-a2b-exl3-6acf468024dd5288750dd683). The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs and the BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) are public; a download needs no token. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
+
+| profile | download | chat plain, tok/s | chat top-1 vs BF16 |
+|-|-|-|-|
+| `lfm25-exl3-2.5` | 8.20 GB | 185.4 | 78.9 % |
+| `lfm25-exl3-3.0` | 9.68 GB | 171.3 | 83.6 % |
+| `lfm25-exl3-3.5` (default for LFM2.5) | 11.16 GB | 150.9 | 86.7 % |
+| `lfm25-exl3-4.0` | 12.64 GB | 143.7 | 88.5 % |
+| `lfm25-exl3-4.5` | 14.12 GB | 128.2 | 91.2 % |
+| `lfm25-exl3-6.0` | 18.63 GB | 105.2 | 93.4 % |
+| `lfm25-bf16` | 47.9 GB | 44.5 | 100 % |
+
+The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
 
 ### Community weights
 
@@ -135,15 +149,15 @@ Start with [docs/architecture.md](docs/architecture.md), a one-page tour. [docs/
 On a new DGX Spark, install in setup mode and then switch to a profile ([docs/setup.md](docs/setup.md)):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.8.3/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.9.0/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5; --list prints every profile
+~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, lfm25-exl3-3.5; --list prints every profile
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.8.3` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.9.0` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
 
-Where the tag `v0.8.3` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.8.3'". Pass `--repo` and `--ref` to install from another repository or release.
+Where the tag `v0.9.0` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.9.0'". Pass `--repo` and `--ref` to install from another repository or release.
 
 Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.
 
@@ -152,7 +166,7 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 | `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.8.3`; `v0.2.0-staircut` is the paper's |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.9.0`; `v0.2.0-staircut` is the paper's |
 | `--repo URL` | the git repository to clone, default `https://github.com/0xBakeer/TandemLLM.git` |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |
@@ -257,7 +271,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 ## Status
 
-The current release is `v0.8.3`, the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of two models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
+The current release is `v0.9.0`. It adds a third model, LiquidAI's LFM2.5-24B-A2B, with six EXL3 sizes and the BF16 checkpoint ([docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md)). `v0.8.3` is the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of three models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Credits
 

@@ -2169,6 +2169,7 @@ class ResidentPrefix:
                 "pin_anchor_list": sorted(self.pin_anchors),
                 "anchor_pool_bytes": self.anchor_bytes, "stash_bytes": self.stash_bytes,
                 "guest_max": self.guest_max, "owner": _short(self.owner),
+                "owner_tag": owner_tag(self.owner), "park_owner_tag": owner_tag(self.park_owner),
                 "park_budget": self.park_budget, "park_bytes": self.park_bytes,
                 "park_base": self.park_base, "park_rows": self.park_rows,
                 "park_owner": _short(self.park_owner),
@@ -2188,6 +2189,15 @@ class _EndRows:
     def __init__(self, end, tokens, glue):
         self.end, self.tokens, self.glue = end, tokens, glue
         self.stats = {"end_replayed": 0}
+
+
+def owner_tag(session: str | None) -> str | None:
+    """A session key's tag for a client that knows its own key (chatd's Context panel asks "is
+    this chat in the slot?"): the first 16 hex digits of its SHA-256, the key itself not shown."""
+    if session is None:
+        return None
+    import hashlib
+    return hashlib.sha256(str(session).encode()).hexdigest()[:16]
 
 
 def _short(session: str | None) -> str | None:

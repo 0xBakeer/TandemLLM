@@ -54,6 +54,7 @@ import { defaults } from '../src/setup/state.ts';
 import qwen from './setup/qwen3.8-27b.json';
 import community from './setup/community-qwen3.8-27b.json';
 import flashNext from './setup/qwen3.8-flash-next.json';
+import lfm25 from './setup/lfm2.5-24b-a2b.json';
 
 // the community packs (CONTRACT.md 2026-10-13, "API (as built)"): GET models/{id} lists the 27B's
 // entries in `community` with `community_sync` (the cached list, synced 12 min ago); POST
@@ -65,7 +66,8 @@ const SYNC_AT = new Date(Date.now() - 12 * 60_000).toISOString();
 const MODEL = withCommunityProfiles({ ...(qwen as unknown as SetupModel), community: COMMUNITY.community, community_sync: { ...COMMUNITY.community_sync, fetched_at: SYNC_AT, checked_at: SYNC_AT } });
 // OPS-97: the models step's second tile (its install is the 27B's walk; the estimate and plan are its own)
 const FLASH_NEXT = flashNext as unknown as SetupModel;
-const MODELS = [MODEL, FLASH_NEXT];
+const LFM25 = lfm25 as unknown as SetupModel;
+const MODELS = [MODEL, FLASH_NEXT, LFM25];
 const modelOf = (id: string | undefined): SetupModel => MODELS.find((m) => m.id === id) ?? MODEL;
 const GIB = 2 ** 30;
 
@@ -718,7 +720,7 @@ export class MockSetup {
         else if (o.communitySource === 'error') Object.assign(sync, { source: 'cache', fetched_at: new Date(Date.now() - 3 * 3600_000).toISOString(), error: 'https://raw.githubusercontent.com/0xBakeer/TandemLLM/main/models/community-index.json: HTTP 404' });
         else Object.assign(sync, { source: 'bundled', fetched_at: null });
       }
-      const body: CommunityBody = { contract_version: '1.0', sync, models: { [MODEL.id]: o.communityEmpty ? [] : COMMUNITY.community, [FLASH_NEXT.id]: [] } };
+      const body: CommunityBody = { contract_version: '1.0', sync, models: { [MODEL.id]: o.communityEmpty ? [] : COMMUNITY.community, [FLASH_NEXT.id]: [], [LFM25.id]: [] } };
       return json(200, body);
     }
     const mc = path.match(/^\/v1\/setup\/models\/([^/]+)\/current$/);

@@ -49,7 +49,7 @@ import threading
 import time
 
 from server import argloop, thinking
-from server.conductor import incontext, inject, libsearch, outcomes, schema, signals, transcripts
+from server.conductor import incontext, inject, libsearch, modelfit, outcomes, schema, signals, transcripts
 from server.conductor import memory as memory_mod
 from server.conductor import packages as packages_mod
 from server import session_tokens as session_tokens_mod
@@ -101,6 +101,12 @@ GEN_PER_HEAD = 8
 SESSION_GENERATIONS = (_S.get("SESSION_GENERATIONS") or "on").strip().lower()
 
 COMPOSITE = "TandemLLM"
+
+
+class _Skip(Exception):
+    """A plan step the model fit leaves out."""
+
+
 RANK = {"raw": 0, "off": 0, "shadow": 1, "on": 2}
 SESSIONS_MAX = 64
 TEXT_CACHE_MAX = 512
@@ -393,9 +399,13 @@ class Plan:
             # the template's own shape for `enable_thinking: false`, spliced at the tail instead of
             # rendered: the head (and its reasoning_effort sentence) stays token for token, and
             # the next turn renders the answer's empty think block the same way
-            tail_ids = list(tok(inject.THINK_OPEN, add_special_tokens=False).input_ids)
-            closed_ids = list(tok(inject.THINK_OFF, add_special_tokens=False).input_ids)
-            if ids[-len(tail_ids):] != tail_ids:
+            for open_, off in ((inject.THINK_OPEN, inject.THINK_OFF),
+                               (inject.THINK_OPEN_BARE, inject.THINK_OFF_BARE)):
+                tail_ids = list(tok(open_, add_special_tokens=False).input_ids)
+                closed_ids = list(tok(off, add_special_tokens=False).input_ids)
+                if ids[-len(tail_ids):] == tail_ids:
+                    break
+            else:
                 tail_ids = None
                 self.row["extra"].setdefault("notes", []).append("thinking_off:no_open_tail")
         im_end = inject.special_id(tok, inject.IM_END)
@@ -710,7 +720,14 @@ class Router:
         chars = int(clf.get("digest_chars", 2000))
         stages, accepted = [], None
         for st in clf["stages"]:
-            if not st.get("enabled", True):
+            # ENG-E10: a model that does not answer the class question has the decider in its
+            # place, also where the router document leaves the decider stage off (the shipped one)
+            served = modelfit.FIT["served_classifier"]
+            if not st.get("enabled", True) and (served or st["kind"] != "decider"):
+                continue
+            if st["kind"] == "qwen" and not served:
+                # ENG-E10: the served model's one-id answers with thinking off are no class
+                # (the adapter's fit); the decider decides, else the turn falls back
                 continue
             a, why = self._stage_adapter(st, roles, qid)
             if a is None:
@@ -1271,6 +1288,15 @@ class Router:
                   "package_sticky": ov.get("package_sticky") or base.get("package_sticky"),
                   "effort_by_size": ov["effort_by_size"] if "effort_by_size" in ov
                   else base.get("effort_by_size")}
+        if modelfit.FIT["fallback"] == "lean" and conf is None and source in ("fallback", "sticky"):
+            # ENG-E10: nobody decided the class (no answer at the accept bar, or a tool turn of
+            # such a session): the profile's default effort and nothing of the default class's
+            # note, so a short chat does not get a coding task's packages and xhigh
+            policy.update(effort=prof["thinking"]["default"], packages=[], core=[], rules=[],
+                          note="", effort_by_size=None)
+            row["extra"]["model_fit_lean"] = True
+        if modelfit.FIT != modelfit.DEFAULTS:
+            row["extra"]["model_fit"] = modelfit.summary()
         self._size(plan, router, prof, sh, sess, policy, row)
         if not dry:
             self._observe(plan, body, router, prof, sh, sess, row)
@@ -1288,9 +1314,14 @@ class Router:
         libsearch.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row, dry)
         # 2026-10-05: the memory notes (its profile switch off, absent included: nothing at all)
         try:
+            if not modelfit.FIT["memory"]:
+                row["extra"]["memory"] = {"mode": "off", "why": "model_fit"}
+                raise _Skip
             memory_mod.attach(self, plan, body, router, prof, packages, roles, sh, sess, cls, row,
                               dry, plan.user, (plan.caps or {}).get("memory"),
                               opt=getattr(plan, "memory_opt", None))
+        except _Skip:
+            pass
         except Exception as exc:                                   # noqa: BLE001
             row["extra"].setdefault("errors", []).append(f"memory:{type(exc).__name__}")
             print(f"[conductor] memory failed: {type(exc).__name__}: {exc}", flush=True)
@@ -1487,6 +1518,9 @@ class Router:
         if dec["effort"] != "off" and note and plan.client_off:
             # No "think carefully" sentence in a turn that cannot think
             row["extra"].setdefault("notes", []).append("effort_note_skipped:client_off")
+        elif dec["effort"] != "off" and note and not modelfit.FIT["effort_notes"]:
+            # ENG-E10: the level sets the switch and the budget; its sentence stays out
+            row["extra"].setdefault("notes", []).append("effort_note_skipped:model_fit")
         elif dec["effort"] != "off" and note:
             parts.append(("effort", {"kind": "effort", "name": base_level, "text": note}))
         reading = self._reading(plan, router, cls, classes, row)
@@ -1504,6 +1538,16 @@ class Router:
             row["extra"]["package_blocked"] = sorted(blocked)
         if unknown:
             row["extra"].setdefault("notes", []).append(f"pin_unknown:{','.join(unknown)}")
+        mode = "none" if cls in modelfit.FIT["no_package_classes"] else modelfit.FIT["packages"]
+        if mode != "all":
+            # ENG-E10: the adapter's fit: the class's core alone, or nothing; pins still go in
+            keep = set(core_in) if mode == "core" else set()
+            dropped = [p for p in listed if p not in keep]
+            listed = [p for p in listed if p in keep]
+            core_in = [p for p in core_in if p in keep]
+            stand_in = [p for p in stand_in if p in keep]
+            if dropped:
+                row["extra"]["package_fit_dropped"] = dropped
         cands = [p for p in listed if p not in sh.loaded_skills and p not in pinned]
         skipped = [p for p in listed if p in sh.loaded_skills]
         if skipped:
@@ -1584,7 +1628,10 @@ class Router:
                     row["extra"].setdefault("package_pinned", []).append(name)
         if fit_note and dec["packages"] != "off":
             parts.append(("packages", {"kind": "tools", "name": "fit", "text": fit_note}))
-        if dec["rules"] != "off" and (policy["rules"] or policy["note"]):
+        if dec["rules"] != "off" and (policy["rules"] or policy["note"]) and \
+                not modelfit.FIT["rules"]:
+            row["extra"].setdefault("notes", []).append("rules_skipped:model_fit")
+        elif dec["rules"] != "off" and (policy["rules"] or policy["note"]):
             text = "\n".join(f"- {r}" for r in policy["rules"])
             if policy["note"]:
                 text = (text + "\n\n" if text else "") + policy["note"]

@@ -17,6 +17,7 @@ import type { ChatBackend, TerminalSession } from './backend';
 import { diffCounts, parseDiff, type DiffRow } from './terminal';
 import type { XtermHandle } from './xterm-pane';
 import { paneIcon, paneWord } from './thread';
+import { filePane, latestPage } from './file-panes';
 import type { Conversation, PaneKind, PaneRef, SandboxFile } from './types';
 import './context-panel';
 
@@ -37,6 +38,9 @@ export class QseChatPanes extends LightElement {
   @property({ type: String }) convId: string | null = null;
   @property({ type: Boolean }) sheet = false;
   @state() private plus = false;
+  /** the plus menu's left edge in the panes box: under the plus button, inside the box */
+  @state() private plusLeft = 6;
+  @state() private plusTop = 40;
   @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string; url?: string }>();
   @state() private files = new Map<string, SandboxFile[]>();
   @state() private file: { path: string; content: string; mime: string; bytes: number; etag?: string } | null = null;
@@ -57,10 +61,12 @@ export class QseChatPanes extends LightElement {
   connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('qse-theme', this.onTheme);
+    document.addEventListener('pointerdown', this.onDocDown, true);
   }
 
   disconnectedCallback(): void {
     window.removeEventListener('qse-theme', this.onTheme);
+    document.removeEventListener('pointerdown', this.onDocDown, true);
     this.resizeObs?.disconnect();
     for (const s of this.screens.values()) {
       s.session?.close();
@@ -68,6 +74,48 @@ export class QseChatPanes extends LightElement {
     }
     this.screens.clear();
     super.disconnectedCallback();
+  }
+
+  /** a press outside the plus menu and its button closes it */
+  private onDocDown = (e: Event) => {
+    const t = e.target as HTMLElement | null;
+    if (t && !t.closest('.ch-pane-menu, .ch-pane-plus')) this.plus = false;
+  };
+
+  /** The plus menu sits in the panes box, not in the tab strip: the strip scrolls sideways
+   *  (overflow-x: auto), which clips anything that drops below it. */
+  private togglePlus(btn: HTMLElement): void {
+    if (this.plus) {
+      this.plus = false;
+      return;
+    }
+    const box = this.querySelector<HTMLElement>('.ch-panes')?.getBoundingClientRect();
+    const b = btn.getBoundingClientRect();
+    const width = Math.min(240, (box?.width ?? 252) - 12);
+    this.plusLeft = box ? Math.max(6, Math.min(b.left - box.left, box.width - width - 6)) : 6;
+    const strip = this.querySelector<HTMLElement>('.ch-pane-tabs')?.getBoundingClientRect();
+    this.plusTop = box && strip ? Math.round(strip.bottom - box.top + 4) : 40;
+    this.plus = true;
+  }
+
+  /** a kind from the plus menu; Preview opens the page the chat made last, or the Files pane */
+  private async pick(k: PaneKind): Promise<void> {
+    this.plus = false;
+    if (k !== 'preview') {
+      this.fire('ch-pane-open', { pane: defaultPane(k) });
+      return;
+    }
+    const page = latestPage(this.conv?.messages ?? []) ?? (await this.newestPage());
+    this.fire('ch-pane-open', { pane: page ? filePane(page)! : defaultPane('files') });
+  }
+
+  /** the newest HTML or SVG file at the top of the sandbox's working directory */
+  private async newestPage(): Promise<string | null> {
+    if (!this.backend || !this.convId) return null;
+    const list = await this.backend.sandboxFiles(this.convId, this.root).catch(() => [] as SandboxFile[]);
+    const pages = list.filter((f) => f.kind === 'file' && filePane(f.path)?.kind === 'preview');
+    pages.sort((a, b) => (b.modified_at ?? '').localeCompare(a.modified_at ?? ''));
+    return pages[0]?.path ?? null;
   }
 
   private fire(name: string, detail: unknown = {}): void {
@@ -184,13 +232,15 @@ export class QseChatPanes extends LightElement {
       <div class="ch-pane-tabs" role="tablist" aria-label="panes">
         ${this.panes.map((x) => html`<span class="ch-pane-tab ${x.id === p?.id ? 'is-on' : ''}" role="tab" aria-selected=${x.id === p?.id}><button type="button" class="ch-pane-tab-btn" @click=${() => this.fire('ch-pane-activate', { id: x.id })}>${icon(paneIcon(x.kind))}<span>${x.title ?? paneWord(x.kind)}</span></button><button type="button" class="ch-pane-tab-x" aria-label=${`Close ${x.title ?? paneWord(x.kind)}`} @click=${() => this.fire('ch-pane-close', { id: x.id })}>${icon('x')}</button></span>`)}
         <span class="ch-pane-plus">
-          <button type="button" class="btn btn-ghost btn-sm" aria-label="Open a pane" aria-haspopup="menu" aria-expanded=${this.plus} @click=${() => (this.plus = !this.plus)}>${icon('plus')}</button>
-          ${this.plus ? html`<div class="ch-pop ch-pane-menu" role="menu">${(['terminal', 'files', 'preview', 'diff', 'plan', 'context'] as PaneKind[]).map((k) => html`<button type="button" role="menuitem" class="ch-pop-item" @click=${() => (this.fire('ch-pane-open', { pane: defaultPane(k) }), (this.plus = false))}>${icon(paneIcon(k))}<span class="ch-pop-name">${paneWord(k)}</span></button>`)}</div>` : nothing}
+          <button type="button" class="btn btn-ghost btn-sm" aria-label="Open a pane" aria-haspopup="menu" aria-expanded=${this.plus} @click=${(e: Event) => this.togglePlus(e.currentTarget as HTMLElement)}>${icon('plus')}</button>
         </span>
         <span class="grow"></span>
         ${this.sheet ? nothing : html`<button type="button" class="btn btn-ghost btn-sm ch-dock-btn" title=${this.dock === 'bottom' ? 'Dock to the right' : 'Dock below'} aria-label=${this.dock === 'bottom' ? 'Dock to the right' : 'Dock below'} @click=${() => this.fire('ch-pane-dock', { dock: this.dock === 'bottom' ? 'right' : 'bottom' })}>${icon(this.dock === 'bottom' ? 'dock-right' : 'dock-bottom')}</button>`}
         <button type="button" class="btn btn-ghost btn-sm" aria-label="Close panes" title="Close" @click=${() => this.fire('ch-panes-close')}>${icon('x')}</button>
       </div>
+      ${this.plus
+        ? html`<div class="ch-pop ch-pane-menu" role="menu" aria-label="open a pane" style=${`left:${this.plusLeft}px;top:${this.plusTop}px`} @keydown=${(e: KeyboardEvent) => e.key === 'Escape' && (this.plus = false)}>${PLUS_KINDS.map((k) => html`<button type="button" role="menuitem" class="ch-pop-item" @click=${() => this.pick(k)}>${icon(paneIcon(k))}<span class="ch-pop-name">${paneWord(k)}</span></button>`)}</div>`
+        : nothing}
       <div class="ch-pane-body" data-kind=${p?.kind ?? ''}>${p ? this.renderPane(p) : html`<p class="muted small ch-pane-empty">No pane open. Press + to open the terminal, the files, or a preview.</p>`}</div>
     </div>`;
   }
@@ -331,7 +381,7 @@ export class QseChatPanes extends LightElement {
       <ul class="ch-file-list ch-file-root" aria-label="sandbox files"><li><div class="ch-file is-root">${icon('folder')}<span>${root}</span></div><ul class="ch-file-list">${tree(root, 1)}</ul></li></ul>
       <div class="ch-file-view">
         ${this.file
-          ? html`<div class="ch-pane-bar"><code class="small">${this.file.path}</code><span class="muted small num">${bytes(this.file.bytes, 0)}</span><span class="grow"></span><button type="button" class="btn btn-ghost btn-sm" title="Edit" @click=${() => this.fire('ch-pane-open', { pane: { kind: 'editor', ref: this.file!.path, title: this.file!.path.split('/').pop() } })}>${icon('edit')} Edit</button>${copyButton(this.file.content, 'Copy file')}</div><pre class="ch-code"><code>${this.file.content}</code></pre>`
+          ? html`<div class="ch-pane-bar"><code class="small">${this.file.path}</code><span class="muted small num">${bytes(this.file.bytes, 0)}</span><span class="grow"></span>${filePane(this.file.path) ? html`<button type="button" class="btn btn-ghost btn-sm" title="Open in a pane" @click=${() => this.fire('ch-pane-open', { pane: filePane(this.file!.path) })}>${icon(paneIcon(filePane(this.file.path)!.kind))} ${paneWord(filePane(this.file.path)!.kind)}</button>` : nothing}<button type="button" class="btn btn-ghost btn-sm" title="Edit" @click=${() => this.fire('ch-pane-open', { pane: { kind: 'editor', ref: this.file!.path, title: this.file!.path.split('/').pop() } })}>${icon('edit')} Edit</button>${copyButton(this.file.content, 'Copy file')}</div><pre class="ch-code"><code>${this.file.content}</code></pre>`
           : html`<p class="muted small ch-pane-empty">Pick a file.</p>`}
       </div>
     </div>`;
@@ -391,6 +441,9 @@ export function defaultPane(k: PaneKind): PaneRef {
       return { kind: 'markdown', ref: 'md:meal-plan', title: 'Markdown' };
   }
 }
+
+/** what the plus menu offers */
+const PLUS_KINDS: PaneKind[] = ['terminal', 'files', 'preview', 'diff', 'plan', 'context'];
 
 interface TermEntry {
   session: TerminalSession | null;

@@ -18,6 +18,7 @@ import { attachLabel, type Attachment as Attach } from './connection';
 import { argsSummary, dividersByMessage, dividerWords, messageText } from './store';
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 import { approvedTitle, approvedWord } from './permission';
+import { callPane } from './file-panes';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -255,6 +256,8 @@ export class QseChatThread extends LightElement {
   private renderCall(c: Conversation, m: Message, t: ToolCallPart, live: boolean): TemplateResult {
     const open = this.openCalls.has(t.id) || t.status === 'asking' || (live && t.status === 'running' && !!t.output);
     const args = argsSummary(t);
+    // the page or Markdown file a write or an edit left opens from the card, folded or not
+    const pane = callPane(t);
     const dur = t.started_at && t.ended_at ? ms(Date.parse(t.ended_at) - Date.parse(t.started_at)) : t.started_at && t.status === 'running' ? ms(this.now - Date.parse(t.started_at)) : null;
     const word = t.status === 'asking' ? 'asking' : t.status === 'done' && t.output?.exit_code ? `exit ${t.output.exit_code}` : t.status;
     return html`<section class="ch-call is-${t.status}" data-call=${t.id} data-tool=${t.name}>
@@ -267,6 +270,7 @@ export class QseChatThread extends LightElement {
         <span class="ch-call-word">${word}</span>
         <span class="ch-call-chev" aria-hidden="true"></span>
       </button>
+      ${pane ? html`<div class="ch-call-row ch-call-open"><button type="button" class="btn btn-sm" @click=${() => this.fire('ch-open-pane', { pane })}>${icon(paneIcon(pane.kind))} Open in ${paneWord(pane.kind)}</button></div>` : nothing}
       ${open
         ? html`<div class="ch-call-body">
             ${t.status === 'asking' && t.permission
@@ -288,7 +292,6 @@ export class QseChatThread extends LightElement {
                 ? html`<div class="ch-call-col"><div class="ch-call-label">output${t.output ? html`<span class="num muted">${bytes(t.output.bytes, 0)}</span>${copyButton(t.output.content, 'Copy output')}` : nothing}</div><pre class="ch-call-pre ch-call-out ${t.output?.is_error ? 'is-error' : ''} ${t.status === 'running' ? 'is-streaming' : ''}">${stripAnsi(t.output?.content ?? '')}</pre></div>`
                 : nothing}
             </div>
-            ${t.pane ? html`<div class="ch-call-row"><button type="button" class="btn btn-sm" @click=${() => this.fire('ch-open-pane', { pane: t.pane })}>${icon(paneIcon(t.pane.kind))} Open in ${paneWord(t.pane.kind)}</button></div>` : nothing}
           </div>`
         : nothing}
     </section>`;

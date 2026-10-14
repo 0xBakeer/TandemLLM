@@ -267,6 +267,22 @@ Session transcripts (SRV-137): with the conductor on, every TandemLLM request th
 
 The disk tier (C1, [caches.md](caches.md#disk-tier)): `GET /v1/conductor/memory/disk` answers whether it runs, its settings and their version, its bytes against the budget, the NVMe's free space against the 50 GB floor, the hit rate, the 20 most-hit entries and the last events; `POST /v1/conductor/memory/disk/clear` empties it. Its settings are `settings.memory.disk_cache` (`mode`, `budget_gb`, `ttl_days`, `admit_after`, `min_free_gb`), applied at the start of the next request.
 
+### The model fit
+
+The router's documents target Qwen3.8. A model's adapter may declare how the router fits it, `Capabilities.conductor` (`engine/models/adapter.py`); `server/conductor/modelfit.py` reads it once at the start and logs `[conductor] model fit (...)`. A model that declares none (the Qwen models) gets the router as its documents say.
+
+| key | default | meaning |
+|-|-|-|
+| `served_classifier` | true | the served model answers the class and package questions (the `qwen` stage); false: the decider alone, asked also where the router leaves its stage off |
+| `fallback` | `class` | a turn no stage classified at its bar gets the default class's policy; `lean`: the profile's default level and nothing added, on its tool turns too |
+| `packages` | `all` | `core`: a class's core skill and the client's pins; `none`: the pins alone |
+| `no_package_classes` | none | classes with no package (pins excepted) |
+| `effort_notes` | true | the level's sentence goes into the note; false: the level sets the switch and the budget alone |
+| `rules` | true | the class's rules and note go into the note |
+| `memory` | true | the memory card and index go in under a profile with memory on |
+
+`QWEN38_CONDUCTOR_FIT`: `model` (default) the adapter's fit, `off` the router as written, `key=value,...` the adapter's fit with those keys replaced (a list takes `+`: `no_package_classes=chat+writing`). A wrong key or value stops the start. The journal row says what the fit changed: `extra.model_fit`, `model_fit_lean`, `package_fit_dropped`, and the notes `effort_note_skipped:model_fit`, `rules_skipped:model_fit`. LFM2.5's fit and its measurements: [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md#conductor).
+
 ### TandemLLM's steps shown to the user (`ui.states`)
 
 A client shows Qwen's reasoning and its answer; what the conductor did around them was on the dashboard only. With a profile's `ui.states: on` (the Profiles screen, off by default, and off for every profile stored before it) each step is one short line the client renders, sent at the moment it happens (`server/conductor/states.py`), in the reasoning or, with `ui.states_channel: content`, in the content (below):

@@ -54,6 +54,7 @@ PIDS = 512
 DISK_LIMIT = 10 * GiB
 FLOOR_GB, MARGIN_GB, STOP_GB, KILL_GB = 15.0, 4.0, 15.0, 12.0
 IDLE_S = 30 * 60
+MEM_TTL_S = 5.0
 LABEL = "tandem.chat"
 
 
@@ -163,6 +164,7 @@ class Box:
         self.error: str | None = None
         self.proxy: Proxy | None = None
         self.lock = threading.RLock()
+        self.mem: tuple[float, int | None] = (0.0, None)   # (when read, bytes in use)
 
 
 class Sandboxes:
@@ -233,13 +235,36 @@ class Sandboxes:
                 n += 1
         return n
 
+    def memory_used(self, b: Box) -> int | None:
+        """A running container's memory in use, as `docker stats` shows it (the cgroup's usage
+        less its inactive file cache), read at most every MEM_TTL_S; None when the runtime does
+        not say. It was a constant 0 before: the Context panel showed "running, 0 B"."""
+        if b.state != "running" or not b.container:
+            return None
+        now = self.clock()
+        if now - b.mem[0] < MEM_TTL_S:
+            return b.mem[1]
+        used = None
+        try:
+            st, s = self.engine.call("GET", f"/containers/{b.container}/stats?stream=false&"
+                                     "one-shot=true", timeout=3)
+            m = (s or {}).get("memory_stats") if st == 200 and isinstance(s, dict) else None
+            if isinstance(m, dict) and m.get("usage") is not None:
+                stats = m.get("stats") or {}
+                cache = stats.get("inactive_file", stats.get("total_inactive_file", 0)) or 0
+                used = max(0, int(m["usage"]) - int(cache))
+        except (OSError, ValueError, TypeError):
+            used = None
+        b.mem = (now, used)
+        return used
+
     def status(self, cid: str) -> dict:
         b = self.box(cid)
         ws, _, _ = self.paths(cid)
         mode = self.network_mode(cid)
         return {"state": b.state if self.available() or b.state == "running" else "error",
                 "image": self.image, "cwd": "/workspace", "cpus": CPUS,
-                "memory_bytes": 0, "memory_limit_bytes": LIMIT_BYTES,
+                "memory_bytes": self.memory_used(b), "memory_limit_bytes": LIMIT_BYTES,
                 "disk_bytes": _du(ws), "disk_limit_bytes": DISK_LIMIT,
                 "network": "on" if mode == "on" else "off", "allowlist": [],
                 "uptime_s": int(self.clock() - b.started) if b.state == "running" else 0,
