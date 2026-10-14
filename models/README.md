@@ -16,7 +16,7 @@ A community pack is one JSON file that a pull request adds: a Hugging Face repos
 
 What a `model.yaml` holds, in the order of the file:
 
-- `schema: 1`, `id` (the folder's name), `name`, `family`, `params`, `pitch` (one line for the tile), `architecture`, `license`, `links`, `icon`, `recommended`.
+- `schema: 1`, `id` (the folder's name), `name`, `family`, `params`, `pitch` (one line for the tile), `architecture`, `license`, `links`, `icon`, `recommended`, and optionally `order`, the tile's place on the models step (lower first, 0 when absent; equal places sort by folder name).
 - `devices`: the boards the numbers were measured on. `total_gib` is MemTotal, `reserved_gib` what the OS and other programs hold outside the engine.
 - `assets`: files a profile or a tool needs besides the profile's weights, with `fetchable` (something here downloads it) and `protected` (reset level 4 never deletes it).
 - `profiles`: one entry per `ops/profiles/<id>.env`, with the weights and drafters in GiB from the load log, the download size in GB, the quality against BF16 with its date and source, the assets it needs and exactly one `recommended: true`.

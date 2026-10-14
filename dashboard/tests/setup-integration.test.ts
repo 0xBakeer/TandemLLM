@@ -134,7 +134,7 @@ describe('the second model (OPS-97)', () => {
   it('the mock lists Flash-Next as a second tile and answers its entry, current and estimate', async () => {
     const ms = new MockSetup();
     const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; recommended: boolean; best_speed: unknown }[];
-    expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false]]);
+    expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false], ['lfm2.5-24b-a2b', false]]);
     // its measured row (3.05, the served speculation): the fastest greedy-512 cell, with its pack
     expect(tiles[1].best_speed).toEqual({ tok_s: 82.69, task: 'code', profile: 'flashnext-3.05' });
     const fn = (await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next')).body as SetupModel;
@@ -146,6 +146,25 @@ describe('the second model (OPS-97)', () => {
     const over = await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(fn), model: fn.id, profile: 'flashnext-6.05' } });
     expect(over.body.fits).toBe(false);
     expect(over.body.notes[0]).toContain('does not fit');
+  });
+});
+describe('the third model (VIS-125)', () => {
+  it('the mock lists LFM2.5-24B-A2B as a third tile with its measured speed, and its estimate fits the whole context in each of its three slots', async () => {
+    const ms = new MockSetup();
+    const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; best_speed: unknown; pitch: string }[];
+    expect(tiles[2].id).toBe('lfm2.5-24b-a2b');
+    expect(tiles[2].best_speed).toMatchObject({ tok_s: 147.54, task: 'prose' });     // the recommended 3.5's best cell
+    const m = (await call(ms, 'GET', '/v1/setup/models/lfm2.5-24b-a2b')).body as SetupModel;
+    expect(m.profiles.map((p) => p.id)).toEqual(['lfm25-bf16', 'lfm25-exl3-2.5', 'lfm25-exl3-3.0', 'lfm25-exl3-3.5',
+      'lfm25-exl3-4.0', 'lfm25-exl3-4.5', 'lfm25-exl3-6.0']);
+    expect(m.profiles.find((p) => p.recommended)?.id).toBe('lfm25-exl3-3.5');
+    expect(m.profiles.every((p) => p.max_window === 131_072)).toBe(true);
+    for (const profile of ['lfm25-exl3-3.5', 'lfm25-bf16']) {
+      const est = (await call(ms, 'POST', '/v1/setup/estimate', { selection: { ...defaults(m), model: m.id, profile } })).body;
+      expect(est.fits).toBe(true);
+      expect(est.context_tokens_fit).toBe(3 * 131_072);
+      expect(est.kv_bytes_per_token).toBe(20_480);
+    }
   });
 });
 describe('the mock answers as the server does', () => {

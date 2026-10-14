@@ -76,8 +76,10 @@ DRAFT="$(pv QWEN38_DRAFT_EXL3)"; DHEAD="$(pv QWEN38_DRAFT_HEAD_EXL3)"; C8="$(pv 
 weights_ok() {
     [ -d "$WDIR" ] || return 1
     if [ -n "$FILES" ]; then for f in $FILES; do [ -s "$WDIR/$f" ] || return 1; done; return 0; fi
-    [ -s "$WDIR/config.json" ] && [ -s "$WDIR/model.safetensors.index.json" ] || return 1
+    [ -s "$WDIR/config.json" ] || return 1
     for f in $ALSO; do [ -s "$WDIR/$f" ] || return 1; done
+    # a pack in one file has no index (LFM2.5's 2.5 pack: model.safetensors alone)
+    [ -s "$WDIR/model.safetensors.index.json" ] || { [ -s "$WDIR/model.safetensors" ]; return; }
     "$PY" -c "import json,os,sys; d=sys.argv[1]; m=json.load(open(os.path.join(d,'model.safetensors.index.json')))['weight_map']; sys.exit(0 if all(os.path.isfile(os.path.join(d,f)) for f in set(m.values())) else 1)" "$WDIR"
 }
 MISSING=""

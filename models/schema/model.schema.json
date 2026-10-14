@@ -908,6 +908,10 @@
       "maxLength": 2000,
       "type": "string"
     },
+    "order": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "parallelism": {
       "additionalProperties": false,
       "properties": {
@@ -1143,7 +1147,8 @@
           "format": {
             "enum": [
               "exl3",
-              "nvfp4"
+              "nvfp4",
+              "bf16"
             ]
           },
           "hf_private": {

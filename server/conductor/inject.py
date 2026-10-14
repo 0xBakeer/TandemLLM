@@ -29,6 +29,10 @@ IM_END = "<|im_end|>"
 # the generation prompt with thinking on, and the template's own closed block for thinking off
 THINK_OPEN = "<think>\n"
 THINK_OFF = "<think>\n\n</think>\n\n"
+# a template that opens the block with no newline and ignores enable_thinking (LFM2.5): its open
+# tail, closed as the server closes it for a client's thinking off (server/app.py build_prompt)
+THINK_OPEN_BARE = "<think>"
+THINK_OFF_BARE = "<think></think>"
 
 
 def special_id(tok, text: str) -> int | None:

@@ -51,6 +51,10 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   a block of a kind that does not exist; FAKE_MEMORY_OPEN one that never closes;
                   with FAKE_CALL_JSON the block sits before the call
     FAKE_STRAY_CLOSE  the answer starts with a sentence and a bare `</think>` line (SRV-187)
+    FAKE_PYTHONIC   with `tools`: a sentence, then LFM2's Pythonic call block to the first tool,
+                  `<|tool_call_start|>[get_weather(city='Berlin', days=3)]<|tool_call_end|>`
+                  (SRV-425; the server reads it when `STATE["tool_format"]` is "pythonic", as the
+                  LFM2.5 adapter sets it); FAKE_PYTHONIC_BAD the block's list never closes
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
@@ -261,6 +265,9 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         answer = ("<tool_call>\n<function=write>\n<parameter=filePath>\n/tmp/mario.html\n"
                   "</parameter>\n<parameter=content>\n" + head + "const LEVEL = [\n"
                   + row * 3000)
+    if tools and "FAKE_PYTHONIC" in user:
+        inner = f"[{tools[0]}(city='Berlin', days=3" + ("" if "FAKE_PYTHONIC_BAD" in user else ")]")
+        answer = "Let me look that up.<|tool_call_start|>" + inner + "<|tool_call_end|>"
     if "FAKE_CALL_NOTOOLS" in user:
         # SRV-247: a call the request did not offer a tool for (the memory search as `tool`)
         answer = "Let me check my memory for that.\n\n" + _call("tool", user)

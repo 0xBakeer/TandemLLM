@@ -54,8 +54,9 @@ from server.stream import (  # noqa: E402
     CLOSE_THINK, OPEN_THINK, AnswerStops, Detokenizer, Reasoning, StopStrings, StrayClose,
     answer_stops, drop_stray_close, opens_think, split_full,
 )
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, schema_types, strip_blocks)
+from engine.tree import DraftTree  # noqa: E402
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_pythonic, schema_types, strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
@@ -1508,7 +1509,8 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                 # when it is a tree loop), and the GPU is offered to a waiting slot between blocks
                 # a drafter taking the plain step all turn (`plain_turn`) submits no block: the
                 # round's barrier must not wait for it
-                _par_block(par, tree_mode and not getattr(drafter, "plain_turn", False))
+                _par_block(par, tree_mode and (not getattr(drafter, "plain_turn", False)
+                                               or getattr(eng.caps, "joint_plain", False)))
             lane = STATE.get("lane")
             if lane is not None and lane.jobs:
                 # A short request waits (server/preempt.py). A block boundary: the
@@ -1544,7 +1546,13 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     tree = tree.truncate(eng.max_len - pos)
                 if par is not None and tree is not None and tree.n_draft > 0:
                     tree = _share_trim(par, tree)
-                if tree is None or tree.n_draft == 0:
+                joint_anchor = False
+                if ((tree is None or tree.n_draft == 0) and par is not None
+                        and getattr(eng.caps, "joint_plain", False) and len(par.decoding()) > 1):
+                    # ENG-241: no draft this round, other slots decoding: the plain step joins the
+                    # round's pass as the anchor alone, so the slots read the weights once
+                    tree, joint_anchor = DraftTree(tokens=[int(ctx[-1])], parents=[-1]), True
+                if tree is None or (tree.n_draft == 0 and not joint_anchor):
                     draft = []
                 else:
                     block = h2d(tree.tokens, torch.long, prompt.device)
@@ -4484,19 +4492,26 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             kwargs.update(add_generation_prompt=False, continue_final_message=True)
         else:
             kwargs["add_generation_prompt"] = True
+        # a client that asked for no thinking, to a model whose template opens the reasoning block
+        # anyway (LFM2.5 always does): the block is closed right after the generation prompt, as the
+        # Qwen template's own thinking off renders it, so the answer starts at once
+        close = (list(tok(CLOSE_THINK, add_special_tokens=False).input_ids)
+                 if client.off and kwargs.get("add_generation_prompt") else [])
         seg = STATE.get("segments")
         if seg is None:
             enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
                                           **kwargs)
+            cids = _as_ids(enc, device="cpu")
+            if close and opens_think(tok.decode(cids[-8:].tolist(), skip_special_tokens=False)):
+                cids = torch.cat([cids, torch.tensor(close, dtype=cids.dtype)])
             if count == "ids":
-                return _as_ids(enc, device="cpu").tolist()
+                return cids.tolist()
             if count == "think":
-                cids = _as_ids(enc, device="cpu")
                 return int(cids.numel()), opens_think(tok.decode(cids.tolist(),
                                                                  skip_special_tokens=False))
             if count:
-                return int(_as_ids(enc, device="cpu").numel())
-            ids = _as_ids(enc)
+                return int(cids.numel())
+            ids = cids.to(STATE["device"])
             # Decoded from the ids rather than rendered a second time, so what is inspected is
             # exactly the token sequence the engine is about to be given.
             return ids, "chat", opens_think(tok.decode(ids.tolist(), skip_special_tokens=False))
@@ -4504,6 +4519,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # (server/tokcache.py); the reasoning tag read from the prompt's decoded tail
         text = tok.apply_chat_template(messages, tokenize=False, **kwargs)
         ids = seg.encode(text)
+        if close and opens_think(tok.decode(ids[-8:], skip_special_tokens=False)):
+            ids = list(ids) + close
         if count == "ids":
             return list(ids)
         if count == "think":
@@ -7446,6 +7463,8 @@ class Handler(BaseHTTPRequestHandler):
                         # its reasoning is a thought about calling, not a call.
                         head, answer = _reasoning_head(text, in_think)
                         ended = bool(ids) and ids[-1] in eos
+                        if STATE.get("tool_format") == "pythonic":
+                            answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -7576,6 +7595,9 @@ class Handler(BaseHTTPRequestHandler):
                                    hold=(sup is not None and sup.holds_calls) or refuse_calls,
                                    live=not any(stops))
                     if parse_calls else None)
+            # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
+            # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
+            pyc = PythonicCalls() if tbuf is not None and STATE.get("tool_format") == "pythonic" else None
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
@@ -7651,7 +7673,7 @@ class Handler(BaseHTTPRequestHandler):
                         # instead of being shown as raw XML; a recognised call streams
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
-                        for out_piece in tbuf.feed(piece):
+                        for out_piece in tbuf.feed(pyc.feed(piece) if pyc is not None else piece):
                             if voice is not None:
                                 voice.content(out_piece)       # v3: a plan in the answer
                             put(_chunk(cid, model, created, {"content": out_piece},
@@ -7897,6 +7919,11 @@ class Handler(BaseHTTPRequestHandler):
                     while cuts and len(ids) >= cuts[0]:
                         cuts.pop(0)                      # regenerated, and nothing came after
                         tbuf.cut()
+                    if pyc is not None:
+                        # SRV-425: a Pythonic block still open: a call at the end token, text if cut
+                        for out_piece in tbuf.feed(pyc.finish(eos=bool(ids) and ids[-1] in eos)):
+                            put(_chunk(cid, model, created, {"content": out_piece},
+                                       **(lp_take() if lpr is not None else NO_LP)))
                     left, sweep = tbuf.finish(eos=bool(ids) and ids[-1] in eos)
                     if tbuf.cut_live:
                         # 2026-10-05: the client holds the open call as it was streamed; its text is not
@@ -9435,9 +9462,14 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
         mem.register("pin", resident.shed_pin)
     suffix = None
     if a.suffix_store:
-        suffix = cache.PersistentSuffixStore(
-            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
-            readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
+        try:
+            suffix = cache.PersistentSuffixStore(
+                a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
+                readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
+        except ValueError as exc:
+            # a store another model's tokenizer wrote (engine/tokfp.py): its ids mean other tokens here
+            print(f"[cache] suffix store off: {exc}", flush=True)
+    if suffix is not None:
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)

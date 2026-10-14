@@ -264,10 +264,15 @@ describe('the memory check on Review', () => {
     expect(estimate(M, { ...sel, window: 65_536, side_window: 65_536 }).fits).toBe(true);
   });
   it('a private profile that is not on the box and no token blocks the weights step', () => {
+    // OPS-95 made every published profile public, so the private ones are marked here, as the
+    // mock's privateProfile option does for the e2e case
     const sel = defaults(M);
+    const P = { ...M, profiles: M.profiles.map((p) => (p.id === sel.profile || p.id === 'exl3-6.0' ? { ...p, hf_private: true } : p)) };
     const dev = { profiles_on_disk: { 'exl3-6.0': true }, hf_token_present: false } as never;
-    expect(tokenBlocked(M, sel, dev)).toBe(true);
-    expect(tokenBlocked(M, { ...sel, profile: 'exl3-6.0' }, dev)).toBe(false);
-    expect(tokenBlocked(M, { ...sel, profile: 'nvfp4' }, dev)).toBe(false);
+    expect(tokenBlocked(P, sel, dev)).toBe(true);
+    expect(tokenBlocked(P, sel, { ...(dev as object), hf_token_present: true } as never)).toBe(false);
+    expect(tokenBlocked(P, { ...sel, profile: 'exl3-6.0' }, dev)).toBe(false);
+    expect(tokenBlocked(P, { ...sel, profile: 'nvfp4' }, dev)).toBe(false);
+    expect(tokenBlocked(M, sel, dev)).toBe(false);
   });
 });

@@ -541,7 +541,7 @@ export class QseSetup extends LightElement {
                   <span class="mtile-pitch">${t.pitch}</span>
                   ${t.community_count ? html`<span class="mtile-comm">${S.community.tileCount(t.community_count)}</span>` : nothing}
                   ${t.best_speed
-                    ? html`<span class="mtile-speed"><span class="mtile-speed-n num">${t.best_speed.tok_s.toFixed(1)}</span><span class="mtile-speed-u">tok/s</span><span class="mtile-speed-note">${t.best_speed.task}, ${t.best_speed.profile}</span></span>`
+                    ? html`<span class="mtile-speed" title=${S.tileSpeedTitle}><span class="mtile-speed-n num">${t.best_speed.tok_s.toFixed(1)}</span><span class="mtile-speed-u">tok/s</span><span class="mtile-speed-note">${t.best_speed.task}, ${t.best_speed.profile}</span></span>`
                     : nothing}
                   <span class="mtile-go"><span class="btn btn-primary">${resuming ? `${S.tileOpen}: ${STEP_LABEL[resume!.step]}` : S.tileOpen}</span></span>
                 </a>`;

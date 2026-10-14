@@ -68,6 +68,25 @@ import torch  # noqa: E402
 
 MUL1 = 0x83DCD12D
 KS = (2, 3, 4, 5, 6, 7, 8)               # every integer rate the recipes use (head 4/5/6/8)
+# ENG-285: the half-integer rates of exllamav3 1.6.0's mul1 packs below 4 bpw (1.5, 2.5, 3.5), as the
+# kernels name them: ten times the rate (a tile 16 K + 8 int16 wide)
+HALF_KS = (15, 25, 35)
+
+
+def kb_of(width: int) -> int:
+    """The kernels' bits of a trellis whose tiles are `width` int16 wide: K for 16 K, ten times the rate
+    for a half-integer one (16 K + 8 -> 10 K + 5)."""
+    return width // 16 if width % 16 == 0 else 10 * (width // 16) + 5
+
+
+def rate(kb: int) -> float:
+    """Bits a weight of the kernels' bits `kb`."""
+    return kb / 10 if kb >= 10 else float(kb)
+
+
+def tile_width(kb: int) -> int:
+    """int16 a 256-weight tile at the kernels' bits `kb`."""
+    return 16 * (kb // 10) + 8 if kb >= 10 else 16 * kb
 SKINNY_MAX = 32                           # rows the decode-in-registers kernel takes in one call
 # rows up to which a call runs the skinny kernel in 32-row chunks instead of decoding a slab
 # (one weight read per chunk against a 2-byte write and read of the slab per weight)
@@ -231,10 +250,36 @@ __device__ __forceinline__ void dq8_aligned_2bits(const uint32_t* ptr, int t_off
     frag1.r[0] = dec2(w4, w5); frag1.r[1] = dec2(w6, w7);
 }
 
+// ENG-285: a half-integer rate (1.5, 2.5 or 3.5 bits, which exllamav3 1.6.0 gives mul1 tensors below
+// 4 bpw) is ten times the rate in these kernels' bits (15, 25, 35). Its 256-weight tile is a ring of
+// 256 KA + 128 bits (8 KA + 4 words, a tile 16 KA + 8 int16 wide): each weight adds KA bits and an odd
+// one a bit more (exllamav3's MASK 0xAAAA), so weight i's 16-bit window ends at ring bit
+// (i + 1) KA + (i + 1) / 2 (exllamav3_ext/quant/frac.cu). An integer rate's tile is 8 K words.
+__host__ __device__ constexpr int tile_u32(int bits) { return bits >= 10 ? 8 * (bits / 10) + 4 : 8 * bits; }
+
+template <int KA>
+__device__ __forceinline__ void dq8_frac(const uint32_t* ptr, int t_offset, FragB& frag0, FragB& frag1) {
+    constexpr int NW = 8 * KA + 4, R = 32 * NW;
+    // t_offset is a multiple of 8: weight t_offset + j's window starts j KA + (j + 1) / 2 bits after
+    // weight t_offset's, so the lane's 8 windows lie in the 3 words from the first one's
+    const int s0 = ((t_offset + 1) * KA + (t_offset >> 1) - 16 + R) % R;
+    const int i0 = s0 >> 5, o0 = s0 & 31;
+    const uint32_t a = ptr[i0], b = ptr[(i0 + 1) % NW], c = ptr[(i0 + 2) % NW];
+    uint32_t w[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int r = o0 + j * KA + ((j + 1) >> 1);
+        w[j] = r < 32 ? fshift(b, a, 48 - r) : fshift(c, b, 80 - r);
+    }
+    frag0.r[0] = dec2(w[0], w[1]); frag0.r[1] = dec2(w[2], w[3]);
+    frag1.r[0] = dec2(w[4], w[5]); frag1.r[1] = dec2(w[6], w[7]);
+}
+
 // the 8 weights of lane (t_offset / 8) of one 16x16 tile, as two B fragments (columns 0..7, 8..15)
 template <int bits>
 __device__ __forceinline__ void dq_tile(const uint32_t* ptr, int idx, FragB& f0, FragB& f1) {
-    if constexpr (bits == 2) dq8_aligned_2bits(ptr, idx, f0, f1);
+    if constexpr (bits >= 10) dq8_frac<bits / 10>(ptr, idx, f0, f1);
+    else if constexpr (bits == 2) dq8_aligned_2bits(ptr, idx, f0, f1);
     else if constexpr (bits == 3) dq8<3, 4>(ptr, idx, f0, f1);
     else if constexpr (bits == 4) dq8_aligned_4bits(ptr, idx, f0, f1);
     else if constexpr (bits == 7) { dq2x2<7>(ptr, idx, f0); dq2x2<7>(ptr, idx + 4, f1); }
@@ -391,7 +436,7 @@ __global__ void __launch_bounds__(128) rot_out_kernel(const TI* __restrict__ YP,
 template <int K>
 __global__ void __launch_bounds__(256) recon_kernel(const uint16_t* __restrict__ T, int ldt,
         int n_off_tiles, __half* __restrict__ WI, int ldw) {
-    constexpr int TW = 8 * K;                      // uint32 a tile
+    constexpr int TW = tile_u32(K);                // uint32 a tile
     __shared__ uint32_t s[8][TW];
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int kt = blockIdx.y, nt = blockIdx.x * 8 + warp;
@@ -762,7 +807,7 @@ void exl3_rot_out(torch::Tensor yp, torch::Tensor svh, torch::Tensor y) {
 void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off) {
     const at::cuda::OptionalCUDAGuard guard(t.device());
     cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
-    TORCH_CHECK(t.dtype() == torch::kInt16 && t.size(2) == 16 * kb && t.stride(2) == 1 && t.stride(1) == 16 * kb, "trellis");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.size(2) == 2 * tile_u32(kb) && t.stride(2) == 1 && t.stride(1) == t.size(2), "trellis");
     TORCH_CHECK(wi.dtype() == torch::kHalf && wi.stride(1) == 1, "wi fp16");
     const int Kin = t.size(0) * 16, ntn = t.size(1), N = wi.size(1);
     const int ldt = t.stride(0) / t.stride(1);
@@ -779,7 +824,10 @@ void exl3_recon(torch::Tensor t, torch::Tensor wi, int64_t kb, int64_t n_off) {
         case 6: recon_kernel<6><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
         case 7: recon_kernel<7><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
         case 8: recon_kernel<8><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
-        default: TORCH_CHECK(false, "recon: K bits 2..8");
+        case 15: recon_kernel<15><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
+        case 25: recon_kernel<25><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
+        case 35: recon_kernel<35><<<grid, 256, 0, st>>>(tp, ldt, off, wp, ld); break;
+        default: TORCH_CHECK(false, "recon: K bits 2..8, or 15 / 25 / 35 for 1.5 / 2.5 / 3.5");
     }
 }
 """
@@ -874,8 +922,9 @@ class EXL3Block:
                  sizes: list[int] | None = None, names: list[str] | None = None,
                  out_fp32: bool = False):
         assert trellis.dtype == torch.int16 and trellis.dim() == 3, (trellis.dtype, trellis.shape)
-        kb = trellis.shape[2] // 16
-        assert trellis.shape[2] == 16 * kb and kb in KS, f"trellis {tuple(trellis.shape)}: K must be 2..8"
+        kb = kb_of(trellis.shape[2])
+        assert trellis.shape[2] == tile_width(kb) and kb in KS + HALF_KS, \
+            f"trellis {tuple(trellis.shape)}: K must be 2..8, 1.5, 2.5 or 3.5"
         # dense tiles; a group member is a view (its trellis rows are the group's, ldt apart)
         self.t = trellis if (trellis.stride(2) == 1 and trellis.stride(1) == trellis.shape[2]) \
             else trellis.contiguous()
@@ -1032,17 +1081,18 @@ def decode_trellis(t: torch.Tensor, nt0: int = 0, nt1: int | None = None) -> tor
     """Pure-torch decode of trellis tiles [KT, nt0:nt1] -> Wi fp16 [Kin, 16 (nt1 - nt0)].
     Bit for bit what the kernels decode (the gate checks it); slow, for tests and the CPU path."""
     KT, NT, W = t.shape
-    kb = W // 16
+    kb = kb_of(W)
     nt1 = NT if nt1 is None else nt1
-    tt = t[:, nt0:nt1].contiguous().view(torch.int32).long() & 0xFFFFFFFF   # [KT, n, 8 kb] words
+    tt = t[:, nt0:nt1].contiguous().view(torch.int32).long() & 0xFFFFFFFF   # [KT, n, W / 2] words
     n = nt1 - nt0
-    words = tt.view(KT * n, 8 * kb)
-    nbits = 256 * kb
+    words = tt.view(KT * n, W // 2)
+    nbits = 16 * W
     # the bit string, MSB-first per word: bit b of the string is bit (31 - b % 32) of word b // 32
     shifts = 31 - torch.arange(32, device=t.device)
     bitstr = ((words.unsqueeze(-1) >> shifts) & 1).view(KT * n, nbits)            # [tiles, 256 kb]
     p = torch.arange(256, device=t.device)
-    end = (p + 1) * kb                                                               # exclusive end
+    # exclusive end; a half-integer rate's odd weights take one bit more (exl3_linear dq8_frac)
+    end = (p + 1) * kb if kb < 10 else (p + 1) * (kb // 10) + (p + 1) // 2
     idx = (end.view(-1, 1) - 16 + torch.arange(16, device=t.device).view(1, -1)) % nbits   # [256, 16]
     win = bitstr[:, idx]                                                             # [tiles, 256, 16]
     weights = (1 << (15 - torch.arange(16, device=t.device)))
@@ -1153,7 +1203,9 @@ def exl3_matmul(x: torch.Tensor | None, w: EXL3Block, *, out: torch.Tensor | Non
     if out is None:
         out = torch.empty(M, w.N, dtype=odt, device=dev)
     mod = _module()
-    if M > CHUNK_UNTIL:
+    # the skinny GEMM decodes integer rates; a half-integer one (an LFM2.5 pack's, ENG-285) takes the
+    # slab at any row count (its rows <= 32 run on tools/fn_kernels.dense)
+    if M > CHUNK_UNTIL or w.kb >= 10:
         return _slab_matmul(x, w, out, xh=xh)
     tile = pick(w.tile_n, w.K, w.kb)
     S_ = tile["S"] if S is None else S
@@ -1330,7 +1382,7 @@ def bench(w: EXL3Block, rows=(1, 8, 16, 32), reps: int = 20, cfg=None, S=None, w
 def random_block(N: int, Kin: int, kb: int, device="cuda", seed: int = 0) -> EXL3Block:
     """Random trellis bits (every bit string is a valid code) and plausible channel factors."""
     g = torch.Generator(device="cpu").manual_seed(seed)
-    t = torch.randint(-32768, 32767, (Kin // 16, N // 16, 16 * kb), generator=g, dtype=torch.int32)
+    t = torch.randint(-32768, 32767, (Kin // 16, N // 16, tile_width(kb)), generator=g, dtype=torch.int32)
     t = t.to(torch.int16)
     suh = (torch.rand(Kin, generator=g) * 0.02 + 0.005) * (torch.randint(0, 2, (Kin,), generator=g) * 2 - 1)
     svh = (torch.rand(N, generator=g) * 0.5 + 0.5) * (torch.randint(0, 2, (N,), generator=g) * 2 - 1)

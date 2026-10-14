@@ -2,7 +2,8 @@
 
 The engine served one architecture, the Qwen3.8-27B (`engine/model.py`, `Qwen38Engine`), and every
 caller knew it. A second one, Qwen3.8-Flash-Next (`qwen4_exp`, `engine/models/flashnext/`), is
-selected here by the checkpoint's own config, never by its file name:
+selected here by the checkpoint's own config, never by its file name, and so is LiquidAI's LFM2 MoE
+(`lfm2_moe`, `engine/models/lfm2_moe/`, ENG-E10):
 
     arch = architecture(raw_config)       # an Arch, or ValueError naming the registered ones
     cfg = arch.load_config(snapshot)      # that model's config object
@@ -70,6 +71,15 @@ register(Arch(
     engine="engine.models.flashnext.engine:FlashNextEngine",
     package="models/flashnext",
     serve="engine.models.flashnext.serving:serve",
+))
+register(Arch(
+    name="lfm2_moe",
+    architectures=("Lfm2MoeForCausalLM",),
+    model_types=("lfm2_moe",),
+    config="engine.models.lfm2_moe.config:load_lfm2_moe_config",
+    engine="engine.models.lfm2_moe.engine:Lfm2MoeEngine",
+    package="models/lfm2_moe",
+    serve="engine.models.lfm2_moe.serving:serve",
 ))
 
 

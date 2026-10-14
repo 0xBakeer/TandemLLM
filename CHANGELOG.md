@@ -2,6 +2,64 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.9.0, 2026-10-14
+
+A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. The Qwen models' text and speed do not change. The shared EXL3 kernels' bytes changed (half-integer rates); `SAME_ROWS` maps them to the old bytes, so the first Qwen start adopts its saved conversations once. Reference: [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md).
+
+### LFM2.5-24B-A2B
+
+- `engine/models/lfm2_moe/`: configuration, reference forward, pack reader, Triton row kernels, board engine. Decode step, verify block (up to 32 rows) and commit run as CUDA graphs; a verify row has the decode step's bits, checked by a self-check at load.
+- Correctness: reference forward within 2.1e-5 of transformers' `Lfm2MoeForCausalLM` (tiny model, fp32). BF16 engine against transformers: top token 98.05 % of 1,024 chat positions, 19 of 20 differences near ties, KL 0.0064. 4.0 pack against exllamav3: 97.85 %, all 22 differences near ties. Trellis decode equals exllamav3 `LinearEXL3` bit for bit.
+- Profiles: `lfm25-bf16` (Liquid's checkpoint) and `lfm25-exl3-{2.5,3.0,3.5,4.0,4.5,6.0}` (exllamav3 1.6.0 packs, private Hugging Face repositories pinned by commit; a download needs a token with access). Each: 131,072-token context, three slots.
+
+DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Chat: one greedy request through the server, 512 tokens, thinking off, plain / lookup. Quality: exllamav3 `model_diff` against BF16 on oasst1 chat. Not the benchmark row. Raw runs: `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
+
+| profile | download | decode step, tok/s | chat, tok/s | chat KL | chat top-1 |
+|-|-|-|-|-|-|
+| `lfm25-exl3-2.5` | 8.20 GB | 188.2 | 185.4 / 175.6 | 0.313 | 78.9 % |
+| `lfm25-exl3-3.0` | 9.68 GB | 175.0 | 171.3 / 168.5 | 0.195 | 83.6 % |
+| `lfm25-exl3-3.5` (default) | 11.16 GB | 153.5 | 150.9 / 143.7 | 0.136 | 86.7 % |
+| `lfm25-exl3-4.0` | 12.64 GB | 145.9 | 143.7 / 139.4 | 0.098 | 88.5 % |
+| `lfm25-exl3-4.5` | 14.12 GB | 128.8 | 128.2 / 124.7 | 0.063 | 91.2 % |
+| `lfm25-exl3-6.0` | 18.63 GB | 106.9 | 105.2 / 103.5 | 0.039 | 93.4 % |
+| `lfm25-bf16` | 47.9 GB | 44.8 | 44.5 / 43.3 | 0 | 100 % |
+
+- Default `lfm25-exl3-3.5`. Rule: the fastest profile in chat as served (lookup on) with chat top-1 against BF16 of at least 85 %. 3.0 is faster (168.5 tok/s) at 83.6 %.
+- No `-hq` profile: an exllamav3 `-hq` 4.0 served chat 9 % slower than 4.0 at a worse KL than 4.5 (0.082 against 0.063).
+- Dense splits per pack (`ops/lfm25-dense-splits.json`). Decode step without / with, tok/s: 2.5 171.2 / 188.2, 3.0 159.1 / 175.0, 3.5 143.4 / 153.5, 4.0 136.1 / 145.9, 4.5 121.6 / 128.8, 6.0 106.9 / 106.9.
+- Server: the checkpoint's chat template. Thinking off, from a client or the conductor, closes the `<think>` block the template always opens. Pythonic tool calls (`<|tool_call_start|>[f(a=1)]<|tool_call_end|>`) become OpenAI `tool_calls`; values are parsed as Python literals, never run. Default sampling when a request names none: temperature 0.1, top_k 50, repetition penalty 1.05.
+- Setup Guide: conductor off by default. With its notes, four short chat asks reasoned for 856 to 1,437 tokens against 99 to 902.
+- Three slots: 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8 tok/s in total on 4.0; each text equals its request alone. When every slot takes a plain step, one joint graph reads the weights once.
+- Disk tier and session spill: 12,288 tokens restored from the disk in 0.96 s against 2.6 s cold, with the cold answer.
+
+### The lookup without a draft head
+
+LFM2.5 drafts with the lookup alone (`NoHead` in the shared tree drafter), cut by StairCut.
+
+- A round with no lookup match is the plain step and is priced as one. Each round's own match decides; StairCut's class-wide skip is not consulted.
+- The lookup's confidence carries its match length, so a long copy match scores above a short phrase match. BF16, store off: edit and copy 153.7 and 157.8 tok/s against 44.3 plain.
+- One StairCut price file per profile (`ops/prices/lfm2.5-24b-a2b/`). Without one, the lookup cost the 2.5 pack 26 % on prose.
+
+Effect: prose, chat and code within 5 % of plain; edit and copy asks 1.8 to 3.6 times faster; every text equal to plain decoding.
+
+### Fixed
+
+- A pack stored as one `model.safetensors` without an index counts as complete in `ops/use-profile.sh` and the Setup Guide. Before, a switch to the 2.5 pack downloaded it again and refused it.
+- Reading a slot's `kv.length` commits nothing. Before, the health report's read committed a joint plain step twice with three slots ("LFM2 forward at 53, the state holds 54 rows").
+- Attention split buffers are kept per attention class. Before, a verify graph captured at a new class freed buffers an older graph replays into (illegal memory access past 2,048 keys).
+- A suffix store written by another tokenizer turns the store off instead of stopping the start.
+- The dashboard's disk tier default is 16 GB, as the server's since 0.4.3 (it showed 50).
+
+### Shared EXL3 kernels
+
+- Half-integer rates (1.5, 2.5 and 3.5 bits a weight, tiles 16 K + 8 int16 wide), as exllamav3 1.6.0 writes them below 4 bpw, in the decode GEMV, the MoE bank, the prefill grouped GEMM and the slab decode. 7-bit experts in the MoE kernels.
+- Whole rates unchanged: 51 of 51 kernel outputs equal the previous tree's bit for bit.
+
+### Setup Guide
+
+- Wren runs beside LFM2.5: on 3.5 it loads its own Qwen3.5-2B in 20 s (3.62 GiB), as the model has no narrator copy to share.
+- The Tools step no longer offers turning vision off on a text-only model.
+
 ## 0.8.3, 2026-10-13
 
 Repository hygiene for the public release: no private hostnames, home paths or personal notes in the files; no code change. The engine's modules are the bytes of 0.8.2, and the text does not change.

@@ -8,6 +8,17 @@ Thank you for helping. Bug reports, measurements from other boards and pull requ
 - Run the dashboard tests if you touched `dashboard/`: `npm ci && npm test` in that folder.
 - A change must not change the text the engine writes. [docs/exactness.md](docs/exactness.md) lists the checks, and a speed claim needs the method in [docs/measurement.md](docs/measurement.md).
 
+## Commit messages and docs
+
+Commits, docs, the CHANGELOG, the README and model cards are written for a reader of the public repository.
+
+- Commit subject: `KEY: imperative summary`, at most 72 characters, with the ticket key (`ENG-287: Keep attention split buffers per class`).
+- Commit body: after a blank line, at most 5 lines wrapped at 72: what changed and why, in technical terms, and at most one evidence line (a test name, or a number with its conditions).
+- Docs are reference text: facts, terms, tables, commands, and each number with its conditions on the same line (board, profile, request shape, date).
+- No session context, run diaries or long measurement logs; raw runs go in a measurement file under `models/<model>/measurements/`.
+- No people: no names of who asked or decided, no "as requested". Upstream authors are credited by name where their work is used.
+- No private hostnames, home paths or personal notes.
+
 ## Community weight packs
 
 To list weights you published on Hugging Face in the setup guide, send a pull request that adds one file, `models/<model>/community/<id>.json`. [docs/community-weights.md](docs/community-weights.md) explains each field, and a maintainer runs the pack on a DGX Spark before it shows as verified. The agreement below applies to that file too.

@@ -112,8 +112,8 @@ export function shortKey(key: string | null, dir: string): string {
 }
 
 // ---------------------------------------------------------------- the disk tier (C1)
-/** engine/disk_cache.py SETTINGS, the settings document's seed */
-export const DISK_DEFAULTS: DiskCacheSettings = { mode: 'on', budget_gb: 50, ttl_days: 7, admit_after: 2, min_free_gb: 50 };
+/** engine/disk_cache.py SETTINGS, the settings document's seed (the budget 16 GB since SRV-271) */
+export const DISK_DEFAULTS: DiskCacheSettings = { mode: 'on', budget_gb: 16, ttl_days: 7, admit_after: 2, min_free_gb: 50 };
 /** the free space the tier never takes the NVMe under, whatever the settings say */
 export const DISK_FLOOR_GB = 50;
 

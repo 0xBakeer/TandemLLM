@@ -244,6 +244,31 @@ def test_a_failed_switch_to_flashnext_rolls_back_to_the_27b():
         assert open(os.path.join(repo, "ops/active-profile")).read().strip() == "exl3-4.5"
 
 
+def test_a_pack_in_one_file_is_complete():
+    """A pack whose weights are one model.safetensors and no index (LFM2.5's 2.5 pack) is on the box: the
+    switch takes it as it is, with no download, and the Setup Guide counts it as there
+    (server/setup/device.py `weights_present`); an empty file is not a pack."""
+    from server.setup import device
+    if not os.path.isfile("/proc/meminfo") or not shutil.which("flock"):
+        print("    (skipped: needs /proc/meminfo and flock -- run it on the box)")
+        return
+    with tempfile.TemporaryDirectory() as home:
+        repo, marks, env = _fake_box(home, fails="none")
+        open(os.path.join(repo, "ops/active-profile"), "w").write("lfm25-exl3-3.5\n")
+        pack = os.path.join(home, "models/lfm2.5-24b-a2b-exl3-2.5")
+        os.makedirs(pack)
+        open(os.path.join(pack, "config.json"), "w").write("{}")
+        open(os.path.join(pack, "model.safetensors"), "w").write("t")
+        assert device.weights_present({"dir": pack, "files": [], "repo": ""})
+        r = subprocess.run(["bash", os.path.join(repo, "ops/use-profile.sh"), "lfm25-exl3-2.5"], env=env,
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0 and "weights" in r.stdout and "present" in r.stdout, r.stdout + r.stderr
+        assert "fetch" not in r.stdout, r.stdout
+        assert open(marks).read().split("\n")[:-1] == ["stop", "start lfm25-exl3-2.5"]
+        open(os.path.join(pack, "model.safetensors"), "w").close()
+        assert not device.weights_present({"dir": pack, "files": [], "repo": ""})
+
+
 def test_a_switch_from_setup_mode_configures_the_box_or_goes_back_to_setup_mode():
     """OPS-95: on a box install.sh --setup left in setup mode (run/setup-pending, no active profile),
     ops/use-profile.sh flashnext-3.05 removes the marker before the start, so start.sh starts the

@@ -48,6 +48,40 @@ from engine.methods.staircut import StairCut
 from engine.tree import DraftTree
 
 
+class NoHead:
+    """The head of a model that has no draft layer (LFM2.5-24B-A2B until Liquid publishes its drafter,
+    ENG-E10): it drafts nothing, so the cut admits the lookup's continuation alone (`StairCut._merged`
+    with an empty spine) and a round with no match takes the plain step. A real head replaces it with
+    no change to the drafter."""
+
+    depth = 0
+    captures = 0
+
+    def __init__(self):
+        self.st = type("NoHeadState", (), {"length": 0})()
+
+    def reset(self) -> None:
+        self.st.length = 0
+
+    def prime(self, rows, nexts) -> None:
+        self.st.length += len(nexts)
+
+    def launch(self, rows, nexts) -> None:
+        self.st.length += len(nexts)
+
+    def read(self) -> tuple[list, list]:
+        return [], []
+
+    def capture_all(self) -> None:
+        pass
+
+    def views(self) -> list:
+        return []
+
+    def resume(self, n: int) -> None:
+        self.st.length = int(n)
+
+
 class MTPTreeDrafter:
     name = "mtp"
     last_q = None
@@ -221,7 +255,11 @@ class MTPTreeDrafter:
         if self._turn is False:
             self.stats["skipped"] += 1
             return None
-        if self.cut.skip(self.cls):
+        # with no draft head (NoHead) each round's own lookup match decides, through the cut's
+        # calibrated q: the class-wide skip, learned for a head that drafts every round, priced the
+        # lookup by the rounds that matched little (LFM2.5, 2026-10-14: three chat asks, then edit and
+        # copy asks the lookup matched throughout took the plain step)
+        if self.head.depth and self.cut.skip(self.cls):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -232,6 +270,14 @@ class MTPTreeDrafter:
             return None
         if not self._feed(int(context[-1])) or k < 1:
             return None
+        look = None
+        if self.head.depth == 0:
+            # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
+            # one, so the drafted rounds' price is learned from rounds that drafted
+            look = self._look(context)
+            if look is None:
+                self.pending = None
+                return None
         rows, nexts = self.pending
         self.pending = None
         c0 = getattr(self.head, "captures", 0)
@@ -241,7 +287,8 @@ class MTPTreeDrafter:
         host = time.perf_counter() - t0
         yield                               # the loop streams the last block while the draft runs
         t1 = time.perf_counter()
-        look = self._look(context)
+        if self.head.depth:
+            look = self._look(context)
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
         tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
@@ -268,7 +315,9 @@ class MTPTreeDrafter:
         # the graphs this class lacks: captured by the engine while the server is idle, so a turn that
         # would pay for them waits for that (the first drafted request in a class paid 3.4-5.1 s)
         extra = self.s.capture_cost(n) if hasattr(self.s, "capture_cost") else 0.0
-        self._turn = self.req["turn"] = bool(self.cut.turn(self.cls, unfed, self.answer, extra))
+        # no draft head: no backlog to read into it, and each round's match decides (above)
+        self._turn = self.req["turn"] = (not self.head.depth
+                                         or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
 
@@ -291,12 +340,19 @@ class MTPTreeDrafter:
         tree is), or None when nothing matches."""
         if self.ngram is None:
             return None
-        _, cands = self.ngram.candidates(context, self.look_depth)
+        order, cands = self.ngram.candidates(context, self.look_depth)
         if not cands:
             return None
         self.stats["looked"] += 1
         total = sum(w for _, w in cands)
-        return cands[0][0], cands[0][1] / (total + self.ngram.alpha)
+        share = cands[0][1] / (total + self.ngram.alpha)
+        if not self.head.depth and order:
+            # no draft head: the match's length goes into the confidence (a copy matches at the longest
+            # order, a passing phrase at the shortest), so the cut's calibration learns them apart and a
+            # run of short matches that missed does not stop a copy from drafting (LFM2.5 BF16,
+            # 2026-10-14: four missed prose rounds held every later round below the cut, a copy ask too)
+            share = 1.0 - (1.0 - share) * min(1.0, self.ngram.min_order / order)
+        return cands[0][0], share
 
     # --- the caches (ENG-157) -------------------------------------------------------------------
     def kv_views(self) -> list:

@@ -393,9 +393,13 @@ class Plan:
             # the template's own shape for `enable_thinking: false`, spliced at the tail instead of
             # rendered: the head (and its reasoning_effort sentence) stays token for token, and
             # the next turn renders the answer's empty think block the same way
-            tail_ids = list(tok(inject.THINK_OPEN, add_special_tokens=False).input_ids)
-            closed_ids = list(tok(inject.THINK_OFF, add_special_tokens=False).input_ids)
-            if ids[-len(tail_ids):] != tail_ids:
+            for open_, off in ((inject.THINK_OPEN, inject.THINK_OFF),
+                               (inject.THINK_OPEN_BARE, inject.THINK_OFF_BARE)):
+                tail_ids = list(tok(open_, add_special_tokens=False).input_ids)
+                closed_ids = list(tok(off, add_special_tokens=False).input_ids)
+                if ids[-len(tail_ids):] == tail_ids:
+                    break
+            else:
                 tail_ids = None
                 self.row["extra"].setdefault("notes", []).append("thinking_off:no_open_tail")
         im_end = inject.special_id(tok, inject.IM_END)
