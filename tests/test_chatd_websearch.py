@@ -15,7 +15,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from chatd_util import Chat
+from chatd_util import Chat, run_all
 
 from chatd import egress, tools as T, websearch as W
 from chatd.plans import PLAN_TOOLS
@@ -264,28 +264,29 @@ def test_egress_reaches_only_the_listed_host_redirects_included():
         srv.shutdown()
 
 
-def test_duckduckgo_on_a_private_address_is_refused_before_connecting(monkeypatch):
-    real = socket.getaddrinfo
+def test_duckduckgo_on_a_private_address_is_refused_before_connecting():
+    real_gai, real_socket = socket.getaddrinfo, socket.socket
     opened = []
 
     def fake(host, port, *a, **kw):
         if host == "html.duckduckgo.com":
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", port))]
-        return real(host, port, *a, **kw)
+        return real_gai(host, port, *a, **kw)
 
-    class NoSocket(socket.socket):
+    class NoSocket(real_socket):
         def connect(self, sa):
             opened.append(sa)
             raise OSError("must not connect")
 
-    monkeypatch.setattr(socket, "getaddrinfo", fake)
-    monkeypatch.setattr(socket, "socket", NoSocket)
+    socket.getaddrinfo, socket.socket = fake, NoSocket
     try:
         W.search(DDG, "x")
     except W.SearchError as exc:
         assert "local network address" in str(exc)
     else:
         raise AssertionError("no error")
+    finally:
+        socket.getaddrinfo, socket.socket = real_gai, real_socket
     assert opened == []
 
 
@@ -464,3 +465,7 @@ def test_global_off_removes_the_tool_and_the_words_for_it():
     assert tool.schema["required"] == ["query"]
     assert T.summary("web_search", {"query": "rust"}) == 'Search the web for "rust"'
     assert "web_search" in PLAN_TOOLS
+
+
+if __name__ == "__main__":
+    run_all(globals())
