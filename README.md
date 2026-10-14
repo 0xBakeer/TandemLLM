@@ -44,9 +44,9 @@ Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Q
 
 The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
 
-LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs. The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs sit in private repositories until we publish them, so a download needs a token with access; the BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) is public. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
+LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs. The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs are in private repositories until published; a download needs a token with access. The BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) is public. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
 
-| profile | download | chat, tok/s | chat top-1 vs BF16 |
+| profile | download | chat plain, tok/s | chat top-1 vs BF16 |
 |-|-|-|-|
 | `lfm25-exl3-2.5` | 8.20 GB | 185.4 | 78.9 % |
 | `lfm25-exl3-3.0` | 9.68 GB | 171.3 | 83.6 % |
@@ -56,7 +56,7 @@ LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 pa
 | `lfm25-exl3-6.0` | 18.63 GB | 105.2 | 93.4 % |
 | `lfm25-bf16` | 47.9 GB | 44.5 | 100 % |
 
-The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.7 to 2.9 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
+The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
 
 ### Community weights
 

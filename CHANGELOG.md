@@ -4,15 +4,17 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## 0.9.0, 2026-10-14
 
-0.9.0 adds a third model, LiquidAI's LFM2.5-24B-A2B (ENG-E10). It is the first model here that is not a Qwen: 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. On one DGX Spark it is the fast one, at 153.5 tok/s for one request on the default pack. The Qwen models' text and speed do not change. The shared EXL3 kernels learned half-integer rates (below), and `SAME_ROWS` names their new bytes as the ones they replaced, so the first Qwen start adopts its saved conversations once instead of sweeping them.
+A third model: LiquidAI's LFM2.5-24B-A2B (ENG-E10), 24B parameters, 4 of 64 experts a token, 30 short-convolution and 10 attention layers. The Qwen models' text and speed do not change. The shared EXL3 kernels' bytes changed (half-integer rates); `SAME_ROWS` maps them to the old bytes, so the first Qwen start adopts its saved conversations once. Reference: [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md).
 
 ### LFM2.5-24B-A2B
 
-- `engine/models/lfm2_moe/` holds the model: its configuration, a reference forward, the pack reader, Triton row kernels and the board engine. The reference matches transformers' `Lfm2MoeForCausalLM` within 2.1e-5 on a tiny random model in fp32. The decode step, a verify block of up to 32 rows and its commit run as CUDA graphs. A verify row has the decode step's bits, and a self-check at load proves it on the device before speculation turns on. docs/lfm2.5-24b-a2b.md and the manual's new chapter describe it.
-- Checked on the Spark against two references. In BF16 the engine's top token agrees with transformers at 98.05 % of 1,024 chat positions; 19 of the 20 differences are near ties, and the KL is 0.0064. On the 4.0 pack it agrees with exllamav3's own forward at 97.85 %, with all 22 differences near ties. Our trellis decode equals exllamav3's `LinearEXL3` bit for bit.
-- Seven profiles: Liquid's BF16 checkpoint (`lfm25-bf16`) and six EXL3 sizes of our own, `lfm25-exl3-{2.5,3.0,3.5,4.0,4.5,6.0}`. Each runs the model's whole 131,072-token context with three slots. The EXL3 packs are exllamav3 1.6.0 conversions, each in a private Hugging Face repository pinned to its commit, so a download needs a token with access until they are published.
+- `engine/models/lfm2_moe/`: configuration, reference forward, pack reader, Triton row kernels, board engine. Decode step, verify block (up to 32 rows) and commit run as CUDA graphs; a verify row has the decode step's bits, checked by a self-check at load.
+- Correctness: reference forward within 2.1e-5 of transformers' `Lfm2MoeForCausalLM` (tiny model, fp32). BF16 engine against transformers: top token 98.05 % of 1,024 chat positions, 19 of 20 differences near ties, KL 0.0064. 4.0 pack against exllamav3: 97.85 %, all 22 differences near ties. Trellis decode equals exllamav3 `LinearEXL3` bit for bit.
+- Profiles: `lfm25-bf16` (Liquid's checkpoint) and `lfm25-exl3-{2.5,3.0,3.5,4.0,4.5,6.0}` (exllamav3 1.6.0 packs, private Hugging Face repositories pinned by commit; a download needs a token with access). Each: 131,072-token context, three slots.
 
-| profile | download | decode step, tok/s | chat plain / lookup, tok/s | chat KL vs BF16 | chat top-1 |
+DGX Spark, 2026-10-14. Decode step: one request, 256 tokens, from its graph. Chat: one greedy request through the server, 512 tokens, thinking off, plain / lookup. Quality: exllamav3 `model_diff` against BF16 on oasst1 chat. Not the benchmark row. Raw runs: `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`.
+
+| profile | download | decode step, tok/s | chat, tok/s | chat KL | chat top-1 |
 |-|-|-|-|-|-|
 | `lfm25-exl3-2.5` | 8.20 GB | 188.2 | 185.4 / 175.6 | 0.313 | 78.9 % |
 | `lfm25-exl3-3.0` | 9.68 GB | 175.0 | 171.3 / 168.5 | 0.195 | 83.6 % |
@@ -22,42 +24,41 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 | `lfm25-exl3-6.0` | 18.63 GB | 106.9 | 105.2 / 103.5 | 0.039 | 93.4 % |
 | `lfm25-bf16` | 47.9 GB | 44.8 | 44.5 / 43.3 | 0 | 100 % |
 
-- The runs, all on 2026-10-14: the decode step is one request from its graph (`tools/lfm_check.py bench`, 256 tokens). Chat is one greedy request of 512 tokens through the server with thinking off. The quality is exllamav3's `model_diff` against BF16 on oasst1 chat, and this engine's own comparison agrees within 0.02 KL. None of these is the benchmark row. The raw runs are in `models/lfm2.5-24b-a2b/measurements/0.8.3-summary.json`, and a registry test holds the Setup Guide's card to that file.
-- The default is `lfm25-exl3-3.5`, by a stated rule: speed comes first for this model, so the default is the fastest profile in chat as it serves (the lookup on) whose chat top-1 agreement with BF16 is at least 85 %. 3.5 serves chat at 143.7 tok/s at 86.7 %. 3.0 is faster, 168.5 tok/s, but at 83.6 %. The plain numbers pick the same profile.
-- An exllamav3 `-hq` variant of 4.0 decoded chat 9 % slower than 4.0 and only 2.8 % faster than 4.5, at a worse KL than 4.5 (0.082 against 0.063). It is not offered.
-- Each pack has its own dense splits for `tools/fn_kernels.dense` (`ops/lfm25-dense-splits.json`, from `tools/fn_tiles.py --dense`). The decode step went from 171.2 to 188.2 tok/s on 2.5, 159.1 to 175.0 on 3.0, 143.4 to 153.5 on 3.5, 136.1 to 145.8 on 4.0 and 121.6 to 128.8 on 4.5; 6.0 found no faster split (106.9).
-- The server uses the checkpoint's own chat template. LFM2.5's template always opens the reasoning block, so a client's thinking off, and the conductor's, close it right after the generation prompt. Pythonic tool calls between `<|tool_call_start|>` and `<|tool_call_end|>` become OpenAI `tool_calls`; the server reads the values as Python literals and never runs them. Liquid's sampling (temperature 0.1, top_k 50, repetition penalty 1.05) is the default when a request names none.
-- The Setup Guide serves it with the conductor off. With the conductor's notes (1,241 to 2,714 hidden tokens), four short chat asks thought for 856 to 1,437 tokens instead of 99 to 902, and with thinking off the model reasoned in the answer.
-- Three slots: 1, 2 and 3 requests at once decoded 139.9, 169.1 and 177.8 tok/s in total on 4.0, each text its request's alone. When every slot takes a plain step, one joint pass from a graph reads the weights once for all of them.
-- The disk tier and the session spill serve this model. A prefix written after two cold prefills came back from the disk, 12,288 tokens in 0.96 s against 2.6 s cold, with the cold answer. A restart read the drained conversation back in 152 ms on the live server.
+- Default `lfm25-exl3-3.5`. Rule: the fastest profile in chat as served (lookup on) with chat top-1 against BF16 of at least 85 %. 3.0 is faster (168.5 tok/s) at 83.6 %.
+- No `-hq` profile: an exllamav3 `-hq` 4.0 served chat 9 % slower than 4.0 at a worse KL than 4.5 (0.082 against 0.063).
+- Dense splits per pack (`ops/lfm25-dense-splits.json`). Decode step without / with, tok/s: 2.5 171.2 / 188.2, 3.0 159.1 / 175.0, 3.5 143.4 / 153.5, 4.0 136.1 / 145.9, 4.5 121.6 / 128.8, 6.0 106.9 / 106.9.
+- Server: the checkpoint's chat template. Thinking off, from a client or the conductor, closes the `<think>` block the template always opens. Pythonic tool calls (`<|tool_call_start|>[f(a=1)]<|tool_call_end|>`) become OpenAI `tool_calls`; values are parsed as Python literals, never run. Default sampling when a request names none: temperature 0.1, top_k 50, repetition penalty 1.05.
+- Setup Guide: conductor off by default. With its notes, four short chat asks reasoned for 856 to 1,437 tokens against 99 to 902.
+- Three slots: 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8 tok/s in total on 4.0; each text equals its request alone. When every slot takes a plain step, one joint graph reads the weights once.
+- Disk tier and session spill: 12,288 tokens restored from the disk in 0.96 s against 2.6 s cold, with the cold answer.
 
-### The lookup drafter without a draft head
+### The lookup without a draft head
 
-LFM2.5 has no draft head yet, so it drafts with the lookup alone, through the shared tree drafter with no head (`NoHead`), cut by StairCut. Three fixes made that pay:
+LFM2.5 drafts with the lookup alone (`NoHead` in the shared tree drafter), cut by StairCut.
 
-- A round with no lookup match is now the plain step, priced as one, and each round's own match decides. StairCut's class-wide skip, which a head that drafts every round needs, is not consulted. Before, on 4.0 with the store off, edit and copy asks that came after three chat asks never drafted.
-- The lookup's confidence carries its match length, so a copy at the longest order scores above a short phrase match and the cut's calibration learns the two apart. In BF16, four missed prose rounds had kept every later round below the cut, a copy ask too. Now, store off, BF16 edit and copy ran at 153.7 and 157.8 tok/s against 44.3 plain, and 4.0 at 291.1 and 326.4 against 141.3 and 141.9. Every text equalled the plain run's.
-- Every profile has its own price file, from its measured verify staircase (`ops/prices/lfm2.5-24b-a2b/`). Without one the lookup cost the 2.5 pack 26 % on prose.
+- A round with no lookup match is the plain step and is priced as one. Each round's own match decides; StairCut's class-wide skip is not consulted.
+- The lookup's confidence carries its match length, so a long copy match scores above a short phrase match. BF16, store off: edit and copy 153.7 and 157.8 tok/s against 44.3 plain.
+- One StairCut price file per profile (`ops/prices/lfm2.5-24b-a2b/`). Without one, the lookup cost the 2.5 pack 26 % on prose.
 
-Prose, code and chat run at about the plain rate with the lookup on, from 2 % above it to 5 % below. Edit and copy asks run 1.7 to 2.9 times faster. A draft head plugs in through the adapter when Liquid publishes one.
+Effect: prose, chat and code within 5 % of plain; edit and copy asks 1.8 to 3.6 times faster; every text equal to plain decoding.
 
 ### Fixed
 
-- A pack in one file is complete. `ops/use-profile.sh` and the Setup Guide took a pack stored as one `model.safetensors`, with no index, for an unfinished download. The 2.5 pack is one file, so a switch to it downloaded the pack again and then refused it ("the download is not a complete set"), and the guide offered the download again.
-- Reading a slot's `kv.length` committed its pending step. The health report reads every slot from its own thread, so with three slots it counted a joint plain step twice ("LFM2 forward at 53, the state holds 54 rows"). The read commits nothing now.
-- All attention classes shared one set of split buffers. A verify graph captured at a new class freed what an earlier class's graph replayed into, an illegal memory access once a request crossed 2,048 keys. Each class keeps its own.
-- A suffix store that another tokenizer wrote stopped the start. It now turns the store off with one line, and the LFM2.5 profiles keep a store of their own.
-- The dashboard's Disk cache tab showed a 50 GB budget for a settings document that never set one. The server's default has been 16 GB since 0.4.3; the dashboard now says 16.
+- A pack stored as one `model.safetensors` without an index counts as complete in `ops/use-profile.sh` and the Setup Guide. Before, a switch to the 2.5 pack downloaded it again and refused it.
+- Reading a slot's `kv.length` commits nothing. Before, the health report's read committed a joint plain step twice with three slots ("LFM2 forward at 53, the state holds 54 rows").
+- Attention split buffers are kept per attention class. Before, a verify graph captured at a new class freed buffers an older graph replays into (illegal memory access past 2,048 keys).
+- A suffix store written by another tokenizer turns the store off instead of stopping the start.
+- The dashboard's disk tier default is 16 GB, as the server's since 0.4.3 (it showed 50).
 
-### The shared EXL3 kernels
+### Shared EXL3 kernels
 
-- They decode half-integer rates: 1.5, 2.5 and 3.5 bits a weight, which exllamav3 1.6.0 gives some tensors below 4 bits a weight (a tile is 16 K + 8 int16 wide). This works in the decode GEMV, the MoE bank, the prefill's grouped GEMM and the slab decode, and the MoE kernels also take 7-bit experts. The 2.5 pack is the first real one with these tensors.
-- At whole rates, 51 of 51 kernel outputs equalled the old tree's bit for bit.
+- Half-integer rates (1.5, 2.5 and 3.5 bits a weight, tiles 16 K + 8 int16 wide), as exllamav3 1.6.0 writes them below 4 bpw, in the decode GEMV, the MoE bank, the prefill grouped GEMM and the slab decode. 7-bit experts in the MoE kernels.
+- Whole rates unchanged: 51 of 51 kernel outputs equal the previous tree's bit for bit.
 
-### Wren beside LFM2.5
+### Setup Guide
 
-- Wren, the Setup Guide's assistant, runs next to LFM2.5. On the 3.5 profile, Qwen3.5-2B loaded its own copy in 20 s and took 3.62 GiB, since this model has no narrator copy to borrow. It answered from the docs that `lfm25-exl3-3.5` takes 10.56 GiB and turned the response cache off and on when asked.
-- The Tools step no longer suggests turning vision off on a model that reads text only. It asks which tools can go instead.
+- Wren runs beside LFM2.5: on 3.5 it loads its own Qwen3.5-2B in 20 s (3.62 GiB), as the model has no narrator copy to share.
+- The Tools step no longer offers turning vision off on a text-only model.
 
 ## 0.8.3, 2026-10-13
 

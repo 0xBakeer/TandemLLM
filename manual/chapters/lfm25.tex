@@ -78,9 +78,9 @@ trellis decode against exllamav3's \code{LinearEXL3} & bit for bit \\
 
 \section{Speed}
 
-One request, greedy, the decode step from its CUDA graph runs at 188.2~tok/s on 2.5, 145.9 on 4.0 (191~GB/s of the bytes a token reads) and 44.7 in BF16 (220~GB/s), with dense splits measured at each pack's shapes (\code{ops/lfm25-dense-splits.json}; 4.0 ran at 136.1 without them). Launching the step's kernels one by one costs 5~\%. An 8,192-token prompt prefills at 7,360~tok/s on 4.0 (\measured).
+The decode step from its CUDA graph, one greedy request: 188.2~tok/s on 2.5, 145.9 on 4.0 (191~GB/s of the bytes a token reads), 44.8 in BF16 (220~GB/s) (\measured). Each pack has its own dense splits (\code{ops/lfm25-dense-splits.json}; 4.0: 136.1~tok/s without them). Eager launches cost 5~\%. An 8,192-token prompt prefills at 7,360~tok/s on 4.0.
 
-A verify block costs about 3~ms a row more, because each row routes to its own experts and a block reads the union of them (Table~\ref{tab:lfm-stair}). A block pays only when it is accepted for about 1.4 tokens a row it adds.
+Each verify row adds about 3~ms, because a block reads the union of its rows' experts (Table~\ref{tab:lfm-stair}). A block pays when it is accepted for about 1.4 tokens a row.
 
 \begin{table}[htbp]
 \centering\small
@@ -95,19 +95,19 @@ experts & 152 & 259 & 333 & 391 & 491 & 563 & 664 & 735 \\
 \end{tabular}
 \end{table}
 
-The model has no draft layer, and Liquid will publish a drafter for it. Until then the server drafts with the lookup alone, through the shared tree drafter with no head (\code{NoHead}) and cut by StairCut with the staircase as its prior. With no head, each round's own lookup match decides through the cut's calibrated acceptance: a round with no match is the plain step and is priced as one, and the class-wide skip that a head needs is not consulted. On 4.0 with the store off, an edit ask ran at 291.1~tok/s (11.1 tokens a block) and a copy ask at 326.4~tok/s (13.5), against 141.3 and 141.9 plain, while the other three asks ran as plain, every text equal to the plain run's (\measured). Before the no-head pricing, the same asks in one server never drafted. Through the server on 4.0 the lookup also gave the same answer as plain decoding for all 20 requests of \code{tools/fn_server_check.py}, with a largest logprob difference of 0.0.
+The model has no draft layer. The server drafts with the lookup alone, through the shared tree drafter with no head (\code{NoHead}), cut by StairCut with each profile's price file (\code{ops/prices/lfm2.5-24b-a2b/}). A round with no lookup match is the plain step and is priced as one; each round's own match decides through the cut's calibrated acceptance; the lookup's confidence carries its match length. On 4.0 with the store off, edit and copy asks run at 291.1 and 326.4~tok/s against 141.3 and 141.9 plain; prose, chat and code run within 5~\% of plain; every text equals the plain one (\measured). The 20 requests of \code{tools/fn_server_check.py} give the same answers with and without the lookup, largest logprob difference 0.0.
 
 \screenshot{lfm25-lookup-edit-copy}{Chat plain against edit and copy asks with the lookup, every size (\measured, 2026-10-14).}{fig:lfm-lookup}
 
 \section{Serving}
 
-The chat template is the checkpoint's own and opens a reasoning block at the end of every prompt; a client that turns thinking off gets the block closed right after the generation prompt. Tool calls are a Python list between \code{<|tool_call_start|>} and \code{<|tool_call_end|>}; \code{server/toolcall.py} rewrites each block into the parser's JSON form as the text arrives, with values read as Python literals and never run, so a client gets OpenAI \code{tool_calls}. Liquid's recommended sampling is the default: temperature 0.1, \code{top_k} 50, repetition penalty 1.05. The Setup Guide turns the conductor off for this model: on four short chat asks its notes (1,241 to 2,714 hidden tokens) made the model think 856 to 1,437 tokens where it thought 99 to 902 without them, and with thinking off it reasoned in the answer instead of answering (\measured, 4.0).
+The chat template is the checkpoint's own and opens a reasoning block at the end of every prompt; a client that turns thinking off gets the block closed right after the generation prompt. Tool calls are a Python list between \code{<|tool_call_start|>} and \code{<|tool_call_end|>}; \code{server/toolcall.py} rewrites each block into the parser's JSON form as the text arrives, with values read as Python literals and never run, so a client gets OpenAI \code{tool_calls}. Liquid's recommended sampling is the default: temperature 0.1, \code{top_k} 50, repetition penalty 1.05. The Setup Guide turns the conductor off for this model: with its notes (1,241 to 2,714 hidden tokens), four short chat asks reasoned for 856 to 1,437 tokens against 99 to 902 without them (\measured, 4.0).
 
-The resident prefix and the state store keep the state through the adapter. A warm server's answers, with the prefix resumed at 4,096 and 12,288 tokens, equalled a cold server's with equal logprobs (\code{tools/fn_cache_check.py}, \measured). The profiles serve three slots over the one copy of the weights, and a slot's plain step joins the other slots' round as one row, from a graph when every slot takes one. On 4.0, 1, 2 and 3 requests at once decoded 139.9, 169.1 and 177.8~tok/s in total, every answer equal to its request alone (\measured). The session spill drains the resident conversation at a stop and reads it back at the next start (13,650 tokens in 309 and 163~ms), and the disk tier restores a prefix written after two cold prefills (12,288 tokens in 0.96 against 2.6~s cold), each with the cold server's answer (\measured); the profiles serve both.
+Caches: with the prefix resumed at 4,096 and 12,288 tokens, warm answers equal cold ones with equal logprobs (\code{tools/fn_cache_check.py}). The session spill drains 13,650 tokens in 309~ms and reads them back in 163~ms; the disk tier restores 12,288 tokens in 0.96~s against 2.6~s cold; both give the cold answer (\measured). Parallel: three slots over one copy of the weights; a slot's plain step joins the round as one row, from a graph when every slot takes one. On 4.0, 1, 2 and 3 requests at once decode 139.9, 169.1 and 177.8~tok/s in total, every answer equal to its request alone (\measured).
 
 \section{What is not measured}
 
 \begin{itemize}
-\item Why the 24B loses more than its 8B sibling at the same rate.
+\item The cause of the 24B's higher KL than its 8B sibling at the same rate.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}
