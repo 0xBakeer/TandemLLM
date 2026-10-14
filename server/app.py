@@ -9462,9 +9462,14 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
         mem.register("pin", resident.shed_pin)
     suffix = None
     if a.suffix_store:
-        suffix = cache.PersistentSuffixStore(
-            a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
-            readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
+        try:
+            suffix = cache.PersistentSuffixStore(
+                a.suffix_store, max_tokens=int(a.suffix_store_mb * (1 << 20)) // 4,
+                readonly=a.suffix_store_readonly, tokenizer_sha=STATE.get("tokenizer_sha")).open()
+        except ValueError as exc:
+            # a store another model's tokenizer wrote (engine/tokfp.py): its ids mean other tokens here
+            print(f"[cache] suffix store off: {exc}", flush=True)
+    if suffix is not None:
         reader = next((d for d in (drafter, getattr(drafter, "ngram", None),
                                    getattr(drafter, "engram", None))
                        if hasattr(d, "add_store")), None)
