@@ -237,7 +237,7 @@ components:
   group: features
   what: Gives each request the right instructions and helper packages, and watches long sessions so they do not
     get stuck.
-  default: true
+  default: false
   required: false
   memory_gib: 0.0
   memory_max_gib: null
@@ -254,7 +254,10 @@ components:
       'off': 'off'
   assets: []
   docs: docs/server.md
-  note: Off, clients talk to the raw engine and the small models below have nothing to do.
+  note: 'Off by default for this model (measured on 4.0, 2026-10-14): on four short chat asks its notes (1,241 to
+    2,714 hidden tokens) made the model think 856 to 1,437 tokens where it thought 99 to 902 without them, and with
+    thinking off it reasoned in the answer instead of answering. Off, clients talk to the raw engine and the small
+    models below have nothing to do.'
 - id: narrator
   label: Narrator
   group: roles
