@@ -190,9 +190,14 @@ class NemotronHServing:
         return len(self.dg.graphs)
 
     def draft_heads(self) -> dict:
-        """The draft heads this model carries, by name: none yet. The checkpoint's MTP head plugs in here
-        (a head with the MTP tree drafter's interface, engine/methods/mtp_drafter.py)."""
+        """The draft heads this model carries, by name: the checkpoint's MTP head ("mtp",
+        engine/models/nemotron_h/mtp.py) when it was loaded, else none."""
         return self.heads
+
+    def add_mtp_head(self, depth: int):
+        from engine.models.nemotron_h.mtp import NemotronHMTPHead
+        self.heads["mtp"] = NemotronHMTPHead(self.fn, depth, self.max_len)
+        return self.heads["mtp"]
 
     def settle(self) -> None:
         self._settle_chain()
@@ -359,7 +364,8 @@ class NemotronHServing:
             if drafter0.ngram is not None:
                 ng.corpus = drafter0.ngram.corpus
             c0 = drafter0.cut
-            d2 = MTPTreeDrafter(e2, NoHead(), StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=False), ng)
+            head = e2.add_mtp_head(drafter0.head.depth) if drafter0.head.depth else NoHead()
+            d2 = MTPTreeDrafter(e2, head, StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=False), ng)
         return e2, d2
 
     def side_slot_bytes(self, max_len: int, paged: bool) -> tuple:
@@ -436,25 +442,29 @@ def prices(path: str, log=print) -> PriceModel:
                            log=log)
 
 
-def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=print):
+def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=print, depth: int = 0):
     """The lookup (the request's own text, `corpus` and the server's suffix store) cut by StairCut,
-    through the shared tree drafter with no head (`NoHead`; the MTP head takes its place)."""
+    through the shared tree drafter: with the checkpoint's MTP head drafting `depth` tokens a round, or
+    with no head (`NoHead`, depth 0)."""
     from engine.drafters.ngram import NgramDrafter
     from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
     from engine.methods.staircut import StairCut
     from engine.tokfp import fingerprint
     ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path), min_order=3, max_depth=16,
                       min_corpus_order=8)
-    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}")
-    return MTPTreeDrafter(srv, NoHead(), StairCut(prices(path, log), siblings=False), ng)
+    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}, "
+        f"MTP head {'depth ' + str(depth) if depth else 'off'}")
+    head = srv.add_mtp_head(depth) if depth else NoHead()
+    return MTPTreeDrafter(srv, head, StairCut(prices(path, log), siblings=False), ng)
 
 
-def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_pool=None, check: bool = True):
+def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_pool=None, check: bool = True,
+          mtp: bool = False):
     """NemotronH for the server: the weights, the engine in the loop's interface, the load-time
     self-check (a verify block's rows and the committed states against the decode steps'). Returns
     (serving, info)."""
     from engine.models.nemotron_h.load import load
-    idx, W, experts, timing = load(path, "cuda", mtp=False, log=log)
+    idx, W, experts, timing = load(path, "cuda", mtp=mtp, log=log)
     mark("weights")
     eng = NemotronHEngine(idx.cfg, W, experts, device="cuda", max_len=max_len)
     if kv_pool is not None:
@@ -473,7 +483,8 @@ def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_p
 def serve(a, ctx) -> dict:
     """NVIDIA's NemotronH from a BF16 checkpoint for the server (`--model <dir>`, the registry's `serve`;
     server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
-    lookup cut by StairCut (`lookup_drafter`, gated by the load-time self-check). What the engine cannot
+    lookup cut by StairCut (`lookup_drafter`, gated by the load-time self-check), and `--draft-head mtp`
+    adds the checkpoint's MTP head at `--depth` (its weights loaded only then). What the engine cannot
     hold yet is in `NemotronHServing.caps`."""
     from transformers import AutoTokenizer
 
@@ -483,24 +494,27 @@ def serve(a, ctx) -> dict:
         ctx.log(f"[server] NemotronH drafts with the lookup: --drafter {a.drafter} taken as the lookup")
     tok = AutoTokenizer.from_pretrained(a.model)
     pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
-    srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool)
+    head = a.drafter != "none" and str(getattr(a, "draft_head", None) or "") == "mtp"
+    srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool, mtp=head)
     drafter = None
+    depth = max(1, int(getattr(a, "depth", 3) or 3)) if head and info["mtp_in_checkpoint"] else 0
     if a.drafter != "none":
         if info["self_check"] and info["self_check"]["ok"]:
-            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log)
+            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log, depth=depth)
             # the loop hands a round k rows past the anchor: the lookup's copy runs up to what the cut admits
             a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
         else:
             ctx.log("[server] NemotronH self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
     fmt = "bf16"
+    what = ("MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
     describe = (f"NemotronH {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
-                f"{'lookup + StairCut' if drafter is not None else 'none'}, max_len {a.max_len:,},")
+                f"{what if drafter is not None else 'none'}, max_len {a.max_len:,},")
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "tool_format": "xml",
                         "weights_info": {"format": fmt, "weights": a.model,
-                                         "drafters": "lookup (no draft head)" if drafter is not None else None,
+                                         "drafters": (what if drafter is not None else None),
                                          "load_s": info["load"].get("total_s"),
                                          "self_check": info["self_check"]}}}

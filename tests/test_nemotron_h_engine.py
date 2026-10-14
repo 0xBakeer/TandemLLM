@@ -243,6 +243,54 @@ def test_graphs_replay_the_eager_bits():
     return f"{len(vg)} verify, {len(cg)} commit graphs"
 
 
+def test_mtp_head_drafts_and_resumes():
+    """The MTP head on random weights of the checkpoint's layout: `launch` drafts `depth` tokens with
+    their top-2 probabilities, `read` moves its length by the fed rows only, and a resume to an earlier
+    length and the same feed drafts the same tokens (its KV is a view the caches restore)."""
+    if SKIP:
+        return SKIP
+    from engine.models.nemotron_h.load import ExpertsRelu2
+    from engine.models.nemotron_h.mtp import NemotronHMTPHead
+    cfg, eng, ref = tiny()
+    raw = dict(TINY_B, num_nextn_predict_layers=1, mtp_layers_block_type=["attention", "moe"])
+    c = config_from_dict(raw, "tiny-mtp")
+    g = torch.Generator().manual_seed(5)
+    H = c.hidden_size
+
+    def r(*shape, s=0.2):
+        return (torch.randn(*shape, generator=g) * s).to(torch.bfloat16).to(DEV)
+    W = dict(eng.W)
+    W.update({"mtp.layers.0.enorm.weight": 1 + r(H, s=0.1), "mtp.layers.0.hnorm.weight": 1 + r(H, s=0.1),
+              "mtp.layers.0.eh_proj.weight": r(H, 2 * H), "mtp.layers.0.norm.weight": 1 + r(H, s=0.1),
+              "mtp.layers.0.mixer.q_proj.weight": r(c.q_dim, H), "mtp.layers.0.mixer.k_proj.weight": r(c.kv_dim, H),
+              "mtp.layers.0.mixer.v_proj.weight": r(c.kv_dim, H), "mtp.layers.0.mixer.o_proj.weight": r(H, c.q_dim),
+              "mtp.layers.1.norm.weight": 1 + r(H, s=0.1), "mtp.layers.1.final_layernorm.weight": 1 + r(H, s=0.1),
+              "mtp.layers.1.mixer.gate.weight": r(4, H, s=0.5),
+              "mtp.layers.1.mixer.gate.e_score_correction_bias": r(4, s=0.05).float(),
+              "mtp.layers.1.mixer.shared_experts.up_proj.weight": r(c.shared_ffn, H),
+              "mtp.layers.1.mixer.shared_experts.down_proj.weight": r(H, c.shared_ffn)})
+    m = "mtp.layers.0.mixer."
+    W[m + "qkv"] = torch.cat([W[m + f"{x}_proj.weight"] for x in "qkv"]).contiguous()
+    ex = dict(eng.experts)
+    ex[("mtp", 1)] = ExpertsRelu2(r(4, 64, H).contiguous(), r(4, H, 64).contiguous())
+    from engine.models.nemotron_h.engine import NemotronHEngine
+    e2 = NemotronHEngine(c, W, ex, device=DEV, max_len=256)
+    head = NemotronHMTPHead(e2, 3, 256)
+    st = e2.new_state(256)
+    e2.prefill(PROMPT, st)
+    rows = e2.prompt_hidden
+    head.prime(rows[:-1], PROMPT[1:].tolist())
+    assert head.st.length == len(PROMPT) - 1
+    head.launch(rows[-1:], [7])
+    t1, p1 = head.read()
+    assert head.st.length == len(PROMPT) and len(t1) == 3 and all(len(t) == 2 and p[0] >= p[1] for t, p in zip(t1, p1))
+    head.resume(len(PROMPT) - 1)
+    head.launch(rows[-1:], [7])
+    t2, _ = head.read()
+    assert t1 == t2
+    return f"depth 3 drafts {[t[0] for t in t1]}, the same after a resume"
+
+
 def test_self_check_passes():
     if SKIP:
         return SKIP
