@@ -10,8 +10,7 @@ drives every model through (the Flash-Next adapter's, engine/models/flashnext/se
 so everything above it -- penalties, the think budget and its forced close, pattern stops, logprobs,
 the reasoning split, the tool-call parser the model names (`tool_format`), the live view -- is the
 server's code. A verified row is the decode step's row bit for bit (ENG-287), so greedy speculation
-writes the plain greedy text. The caches, side slots and drafters come with SPD-107: `caps` says what
-is on.
+writes the plain greedy text. `caps` says what is on.
 """
 
 from __future__ import annotations
@@ -111,9 +110,12 @@ class Lfm2CacheState(SectionState):
 class Lfm2MoeServing:
     """`Lfm2MoeEngine` with one state and its graphs, in the server's engine interface."""
 
-    # the caches and side slots wait for SPD-107's checks; the shadow reader was validated on Qwen text
-    caps = Capabilities(caches=False, side_slots=False, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=False,
-                        side_lane=False)
+    # the caches on the prefill's 4,096-token grid (a restore answered as a cold prefill, logprobs equal:
+    # tools/fn_cache_check.py on 4.0, 2026-10-14); side slots with joint passes, a plain step joining the
+    # round (`joint_plain`: no draft head, so most rounds are plain steps); the shadow reader was
+    # validated on Qwen text; the side lane copies the 27B's pending commit
+    caps = Capabilities(caches=True, side_slots=True, anchor_grid=PREFILL_CHUNK, shadow=False, joint_verify=True,
+                        side_lane=False, joint_plain=True)
 
     def __init__(self, eng: Lfm2MoeEngine, max_len: int, slot=None):
         self.fn, self.cfg, self.max_len = eng, eng.cfg, max_len
