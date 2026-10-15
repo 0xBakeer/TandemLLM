@@ -17,7 +17,7 @@
 
     python tools/fn_dense_rows_check.py exact --seeds 8
     python tools/fn_dense_rows_check.py same --ref /tmp/fn_kernels_ref.py
-    python tools/fn_dense_rows_check.py real --model ~/models/nemotron-3.5-bolt-74b-a9b-exl3-2.0-hq
+    python tools/fn_dense_rows_check.py real --model ~/models/nemotron-3.5-bolt-74b-a9b-exl3-2.0
     python tools/fn_dense_rows_check.py bench --json out.json
 """
 
@@ -37,7 +37,7 @@ import torch  # noqa: E402
 from tools import exl3_linear as X  # noqa: E402
 from tools import fn_kernels as FK  # noqa: E402
 
-# (name, N, Kin, bits): Bolt 2.0-hq's dense projections (4 bits, the head 6) and the 27B's / Flash-Next's
+# (name, N, Kin, bits): Bolt 2.0's dense projections (4 bits, the head 6) and the 27B's / Flash-Next's
 BOLT = [("mamba.in_proj", 18560, 4096, 4), ("mamba.out_proj", 4096, 8192, 4), ("attn.qkv", 4608, 4096, 4),
         ("attn.o_proj", 4096, 4096, 4), ("latent.fc1", 1024, 4096, 4), ("latent.fc2", 4096, 1024, 4),
         ("shared.up", 5376, 4096, 4), ("shared.down", 4096, 5376, 4), ("head", 131072, 4096, 6)]

@@ -1,6 +1,6 @@
 # NemotronH (Nemotron 3.5 Lightning, Bolt)
 
-NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and from an EXL3 pack converted from NVIDIA's BF16 checkpoint (2-bit experts, 4-bit dense projections), both with NVIDIA's LiLiCorr drafter; and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on. Text only: Bolt's RADIO image tower is not served yet.
+NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and from EXL3 packs converted from NVIDIA's BF16 checkpoint (2.0 to 6.0 bpw; the 2.0 pack has 4-bit dense projections), all with NVIDIA's LiLiCorr drafter; and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on. Text only: Bolt's RADIO image tower is not served yet.
 
 Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`; quality against BF16 logits: `tools/nh_quality.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`. EXL3 packs: `tools/fn_kernels.py` (`dense_rows`) and `tools/exl3_relu2.py`. Draft head: `engine/drafters/lilicorr.py`.
 
@@ -45,20 +45,39 @@ DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768
 - A CUDA GEMV for the IQ2_XXS shared experts took the decode step to 32.7 tok/s and 8 / 16-row chains to 57.9 / 93.2 ms; it is not in this tree, so this profile decodes at the rates above, and the LiLiCorr rows of the IQ2 table under [LiLiCorr](#lilicorr), measured with it, are higher than this tree gives.
 - Prefill (random tokens, one engine): 246 tok/s at 1,024 tokens, 799 at 8,192, 752 at 32,768, 698 at 131,072, 680 at 262,000 (385 s; 28.9 GiB reserved at the peak, the box never under 82 GiB available). Decode at 32,768 and 131,072 tokens of context: 26.06 and 23.27 tok/s.
 
-### Bolt: nemotron-bolt-exl3-2.0-hq
+### Bolt: nemotron-bolt-exl3-2.0
 
-`nemotron-bolt-exl3-2.0-hq` (`ops/profiles/nemotron-bolt-exl3-2.0-hq.env`): an EXL3 pack converted from NVIDIA's BF16 checkpoint (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16, revision bca0a8cb) by exllamav3 1.6.2 with a patch for the Puzzle/Bolt layer table: routed experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6 (23.48 GB, the RADIO tower in the pack in BF16 and not loaded); 20.22 GiB at load; 262,144 tokens; 3 slots; NVIDIA's LiLiCorr drafter and the lookup cut by StairCut (prices `ops/prices/nemotron-3.5-bolt-74b-a9b/nemotron-bolt-exl3-2.0-hq.dgx-spark.json`, measured on the rows path). The pack's repository is private for now: a download needs the token.
+`nemotron-bolt-exl3-2.0` (`ops/profiles/nemotron-bolt-exl3-2.0.env`): an EXL3 pack converted from NVIDIA's BF16 checkpoint (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16, revision bca0a8cb) by exllamav3 1.6.2 with a patch for the Puzzle/Bolt layer table: routed experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6 (23.48 GB, the RADIO tower in the pack in BF16 and not loaded); 20.22 GiB at load; 262,144 tokens; 3 slots; NVIDIA's LiLiCorr drafter and the lookup cut by StairCut (prices `ops/prices/nemotron-3.5-bolt-74b-a9b/nemotron-bolt-exl3-2.0.dgx-spark.json`, measured on the rows path). The pack is in a public Hugging Face repository (0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0, pinned by commit).
 
 Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; BF16 perplexity 5.97):
 
 | weights | KL | top-1 | perplexity |
 |-|-|-|-|
-| `nemotron-bolt-exl3-2.0-hq` | 0.170 | 84.1 % | 6.81 |
+| `nemotron-bolt-exl3-2.0` | 0.170 | 84.1 % | 6.81 |
 | `nemotron-bolt-iq2` (NVIDIA's GGUF) | 0.259 | 79.6 % | 7.48 |
 
-exllamav3's `model_diff` on 100 wikitext-2 rows of 2,048 tokens: the 2.0-hq pack KL 0.088, top-1 87.6 %.
+exllamav3's `model_diff` on 100 wikitext-2 rows of 2,048 tokens: the 2.0 pack KL 0.088, top-1 87.6 %. A pack with the dense projections at 2 bits as well measured KL 0.379, top-1 73.9 % in this engine and is not published as a profile.
 
 DGX Spark, 2026-10-15: decode step 44.2 tok/s from its graph on the rows path (41.0 with a CTA a row); with LiLiCorr and the lookup, prose / code / chat / edit / copy 65.8 / 99.0 / 69.3 / 152.8 / 256.0 tok/s, every text the plain run's (table and conditions under [LiLiCorr](#lilicorr)).
+
+### Bolt: nemotron-bolt-exl3-2.5 to 6.0
+
+`nemotron-bolt-exl3-<bpw>` (`ops/profiles/nemotron-bolt-exl3-<bpw>.env`): EXL3 packs of the same BF16 checkpoint at one rate for every projection, head 6, each in its public repository 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>, pinned by commit; 262,144 tokens; 3 slots; LiLiCorr and the lookup cut by StairCut. They have no StairCut price file yet: the cut learns its prices online.
+
+Quality as above (`tools/nh_quality.py`, 8 wikitext-2 rows of 1,024 tokens against the BF16 logits); decode step from its graph with one CTA a row (`dense`, measured before the rows path; the 2.0 pack: 41.3 there, 44.2 on the rows path); DGX Spark, 2026-10-15:
+
+| profile | download | at load | KL | top-1 | perplexity | decode step |
+|-|-|-|-|-|-|-|
+| `nemotron-bolt-exl3-2.0` | 23.48 GB | 20.22 GiB | 0.170 | 84.1 % | 6.81 | 41.3 tok/s |
+| `nemotron-bolt-exl3-2.5` | 27.61 GB | 24.07 GiB | 0.094 | 87.3 % | 6.34 | 39.9 tok/s |
+| `nemotron-bolt-exl3-3.0` | 31.75 GB | 27.92 GiB | 0.061 | 89.7 % | 6.21 | 39.6 tok/s |
+| `nemotron-bolt-exl3-3.5` | 35.88 GB | 32.01 GiB | 0.044 | 91.1 % | 6.12 | 38.7 tok/s |
+| `nemotron-bolt-exl3-4.0` | 40.01 GB | 36.18 GiB | 0.034 | 92.7 % | 6.10 | 38.4 tok/s |
+| `nemotron-bolt-exl3-5.0` | 49.13 GB | 44.42 GiB | 0.016 | 94.8 % | 6.00 | 32.0 tok/s |
+| `nemotron-bolt-exl3-6.0` | 58.37 GB | 53.00 GiB | 0.0087 | 96.2 % | 5.98 | 27.8 tok/s |
+| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 22.19 GiB | 0.259 | 79.6 % | 7.48 | 27.9 tok/s |
+
+Each pack passed the load-time self-check and a chat on the Spark. The LiLiCorr rows of [LiLiCorr](#lilicorr) are measured on the 2.0 pack only.
 
 ### Lightning: nemotron-lightning-bf16
 
@@ -158,7 +177,7 @@ DGX Spark, 2026-10-15, `nemotron-bolt-iq2` on a build with the CUDA GEMV for the
 - `fn_server_check.py`, 20 requests: 17 the same as plain; the other 3 (thinking on, a low thinking cap, JSON with 150 tokens) the same up to the reasoning budget's close, which lands at the end of the verified block (4 to 6 tokens later, docs/exactness.md, output changes).
 - A verify block's cost is the IQ2_XXS kernels (CUDA events, 1k context, 1 / 8 / 16 rows): the expert bank 3.9 / 22.1 / 42.7 ms, the shared experts' GEMV 3.4 / 11.3 / 22.4; the NVFP4 projections (11.0 .. 11.6), the Q8_0 head, attention and latents (9.5 .. 9.9) and the SSM walk (0.8 .. 2.2) barely move. Chains of 1 / 2 / 4 / 8 / 16 rows: 29.4 / 34.4 / 41.5 / 57.6 / 90.2 ms.
 
-On the EXL3 2.0-hq pack (`nemotron-bolt-exl3-2.0-hq`: experts at 2 bits, the dense projections at 4, head 6), with the projections on `dense_rows` and the bank grouped ([How the engine runs it](#how-the-engine-runs-it)); DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
+On the EXL3 2.0 pack (`nemotron-bolt-exl3-2.0`: experts at 2 bits, the dense projections at 4, head 6), with the projections on `dense_rows` and the bank grouped ([How the engine runs it](#how-the-engine-runs-it)); DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
 
 | class | EXL3 plain | EXL3 LiLiCorr + lookup | IQ2 LiLiCorr + lookup (above) | llama.cpp + LiLiCorr (IQ2 GGUF) |
 |-|-|-|-|-|
@@ -193,7 +212,7 @@ On the EXL3 2.0-hq pack (`nemotron-bolt-exl3-2.0-hq`: experts at 2 bits, the den
 | LiLiCorr against an fp32 reference written from vLLM's and llama.cpp's code (tiny weights) | block within 2e-5, lattice scores within 1e-4, the same walk |
 | LiLiCorr on Bolt against llama.cpp + LiLiCorr, 8 prompts x 256 | accepted length 4.55 against 4.57 |
 | Bolt server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 22 the same, 3 the same up to the reasoning budget's close |
-| EXL3 rows path (`tools/fn_dense_rows_check.py`): `dense_rows` against the one-row `dense` at Bolt's, the 27B's and Flash-Next's shapes, M 1..32, clusters, 8 warps, groups, the fp32 head, every rate; all 281 projections of the 2.0-hq pack; `dense` against 0.9.x's | every byte the same |
+| EXL3 rows path (`tools/fn_dense_rows_check.py`): `dense_rows` against the one-row `dense` at Bolt's, the 27B's and Flash-Next's shapes, M 1..32, clusters, 8 warps, groups, the fp32 head, every rate; all 281 projections of the 2.0 pack; `dense` against 0.9.x's | every byte the same |
 | EXL3 bank grouped (`tests/gpu/test_nemotron_h_exl3_gpu.py`, `fn_dense_rows_check.py bank`): M 2..32, every row on the same 9 experts up to few shared | every pair its lone call's bytes |
-| Bolt EXL3 2.0-hq engine on the rows path (`fn_dense_rows_check.py engine`, 3 prompts): self-check at 24 and 8 rows, a 16-row tree against each branch's sequential decode, graph replay, 32 decode steps with `QSE_NH_DENSE_ROWS` on and off | bit for bit |
-| Bolt EXL3 2.0-hq server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 21 the same, 4 the same up to the reasoning budget's close |
+| Bolt EXL3 2.0 engine on the rows path (`fn_dense_rows_check.py engine`, 3 prompts): self-check at 24 and 8 rows, a 16-row tree against each branch's sequential decode, graph replay, 32 decode steps with `QSE_NH_DENSE_ROWS` on and off | bit for bit |
+| Bolt EXL3 2.0 server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 21 the same, 4 the same up to the reasoning budget's close |

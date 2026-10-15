@@ -2,9 +2,9 @@
 #
 # NVIDIA's hybrid Mamba2 / mixture-of-experts model for 24 GB, served from NVIDIA's own GGUF (IQ2_XXS experts,
 # NVFP4 Mamba2 projections, Q8_0 head and attention) read as stored (engine/models/nemotron_h, docs/nemotron-h.md),
-# or from an EXL3 pack of the BF16 checkpoint. Profile ops/profiles/nemotron-bolt-iq2.env: its config and tokenizer
+# or from our EXL3 packs of the BF16 checkpoint. Profile ops/profiles/nemotron-bolt-iq2.env: its config and tokenizer
 # from the BF16 repository, the GGUF an asset fetched from NVIDIA's repository at a pinned revision, never re-hosted;
-# ops/profiles/nemotron-bolt-exl3-2.0-hq.env: the pack's own repository. weights_gib: allocated at load
+# ops/profiles/nemotron-bolt-exl3-<bpw>.env (2.0 to 6.0): each pack's own public repository. weights_gib: allocated at load
 # (measured 2026-10-15). max_window: the model's whole context, 262,144 tokens: its KV is 8,192 bytes a token (8
 # attention layers, 2 KV heads of 128), 2 GiB at the full window. Rows of the measured table come from real runs only.
 schema: 1
@@ -14,7 +14,7 @@ family: Nemotron 3.5
 params: ~74B, ~9B active a token
 recommended: true
 order: 5
-pitch: NVIDIA's 74B hybrid Mamba2 and mixture-of-experts model in 22 GB, served from NVIDIA's own 2-bit GGUF.
+pitch: NVIDIA's 74B hybrid Mamba2 and mixture-of-experts model in 23 GB, from EXL3 packs at 2.0 to 6.0 bpw or NVIDIA's 2-bit GGUF.
 architecture: 88 layers, 40 Mamba2, 40 mixture-of-experts (240 to 496 experts a layer, 9 a token, one shared, a
   1,024-wide latent) and 8 attention layers without positional encoding; it thinks in a <think> block and calls
   tools in the XML form. Text only in TandemLLM so far (the image tower is not served).
@@ -114,7 +114,7 @@ profiles:
   drafters_gib: 1.32
   hf_repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16
   hf_private: false
-  recommended: true
+  recommended: false
   badges:
   - NVIDIA's own quantization
   quality:
@@ -134,17 +134,18 @@ profiles:
     Drafts with NVIDIA''s LiLiCorr drafter (0.96 GB, NVFP4; 1.32 GiB allocated with its rings) and the lookup.'
   hf_revision: 153d4551268566bb7d57681ceded1289e6341fcd
   max_window: 262144
-- id: nemotron-bolt-exl3-2.0-hq
-  label: EXL3 2.0 bpw experts, 4-bit dense (ours)
+- id: nemotron-bolt-exl3-2.0
+  label: EXL3 2.0 bpw experts, 4-bit dense
   format: exl3
   bpw: 2.19
   disk_gb: 23.48
   weights_gib: 20.22
   drafters_gib: 1.32
-  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0-hq
-  hf_private: true
-  recommended: false
-  badges: []
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0
+  hf_private: false
+  recommended: true
+  badges:
+  - recommended
   quality:
     kl_vs_bf16: 0.1697
     top1_pct: 84.05
@@ -158,8 +159,164 @@ profiles:
     experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6; the RADIO tower is in
     the pack in BF16 and not loaded. A decode token reads about 4.7 GB. Measured 2026-10-15: 20.22 GiB at load, the decode
     step 44.2 tok/s (the IQ2 GGUF 27.9). Drafts with NVIDIA''s LiLiCorr drafter and the lookup, a verify block''s rows
-    on one trellis decode (SPD-125). The repository is private: a download needs the token.'
+    on one trellis decode (SPD-125). The Hugging Face repository is public: a download needs no token.'
   hf_revision: 0c59e1c05ce5d0161028d2a8f7392730ba5d79a2
+  max_window: 262144
+- id: nemotron-bolt-exl3-2.5
+  label: EXL3 2.5 bpw
+  format: exl3
+  bpw: 2.5
+  disk_gb: 27.61
+  weights_gib: 24.07
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.5
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0941
+    top1_pct: 87.3
+    ppl: 6.34
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 2.5 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 27.61 GB, 24.07 GiB at load, the decode step
+    39.92 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: 619793f8f60adce3c70fe06c2ea14b67eb591b26
+  max_window: 262144
+- id: nemotron-bolt-exl3-3.0
+  label: EXL3 3.0 bpw
+  format: exl3
+  bpw: 3.0
+  disk_gb: 31.75
+  weights_gib: 27.92
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-3.0
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0611
+    top1_pct: 89.72
+    ppl: 6.21
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 3.0 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 31.75 GB, 27.92 GiB at load, the decode step
+    39.57 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: 5791e33ea784ebc11a257754a783da8cc5139e29
+  max_window: 262144
+- id: nemotron-bolt-exl3-3.5
+  label: EXL3 3.5 bpw
+  format: exl3
+  bpw: 3.5
+  disk_gb: 35.88
+  weights_gib: 32.01
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-3.5
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0435
+    top1_pct: 91.14
+    ppl: 6.12
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 3.5 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 35.88 GB, 32.01 GiB at load, the decode step
+    38.66 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: ba0be2cff48138a5e2f42adf110cce22b1ad56f0
+  max_window: 262144
+- id: nemotron-bolt-exl3-4.0
+  label: EXL3 4.0 bpw
+  format: exl3
+  bpw: 4.0
+  disk_gb: 40.01
+  weights_gib: 36.18
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-4.0
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0339
+    top1_pct: 92.68
+    ppl: 6.1
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 4.0 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 40.01 GB, 36.18 GiB at load, the decode step
+    38.4 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: 41ec6bfe3898dbe7ea903574612402c1dd4aba6b
+  max_window: 262144
+- id: nemotron-bolt-exl3-5.0
+  label: EXL3 5.0 bpw
+  format: exl3
+  bpw: 5.0
+  disk_gb: 49.13
+  weights_gib: 44.42
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-5.0
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0157
+    top1_pct: 94.75
+    ppl: 6.0
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 5.0 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 49.13 GB, 44.42 GiB at load, the decode step
+    32.0 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: 577893d50d2eb9edd27c0e204996c6f57b202650
+  max_window: 262144
+- id: nemotron-bolt-exl3-6.0
+  label: EXL3 6.0 bpw
+  format: exl3
+  bpw: 6.0
+  disk_gb: 58.37
+  weights_gib: 53.0
+  drafters_gib: 1.32
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-6.0
+  hf_private: false
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.0087
+    top1_pct: 96.15
+    ppl: 5.98
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry)'
+  assets_required:
+  - nemotron-bolt-lilicorr
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch at 6.0 bpw, head
+    6; the RADIO tower is in the pack in BF16 and not loaded. Measured 2026-10-15: 58.37 GB, 53.0 GiB at load, the decode step
+    27.77 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
+    StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
+    no token.'
+  hf_revision: ecde863982d267294f9e08a7c68c64ca3ef3706c
   max_window: 262144
 measurements:
   build: 0.9.1
