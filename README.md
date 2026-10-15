@@ -137,15 +137,15 @@ Start with [docs/architecture.md](docs/architecture.md), a one-page tour. [docs/
 On a new DGX Spark, install in setup mode and then switch to a profile ([docs/setup.md](docs/setup.md)):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.9.1/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.9.2/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, lfm25-exl3-3.5; --list prints every profile
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.9.1` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.9.2` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
 
-Where the tag `v0.9.1` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.9.1'". Pass `--repo` and `--ref` to install from another repository or release. Early-access testers clone from their own repository ([EARLY-ACCESS.md](EARLY-ACCESS.md)).
+Where the tag `v0.9.2` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.9.2'". Pass `--repo` and `--ref` to install from another repository or release. Early-access testers clone from their own repository ([EARLY-ACCESS.md](EARLY-ACCESS.md)).
 
 Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.
 
@@ -154,7 +154,7 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 | `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.9.1`; `v0.2.0-staircut` is the paper's |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.9.2`; `v0.2.0-staircut` is the paper's |
 | `--repo URL` | the git repository to clone, default `https://github.com/0xBakeer/TandemLLM.git` |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |
@@ -259,7 +259,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 ## Status
 
-The current release is `v0.9.1`. It adds web search and media playback to the Chat tab, turns on the loop guard and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page; an EXL3 profile of the 27B downloads 3.54 GB of base tensors instead of 30.41. `v0.9.0` adds a third model, LiquidAI's LFM2.5-24B-A2B, with six EXL3 sizes and the BF16 checkpoint ([docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md)). `v0.8.3` is the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of three models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
+The current release is `v0.9.2`. It fixes two install bugs on a new box: a download whose file list is globs (the shadow reader's and the narrator's models) failed its checksum step, and after `install.sh --setup` the 27B's EXL3 profiles refused to start without the full FP8 base. `v0.9.1` adds web search and media playback to the Chat tab, turns on the loop guard and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page; an EXL3 profile of the 27B downloads 3.54 GB of base tensors instead of 30.41. `v0.9.0` adds a third model, LiquidAI's LFM2.5-24B-A2B, with six EXL3 sizes and the BF16 checkpoint ([docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md)). `v0.8.3` is the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of three models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Credits
 

@@ -61,6 +61,8 @@ WDIR="$(pv QSE_WEIGHTS_DIR)"; HF="$(pv QSE_WEIGHTS_HF)"; GB="$(pv QSE_WEIGHTS_GB
 REV="$(pv QSE_WEIGHTS_REVISION)"; ALSO="$(pv QSE_WEIGHTS_ALSO)"
 [ -n "$MEM_NEED_GB" ] || MEM_NEED_GB="$(pv QSE_MEM_NEED_GIB)"; MEM_NEED_GB="${MEM_NEED_GB:-80}"
 PY="$(pv PY)"; PORT="$(pv PORT)"
+# OPS-143: the HF cache serve.env names (install.sh with HF_HOME), for fetch_weights.py's base
+HFC="$(pv HF_HUB_CACHE)"; [ -z "$HFC" ] || export HF_HUB_CACHE="$HFC"
 # the smoke's turn: serve.env's SMOKE_URL (a reverse proxy in front of the engine), else the engine
 # itself; the conductor's name, or the served raw name when the conductor is off (as the setup guide's)
 SMOKE_URL="${SMOKE_URL:-$(pv SMOKE_URL)}"; SMOKE_URL="${SMOKE_URL:-http://127.0.0.1:$PORT/v1}"
