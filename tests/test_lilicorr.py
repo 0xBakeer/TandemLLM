@@ -555,6 +555,27 @@ def test_checkpoint_reader_takes_modelopt_nvfp4():
     return f"{sum(type(v).__name__ == 'NVFP4Block' for v in got.values())} NVFP4 blocks, the rest bf16"
 
 
+def test_wide_activations_stay_finite_on_nvfp4():
+    """The NVFP4 kernels multiply in fp16: a row past its range (the draft's MLP inputs reach 1e5) is
+    scaled by a power of two around the product, finite and near the bf16 product; a row in range is
+    the plain call's bits."""
+    if SKIP or DEV != "cuda":
+        return SKIP or "skipped: the NVFP4 kernels need the GPU"
+    from engine.drafters.lilicorr import _lin, _lin_wide
+    from tools.nvfp4_linear import quantize_to_nvfp4
+    g = torch.Generator().manual_seed(2)
+    w = quantize_to_nvfp4((torch.randn(256, 512, generator=g) * 0.02).to(DEV))
+    x = torch.randn(8, 512, generator=g).to(DEV, torch.bfloat16)
+    x[3, 7] = 3e5
+    x[5] *= 1e3
+    y = _lin_wide(x, w)
+    ref = x.float() @ w.dequant().float().T
+    assert torch.isfinite(y).all()
+    assert float((y.float() - ref).abs().max() / ref.abs().max()) < 0.02
+    assert torch.equal(y[[0, 1, 2, 4, 6, 7]], _lin(x[[0, 1, 2, 4, 6, 7]], w))
+    return "rows past 2^15 scaled by a power of two; rows in range untouched"
+
+
 class _Srv:
     def __init__(self, st):
         self.st = st

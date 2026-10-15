@@ -140,6 +140,21 @@ def load_weights(path: str, device: str = "cuda") -> dict:
     return W
 
 
+#: the largest activation the NVFP4 kernels take as it is: they multiply in fp16 (max 65,504)
+F16_SAFE = 2.0 ** 15
+
+
+def _lin_wide(x: torch.Tensor, w) -> torch.Tensor:
+    """`_lin` for an input that can leave fp16's range (the taps, the MLPs' inputs: the draft's
+    activations reach 1e5 where the trunk's normed ones never do): an NVFP4 weight's kernel multiplies
+    in fp16, so a row whose largest value is past F16_SAFE is scaled down by a power of two first and
+    the product scaled back (both exact); a bf16 weight runs as it is."""
+    if isinstance(w, torch.Tensor):
+        return _lin(x, w)
+    s = torch.exp2(torch.ceil(torch.log2(x.abs().amax(-1, keepdim=True).float() / F16_SAFE)).clamp_min(0.0))
+    return (_lin((x / s).to(x.dtype), w) * s).to(x.dtype)
+
+
 def _linb(x: torch.Tensor, W: dict, name: str) -> torch.Tensor:
     """A linear layer of the checkpoint with its bias when it has one."""
     y = _lin(x, W[name + ".weight"])
@@ -196,7 +211,7 @@ class LiLiCorrModel:
         head_dim]): K normed and roped, as the block reads them."""
         c = self.cfg
         n = taps.shape[0]
-        g = _rms(_lin(taps.reshape(n, -1), self.W["fc.weight"]), self.W["hidden_norm.weight"], c.rms_norm_eps)
+        g = _rms(_lin_wide(taps.reshape(n, -1), self.W["fc.weight"]), self.W["hidden_norm.weight"], c.rms_norm_eps)
         kv = F.linear(g, self.kv_w).view(n, c.num_hidden_layers, 2, c.num_key_value_heads, c.head_dim)
         k = torch.stack([_rms(kv[:, i, 0], self.W[f"layers.{i}.self_attn.k_norm.weight"], c.rms_norm_eps)
                          for i in range(c.num_hidden_layers)])                  # [L, n, kv, D]
@@ -246,8 +261,8 @@ class LiLiCorrModel:
             mk = None
             if conv is not None:
                 x, mk = conv[1].prepare(x, bpos)
-            x = _lin(F.silu(_lin(x, self.W[f"{p}.mlp.gate_proj.weight"])) * _lin(x, self.W[f"{p}.mlp.up_proj.weight"]),
-                     self.W[f"{p}.mlp.down_proj.weight"])
+            x = _lin_wide(F.silu(_lin_wide(x, self.W[f"{p}.mlp.gate_proj.weight"]))
+                          * _lin_wide(x, self.W[f"{p}.mlp.up_proj.weight"]), self.W[f"{p}.mlp.down_proj.weight"])
             if conv is not None:
                 x = conv[1].finish(x, mk, bpos)
             h = h + x
@@ -303,7 +318,8 @@ class LiLiCorrModel:
             o = F.scaled_dot_product_attention(q[None], k[None], v[None], attn_mask=bias[None])[0]
             x = x + _linb(o.transpose(0, 1).reshape(n, Hc), W, f"{p}.attn.out_proj")
             y = _rms(x, W[f"{p}.mlp_norm.weight"], eps)
-            x = x + _linb(F.silu(_linb(y, W, f"{p}.mlp.up_proj")), W, f"{p}.mlp.down_proj")
+            y = F.silu(_linb(y, W, f"{p}.mlp.up_proj"))
+            x = x + _lin_wide(y, W[f"{p}.mlp.down_proj.weight"]) + W[f"{p}.mlp.down_proj.bias"]
         x = _rms(x, W["lilicorr.output_norm.weight"], eps).view(S, T, Hc)
         a = _rms(a, W["lilicorr.anchor_norm.weight"], eps)
         ws, wa, wx = self.factor_w
