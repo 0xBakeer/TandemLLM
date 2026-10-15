@@ -211,6 +211,38 @@ if HAVE_TRITON:
 if HAVE_TRITON:
 
     @triton.jit
+    def _iq2_dequant(D, QS, G8, KS, Y, NB: tl.constexpr):
+        # one block of 256 weights a program, as the twin computes them, rounded once to bf16
+        r = tl.program_id(0)
+        b = tl.program_id(1)
+        g8 = tl.arange(0, 8)
+        l4 = tl.arange(0, 4)
+        j8 = tl.arange(0, 8)
+        d = tl.load(D + r * NB + b).to(tl.float32)
+        q0 = tl.load(QS + (r * NB + b) * 16 + 2 * g8)
+        q1 = tl.load(QS + (r * NB + b) * 16 + 2 * g8 + 1)
+        db = (d * (0.5 + ((q1 >> 28) & 0xF).to(tl.float32))) * 0.25                                  # [8]
+        ge = tl.load(G8 + ((q0[:, None] >> (8 * l4[None, :])) & 0xFF))                               # [8, 4]
+        g = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.float32)                      # [8, 4, 8]
+        ks = tl.load(KS + ((q1[:, None] >> (7 * l4[None, :])) & 0x7F))
+        neg = ((ks[:, :, None] >> j8[None, None, :]) & 1) == 1
+        w = db[:, None, None] * g
+        w = tl.reshape(tl.where(neg, -w, w), (256,))
+        tl.store(Y + (r * NB + b) * 256 + tl.arange(0, 256), w.to(tl.bfloat16))
+
+
+def dequant_bf16(d: torch.Tensor, qs: torch.Tensor, g8: torch.Tensor, ks: torch.Tensor) -> torch.Tensor:
+    """Split IQ2_XXS blocks (d [R, nb], qs [R, nb, 16]) on the GPU -> bf16 [R, nb 256]: the twin's values
+    rounded once, for a prompt chunk's cuBLAS."""
+    R, nb = d.shape
+    y = torch.empty(R, nb * QK, dtype=torch.bfloat16, device=d.device)
+    _iq2_dequant[(R, nb)](d, qs, g8, ks, y, NB=nb, num_warps=1)
+    return y
+
+
+if HAVE_TRITON:
+
+    @triton.jit
     def _iq2_bank(X, s_x, IDS, D, QS, G, KS, Y, N, S: tl.constexpr, NB: tl.constexpr, BN: tl.constexpr,
                   RELU2: tl.constexpr):
         # one (row, slot) pair p: y[p] = W[e] x[p // S] over expert e = IDS[p], K in order, fp32; RELU2:
@@ -260,15 +292,18 @@ class IQ2Bank:
         self.ud, self.uq = torch.from_numpy(du).to(device), torch.from_numpy(qu).to(device)
         self.dd, self.dq = torch.from_numpy(dd).to(device), torch.from_numpy(qd).to(device)
         self._g = torch.from_numpy(GRID.reshape(-1)).to(device)
+        self._g8 = torch.from_numpy(GRID8).to(device)
         self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
         self.nbytes = (E * I * (X // QK) + E * X * (I // QK)) * BLOCK_BYTES
 
     def expert(self, e: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Expert e's (up [I, X], down [X, I]) decoded to bf16 on the device, for a prompt chunk's cuBLAS."""
         I, X = self.I, self.X
-        up = dequant_blocks(self.ud[e * I:(e + 1) * I], self.uq[e * I:(e + 1) * I]).to(torch.bfloat16)
-        down = dequant_blocks(self.dd[e * X:(e + 1) * X], self.dq[e * X:(e + 1) * X]).to(torch.bfloat16)
-        return up, down
+        if self.ud.device.type != "cuda":
+            return (dequant_blocks(self.ud[e * I:(e + 1) * I], self.uq[e * I:(e + 1) * I]).to(torch.bfloat16),
+                    dequant_blocks(self.dd[e * X:(e + 1) * X], self.dq[e * X:(e + 1) * X]).to(torch.bfloat16))
+        return (dequant_bf16(self.ud[e * I:(e + 1) * I], self.uq[e * I:(e + 1) * I], self._g8, self._ks),
+                dequant_bf16(self.dd[e * X:(e + 1) * X], self.dq[e * X:(e + 1) * X], self._g8, self._ks))
 
     def moe_relu2(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         """x [M, X] bf16, ids int32 [M, S] -> yd [M S, X] fp32 (bf16 values, unweighted, pair order)."""
@@ -309,7 +344,9 @@ class IQ2Linear:
         M = x2.shape[0]
         if M > ROWS_MAX:
             # a prompt chunk: the weight decoded to bf16 for one cuBLAS call (the rows' bits are not kept)
-            y = torch.nn.functional.linear(x2, dequant_blocks(self.d, self.qs).to(torch.bfloat16))
+            w = dequant_bf16(self.d, self.qs, self._g8, self._ks) if x2.is_cuda else \
+                dequant_blocks(self.d, self.qs).to(torch.bfloat16)
+            y = torch.nn.functional.linear(x2, w)
             y = y.float() if f32 else y
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
