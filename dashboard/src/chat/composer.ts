@@ -5,7 +5,6 @@
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { bytes } from '../lib/format';
 import { stripEdge, type Edge } from '../lib/phone';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
@@ -13,6 +12,7 @@ import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, Slas
 import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { chatProvider, providerWord } from './websearch';
+import { attachmentWords } from './context-words';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
@@ -28,6 +28,9 @@ export class QseChatComposer extends LightElement {
   @property({ type: Boolean }) running = false;
   @property({ type: Boolean }) disabled = false;
   @property({ type: String }) draft = '';
+  /** uploads a file as soon as it is added, so its chip shows the tokens and whether it goes
+   *  as a file (SRV-487, VIS-169); without it the view uploads at the send */
+  @property({ attribute: false }) upload: ((f: File) => Promise<Attachment>) | null = null;
   @state() private text = '';
   @state() private files: Attachment[] = [];
   /** the File behind each attachment chip, for the upload before a send (CONTRACT 8, request 9) */
@@ -214,6 +217,21 @@ export class QseChatComposer extends LightElement {
       out.push(att);
     }
     this.files = [...this.files, ...out];
+    for (const att of out) void this.uploadEarly(att);
+  }
+
+  /** the server's attachment in place of the local chip; a failure leaves the File for the send */
+  private async uploadEarly(att: Attachment): Promise<void> {
+    const f = this.blobs.get(att.id);
+    if (!this.upload || !f) return;
+    try {
+      const up = await this.upload(f);
+      if (!this.files.some((x) => x.id === att.id)) return;
+      this.files = this.files.map((x) => (x.id === att.id ? { ...up, preview: att.preview ?? null } : x));
+      this.blobs.delete(att.id);
+    } catch {
+      /* the send uploads it again and says so if it fails */
+    }
   }
 
   /** an attachment the server holds already (an MCP resource) */
@@ -250,7 +268,7 @@ export class QseChatComposer extends LightElement {
         if (e.dataTransfer?.files.length) void this.addFiles(e.dataTransfer.files);
       }}>
       ${this.slash ? this.renderSlash() : nothing}
-      ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${bytes(a.bytes, 0)}</span><button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>` : nothing}
+      ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn warn-ink">as a file</span>` : nothing}<button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>${this.files.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn warn-ink small" role="status">${w}</p>`)}` : nothing}
       <label class="sr-only" for="ch-input">Message</label>
       <textarea id="ch-input" rows="1" placeholder=${this.running ? (this.phone ? 'Steer the run' : 'Steer: goes in after the current step') : this.phone ? 'Message TandemLLM' : 'Message TandemLLM, or / for a command'} .value=${this.text} ?disabled=${this.disabled} @input=${this.onInput} @keydown=${this.onKey} @paste=${this.onPaste}></textarea>
       <div class="ch-composer-row">

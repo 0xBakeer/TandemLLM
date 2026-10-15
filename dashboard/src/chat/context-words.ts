@@ -1,8 +1,8 @@
 // The Context panel's figures in words: a value, or why there is none. A bare "—" told the reader
 // nothing (2026-10-14: "KV for this chat —", "resident prefix —", "running, 0 B", "— tokens").
 
-import { bytes, exact } from '../lib/format';
-import type { ContextReport, HarnessMemory, SandboxCallData, SandboxStatus } from './types';
+import { bytes, compact, exact } from '../lib/format';
+import type { Attachment, ContextReport, HarnessMemory, SandboxCallData, SandboxStatus } from './types';
 
 export const NOT_TRACKED = 'not tracked for this model';
 export const AFTER_TURN = 'measured after the first turn';
@@ -60,6 +60,14 @@ export function sandboxCallWords(d: SandboxCallData): string {
   if (d.reason === 'oom') return `Out of memory (${d.limit_gib} GiB sandbox limit): the kernel killed a process of this call.`;
   const gave = d.reason === 'no_memory' && d.engine_released_gib != null ? `, the engine gave back ${d.engine_released_gib} GiB` : '';
   return `The sandbox did not start: ${d.why ?? 'no room'} (waited ${d.waited_s ?? 0} s${gave}). The command did not run.`;
+}
+
+/** an attachment chip's figures, and for a file too long to include, what happens to it
+ *  (SRV-487, VIS-169) */
+export function attachmentWords(a: Attachment): { size: string; warn: string | null } {
+  const size = [bytes(a.bytes, 0), a.tokens != null ? `${compact(a.tokens)} tok` : ''].filter(Boolean).join(' · ');
+  const warn = a.inline === false ? `${a.name} is too long to include (about ${exact(a.tokens)} tokens): the model gets one line with its name, size and path${a.path ? ` (${a.path})` : " in the chat's workspace"}.` : null;
+  return { size, warn };
 }
 
 /** a skill's size in the prompt */

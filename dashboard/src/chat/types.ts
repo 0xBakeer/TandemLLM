@@ -183,8 +183,13 @@ export interface Attachment {
   preview?: string | null;
   /** GET /attachments/{id} */
   url?: string;
-  /** its cost in context once read */
+  /** its cost in context once read (a markup file's: its readable text) */
   tokens?: number | null;
+  /** a text file: whether the prompt carries it whole; false: one line with its path (SRV-487).
+   *  Before the send, chatd's guess against its fixed cap */
+  inline?: boolean;
+  /** where the send saved it in the chat's workspace (uploads/) */
+  path?: string;
 }
 
 export interface TurnStats {

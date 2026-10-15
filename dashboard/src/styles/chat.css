@@ -3197,3 +3197,11 @@ qse-chat-panes {
     transition: none;
   }
 }
+/* SRV-487, VIS-169: a text attachment too long to include goes as a file */
+.ch-chip-warn {
+  white-space: nowrap;
+}
+.ch-attach-warn {
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}

@@ -114,6 +114,8 @@ interface Attachment {
   preview?: string | null;                       // a small image's data URL
   url?: string;                                  // v0.2: GET /attachments/{id}
   tokens?: number | null;                        // v0.2: its cost in context once read
+  inline?: boolean;                              // a text file: in the prompt whole; false: one line with its path (SRV-487)
+  path?: string;                                 // where the send saved it: /workspace/uploads/<name>
 }
 
 interface TurnStats {

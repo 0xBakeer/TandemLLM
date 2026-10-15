@@ -1,8 +1,8 @@
 // The Context panel's words for a figure it has no value for (VIS-137): a value, or why there is
 // none, never a bare dash.
 import { describe, expect, it } from 'vitest';
-import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, kvWords, partWords, residentWords, sandboxCallWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
-import type { ContextReport, SandboxStatus } from '../src/chat/types';
+import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, attachmentWords, kvWords, partWords, residentWords, sandboxCallWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
+import type { Attachment, ContextReport, SandboxStatus } from '../src/chat/types';
 
 describe('the Context panel says why a figure is missing', () => {
   const mem = (m: Partial<ContextReport['memory']>): ContextReport['memory'] => ({ kv_bytes: null, resident_bytes: null, sandbox_disk_bytes: null, ...m });
@@ -32,6 +32,13 @@ describe('the Context panel says why a figure is missing', () => {
     expect(sandboxCallWords({ reason: 'no_memory', why, waited_s: 60, limit_gib: 1, floor_gib: 4, mem_available_gib: 3.2, engine_released_gib: 0.5 })).toBe(`The sandbox did not start: ${why} (waited 60 s, the engine gave back 0.5 GiB). The command did not run.`);
     expect(sandboxCallWords({ reason: 'busy', why: '4 sandbox(es) of other chats are running commands, the most at once', waited_s: 60, limit_gib: 1 })).toBe('The sandbox did not start: 4 sandbox(es) of other chats are running commands, the most at once (waited 60 s). The command did not run.');
     expect(sandboxCallWords({ reason: 'oom', limit_gib: 1 })).toBe('Out of memory (1 GiB sandbox limit): the kernel killed a process of this call.');
+  });
+  it('gives an attachment its size and tokens, and says when it goes as a file (SRV-487, VIS-169)', () => {
+    const at = (x: Partial<Attachment>) => ({ id: 'a1', name: 'TandemLLM-and-StairCut.html', kind: 'text', bytes: 9_455_990, mime: 'text/html', ...x }) as Attachment;
+    expect(attachmentWords(at({ tokens: 6123, inline: true }))).toEqual({ size: '9 MB · 6.1K tok', warn: null });
+    expect(attachmentWords(at({ tokens: 2_363_997, inline: false, path: '/workspace/uploads/TandemLLM-and-StairCut.html' })).warn).toBe('TandemLLM-and-StairCut.html is too long to include (about 2,363,997 tokens): the model gets one line with its name, size and path (/workspace/uploads/TandemLLM-and-StairCut.html).');
+    expect(attachmentWords(at({ tokens: 40_000, inline: false })).warn).toMatch(/size and path in the chat's workspace\.$/);
+    expect(attachmentWords(at({ kind: 'image', mime: 'image/png', bytes: 2048, tokens: null })).size).toBe('2 KB');
   });
   it("counts a skill's tokens, or says when they are counted", () => {
     expect(skillTokens(1234)).toBe('1,234 tokens');
