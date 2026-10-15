@@ -14,7 +14,8 @@ Tensors, by type:
   NVFP4 2-D          an `NVFP4Linear` with the tensor's scale (`<name>.scale`, Bolt's Mamba2 in_proj and
                      out_proj) applied to the fp32 sum, as llama.cpp's build_lora_mm does
   F32 / F16 / BF16   as bf16 (fp32 for the router's bias, A, dt_bias, D)
-  Q8_0               dequantised to bf16 at load (the twin, bit for bit with gguf-py)
+  Q8_0 2-D           a `Q8Linear` (the head, the attention and latent projections) on its tile kernel; the
+                     embedding dequantised to bf16 at load (the twin, bit for bit with gguf-py), a row a token
   any other type     refused by name (GGUFFile.open): one kernel per type found in a release
 
 llama.cpp stores some Mamba2 tensors in its own forms: `ssm_a` is A itself (-exp(A_log)), `ssm_d` and
@@ -204,18 +205,19 @@ def _dense(g: GGUFFile, name: str, device, want) -> torch.Tensor:
     raise ValueError(f"{name}: {t.type_name} has no reader here")
 
 
-def load_gguf(path: str, device="cuda", mtp: bool = True, log=print):
+def load_gguf(path: str, device="cuda", mtp: bool = True, log=print, config_dir: str | None = None):
     """(cfg, W, experts, timing, g) of a NemotronH GGUF, in load.py's forms; `path` the file or a
-    directory holding it (and the checkpoint's config.json and tokenizer, as the profiles keep them)."""
+    directory holding it. The checkpoint's config.json (in `config_dir`, else beside the file) is checked
+    against the GGUF's metadata when there is one."""
     path = trunk_gguf(path) or path
     from tools import iq2_linear as Q
     t0 = time.time()
     g = GGUFFile.open(path)
     cfg = config_from_gguf(g)
-    cj = os.path.join(os.path.dirname(path), "config.json")
+    cj = os.path.join(config_dir or os.path.dirname(path), "config.json")
     if os.path.isfile(cj):
         from engine.models.nemotron_h.config import config_from_dict
-        c2 = config_from_dict(json.load(open(cj)), os.path.dirname(path))
+        c2 = config_from_dict(json.load(open(cj)), os.path.dirname(cj))
         for f in ("layer_types", "moe_k", "moe_ffn", "moe_experts", "hidden_size", "ssm_state_size", "mamba_num_heads"):
             if getattr(c2, f) != getattr(cfg, f):
                 raise ValueError(f"config.json and the GGUF metadata disagree on {f}")
@@ -241,6 +243,10 @@ def load_gguf(path: str, device="cuda", mtp: bool = True, log=print):
             continue
         if t.type_name == "IQ2_XXS" and len(t.shape) == 2:
             W[canon] = Q.IQ2Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
+            packed += 1
+            continue
+        if t.type_name == "Q8_0" and len(t.shape) == 2 and canon != "embeddings.weight":
+            W[canon] = Q.Q8Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
             packed += 1
             continue
         if t.type_name == "NVFP4" and len(t.shape) == 2:

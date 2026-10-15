@@ -152,7 +152,7 @@ def test_gguf_reads_and_serves_near_its_twin():
         from engine.models.nemotron_h.engine import NemotronHEngine
         from engine.models.nemotron_h.load import ExpertsRelu2
         c3, W, experts, timing, _ = load_gguf(p, DEV, log=None)
-        assert timing["packed"] == 3 * 2 + 3 + 3, timing
+        assert timing["packed"] == 3 * 2 + 3 + 3 + 3, timing
         o = W["layers.0.mixer.out_proj.weight"]
         assert isinstance(o, Q.NVFP4Linear) and o.scale == np.float32(NVFP4_SCALE)
         eng = NemotronHEngine(c3, W, experts, device=DEV, max_len=256)

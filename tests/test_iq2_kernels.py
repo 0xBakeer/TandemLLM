@@ -168,6 +168,32 @@ def test_gemm_near_the_twin_and_row_invariant():
     return f"rel err {err:.1e}; rows 1..32 bit for bit; a 40-row chunk rel {errc:.1e}"
 
 
+def test_q8_gemm_near_the_twin_and_row_invariant():
+    if not KERNELS:
+        return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
+    N, K = 72, 512
+    rng = np.random.default_rng(3)
+    nb = N * K // 32
+    b = rng.integers(-127, 128, size=(nb, 34)).astype(np.int8).view(np.uint8)
+    b[:, :2] = (rng.random(nb) * 0.004 + 0.001).astype(np.float16).view(np.uint8).reshape(nb, 2)
+    raw = b.reshape(-1)
+    lin = Q.Q8Linear(raw, N, K, device=DEV)
+    w = Q.dequant_q8_0(raw, N, K)
+    assert torch.equal(lin.dequant().cpu(), w)
+    g = torch.Generator().manual_seed(4)
+    x = torch.randn(40, K, generator=g).to(torch.bfloat16).to(DEV)
+    want = Q.matmul_reference(x.cpu(), w)
+    y = lin.matmul(x[:32], f32=True)
+    err = ((y.cpu() - want[:32]).abs().max() / want.abs().max()).item()
+    assert err < 1e-5, err
+    for M in (1, 2, 15, 16, 17, 32):
+        assert torch.equal(lin.matmul(x[:M], f32=True), y[:M]), M
+    yc = lin.matmul(x, f32=True)
+    errc = ((yc.cpu() - want).abs().max() / want.abs().max()).item()
+    assert errc < 1e-2, errc
+    return f"rel err {err:.1e}; rows 1..32 bit for bit; a 40-row chunk rel {errc:.1e}"
+
+
 def test_expert_bank_near_the_twin_and_pair_invariant():
     if not KERNELS:
         return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
