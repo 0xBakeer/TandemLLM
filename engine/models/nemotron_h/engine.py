@@ -23,6 +23,13 @@ step as a CUDA graph.
 
 `DecodeGraph` captures the decode step once per attention class (kernels.classes) and `VerifyGraph` an
 M-row block.
+
+Taps (`set_taps`, a block drafter's context, SPD-123): the residual stream entering each tapped layer
+(llama.cpp's `t_layer_inp`, the output of the layer before after its residual add) of every row lands in
+the row buffers ("taps"), inside the graphs; a committed row's taps go to the state's ring (`st.ring`, by
+position modulo its rows): a decode step's in the step, a verify block's kept path's in the commit, a
+prompt chunk's last rows in the chunk. They are copies of values the rows compute anyway, so the rows'
+bits do not change.
 """
 
 from __future__ import annotations
@@ -104,6 +111,25 @@ class NemotronHEngine(NemotronHRef):
         self._f32.update({(li, "bias"): W[m[li] + "gate.e_score_correction_bias"].float().contiguous()
                           for li in c.moe_layers})
 
+    #: the tapped layers (`set_taps`) and each one's column in the taps; the ring's rows
+    taps: tuple = ()
+    _tap_at: dict = {}
+    ring_rows = 0
+
+    def set_taps(self, layers, window: int) -> None:
+        """Keep the residual rows entering `layers` for a drafter that reads the last `window` committed
+        rows: every state gets a ring of `window` + CAPTURE_ROWS rows (a verify block's commit lands
+        between two drafts). Before any state, row buffer or graph exists: they are sized and captured
+        with the taps."""
+        if self._rb:
+            raise RuntimeError("set_taps after the row buffers exist: their graphs would not write the taps")
+        layers = tuple(int(x) for x in layers)
+        if any(not 0 < li < self.cfg.num_hidden_layers for li in layers):
+            raise ValueError(f"taps {layers}: a layer of 1..{self.cfg.num_hidden_layers - 1} (the embedding is not one)")
+        self.taps = layers
+        self._tap_at = {li: k for k, li in enumerate(layers)}
+        self.ring_rows = int(window) + CAPTURE_ROWS
+
     # ------------------------------------------------------------------------- state
     def new_state(self, cap: int | None = None, paged: bool = False) -> NhState:
         """A state with every tensor the step writes allocated up front (a graph holds them). `paged`
@@ -113,6 +139,8 @@ class NemotronHEngine(NemotronHRef):
         c = self.cfg
         cap = cap or self.max_len
         st = NhState(cap=cap)
+        if self.taps:
+            st.ring = torch.zeros(self.ring_rows, len(self.taps), c.hidden_size, dtype=self.dtype, device=self.device)
         if paged and _kvp.POOL is not None and cap >= _kvp.PAGED_MIN_ROWS and str(self.device).startswith("cuda"):
             st.pages = _kvp.PagedSet(_kvp.OWNER)
         for li, t in enumerate(c.layer_types):
@@ -208,20 +236,21 @@ class NemotronHEngine(NemotronHRef):
         """The device inputs of an M-row call and their pinned host image (one H2D copy a call):
 
           tok, pos, slot   int64 [M]: the token, its position (block start + depth), its cache slot
+          ring             int64 [M]: a decode step's row in the state's taps ring
           ctl              int32 [M, 2]: visible keys, block start
           anc              int32 [M, ANC]: the cache slot of the row's ancestor at each depth
           csrc             int32 [M, KT - 1]: where the row's earlier conv inputs live (a row of the
                            block, or -1 - a state column)
           manc, mn         int32 [M, ANC], [M]: the block rows of the row's path (root first), its length
-        and the outputs (logits, greedy tokens and their pinned copy, the final normed rows) and each
-        Mamba layer's in_proj rows and conv outputs (what a commit keeps)."""
+        and the outputs (logits, greedy tokens and their pinned copy, the final normed rows, the taps) and
+        each Mamba layer's in_proj rows and conv outputs (what a commit keeps)."""
         key = M if key is None else key
         rb = self._rb.get(key)
         if rb is not None:
             return rb
         c, dev = self.cfg, self.device
         S = c.conv_state_len
-        n64 = 3 * M
+        n64 = 4 * M
         n32 = M * (2 + K.ANC + S + K.ANC + 1)
         n32 += n32 % 2
         nb = 8 * n64 + 4 * n32
@@ -229,7 +258,7 @@ class NemotronHEngine(NemotronHRef):
         def views(b):
             i64 = b[:8 * n64].view(torch.int64)
             i32 = b[8 * n64:].view(torch.int32)
-            v = {"tok": i64[:M], "pos": i64[M:2 * M], "slot": i64[2 * M:3 * M]}
+            v = {"tok": i64[:M], "pos": i64[M:2 * M], "slot": i64[2 * M:3 * M], "ring": i64[3 * M:4 * M]}
             k = 0
             for name, w in (("ctl", 2), ("anc", K.ANC), ("csrc", S), ("manc", K.ANC), ("mn", 1)):
                 v[name] = i32[k:k + M * w].view(M, w)
@@ -249,6 +278,8 @@ class NemotronHEngine(NemotronHRef):
               "proj": {li: torch.zeros(M, c.in_proj_dim, dtype=self.dtype, device=dev) for li in c.mamba_layers},
               "xbc": {li: torch.zeros(M, c.conv_dim, dtype=self.dtype, device=dev) for li in c.mamba_layers},
               "attn": {}}
+        if self.taps:
+            rb["taps"] = torch.zeros(M, len(self.taps), c.hidden_size, dtype=self.dtype, device=dev)
         if M == 1:
             h = rb["h"]
             h["csrc"].numpy()[:] = K.window_src([-1], c.conv_kernel)[0]
@@ -272,6 +303,8 @@ class NemotronHEngine(NemotronHRef):
         h["slot"].numpy()[0] = L
         h["ctl"].numpy()[0] = (L + 1, L)
         h["anc"].numpy()[0, 0] = L
+        if self.taps:
+            h["ring"].numpy()[0] = L % self.ring_rows
         rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
         rb["copied"].record()
 
@@ -334,6 +367,10 @@ class NemotronHEngine(NemotronHRef):
         I, CD = c.intermediate, c.conv_dim
         for li, t in enumerate(c.layer_types):
             m = self.pre(li) + "mixer."
+            k = self._tap_at.get(li)
+            if k is not None:
+                for (_, rb, _, _), r in zip(parts, sl):
+                    rb["taps"][:, k].copy_(h if one else h[r])
             if t == "mamba":
                 if one:
                     P = self.lin(n, self.W[m + "in_proj.weight"], out=parts[0][1]["proj"][li])
@@ -377,9 +414,11 @@ class NemotronHEngine(NemotronHRef):
             for (_, rb, _, _), r in zip(parts, sl):
                 rb["hidden"].copy_(n[r])
                 rb["logits"].copy_(logits[r])
-        for _, rb, _, _ in parts:
+        for st, rb, _, _ in parts:
             torch.argmax(rb["logits"], dim=-1, out=rb["next"])
             rb["next_h"].copy_(rb["next"], non_blocking=True)
+            if write and st.ring is not None:
+                st.ring.index_copy_(0, rb["d"]["ring"], rb["taps"])
 
     def step(self, st: NhState, ns: int | None = None, slot=None) -> torch.Tensor:
         """One decode token from the device buffers (`stage` first): the conv and SSM states advance in
@@ -476,7 +515,7 @@ class NemotronHEngine(NemotronHRef):
         c, dev = self.cfg, self.device
         n = key[1]
         S = c.conv_state_len
-        sizes = (("idx", n), ("src", n), ("dst", n), ("cols", S))
+        sizes = (("idx", n), ("src", n), ("dst", n), ("cols", S), ("ring", n))
         tot = sum(w for _, w in sizes)
         pin = dev.type == "cuda"
         hbuf = torch.zeros(tot, dtype=torch.int64, pin_memory=pin)
@@ -512,6 +551,8 @@ class NemotronHEngine(NemotronHRef):
         h["idx"].numpy()[:] = path
         h["src"].numpy()[:] = [L + r for r in path]
         h["dst"].numpy()[:] = L + np.arange(n)
+        if self.taps:
+            h["ring"].numpy()[:] = (L + np.arange(n)) % self.ring_rows
         # the last S inputs along the path as columns of [state (S columns) | the block's rows]
         h["cols"].numpy()[:] = (list(range(S)) + [S + r for r in path])[-S:]
         h["path"].numpy()[0, :n] = path
@@ -538,6 +579,8 @@ class NemotronHEngine(NemotronHRef):
             for li in c.attention_layers:
                 st.k[li].index_copy_(1, d["dst"], st.k[li].index_select(1, d["src"]))
                 st.v[li].index_copy_(1, d["dst"], st.v[li].index_select(1, d["src"]))
+        if st.ring is not None:
+            st.ring.index_copy_(0, d["ring"], rb["taps"].index_select(0, d["idx"]))
 
     # ------------------------------------------------------------------------- prompt chunks
     @torch.no_grad()
@@ -561,7 +604,13 @@ class NemotronHEngine(NemotronHRef):
             raise ValueError(f"{L + T} rows exceed the state's capacity {st.cap}")
         h = self.W["embeddings.weight"].index_select(0, tokens)
         h, n = self._add_rms(h, None, self.W["layers.0.norm.weight"])
+        if st.ring is not None:
+            j0 = max(0, T - self.ring_rows)               # the chunk's rows the ring keeps
+            rdst = torch.arange(L + j0, L + T, device=self.device) % self.ring_rows
         for li, t in enumerate(c.layer_types):
+            k = self._tap_at.get(li)
+            if k is not None and st.ring is not None:
+                st.ring[:, k].index_copy_(0, rdst, h[j0:])
             if t == "mamba":
                 out = self._mamba_chunk(n, li, st)
             elif t == "attention":
@@ -667,26 +716,31 @@ class NemotronHEngine(NemotronHRef):
         """The load-time check that a verify block's rows are the decode step's: decode `steps` tokens
         one at a time from a prefill, then verify the same tokens as one chain block from the prefill's
         state and compare every row's logits bit for bit; then commit the chain and compare the SSM
-        and conv states with the decode steps'. Any difference leaves `spec_ok` False (speculation
-        off) and names the first row or layer."""
+        and conv states with the decode steps'. With taps (`set_taps`) a verify row's taps are held to
+        the decode step's and the ring after the commit to the ring after the steps. Any difference
+        leaves `spec_ok` False (speculation off) and names the first row or layer."""
         st = self.new_state(min(self.max_len, len(prompt) + steps + CAPTURE_ROWS))
         lg = self.prefill(torch.tensor(prompt), st)
         snap = _snapshot(st)
         L = st.length
-        toks, rows = [int(lg[0].argmax())], []
+        toks, rows, taps = [int(lg[0].argmax())], [], []
         for _ in range(min(steps, ROWS_MAX)):
             self.stage(toks[-1], st)
             out = self.step(st)
             st.length += 1
             rows.append(out[0].clone())
             toks.append(int(out[0].argmax()))
+            if self.taps:
+                taps.append(self._rb[1]["taps"][0].clone())
         after = _snapshot(st)
+        ring = st.ring.clone() if st.ring is not None else None
         st.length = L
         _restore(st, snap)
         M = len(rows)
         self.stage_rows(toks[:M], list(range(-1, M - 1)), st)
         got = self.rows_step(st, M)
         bad = next((i for i in range(M) if not torch.equal(got[i], rows[i])), None)
+        tap_bad = next((i for i in range(len(taps)) if not torch.equal(self._rb[M]["taps"][i], taps[i])), None)
         layer = None
         if bad is None:
             self.commit(st, list(range(M)))
@@ -694,8 +748,12 @@ class NemotronHEngine(NemotronHRef):
                 if not torch.equal(a, b):
                     layer = sorted(st.conv)[k % len(st.conv)] if st.conv else k
                     break
-        self.spec_ok = bad is None and layer is None
+            if ring is not None and not torch.equal(st.ring, ring):
+                tap_bad = "ring"
+        self.spec_ok = bad is None and layer is None and tap_bad is None
         res = {"ok": self.spec_ok, "rows": M, "first_diff": bad, "state_diff_layer": layer}
+        if self.taps:
+            res["tap_diff"] = tap_bad
         if log:
             log(f"[nh-selfcheck] {'PASS' if self.spec_ok else 'FAIL: speculation stays off'}: {res}")
         return res

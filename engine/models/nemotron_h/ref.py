@@ -65,10 +65,18 @@ class NhState:
     v: dict = field(default_factory=dict)
     pages: object = None        # the KV pool's paged set (engine/kvpool.py), or None
     block: tuple | None = None  # the board engine's last verify block: (tokens, parents, paths, row buffers key)
+    # the board engine's taps (`NemotronHEngine.set_taps`): the residual rows entering the tapped layers of
+    # the last committed rows, [ring rows, taps, hidden] by position modulo the ring; rows from `tap_from` on
+    # are this sequence's, and `tap_gen` moves whenever the rows below the length stop being them
+    ring: object = None
+    tap_from: int = 0
+    tap_gen: int = 0
 
     def reset_inplace(self) -> None:
         """A new sequence in the same buffers: conv and SSM states zeroed, the length 0."""
         self.length = 0
+        self.tap_from = 0
+        self.tap_gen += 1
         for t in self.conv.values():
             t.zero_()
         for t in self.ssm.values():
