@@ -83,6 +83,8 @@ OMNI_IGNORED = {
     "torch_dtype", "dtype", "transformers_version", "bos_token_id", "pad_token_id", "tie_word_embeddings",
     # Bolt's wrapper (NemotronH_Omni_Reasoning_V3): the processor, the video patches, the tower's last norm
     "processor_class", "video_temporal_patch_size", "vision_final_layernorm",
+    # an EXL3 pack's (exllamav3 writes it at the wrapper's level): engine/models/nemotron_h/pack.py reads it
+    "quantization_config",
 }
 
 

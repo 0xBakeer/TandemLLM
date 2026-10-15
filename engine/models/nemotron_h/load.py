@@ -8,6 +8,11 @@
                    [E, X, I], X the latent width or the hidden width); the MTP head's MoE block J
                    under ("mtp", J)
 
+From an EXL3 pack (ENG-E12) every projection the pack quantised is an `EXL3Block` (tools/exl3_linear.py;
+the head with fp32 logits), q | k | v one EXL3 group where the three share a rate, and the routed experts
+of a layer a `Relu2Bank` (tools/exl3_relu2.py); what the pack stored in fp16 (the norms, the conv taps, the
+router, the embedding) is cast back to bf16, which is exact for the BF16 checkpoint's values.
+
 `load_any` takes either form of checkpoint: a GGUF (a `*.gguf` file, a directory holding one, or the file
 QSE_NH_GGUF names for a directory of config and tokenizer: gguf_load.py) or the BF16 safetensors below.
 
@@ -52,11 +57,33 @@ def _experts(idx: PackIndex, prefix: str, E: int, I: int, X: int, device, dtype)
     return ExpertsRelu2(up, down)
 
 
+def _exl3_experts(idx: PackIndex, prefix: str, E: int, device):
+    from tools.exl3_relu2 import Relu2Bank
+    return Relu2Bank([(idx.exl3(prefix + f"experts.{e}.up_proj", device), idx.exl3(prefix + f"experts.{e}.down_proj", device))
+                      for e in range(E)])
+
+
+def _fuse_qkv(W: dict, m: str) -> None:
+    """q | k | v in one weight: a bf16 concatenation, or one EXL3 group when the three share a rate (else
+    the engine launches them apart)."""
+    from tools.exl3_linear import EXL3Block
+    ws = [W[m + f"{x}_proj.weight"] for x in "qkv"]
+    if all(torch.is_tensor(w) for w in ws):
+        W[m + "qkv"] = torch.cat(ws).contiguous()
+    elif all(isinstance(w, EXL3Block) for w in ws) and len({w.kb for w in ws}) == 1:
+        g = EXL3Block.group(ws, ["q", "k", "v"])
+        W[m + "qkv"] = g
+        for i, x in enumerate("qkv"):
+            W[m + f"{x}_proj.weight"] = g.member(i)
+
+
 def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=print, idx: PackIndex | None = None):
-    """(idx, W, experts, timing) of the checkpoint at `path`; `mtp`: the MTP head's tensors too."""
+    """(idx, W, experts, timing) of the checkpoint or EXL3 pack at `path`; `mtp`: the MTP head's tensors too."""
     t0 = time.time()
     idx = idx or PackIndex.open(path)
     idx.audit()
+    if idx.is_exl3:
+        idx.check_mul1()
     c = idx.cfg
     mtp = mtp and idx.has_mtp
     timing = {"index_s": round(time.time() - t0, 2), "notes": list(idx.notes)}
@@ -65,6 +92,10 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
     for name, _ in expected(c, mtp=mtp):
         if ".experts." in name:
             continue
+        base = name[:-len(".weight")]
+        if idx.formats.get(base) == "exl3":
+            W[name] = idx.exl3(base, device, out_fp32=name == "lm_head.weight")
+            continue
         t = idx.read(name)
         want = torch.float32 if name.endswith(FP32) else dtype
         W[name] = t.to(device=device, dtype=want).contiguous()
@@ -72,23 +103,28 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
     if c.tie_word_embeddings:
         W["lm_head.weight"] = W["embeddings.weight"]
     for li in c.attention_layers:
-        m = f"layers.{li}.mixer."
-        W[m + "qkv"] = torch.cat([W[m + f"{x}_proj.weight"] for x in "qkv"]).contiguous()
+        _fuse_qkv(W, f"layers.{li}.mixer.")
     timing["dense_s"] = round(time.time() - t1, 2)
     t1 = time.time()
     experts: dict = {}
     for n, li in enumerate(c.moe_layers):
-        experts[li] = _experts(idx, f"layers.{li}.mixer.", c.moe_experts[li], c.moe_ffn[li], c.expert_in, device, dtype)
+        p = f"layers.{li}.mixer."
+        if idx.formats.get(p + "experts.0.up_proj") == "exl3":
+            experts[li] = _exl3_experts(idx, p, c.moe_experts[li], device)
+        else:
+            experts[li] = _experts(idx, p, c.moe_experts[li], c.moe_ffn[li], c.expert_in, device, dtype)
         idx.drop_cache()
         if log and n % 8 == 7:
             log(f"[nh-load] experts through layer {li}: {time.time() - t1:.1f} s")
     if mtp:
         for j, (k, ffn, E) in c.mtp_moe.items():
-            experts[("mtp", j)] = _experts(idx, f"mtp.layers.{j}.mixer.", E, ffn, c.expert_in, device, dtype)
+            p = f"mtp.layers.{j}.mixer."
+            experts[("mtp", j)] = _exl3_experts(idx, p, E, device) if idx.formats.get(p + "experts.0.up_proj") == "exl3" \
+                else _experts(idx, p, E, ffn, c.expert_in, device, dtype)
         idx.drop_cache()
         m = "mtp.layers.0.mixer."
         if m + "q_proj.weight" in W:
-            W[m + "qkv"] = torch.cat([W[m + f"{x}_proj.weight"] for x in "qkv"]).contiguous()
+            _fuse_qkv(W, m)
     timing["experts_s"] = round(time.time() - t1, 2)
     timing["total_s"] = round(time.time() - t0, 2)
     timing["mtp"] = mtp
