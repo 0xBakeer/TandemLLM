@@ -27,7 +27,7 @@ A decode token reads 5.16 GB on Bolt: the NVFP4 Mamba2 projections 2.47 GB, the 
 
 ### Bolt: nemotron-bolt-iq2
 
-`nemotron-bolt-iq2` (`ops/profiles/nemotron-bolt-iq2.env`): NVIDIA's GGUF of revision 18828290 of nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF (22.0 GB, the registry entry's asset, fetched from NVIDIA's repository and never re-hosted; `QSE_NH_GGUF` names it), with the config, tokenizer and chat template of the BF16 repository (revision 153d4551) in the profile's weights directory; 22.19 GiB at load; 262,144 tokens; 3 slots; the lookup cut by StairCut (Bolt has no MTP head). Setup Guide entry: [models/nemotron-3.5-bolt-74b-a9b/model.yaml](../models/nemotron-3.5-bolt-74b-a9b/model.yaml).
+`nemotron-bolt-iq2` (`ops/profiles/nemotron-bolt-iq2.env`): NVIDIA's GGUF of revision 724e3fee of nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF (22.0 GB, the registry entry's asset, fetched from NVIDIA's repository and never re-hosted; `QSE_NH_GGUF` names it), with the config, tokenizer and chat template of the BF16 repository (revision 153d4551) in the profile's weights directory; 22.19 GiB at load; 262,144 tokens; 3 slots; the lookup cut by StairCut (Bolt has no MTP head). Setup Guide entry: [models/nemotron-3.5-bolt-74b-a9b/model.yaml](../models/nemotron-3.5-bolt-74b-a9b/model.yaml).
 
 DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off.
 

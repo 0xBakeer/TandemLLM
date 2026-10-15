@@ -1,15 +1,16 @@
 {
  "nemotron-bolt-iq2": {
   "hub": {
-   "repo": "nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF",
-   "revision": "188282901e3b6f8169aff9de69022a78350259b0",
+   "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF",
+   "revision": "724e3fee41becc4048998e2204748147876ed56b",
    "file": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf",
    "bytes": 22018326528,
    "sha256": "91d63363e782c8a3d5f4be42816eba8e0d42dd2530bd07a7d0d2dc440599af75",
    "text_files": {
     "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16",
     "revision": "153d4551268566bb7d57681ceded1289e6341fcd"
-   }
+   },
+   "measured_from": "nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF at 188282901e3b6f8169aff9de69022a78350259b0, the same file (sha256 on the hub)"
   },
   "decode_step": {
    "tok_s": 27.47,

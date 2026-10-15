@@ -21,7 +21,7 @@ license: The model's license (OpenMDW-1.1) is on its Hugging Face page. TandemLL
 icon: null
 links:
 - label: Model card
-  url: https://huggingface.co/nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF
+  url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF
 - label: BF16 checkpoint
   url: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16
 devices:
@@ -37,10 +37,10 @@ assets:
   also: []
   fetchable: true
   protected: false
-  hf_repo: nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF
+  hf_repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF
   fetch:
-  - repo: nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF
-    revision: 188282901e3b6f8169aff9de69022a78350259b0
+  - repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF
+    revision: 724e3fee41becc4048998e2204748147876ed56b
     files:
     - NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf
     to: ${HOME}/models/nemotron-3.5-bolt-74b-a9b-iq2-gguf
@@ -106,7 +106,7 @@ profiles:
       chat positions, every difference a near tie'
   assets_required:
   - nemotron-bolt-iq2-gguf
-  note: 'NVIDIA''s GGUF (revision 18828290) read as stored: IQ2_XXS experts, NVFP4 Mamba2 projections with their tensor
+  note: 'NVIDIA''s GGUF (revision 724e3fee) read as stored: IQ2_XXS experts, NVFP4 Mamba2 projections with their tensor
     scales, Q8_0 head, attention and latent projections. A decode token reads about 4.6 GB of it. The config and the
     tokenizer come from the BF16 repository (revision 153d4551, 17 MB). Weights GiB: allocated at load (measured).'
   hf_revision: 153d4551268566bb7d57681ceded1289e6341fcd
