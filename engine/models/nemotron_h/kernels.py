@@ -12,7 +12,10 @@ twins"). With the reference's roundings (engine/models/nemotron_h/ref.py):
   ssm_rows       the selective state update walked from the committed state S0 along the row's
                  ancestors (`anc`, up to ANC): dt = softplus(dt_raw + dt_bias), S = S exp(dt A) +
                  dt x B, all fp32, then y = bf16(S C + D x). `write`: the walk's last S replaces S0
-                 (a decode step; a commit runs it over the kept path)
+                 (a decode step; a commit runs it over the kept path). A block of rows walks once a
+                 head: a row whose parent is the row before it goes on from that row's S, any other
+                 row walks its path from S0 again -- every row's S is the same products in the same
+                 order as its own walk, and S0 is read once, not once a row
   gated_norm     y silu(z) in fp32, RMS over each group, times w in fp32, one rounding
   router         fp32 logits: sigmoid, the correction bias for the choice, top k (ties to the lower
                  id), the chosen sigmoids / (sum + 1e-20) x scale, fp32
@@ -110,6 +113,39 @@ if HAVE_TRITON:
         tl.store(Y + r * s_y + h * HD + d, y.to(tl.bfloat16))
         if WRITE:
             tl.store(sp, S, mask=nm[None, :])
+
+    @triton.jit
+    def _ssm_walk(P, s_p, DT_OFF, XBC, s_x, ANCT, NANC, S0, A, DTB, DP, Y, s_y, M,
+                  I: tl.constexpr, GN: tl.constexpr, HD: tl.constexpr, N: tl.constexpr, REP: tl.constexpr,
+                  NA: tl.constexpr, BD: tl.constexpr, BN: tl.constexpr):
+        h = tl.program_id(0)
+        db = tl.program_id(1)
+        d = db * BD + tl.arange(0, BD)
+        n = tl.arange(0, BN)
+        nm = n < N
+        g = h // REP
+        S0v = tl.load(S0 + h * HD * N + d[:, None] * N + n[None, :], mask=nm[None, :], other=0.0)
+        a_h = tl.load(A + h)
+        b_h = tl.load(DTB + h)
+        dp = tl.load(DP + h)
+        S = S0v
+        for r in range(0, M):
+            cnt = tl.load(NANC + r)
+            par = tl.load(ANCT + r * NA + tl.maximum(cnt - 2, 0))
+            on = (cnt >= 2) & (par == r - 1)              # the walk so far is this row's path less itself
+            S = tl.where(on, S, S0v)
+            for t in range(tl.where(on, cnt - 1, 0), cnt):
+                a = tl.load(ANCT + r * NA + t)
+                dt = tl.load(P + a * s_p + DT_OFF + h).to(tl.float32) + b_h
+                dt = tl.where(dt <= 20.0, tl.log(1.0 + tl.exp(dt)), dt)
+                dA = tl.exp(dt * a_h)
+                x = tl.load(XBC + a * s_x + h * HD + d).to(tl.float32)
+                B = tl.load(XBC + a * s_x + I + g * N + n, mask=nm, other=0.0).to(tl.float32)
+                S = S * dA + (dt * x)[:, None] * B[None, :]
+            C = tl.load(XBC + r * s_x + I + GN + g * N + n, mask=nm, other=0.0).to(tl.float32)
+            xr = tl.load(XBC + r * s_x + h * HD + d).to(tl.float32)
+            y = tl.sum(S * C[None, :], 1) + dp * xr
+            tl.store(Y + r * s_y + h * HD + d, y.to(tl.bfloat16))
 
     @triton.jit
     def _gated_norm(Yv, s_y, Z, s_z, W, OUT, eps, I: tl.constexpr, GS: tl.constexpr, BLOCK: tl.constexpr):
@@ -257,6 +293,11 @@ def ssm_rows(proj: torch.Tensor, dt_off: int, xbc: torch.Tensor, anc: torch.Tens
     if y is None:
         y = torch.empty(M, I, dtype=torch.bfloat16, device=xbc.device)
     BD = 16 if HD % 16 == 0 else HD
+    if M > 1 and not write:
+        _ssm_walk[(Hh, HD // BD)](proj, proj.stride(0), dt_off, xbc, xbc.stride(0), anc, nanc, S0, A, dtb, Dp, y,
+                                  y.stride(0), M, I=I, GN=GN, HD=HD, N=N, REP=Hh // n_groups, NA=anc.shape[1], BD=BD,
+                                  BN=triton.next_power_of_2(N), num_warps=4)
+        return y
     _ssm_rows[(M, Hh, HD // BD)](proj, proj.stride(0), dt_off, xbc, xbc.stride(0), anc, nanc, S0, A, dtb, Dp, y, y.stride(0),
                                  I=I, GN=GN, HD=HD, N=N, REP=Hh // n_groups, NA=anc.shape[1], BD=BD,
                                  BN=triton.next_power_of_2(N), WRITE=write, num_warps=4)

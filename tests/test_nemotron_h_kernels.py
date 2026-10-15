@@ -96,6 +96,25 @@ def test_a_chain_row_is_the_decode_steps_bit_for_bit():
         assert torch.equal(Sc, S), (M, "commit")
 
 
+def test_a_tree_row_is_its_paths_decode_steps_bit_for_bit():
+    """A block walks the SSM once a head (`_ssm_walk`): a row continuing the row before it goes on
+    from that row's state, a branch walks its path from S0 again. Every row is the decode steps along
+    its path, bit for bit."""
+    parents = [-1, 0, 1, 0, 3, 4, 1, 6, 7, 0]
+    M = len(parents)
+    proj, wc, bc, state, S0, A, dtb, Dp = _mamba_inputs(M)
+    src = torch.tensor(K.window_src(parents, KT), dtype=torch.int32, device=DEV)
+    xbc = K.conv_rows(proj, I, state, wc, bc, src)
+    anc, nanc = _anc(parents)
+    y = K.ssm_rows(proj, I + CD, xbc, anc, nanc, S0, A, dtb, Dp, G)
+    a1, n1 = _anc([-1])
+    for r in range(M):
+        S = S0.clone()
+        for a in anc[r, :int(nanc[r])].tolist():
+            y1 = K.ssm_rows(proj[a:a + 1], I + CD, xbc[a:a + 1], a1, n1, S, A, dtb, Dp, G, write=True)
+        assert torch.equal(y1[0], y[r]), r
+
+
 def test_gated_norm_add_rms_router():
     M = 9
     y, z, w = rnd(M, I), rnd(M, I), 1 + rnd(I, s=0.1)
