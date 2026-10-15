@@ -5,6 +5,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ## Unreleased
 
 - Chat tab: each chat's sandbox has 1 GiB of memory (`QSE_SANDBOX_MEM_GB`; was 4 GiB), and four of them take what one took (`QSE_SANDBOX_TOTAL_GB` follows the limit). A process the kernel kills at the limit fails its call with "out of memory (1 GiB sandbox limit)", read from the container's cgroup, also when a pipe's writer exits 1 after its reader was killed; the call card shows it (SRV-485, VIS-167). What fits in 1 GiB, measured: [docs/chat.md](docs/chat.md#the-sandbox-phase-2).
+- Chat tab: an attachment is never inlined past the window. Every attachment is saved under the chat's `/workspace/uploads/` when its message is sent; one message's text files share a budget of a quarter of the free window, at most 32,000 tokens, and a file past it is one line with its name, size, tokens and path. The chip shows size and tokens on upload and marks a file that goes as a file. A request that does not fit names the attachment or the largest part instead of advising a new chat (SRV-487, VIS-169).
 - Engine: `POST /v1/cache/release {bytes}` (as `/v1/cache/clear`: the admin token or trusted-local) gives back what the engine holds idle, cheapest first: free allocator blocks and caches while slot 0 is idle, the small models, idle side conversations, slot 0's idle conversation (to the NVMe first). chatd asks it before a sandbox waits and before the memory guard stops one (SRV-483).
 
 ### Fixed

@@ -125,6 +125,16 @@ MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are calle
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.
 
+## Attachments
+
+An image goes to a model that reads images; a text file goes into the prompt, and its tokens show on
+its chip as soon as it is added (the composer uploads it then). When a message is sent, each of its
+attachments is saved in the chat's workspace under `uploads/` (`/workspace/uploads/<name>`, a free
+name). The message's text files share a budget of a quarter of the window's free room, at most
+32,000 tokens; a file past it is not inlined: the prompt gets one line with its name, size, tokens
+and path, and the chip marks it "as a file" before the send. A request that still does not fit
+names its cause: the attachment, its message and its tokens, or the largest part.
+
 ## Web search
 
 `web_search(query, max_results?)` is a built-in tool. It answers a numbered list of results: title, URL, snippet, and date and engine when the provider gives them. The model cites the URLs and reads a page with `web_fetch`. The search runs in chatd on the host, not in the sandbox.

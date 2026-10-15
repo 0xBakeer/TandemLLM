@@ -9,7 +9,8 @@ queue) only ever appends. `tests/test_chatd_render.py` pins it: the same convers
 same bytes across calls and across a restart (a fresh store read).
 
     messages        the branch, root to head: user text (text attachments as a fenced block after
-                    it, images as `image_url` parts when the model reads images), assistant text with
+                    it, one line with its workspace path for one over the budget, chatd/attach.py;
+                    images as `image_url` parts when the model reads images), assistant text with
                     its reasoning as `reasoning_content` (the engine's template decides what to keep);
                     notices (role `system` in the tree) are the UI's and are left out
     tool images     in the tool message that returned them, the newest one only: an older
@@ -26,6 +27,8 @@ from __future__ import annotations
 import base64
 import json
 
+from chatd import attach
+
 SESSION_PREFIX = "chat-"
 
 
@@ -38,6 +41,14 @@ def session_id(conversation_id: str) -> str:
 
 def text_of(parts: list[dict], kind: str = "text") -> str:
     return "".join(p.get("text") or "" for p in parts if p.get("type") == kind)
+
+
+def inlined(a: dict) -> bool:
+    """A text attachment the prompt carries whole: as placed when its message was sent (SRV-487);
+    one from before that, while it stays within INLINE_MAX_TOKENS."""
+    if a.get("inline") is not None:
+        return bool(a["inline"])
+    return int(a.get("tokens") or 0) <= attach.INLINE_MAX_TOKENS
 
 
 def _user(m: dict, vision: bool, blob=None) -> dict:
@@ -58,6 +69,9 @@ def _user(m: dict, vision: bool, blob=None) -> dict:
                            + base64.b64encode(data).decode()}})
         elif a.get("kind") == "text":
             body = data.decode("utf-8", "replace")
+            if not inlined(a):
+                text += attach.line(a)
+                continue
             text += f"\n\n```{a.get('name') or 'file'}\n{body}\n```"
     if images:
         return {"role": "user", "content": [{"type": "text", "text": text}, *images]}

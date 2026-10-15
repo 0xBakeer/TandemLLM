@@ -29,6 +29,31 @@ class ApiConflict(Exception):
     pass
 
 
+def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio) -> str:
+    """The request does not fit: say which part is the cause (SRV-487, VIS-169). Live
+    (2026-10-15) one 9.5 MB HTML attachment made a request of 2,875,364 tokens, and the error
+    told the user to start a new chat."""
+    head = (f"This request is about {est:,} tokens and the model's window is {window:,}: there "
+            f"is no room left for an answer. ")
+    atts = [(int(a.get("tokens") or 0), a, m) for m in path if m.get("role") == "user"
+            for a in m.get("attachments") or [] if a.get("kind") == "text" and render.inlined(a)]
+    big = max(atts, key=lambda x: x[0], default=None)
+    if big is not None and big[0] * 2 > est:
+        said = " ".join(render.text_of(big[2].get("parts") or []).split())
+        said = f' ("{said[:60]}{"..." if len(said) > 60 else ""}")' if said else ""
+        return head + (f"The cause is the attachment {big[1].get('name') or 'file'} in your "
+                       f"message{said}: about {big[0]:,} tokens. Edit that message and leave "
+                       f"the file out, or attach a shorter one.")
+    sizes = [(comp.estimate({"messages": [m]}, ratio), m) for m in body.get("messages") or []]
+    n, m = max(sizes, key=lambda x: x[0], default=(0, {}))
+    role = m.get("role")
+    what = ("the system prompt with the skills" if role == "system" else
+            "a tool result" if role == "tool" else "one of your messages" if role == "user"
+            else "an answer")
+    return head + (f"The largest part is {what}, about {n:,} tokens. Edit an earlier message to "
+                   f"branch off before it, or start a new chat.")
+
+
 class ToolCtx:
     """What an executor may use for one call."""
 
@@ -681,10 +706,7 @@ class AgentMixin:
             body = build(keep_from=user_i)
             est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:
-            raise GuardError(
-                f"This conversation is about {est:,} tokens and the model's window is "
-                f"{window:,}: there is no room left for an answer. Start a new chat, or edit an "
-                f"earlier message to branch off before the long part.")
+            raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio))
         if window:
             room = window - est - 256
             cap = int(info.get("max_output") or 0)
