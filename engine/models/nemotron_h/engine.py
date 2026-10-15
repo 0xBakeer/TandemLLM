@@ -598,8 +598,10 @@ class NemotronHEngine(NemotronHRef):
         st.v[li][:, L:L + T] = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
         k = st.k[li][:, :L + T].unsqueeze(0)
         v = st.v[li][:, :L + T].unsqueeze(0)
-        o = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k.repeat_interleave(c.gqa, 1),
-                                           v.repeat_interleave(c.gqa, 1), attn_mask=causal_lower_right(T, L + T))
+        # GQA inside SDPA: the same results as K and V repeated to every query head, without the copies (at
+        # 262,144 tokens the copies grew with every chunk and the allocator kept each size: 100 GiB reserved)
+        o = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k, v, attn_mask=causal_lower_right(T, L + T),
+                                           enable_gqa=True)
         return self.mm(o[0].transpose(0, 1).reshape(T, -1), self.W[m + "o_proj.weight"])
 
     def _moe_chunk(self, n, li):
