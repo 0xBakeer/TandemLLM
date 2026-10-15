@@ -72,17 +72,40 @@ Each chat's tools run in its own container, `tandem-chat-<id>` from the image `t
 `QSE_SANDBOX_SOCKET` (default `/var/run/docker.sock`); Podman serves the same API, and
 `ops/sandbox/install.sh` (root once) sets up rootless Podman under the user `tandem-sbx` with its
 nftables rules. Every container is locked down whatever the runtime: uid 1000, no capabilities, a
-read-only root, `--network none`, 4 GiB, 4 CPUs, 512 pids, no GPU. Its internet goes through
-chatd's per-chat proxy, which refuses the LAN and this box (`sandbox_network` per chat: on or off).
+read-only root, `--network none`, 1 GiB of memory, 4 CPUs, 512 pids, no GPU. Its internet goes
+through chatd's per-chat proxy, which refuses the LAN and this box (`sandbox_network` per chat: on
+or off).
 
-The engine comes first. A sandbox starts only when MemAvailable minus its limit stays at 19 GiB or
-more; the guard stops the least recently used idle sandbox under 15 GiB and kills them all under
-12 GiB; an idle sandbox stops after 30 minutes. The files stay. Knobs:
+A chat's tool call gets its sandbox: the sandbox has priority over what the engine holds idle. The
+engine keeps itself at its own floors (the KV pool's hard floor and the request admission's floor),
+so a sandbox only has to leave room for a prefill's workspace: 2.7 GiB measured for a 203,052-token
+prefill of the 27B EXL3 6.0 on the Spark, 3.5 GiB at the full window. A sandbox starts when
+MemAvailable minus its limit stays at 4 GiB or more. When it does not, chatd asks the engine for
+the difference (`POST /v1/cache/release`): the engine gives back its free allocator blocks, its
+caches, the small models and idle conversations (to the NVMe when the spill is on), never what a
+running request uses. A call waits for its sandbox at most 60 s; then it fails with the reason and
+the numbers, the model reads them as the tool's result and the chat shows them on the call. The
+guard asks the engine first and then stops the least recently used idle sandbox under 3 GiB, and
+kills them all under 2 GiB; an idle sandbox stops after 30 minutes. The files stay.
 
-- `QSE_SANDBOX_MIN_START_GB` (0): MemAvailable needed to start one (30 while other work runs memory
-  fits on the box)
-- `QSE_SANDBOX_MAX_RUNNING` (4) and `QSE_SANDBOX_TOTAL_GB` (16): how many run at once, and their
-  limits' sum
+A process the kernel kills at the memory limit (the cgroup's `oom_kill` count) fails its call with
+"out of memory (1 GiB sandbox limit)". What fits in 1 GiB, measured on the Spark (peak of the
+container's memory, page cache included): `pip install` of pillow, numpy, imageio-ffmpeg and
+piper-tts 549 MiB; `npm i` of typescript, eslint, @playwright/test, react and webpack 531 MiB; a
+Vite build 254 MiB; render_page of a 6,000-element page at 1280x800 503 MiB, at 2400x2400 442 MiB,
+a WebGL page at 1920x1080 422 MiB; piper text to speech, 55 s of audio, 366 MiB; 60 s of 1280x720
+video drawn with PIL and encoded with libx264 415 MiB; the same at 1920x1080, preset medium, 1,010
+MiB; pandas with 2 million rows and a matplotlib plot 391 MiB; g++ -O2, four files at once, 784
+MiB. What does not: libx264 at 1920x1080 with preset slow and its default threads, 20 g++ at once,
+a 1.5 GB numpy array. The sandbox has 4 CPUs while `nproc` counts the whole box, so a tool that
+starts a thread per core (x264, make -j, xargs -P) takes more memory than it needs: with
+`-threads 4` the 1080p slow encode peaks at 652 MiB. Knobs:
+
+- `QSE_SANDBOX_MEM_GB` (1): each sandbox's memory limit
+- `QSE_SANDBOX_FLOOR_GB` (4): MemAvailable a new sandbox must leave after its limit
+- `QSE_SANDBOX_WAIT_S` (60): the longest a call waits for its sandbox
+- `QSE_SANDBOX_MAX_RUNNING` (4) and `QSE_SANDBOX_TOTAL_GB` (the two multiplied, 4): how many run at
+  once, and their limits' sum
 - `QSE_SANDBOX_IMAGE` (`tandem-sandbox:1`)
 
 Export them before `ops/chatd.sh start`. Without a runtime, starting a sandbox answers 503

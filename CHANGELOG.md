@@ -2,6 +2,15 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+- Chat tab: each chat's sandbox has 1 GiB of memory (`QSE_SANDBOX_MEM_GB`; was 4 GiB), and four of them take what one took (`QSE_SANDBOX_TOTAL_GB` follows the limit). A process the kernel kills at the limit fails its call with "out of memory (1 GiB sandbox limit)", read from the container's cgroup, also when a pipe's writer exits 1 after its reader was killed; the call card shows it (SRV-485, VIS-167). What fits in 1 GiB, measured: [docs/chat.md](docs/chat.md#the-sandbox-phase-2).
+- Engine: `POST /v1/cache/release {bytes}` (as `/v1/cache/clear`: the admin token or trusted-local) gives back what the engine holds idle, cheapest first: free allocator blocks and caches while slot 0 is idle, the small models, idle side conversations, slot 0's idle conversation (to the NVMe first). chatd asks it before a sandbox waits and before the memory guard stops one (SRV-483).
+
+### Fixed
+
+- Chat tab (SRV-481): a tool call waited for its sandbox without end. On the Spark every `bash` call of a chat waited 21 minutes on a 30 GiB start line (`QSE_SANDBOX_MIN_START_GB`, a leftover from the Flash-Next memory fits) and a 19 GiB reserve, with MemAvailable at 20 GiB. The start line is gone. A sandbox starts when MemAvailable less its limit stays at 4 GiB or more (`QSE_SANDBOX_FLOOR_GB`): the engine keeps itself at its own floors, and a prefill's workspace measured 2.7 GiB at 203,052 tokens. The guard stops an idle sandbox under 3 GiB and kills them all under 2 GiB. A wait ends after 60 s (`QSE_SANDBOX_WAIT_S`) with the reason and the numbers, as the tool result the model reads and on the call card; the terminal and stdio MCP servers no longer wait forever either.
+
 ## 0.9.1, 2026-10-14
 
 0.9.1 adds web search and media playback to the Chat tab, turns on the loop guard, the loop escape and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page and the EXL3 base download. The decode path does not change: under `engine/` only the small models' slot changed (VIS-153).

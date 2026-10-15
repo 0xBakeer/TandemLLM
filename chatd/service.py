@@ -172,7 +172,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
         self.stopping = threading.Event()
         self.sandboxes = sandboxes or Sandboxes(data_dir, log=self.log,
                                                 on_change=self._sandbox_changed,
-                                                network_mode=self._network_mode)
+                                                network_mode=self._network_mode,
+                                                release=self.engine.release_memory)
         self.snaps = Snapshots(os.path.join(data_dir, "snapshots"))
         self._library: tuple[float, bool] | None = None
         from chatd.mcp import Mcp

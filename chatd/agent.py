@@ -41,17 +41,26 @@ class ToolCtx:
         self.engine = svc.engine
         self._out: list[str] = []
         self.quiet = False
+        self.oom = False                     # the last exec lost a process at the memory limit
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
 
         def waiting(why):
-            self.run.set_phase("tool", f"Waiting for memory to start the sandbox ({why})")
+            self.run.set_phase("tool", f"Waiting to start the sandbox ({why})")
         sb.ensure(self.cid, cancel=self.run.cancel, on_wait=waiting)
         self.run.set_phase("tool", self._running_words())
         self.quiet = quiet
-        return sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
-                      cancel=self.run.cancel)
+        before = sb.oom_kills(self.cid)
+        code, timed_out = sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
+                                 cancel=self.run.cancel)
+        after = sb.oom_kills(self.cid)
+        # the cgroup's count when it can be read (a pipe's writer killed at the limit leaves its
+        # reader an exit 1); else a SIGKILL chatd did not send: 137 from bash, 9 from setsid when
+        # the killed process is the command itself
+        self.oom = (after > before if before is not None and after is not None else
+                    code in (9, 137) and not timed_out and not self.run.cancel.is_set())
+        return code, timed_out
 
     def _running_words(self) -> str:
         name = self.part.get("name")
@@ -508,7 +517,7 @@ class AgentMixin:
         try:
             res = tool.executor(ctx, args)
         except (ToolError, PathError, Unavailable, egress.Refused) as exc:
-            res = Result(str(exc), is_error=True)
+            res = Result(str(exc), is_error=True, data=getattr(exc, "data", None))
         except tools_mod.ChangedError:
             res = Result("the file changed meanwhile; read it again", is_error=True)
         except FileNotFoundError:
