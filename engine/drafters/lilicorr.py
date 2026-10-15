@@ -348,9 +348,14 @@ class LiLiCorrModel:
 class LiLiCorrHead:
     """LiLiCorr as a draft head of the shared tree drafter (`MTPTreeDrafter`): `depth` 7, the rows it
     is handed are counted (the drafter's bookkeeping) and the context is read from the serving engine's
-    tap ring. `srv`: the NemotronH serving engine (`st`, `kv.length`, `fn` with the taps set)."""
+    tap ring. `srv`: the NemotronH serving engine (`st`, `kv.length`, `fn` with the taps set).
 
-    def __init__(self, srv, model: LiLiCorrModel):
+    The draft (the block, the head, the lattice, the walk) is one CUDA graph over the head's rings and
+    a staged input (the anchor, its position, the anchor row's slot, which context slots each block row
+    sees), captured at the first draft (the load-time gate's); the context's rows run eagerly before it
+    (their count varies)."""
+
+    def __init__(self, srv, model: LiLiCorrModel, graph: bool = True):
         self.srv, self.m = srv, model
         c = model.cfg
         self.depth = c.slots
@@ -367,6 +372,14 @@ class LiLiCorrHead:
         self._out = None
         self._n = 0
         self.stats = {"drafts": 0, "context_rows": 0}
+        # the staged input: int64 (anchor, position, anchor row's slot), fp32 (the anchor row is this
+        # sequence's), bool [block, window] (the context slots a block row sees)
+        pin = dev.type == "cuda"
+        self._h = {"i": torch.zeros(3, dtype=torch.long, pin_memory=pin), "f": torch.zeros(1, pin_memory=pin),
+                   "ok": torch.zeros(c.block_size, self.W, dtype=torch.bool, pin_memory=pin)}
+        self._d = {k: torch.zeros_like(v, device=dev) for k, v in self._h.items()}
+        self._copied = torch.cuda.Event() if pin else None
+        self.graph = None if not (graph and pin) else False           # False: not captured yet
 
     # --- the drafter's interface ------------------------------------------------------------------
     def reset(self) -> None:
@@ -400,20 +413,49 @@ class LiLiCorrHead:
     # --- the context and the draft ----------------------------------------------------------------
     def draft_at(self, anchor: int, n: int) -> torch.Tensor:
         """[slots, 4] on the device (`LiLiCorrModel.walk`) for `anchor` at position n."""
-        m = self.m
-        dev = m.device
         self.feed(n)
-        lo = n - self.W + 1
         tag = self.tag
-        ok = (tag >= max(lo, 0)) & (tag < n)                          # a slot this draft may read at all
+        ok = (tag >= max(n - self.W + 1, 0)) & (tag < n)              # a slot this draft may read at all
         # row i (position n + i) sees a context key at p when n + i - p < window
         pos = torch.arange(self.m.cfg.block_size)[:, None] + n
-        ctx_ok = ok[None, :] & (pos - tag[None, :] < self.W)
         prev = (n - 1) % self.W
-        a_ok = 1.0 if n > 0 and int(tag[prev]) == n - 1 else 0.0
+        if self._copied is not None:
+            self._copied.synchronize()                                # the last draft's copy has left
+        h = self._h
+        h["ok"].copy_(ok[None, :] & (pos - tag[None, :] < self.W))
+        h["i"][0], h["i"][1], h["i"][2] = anchor, n, prev
+        h["f"][0] = 1.0 if n > 0 and int(tag[prev]) == n - 1 else 0.0
+        for k, t in h.items():
+            self._d[k].copy_(t, non_blocking=True)
+        if self._copied is not None:
+            self._copied.record()
         self.stats["drafts"] += 1
-        return m.draft(torch.tensor([anchor], device=dev), torch.tensor(n, device=dev), self.k, self.v,
-                       ctx_ok.to(dev, non_blocking=True), self.g[prev], a_ok)
+        if self.graph is None:
+            return self._draft()
+        if self.graph is False:
+            self._capture()
+        self.graph.replay()
+        return self._out
+
+    def _draft(self) -> torch.Tensor:
+        d = self._d
+        return self.m.draft(d["i"][:1], d["i"][1], self.k, self.v, d["ok"], self.g.index_select(0, d["i"][2:])[0],
+                            d["f"][0])
+
+    def _capture(self) -> None:
+        from engine import capture_lock
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(2):
+                self._draft()
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with capture_lock.LOCK, torch.cuda.graph(g):
+            self._out = self._draft()
+        torch.cuda.synchronize()
+        self.graph = g
+        self.captures += 1
 
     def feed(self, n: int) -> None:
         """g, K and V of the committed rows below n this ring does not hold yet, from the engine's tap

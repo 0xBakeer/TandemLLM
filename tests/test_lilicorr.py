@@ -582,9 +582,9 @@ def test_head_feeds_its_ring_by_position_and_window():
     st = _St(ring)
     a = LiLiCorrHead(_Srv(st), m)
     a.draft_at(3, 150)                                   # an earlier draft: its rows stay in the ring
-    got = a.draft_at(3, 190)
+    got = a.draft_at(3, 190).clone()                     # (the graph's output buffer: the next draft's too)
     b = LiLiCorrHead(_Srv(st), m)
-    once = b.draft_at(3, 190)
+    once = b.draft_at(3, 190).clone()
     assert torch.allclose(got, once, atol=1e-5), (got - once).abs().max()
     # the same draft from the model directly: the window's rows only
     pos = torch.arange(190 - WINDOW + 1, 190)
@@ -594,7 +594,7 @@ def test_head_feeds_its_ring_by_position_and_window():
     assert torch.allclose(got, direct, atol=1e-5), (got - direct).abs().max()
     # a restore at 185: the rows below are not this sequence's; the draft reads 185 .. 189 only
     st.tap_from, st.tap_gen = 185, st.tap_gen + 1
-    got2 = a.draft_at(3, 190)
+    got2 = a.draft_at(3, 190).clone()
     pos = torch.arange(185, 190)
     gd, k, v = m.context(taps[pos.to(DEV)], pos.to(DEV))
     ok = (190 + torch.arange(c.block_size)[:, None] - pos[None, :]) < WINDOW
@@ -625,6 +625,12 @@ def test_head_interface_counts_rows_and_reads_tokens():
     assert all(len(t) == 2 and p[0] >= p[1] for t, p in zip(tok, prob))
     h.resume(12)
     assert h.st.length == 12
+    if DEV == "cuda":
+        # the captured draft against the eager one on the same rings and input
+        e = LiLiCorrHead(srv, m, graph=False)
+        want = e.draft_at(5, 40).clone()
+        got = h.draft_at(5, 40)
+        assert h.captures == 1 and torch.allclose(got, want, atol=1e-5), (got - want).abs().max()
     return f"tokens {[t[0] for t in tok]}"
 
 
