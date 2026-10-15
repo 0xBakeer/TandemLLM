@@ -92,7 +92,10 @@ class _KV:
             return
         if not 0 < v <= self.max_len:
             raise ValueError(f"the NemotronH state cannot hold {v} rows (capacity {self.max_len})")
-        self._s.st.length = v
+        st = self._s.st
+        st.length = v
+        # a restore (the caches, a probe's way back): the taps below v may be another sequence's
+        st.tap_from, st.tap_gen = v, st.tap_gen + 1
 
     @property
     def max_len(self) -> int:
@@ -196,13 +199,21 @@ class NemotronHServing:
 
     def draft_heads(self) -> dict:
         """The draft heads this model carries, by name: the checkpoint's MTP head ("mtp",
-        engine/models/nemotron_h/mtp.py) when it was loaded, else none."""
+        engine/models/nemotron_h/mtp.py) when it was loaded, LiLiCorr ("lilicorr",
+        engine/drafters/lilicorr.py) when its checkpoint was, else none."""
         return self.heads
 
     def add_mtp_head(self, depth: int):
         from engine.models.nemotron_h.mtp import NemotronHMTPHead
         self.heads["mtp"] = NemotronHMTPHead(self.fn, depth, self.max_len)
         return self.heads["mtp"]
+
+    def add_lilicorr(self, model=None, path: str | None = None, log=print):
+        """LiLiCorr over this state's taps: a new head over `model` (another slot's weights, shared) or
+        over the checkpoint at `path`."""
+        from engine.drafters.lilicorr import LiLiCorrHead, build_head
+        self.heads["lilicorr"] = LiLiCorrHead(self, model) if model is not None else build_head(self, path, log=log)
+        return self.heads["lilicorr"]
 
     def settle(self) -> None:
         self._settle_chain()
@@ -369,7 +380,10 @@ class NemotronHServing:
             if drafter0.ngram is not None:
                 ng.corpus = drafter0.ngram.corpus
             c0 = drafter0.cut
-            head = e2.add_mtp_head(drafter0.head.depth) if drafter0.head.depth else NoHead()
+            if "lilicorr" in self.heads and drafter0.head is self.heads["lilicorr"]:
+                head = e2.add_lilicorr(model=drafter0.head.m)
+            else:
+                head = e2.add_mtp_head(drafter0.head.depth) if drafter0.head.depth else NoHead()
             d2 = MTPTreeDrafter(e2, head, StairCut(PriceModel(c0.prices.table, c0.prices.step), siblings=False), ng)
         return e2, d2
 
@@ -447,41 +461,77 @@ def prices(path: str, log=print) -> PriceModel:
                            log=log)
 
 
-def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=print, depth: int = 0):
+def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=print, depth: int = 0,
+                   head=None):
     """The lookup (the request's own text, `corpus` and the server's suffix store) cut by StairCut,
-    through the shared tree drafter: with the checkpoint's MTP head drafting `depth` tokens a round, or
-    with no head (`NoHead`, depth 0)."""
+    through the shared tree drafter: with `head` (LiLiCorr, its block a round), the checkpoint's MTP head
+    drafting `depth` tokens a round, or no head (`NoHead`, depth 0)."""
     from engine.drafters.ngram import NgramDrafter
     from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
     from engine.methods.staircut import StairCut
     from engine.tokfp import fingerprint
     ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path), min_order=3, max_depth=16,
                       min_corpus_order=8)
-    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}, "
-        f"MTP head {'depth ' + str(depth) if depth else 'off'}")
-    head = srv.add_mtp_head(depth) if depth else NoHead()
+    what = ("LiLiCorr, block of " + str(head.depth) if head is not None else
+            "MTP head depth " + str(depth) if depth else "no head")
+    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}, {what}")
+    if head is None:
+        head = srv.add_mtp_head(depth) if depth else NoHead()
     return MTPTreeDrafter(srv, head, StairCut(prices(path, log), siblings=False), ng)
 
 
+#: the load-time gate's floor: the mean run of drafted tokens the trunk's greedy keeps (a draft wired
+#: wrong keeps about none)
+LILICORR_GATE = 1.0
+
+
 def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_pool=None, check: bool = True,
-          mtp: bool = False):
+          mtp: bool = False, lilicorr: str | None = None):
     """NemotronH for the server: the weights, the engine in the loop's interface, the load-time
-    self-check (a verify block's rows and the committed states against the decode steps'). Returns
-    (serving, info)."""
+    self-check (a verify block's rows and the committed states against the decode steps'). With
+    `lilicorr` (a LiLiCorr checkpoint directory) the engine keeps its taps and the draft head is built
+    and gated (`info["lilicorr"]`: the gate's result, or why the head is off). Returns (serving, info)."""
+    from engine.drafters import lilicorr as LC
     from engine.models.nemotron_h.load import load_any
     idx, W, experts, timing = load_any(path, "cuda", mtp=mtp, log=log)
     mark("weights")
     eng = NemotronHEngine(idx.cfg, W, experts, device="cuda", max_len=max_len)
+    lc = None
+    if lilicorr is not None:
+        missing = LC.missing_files(lilicorr)
+        if missing:
+            lc = {"ok": False, "why": f"LiLiCorr files missing: {', '.join(missing)}"}
+        else:
+            cfg = LC.load_config(lilicorr)
+            eng.set_taps(cfg.target_layer_ids, cfg.window)
     if kv_pool is not None:
         kv_pool()
     srv = NemotronHServing(eng, max_len)
     mark("engine")
     res = None
+    text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
+                                   tokenize=False, add_generation_prompt=True)
+    prompt = tok(text, add_special_tokens=False)["input_ids"]
     if check:
-        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
-                                       tokenize=False, add_generation_prompt=True)
-        res = eng.self_check(tok(text, add_special_tokens=False)["input_ids"], log=log)
-    info = {"pack": path, "load": timing, "formats": idx.notes, "self_check": res, "mtp_in_checkpoint": idx.has_mtp}
+        res = eng.self_check(prompt, log=log)
+    if lilicorr is not None and lc is None:
+        try:
+            head = srv.add_lilicorr(path=lilicorr, log=log)
+            g = LC.gate(eng, head, eng.new_state(min(max_len, len(prompt) + 128)), prompt)
+            ok = g["mean_run"] >= LILICORR_GATE
+            lc = {"ok": ok, "gate": g, **({} if ok else {"why": f"LiLiCorr gate: mean run {g['mean_run']} "
+                                                                  f"under {LILICORR_GATE}"})}
+            log(f"[lilicorr] gate {'PASS' if ok else 'FAIL'}: mean run {g['mean_run']} of {head.depth} "
+                f"over {g['positions']} positions")
+        except Exception as e:                       # noqa: BLE001  (the drafter stays off, the trunk serves)
+            lc = {"ok": False, "why": f"LiLiCorr failed to load: {type(e).__name__}: {e}"}
+        if not lc["ok"]:
+            srv.heads.pop("lilicorr", None)
+        mark("lilicorr")
+    if lc is not None and not lc["ok"]:
+        log(f"[server] {lc['why']}: the lookup drafts alone")
+    info = {"pack": path, "load": timing, "formats": idx.notes, "self_check": res, "mtp_in_checkpoint": idx.has_mtp,
+            "lilicorr": lc}
     return srv, info
 
 
@@ -499,13 +549,18 @@ def serve(a, ctx) -> dict:
         ctx.log(f"[server] NemotronH drafts with the lookup: --drafter {a.drafter} taken as the lookup")
     tok = AutoTokenizer.from_pretrained(a.model)
     pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
-    head = a.drafter != "none" and str(getattr(a, "draft_head", None) or "") == "mtp"
-    srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool, mtp=head)
+    name = str(getattr(a, "draft_head", None) or "") if a.drafter != "none" else ""
+    head = name == "mtp"
+    # LiLiCorr's checkpoint: QSE_NH_LILICORR (the profile's), else the directory beside the model's
+    lc_path = (os.environ.get("QSE_NH_LILICORR") or os.path.join(os.path.dirname(os.path.normpath(a.model)),
+                                                                   "nemotron-3.5-bolt-lilicorr")) if name == "lilicorr" else None
+    srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool, mtp=head, lilicorr=lc_path)
     drafter = None
     depth = max(1, int(getattr(a, "depth", 3) or 3)) if head and info["mtp_in_checkpoint"] else 0
+    lc_head = srv.heads.get("lilicorr")
     if a.drafter != "none":
         if info["self_check"] and info["self_check"]["ok"]:
-            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log, depth=depth)
+            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log, depth=depth, head=lc_head)
             # the loop hands a round k rows past the anchor: the lookup's copy runs up to what the cut admits
             a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
         else:
@@ -513,7 +568,8 @@ def serve(a, ctx) -> dict:
     ctx.mark("drafters")
     from engine.models.nemotron_h.load import gguf_of
     fmt = "gguf" if gguf_of(a.model) else "bf16"
-    what = ("MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
+    what = ("LiLiCorr + lookup + StairCut" if lc_head is not None else
+            "MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
     describe = (f"NemotronH {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
                 f"{what if drafter is not None else 'none'}, max_len {a.max_len:,},")
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
@@ -523,4 +579,13 @@ def serve(a, ctx) -> dict:
                         "weights_info": {"format": fmt, "weights": a.model,
                                          "drafters": (what if drafter is not None else None),
                                          "load_s": info["load"].get("total_s"),
-                                         "self_check": info["self_check"]}}}
+                                         "self_check": info["self_check"],
+                                         "lilicorr": _lc_info(info["lilicorr"])}}}
+
+
+def _lc_info(lc: dict | None) -> dict | None:
+    """What /health says of LiLiCorr: on or off, why it is off, the gate's mean run."""
+    if lc is None:
+        return None
+    return {"ok": lc["ok"], **({"why": lc["why"]} if "why" in lc else {}),
+            **({"gate_mean_run": lc["gate"]["mean_run"]} if "gate" in lc else {})}
