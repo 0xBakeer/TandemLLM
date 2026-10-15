@@ -43,12 +43,15 @@ FORMULA = "fp4"
 #: ones; a whole rate's code is the same (its tile width 8 K words, no new branch taken), and on the Spark
 #: every dense, skinny-GEMM, slab, MoE and prefill-MoE output at rates 2..8 equalled the tree before's bit
 #: for bit (the same random blocks and inputs through both trees)
+#: SPD-125: tools/fn_kernels.py adds `dense_rows` (a verify block's EXL3 projections, opt-in) beside the
+#: kernels it had; their code is the same, and on the Spark `dense` at 1..32 rows at Bolt's, the 27B's and
+#: Flash-Next's shapes equalled 0.9.0-0.9.2's byte for byte (tools/fn_dense_rows_check.py same)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
              "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441",
              ("tools/exl3_linear.py", "a75b6a3f1fd36ff9ecafe79c09cb797106ce48f53edc73b10d4ef19a0fe3c40f"):
              "5078b33c3d03eac42706d3b05650b0604f2ae96d267db2c996f59409929a3a48",
-             ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
-             "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
+             ("tools/fn_kernels.py", "152025a29380f1bc9c0a1d93b2382531260b443cbe542549f332fa245ac23b7f"):
+             "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93",
              ("tools/fn_prefill_kernels.py", "653b447087545778f29eb856e12681d0d1229847ada9ec7291477aeda8c54106"):
              "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987"}
 
