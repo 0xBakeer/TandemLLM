@@ -1058,6 +1058,149 @@ __global__ void __launch_bounds__(256) dense_kernel(const __nv_bfloat16* __restr
     dense_body<KB, ST, WARPS, OF32>(X, ldx, T, ldt, SUH, SVH, Yv, ldy, M, Kin, N, b1, b2, S, smem);
 }
 
+// SPD-125: the same projection for M > 1 rows with each trellis tile decoded once for 16 rows. First
+// every (member, row)'s input rotated once (dense_rot_kernel: dense_body's arithmetic, into XH [G, M,
+// Kin] fp16), then one CTA a (128-column block, group of 16 rows, rank): rows 0..7 of the group in the
+// mma's lane groups of a0/a2, rows 8..15 in a1/a3. A row's sums are the products the one-row CTA forms
+// (its K slices the same warps', in the same K order; an mma's output element reads only its own
+// row of A), its warp partials added in the same warp and rank order, then the same output rotation
+// and svh, so every output byte is the one-row call's.
+
+// grid (Kin/128/4, M, G), 4 warps: one warp a 128-block of one (member, row)
+__global__ void __launch_bounds__(128) dense_rot_kernel(const __nv_bfloat16* __restrict__ X, int ldx,
+        const __half* __restrict__ SUH, __half* __restrict__ XH, int M, int Kin) {
+    pdl_wait();
+    pdl_trigger();
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int blk = blockIdx.x * 4 + warp;
+    if (blk * 128 >= Kin) return;
+    const int row = blockIdx.y, member = blockIdx.z;
+    const int k = blk * 128 + 4 * lane;
+    const __half* suh = SUH + (size_t)member * Kin;
+    const uint2 xr = *reinterpret_cast<const uint2*>(X + (size_t)row * ldx + k);
+    const uint2 sr = *reinterpret_cast<const uint2*>(suh + k);
+    float v0 = __uint_as_float(xr.x << 16), v1 = __uint_as_float(xr.x & 0xffff0000u);
+    float v2 = __uint_as_float(xr.y << 16), v3 = __uint_as_float(xr.y & 0xffff0000u);
+    const __half2 s01 = *reinterpret_cast<const __half2*>(&sr.x), s23 = *reinterpret_cast<const __half2*>(&sr.y);
+    v0 *= __low2float(s01); v1 *= __high2float(s01); v2 *= __low2float(s23); v3 *= __high2float(s23);
+    wht128(v0, v1, v2, v3, lane);
+    __half2 o01 = __floats2half2_rn(v0 * RSQRT128, v1 * RSQRT128);
+    __half2 o23 = __floats2half2_rn(v2 * RSQRT128, v3 * RSQRT128);
+    uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+    *reinterpret_cast<uint2*>(XH + ((size_t)member * M + row) * Kin + k) = o;
+}
+
+// grid.x = ((cb MG) + group) S + rank, cluster (S); RED [WARPS][R][128] overlays the stages after the sums
+template <int KB, int ST, int WARPS, bool OF32>
+__global__ void __launch_bounds__(256) dense_rows_kernel(const __half* __restrict__ XH,
+        const uint32_t* __restrict__ T, int ldt, const __half* __restrict__ SVH,
+        void* __restrict__ Yv, int ldy, int M, int Kin, int N, int b1, int b2, int S) {
+    extern __shared__ uint32_t smem[];
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int g = lane >> 2, t = lane & 3;
+    const int MG = (M + 15) / 16;
+    const int rank = blockIdx.x % S, t2 = blockIdx.x / S;
+    const int grp = t2 % MG, cb = t2 / MG;
+    const int member = (cb >= b1) + (cb >= b2);
+    const int KT = Kin / 16, per_r = KT / S;
+    const int ka = rank * per_r, kb = ka + per_r;
+    const int r0 = grp * 16, R = min(16, M - r0);
+    RowGemm<KB, ST, WARPS> rg(T, ldt, cb, ka, kb, smem);
+    rg.issue_first();                                  // the weights do not depend on the predecessor
+    pdl_wait();
+    pdl_trigger();
+    // the A operands of K tile kt from XH (rows g and 8 + g of the group, K 2t.. and 2t + 8..), a tile ahead
+    const __half* xh = XH + ((size_t)member * M + r0) * Kin;
+    const bool lo = g < R, hi = g + 8 < R;
+    const uint32_t* pa = reinterpret_cast<const uint32_t*>(xh + (size_t)(lo ? g : 0) * Kin + 2 * t);
+    const uint32_t* pb = reinterpret_cast<const uint32_t*>(xh + (size_t)(hi ? g + 8 : 0) * Kin + 2 * t);
+    uint32_t xn[4] = {0u, 0u, 0u, 0u};
+    auto load_x = [&](int kt) {
+        xn[0] = lo ? __ldg(pa + kt * 8) : 0u;
+        xn[1] = hi ? __ldg(pb + kt * 8) : 0u;
+        xn[2] = lo ? __ldg(pa + kt * 8 + 4) : 0u;
+        xn[3] = hi ? __ldg(pb + kt * 8 + 4) : 0u;
+    };
+    float acc[8][2][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int c = 0; c < 4; ++c) acc[j][h][c] = 0.f;
+    if (rg.k0 < rg.k1) load_x(rg.k0);
+    for (int kt = rg.k0; kt < rg.k1; ++kt) {
+        const int i = kt - rg.k0;
+        const uint32_t a0 = xn[0], a1 = xn[1], a2 = xn[2], a3 = xn[3];
+        if (kt + 1 < rg.k1) load_x(kt + 1);
+        rg.issue(kt + ST - 1, (i + ST - 1) % ST);
+        cp_wait<ST - 1>();
+        __syncwarp();
+        const uint32_t* buf = rg.stage + (i % ST) * rg.SW;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            FragB f0, f1;
+            dq_tile<KB>(buf + j * rg.TW, lane * 8, f0, f1);
+            mma(acc[j][0], a0, a1, a2, a3, f0.r[0], f0.r[1]);
+            mma(acc[j][1], a0, a1, a2, a3, f1.r[0], f1.r[1]);
+        }
+        __syncwarp();
+    }
+    cp_wait<0>();
+    __syncthreads();                                   // every warp is done with the stages
+    float* red = reinterpret_cast<float*>(smem);
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int col = j * 16 + h * 8 + 2 * t;
+            if (lo) {
+                red[((size_t)warp * R + g) * 128 + col] = acc[j][h][0];
+                red[((size_t)warp * R + g) * 128 + col + 1] = acc[j][h][1];
+            }
+            if (hi) {
+                red[((size_t)warp * R + g + 8) * 128 + col] = acc[j][h][2];
+                red[((size_t)warp * R + g + 8) * 128 + col + 1] = acc[j][h][3];
+            }
+        }
+    __syncthreads();
+    cg::cluster_group cluster = cg::this_cluster();
+    if (S > 1) cluster.sync();
+    {
+        const int c = 4 * lane, n = cb * 128 + 4 * lane;
+        const uint2 sv = *reinterpret_cast<const uint2*>(SVH + n);
+        const __half2 s01 = *reinterpret_cast<const __half2*>(&sv.x), s23 = *reinterpret_cast<const __half2*>(&sv.y);
+        // one warp of the cluster a row: the ranks' warp partials, rank-major and in warp order (the one-row
+        // CTA's sums), a rank's WARPS partials loaded before they are added
+        for (int r = rank * WARPS + warp; r < R; r += S * WARPS) {
+            float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+            for (int q = 0; q < S; ++q) {
+                const float* rr = S == 1 ? red : cluster.map_shared_rank(red, q);
+                float4 p[WARPS];
+#pragma unroll
+                for (int w = 0; w < WARPS; ++w) p[w] = *reinterpret_cast<const float4*>(rr + ((size_t)w * R + r) * 128 + c);
+#pragma unroll
+                for (int w = 0; w < WARPS; ++w) {
+                    if (q == 0 && w == 0) { v0 = p[w].x; v1 = p[w].y; v2 = p[w].z; v3 = p[w].w; }
+                    else { v0 += p[w].x; v1 += p[w].y; v2 += p[w].z; v3 += p[w].w; }
+                }
+            }
+            wht128(v0, v1, v2, v3, lane);
+            v0 = v0 * RSQRT128 * __low2float(s01);  v1 = v1 * RSQRT128 * __high2float(s01);
+            v2 = v2 * RSQRT128 * __low2float(s23);  v3 = v3 * RSQRT128 * __high2float(s23);
+            const size_t m = (size_t)(r0 + r);
+            if constexpr (OF32) {
+                *reinterpret_cast<float4*>(reinterpret_cast<float*>(Yv) + m * ldy + n) = make_float4(v0, v1, v2, v3);
+            } else {
+                __nv_bfloat162 o01 = __floats2bfloat162_rn(v0, v1), o23 = __floats2bfloat162_rn(v2, v3);
+                uint2 o; o.x = *reinterpret_cast<uint32_t*>(&o01); o.y = *reinterpret_cast<uint32_t*>(&o23);
+                *reinterpret_cast<uint2*>(reinterpret_cast<__nv_bfloat16*>(Yv) + m * ldy + n) = o;
+            }
+        }
+    }
+    if (S > 1) cluster.sync();                         // every rank keeps its RED until the others have read it
+}
+
 // ------------------------------------------------------------------------- attention, a row's inputs
 // grid (Hq + 2 Hk + 1, M), D threads: CTA h < Hq of row m normalises query head h (1 + w) and rotates
 // its first ROT dims at the row's position POS[m] (the reference's rope: bf16(bf16(x c) + bf16(rot(x) s)));
@@ -1219,6 +1362,59 @@ void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor
     TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
     TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
     if (y.dtype() == torch::kFloat) { DENSE_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_KB(false) }
+}
+
+template <int KB, int ST, int WARPS, bool OF32>
+static void dense_rows_launch(const torch::Tensor& xh, const torch::Tensor& t, const torch::Tensor& svh,
+                              torch::Tensor& y, int M, int Kin, int N, int b1, int b2, int S, cudaStream_t st) {
+    constexpr int SW = 8 * tile_u32(KB);
+    const size_t smem = std::max((size_t)WARPS * ST * SW * 4, (size_t)WARPS * std::min(16, M) * 128 * 4);
+    auto kern = dense_rows_kernel<KB, ST, WARPS, OF32>;
+    static bool attr = false;
+    if (!attr) {
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+        cudaFuncSetAttribute(kern, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+        attr = true;
+    }
+    launch_cluster(kern, dim3((N / 128) * ((M + 15) / 16) * S), dim3(32 * WARPS), smem, S, st,
+        (const __half*)xh.data_ptr(), (const uint32_t*)t.data_ptr(), (int)(t.stride(0) / t.stride(1)),
+        (const __half*)svh.data_ptr(), (void*)y.data_ptr(), (int)y.stride(0), M, Kin, N, b1, b2, S);
+}
+
+#define DENSE_ROWS_W(KB, OF32)                                                                    \
+    if (warps == 4) dense_rows_launch<KB, 3, 4, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);   \
+    else dense_rows_launch<KB, 3, 8, OF32>(xh, t, svh, y, M, Kin, N, b1, b2, S, st);
+#define DENSE_ROWS_KB(OF32)                                                                       \
+    switch (kb) {                                                                                 \
+        case 2: { DENSE_ROWS_W(2, OF32) break; } case 3: { DENSE_ROWS_W(3, OF32) break; }           \
+        case 4: { DENSE_ROWS_W(4, OF32) break; } case 5: { DENSE_ROWS_W(5, OF32) break; }           \
+        case 6: { DENSE_ROWS_W(6, OF32) break; } case 8: { DENSE_ROWS_W(8, OF32) break; }           \
+        case 15: { DENSE_ROWS_W(15, OF32) break; } case 25: { DENSE_ROWS_W(25, OF32) break; }       \
+        case 35: { DENSE_ROWS_W(35, OF32) break; }                                                \
+        default: TORCH_CHECK(false, "fn_dense_rows: K 2..6 and 8, 1.5, 2.5 and 3.5");             \
+    }
+
+// xh: fp16 [G, M, Kin] workspace for the rotated inputs (G = suh's members)
+void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh,
+                   torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps) {
+    const at::cuda::OptionalCUDAGuard guard(x.device());
+    cudaStream_t st = at::cuda::getCurrentCUDAStream().stream();
+    TORCH_CHECK(x.dtype() == torch::kBFloat16 && x.dim() == 2 && x.stride(1) == 1 && x.stride(0) % 4 == 0, "x bf16 [M, Kin]");
+    TORCH_CHECK(t.dtype() == torch::kInt16 && t.dim() == 3 && t.stride(2) == 1 && t.stride(1) == t.size(2),
+                "trellis [Kin/16, N/16, 16 K] with dense tiles (a group member may be a view)");
+    const int kb = t.size(2) % 16 ? 10 * (int)(t.size(2) / 16) + 5 : (int)(t.size(2) / 16);
+    const int M = x.size(0), Kin = x.size(1), N = t.size(1) * 16;
+    const int G = suh.dim() == 2 ? suh.size(0) : 1;
+    TORCH_CHECK(t.size(0) * 16 == Kin && N % 128 == 0 && Kin % 128 == 0, "shapes");
+    TORCH_CHECK(S >= 1 && S <= 8 && (Kin / 16) % (8 * S) == 0, "a rank's K slice must be whole 128 blocks");
+    TORCH_CHECK(suh.dtype() == torch::kHalf && suh.is_contiguous() && suh.size(-1) == Kin, "suh fp16 [G, Kin]");
+    TORCH_CHECK(svh.dtype() == torch::kHalf && svh.numel() == N, "svh");
+    TORCH_CHECK(xh.dtype() == torch::kHalf && xh.is_contiguous() && xh.numel() >= (int64_t)G * M * Kin, "xh fp16 [G, M, Kin]");
+    TORCH_CHECK(y.size(0) == M && y.size(1) == N && y.stride(1) == 1, "y [M, N]");
+    TORCH_CHECK(M >= 1 && M <= 32 && (warps == 4 || warps == 8), "rows 1..32, warps 4 or 8");
+    launch(dense_rot_kernel, dim3((Kin + 511) / 512, M, G), dim3(128), 0, st, (const __nv_bfloat16*)x.data_ptr(),
+        (int)x.stride(0), (const __half*)suh.data_ptr(), (__half*)xh.data_ptr(), M, Kin);
+    if (y.dtype() == torch::kFloat) { DENSE_ROWS_KB(true) } else { TORCH_CHECK(y.dtype() == torch::kBFloat16, "y bf16 or fp32"); DENSE_ROWS_KB(false) }
 }
 
 void fn_attn_prep(torch::Tensor qkv, c10::optional<torch::Tensor> iqk, torch::Tensor pos, torch::Tensor slot,
@@ -1597,7 +1793,9 @@ _CPP = (
     "void fn_combine_inject_norm(torch::Tensor h0, torch::Tensor yd, torch::Tensor ids, torch::Tensor wts, "
     "torch::Tensor d, int64_t R, c10::optional<torch::Tensor> w, torch::Tensor hn, torch::Tensor nn, int64_t hc, double eps);\n"
     "void fn_dense(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor y, "
-    "int64_t b1, int64_t b2, int64_t S, int64_t warps);\n")
+    "int64_t b1, int64_t b2, int64_t S, int64_t warps);\n"
+    "void fn_dense_rows(torch::Tensor x, torch::Tensor t, torch::Tensor suh, torch::Tensor svh, torch::Tensor xh, "
+    "torch::Tensor y, int64_t b1, int64_t b2, int64_t S, int64_t warps);\n")
 
 _MOD = None
 
@@ -1616,7 +1814,7 @@ def _module():
                                       "fn_moe_combine", "fn_moe_groups", "fn_moe_gu_group", "fn_moe_down_group",
                                       "fn_hc_norm", "fn_inject_norm", "fn_gated_norm",
                                       "fn_set_pdl", "fn_set_gemv_split", "fn_set_moe_st", "fn_set_moe_warps", "fn_attn_prep",
-                                      "fn_gate_mul", "fn_dense", "fn_combine_inject_norm"],
+                                      "fn_gate_mul", "fn_dense", "fn_dense_rows", "fn_combine_inject_norm"],
                            extra_cuda_cflags=["-O3", "-lineinfo", "-gencode=arch=compute_121a,code=sm_121a"],
                            verbose=False)
         _MOD.fn_set_pdl(int(_S.get("FN_PDL") == "1"))
@@ -1742,6 +1940,18 @@ def dense(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
     if out is None:
         out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
     _module().fn_dense(x, w.t, w.suh, w.svh, out, w.bounds[0], w.bounds[1], S, warps)
+    return out
+
+
+def dense_rows(x: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
+    """`dense` for a verify block (SPD-125): each trellis tile decoded once for up to 16 rows (rows
+    of the m16n8k16 tile), the inputs rotated once a row first. Every output byte is the one-row
+    `dense` call's on that row (same split, same K slices, warp and rank order); an opt-in for M > 1."""
+    S, warps = dense_split(w.tile_n, w.K, w.kb)
+    if out is None:
+        out = torch.empty(x.shape[0], w.N, dtype=torch.float32 if w.out_fp32 else torch.bfloat16, device=x.device)
+    xh = torch.empty(w.suh.shape[0], x.shape[0], w.K, dtype=torch.float16, device=x.device)
+    _module().fn_dense_rows(x, w.t, w.suh, w.svh, xh, out, w.bounds[0], w.bounds[1], S, warps)
     return out
 
 

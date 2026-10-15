@@ -79,9 +79,11 @@ _QUALITY = _obj({"kl_vs_bf16": {"type": ["number", "null"]}, "top1_pct": {"type"
                  "ppl": {"type": ["number", "null"]}, "date": _STR, "source": _STR})
 # OPS-95: `fetch`, optional, what ops/fetch_weights.py --assets downloads when the asset is missing:
 # each entry's files (names or globs of the repo) into `to` (${HOME}, ${REPO} or ${HF_HUB}: the HF cache)
+# SPD-121: `revision`, optional: the commit the files are fetched at (default: the repo's default branch)
 # OPS-133: `skip_dtypes` / `skip_tensors`, optional: the safetensors files are fetched without the
 # tensors of those dtypes (and their `<name>_scale_inv`) and those names, by range requests
 _FETCH = _obj({"repo": _STR, "files": {"type": "array", "items": _STR}, "to": _STR, "gb": _NUM0,
+               "revision": {"type": "string", "pattern": r"^[0-9a-f]{40}$"},
                "skip_dtypes": {"type": "array", "items": _STR},
                "skip_tensors": {"type": "array", "items": _STR}},
               required=("repo", "files", "to", "gb"))
@@ -97,7 +99,7 @@ _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "
 # SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
 # that fits the device preset (null: none fits), a lookup table beside the weights (warm: in the page
 # cache; cold: read past it through a row cache), a tool's memory under this profile
-_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4", "bf16"]},
+_PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4", "bf16", "gguf"]},
                  "bpw": {"type": ["number", "null"]}, "disk_gb": _NUM0, "weights_gib": _NUM0,
                  "drafters_gib": _NUM0, "hf_repo": _STR, "hf_private": {"type": "boolean"},
                  "recommended": {"type": "boolean"}, "badges": {"type": "array", "items": _STR},

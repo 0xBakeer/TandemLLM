@@ -222,8 +222,11 @@ def legacy_fingerprints(here: str, m, a, adopt_from=(), tree: str | None = None)
                         mf.fingerprint(here, m, x, formula="fp3", same=mf.SAME_ROWS)]
     if mf.SAME_ROWS:
         # and fp4 itself (its extra by content, as `start` computes it) on those bytes: the files
-        # this tree's formula wrote before a `SAME_ROWS` change
-        out.append(mf.fingerprint(here, m, fingerprint_extra(a), same=mf.SAME_ROWS))
+        # this tree's formula wrote before a `SAME_ROWS` change; ENG-341: on every mix of the
+        # replaced bytes too, one of them the release's before (`same_variants`)
+        x = fingerprint_extra(a)
+        out.append(mf.fingerprint(here, m, x, same=mf.SAME_ROWS))
+        out += [mf.fingerprint(here, m, x, same=s) for s in mf.same_variants(here, m)]
     return list(dict.fromkeys(out))
 
 

@@ -83,9 +83,11 @@ def test_every_capture_in_the_engine_and_the_server_holds_the_lock():
     # ENG-221: Flash-Next's decode step (engine/models/flashnext/engine.py DecodeGraph); ENG-227/153:
     # its verify block (VerifyGraph), its commit (CommitGraph) and its MTP chain draft (MTPChainGraph)
     # ENG-287: LFM2's decode step, joint decode step, verify block and commit (engine/models/lfm2_moe/engine.py)
+    # ENG-319: NemotronH's decode step, joint decode step, verify block and commit; SPD-123: the LiLiCorr draft
     assert sorted(found) == ["engine/drafters/draft_graph.py", "engine/drafters/draft_graph.py",
-                             "engine/generative/qwen35.py"] + ["engine/models/flashnext/engine.py"] * 4 + [
-                             "engine/models/lfm2_moe/engine.py"] * 4 + ["engine/verify_graph.py"], found
+                             "engine/drafters/lilicorr.py", "engine/generative/qwen35.py"] + [
+                             "engine/models/flashnext/engine.py"] * 4 + ["engine/models/lfm2_moe/engine.py"] * 4 + [
+                             "engine/models/nemotron_h/engine.py"] * 4 + ["engine/verify_graph.py"], found
     return f"{len(found)} capture sites, each under the lock"
 
 

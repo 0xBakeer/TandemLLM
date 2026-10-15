@@ -135,6 +135,10 @@
                   "maxLength": 2000,
                   "type": "string"
                 },
+                "revision": {
+                  "pattern": "^[0-9a-f]{40}$",
+                  "type": "string"
+                },
                 "skip_dtypes": {
                   "items": {
                     "maxLength": 2000,
@@ -1169,7 +1173,8 @@
             "enum": [
               "exl3",
               "nvfp4",
-              "bf16"
+              "bf16",
+              "gguf"
             ]
           },
           "hf_private": {
