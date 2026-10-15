@@ -6,7 +6,7 @@ engine, against BF16 logits stored once.
     python tools/nh_quality.py compare a.json b.json
 
 Bolt's BF16 checkpoint (150 GB) does not fit the Spark beside anything, so the reference is a bundle made on
-an HF job (~/bolt-exl3/jobs/ref-bolt.sh: exllamav3 model_diff with BF16 as model B, 8 wikitext rows x 1,024):
+a cloud GPU (exllamav3 model_diff with BF16 as model B, 8 wikitext rows x 1,024):
 `input_ids.safetensors` and `logits_bf16.safetensors` ("tensor.<row>", [1, T, vocab]). `eval` prefills each
 row through the engine (teacher forced, every row's logits in fp32) and compares position by position:
 KL(BF16 || set) of the softmax over the whole vocabulary, the top-1 agreement, how many disagreements are near
