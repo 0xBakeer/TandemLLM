@@ -604,7 +604,8 @@ class NemotronHEngine(NemotronHRef):
 
     def _moe_chunk(self, n, li):
         """A prompt chunk's MoE block: fp32 router logits, the router kernel, each expert once over its
-        rows (cuBLAS), the ordered combine, the latent pair, the shared expert."""
+        rows (cuBLAS; a packed bank's expert decoded to bf16 first), the ordered combine, the latent pair,
+        the shared expert."""
         c = self.cfg
         m = self.pre(li) + "mixer."
         logits = F.linear(n.float(), self.W[m + "gate.weight"].float())
@@ -613,13 +614,6 @@ class NemotronHEngine(NemotronHRef):
         x = self.mm(n, self.W[m + "fc1_latent_proj.weight"]) if c.moe_latent_size else n
         e = self.experts[li]
         T, S = ids.shape
-        if hasattr(e, "moe_relu2"):
-            # packed experts (tools/iq2_linear.IQ2Bank): every pair on the bank kernel
-            out = K.combine(e.moe_relu2(x, ids), ids, wts)
-            if c.moe_latent_size:
-                out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])
-            return out + self.mm(F.relu(self.mm(n, self.W[m + "shared_experts.up_proj.weight"])).square(),
-                                 self.W[m + "shared_experts.down_proj.weight"])
         flat = ids.reshape(-1).long()
         yd = torch.empty(T * S, x.shape[1], dtype=torch.float32, device=n.device)
         order = torch.argsort(flat, stable=True)
@@ -631,7 +625,8 @@ class NemotronHEngine(NemotronHRef):
             pairs = order[o:o + cnt]
             o += cnt
             xe = x.index_select(0, pairs // S)
-            yd[pairs] = F.linear(F.relu(F.linear(xe, e.up[ex])).square(), e.down[ex]).float()
+            up, down = e.expert(ex)                  # packed experts (IQ2Bank): decoded to bf16 for the chunk
+            yd[pairs] = F.linear(F.relu(F.linear(xe, up)).square(), down).float()
         out = K.combine(yd, ids, wts)
         if c.moe_latent_size:
             out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])

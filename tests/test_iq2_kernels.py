@@ -36,6 +36,8 @@ def random_nvfp4(N: int, K: int, seed: int = 0) -> np.ndarray:
 def test_tables():
     assert Q.GRID.shape == (256, 8) and set(np.unique(Q.GRID)) == {8.0, 25.0, 43.0}
     assert Q.KSIGNS[0] == 0 and Q.KSIGNS[1] == 0x81 and Q.KSIGNS[3] == 0x03 and Q.KSIGNS[127] == 0xFF
+    unpacked = (Q.GRID8[:, None] >> (8 * np.arange(8))[None, :]) & 0xFF
+    assert np.array_equal(unpacked.astype(np.float32), Q.GRID)
 
 
 def test_twin_equals_gguf_py():
@@ -83,6 +85,26 @@ def test_nvfp4_twin_equals_gguf_py():
     return "NVFP4 bit for bit"
 
 
+def test_nvfp4_repack_keeps_every_value():
+    from tools.nvfp4_linear import FP4_GRID
+    N, K = 6, 256
+    raw = random_nvfp4(N, K, seed=9)
+    raw.reshape(-1, 36)[:, :4][raw.reshape(-1, 36)[:, :4] == 0xFF] = 0x80
+    raw.reshape(-1, 36)[0, 0] = 0x7F                                   # ggml: zero
+    blk = Q.repack_nvfp4(torch.from_numpy(raw), N, K, 0.5)
+    c = torch.stack([blk.w & 0x0F, blk.w >> 4], -1).reshape(N, K).long()
+    v = FP4_GRID[c & 7] * torch.where(c >= 8, -1.0, 1.0) * blk.s.float().repeat_interleave(16, 1)
+    assert torch.equal(v, Q.dequant_nvfp4(raw, N, K)) and blk.s2 == 0.5
+    bad = raw.copy()
+    bad[0] = 0xFF
+    try:
+        Q.repack_nvfp4(torch.from_numpy(bad), N, K, 1.0)
+    except ValueError as e:
+        assert "0xFF" in str(e)
+    else:
+        raise AssertionError("a 0xFF scale byte was repacked")
+
+
 def test_nvfp4_layout():
     # one block: sub-block 1's scale byte 0x38 (0.5), byte 3 of its codes = 0x7A: weight 16 + 3 is
     # code 0xA (-2) and weight 16 + 3 + 8 code 0x7 (12)
@@ -98,22 +120,28 @@ def test_nvfp4_gemm_near_the_twin_and_row_invariant():
         return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
     N, K, scale = 80, 256, 1.5e-4
     raw = random_nvfp4(N, K, seed=5)
+    raw.reshape(-1, 36)[:, :4][raw.reshape(-1, 36)[:, :4] == 0xFF] = 0x7E      # 0xFF has no E4M3 value
     lin = Q.NVFP4Linear(raw, N, K, scale=scale, device=DEV)
     w = Q.dequant_nvfp4(raw, N, K)
-    assert torch.equal(lin.dequant(), w)
+    assert torch.equal(lin.dequant(), w)                       # the repack (GPU) keeps every value
     g = torch.Generator().manual_seed(2)
     x = torch.randn(33, K, generator=g).to(torch.bfloat16).to(DEV)
-    y = lin.matmul(x, f32=True)
     want = Q.matmul_reference(x.cpu(), w) * scale
+    if DEV == "cuda":
+        # the skinny kernel (bf16 rows): near the twin, every row of 1..32 its lone call's bits
+        y = lin.matmul(x[:32]).float()
+        want = want[:32]
+        err = ((y.cpu() - want).abs().max() / want.abs().max()).item()
+        assert err < 1e-2, err
+        for M in (1, 2, 7, 16, 17, 32):
+            assert torch.equal(lin.matmul(x[:M]).float(), y[:M]), M
+        return f"rel err {err:.1e} (bf16 rows); rows 1..32 bit for bit"
+    y = lin.matmul(x, f32=True)
     err = ((y.cpu() - want).abs().max() / want.abs().max()).item()
     assert err < 1e-5, err
     for M in (1, 2, 16, 17, 33):
         assert torch.equal(lin.matmul(x[:M], f32=True), y[:M]), M
-    yb = lin.matmul(x)
-    assert yb.dtype == torch.bfloat16
-    if DEV == "cuda":                       # the interpreter's fp32 -> bf16 cast truncates
-        assert torch.equal(yb, y.to(torch.bfloat16))
-    return f"rel err {err:.1e}; rows 1..33 bit for bit; bf16 = the fp32 sum rounded once"
+    return f"rel err {err:.1e}; rows 1..33 bit for bit"
 
 
 def test_gemm_near_the_twin_and_row_invariant():
@@ -125,15 +153,19 @@ def test_gemm_near_the_twin_and_row_invariant():
     w = Q.dequant_iq2_xxs(raw, N, K)
     assert torch.equal(lin.dequant(), w)
     g = torch.Generator().manual_seed(0)
-    x = torch.randn(33, K, generator=g).to(torch.bfloat16).to(DEV)
-    y = lin.matmul(x, f32=True)
+    x = torch.randn(40, K, generator=g).to(torch.bfloat16).to(DEV)
+    y = lin.matmul(x[:32], f32=True)
     want = Q.matmul_reference(x.cpu(), w)
-    err = ((y.cpu() - want).abs().max() / want.abs().max()).item()
+    err = ((y.cpu() - want[:32]).abs().max() / want.abs().max()).item()
     assert err < 1e-5, err
-    for M in (1, 2, 16, 17, 33):
+    for M in (1, 2, 16, 17, 32):
         y1 = lin.matmul(x[:M], f32=True)
         assert torch.equal(y1, y[:M]), M
-    return f"rel err {err:.1e}; rows 1..33 bit for bit"
+    # a prompt chunk (past 32 rows): the weight decoded to bf16, one cuBLAS call
+    yc = lin.matmul(x, f32=True)
+    errc = ((yc.cpu() - want).abs().max() / want.abs().max()).item()
+    assert errc < 1e-2, errc
+    return f"rel err {err:.1e}; rows 1..32 bit for bit; a 40-row chunk rel {errc:.1e}"
 
 
 def test_expert_bank_near_the_twin_and_pair_invariant():
@@ -157,6 +189,9 @@ def test_expert_bank_near_the_twin_and_pair_invariant():
     for r in range(M):
         y1 = bank.moe_relu2(x[r:r + 1].to(DEV), ids[r:r + 1].to(DEV)).cpu()
         assert torch.equal(y1, yd[r * S:(r + 1) * S]), r
+    for e in range(E):                                    # a prompt chunk's expert: the twin, in bf16
+        up_e, down_e = bank.expert(e)
+        assert torch.equal(up_e.cpu(), wu[e].to(torch.bfloat16)) and torch.equal(down_e.cpu(), wd[e].to(torch.bfloat16))
     return f"{M * S} pairs; each row's pairs = its lone call bit for bit"
 
 

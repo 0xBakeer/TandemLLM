@@ -27,10 +27,18 @@ A tensor may carry a per-tensor fp32 scale (`<name>.scale`, shape [1]: Bolt's Ma
 out_proj), which llama.cpp multiplies into the matmul's fp32 output (`build_lora_mm`); `NVFP4Linear`
 does the same before its one rounding.
 
+These are the values of the checkpoints' NVFP4 (tools/nvfp4_linear.py's `NVFP4Block`: E2M1 codes, an
+E4M3 scale a group of 16, the per-tensor scale), since kvalues = 2 E2M1 and ue4m3 = E4M3 / 2, and the
+code nibbles mean the same values. `repack_nvfp4` moves a GGUF tensor into that layout without changing
+a value (the nibbles reordered to two consecutive weights a byte, the scale bytes kept with bit 7, which
+ggml does not read, cleared, and 0x7F, which ggml reads as zero, written as zero), so on the GPU the
+rows run on the 27B's row-invariant tensor-core kernel (tools/nvfp4_skinny.py) and a prompt chunk on
+`nvfp4_matmul`; the Triton GEMM below serves the CPU interpreter.
+
 `IQ2Linear` is the Linear interface (`shape`, `nbytes`, `matmul`) over a packed [N, K] tensor (rows of
-K / 256 blocks, as stored): `iq2_gemm` decodes a [BN, 32] slice of weights per step and multiplies it
-in fp32 (IEEE, no TF32) into 16-row tiles of x, K in order, so a row of an M-row call is the one-row
-call's row bit for bit (docs/kernels.md, "Verify twins").
+K / 256 blocks, as stored): `iq2_gemm` runs one row of x a program, decodes 4 groups of 32 weights of
+8 outputs a step and sums the products in fp32, K in order, so a row of an M-row call is the one-row
+call's row bit for bit (docs/kernels.md, "Verify twins"); a block of M rows reads the weights M times.
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ except Exception:          # noqa: BLE001
 
 QK = 256
 BLOCK_BYTES = 66
+#: rows up to which a packed weight multiplies on its row-invariant kernel (the engine's ROWS_MAX)
+ROWS_MAX = 32
 # ggml's iq2xxs_grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
 # little-endian u16s): the packing gguf-py uses
 _GRID_HEX = (
@@ -87,6 +97,8 @@ def ksigns_table() -> np.ndarray:
 
 GRID = grid_table()
 KSIGNS = ksigns_table()
+#: the grid with an entry's 8 magnitudes as the bytes of one int64 (byte j = magnitude j)
+GRID8 = (GRID.astype(np.int64) << (8 * np.arange(8, dtype=np.int64))[None, :]).sum(1)
 
 
 def split_blocks(raw: np.ndarray, N: int, K: int) -> tuple[np.ndarray, np.ndarray]:
@@ -101,20 +113,28 @@ def split_blocks(raw: np.ndarray, N: int, K: int) -> tuple[np.ndarray, np.ndarra
 def dequant_iq2_xxs(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
     """The twin: a packed [N, K] IQ2_XXS tensor -> fp32 [N, K] (torch, CPU)."""
     d, qs = split_blocks(raw, N, K)
-    d = torch.from_numpy(d.astype(np.float32))                          # [N, nb]
-    q = torch.from_numpy(qs.view(np.uint32).astype(np.int64)).view(N, -1, 8, 2)   # [N, nb, 8 groups, (q0, q1)]
+    return dequant_blocks(torch.from_numpy(d), torch.from_numpy(qs))
+
+
+def dequant_blocks(d: torch.Tensor, qs: torch.Tensor) -> torch.Tensor:
+    """The twin's arithmetic on split blocks on any device: d fp16 [N, nb], qs int32 [N, nb, 16] -> fp32
+    [N, nb 256]."""
+    dev = d.device
+    N = d.shape[0]
+    d = d.float()                                                       # [N, nb]
+    q = (qs.long() & 0xFFFFFFFF).view(N, -1, 8, 2)                      # [N, nb, 8 groups, (q0, q1)]
     q0, q1 = q[..., 0], q[..., 1]
     scale = (q1 >> 28) & 0xF
     db = d[..., None] * (0.5 + scale.to(torch.float32))                 # fp32: d * (0.5 + s)
     db = db * 0.25
-    idx = (q0[..., None] >> torch.tensor([0, 8, 16, 24])) & 0xFF        # [N, nb, 8, 4]
-    g = torch.from_numpy(GRID)[idx]                                     # [N, nb, 8, 4, 8]
-    si = (q1[..., None] >> torch.tensor([0, 7, 14, 21])) & 0x7F
-    ks = torch.from_numpy(KSIGNS.astype(np.int64))[si]                  # [N, nb, 8, 4]
-    bit = (ks[..., None] >> torch.arange(8)) & 1
-    sign = torch.where(bit == 1, torch.tensor(-1.0), torch.tensor(1.0))
+    idx = (q0[..., None] >> torch.tensor([0, 8, 16, 24], device=dev)) & 0xFF   # [N, nb, 8, 4]
+    g = torch.from_numpy(GRID).to(dev)[idx]                             # [N, nb, 8, 4, 8]
+    si = (q1[..., None] >> torch.tensor([0, 7, 14, 21], device=dev)) & 0x7F
+    ks = torch.from_numpy(KSIGNS.astype(np.int64)).to(dev)[si]          # [N, nb, 8, 4]
+    bit = (ks[..., None] >> torch.arange(8, device=dev)) & 1
+    sign = torch.where(bit == 1, torch.tensor(-1.0, device=dev), torch.tensor(1.0, device=dev))
     w = (db[..., None, None] * g) * sign
-    return w.reshape(N, K)
+    return w.reshape(N, -1)
 
 
 NVFP4_QK = 64
@@ -154,35 +174,38 @@ def dequant_q8_0(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
 if HAVE_TRITON:
 
     @triton.jit
-    def _iq2_gemm(X, s_x, D, QS, G, KS, Y, s_y, M, N, NB: tl.constexpr, BN: tl.constexpr, F32: tl.constexpr):
-        pm = tl.program_id(0)
+    def _iq2_gemm(X, s_x, D, QS, G8, KS, Y, s_y, N, NB: tl.constexpr, BN: tl.constexpr, GB: tl.constexpr,
+                  F32: tl.constexpr):
+        # one row of x a program (row-invariant by construction), BN outputs, GB groups of 32 weights a
+        # step: each group's two words, its four grid entries gathered as packed bytes (G8: one int64 an
+        # entry), the signs and the scale as in the twin, the products summed in fp32, K in order
+        m = tl.program_id(0)
         pn = tl.program_id(1)
-        rows = pm * 16 + tl.arange(0, 16)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
-        k32 = tl.arange(0, 32)
-        grp = k32 // 8
-        el = k32 % 8
-        acc = tl.zeros([16, BN], dtype=tl.float32)
-        for b in range(0, NB):
-            d = tl.load(D + cols * NB + b, mask=cm, other=0.0).to(tl.float32)            # [BN]
-            for j in tl.static_range(8):
-                q0 = tl.load(QS + (cols * NB + b) * 16 + 2 * j, mask=cm, other=0)
-                q1 = tl.load(QS + (cols * NB + b) * 16 + 2 * j + 1, mask=cm, other=0)
-                s = ((q1 >> 28) & 0xF).to(tl.float32)
-                db = (d * (0.5 + s)) * 0.25                                               # [BN]
-                idx = (q0[:, None] >> (8 * grp[None, :])) & 0xFF                          # [BN, 32]
-                g = tl.load(G + idx * 8 + el[None, :])
-                si = (q1[:, None] >> (7 * grp[None, :])) & 0x7F
-                ks = tl.load(KS + si)
-                neg = ((ks >> el[None, :]) & 1) == 1
-                w = db[:, None] * g
-                w = tl.where(neg, -w, w)                                                  # [BN, 32]
-                k = b * 256 + j * 32 + k32
-                x = tl.load(X + rows[:, None] * s_x + k[None, :], mask=rows[:, None] < M, other=0.0).to(tl.float32)
-                acc += tl.dot(x, tl.trans(w), input_precision="ieee")
+        gg = tl.arange(0, GB)
+        l4 = tl.arange(0, 4)
+        j8 = tl.arange(0, 8)
+        kk = tl.arange(0, GB * 32)
+        acc = tl.zeros([BN], dtype=tl.float32)
+        for st in range(0, NB * 8 // GB):
+            gidx = st * GB + gg
+            b = gidx // 8
+            wq = (cols[:, None] * NB + b[None, :]) * 16 + 2 * (gidx % 8)[None, :]
+            d = tl.load(D + cols[:, None] * NB + b[None, :], mask=cm[:, None], other=0.0).to(tl.float32)   # [BN, GB]
+            q0 = tl.load(QS + wq, mask=cm[:, None], other=0)
+            q1 = tl.load(QS + wq + 1, mask=cm[:, None], other=0)
+            db = (d * (0.5 + ((q1 >> 28) & 0xF).to(tl.float32))) * 0.25
+            ge = tl.load(G8 + ((q0[:, :, None] >> (8 * l4[None, None, :])) & 0xFF))                       # [BN, GB, 4]
+            g = ((ge[:, :, :, None] >> (8 * j8[None, None, None, :])) & 0xFF).to(tl.float32)              # [BN, GB, 4, 8]
+            ks = tl.load(KS + ((q1[:, :, None] >> (7 * l4[None, None, :])) & 0x7F))
+            neg = ((ks[:, :, :, None] >> j8[None, None, None, :]) & 1) == 1
+            w = db[:, :, None, None] * g
+            w = tl.reshape(tl.where(neg, -w, w), (BN, GB * 32))
+            x = tl.load(X + m * s_x + st * GB * 32 + kk).to(tl.float32)
+            acc += tl.sum(w * x[None, :], 1)
         out = acc if F32 else acc.to(tl.bfloat16)
-        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+        tl.store(Y + m * s_y + cols, out, mask=cm)
 
 
 if HAVE_TRITON:
@@ -240,6 +263,13 @@ class IQ2Bank:
         self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
         self.nbytes = (E * I * (X // QK) + E * X * (I // QK)) * BLOCK_BYTES
 
+    def expert(self, e: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Expert e's (up [I, X], down [X, I]) decoded to bf16 on the device, for a prompt chunk's cuBLAS."""
+        I, X = self.I, self.X
+        up = dequant_blocks(self.ud[e * I:(e + 1) * I], self.uq[e * I:(e + 1) * I]).to(torch.bfloat16)
+        down = dequant_blocks(self.dd[e * X:(e + 1) * X], self.dq[e * X:(e + 1) * X]).to(torch.bfloat16)
+        return up, down
+
     def moe_relu2(self, x: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
         """x [M, X] bf16, ids int32 [M, S] -> yd [M S, X] fp32 (bf16 values, unweighted, pair order)."""
         M, S = ids.shape
@@ -266,7 +296,7 @@ class IQ2Linear:
         self.d = torch.from_numpy(d).to(device)
         self.qs = torch.from_numpy(qs).to(device)
         self.nbytes = N * (K // QK) * BLOCK_BYTES
-        self._g = torch.from_numpy(GRID.reshape(-1)).to(device)
+        self._g8 = torch.from_numpy(GRID8).to(device)
         self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
 
     def dequant(self) -> torch.Tensor:
@@ -277,12 +307,16 @@ class IQ2Linear:
     def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
         x2 = x.reshape(-1, self.K).contiguous()
         M = x2.shape[0]
+        if M > ROWS_MAX:
+            # a prompt chunk: the weight decoded to bf16 for one cuBLAS call (the rows' bits are not kept)
+            y = torch.nn.functional.linear(x2, dequant_blocks(self.d, self.qs).to(torch.bfloat16))
+            y = y.float() if f32 else y
+            return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        BN = 32
-        _iq2_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, BN))](x2, x2.stride(0), self.d, self.qs, self._g, self._ks, out,
-                                                                 out.stride(0), M, self.N, NB=self.K // QK, BN=BN,
-                                                                 F32=f32, num_warps=4)
+        # 8 outputs and 4 groups a step, one warp: 0.10 ms a 5,376 x 4,096 row on GB10 (55 GB/s)
+        _iq2_gemm[(M, triton.cdiv(self.N, 8))](x2, x2.stride(0), self.d, self.qs, self._g8, self._ks, out, out.stride(0),
+                                               self.N, NB=self.K // QK, BN=8, GB=4, F32=f32, num_warps=1)
         return out.view(*x.shape[:-1], self.N)
 
 
@@ -319,26 +353,58 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
 
+def repack_nvfp4(raw: torch.Tensor, N: int, K: int, scale: float):
+    """A GGUF NVFP4 tensor (uint8, any device) as an `NVFP4Block` with the same values: codes [N, K / 2]
+    with weight 2 i in byte i's low nibble, E4M3 scales [N, K / 16], `scale` as the per-tensor scale."""
+    from tools.nvfp4_linear import NVFP4Block
+    b = raw.reshape(N, K // NVFP4_QK, NVFP4_BLOCK_BYTES)
+    d = b[..., :4]
+    if bool((d == 0xFF).any()):
+        raise ValueError("an NVFP4 scale byte 0xFF (480 in ggml) has no E4M3 value")
+    d = torch.where((d & 0x7F) == 0x7F, torch.zeros_like(d), d & 0x7F)
+    qs = b[..., 4:].reshape(N, -1, 4, 8)
+    codes = torch.cat([qs & 0x0F, qs >> 4], -1).reshape(N, K // 2, 2)
+    packed = (codes[..., 0] | (codes[..., 1] << 4)).contiguous()
+    return NVFP4Block(packed, d.reshape(N, K // 16).contiguous().view(torch.float8_e4m3fn), scale)
+
+
 class NVFP4Linear:
-    """A packed NVFP4 weight [N, K] on the device (the blocks as stored, int32 words [N, K / 64, 9]) and
-    its per-tensor scale (1.0 when the file has none)."""
+    """A packed NVFP4 weight [N, K] on the device and its per-tensor scale (1.0 when the file has none):
+    on a GPU with K a multiple of 128 the checkpoints' layout (`repack_nvfp4`, `blk`), else the blocks as
+    stored (int32 words [N, K / 64, 9], the Triton GEMM)."""
 
     def __init__(self, raw: np.ndarray, N: int, K: int, scale: float = 1.0, device="cuda"):
         if K % NVFP4_QK:
             raise ValueError(f"NVFP4 needs K a multiple of {NVFP4_QK}, not {K}")
         self.N, self.K, self.shape, self.scale = N, K, (N, K), float(scale)
-        self.qb = torch.from_numpy(np.ascontiguousarray(raw).view(np.int32).reshape(N, K // NVFP4_QK, 9).copy()).to(device)
         self.nbytes = N * (K // NVFP4_QK) * NVFP4_BLOCK_BYTES
+        self.blk = self.qb = None
+        if torch.device(device).type == "cuda" and K % 128 == 0:          # the checkpoints' layout's K step
+            self.blk = repack_nvfp4(torch.from_numpy(np.ascontiguousarray(raw)).to(device), N, K, self.scale)
+            return
+        self.qb = torch.from_numpy(np.ascontiguousarray(raw).view(np.int32).reshape(N, K // NVFP4_QK, 9).copy()).to(device)
         self._lut = torch.from_numpy(UE4M3).to(device)
         self._kv = torch.from_numpy(NVFP4_KVALUES).to(device)
 
     def dequant(self) -> torch.Tensor:
-        """The twin of the stored blocks (fp32 [N, K], without the scale)."""
+        """The weight without the scale, fp32 [N, K] on the CPU."""
+        if self.blk is not None:
+            from tools.nvfp4_linear import FP4_GRID
+            c = torch.stack([self.blk.w & 0x0F, self.blk.w >> 4], -1).reshape(self.N, self.K).long().cpu()
+            v = FP4_GRID[c & 7] * torch.where(c >= 8, -1.0, 1.0)
+            return v * self.blk.s.float().cpu().repeat_interleave(16, 1)
         return dequant_nvfp4(self.qb.cpu().numpy().view(np.uint8).reshape(-1), self.N, self.K)
 
     def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
         x2 = x.reshape(-1, self.K).contiguous()
         M = x2.shape[0]
+        if self.blk is not None:
+            if f32:
+                raise ValueError("NVFP4Linear writes bf16 rows on the GPU")
+            from tools.nvfp4_linear import nvfp4_matmul
+            from tools.nvfp4_skinny import SKINNY_MAX, nvfp4_matmul_skinny
+            y = nvfp4_matmul_skinny(x2, self.blk, out=out) if M <= SKINNY_MAX else nvfp4_matmul(x2, self.blk, out=out)
+            return y.view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
         BN = 32
