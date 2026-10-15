@@ -1,8 +1,8 @@
 # NemotronH (Nemotron 3.5 Lightning, Bolt)
 
-NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on.
+NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and from an EXL3 pack converted from NVIDIA's BF16 checkpoint (2-bit experts, 4-bit dense projections), both with NVIDIA's LiLiCorr drafter; and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on. Text only: Bolt's RADIO image tower is not served yet.
 
-Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`.
+Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`; quality against BF16 logits: `tools/nh_quality.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`. EXL3 packs: `tools/fn_kernels.py` (`dense_rows`) and `tools/exl3_relu2.py`. Draft head: `engine/drafters/lilicorr.py`.
 
 ## The model
 
@@ -33,16 +33,32 @@ DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768
 
 | measurement | plain | lookup |
 |-|-|-|
-| decode step from its graph (`nh_check.py bench`, 256 tokens) | 27.72 tok/s (36.08 ms) | |
+| decode step from its graph (`nh_check.py bench`, 256 tokens) | 27.94 tok/s (35.79 ms) | |
 | prose / chat / code, 512 greedy tokens, thinking off (`fn_lookup_ab.py`) | 27.47 / 27.45 / 27.44 | 27.53 / 27.31 / 29.34 |
 | edit / copy asks | 27.39 / 27.39 | 57.70 / 58.90 (4.52 / 9.46 tokens a block) |
 | 1 / 2 / 3 requests at once, 256 tokens each, total (`lfm_parallel.py`) | | 26.94 / 32.57 / 38.30 tok/s, 2 and 3 slots decoding together (254 joint rounds), each text its request's alone |
-| verify chain of 1 / 2 / 4 / 8 / 16 rows at 1,024 tokens (`nh_check.py staircase`) | | 35.7 / 49.7 / 69.7 / 110.6 / 195.7 ms |
+| verify chain of 1 / 2 / 4 / 8 / 16 rows at 1,024 tokens (`nh_check.py staircase`, the profile's price file) | | 34.8 / 41.5 / 47.2 / 73.2 / 114.3 ms |
 
-- llama.cpp on the same GGUF (master 620d2225c with #30520, same board): `llama-bench -ngl 99 -p 0 -n 128` 35.37 tok/s; llama-server greedy on the 8 prompts below 38.6-39.4 tok/s. The engine's 27.72 is 1.28x below llama-bench.
+- llama.cpp on the same GGUF (master 620d2225c with #30520, same board): `llama-bench -ngl 99 -p 0 -n 128` 35.37 tok/s; llama-server greedy on the 8 prompts below 38.6-39.4 tok/s. The engine's 27.94 is 1.27x below llama-bench.
 - Every lookup answer is the plain run's text. Through `fn_server_check.py`, 19 of 20 answers are identical; the thinking-on one is identical up to the reasoning budget's forced close, which lands one token later at the end of the verified block (docs/exactness.md, output changes).
-- A verify row costs about 10 ms more than the one before it: the IQ2_XXS shared expert runs one row a program (row-invariant by construction, 0.10 ms a row a projection) and the routed experts one (row, expert) pair a program, so the lookup pays off on edit and copy asks and not on prose.
+- A verify row costs 2.7 to 14.6 ms more than the one before it (about 4 ms, a step at 5 and 9 rows): the IQ2_XXS shared expert decodes its weights once for up to 16 rows (5,376 x 4,096: 0.10 ms for one row, 0.36 for 8, 0.47 for 16) and the routed experts run one (row, expert) pair a program, so the lookup pays off on edit and copy asks and not on prose.
+- A CUDA GEMV for the IQ2_XXS shared experts took the decode step to 32.7 tok/s and 8 / 16-row chains to 57.9 / 93.2 ms; it is not in this tree, so this profile decodes at the rates above, and the LiLiCorr rows of the IQ2 table under [LiLiCorr](#lilicorr), measured with it, are higher than this tree gives.
 - Prefill (random tokens, one engine): 246 tok/s at 1,024 tokens, 799 at 8,192, 752 at 32,768, 698 at 131,072, 680 at 262,000 (385 s; 28.9 GiB reserved at the peak, the box never under 82 GiB available). Decode at 32,768 and 131,072 tokens of context: 26.06 and 23.27 tok/s.
+
+### Bolt: nemotron-bolt-exl3-2.0-hq
+
+`nemotron-bolt-exl3-2.0-hq` (`ops/profiles/nemotron-bolt-exl3-2.0-hq.env`): an EXL3 pack converted from NVIDIA's BF16 checkpoint (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16, revision bca0a8cb) by exllamav3 1.6.2 with a patch for the Puzzle/Bolt layer table: routed experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6 (23.48 GB, the RADIO tower in the pack in BF16 and not loaded); 20.22 GiB at load; 262,144 tokens; 3 slots; NVIDIA's LiLiCorr drafter and the lookup cut by StairCut (prices `ops/prices/nemotron-3.5-bolt-74b-a9b/nemotron-bolt-exl3-2.0-hq.dgx-spark.json`, measured on the rows path). The pack's repository is private for now: a download needs the token.
+
+Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; BF16 perplexity 5.97):
+
+| weights | KL | top-1 | perplexity |
+|-|-|-|-|
+| `nemotron-bolt-exl3-2.0-hq` | 0.170 | 84.1 % | 6.81 |
+| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 0.259 | 79.6 % | 7.48 |
+
+exllamav3's `model_diff` on 100 wikitext-2 rows of 2,048 tokens: the 2.0-hq pack KL 0.088, top-1 87.6 %.
+
+DGX Spark, 2026-10-15: decode step 44.2 tok/s from its graph on the rows path (41.0 with a CTA a row); with LiLiCorr and the lookup, prose / code / chat / edit / copy 65.8 / 99.0 / 69.3 / 152.8 / 256.0 tok/s, every text the plain run's (table and conditions under [LiLiCorr](#lilicorr)).
 
 ### Lightning: nemotron-lightning-bf16
 
@@ -98,7 +114,7 @@ The GGUF types Bolt holds, each with a twin equal to gguf-py's dequant bit for b
 
 | type | where in Bolt | format | kernel (rows 1..32 row-invariant) | prompt chunk |
 |-|-|-|-|-|
-| IQ2_XXS (16) | routed and shared experts | 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign | dense: one row a program, 8 outputs and 4 groups a step (`IQ2Linear`); bank: one (row, expert) pair a program (`IQ2Bank`) | decoded to bf16 on `_iq2_dequant`, cuBLAS |
+| IQ2_XXS (16) | routed and shared experts | 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign | dense: 8 outputs and 4 groups a step, decoded once for up to 16 rows of a program (`IQ2Linear`); bank: one (row, expert) pair a program (`IQ2Bank`) | decoded to bf16 on `_iq2_dequant`, cuBLAS |
 | NVFP4 (40) | every Mamba2 in_proj and out_proj | 64 weights in 36 bytes: 4 UE4M3 scales (one a 16) and E2M1 nibbles, w = kvalue x ue4m3; a per-tensor fp32 scale (`blk.N.ssm_in.scale`, `ssm_out.scale`) multiplies the matmul's output, as llama.cpp's build_lora_mm does | repacked at load into the checkpoints' NVFP4 layout without changing a value (kvalues = 2 E2M1, ue4m3 = E4M3 / 2) and run on `tools/nvfp4_skinny.py`, the tensor scale on the fp32 sum (tiles in `ops/skinny-tiles.json`) | `nvfp4_matmul` |
 | Q8_0 (8) | head, attention, latent projections, embedding | 32 int8 and an fp16 scale | 16-row tiles, one bf16 tensor-core product a block of 32 (int8 is exact in bf16) times its scale: the same time for 1..32 rows (`Q8Linear`) | the twin in bf16, cuBLAS |
 
@@ -126,7 +142,7 @@ NVIDIA's drafter for Bolt (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
 
 Offline, a draft at every position of the trunk's greedy text (`nh_check.py lilicorr`, 8 chat prompts x 256 tokens, thinking on): accepted length 4.55 (3.43 .. 6.49), against llama.cpp master 620d2225c with the LiLiCorr GGUF on the same prompts 4.57 (3.45 .. 6.38) and NVIDIA's 4.68 (greedy, SPEED-Bench); the draft agrees with the trunk at depth 1 .. 7 in 89.3, 80.0, 70.3, 60.4, 53.0, 45.5, 39.5 % of positions.
 
-DGX Spark, 2026-10-15, the build of `nemotron-bolt-iq2` with the CUDA IQ2 GEMV of 9d8a6022, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
+DGX Spark, 2026-10-15, `nemotron-bolt-iq2` on a build with the CUDA GEMV for the IQ2_XXS shared experts (not in this tree, see [the IQ2 profile](#bolt-nemotron-bolt-iq2)), one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
 
 | class | plain | lookup | LiLiCorr | LiLiCorr + lookup | llama.cpp plain | llama.cpp + LiLiCorr |
 |-|-|-|-|-|-|-|

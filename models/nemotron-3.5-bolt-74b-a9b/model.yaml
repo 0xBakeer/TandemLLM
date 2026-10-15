@@ -1,9 +1,10 @@
 # NVIDIA Nemotron 3.5 Bolt 74B-A9B in TandemLLM: the setup guide's registry entry (docs/setup.md). Schema 1.
 #
 # NVIDIA's hybrid Mamba2 / mixture-of-experts model for 24 GB, served from NVIDIA's own GGUF (IQ2_XXS experts,
-# NVFP4 Mamba2 projections, Q8_0 head and attention) read as stored (engine/models/nemotron_h, docs/nemotron-h.md).
-# One profile (ops/profiles/nemotron-bolt-iq2.env): its config and tokenizer from the BF16 repository, the GGUF an
-# asset fetched from NVIDIA's repository at a pinned revision, never re-hosted. weights_gib: allocated at load
+# NVFP4 Mamba2 projections, Q8_0 head and attention) read as stored (engine/models/nemotron_h, docs/nemotron-h.md),
+# or from an EXL3 pack of the BF16 checkpoint. Profile ops/profiles/nemotron-bolt-iq2.env: its config and tokenizer
+# from the BF16 repository, the GGUF an asset fetched from NVIDIA's repository at a pinned revision, never re-hosted;
+# ops/profiles/nemotron-bolt-exl3-2.0-hq.env: the pack's own repository. weights_gib: allocated at load
 # (measured 2026-10-15). max_window: the model's whole context, 262,144 tokens: its KV is 8,192 bytes a token (8
 # attention layers, 2 KV heads of 128), 2 GiB at the full window. Rows of the measured table come from real runs only.
 schema: 1
@@ -156,7 +157,7 @@ profiles:
   note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch: routed
     experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6; the RADIO tower is in
     the pack in BF16 and not loaded. A decode token reads about 4.7 GB. Measured 2026-10-15: 20.22 GiB at load, the decode
-    step 44.2 tok/s (the IQ2 GGUF 32.7). Drafts with NVIDIA''s LiLiCorr drafter and the lookup, a verify block''s rows
+    step 44.2 tok/s (the IQ2 GGUF 27.9). Drafts with NVIDIA''s LiLiCorr drafter and the lookup, a verify block''s rows
     on one trellis decode (SPD-125). The repository is private: a download needs the token.'
   hf_revision: 0c59e1c05ce5d0161028d2a8f7392730ba5d79a2
   max_window: 262144
