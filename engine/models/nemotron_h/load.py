@@ -8,6 +8,9 @@
                    [E, X, I], X the latent width or the hidden width); the MTP head's MoE block J
                    under ("mtp", J)
 
+`load_any` takes either form of checkpoint: a GGUF (a `*.gguf` file, a directory holding one, or the file
+QSE_NH_GGUF names for a directory of config and tokenizer: gguf_load.py) or the BF16 safetensors below.
+
 Each expert is copied into its stack slot straight from the file, so the host holds one expert at a
 time beside the device copy, and the shards' page cache is dropped after every layer (a 66 GB
 checkpoint's cache beside its device copy does not fit a unified-memory board).
@@ -15,6 +18,7 @@ checkpoint's cache beside its device copy does not fit a unified-memory board).
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -91,3 +95,20 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
     if log:
         log(f"[nh-load] {path}: {timing}")
     return idx, W, experts, timing
+
+
+def gguf_of(path: str) -> str | None:
+    """The GGUF a checkpoint directory serves: QSE_NH_GGUF (a profile whose directory holds the config and
+    the tokenizer, the GGUF in NVIDIA's download beside it), else a GGUF in the directory itself."""
+    from engine.models.nemotron_h.gguf_load import trunk_gguf
+    return os.environ.get("QSE_NH_GGUF") or trunk_gguf(path)
+
+
+def load_any(path: str, device="cuda", mtp: bool = True, log=print):
+    """(idx, W, experts, timing) of a GGUF (gguf_load.GGUFIndex as the index) or a safetensors checkpoint."""
+    from engine.models.nemotron_h.gguf_load import GGUFIndex, load_gguf
+    g = gguf_of(path)
+    if g is None:
+        return load(path, device, mtp=mtp, log=log)
+    cfg, W, experts, timing, gf = load_gguf(g, device, mtp=mtp, log=log, config_dir=path if os.path.isdir(path) else None)
+    return GGUFIndex(gf, cfg), W, experts, timing

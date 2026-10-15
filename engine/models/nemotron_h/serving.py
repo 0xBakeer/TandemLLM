@@ -463,8 +463,8 @@ def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_p
     """NemotronH for the server: the weights, the engine in the loop's interface, the load-time
     self-check (a verify block's rows and the committed states against the decode steps'). Returns
     (serving, info)."""
-    from engine.models.nemotron_h.load import load
-    idx, W, experts, timing = load(path, "cuda", mtp=mtp, log=log)
+    from engine.models.nemotron_h.load import load_any
+    idx, W, experts, timing = load_any(path, "cuda", mtp=mtp, log=log)
     mark("weights")
     eng = NemotronHEngine(idx.cfg, W, experts, device="cuda", max_len=max_len)
     if kv_pool is not None:
@@ -481,7 +481,7 @@ def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_p
 
 
 def serve(a, ctx) -> dict:
-    """NVIDIA's NemotronH from a BF16 checkpoint for the server (`--model <dir>`, the registry's `serve`;
+    """NVIDIA's NemotronH from a BF16 checkpoint or a GGUF for the server (`--model <dir>`, the registry's `serve`;
     server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
     lookup cut by StairCut (`lookup_drafter`, gated by the load-time self-check), and `--draft-head mtp`
     adds the checkpoint's MTP head at `--depth` (its weights loaded only then). What the engine cannot
@@ -506,7 +506,8 @@ def serve(a, ctx) -> dict:
         else:
             ctx.log("[server] NemotronH self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
-    fmt = "bf16"
+    from engine.models.nemotron_h.load import gguf_of
+    fmt = "gguf" if gguf_of(a.model) else "bf16"
     what = ("MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
     describe = (f"NemotronH {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "
                 f"{what if drafter is not None else 'none'}, max_len {a.max_len:,},")
