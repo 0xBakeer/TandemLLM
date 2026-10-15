@@ -517,7 +517,7 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
     plans = []
     for aid, e, to in todo:
         print(f"[fetch] {aid}: {e['repo']} ({' '.join(e['files'])}) -> {to}")
-        hm, left = plan(e["repo"], to, e["files"])
+        hm, left = plan(e["repo"], to, e["files"], revision=e.get("revision"))
         if is_plain(e):
             # OPS-133: only the tensors kept; the plan's sizes are the whole files
             left = int(e["gb"] * 1e9)

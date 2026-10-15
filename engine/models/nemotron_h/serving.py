@@ -36,8 +36,13 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py")
-#: the model's name in ops/prices/ and models/ (the served checkpoint's: Lightning until Bolt has a card)
-MODEL_ID = "nemotron-3.5-lightning-30b-a3b"
+#: the model's name in ops/prices/ and models/, by the served weight profile's name
+MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b"}
+
+
+def model_id(path: str) -> str:
+    p = profile_of(path)
+    return next((m for k, m in MODEL_IDS.items() if p.startswith(k)), "nemotron-3.5-lightning-30b-a3b")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
@@ -438,7 +443,7 @@ def profile_of(path: str) -> str:
 
 def prices(path: str, log=print) -> PriceModel:
     """StairCut's prior for this profile on this device (ops/prices/<model>/<profile>.<device>.json)."""
-    return PriceModel.load(os.path.join(ROOT, "ops", "prices", MODEL_ID, f"{profile_of(path)}.{device_id()}.json"),
+    return PriceModel.load(os.path.join(ROOT, "ops", "prices", model_id(path), f"{profile_of(path)}.{device_id()}.json"),
                            log=log)
 
 

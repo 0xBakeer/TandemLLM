@@ -107,6 +107,24 @@ def test_handler_tool_call_and_reasoning():
         assert out["finish"] == "stop"
 
 
+def test_bolt_profile_names_its_card_and_prices():
+    from server import model_card
+    from engine.models.nemotron_h import serving
+    old = os.environ.get("QSE_WEIGHTS")
+    try:
+        os.environ["QSE_WEIGHTS"] = "nemotron-bolt-iq2"
+        assert serving.model_id("/x") == "nemotron-3.5-bolt-74b-a9b"
+        os.environ["QSE_WEIGHTS"] = "nemotron-lightning-bf16"
+        assert serving.model_id("/x") == "nemotron-3.5-lightning-30b-a3b"
+    finally:
+        if old is None:
+            os.environ.pop("QSE_WEIGHTS", None)
+        else:
+            os.environ["QSE_WEIGHTS"] = old
+    c = model_card.find("nemotron-bolt-iq2")
+    assert c["label"] == "Nemotron 3.5 Bolt 74B-A9B" and not c["capabilities"]["vision"]
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
