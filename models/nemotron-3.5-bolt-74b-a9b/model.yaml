@@ -46,6 +46,25 @@ assets:
     to: ${HOME}/models/nemotron-3.5-bolt-74b-a9b-iq2-gguf
     gb: 22.02
   source: Public on Hugging Face, NVIDIA's file at the pinned revision (sha256 91d63363...af75 on the hub).
+- id: nemotron-bolt-lilicorr
+  label: LiLiCorr drafter for Nemotron 3.5 Bolt (NVIDIA)
+  path: ${HOME}/models/nemotron-3.5-bolt-lilicorr/model.safetensors
+  also: []
+  fetchable: true
+  protected: false
+  hf_repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
+  fetch:
+  - repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
+    revision: 4c6a5613b6d887194a3a5493e3a18a5b3930bb86
+    files:
+    - config.json
+    - hf_quant_config.json
+    - model.safetensors
+    - LICENSE
+    to: ${HOME}/models/nemotron-3.5-bolt-lilicorr
+    gb: 0.96
+  source: Public on Hugging Face, NVIDIA's NVFP4 drafter at the pinned revision (model.safetensors sha256
+    850c121c...8562 on the hub); the engine reads it as stored (engine/drafters/lilicorr.py).
 - id: qwen3.5-2b
   label: Qwen3.5-2B (the narrator, and Wren)
   path: ${HOME}/.qwen38-spark-engine/models/qwen3.5-2b/config.json
@@ -91,7 +110,7 @@ profiles:
   bpw: 2.38
   disk_gb: 22.04
   weights_gib: 22.19
-  drafters_gib: 0.0
+  drafters_gib: 1.32
   hf_repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16
   hf_private: false
   recommended: true
@@ -106,9 +125,11 @@ profiles:
       chat positions, every difference a near tie'
   assets_required:
   - nemotron-bolt-iq2-gguf
+  - nemotron-bolt-lilicorr
   note: 'NVIDIA''s GGUF (revision 724e3fee) read as stored: IQ2_XXS experts, NVFP4 Mamba2 projections with their tensor
     scales, Q8_0 head, attention and latent projections. A decode token reads about 4.6 GB of it. The config and the
-    tokenizer come from the BF16 repository (revision 153d4551, 17 MB). Weights GiB: allocated at load (measured).'
+    tokenizer come from the BF16 repository (revision 153d4551, 17 MB). Weights GiB: allocated at load (measured).
+    Drafts with NVIDIA''s LiLiCorr drafter (0.96 GB, NVFP4; 1.32 GiB allocated with its rings) and the lookup.'
   hf_revision: 153d4551268566bb7d57681ceded1289e6341fcd
   max_window: 262144
 measurements:

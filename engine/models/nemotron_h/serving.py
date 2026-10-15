@@ -472,9 +472,12 @@ def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=p
     from engine.tokfp import fingerprint
     ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path), min_order=3, max_depth=16,
                       min_corpus_order=8)
+    if head is not None and os.environ.get("QSE_NH_LOOKUP", "on") == "off":
+        ng = None                            # the head alone (a measurement's row: LiLiCorr without the lookup)
     what = ("LiLiCorr, block of " + str(head.depth) if head is not None else
             "MTP head depth " + str(depth) if depth else "no head")
-    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}, {what}")
+    log(f"[server] NemotronH lookup drafter: corpus {(corpus or 'none') if ng is not None and ng.corpus is not None else 'none'}"
+        f"{'' if ng is not None else ' (the lookup off)'}, {what}")
     if head is None:
         head = srv.add_mtp_head(depth) if depth else NoHead()
     return MTPTreeDrafter(srv, head, StairCut(prices(path, log), siblings=False), ng)
