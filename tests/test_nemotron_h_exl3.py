@@ -128,6 +128,8 @@ def test_pack_audits_and_loads_every_layer_kind_as_exl3():
         b = blocks["layers.0.mixer.in_proj"]
         assert idx.nbytes("layers.0.mixer.in_proj.weight") == b.t.numel() * 2 + (b.K + b.N) * 2
         assert db["total"] == sum(db["parts"].values()) and db["parts"]["experts"] > 0
+        h = blocks["lm_head"]
+        assert db["parts"]["head"] == h.t.numel() * 2 + (h.K + h.N) * 2          # the pack's head, not the embedding
         assert summary(idx)["quant"]["bits"] == 2.0
         _, LW, experts, timing = load(d, "cpu", log=None, idx=idx)
         for base in ("layers.0.mixer.in_proj", "layers.0.mixer.out_proj", "layers.1.mixer.fc1_latent_proj",

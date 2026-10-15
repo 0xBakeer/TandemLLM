@@ -298,7 +298,8 @@ class PackIndex:
                     parts["latent"] += self.nbytes(m + "fc1_latent_proj.weight") + self.nbytes(m + "fc2_latent_proj.weight")
                 del E
             parts["norms"] += self.nbytes(f"layers.{li}.norm.weight")
-        parts["head"] += self.nbytes("lm_head.weight" if "lm_head.weight" in self.tensors else "embeddings.weight")
+        own = "lm_head.weight" in self.tensors or "lm_head.trellis" in self.tensors
+        parts["head"] += self.nbytes("lm_head.weight" if own else "embeddings.weight")
         e = self.tensors["embeddings.weight"]
         parts["embed_row"] += e.shape[1] * DSIZE[e.dtype]
         parts["ssm_state_rw"] += 2 * c.ssm_state_bytes()
