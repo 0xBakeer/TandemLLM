@@ -1,9 +1,9 @@
 """A NemotronH GGUF in llama.cpp's layout (`nemotron_h_moe`), written on the CPU with gguf-py from a tiny
-random model (IQ2_XXS experts and a 2-D IQ2_XXS weight from random blocks, a Q8_0 projection, the rest
-F32/BF16 in llama.cpp's own Mamba2 forms): the reader's config equals the model's, the loader's engine
+random model (IQ2_XXS experts and a 2-D IQ2_XXS weight from random blocks, a Q8_0 projection, Bolt's
+NVFP4 out_proj with its tensor scale, the rest F32/BF16 in llama.cpp's own Mamba2 forms): the reader's config equals the model's, the loader's engine
 answers near the same model with the packed weights decoded by the twins (bf16 at load), and its
 load-time self-check passes (verify rows = decode steps bit for bit on the packed kernels). Skipped
-without gguf-py, or without a GPU / TRITON_INTERPRET=1 for the engine part."""
+without gguf-py (with NVFP4: llama.cpp's, after GGML_TYPE_NVFP4 = 40), or without a GPU / TRITON_INTERPRET=1 for the engine part."""
 
 from __future__ import annotations
 
@@ -35,6 +35,17 @@ def random_q8(N: int, K_: int, seed: int) -> np.ndarray:
     b = rng.integers(-40, 40, size=(nb, 34)).astype(np.int8).view(np.uint8)
     b[:, :2] = (rng.random(nb) * 0.004 + 0.001).astype(np.float16).view(np.uint8).reshape(nb, 2)
     return b.reshape(-1)
+
+
+def random_nvfp4_small(N: int, K_: int, seed: int) -> np.ndarray:
+    """NVFP4 blocks with sub-block scales between 0.125 and 0.47 (UE4M3 bytes 0x28..0x3F)."""
+    rng = np.random.default_rng(seed)
+    b = rng.integers(0, 256, size=(N * K_ // 64, 36), dtype=np.uint8)
+    b[:, :4] = rng.integers(0x28, 0x40, size=(b.shape[0], 4), dtype=np.uint8)
+    return b.reshape(-1)
+
+
+NVFP4_SCALE = 0.02
 
 
 def write_gguf(path: str):
@@ -93,7 +104,9 @@ def write_gguf(path: str):
             put(b + "ssm_d", m + "D", W[m + "D"].reshape(-1, 1), W[m + "D"])
             put(b + "ssm_norm.weight", m + "norm.weight", W[m + "norm.weight"].reshape(cfg.n_groups, -1),
                 W[m + "norm.weight"])
-            put(b + "ssm_out.weight", m + "out_proj.weight", W[m + "out_proj.weight"])
+            put_q(b + "ssm_out.weight", m + "out_proj.weight", random_nvfp4_small(cfg.hidden_size, cfg.intermediate, li),
+                  cfg.hidden_size, cfg.intermediate, T.NVFP4, lambda r, N, K_: Q.dequant_nvfp4(r, N, K_) * NVFP4_SCALE)
+            w.add_tensor(b + "ssm_out.scale", np.array([NVFP4_SCALE], dtype=np.float32))
         elif t == "attention":
             for x, y in (("attn_q", "q_proj"), ("attn_k", "k_proj"), ("attn_v", "v_proj"), ("attn_output", "o_proj")):
                 put(b + x + ".weight", m + y + ".weight", W[m + y + ".weight"])
@@ -118,9 +131,10 @@ def write_gguf(path: str):
 
 def test_gguf_reads_and_serves_near_its_twin():
     try:
-        import gguf  # noqa: F401
+        import gguf
+        gguf.GGMLQuantizationType.NVFP4
     except Exception:  # noqa: BLE001
-        return "skipped: gguf-py missing"
+        return "skipped: gguf-py missing or without NVFP4"
     from engine.models.nemotron_h.gguf_load import config_from_gguf, load_gguf
     from engine.models.nemotron_h.gguf import GGUFFile
     with tempfile.TemporaryDirectory() as d:
@@ -131,13 +145,16 @@ def test_gguf_reads_and_serves_near_its_twin():
         for f in ("layer_types", "moe_k", "moe_ffn", "moe_experts", "hidden_size", "mamba_num_heads", "mamba_head_dim",
                   "ssm_state_size", "n_groups", "num_key_value_heads", "head_dim", "shared_ffn"):
             assert getattr(c2, f) == getattr(cfg, f), f
-        assert g.types() == {"F32": g.types()["F32"], "Q8_0": 3, "IQ2_XXS": 9}, g.types()
+        assert g.types() == {"F32": g.types()["F32"], "Q8_0": 3, "IQ2_XXS": 9, "NVFP4": 3}, g.types()
+        assert g.canonical_names()["layers.0.mixer.out_proj.scale"] == "blk.0.ssm_out.scale" and not g.unmapped()
         if not KERNELS:
             return "config and types ok; engine skipped: Triton on a GPU, or TRITON_INTERPRET=1"
         from engine.models.nemotron_h.engine import NemotronHEngine
         from engine.models.nemotron_h.load import ExpertsRelu2
         c3, W, experts, timing, _ = load_gguf(p, DEV, log=None)
-        assert timing["packed"] == 3 * 2 + 3, timing
+        assert timing["packed"] == 3 * 2 + 3 + 3, timing
+        o = W["layers.0.mixer.out_proj.weight"]
+        assert isinstance(o, Q.NVFP4Linear) and o.scale == np.float32(NVFP4_SCALE)
         eng = NemotronHEngine(c3, W, experts, device=DEV, max_len=256)
         res = eng.self_check(PROMPT, steps=8, log=None)
         assert res["ok"], res

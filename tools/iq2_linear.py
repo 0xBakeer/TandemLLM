@@ -1,5 +1,5 @@
-"""GGUF IQ2_XXS (and Q8_0) weights: the dequant twin from the format, and a row-invariant GEMM that
-decodes the blocks on the fly.
+"""GGUF IQ2_XXS, NVFP4 (and Q8_0) weights: the dequant twins from the format, and row-invariant GEMMs
+that decode the blocks on the fly.
 
 IQ2_XXS (ggml type 16, 2.0625 bits a weight): a block of 256 weights in 66 bytes, an fp16 scale `d` and
 eight groups of 32 weights, each group two u32 words:
@@ -14,6 +14,18 @@ eight groups of 32 weights, each group two u32 words:
 in fp32 in that order (llama.cpp's `dequantize_row_iq2_xxs` and gguf-py's `IQ2_XXS.dequantize_blocks`;
 the grid and sign tables are ggml's, MIT). `dequant_iq2_xxs` is the twin; tests/test_iq2_kernels.py
 holds it to gguf-py bit for bit. Q8_0 (type 8): 32 int8 with an fp16 scale, w = d * q.
+
+NVFP4 (ggml type 40, 4.5 bits a weight): a block of 64 weights in 36 bytes, four UE4M3 scales (one a
+sub-block of 16) and 32 bytes of E2M1 codes; byte j of sub-block s holds weight 16 s + j in its low
+nibble and 16 s + j + 8 in its high one:
+
+  w = kvalues[code] * ue4m3(d[s])      kvalues = E2M1 doubled (0, 1, 2, 3, 4, 6, 8, 12, and negatives),
+                                       ue4m3 = (1 + m / 8) 2^(e - 7) (m 2^-9 at e = 0, 0 at 0 and 0x7F) / 2
+
+(llama.cpp's `dequantize_row_nvfp4`, gguf-py's `NVFP4.dequantize_blocks`); every product is exact in fp32.
+A tensor may carry a per-tensor fp32 scale (`<name>.scale`, shape [1]: Bolt's Mamba2 in_proj and
+out_proj), which llama.cpp multiplies into the matmul's fp32 output (`build_lora_mm`); `NVFP4Linear`
+does the same before its one rounding.
 
 `IQ2Linear` is the Linear interface (`shape`, `nbytes`, `matmul`) over a packed [N, K] tensor (rows of
 K / 256 blocks, as stored): `iq2_gemm` decodes a [BN, 32] slice of weights per step and multiplies it
@@ -103,6 +115,32 @@ def dequant_iq2_xxs(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
     sign = torch.where(bit == 1, torch.tensor(-1.0), torch.tensor(1.0))
     w = (db[..., None, None] * g) * sign
     return w.reshape(N, K)
+
+
+NVFP4_QK = 64
+NVFP4_BLOCK_BYTES = 36
+#: E2M1 doubled (ggml's kvalues_mxfp4)
+NVFP4_KVALUES = np.array([0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12], dtype=np.float32)
+
+
+def ue4m3_table() -> np.ndarray:
+    """ggml_ue4m3_to_fp32 of every byte (float32 [256]), the 0.5 of the kvalues convention included."""
+    x = np.arange(256)
+    e, m = (x >> 3) & 0xF, (x & 7).astype(np.float32)
+    raw = np.where(e == 0, m * np.float32(2.0 ** -9), (1.0 + m / 8.0) * np.exp2(e - 7.0)).astype(np.float32)
+    return np.where((x == 0) | (x == 0x7F), np.float32(0.0), raw * np.float32(0.5)).astype(np.float32)
+
+
+UE4M3 = ue4m3_table()
+
+
+def dequant_nvfp4(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
+    """The twin: a packed [N, K] NVFP4 tensor -> fp32 [N, K] (torch, CPU), without the tensor's scale."""
+    b = np.ascontiguousarray(raw).reshape(N, K // NVFP4_QK, NVFP4_BLOCK_BYTES)
+    d = UE4M3[b[..., :4]]                                               # [N, nb, 4]
+    qs = b[..., 4:].reshape(N, -1, 4, 8)
+    codes = np.concatenate([qs & 0x0F, qs >> 4], -1)                    # [N, nb, 4, 16]
+    return torch.from_numpy((NVFP4_KVALUES[codes] * d[..., None]).reshape(N, K))
 
 
 def dequant_q8_0(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
@@ -245,6 +283,68 @@ class IQ2Linear:
         _iq2_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, BN))](x2, x2.stride(0), self.d, self.qs, self._g, self._ks, out,
                                                                  out.stride(0), M, self.N, NB=self.K // QK, BN=BN,
                                                                  F32=f32, num_warps=4)
+        return out.view(*x.shape[:-1], self.N)
+
+
+if HAVE_TRITON:
+
+    @triton.jit
+    def _nvfp4_gemm(X, s_x, QB, LUT, KV, Y, s_y, M, N, scale, NB: tl.constexpr, BN: tl.constexpr, F32: tl.constexpr):
+        # QB: the blocks as int32 words [N, NB, 9] (4 scale bytes, then 32 code bytes); a [BN, 64] slice of
+        # weights decoded a step, multiplied in fp32 (IEEE) into 16-row tiles of x, K in order; the
+        # tensor's scale on the fp32 sum, then one rounding
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        k64 = tl.arange(0, 64)
+        sub = k64 // 16
+        byte = 4 + sub * 8 + (k64 % 8)                         # the code byte of weight k within the block
+        hi = (k64 % 16) >= 8
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for b in range(0, NB):
+            base = (cols * NB + b) * 9                                                     # [BN] words
+            dw = tl.load(QB + base, mask=cm, other=0)                                      # the 4 scale bytes
+            dsc = (dw[:, None] >> (8 * sub[None, :])) & 0xFF                               # [BN, 64]
+            qw = tl.load(QB + base[:, None] + byte[None, :] // 4, mask=cm[:, None], other=0)
+            q = (qw >> (8 * (byte[None, :] % 4))) & 0xFF
+            code = tl.where(hi[None, :], q >> 4, q & 0xF)
+            w = tl.load(KV + code) * tl.load(LUT + dsc)                                    # [BN, 64] fp32, exact
+            k = b * 64 + k64
+            x = tl.load(X + rows[:, None] * s_x + k[None, :], mask=rows[:, None] < M, other=0.0).to(tl.float32)
+            acc += tl.dot(x, tl.trans(w), input_precision="ieee")
+        acc = acc * scale
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+class NVFP4Linear:
+    """A packed NVFP4 weight [N, K] on the device (the blocks as stored, int32 words [N, K / 64, 9]) and
+    its per-tensor scale (1.0 when the file has none)."""
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, scale: float = 1.0, device="cuda"):
+        if K % NVFP4_QK:
+            raise ValueError(f"NVFP4 needs K a multiple of {NVFP4_QK}, not {K}")
+        self.N, self.K, self.shape, self.scale = N, K, (N, K), float(scale)
+        self.qb = torch.from_numpy(np.ascontiguousarray(raw).view(np.int32).reshape(N, K // NVFP4_QK, 9).copy()).to(device)
+        self.nbytes = N * (K // NVFP4_QK) * NVFP4_BLOCK_BYTES
+        self._lut = torch.from_numpy(UE4M3).to(device)
+        self._kv = torch.from_numpy(NVFP4_KVALUES).to(device)
+
+    def dequant(self) -> torch.Tensor:
+        """The twin of the stored blocks (fp32 [N, K], without the scale)."""
+        return dequant_nvfp4(self.qb.cpu().numpy().view(np.uint8).reshape(-1), self.N, self.K)
+
+    def matmul(self, x: torch.Tensor, out: torch.Tensor | None = None, f32: bool = False) -> torch.Tensor:
+        x2 = x.reshape(-1, self.K).contiguous()
+        M = x2.shape[0]
+        if out is None:
+            out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+        BN = 32
+        _nvfp4_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, BN))](x2, x2.stride(0), self.qb, self._lut, self._kv, out,
+                                                                   out.stride(0), M, self.N, self.scale,
+                                                                   NB=self.K // NVFP4_QK, BN=BN, F32=f32, num_warps=4)
         return out.view(*x.shape[:-1], self.N)
 
 

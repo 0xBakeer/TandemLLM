@@ -1,7 +1,8 @@
-"""IQ2_XXS: the dequant twin (tools/iq2_linear.py) against gguf-py's `IQ2_XXS.dequantize_blocks` bit for
-bit on random blocks (every bit pattern of a block is a valid block), Q8_0 likewise; the on-the-fly GEMM
-against the twin's fp32 matmul, and its rows invariant to the row count up to 33 (bit for bit). The
-GEMM runs on the GPU or under TRITON_INTERPRET=1; the twin anywhere."""
+"""IQ2_XXS and NVFP4: the dequant twins (tools/iq2_linear.py) against gguf-py's `IQ2_XXS.dequantize_blocks`
+and `NVFP4.dequantize_blocks` bit for bit on random blocks (every bit pattern of a block is a valid
+block), Q8_0 likewise; the on-the-fly GEMMs against the twins' fp32 matmul, and their rows invariant to
+the row count up to 33 (bit for bit). The GEMMs run on the GPU or under TRITON_INTERPRET=1; the twins
+anywhere. NVFP4 needs a gguf-py with the type (llama.cpp after GGML_TYPE_NVFP4 = 40)."""
 
 from __future__ import annotations
 
@@ -25,6 +26,11 @@ def random_iq2(N: int, K: int, seed: int = 0) -> np.ndarray:
     d = (rng.standard_normal(nb) * 0.02).astype(np.float16)
     b[:, :2] = d.view(np.uint8).reshape(nb, 2)
     return b.reshape(-1)
+
+
+def random_nvfp4(N: int, K: int, seed: int = 0) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 256, size=N * (K // 64) * 36, dtype=np.uint8)
 
 
 def test_tables():
@@ -51,6 +57,63 @@ def test_twin_equals_gguf_py():
         w8 = dequantize(b8.reshape(N, -1), GGMLQuantizationType.Q8_0).astype(np.float32)
         assert np.array_equal(w8.view(np.uint32), Q.dequant_q8_0(b8.reshape(-1), N, K).numpy().view(np.uint32))
     return "IQ2_XXS and Q8_0 bit for bit"
+
+
+def test_ue4m3_table():
+    assert Q.UE4M3[0] == 0.0 and Q.UE4M3[0x7F] == 0.0
+    assert Q.UE4M3[0x38] == 0.5                              # e 7, m 0: 1.0, halved
+    assert Q.UE4M3[0x01] == 2.0 ** -10                       # subnormal: 1 x 2^-9, halved
+    assert Q.UE4M3[0x7E] == (1 + 6 / 8) * 2.0 ** 8 * 0.5     # the largest finite
+    assert Q.UE4M3[0x80] == 0.0 and Q.UE4M3[0xB8] == 0.5     # bit 7 is not read
+
+
+def test_nvfp4_twin_equals_gguf_py():
+    try:
+        from gguf.constants import GGMLQuantizationType
+        from gguf.quants import dequantize
+        qt = GGMLQuantizationType.NVFP4
+    except Exception:  # noqa: BLE001
+        return "skipped: gguf-py without NVFP4"
+    for N, K in ((3, 64), (5, 1024)):
+        raw = random_nvfp4(N, K, seed=N)
+        want = dequantize(raw.reshape(N, -1), qt).astype(np.float32)
+        got = Q.dequant_nvfp4(raw, N, K).numpy()
+        assert want.shape == got.shape and np.array_equal(want.view(np.uint32), got.view(np.uint32)), \
+            (N, K, np.abs(want - got).max())
+    return "NVFP4 bit for bit"
+
+
+def test_nvfp4_layout():
+    # one block: sub-block 1's scale byte 0x38 (0.5), byte 3 of its codes = 0x7A: weight 16 + 3 is
+    # code 0xA (-2) and weight 16 + 3 + 8 code 0x7 (12)
+    b = np.zeros(36, dtype=np.uint8)
+    b[1] = 0x38
+    b[4 + 8 + 3] = 0x7A
+    w = Q.dequant_nvfp4(b, 1, 64).numpy()[0]
+    assert w[19] == -1.0 and w[27] == 6.0 and np.count_nonzero(w) == 2
+
+
+def test_nvfp4_gemm_near_the_twin_and_row_invariant():
+    if not KERNELS:
+        return "skipped: Triton on a GPU, or TRITON_INTERPRET=1"
+    N, K, scale = 80, 256, 1.5e-4
+    raw = random_nvfp4(N, K, seed=5)
+    lin = Q.NVFP4Linear(raw, N, K, scale=scale, device=DEV)
+    w = Q.dequant_nvfp4(raw, N, K)
+    assert torch.equal(lin.dequant(), w)
+    g = torch.Generator().manual_seed(2)
+    x = torch.randn(33, K, generator=g).to(torch.bfloat16).to(DEV)
+    y = lin.matmul(x, f32=True)
+    want = Q.matmul_reference(x.cpu(), w) * scale
+    err = ((y.cpu() - want).abs().max() / want.abs().max()).item()
+    assert err < 1e-5, err
+    for M in (1, 2, 16, 17, 33):
+        assert torch.equal(lin.matmul(x[:M], f32=True), y[:M]), M
+    yb = lin.matmul(x)
+    assert yb.dtype == torch.bfloat16
+    if DEV == "cuda":                       # the interpreter's fp32 -> bf16 cast truncates
+        assert torch.equal(yb, y.to(torch.bfloat16))
+    return f"rel err {err:.1e}; rows 1..33 bit for bit; bf16 = the fp32 sum rounded once"
 
 
 def test_gemm_near_the_twin_and_row_invariant():

@@ -28,12 +28,13 @@ import numpy as np
 
 MAGIC = b"GGUF"
 #: ggml type id -> (name, values a block, bytes a block): the types the engine reads
-BLOCKS = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 30: ("BF16", 1, 2), 8: ("Q8_0", 32, 34), 16: ("IQ2_XXS", 256, 66)}
+BLOCKS = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 30: ("BF16", 1, 2), 8: ("Q8_0", 32, 34), 16: ("IQ2_XXS", 256, 66),
+          40: ("NVFP4", 64, 36)}
 #: every ggml type id this reader names in a refusal (llama.cpp's ggml.h)
 TYPE_NAMES = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 9: "Q8_1", 10: "Q2_K",
               11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 15: "Q8_K", 16: "IQ2_XXS", 17: "IQ2_XS", 18: "IQ3_XXS",
               19: "IQ1_S", 20: "IQ4_NL", 21: "IQ3_S", 22: "IQ2_S", 23: "IQ4_XS", 24: "I8", 25: "I16", 26: "I32",
-              27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0", 35: "TQ2_0", 39: "MXFP4"}
+              27: "I64", 28: "F64", 29: "IQ1_M", 30: "BF16", 34: "TQ1_0", 35: "TQ2_0", 39: "MXFP4", 40: "NVFP4"}
 _SCALAR = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
 
 #: llama.cpp's NemotronH tensor names (blk.N.*) -> the canonical names of ref.py / pack.py
@@ -50,6 +51,8 @@ CANONICAL = [
     (r"^blk\.(\d+)\.ssm_d$", r"layers.\1.mixer.D"),
     (r"^blk\.(\d+)\.ssm_norm\.weight$", r"layers.\1.mixer.norm.weight"),
     (r"^blk\.(\d+)\.ssm_out\.weight$", r"layers.\1.mixer.out_proj.weight"),
+    (r"^blk\.(\d+)\.ssm_in\.scale$", r"layers.\1.mixer.in_proj.scale"),
+    (r"^blk\.(\d+)\.ssm_out\.scale$", r"layers.\1.mixer.out_proj.scale"),
     (r"^blk\.(\d+)\.attn_q\.weight$", r"layers.\1.mixer.q_proj.weight"),
     (r"^blk\.(\d+)\.attn_k\.weight$", r"layers.\1.mixer.k_proj.weight"),
     (r"^blk\.(\d+)\.attn_v\.weight$", r"layers.\1.mixer.v_proj.weight"),

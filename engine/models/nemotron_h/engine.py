@@ -118,7 +118,7 @@ class NemotronHEngine(NemotronHRef):
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         if not torch.is_tensor(w):
-            # a packed weight (tools/iq2_linear.IQ2Linear): its own row-invariant kernel at any row count
+            # a packed weight (tools/iq2_linear: IQ2Linear, NVFP4Linear): its own row-invariant kernel at any row count
             return w.matmul(x2, out=out).view(*x.shape[:-1], w.shape[0])
         if x2.shape[0] <= ROWS_MAX:
             return K.linear_rows(x2, w, out=out).view(*x.shape[:-1], w.shape[0])
