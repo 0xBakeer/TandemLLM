@@ -110,7 +110,7 @@ export function sandboxFor(running: boolean, stopped_reason: SandboxStatus['stop
     cwd: '/work/sync',
     cpus: 4,
     memory_bytes: running ? 412e6 : 0,
-    memory_limit_bytes: 4e9,
+    memory_limit_bytes: 1024 ** 3,
     disk_bytes: 186e6,
     disk_limit_bytes: 20e9,
     network: 'off',

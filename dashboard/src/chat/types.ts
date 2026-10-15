@@ -133,8 +133,9 @@ export interface ToolOutput {
   truncated?: boolean;
   exit_code?: number | null;
   images?: Attachment[];
-  /** structured output for the card: web_search's results (SRV-469) */
-  data?: WebSearchData | null;
+  /** structured output for the card: web_search's results (SRV-469), or why the sandbox could
+   *  not run the call (SRV-481, SRV-485) */
+  data?: (WebSearchData & { sandbox?: undefined }) | { sandbox: SandboxCallData; results?: undefined } | null;
 }
 export interface ToolCallPart {
   type: 'tool_call';
@@ -559,6 +560,18 @@ export interface WebSearchData {
 }
 
 // ---- the sandbox ------------------------------------------------------------------------------
+
+/** a call the sandbox could not run: it did not start within its wait (short of memory, or the
+ *  other chats' sandboxes busy), or the kernel killed a process at the memory limit */
+export interface SandboxCallData {
+  reason: 'no_memory' | 'busy' | 'oom';
+  limit_gib: number;
+  why?: string;
+  waited_s?: number;
+  mem_available_gib?: number;
+  floor_gib?: number;
+  engine_released_gib?: number;
+}
 
 export type SandboxState = 'running' | 'stopped' | 'creating' | 'error' | 'waiting_memory';
 export interface SandboxStatus {

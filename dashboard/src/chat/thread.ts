@@ -20,6 +20,7 @@ import { planItems, toolLabel, type Compaction, type Conversation, type Message,
 import { approvedTitle, approvedWord } from './permission';
 import { callMedia, callPane, loadMediaView } from './file-panes';
 import { hostOf, resultsWord, searchResults } from './websearch';
+import { sandboxCallWords } from './context-words';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -278,6 +279,7 @@ export class QseChatThread extends LightElement {
       </button>
       ${found?.length ? renderResults(found) : nothing}
       ${t.name === 'web_search' && t.status === 'failed' && t.output?.content ? html`<p class="ch-call-row ch-search-err err-ink small" role="alert">${t.output.content.split('\n')[0]}</p>` : nothing}
+      ${t.output?.data?.sandbox ? html`<p class="ch-call-row ch-search-err err-ink small" role="alert" data-sandbox=${t.output.data.sandbox.reason}>${sandboxCallWords(t.output.data.sandbox)}</p>` : nothing}
       ${media ? html`<div class="ch-call-row ch-call-media"><qse-media-view kind=${media.kind} src=${media.src} name=${media.name} compact></qse-media-view></div>` : nothing}
       ${pane ? html`<div class="ch-call-row ch-call-open"><button type="button" class="btn btn-sm" @click=${() => this.fire('ch-open-pane', { pane })}>${icon(paneIcon(pane.kind))} Open in ${paneWord(pane.kind)}</button></div>` : nothing}
       ${open

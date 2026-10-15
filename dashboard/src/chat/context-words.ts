@@ -2,7 +2,7 @@
 // nothing (2026-10-14: "KV for this chat —", "resident prefix —", "running, 0 B", "— tokens").
 
 import { bytes, exact } from '../lib/format';
-import type { ContextReport, HarnessMemory, SandboxStatus } from './types';
+import type { ContextReport, HarnessMemory, SandboxCallData, SandboxStatus } from './types';
 
 export const NOT_TRACKED = 'not tracked for this model';
 export const AFTER_TURN = 'measured after the first turn';
@@ -53,6 +53,13 @@ export function residentWords(mem: Mem, backend: Backend): string {
 export function sandboxWords(sb: SandboxStatus): string {
   if (sb.state !== 'running') return sb.state.replace('_', ' ');
   return sb.memory_bytes != null ? `running, ${bytes(sb.memory_bytes, 0)}` : 'running, memory not reported by the runtime';
+}
+
+/** the call card's line when the sandbox could not run the call (SRV-481, SRV-485) */
+export function sandboxCallWords(d: SandboxCallData): string {
+  if (d.reason === 'oom') return `Out of memory (${d.limit_gib} GiB sandbox limit): the kernel killed a process of this call.`;
+  const gave = d.reason === 'no_memory' && d.engine_released_gib != null ? `, the engine gave back ${d.engine_released_gib} GiB` : '';
+  return `The sandbox did not start: ${d.why ?? 'no room'} (waited ${d.waited_s ?? 0} s${gave}). The command did not run.`;
 }
 
 /** a skill's size in the prompt */

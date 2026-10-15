@@ -1,7 +1,7 @@
 // The Context panel's words for a figure it has no value for (VIS-137): a value, or why there is
 // none, never a bare dash.
 import { describe, expect, it } from 'vitest';
-import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, kvWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
+import { AFTER_TURN, NEXT_TURN, NOT_TRACKED, kvWords, partWords, residentWords, sandboxCallWords, sandboxWords, skillTokens, turnFigure } from '../src/chat/context-words';
 import type { ContextReport, SandboxStatus } from '../src/chat/types';
 
 describe('the Context panel says why a figure is missing', () => {
@@ -26,6 +26,12 @@ describe('the Context panel says why a figure is missing', () => {
     expect(sandboxWords(sb({ memory_bytes: 31_449_088 }))).toBe('running, 31 MB');
     expect(sandboxWords(sb({}))).toBe('running, memory not reported by the runtime');
     expect(sandboxWords(sb({ state: 'waiting_memory' }))).toBe('waiting memory');
+  });
+  it('says on the call why the sandbox could not run it (SRV-481, SRV-485)', () => {
+    const why = 'MemAvailable 3.2 GiB: a 1 GiB sandbox would leave the engine under its 4 GiB floor';
+    expect(sandboxCallWords({ reason: 'no_memory', why, waited_s: 60, limit_gib: 1, floor_gib: 4, mem_available_gib: 3.2, engine_released_gib: 0.5 })).toBe(`The sandbox did not start: ${why} (waited 60 s, the engine gave back 0.5 GiB). The command did not run.`);
+    expect(sandboxCallWords({ reason: 'busy', why: '4 sandbox(es) of other chats are running commands, the most at once', waited_s: 60, limit_gib: 1 })).toBe('The sandbox did not start: 4 sandbox(es) of other chats are running commands, the most at once (waited 60 s). The command did not run.');
+    expect(sandboxCallWords({ reason: 'oom', limit_gib: 1 })).toBe('Out of memory (1 GiB sandbox limit): the kernel killed a process of this call.');
   });
   it("counts a skill's tokens, or says when they are counted", () => {
     expect(skillTokens(1234)).toBe('1,234 tokens');
