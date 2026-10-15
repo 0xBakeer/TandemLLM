@@ -65,17 +65,22 @@ def _sha256(path: str) -> str:
 MANIFEST = "_hub_manifest.json"
 
 
+def _matches(name: str, patterns: list[str] | None) -> bool:
+    return not patterns or any(fnmatch.fnmatch(name, p) for p in patterns)
+
+
 def verify(d: str, only: list[str] | None = None, hub: dict | None = None) -> list[str]:
-    """Every (file, checksum) the lists in `d` name and `d` holds (or, with `only`, must hold): the
-    mismatches and the missing, empty when all match. `hub`: the manifest's files, for a folder that
-    has no _hub_manifest.json of its own (a snapshot in the Hugging Face cache)."""
+    """Every (file, checksum) the lists in `d` name and `d` holds (or, with `only`, names or globs as a
+    fetch entry's `files`, must hold): the mismatches and the missing, empty when all match. `hub`: the
+    manifest's files, for a folder that has no _hub_manifest.json of its own (a snapshot in the Hugging
+    Face cache)."""
     bad, checked = [], 0
     mp = os.path.join(d, MANIFEST)
     if hub is None and os.path.isfile(mp):
         hub = json.load(open(mp))["files"]
     if hub:
         for name, m in sorted(hub.items()):
-            if not m.get("sha256") or (only and name not in only):
+            if not m.get("sha256") or not _matches(name, only):
                 continue
             f = os.path.join(d, name)
             if not os.path.isfile(f):
@@ -94,7 +99,7 @@ def verify(d: str, only: list[str] | None = None, hub: dict | None = None) -> li
             if len(parts) < 2:
                 continue
             want, name = parts[0].lower(), parts[-1].lstrip("*")
-            if only and name not in only:
+            if not _matches(name, only):
                 continue
             f = os.path.join(d, name)
             if not os.path.isfile(f):
@@ -132,10 +137,6 @@ def manifest(repo: str, revision: str | None, part: str) -> str:
     with open(os.path.join(part, MANIFEST), "w") as fh:
         json.dump(m, fh, indent=1)
     return m["commit"]
-
-
-def _matches(name: str, patterns: list[str] | None) -> bool:
-    return not patterns or any(fnmatch.fnmatch(name, p) for p in patterns)
 
 
 def _merge(src: str, dst: str) -> None:
