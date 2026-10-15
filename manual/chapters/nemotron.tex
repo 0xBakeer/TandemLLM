@@ -55,7 +55,7 @@ The EXL3 projections run on \code{tools/fn_kernels.dense_rows}: each row's input
 
 \section{LiLiCorr}\index{LiLiCorr}
 
-Bolt has no MTP head. NVIDIA's drafter for it is LiLiCorr (0.96~GB, NVFP4), ported from vLLM's and llama.cpp's implementations to \code{engine/drafters/lilicorr.py}. The engine keeps the residual rows entering six of Bolt's layers in a ring a sequence; the drafter reads them, runs a block of 8 positions through five layers of sliding-window attention with sink logits and a dynamic convolution, and walks a candidate lattice to 7 tokens, all as one CUDA graph. It drafts beside the lookup, and StairCut cuts every block. Every drafted token is verified, so the text is the plain decode's. On 8 chat prompts its accepted length is 4.55 tokens a block, against 4.57 for llama.cpp with the same drafter (\measured).
+Bolt has no MTP head. NVIDIA's drafter for it is LiLiCorr (0.96~GB, NVFP4), ported from vLLM's and llama.cpp's implementations to \code{engine/drafters/lilicorr.py}. The engine keeps the residual rows entering six of Bolt's layers in a ring a sequence; the drafter reads them, runs a block of 8 positions through five layers of sliding-window attention with sink logits and a dynamic convolution, and walks a candidate lattice to 7 tokens, all as one CUDA graph. It drafts beside the lookup in the EXL3 profiles, and StairCut cuts every block; the IQ2 profile drafts with the lookup alone, since with LiLiCorr beside it StairCut kept plain steps on this build (cause not isolated). Every drafted token is verified, so the text is the plain decode's. On 8 chat prompts its accepted length is 4.55 tokens a block, against 4.57 for llama.cpp with the same drafter (\measured).
 
 \begin{table}[htbp]
 \centering\small

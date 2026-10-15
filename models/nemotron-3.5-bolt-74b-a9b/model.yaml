@@ -111,7 +111,7 @@ profiles:
   bpw: 2.38
   disk_gb: 22.04
   weights_gib: 22.19
-  drafters_gib: 1.32
+  drafters_gib: 0.0
   hf_repo: nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16
   hf_private: false
   recommended: false
@@ -127,11 +127,11 @@ profiles:
       positions, every difference a near tie'
   assets_required:
   - nemotron-bolt-iq2-gguf
-  - nemotron-bolt-lilicorr
   note: 'NVIDIA''s GGUF (revision 724e3fee) read as stored: IQ2_XXS experts, NVFP4 Mamba2 projections with their tensor
     scales, Q8_0 head, attention and latent projections. A decode token reads about 4.6 GB of it. The config and the
     tokenizer come from the BF16 repository (revision 153d4551, 17 MB). Weights GiB: allocated at load (measured).
-    Drafts with NVIDIA''s LiLiCorr drafter (0.96 GB, NVFP4; 1.32 GiB allocated with its rings) and the lookup.'
+    Drafts with the lookup alone: with LiLiCorr beside it StairCut kept plain steps on this build (cause not isolated);
+    QSE_NH_HEAD=lilicorr turns the drafter on.'
   hf_revision: 153d4551268566bb7d57681ceded1289e6341fcd
   max_window: 262144
 - id: nemotron-bolt-exl3-2.0
