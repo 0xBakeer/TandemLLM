@@ -36,9 +36,10 @@ rows run on the 27B's row-invariant tensor-core kernel (tools/nvfp4_skinny.py) a
 `nvfp4_matmul`; the Triton GEMM below serves the CPU interpreter.
 
 `IQ2Linear` is the Linear interface (`shape`, `nbytes`, `matmul`) over a packed [N, K] tensor (rows of
-K / 256 blocks, as stored): `iq2_gemm` runs one row of x a program, decodes 4 groups of 32 weights of
-8 outputs a step and sums the products in fp32, K in order, so a row of an M-row call is the one-row
-call's row bit for bit (docs/kernels.md, "Verify twins"); a block of M rows reads the weights M times.
+K / 256 blocks, as stored): `iq2_gemm` decodes 4 groups of 32 weights of 8 outputs a step once for up
+to 16 rows of x and sums each row's products in fp32, K in order, by the same reduction whatever the
+rows a program, so a row of an M-row call is the one-row call's row bit for bit (docs/kernels.md,
+"Verify twins").
 """
 
 from __future__ import annotations
@@ -174,12 +175,13 @@ def dequant_q8_0(raw: np.ndarray, N: int, K: int) -> torch.Tensor:
 if HAVE_TRITON:
 
     @triton.jit
-    def _iq2_gemm(X, s_x, D, QS, G8, KS, Y, s_y, N, NB: tl.constexpr, BN: tl.constexpr, GB: tl.constexpr,
-                  F32: tl.constexpr):
-        # one row of x a program (row-invariant by construction), BN outputs, GB groups of 32 weights a
-        # step: each group's two words, its four grid entries gathered as packed bytes (G8: one int64 an
-        # entry), the signs and the scale as in the twin, the products summed in fp32, K in order
-        m = tl.program_id(0)
+    def _iq2_gemm(X, s_x, D, QS, G8, KS, Y, s_y, M, N, NB: tl.constexpr, BN: tl.constexpr, GB: tl.constexpr,
+                  R: tl.constexpr, F32: tl.constexpr):
+        # R rows of x a program, BN outputs, GB groups of 32 weights a step: each group's two words, its four
+        # grid entries gathered as packed bytes (G8: one int64 an entry), the signs and the scale as in the
+        # twin, decoded once for the R rows; each row's products summed in fp32 by the same reduction as in
+        # the one-row build, K in order, so a row's bits do not depend on R or on the other rows
+        pm = tl.program_id(0)
         pn = tl.program_id(1)
         cols = pn * BN + tl.arange(0, BN)
         cm = cols < N
@@ -187,7 +189,8 @@ if HAVE_TRITON:
         l4 = tl.arange(0, 4)
         j8 = tl.arange(0, 8)
         kk = tl.arange(0, GB * 32)
-        acc = tl.zeros([BN], dtype=tl.float32)
+        rr = tl.arange(0, R)
+        acc = tl.zeros([R, BN], dtype=tl.float32)
         for st in range(0, NB * 8 // GB):
             gidx = st * GB + gg
             b = gidx // 8
@@ -202,10 +205,13 @@ if HAVE_TRITON:
             neg = ((ks[:, :, :, None] >> j8[None, None, None, :]) & 1) == 1
             w = db[:, :, None, None] * g
             w = tl.reshape(tl.where(neg, -w, w), (BN, GB * 32))
-            x = tl.load(X + m * s_x + st * GB * 32 + kk).to(tl.float32)
-            acc += tl.sum(w * x[None, :], 1)
+            for r in tl.static_range(R):
+                row = pm * R + r
+                x = tl.load(X + row * s_x + st * GB * 32 + kk, mask=(kk >= 0) & (row < M), other=0.0).to(tl.float32)
+                acc = tl.where(rr[:, None] == r, acc + tl.sum(w * x[None, :], 1)[None, :], acc)
+        rows = pm * R + rr
         out = acc if F32 else acc.to(tl.bfloat16)
-        tl.store(Y + m * s_y + cols, out, mask=cm)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
 
 if HAVE_TRITON:
@@ -351,9 +357,12 @@ class IQ2Linear:
             return (y if out is None else out.copy_(y)).view(*x.shape[:-1], self.N)
         if out is None:
             out = torch.empty(M, self.N, dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
-        # 8 outputs and 4 groups a step, one warp: 0.10 ms a 5,376 x 4,096 row on GB10 (55 GB/s)
-        _iq2_gemm[(M, triton.cdiv(self.N, 8))](x2, x2.stride(0), self.d, self.qs, self._g8, self._ks, out, out.stride(0),
-                                               self.N, NB=self.K // QK, BN=8, GB=4, F32=f32, num_warps=1)
+        # 8 outputs and 4 groups a step, one warp; the rows a program by the call's row count (the builds give
+        # a row the same bits): a 5,376 x 4,096 weight takes 0.10 ms for one row, 0.36 for 8, 0.47 for 16 on GB10
+        R = 1 if M == 1 else 4 if M <= 4 else 8 if M <= 8 else 16
+        _iq2_gemm[(triton.cdiv(M, R), triton.cdiv(self.N, 8))](x2, x2.stride(0), self.d, self.qs, self._g8, self._ks, out,
+                                                               out.stride(0), M, self.N, NB=self.K // QK, BN=8, GB=4, R=R,
+                                                               F32=f32, num_warps=1)
         return out.view(*x.shape[:-1], self.N)
 
 
