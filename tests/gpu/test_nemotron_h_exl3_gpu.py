@@ -1,7 +1,7 @@
 """NemotronH EXL3 kernels on the board (ENG-E12): the relu^2 expert bank (tools/exl3_relu2.py) against its
 CPU arithmetic (each projection through tools/exl3_linear.reference_matmul), a pair's bits independent of
-the call's row count (a verify block's rows are the decode step's), and the dense projections at Bolt's
-shapes through tools/fn_kernels.dense against the reference. GPU only.
+the call's row count (a verify block's rows are the decode step's; grouped pairs of one expert too), and the
+dense projections at Bolt's shapes through tools/fn_kernels.dense / dense_rows against the reference. GPU only.
 
     python tests/gpu/test_nemotron_h_exl3_gpu.py
 """
@@ -51,6 +51,26 @@ def test_relu2_rows_are_their_lone_calls():
         assert torch.equal(one, full[m * 9:(m + 1) * 9]), m
 
 
+def test_relu2_groups_are_their_lone_calls():
+    """SPD-125: a block's pairs of one expert share its tile decode (groups of up to 8, a run of one expert split
+    past 8) and every pair keeps its lone call's bytes; the path a CTA a pair gives the same bytes."""
+    import tools.exl3_relu2 as RB
+    bank = _bank(16, 2048, 1024)
+    g = torch.Generator(device="cuda").manual_seed(2)
+    x = (torch.randn(32, 1024, device="cuda", generator=g) * 2).to(torch.bfloat16)
+    for pool in (9, 12, 16):
+        ids = torch.stack([torch.randperm(pool, device="cuda", generator=g)[:9] for _ in range(32)]).to(torch.int32)
+        one = torch.cat([bank.moe_relu2(x[m:m + 1], ids[m:m + 1]) for m in range(32)])
+        for M in (2, 8, 9, 16, 32):
+            assert torch.equal(bank.moe_relu2(x[:M], ids[:M]), one[:M * 9]), (pool, M)
+        RB.GROUP = False
+        try:
+            assert torch.equal(bank.moe_relu2(x, ids), one), pool
+        finally:
+            RB.GROUP = True
+    return "pools 9 / 12 / 16 of 9 a row, M 2..32"
+
+
 def test_dense_projections_at_bolt_shapes():
     from engine.models.nemotron_h.engine import _exl3_mm
     worst = 0.0
@@ -61,6 +81,8 @@ def test_dense_projections_at_bolt_shapes():
         ref = reference_matmul(x, w).float()
         worst = max(worst, float((y - ref).abs().max() / ref.abs().max()))
         assert torch.equal(_exl3_mm(x[:1], w), _exl3_mm(x, w)[:1]), (N, K)
+        # SPD-125: the verify block's rows path (dense_rows) and one CTA a row give the same bytes
+        assert torch.equal(torch.cat([_exl3_mm(x[m:m + 1], w) for m in range(8)]).float(), y), (N, K)
     assert worst < 2e-2, worst
     return f"worst rel {worst:.2e}"
 

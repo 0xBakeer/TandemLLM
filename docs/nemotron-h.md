@@ -82,6 +82,8 @@ The reference forward (`ref.py`) follows transformers' NemotronH and the CUDA pa
 - Prefill: 4,096-token chunks, the chunked SSD form in fp32 matmuls (chunk 128), SDPA, one GEMM pair an expert. The next token agrees with the row path; the bits do not.
 - CUDA graphs: the decode step per attention class, verify blocks, commits, joint decode steps of the side slots.
 - Taps (`set_taps`, a block drafter's context): the residual stream entering the tapped layers (llama.cpp's `t_layer_inp`) of every row, copied inside the graphs; a committed row's taps go to the state's ring by position (window + 64 rows): a decode step's in the step, a verify block's kept path's in the commit, a prompt chunk's last rows in the chunk. A restore or a restart moves `tap_gen`, so a drafter drops what it read of the rows below the length.
+- EXL3 projections (a pack's Mamba2, attention, latent, shared-expert and head blocks): `tools/fn_kernels.dense_rows` for the decode step and verify blocks up to 32 rows. Each row's input is rotated once (`dense_rot_kernel`, the arithmetic `dense` fuses), then one CTA a 128-column block, group of 16 rows and cluster rank decodes the trellis tiles once for the group: rows 0..7 in the m16n8k16 tile's a0/a2 lane groups, rows 8..15 in a1/a3. A row's K slices, warp and rank order, output rotation and svh are the one-row `dense` call's, so every output byte is its byte; the ranks' partials are added by every warp of the cluster, a row a warp. `QSE_NH_DENSE_ROWS=off` runs `dense`, a CTA a row.
+- EXL3 experts (`tools/exl3_relu2.Relu2Bank`): a verify block's (row, slot) pairs in ascending expert id, cut into groups of up to 8 pairs of one expert; a group's CTA decodes the expert's tiles once (row r in lane group r) with each pair's lone-call arithmetic. `QSE_NH_BANK_GROUP=off`: a CTA a pair.
 - Load-time self-check: a 24-token decode replayed as one verify block, every row and the committed states compared bit for bit (with taps, each row's taps and the committed ring too); a difference turns speculation off.
 - Caches: sections `mamba.conv.<L>` (bf16 [3, conv_dim]) and `mamba.S.<L>` (fp32 [heads, 64, state]), views K and V. Lightning: 46.8 MiB of sections a sequence, 6,144 bytes of KV a token.
 
@@ -140,6 +142,20 @@ DGX Spark, 2026-10-15, the build of `nemotron-bolt-iq2` with the CUDA IQ2 GEMV o
 - `fn_server_check.py`, 20 requests: 17 the same as plain; the other 3 (thinking on, a low thinking cap, JSON with 150 tokens) the same up to the reasoning budget's close, which lands at the end of the verified block (4 to 6 tokens later, docs/exactness.md, output changes).
 - A verify block's cost is the IQ2_XXS kernels (CUDA events, 1k context, 1 / 8 / 16 rows): the expert bank 3.9 / 22.1 / 42.7 ms, the shared experts' GEMV 3.4 / 11.3 / 22.4; the NVFP4 projections (11.0 .. 11.6), the Q8_0 head, attention and latents (9.5 .. 9.9) and the SSM walk (0.8 .. 2.2) barely move. Chains of 1 / 2 / 4 / 8 / 16 rows: 29.4 / 34.4 / 41.5 / 57.6 / 90.2 ms.
 
+On the EXL3 2.0-hq pack (`nemotron-bolt-exl3-2.0-hq`: experts at 2 bits, the dense projections at 4, head 6), with the projections on `dense_rows` and the bank grouped ([How the engine runs it](#how-the-engine-runs-it)); DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
+
+| class | EXL3 plain | EXL3 LiLiCorr + lookup | IQ2 LiLiCorr + lookup (above) | llama.cpp + LiLiCorr (IQ2 GGUF) |
+|-|-|-|-|-|
+| prose | 43.04 | 65.81 (3.01) | 42.59 | 47.93 |
+| code | 43.01 | 98.98 (4.87) | 73.83 | 89.00 |
+| chat | 43.16 | 69.27 (3.10) | 47.99 | 60.28 |
+| edit | 43.10 | 152.75 (12.46) | 114.16 | 94.48 |
+| copy | 43.16 | 256.00 (15.97) | 147.15 | 135.11 |
+
+- Every LiLiCorr text is the plain run's. `fn_server_check.py`, 20 requests: 16 the same; thinking on, a low thinking cap and JSON at 150 and 140 tokens the same up to the reasoning budget's close (docs/exactness.md, output changes). 1 / 2 / 3 requests at once (3 slots, 256 tokens): 58.8 / 66.4 / 72.1 tok/s in total, every text its request's alone.
+- Chains of 1 / 2 / 4 / 8 / 16 rows at 1k context: 22.1 / 24.7 / 28.7 / 33.8 / 44.9 ms (a CTA a row: 23.8 / 28.0 / 41.7 / 74.7 / 142.1); the decode step 23.1 ms (44.2 tok/s from its graph in a later window; `dense`: 41.0). At 8 rows: `dense_rows` 17.3 ms (the decode step's `dense` 18.0), the bank 10.6, the head 1.6, the SSM walk 1.3.
+- Rows of a real 8 / 16-row block route to 57 / 46 % distinct experts; the grouped bank reads each once.
+
 ## Checks
 
 | check | result |
@@ -161,3 +177,7 @@ DGX Spark, 2026-10-15, the build of `nemotron-bolt-iq2` with the CUDA IQ2 GEMV o
 | LiLiCorr against an fp32 reference written from vLLM's and llama.cpp's code (tiny weights) | block within 2e-5, lattice scores within 1e-4, the same walk |
 | LiLiCorr on Bolt against llama.cpp + LiLiCorr, 8 prompts x 256 | accepted length 4.55 against 4.57 |
 | Bolt server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 22 the same, 3 the same up to the reasoning budget's close |
+| EXL3 rows path (`tools/fn_dense_rows_check.py`): `dense_rows` against the one-row `dense` at Bolt's, the 27B's and Flash-Next's shapes, M 1..32, clusters, 8 warps, groups, the fp32 head, every rate; all 281 projections of the 2.0-hq pack; `dense` against 0.9.x's | every byte the same |
+| EXL3 bank grouped (`tests/gpu/test_nemotron_h_exl3_gpu.py`, `fn_dense_rows_check.py bank`): M 2..32, every row on the same 9 experts up to few shared | every pair its lone call's bytes |
+| Bolt EXL3 2.0-hq engine on the rows path (`fn_dense_rows_check.py engine`, 3 prompts): self-check at 24 and 8 rows, a 16-row tree against each branch's sequential decode, graph replay, 32 decode steps with `QSE_NH_DENSE_ROWS` on and off | bit for bit |
+| Bolt EXL3 2.0-hq server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 21 the same, 4 the same up to the reasoning budget's close |
