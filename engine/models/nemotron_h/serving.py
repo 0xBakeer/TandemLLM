@@ -542,12 +542,12 @@ def build(path: str, max_len: int, tok, mark=lambda stage: None, log=print, kv_p
     if lc is not None and not lc["ok"]:
         log(f"[server] {lc['why']}: the lookup drafts alone")
     info = {"pack": path, "load": timing, "formats": idx.notes, "self_check": res, "mtp_in_checkpoint": idx.has_mtp,
-            "lilicorr": lc}
+            "exl3": bool(getattr(idx, "is_exl3", False)), "lilicorr": lc}
     return srv, info
 
 
 def serve(a, ctx) -> dict:
-    """NVIDIA's NemotronH from a BF16 checkpoint or a GGUF for the server (`--model <dir>`, the registry's `serve`;
+    """NVIDIA's NemotronH from a BF16 checkpoint, an EXL3 pack or a GGUF for the server (`--model <dir>`, the registry's `serve`;
     server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
     lookup cut by StairCut (`lookup_drafter`, gated by the load-time self-check), and `--draft-head mtp`
     adds the checkpoint's MTP head at `--depth` (its weights loaded only then). What the engine cannot
@@ -578,7 +578,7 @@ def serve(a, ctx) -> dict:
             ctx.log("[server] NemotronH self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
     from engine.models.nemotron_h.load import gguf_of
-    fmt = "gguf" if gguf_of(a.model) else "bf16"
+    fmt = "gguf" if gguf_of(a.model) else ("exl3" if info["exl3"] else "bf16")
     what = ("LiLiCorr + lookup + StairCut" if lc_head is not None else
             "MTP head depth " + str(depth) + " + lookup + StairCut" if depth else "lookup + StairCut")
     describe = (f"NemotronH {a.model} ({fmt}): load {info['load'].get('total_s')} s, drafter "

@@ -50,6 +50,27 @@ PREFILL_CHUNK = 4096
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
+#: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
+DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
+
+
+def _exl3_mm(x2: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
+    """An EXL3 projection (ENG-E12): tools/fn_kernels.dense up to 32 rows (row-invariant, the input rotation
+    fused), the library's GEMM above that or at a rate dense does not take; on the CPU the torch reference a
+    row at a time (row-invariant as the kernels are: a verify block's rows are the decode step's)."""
+    from tools import fn_kernels as FK
+    from tools.exl3_linear import exl3_matmul
+    if not x2.is_cuda:
+        y = torch.cat([exl3_matmul(x2[i:i + 1], w) for i in range(x2.shape[0])])
+        return y if out is None else out.copy_(y)
+    if x2.shape[0] <= ROWS_MAX and w.kb in DENSE_K:
+        return FK.dense(x2, w, out=out)
+    return exl3_matmul(x2, w, out=out)
+
+
+def _is_exl3(w) -> bool:
+    from tools.exl3_linear import EXL3Block
+    return isinstance(w, EXL3Block)
 
 
 class _NoEvent:
@@ -145,6 +166,8 @@ class NemotronHEngine(NemotronHRef):
         x2 = x.reshape(-1, x.shape[-1])
         if not x2.is_contiguous():
             x2 = x2.contiguous()
+        if _is_exl3(w):
+            return _exl3_mm(x2, w, out=out).view(*x.shape[:-1], w.N)
         if not torch.is_tensor(w):
             # a packed weight (tools/iq2_linear: IQ2Linear, NVFP4Linear): its own row-invariant kernel at any row count
             return w.matmul(x2, out=out).view(*x.shape[:-1], w.shape[0])
@@ -169,6 +192,8 @@ class NemotronHEngine(NemotronHRef):
     def head(self, n: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         """Logits [M, vocab] fp32 of the final normed rows (a static `out` in a graph)."""
         w = self.head_weight()
+        if _is_exl3(w):
+            return _exl3_mm(n, w, out=out)          # an fp32 head block (load.py: out_fp32)
         if not torch.is_tensor(w):
             return w.matmul(n, out=out, f32=True)
         if n.shape[0] <= ROWS_MAX:
@@ -655,8 +680,8 @@ class NemotronHEngine(NemotronHRef):
 
     def _moe_chunk(self, n, li):
         """A prompt chunk's MoE block: fp32 router logits, the router kernel, each expert once over its
-        rows (cuBLAS; a packed bank's expert decoded to bf16 first), the ordered combine, the latent pair,
-        the shared expert."""
+        rows (cuBLAS; an IQ2 bank's expert decoded to bf16 first, an EXL3 expert on its own GEMM), the
+        ordered combine, the latent pair, the shared expert."""
         c = self.cfg
         m = self.pre(li) + "mixer."
         logits = F.linear(n.float(), self.W[m + "gate.weight"].float())
@@ -676,8 +701,8 @@ class NemotronHEngine(NemotronHRef):
             pairs = order[o:o + cnt]
             o += cnt
             xe = x.index_select(0, pairs // S)
-            up, down = e.expert(ex)                  # packed experts (IQ2Bank): decoded to bf16 for the chunk
-            yd[pairs] = F.linear(F.relu(F.linear(xe, up)).square(), down).float()
+            up, down = e.expert(ex)                  # bf16 (an IQ2Bank's decoded for the chunk) or EXL3 blocks
+            yd[pairs] = self.mm(F.relu(self.mm(xe, up)).square(), down).float()
         out = K.combine(yd, ids, wts)
         if c.moe_latent_size:
             out = self.mm(out, self.W[m + "fc2_latent_proj.weight"])

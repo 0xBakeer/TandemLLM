@@ -117,12 +117,13 @@ profiles:
   badges:
   - NVIDIA's own quantization
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
-    ppl: null
+    kl_vs_bf16: 0.2588
+    top1_pct: 79.59
+    ppl: 7.48
     date: '2026-10-15'
-    source: 'not measured against BF16 yet; against llama.cpp on the same GGUF, teacher-forced: top-1 97.75 % of 1,024
-      chat positions, every difference a near tie'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, 8 wikitext-2 rows of 1,024 tokens from
+      an HF job, BF16 ppl 5.97); against llama.cpp on the same GGUF, teacher-forced: top-1 97.75 % of 1,024 chat
+      positions, every difference a near tie'
   assets_required:
   - nemotron-bolt-iq2-gguf
   - nemotron-bolt-lilicorr
@@ -131,6 +132,31 @@ profiles:
     tokenizer come from the BF16 repository (revision 153d4551, 17 MB). Weights GiB: allocated at load (measured).
     Drafts with NVIDIA''s LiLiCorr drafter (0.96 GB, NVFP4; 1.32 GiB allocated with its rings) and the lookup.'
   hf_revision: 153d4551268566bb7d57681ceded1289e6341fcd
+  max_window: 262144
+- id: nemotron-bolt-exl3-2.0-hq
+  label: EXL3 2.0 bpw experts, 4-bit dense (ours)
+  format: exl3
+  bpw: 2.19
+  disk_gb: 23.48
+  weights_gib: 20.22
+  drafters_gib: 0.0
+  hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0-hq
+  hf_private: true
+  recommended: false
+  badges: []
+  quality:
+    kl_vs_bf16: 0.1697
+    top1_pct: 84.05
+    ppl: 6.81
+    date: '2026-10-15'
+    source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, the same 8 rows as the IQ2 entry);
+      exllamav3''s model_diff on 100 wikitext-2 rows of 2,048: KL 0.088, top-1 87.6 %'
+  assets_required: []
+  note: 'Converted from the BF16 checkpoint (revision bca0a8cb) by exllamav3 1.6.2 with our Puzzle/Bolt patch: routed
+    experts at 2 bits, the Mamba2, attention, latent and shared-expert projections at 4, head 6; the RADIO tower is in
+    the pack in BF16 and not loaded. A decode token reads about 4.7 GB. Measured 2026-10-15: 20.22 GiB at load, the decode
+    step 41.3 tok/s (the IQ2 GGUF 28.4 in the same window). The repository is private: a download needs the token.'
+  hf_revision: 0c59e1c05ce5d0161028d2a8f7392730ba5d79a2
   max_window: 262144
 measurements:
   build: 0.9.1

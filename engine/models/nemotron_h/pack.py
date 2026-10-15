@@ -1,4 +1,4 @@
-"""The NemotronH weights on disk: a BF16 safetensors checkpoint, one index over its shards.
+"""The NemotronH weights on disk: a BF16 safetensors checkpoint or an EXL3 pack, one index over its shards.
 
 `PackIndex.open(dir)` reads `config.json` (engine/models/nemotron_h/config.py) and every shard's header
 (nothing else), and names each tensor canonically: the stored key without its `backbone.` prefix (an
@@ -17,6 +17,13 @@ projection, the router, the k routed experts of each MoE layer at that layer's e
 expert and latent pair, the head, one embedding row, the fp32 SSM states and conv states read and
 written, and the KV rows of `context` tokens. It is the ceiling a measured tok/s is held against.
 
+An EXL3 pack (exllamav3 with the Puzzle/Bolt patch, ENG-E12) stores a quantised projection `X` as
+`X.trellis` int16 [Kin/16, N/16, 16 K], `X.suh` / `X.svh` fp16 (or the packed sign fields `X.su` / `X.sv`)
+and `X.mul1`, and the rest as fp16 (norms, conv taps, the router, the embedding) or fp32; the vision tower
+it copies unquantised is skipped like the BF16 checkpoint's. A projection is BF16/F16 (`X.weight`) or EXL3
+per tensor (`formats`); `audit()` checks each EXL3 block's shapes against the config, its rate against the
+ones the kernels decode, and the mul1 codebook.
+
 A GGUF reader (Bolt's IQ2_XXS release) plugs in beside this one with the same canonical names.
 """
 
@@ -31,7 +38,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
-from engine.models.lfm2_moe.pack import DSIZE, DT, TensorInfo, safetensors_header
+from engine.models.lfm2_moe.pack import DSIZE, DT, EXL3_SUFFIX, MUL1, RATES, TensorInfo, safetensors_header
 from engine.models.nemotron_h.config import NemotronHConfig, config_from_dict
 
 PREFIXES = ("language_model.backbone.", "language_model.", "backbone.")
@@ -106,6 +113,13 @@ class PackIndex:
     skipped: int = 0                            # tensors outside the language model
     has_mtp: bool = False
     notes: list[str] = field(default_factory=list)
+    quant: dict = field(default_factory=dict)   # the pack's quantization_config (an EXL3 pack's)
+    formats: dict = field(default_factory=dict)  # projection base -> "bf16" | "f16" | "exl3" (after audit)
+
+    @property
+    def is_exl3(self) -> bool:
+        return str(self.quant.get("quant_method", "")).lower() == "exl3" or any(
+            n.endswith(".trellis") for n in self.tensors)
 
     @classmethod
     def open(cls, path: str) -> "PackIndex":
@@ -155,36 +169,81 @@ class PackIndex:
                 info = TensorInfo(name, k, fp, t["dtype"], tuple(t["shape"]), start + b0, b1 - b0)
                 if info.nbytes != int(np.prod(info.shape)) * DSIZE[info.dtype]:
                     raise ValueError(f"{fn}: {k} has {info.nbytes} bytes for {info.shape} {info.dtype}")
-                info.kind = "expert" if ".experts." in name else "plain"
+                info.kind = "expert" if ".experts." in name else (
+                    "exl3" if name.rsplit(".", 1)[-1] in EXL3_SUFFIX else "plain")
                 tensors[name] = info
             if files[fn] != start + end:
                 raise ValueError(f"{fp}: {files[fn]} bytes on disk, the header describes {start + end}"
                                  " (truncated or corrupt)")
-        idx = cls(path, cfg, tensors, files, skipped)
-        idx.has_mtp = "mtp.layers.0.eh_proj.weight" in tensors
+        idx = cls(path, cfg, tensors, files, skipped, quant=raw.get("quantization_config") or {})
+        idx.has_mtp = "mtp.layers.0.eh_proj.weight" in tensors or "mtp.layers.0.eh_proj.trellis" in tensors
         return idx
 
     # --------------------------------------------------------------------------- checks
     def audit(self) -> list[str]:
-        """Every tensor the layer table expects, with its shape; the MTP head when the checkpoint has
-        one (whole, or not at all). Raises naming the first problem; returns notes."""
+        """Every tensor the layer table expects, with its shape, a projection as BF16/F16 or as a whole EXL3
+        block; the MTP head when the checkpoint has one (whole, or not at all). Raises naming the first
+        problem; returns notes."""
         c = self.cfg
         want = expected(c, mtp=self.has_mtp)
+        formats, read = {}, set()
         for name, shape in want:
             t = self.tensors.get(name)
+            base = name[:-len(".weight")] if name.endswith(".weight") else None
+            if t is None and base is not None and len(shape) == 2 and base + ".trellis" in self.tensors:
+                read |= self._audit_exl3(base, *shape)
+                formats[base] = "exl3"
+                continue
             if t is None:
                 raise ValueError(f"{name} is missing from the checkpoint")
             if tuple(t.shape) != tuple(shape):
                 raise ValueError(f"{name} {t.shape}: the config wants {shape}")
             if t.dtype not in ("BF16", "F32", "F16"):
                 raise ValueError(f"{name}: dtype {t.dtype}; this reader takes BF16, F16 and F32")
-        extra = sorted(set(self.tensors) - {n for n, _ in want})
+            if base is not None and len(shape) == 2:
+                formats[base] = t.dtype.lower()
+            read.add(name)
+        extra = sorted(set(self.tensors) - read)
         if extra and not (not self.has_mtp and all(e.startswith("mtp.") for e in extra)):
             raise ValueError(f"{len(extra)} tensor(s) the layer table does not read, first {extra[0]}")
-        dt = Counter(t.dtype for t in self.tensors.values())
+        self.formats = formats
+        dt = Counter(t.dtype for t in self.tensors.values() if t.kind != "exl3" and not t.name.endswith(".trellis"))
         self.notes = [f"tensors {len(self.tensors)} ({dict(dt)}), mtp {'yes' if self.has_mtp else 'no'}"
                       + (f", {self.skipped} tower tensors skipped" if self.skipped else "")]
+        if self.is_exl3:
+            self.notes.append(f"projections {dict(Counter(formats.values()))}, EXL3 bits "
+                              f"{dict(sorted(Counter(self.tensors[b + '.trellis'].k for b, f in formats.items() if f == 'exl3').items()))}")
         return self.notes
+
+    def _audit_exl3(self, base: str, N: int, Kin: int) -> set:
+        """One EXL3 block: trellis [Kin/16, N/16, 16 K] at a rate the kernels decode, the mul1 codebook, the
+        channel factors (or their packed signs) at their lengths. Returns the tensors it reads."""
+        t = self.tensors[base + ".trellis"]
+        if base + ".mcg" in self.tensors or base + ".mul1" not in self.tensors:
+            raise ValueError(f"{base}: not the mul1 codebook (mcg or 3inst); the engine decodes mul1 only")
+        if len(t.shape) != 3 or (t.shape[0] * 16, t.shape[1] * 16) != (Kin, N):
+            raise ValueError(f"{base}.trellis {t.shape} does not fit {(N, Kin)}")
+        if t.k not in RATES:
+            raise ValueError(f"{base}: {t.k} bits a weight; the kernels take 2..8, 1.5, 2.5 and 3.5")
+        read = {base + ".trellis", base + ".mul1"}
+        for s, alt, n in (("suh", "su", Kin), ("svh", "sv", N)):
+            if base + "." + s in self.tensors:
+                if self.tensors[base + "." + s].shape != (n,):
+                    raise ValueError(f"{base}.{s} {self.tensors[base + '.' + s].shape} != ({n},)")
+                read.add(base + "." + s)
+            elif base + "." + alt in self.tensors:
+                read.add(base + "." + alt)
+            else:
+                raise ValueError(f"{base}: no {s} and no {alt}")
+        return read
+
+    def check_mul1(self) -> None:
+        """Every `.mul1` holds 0x83DCD12D (the codebook the kernels decode)."""
+        for n in self.tensors:
+            if n.endswith(".mul1"):
+                v = int(self.read(n).view(-1)[0].item()) & 0xFFFFFFFF
+                if v != MUL1:
+                    raise ValueError(f"{n} = {v:#x}: only the mul1 codebook {MUL1:#x} is decoded")
 
     def verify_sha256(self, manifest: dict) -> dict:
         """Every shard against a manifest {file: {"sha256": hex}} (a missing entry is reported, a wrong
@@ -206,7 +265,14 @@ class PackIndex:
 
     # --------------------------------------------------------------------------- summaries
     def nbytes(self, name: str) -> int:
-        return self.tensors[name].nbytes
+        """Bytes of a tensor as stored; for a projection's `X.weight` that the pack holds as EXL3, its
+        trellis and channel factors."""
+        t = self.tensors.get(name)
+        if t is not None:
+            return t.nbytes
+        base = name[:-len(".weight")]
+        return sum(self.tensors[base + "." + s].nbytes for s in ("trellis", "suh", "svh", "su", "sv")
+                   if base + "." + s in self.tensors)
 
     def decode_bytes(self, context: int = 0) -> dict:
         """What one decode token reads (bytes), by part; `context`: the KV rows attention reads."""
@@ -222,7 +288,8 @@ class PackIndex:
                 parts["attn_proj"] += sum(self.nbytes(m + f"{x}_proj.weight") for x in "qkvo")
             else:
                 E = c.moe_experts[li]
-                eb = self.nbytes(m + "experts.0.up_proj.weight") + self.nbytes(m + "experts.0.down_proj.weight")
+                eb = sum(self.nbytes(m + f"experts.{e}.up_proj.weight") + self.nbytes(m + f"experts.{e}.down_proj.weight")
+                         for e in range(E)) / E
                 parts["experts"] += c.moe_k[li] * eb
                 parts["shared"] += self.nbytes(m + "shared_experts.up_proj.weight") + self.nbytes(
                     m + "shared_experts.down_proj.weight")
@@ -231,7 +298,8 @@ class PackIndex:
                     parts["latent"] += self.nbytes(m + "fc1_latent_proj.weight") + self.nbytes(m + "fc2_latent_proj.weight")
                 del E
             parts["norms"] += self.nbytes(f"layers.{li}.norm.weight")
-        parts["head"] += self.nbytes("lm_head.weight" if "lm_head.weight" in self.tensors else "embeddings.weight")
+        own = "lm_head.weight" in self.tensors or "lm_head.trellis" in self.tensors
+        parts["head"] += self.nbytes("lm_head.weight" if own else "embeddings.weight")
         e = self.tensors["embeddings.weight"]
         parts["embed_row"] += e.shape[1] * DSIZE[e.dtype]
         parts["ssm_state_rw"] += 2 * c.ssm_state_bytes()
@@ -242,6 +310,7 @@ class PackIndex:
         return {"parts": parts, "total": sum(parts.values()), "context": context}
 
     def resident_bytes(self, mtp: bool = True) -> int:
+        """Bytes the language model's tensors hold as stored."""
         return sum(t.nbytes for n, t in self.tensors.items() if mtp or not n.startswith("mtp."))
 
     # --------------------------------------------------------------------------- reading
@@ -269,6 +338,17 @@ class PackIndex:
         return out.to(device) if device is not None else out
 
 
+    def exl3(self, base: str, device=None, out_fp32: bool = False):
+        """The EXL3 projection `base` as an EXL3Block (signs unpacked where the pack packed them)."""
+        from tools.exl3_linear import EXL3Block, unpack_signs
+
+        def part(s, alt):
+            if base + "." + s in self.tensors:
+                return self.read(base + "." + s, device)
+            return unpack_signs(self.read(base + "." + alt)).to(device)
+        return EXL3Block(self.read(base + ".trellis", device), part("suh", "su"), part("svh", "sv"), out_fp32=out_fp32)
+
+
 def summary(idx: PackIndex) -> dict:
     """The audit record: counts, dtypes, the layer table, resident and decode bytes."""
     c = idx.cfg
@@ -278,5 +358,6 @@ def summary(idx: PackIndex) -> dict:
         "layers": dict(Counter(c.layer_types)), "resident": idx.resident_bytes(),
         "resident_no_mtp": idx.resident_bytes(mtp=False),
         "decode_bytes": idx.decode_bytes(), "decode_bytes_8k": idx.decode_bytes(context=8192),
+        "formats": dict(Counter(idx.formats.values())), "quant": {k: v for k, v in idx.quant.items() if k != "tensor_storage"},
         "notes": idx.notes,
     }
