@@ -13,6 +13,10 @@
                                                                    context, and the experts a block reads
     $PY tools/nh_check.py mtp --model <dir> --depth 3                the checkpoint's MTP head against the
                                                                    trunk's greedy text: agreement a depth
+    $PY tools/nh_check.py lilicorr --model <dir> --draft <dir>        LiLiCorr (SPD-123) against the trunk's
+                                                                   greedy text: a draft at every position,
+                                                                   agreement a depth, the accepted length
+                                                                   of a greedy speculative run, draft ms
     $PY tools/nh_check.py prices --stair s.json --bench b.json --out <price file>
     $PY tools/nh_check.py llamacpp --model <dir> --url <llama-server> --out ref.pt
                                                                    llama.cpp's greedy text on the same
@@ -64,12 +68,15 @@ def _ids(tok, prompt: str) -> list[int]:
     return tok(text, add_special_tokens=False)["input_ids"]
 
 
-def _engine(model: str, max_len: int):
+def _engine(model: str, max_len: int, taps=None):
+    """The engine of a checkpoint; `taps`: a LiLiCorr config whose taps it keeps."""
     from engine.models.nemotron_h.engine import NemotronHEngine
     from engine.models.nemotron_h.load import load_any
     t0 = time.time()
     idx, W, experts, timing = load_any(model, "cuda", mtp=False, log=None)
     eng = NemotronHEngine(idx.cfg, W, experts, device="cuda", max_len=max_len)
+    if taps is not None:
+        eng.set_taps(taps.target_layer_ids, taps.window)
     torch.cuda.synchronize()
     return idx, eng, {"load_s": round(time.time() - t0, 1), "allocated_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
                       **timing}
@@ -262,6 +269,83 @@ def cmd_mtp(a) -> None:
     print(json.dumps(res), flush=True)
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
+
+
+def cmd_lilicorr(a) -> None:
+    """LiLiCorr against the trunk's own greedy text: per prompt the prefill and `tokens` greedy decode
+    steps from the captured graph (the taps on), and before each step a draft anchored at that
+    position (the context the committed rows give it). Reported: the agreement of the draft with the
+    trunk's next tokens at each depth, the mean run of agreeing tokens, the accepted length a greedy
+    speculative run of these drafts would have (blocks of 1 + the run, from the first token on: the
+    figure llama.cpp and vLLM report), and the draft's ms (CUDA events, eager)."""
+    from types import SimpleNamespace
+
+    from transformers import AutoTokenizer
+
+    from engine.drafters.lilicorr import build_head, load_config
+    from engine.models.nemotron_h.engine import DecodeGraph
+    tok = AutoTokenizer.from_pretrained(a.model)
+    idx, eng, info = _engine(a.model, a.max_len, taps=load_config(a.draft))
+    srv = SimpleNamespace(fn=eng, st=None, kv=SimpleNamespace(length=0))
+    head = build_head(srv, a.draft, log=lambda m: print(m, flush=True))
+    D = head.depth
+    prompts = [p for p in PROMPTS[:a.prompts]] + [open(f).read() for f in (a.prompt_file or [])]
+    agree, runs_all, al_all, ms_all = [0] * D, [], [], []
+    out = {"model": a.model, "draft": a.draft, "tokens": a.tokens, "thinking": a.thinking, "load": info, "prompts": []}
+    for p in prompts:
+        msgs = [{"role": "user", "content": p}]
+        text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
+                                       **({} if a.thinking else {"enable_thinking": False}))
+        ids = tok(text, add_special_tokens=False)["input_ids"]
+        st = eng.new_state(a.max_len)
+        srv.st = st
+        lg = eng.prefill(torch.tensor(ids), st)
+        seq = list(ids) + [int(lg[0].argmax())]
+        dg = DecodeGraph(eng, st)
+        drafts, ms = [], []
+        for _ in range(a.tokens):
+            n = st.length                                   # the anchor seq[n] at position n
+            e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            e0.record()
+            d = head.draft_at(seq[n], n)
+            e1.record()
+            drafts.append(d[:, 0].long().tolist())
+            ms.append(e0.elapsed_time(e1))
+            seq.append(dg.greedy(seq[n]))
+        P = len(ids)
+        runs = []
+        for j, d in enumerate(drafts[:a.tokens - D]):
+            t = P + j
+            r = 0
+            while r < D and d[r] == seq[t + 1 + r]:
+                r += 1
+            runs.append(r)
+            for k in range(D):
+                agree[k] += d[k] == seq[t + 1 + k]
+        # a greedy speculative run of these drafts: a block keeps its run and the trunk's next token
+        t, blocks, toks = 0, 0, 0
+        while t < len(runs):
+            blocks += 1
+            toks += runs[t] + 1
+            t += runs[t] + 1
+        rec = {"prompt": p[:48], "mean_run": round(sum(runs) / max(len(runs), 1), 3),
+               "accepted_length": round(toks / max(blocks, 1), 3), "draft_ms": round(sorted(ms)[len(ms) // 2], 2),
+               "text": tok.decode(seq[P:])[:120]}
+        runs_all += runs
+        al_all.append(rec["accepted_length"])
+        ms_all += ms
+        out["prompts"].append(rec)
+        print(json.dumps(rec), flush=True)
+    n = max(len(runs_all), 1)
+    out.update({"positions": len(runs_all), "agree_at_depth": [round(x / n, 4) for x in agree],
+                "mean_run": round(sum(runs_all) / n, 3),
+                "accepted_length_mean": round(sum(al_all) / max(len(al_all), 1), 3),
+                "accepted_length_range": [min(al_all), max(al_all)] if al_all else None,
+                "draft_ms_median": round(sorted(ms_all)[len(ms_all) // 2], 2) if ms_all else None,
+                "head_stats": head.stats})
+    print(json.dumps({k: v for k, v in out.items() if k != "prompts"}), flush=True)
+    if a.json:
+        json.dump(out, open(a.json, "w"), indent=1)
 
 
 def cmd_cmp(a) -> None:
@@ -555,6 +639,15 @@ def main() -> None:
     mt.add_argument("--prompts", type=int, default=8)
     mt.add_argument("--max-len", type=int, default=8192)
     mt.add_argument("--json")
+    li = sub.add_parser("lilicorr")
+    li.add_argument("--model", required=True)
+    li.add_argument("--draft", required=True, help="the LiLiCorr checkpoint directory")
+    li.add_argument("--tokens", type=int, default=256)
+    li.add_argument("--prompts", type=int, default=8)
+    li.add_argument("--prompt-file", nargs="*", help="more prompts, a file each")
+    li.add_argument("--thinking", type=int, default=1, help="the chat template's thinking (1 on, 0 off)")
+    li.add_argument("--max-len", type=int, default=8192)
+    li.add_argument("--json")
     cf = sub.add_parser("config")
     cf.add_argument("--model", required=True)
     cf.add_argument("--against", help="a known config.json (Puzzle 75B-A9B's): the fields and rows that differ")
@@ -590,6 +683,7 @@ def main() -> None:
     lm.add_argument("--json")
     a = ap.parse_args()
     {"llamacpp": cmd_llamacpp, "llamacmp": cmd_llamacmp, "cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "hf": cmd_hf, "config": cmd_config, "mtp": cmd_mtp,
+     "lilicorr": cmd_lilicorr,
      "bench": cmd_bench, "staircase": cmd_staircase}[a.cmd](a)
 
 
