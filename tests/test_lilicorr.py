@@ -693,6 +693,59 @@ def test_serving_drafts_a_round_with_the_head_and_a_long_lookup():
     return f"a round of {len(tree.tokens) - 1} drafted tokens; lookup min order {LOOK_MIN_ORDER_HEAD}"
 
 
+def test_build_leaves_the_lookup_alone_and_says_why():
+    """`serving.build` with LiLiCorr: missing files, or a draft that fails the load-time gate (random
+    weights agree with no trunk), leave no head (the lookup drafts alone), the reason in the log and in
+    the info /health reports; the engine's self-check still passes."""
+    if SKIP:
+        return SKIP
+    from types import SimpleNamespace
+
+    from safetensors.torch import save_file
+
+    import engine.models.nemotron_h.load as L
+    from engine.models.nemotron_h import serving as SV
+    from tools.nvfp4_linear import quantize_to_nvfp4
+    cfg, eng = engine()
+
+    class Tok:
+        def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True):
+            return msgs[0]["content"]
+
+        def __call__(self, text, add_special_tokens=False):
+            return {"input_ids": [3 + ord(ch) % 200 for ch in text]}
+    real = L.load_any
+    L.load_any = lambda path, device, mtp=False, log=None: (SimpleNamespace(cfg=cfg, notes={}, has_mtp=False), eng.W,
+                                                             eng.experts, {})
+    logs = []
+    try:
+        srv, info = SV.build("tiny", 256, Tok(), log=logs.append, lilicorr="/nonexistent/lilicorr")
+        assert info["self_check"]["ok"] and "lilicorr" not in srv.heads
+        assert info["lilicorr"]["ok"] is False and "files missing" in info["lilicorr"]["why"], info["lilicorr"]
+        assert any("the lookup drafts alone" in m for m in logs)
+        assert SV._lc_info(info["lilicorr"])["why"].startswith("LiLiCorr files missing")
+        with tempfile.TemporaryDirectory() as d:
+            out = {}
+            for k, v in lc_weights().items():
+                if _nvfp4(k):
+                    q = quantize_to_nvfp4(v)
+                    out[k], out[k[:-len("weight")] + "weight_scale"] = q.w.cpu(), q.s.cpu()
+                    out[k[:-len("weight")] + "weight_scale_2"] = torch.tensor(q.s2, dtype=torch.float32)
+                else:
+                    out[k] = v.to(torch.bfloat16)
+            save_file(out, os.path.join(d, "model.safetensors"))
+            json.dump(LC_CFG, open(os.path.join(d, "config.json"), "w"))
+            logs.clear()
+            srv, info = SV.build("tiny", 256, Tok(), log=logs.append, lilicorr=d)
+        lc = info["lilicorr"]
+        assert lc["ok"] is False and lc["gate"]["mean_run"] < SV.LILICORR_GATE and "gate" in lc["why"], lc
+        assert "lilicorr" not in srv.heads and srv.fn.taps == TAPS
+        assert any("[lilicorr] gate FAIL" in m for m in logs) and any("the lookup drafts alone" in m for m in logs)
+    finally:
+        L.load_any = real
+    return f"missing files and a failed gate (mean run {lc['gate']['mean_run']}): no head, reason logged"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
