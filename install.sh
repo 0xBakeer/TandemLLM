@@ -745,6 +745,9 @@ setv CORPUS "$(q "$CORPUS_VALUE")"
 setv QSE_USAGE_LEDGER "$(q "$DIR/state/usage/ledger.sqlite3")"
 setv DROP_PAGE_CACHE 0              # bin/tandem drops the weights' page cache with this install's paths
 setv QWEN38_MODEL "$(q "$SNAP_BASE")"
+# a cache of its own (HF_HOME or HF_HUB_CACHE here): the engine, the setup guide and ops/use-profile.sh
+# look for the base and fetch into the same one (OPS-143)
+[ "$HF_HUB_DIR" = "$HOME/.cache/huggingface/hub" ] || setv HF_HUB_CACHE "$(q "$HF_HUB_DIR")"
 setv QSE_SECRETS "$(q "$DIR/state/secrets.env")"
 if [ -n "$CUDA_HOME_FOUND" ]; then setv CUDA_HOME "$(q "$CUDA_HOME_FOUND")"; fi
 if [ "$SPARK" != 1 ]; then
@@ -758,18 +761,26 @@ render_env() {
     printf '# put your own settings in %s/local.env, which is read last.\n' "$RUN"
     printf '# The template is the release'"'"'s ops/serve.env (%s); these keys are this machine'"'"'s:\n' "$TANDEM_REF"
     printf '#   %s\n\n' "${ENV_KEYS[*]}"
+    # The keys the template lacks go in before its weight profile (OPS-143), which may replace them: an
+    # EXL3 profile's QWEN38_MODEL is base-plain on a box without the FP8 snapshot, a standalone
+    # community pack's is the pack. Appended after it, install.sh's values replaced the profile's.
     # shellcheck disable=SC2016  # the $0/$1 are awk's
     env "${ENV_ASSIGN[@]}" awk -v keys="${ENV_KEYS[*]}" '
         BEGIN { n = split(keys, k, " "); for (i = 1; i <= n; i++) want[k[i]] = 1 }
+        function mine() {
+            if (done++) return
+            printf "# set by install.sh (not in the template)\n"
+            for (i = 1; i <= n; i++) if (!(k[i] in tmpl)) print k[i] "=" ENVIRON["TV_" k[i]]
+            printf "\n"
+        }
+        FNR == NR { if (match($0, /^[A-Za-z_][A-Za-z0-9_]*=/)) tmpl[substr($0, 1, RLENGTH - 1)] = 1; next }
+        /^# Weight profile \(ops\/use-profile\.sh\)/ { mine() }
         match($0, /^[A-Za-z_][A-Za-z0-9_]*=/) {
             key = substr($0, 1, RLENGTH - 1)
             if (key in want) { if (!(key in seen)) print key "=" ENVIRON["TV_" key]; seen[key] = 1; next }
         }
         { print }
-        END {
-            printf "\n# set by install.sh (not in the template)\n"
-            for (i = 1; i <= n; i++) if (!(k[i] in seen)) print k[i] "=" ENVIRON["TV_" k[i]]
-        }' "$TEMPLATE"
+        END { if (!done) { printf "\n"; mine() } }' "$TEMPLATE" "$TEMPLATE"
     printf '\nif [ -f %s ]; then . %s; fi\n' "$(q "$RUN/local.env")" "$(q "$RUN/local.env")"
 }
 if [ ! -f "$TEMPLATE" ]; then

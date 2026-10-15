@@ -1,5 +1,7 @@
-"""A fresh box (OPS-143): fetch_weights.py checks a fetch entry's globs. No GPU and no network: the
-downloads run against tests/test_weight_profiles.py's fake hub.
+"""A fresh box (OPS-143): fetch_weights.py checks a fetch entry's globs, and install.sh --setup into an
+empty HOME leaves a config the EXL3 profiles accept. No GPU and no network: the downloads run against
+tests/test_weight_profiles.py's fake hub, and install.sh runs with stand-ins for nvidia-smi, nvcc, uv
+and the venv's Python (the 3.11 check and the GPU check pass, everything else is this Python).
 
 The test matrix, the Gherkin of OPS-143:
 
@@ -9,8 +11,17 @@ The test matrix, the Gherkin of OPS-143:
   2  a tool model whose entry is all globs (Qwen3.5-0.8B, the shadow reader's) fetches and verifies;
      a changed file under a glob (Laya's encoder/*) fails the fetch and stays out of the folder
                                                                  test_a_tool_model_of_globs_fetches
+  3  install.sh --setup on an empty HOME writes QWEN38_MODEL before the weight profile: an EXL3
+     profile reads base-plain while the HF cache has no FP8 snapshot and the snapshot once it has one,
+     NVFP4 reads the HF cache, a standalone community pack reads its own folder
+                                                                 test_a_setup_install_resolves_the_base
+  4  on that install, ops/use-profile.sh exl3-4.0 --fetch-only with the pack and its assets on disk
+     (base-plain, no FP8 snapshot) passes                         test_a_setup_install_takes_an_exl3_profile
+  5  install.sh with HF_HOME: serve.env names that cache, so a later shell without HF_HOME finds the
+     FP8 snapshot there and use-profile.sh's fetch_weights.py looks in it
+                                                                 test_a_setup_install_with_hf_home_keeps_one_cache
 
-Run: python tests/test_fresh_install.py
+Run: python tests/test_fresh_install.py   (3 and 4 need Linux: install.sh stops anywhere else)
 """
 from __future__ import annotations
 
@@ -19,6 +30,9 @@ import hashlib
 import io
 import json
 import os
+import platform
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -27,6 +41,9 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import test_weight_profiles as W  # noqa: E402
+
+BASE_SNAP = ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8/snapshots"
+PLAIN = ".qwen38-spark-engine/weights/base-plain"
 
 
 def _write(path: str, data: bytes) -> None:
@@ -104,7 +121,182 @@ def test_a_tool_model_of_globs_fetches():
         W._fetch_box_close(tmp, old, hub)
 
 
+# ---------------------------------------------------------------- install.sh --setup on an empty HOME
+_STUBS = {
+    # a DGX Spark's answers (GB10, sm_121, driver 580)
+    "bin/nvidia-smi": """#!/bin/bash
+case "$*" in
+  -L) echo "GPU 0: NVIDIA GB10 (UUID: GPU-00000000-0000-0000-0000-000000000000)" ;;
+  *query-gpu=name,driver_version,compute_cap,memory.total*) echo "NVIDIA GB10, 580.95.05, 12.1, [N/A]" ;;
+  *) exit 0 ;;
+esac
+""",
+    "cuda/bin/nvcc": '#!/bin/bash\necho "Cuda compilation tools, release 13.0, V13.0.88"\n',
+    "bin/uv": '#!/bin/bash\n[ "$1" = --version ] && echo "uv 0.12.12"\nexit 0\n',
+    "bin/g++": "#!/bin/bash\nexit 0\n",
+}
+# the venv's Python: the 3.11 check and the GPU check pass, the rest runs on this Python
+_PY = """#!/bin/bash
+if [ "$1" = -c ] && [[ "$2" == *version_info* ]]; then exit 0; fi
+if [ "$1" = - ]; then
+    s="$(cat)"
+    case "$s" in *"import torch"*) echo "    ok torch (stand-in)"; exit 0 ;; esac
+    shift; exec {py} -c "$s" "$@"
+fi
+exec {py} "$@"
+"""
+_BOX: dict = {}
+
+
+def _box(name: str = "plain", hf_home: str | None = None) -> dict | None:
+    """install.sh --setup --no-start into a HOME of its own (`hf_home`: HF_HOME under it), once per
+    name; the release is this checkout's files as one commit of a repository of their own. None off
+    Linux."""
+    if platform.system() != "Linux":
+        return None
+    if name in _BOX:
+        return _BOX[name]
+    if not _BOX:
+        tmp = tempfile.mkdtemp(prefix="fresh-install-")
+        rel, stubs = os.path.join(tmp, "release"), os.path.join(tmp, "stubs")
+        skip = shutil.ignore_patterns("node_modules", "__pycache__", "*.pdf")
+        shutil.copytree(ROOT, rel, symlinks=True, ignore=lambda d, names: set(skip(d, names)) | (
+            {".git", "run", "logs", "train"} & set(names) if os.path.samefile(d, ROOT) else set()))
+        git = ["git", "-C", rel, "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "release"]):
+            subprocess.run(git + cmd, check=True, capture_output=True)
+        for p, text in _STUBS.items():
+            _write(os.path.join(stubs, p), text.encode())
+            os.chmod(os.path.join(stubs, p), 0o755)
+        _BOX["_"] = {"tmp": tmp, "rel": rel, "stubs": stubs, "ref": subprocess.run(
+            git + ["rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()}
+    rel, stubs, ref = (_BOX["_"][k] for k in ("rel", "stubs", "ref"))
+    home = os.path.join(_BOX["_"]["tmp"], name)
+    d = os.path.join(home, "TandemLLM")
+    _write(os.path.join(d, "venv/bin/python"), _PY.format(py=sys.executable).encode())
+    os.chmod(os.path.join(d, "venv/bin/python"), 0o755)
+    for f in ("config.json", "tokenizer.json"):          # Wren's model, so nothing is downloaded
+        _write(os.path.join(home, ".qwen38-spark-engine/models/qwen3.5-2b", f), b"{}")
+    env = {"HOME": home, "PATH": os.path.join(stubs, "bin") + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+           "CUDA_HOME": os.path.join(stubs, "cuda"), "LANG": "C.UTF-8"}
+    if hf_home:
+        env["HF_HOME"] = os.path.join(home, hf_home)
+    r = subprocess.run(["bash", os.path.join(ROOT, "install.sh"), "--setup", "--no-start", "--yes", "--dir", d,
+                        "--repo", rel, "--ref", ref, "--port", "18996", "--host", "127.0.0.1"],
+                       env=env, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+    env.pop("HF_HOME", None)            # what follows runs as a later shell would, without it
+    _BOX[name] = {"home": home, "dir": d, "env": env, "out": r.stdout}
+    return _BOX[name]
+
+
+def _resolve(box: dict, profile: str, keys=("QWEN38_MODEL",), extra: dict | None = None) -> dict:
+    script = "set -a; . \"$1\"; " + "; ".join(f'echo "{k}=${{{k}-<unset>}}"' for k in keys)
+    env = dict(box["env"], QSE_PROFILE_OVERRIDE=profile, **(extra or {}))
+    out = subprocess.run(["bash", "-c", script, "-", os.path.join(box["dir"], "run/ops/serve.env")], env=env,
+                         capture_output=True, text=True, check=True).stdout
+    return dict(line.split("=", 1) for line in out.splitlines())
+
+
+def test_a_setup_install_resolves_the_base():
+    box = _box()
+    if box is None:
+        print("    (skipped: install.sh runs on Linux only -- run it on the box)")
+        return
+    home = box["home"]
+    text = open(os.path.join(box["dir"], "run/ops/serve.env")).read()
+    model = text.index("\nQWEN38_MODEL=")
+    assert model < text.index("\nQSE_PROFILE_NAME="), "QWEN38_MODEL is written after the weight profile"
+    assert text.count("\nQWEN38_MODEL=") == 1
+    snaps = os.path.join(home, BASE_SNAP)
+    assert _resolve(box, "")["QWEN38_MODEL"] == snaps
+    assert _resolve(box, "nvfp4")["QWEN38_MODEL"] == snaps
+    for p in ("exl3-2.5", "exl3-4.0", "exl3-6.0"):
+        assert _resolve(box, p)["QWEN38_MODEL"] == os.path.join(home, PLAIN), p
+    # a standalone community pack reads its own folder (server/setup/community.py)
+    from server.setup import community, registry
+    m, c = next((m, c) for m in registry.load_all()[0].values()
+                for c in m.get("community") or [] if c["load"] == "standalone")
+    with tempfile.TemporaryDirectory() as cdir:
+        _write(os.path.join(cdir, c["profile"] + ".env"), community.env(m, c).encode())
+        got = _resolve(box, c["profile"], extra={"QSE_COMMUNITY_ENV_DIR": cdir})["QWEN38_MODEL"]
+    assert got == os.path.join(home, ".tandemllm/community", c["id"]), got
+    # with the full FP8 snapshot in this install's HF cache, the EXL3 profiles read it
+    snap = os.path.join(snaps, "c0ffee")
+    _write(os.path.join(snap, "config.json"), b"{}")
+    try:
+        assert _resolve(box, "exl3-4.0")["QWEN38_MODEL"] == snaps
+    finally:
+        shutil.rmtree(os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8"))
+
+
+def test_a_setup_install_takes_an_exl3_profile():
+    box = _box()
+    if box is None:
+        print("    (skipped: install.sh runs on Linux only -- run it on the box)")
+        return
+    from server.setup import registry
+    home, src = box["home"], os.path.join(box["dir"], "src")
+    m = registry.load_all(os.path.join(src, "models"))[0]["qwen3.8-27b"]
+    for aid in registry.profile(m, "exl3-4.0")["assets_required"]:
+        a = registry.asset(m, aid)
+        for p in [a["path"], *a.get("also", [])]:
+            p = p.replace("${HOME}", home).replace("${REPO}", src)
+            if p.endswith((".json", ".safetensors")):
+                _write(p, b"{}")
+            else:
+                os.makedirs(p, exist_ok=True)
+    for f in ("config.json", "model.safetensors"):
+        _write(os.path.join(home, "exl3-quants/4.0", f), b"{}")
+    assert not os.path.exists(os.path.join(home, BASE_SNAP))
+    r = subprocess.run(["bash", os.path.join(box["dir"], "run/ops/use-profile.sh"), "exl3-4.0", "--fetch-only"],
+                       env=box["env"], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and "fetch-only: done" in out and "REFUSING" not in out, out
+
+
+
+def test_a_setup_install_with_hf_home_keeps_one_cache():
+    """install.sh run with HF_HOME: serve.env names that cache (HF_HUB_CACHE) before the profile, so
+    a later shell without HF_HOME finds the FP8 snapshot there, and ops/use-profile.sh hands the cache
+    to fetch_weights.py: base-plain needs no download, the snapshot stands for it."""
+    box = _box("hf-home", hf_home="hf")
+    if box is None:
+        print("    (skipped: install.sh runs on Linux only -- run it on the box)")
+        return
+    home, src = box["home"], os.path.join(box["dir"], "src")
+    hub = os.path.join(home, "hf", "hub")
+    text = open(os.path.join(box["dir"], "run/ops/serve.env")).read()
+    assert f"\nHF_HUB_CACHE='{hub}'\n" in text and text.index("\nHF_HUB_CACHE=") < text.index("\nQSE_PROFILE_NAME=")
+    snaps = os.path.join(hub, "models--Qwen--Qwen3.8-27B-FP8", "snapshots")
+    assert _resolve(box, "exl3-4.0")["QWEN38_MODEL"] == os.path.join(home, PLAIN)
+    _write(os.path.join(snaps, "c0ffee", "config.json"), b"{}")
+    got = _resolve(box, "exl3-4.0", keys=("QWEN38_MODEL", "HF_HUB_CACHE"))
+    assert got == {"QWEN38_MODEL": snaps, "HF_HUB_CACHE": hub}, got
+    from server.setup import registry
+    m = registry.load_all(os.path.join(src, "models"))[0]["qwen3.8-27b"]
+    for aid in ("exl3-drafters-k3", "exl3-draft-head-k4", "nvfp4-drafters"):
+        a = registry.asset(m, aid)
+        for p in [a["path"], *a.get("also", [])]:
+            p = p.replace("${HOME}", home).replace("${REPO}", src)
+            if p.endswith(".safetensors"):
+                _write(p, b"{}")
+            else:
+                os.makedirs(p, exist_ok=True)
+    for f in ("config.json", "model.safetensors"):
+        _write(os.path.join(home, "exl3-quants/4.0", f), b"{}")
+    r = subprocess.run(["bash", os.path.join(box["dir"], "run/ops/use-profile.sh"), "exl3-4.0", "--fetch-only"],
+                       env=box["env"], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0 and "[fetch] base-plain: on this box" in out and "fetch-only: done" in out, out
+    assert not os.path.exists(os.path.join(home, PLAIN))
+
+
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn(); print(f"  {name:60s} ok")
+    try:
+        for name, fn in sorted(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                fn(); print(f"  {name:60s} ok")
+    finally:
+        if _BOX:
+            shutil.rmtree(_BOX["_"]["tmp"], ignore_errors=True)
