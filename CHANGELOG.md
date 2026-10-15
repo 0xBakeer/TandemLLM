@@ -2,7 +2,9 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.10.0, 2026-10-15
+
+0.10.0 adds a fourth model, NVIDIA's Nemotron 3.5 Bolt 74B-A9B, from our EXL3 packs at 2.0 to 6.0 bpw or NVIDIA's IQ2 GGUF, with NVIDIA's LiLiCorr drafter, and limits each Chat tab sandbox to 1 GiB. The other models' text and speed do not change, and their saved conversations carry over.
 
 - Chat tab: each chat's sandbox has 1 GiB of memory (`QSE_SANDBOX_MEM_GB`; was 4 GiB), and four of them take what one took (`QSE_SANDBOX_TOTAL_GB` follows the limit). A process the kernel kills at the limit fails its call with "out of memory (1 GiB sandbox limit)", read from the container's cgroup, also when a pipe's writer exits 1 after its reader was killed; the call card shows it (SRV-485, VIS-167). What fits in 1 GiB, measured: [docs/chat.md](docs/chat.md#the-sandbox-phase-2).
 - Chat tab: an attachment is never inlined past the window. Every attachment is saved under the chat's `/workspace/uploads/` when its message is sent; one message's text files share a budget of a quarter of the free window, at most 32,000 tokens, and a file past it is one line with its name, size, tokens and path. The chip shows size and tokens on upload and marks a file that goes as a file. A request that does not fit names the attachment or the largest part instead of advising a new chat (SRV-487, VIS-169).
@@ -29,6 +31,8 @@ A fourth model family: NVIDIA's NemotronH hybrid (ENG-E12), Mamba2, NoPE attenti
 ### Fixed
 
 - Chat tab (SRV-481): a tool call waited for its sandbox without end. On the Spark every `bash` call of a chat waited 21 minutes on a 30 GiB start line (`QSE_SANDBOX_MIN_START_GB`, a leftover from the Flash-Next memory fits) and a 19 GiB reserve, with MemAvailable at 20 GiB. The start line is gone. A sandbox starts when MemAvailable less its limit stays at 4 GiB or more (`QSE_SANDBOX_FLOOR_GB`): the engine keeps itself at its own floors, and a prefill's workspace measured 2.7 GiB at 203,052 tokens. The guard stops an idle sandbox under 3 GiB and kills them all under 2 GiB. A wait ends after 60 s (`QSE_SANDBOX_WAIT_S`) with the reason and the numbers, as the tool result the model reads and on the call card; the terminal and stdio MCP servers no longer wait forever either.
+
+Upgrade: run the 0.10.0 installer again (`--setup --force-setup` on a box installed with `--setup`, the same `--dir` otherwise), then `ops/use-profile.sh nemotron-bolt-exl3-2.0` for Bolt.
 
 ## 0.9.2, 2026-10-15
 

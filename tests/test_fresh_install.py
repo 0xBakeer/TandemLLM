@@ -21,6 +21,12 @@ The test matrix, the Gherkin of OPS-143:
      FP8 snapshot there and use-profile.sh's fetch_weights.py looks in it
                                                                  test_a_setup_install_with_hf_home_keeps_one_cache
 
+OPS-146 (release 0.10.0): the same install takes Nemotron 3.5 Bolt's default profile
+
+  6  ops/use-profile.sh nemotron-bolt-exl3-2.0 resolves to the public 2.0 pack's folder with LiLiCorr as
+     its draft head, and --fetch-only with the pack and the LiLiCorr asset on disk passes
+                                                                 test_a_setup_install_takes_the_bolt_profile
+
 Run: python tests/test_fresh_install.py   (3 and 4 need Linux: install.sh stops anywhere else)
 """
 from __future__ import annotations
@@ -254,6 +260,42 @@ def test_a_setup_install_takes_an_exl3_profile():
     out = r.stdout + r.stderr
     assert r.returncode == 0 and "fetch-only: done" in out and "REFUSING" not in out, out
 
+
+
+def test_a_setup_install_takes_the_bolt_profile():
+    box = _box()
+    if box is None:
+        print("    (skipped: install.sh runs on Linux only -- run it on the box)")
+        return
+    from server.setup import registry
+    home, src = box["home"], os.path.join(box["dir"], "src")
+    m = registry.load_all(os.path.join(src, "models"))[0]["nemotron-3.5-bolt-74b-a9b"]
+    p = registry.profile(m, "nemotron-bolt-exl3-2.0")
+    assert registry.recommended_profile(m)["id"] == "nemotron-bolt-exl3-2.0"
+    assert p["hf_repo"] == "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0" and not p["hf_private"]
+    pack = os.path.join(home, "models/nemotron-3.5-bolt-74b-a9b-exl3-2.0")
+    got = _resolve(box, "nemotron-bolt-exl3-2.0", keys=("QSE_WEIGHTS_DIR", "QSE_WEIGHTS_HF", "QSE_ENGINE_FLAGS"))
+    assert got["QSE_WEIGHTS_DIR"] == pack, got
+    assert got["QSE_WEIGHTS_HF"] == p["hf_repo"], got
+    assert f"--model {pack} " in got["QSE_ENGINE_FLAGS"] and "--draft-head lilicorr" in got["QSE_ENGINE_FLAGS"], got
+    for aid in p["assets_required"]:
+        a = registry.asset(m, aid)
+        for f in [a["path"], *a.get("also", [])]:
+            f = f.replace("${HOME}", home).replace("${REPO}", src)
+            if f.endswith((".json", ".safetensors")):
+                _write(f, b"{}")
+            else:
+                os.makedirs(f, exist_ok=True)
+    for f in ("config.json", "model.safetensors"):
+        _write(os.path.join(pack, f), b"{}")
+    try:
+        r = subprocess.run(["bash", os.path.join(box["dir"], "run/ops/use-profile.sh"), "nemotron-bolt-exl3-2.0",
+                            "--fetch-only"], env=box["env"], capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        out = r.stdout + r.stderr
+        assert r.returncode == 0 and "fetch-only: done" in out and "REFUSING" not in out, out
+    finally:
+        shutil.rmtree(pack)
 
 
 def test_a_setup_install_with_hf_home_keeps_one_cache():
