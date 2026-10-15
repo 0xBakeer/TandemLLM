@@ -2,6 +2,18 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.9.2, 2026-10-15
+
+0.9.2 fixes two install bugs an early tester hit on a new DGX Spark with 0.9.1. The engine, the conductor and the dashboard do not change.
+
+### Fixed
+
+- `ops/fetch_weights.py` (OPS-143): `verify()` compared a fetch entry's globs to file names literally. A download whose list is all globs (Qwen3.5-0.8B for the shadow reader, Qwen3.5-2B for the narrator) checked no file and failed with "0 files checked: FAILED"; Laya's files under `multilingual/` and `typed-decisions/` were not checked. The globs now select the files, as in the plan.
+- `install.sh --setup` (OPS-143): the installer wrote `QWEN38_MODEL`, the Hugging Face cache's base folder, after the weight profile. On a new box that folder is empty, the 27B's EXL3 profiles did not switch to `base-plain`, and `use-profile.sh exl3-*` refused with base-plain on disk. The keys the installer adds now come before the profile, and an EXL3 profile takes `base-plain` when that folder holds no snapshot. A standalone community pack reads its own folder on an install.sh box for the same reason.
+- `install.sh` with `HF_HOME` or `HF_HUB_CACHE` set (OPS-143): `serve.env` names that cache, and `use-profile.sh` passes it to the fetch, so a later shell without the variable fetches and finds the base in the same cache.
+
+Upgrade: run the 0.9.2 installer again (`--setup --force-setup` on a box installed with `--setup`, the same `--dir` otherwise). It rewrites `run/ops/serve.env` and the scripts in `run/ops`; a `git checkout` of the tag alone keeps the old ones.
+
 ## 0.9.1, 2026-10-14
 
 0.9.1 adds web search and media playback to the Chat tab, turns on the loop guard, the loop escape and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page and the EXL3 base download. The decode path does not change: under `engine/` only the small models' slot changed (VIS-153).
