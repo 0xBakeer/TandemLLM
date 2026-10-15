@@ -29,6 +29,7 @@ exemption, and a session cookie so the dashboard's EventSource needs no token in
     POST /v1/cache/peek, /v1/cache/prewarm  the same (`cache_read`; SRV-349: where a chat's rows
                                             are, and the NVMe read back while the engine is idle)
     POST /v1/cache/clear                    the admin BEARER token (never the cookie), or trusted-local
+    POST /v1/cache/release                  the same (SRV-483: chatd asks for room for a sandbox)
     PUT/POST /v1/conductor/* (writes)       the admin token/session, or trusted-local; reads follow
                                             the dashboard rule below
     POST /v1/systemone, /v1/predict         the admin token/session, or trusted-local (decision

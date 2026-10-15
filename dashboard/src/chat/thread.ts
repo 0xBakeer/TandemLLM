@@ -20,6 +20,7 @@ import { planItems, toolLabel, type Compaction, type Conversation, type Message,
 import { approvedTitle, approvedWord } from './permission';
 import { callMedia, callPane, loadMediaView } from './file-panes';
 import { hostOf, resultsWord, searchResults } from './websearch';
+import { attachmentWords, sandboxCallWords } from './context-words';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -144,7 +145,7 @@ export class QseChatThread extends LightElement {
     const text = messageText(m);
     return html`<article class="ch-msg ch-user ${editing ? 'is-editing' : ''}" data-mid=${m.id} data-role="user">
       ${m.attachments?.length
-        ? html`<div class="ch-attachments">${m.attachments.map((a) => html`<span class="ch-chip" title=${`${a.name}, ${bytes(a.bytes)}`}>${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${bytes(a.bytes, 0)}</span></span>`)}</div>`
+        ? html`<div class="ch-attachments">${m.attachments.map((a) => html`<span class="ch-chip" title=${`${a.name}, ${bytes(a.bytes)}`}>${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn warn-ink" title=${attachmentWords(a).warn ?? ''}>as a file</span>` : nothing}</span>`)}</div>${m.attachments.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn warn-ink small">${w}</p>`)}`
         : nothing}
       ${editing
         ? html`<div class="ch-bubble ch-edit">
@@ -278,6 +279,7 @@ export class QseChatThread extends LightElement {
       </button>
       ${found?.length ? renderResults(found) : nothing}
       ${t.name === 'web_search' && t.status === 'failed' && t.output?.content ? html`<p class="ch-call-row ch-search-err err-ink small" role="alert">${t.output.content.split('\n')[0]}</p>` : nothing}
+      ${t.output?.data?.sandbox ? html`<p class="ch-call-row ch-search-err err-ink small" role="alert" data-sandbox=${t.output.data.sandbox.reason}>${sandboxCallWords(t.output.data.sandbox)}</p>` : nothing}
       ${media ? html`<div class="ch-call-row ch-call-media"><qse-media-view kind=${media.kind} src=${media.src} name=${media.name} compact></qse-media-view></div>` : nothing}
       ${pane ? html`<div class="ch-call-row ch-call-open"><button type="button" class="btn btn-sm" @click=${() => this.fire('ch-open-pane', { pane })}>${icon(paneIcon(pane.kind))} Open in ${paneWord(pane.kind)}</button></div>` : nothing}
       ${open

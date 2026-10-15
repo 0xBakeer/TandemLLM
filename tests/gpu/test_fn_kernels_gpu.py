@@ -7,7 +7,8 @@
   * the MoE kernels on random EXL3 experts at the real shapes (hidden 2560, expert 640): the one-row
     output equals the fixed-order torch reference within the BF16 bound below; every row of an M-row
     call equals its M = 1 call bit for bit, with rows sharing experts; experts no row selects are
-    never read (their trellis is overwritten and nothing changes); every K the packs use passes.
+    never read (their trellis is overwritten and nothing changes); every K the packs use passes;
+  * dense_rows (SPD-125) returns the one-row dense call's bytes for every row, M = 1..32.
 
 Run on the box: python tests/gpu/test_fn_kernels_gpu.py   (under flock ~/.qwen38-box.flock)
 """
@@ -209,6 +210,38 @@ def test_dense_reference_rows_and_groups():
     yh = K.dense(_x(1, 2560, 53, 0.5), hb)
     assert yh.dtype == torch.float32
     return "; ".join(out) + "; rows 1..32 bit-equal; group = members; fp32 head output"
+
+
+def test_dense_rows_are_the_one_row_calls():
+    """SPD-125: `dense_rows` (each trellis tile decoded once for 16 rows) returns every row's one-row `dense`
+    bytes: Bolt's and the 27B's shapes, M = 1..32 (two row groups), clusters and 8 warps, a group, the fp32 head."""
+    out = []
+    for N, Kin, kb in ((18560, 4096, 4), (4096, 8192, 4), (1024, 4096, 4), (4096, 1024, 4), (34816, 5120, 5),
+                       (5120, 17408, 5), (2560, 6144, 5), (4096, 4096, 2), (4096, 4096, 35)):
+        w = X.random_block(N, Kin, kb, seed=N + kb)
+        x = _x(32, Kin, 61, 2.0)
+        one = torch.cat([K.dense(x[m:m + 1], w) for m in range(32)])
+        for M in (1, 2, 7, 8, 16, 17, 32):
+            assert torch.equal(K.dense_rows(x[:M], w), one[:M]), (N, Kin, kb, M)
+        out.append(f"{N}x{Kin}x{kb} S{K.dense_split(N, Kin, kb)[0]}")
+    for split in ((8, 4), (2, 8), (1, 8)):
+        K.DENSE_SPLIT[(4096, 8192, 4)] = split
+        try:
+            w = X.random_block(4096, 8192, 4, seed=5)
+            x = _x(16, 8192, 62)
+            one = torch.cat([K.dense(x[m:m + 1], w) for m in range(16)])
+            assert torch.equal(K.dense_rows(x, w), one), split
+        finally:
+            K.DENSE_SPLIT.pop((4096, 8192, 4), None)
+    grp = X.EXL3Block.group([X.random_block(n, 4096, 4, seed=80 + i) for i, n in enumerate((8192, 1024))], ["a", "b"])
+    x = _x(9, 4096, 63)
+    assert torch.equal(K.dense_rows(x, grp), torch.cat([K.dense(x[m:m + 1], grp) for m in range(9)]))
+    hb = X.random_block(16384, 4096, 6, seed=71)
+    hb.out_fp32 = True
+    x = _x(8, 4096, 64)
+    yh = K.dense_rows(x, hb)
+    assert yh.dtype == torch.float32 and torch.equal(yh, torch.cat([K.dense(x[m:m + 1], hb) for m in range(8)]))
+    return "; ".join(out) + "; rows 1..32 = the one-row calls, splits S8/S2/w8, group, fp32 head"
 
 
 def _bank(n_exp: int, kbs, shared_k: int, seed: int = 0):

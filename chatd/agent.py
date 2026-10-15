@@ -29,6 +29,31 @@ class ApiConflict(Exception):
     pass
 
 
+def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio) -> str:
+    """The request does not fit: say which part is the cause (SRV-487, VIS-169). Live
+    (2026-10-15) one 9.5 MB HTML attachment made a request of 2,875,364 tokens, and the error
+    told the user to start a new chat."""
+    head = (f"This request is about {est:,} tokens and the model's window is {window:,}: there "
+            f"is no room left for an answer. ")
+    atts = [(int(a.get("tokens") or 0), a, m) for m in path if m.get("role") == "user"
+            for a in m.get("attachments") or [] if a.get("kind") == "text" and render.inlined(a)]
+    big = max(atts, key=lambda x: x[0], default=None)
+    if big is not None and big[0] * 2 > est:
+        said = " ".join(render.text_of(big[2].get("parts") or []).split())
+        said = f' ("{said[:60]}{"..." if len(said) > 60 else ""}")' if said else ""
+        return head + (f"The cause is the attachment {big[1].get('name') or 'file'} in your "
+                       f"message{said}: about {big[0]:,} tokens. Edit that message and leave "
+                       f"the file out, or attach a shorter one.")
+    sizes = [(comp.estimate({"messages": [m]}, ratio), m) for m in body.get("messages") or []]
+    n, m = max(sizes, key=lambda x: x[0], default=(0, {}))
+    role = m.get("role")
+    what = ("the system prompt with the skills" if role == "system" else
+            "a tool result" if role == "tool" else "one of your messages" if role == "user"
+            else "an answer")
+    return head + (f"The largest part is {what}, about {n:,} tokens. Edit an earlier message to "
+                   f"branch off before it, or start a new chat.")
+
+
 class ToolCtx:
     """What an executor may use for one call."""
 
@@ -41,17 +66,26 @@ class ToolCtx:
         self.engine = svc.engine
         self._out: list[str] = []
         self.quiet = False
+        self.oom = False                     # the last exec lost a process at the memory limit
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
 
         def waiting(why):
-            self.run.set_phase("tool", f"Waiting for memory to start the sandbox ({why})")
+            self.run.set_phase("tool", f"Waiting to start the sandbox ({why})")
         sb.ensure(self.cid, cancel=self.run.cancel, on_wait=waiting)
         self.run.set_phase("tool", self._running_words())
         self.quiet = quiet
-        return sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
-                      cancel=self.run.cancel)
+        before = sb.oom_kills(self.cid)
+        code, timed_out = sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
+                                 cancel=self.run.cancel)
+        after = sb.oom_kills(self.cid)
+        # the cgroup's count when it can be read (a pipe's writer killed at the limit leaves its
+        # reader an exit 1); else a SIGKILL chatd did not send: 137 from bash, 9 from setsid when
+        # the killed process is the command itself
+        self.oom = (after > before if before is not None and after is not None else
+                    code in (9, 137) and not timed_out and not self.run.cancel.is_set())
+        return code, timed_out
 
     def _running_words(self) -> str:
         name = self.part.get("name")
@@ -508,7 +542,7 @@ class AgentMixin:
         try:
             res = tool.executor(ctx, args)
         except (ToolError, PathError, Unavailable, egress.Refused) as exc:
-            res = Result(str(exc), is_error=True)
+            res = Result(str(exc), is_error=True, data=getattr(exc, "data", None))
         except tools_mod.ChangedError:
             res = Result("the file changed meanwhile; read it again", is_error=True)
         except FileNotFoundError:
@@ -672,10 +706,7 @@ class AgentMixin:
             body = build(keep_from=user_i)
             est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:
-            raise GuardError(
-                f"This conversation is about {est:,} tokens and the model's window is "
-                f"{window:,}: there is no room left for an answer. Start a new chat, or edit an "
-                f"earlier message to branch off before the long part.")
+            raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio))
         if window:
             room = window - est - 256
             cap = int(info.get("max_output") or 0)

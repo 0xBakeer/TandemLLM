@@ -220,6 +220,81 @@ def test_admission_takes_back_idle_conversations_before_it_waits():
         kvpool.POOL = old
 
 
+def test_a_release_for_a_sandbox_gives_back_idle_memory_in_the_pools_order():
+    """SRV-483: chatd's sandbox has priority over what the engine holds idle."""
+    app = _app()
+    from engine import kvpool
+    calls = []
+    pool = kvpool.KVPool(hard_floor=0, meminfo=lambda: 100 * GiB)
+    pool.add_reclaimer("caches", lambda want, o: calls.append(("pool caches", want)) or GiB)
+    pool.add_reclaimer("roles", lambda want, o: calls.append(("roles", want, o)) or GiB)
+    pool.add_reclaimer("idle_side", lambda want, o: calls.append(("idle_side", want, o)) or 2 * GiB)
+    pool.add_reclaimer("idle_slot0", lambda want, o: calls.append(("idle_slot0", want, o)) or GiB)
+    old = kvpool.POOL, app._kv_reclaim_caches, app._lock_when_idle
+    kvpool.POOL = pool
+    app._kv_reclaim_caches = lambda want, o: calls.append(("caches", want, o)) or GiB
+    try:
+        out = app._memory_release(3 * GiB)
+        assert calls == [("caches", 3 * GiB, "release"), ("roles", 2 * GiB, "release"),
+                         ("idle_side", GiB, "release")], calls
+        assert out["released_bytes"] == 4 * GiB and out["asked_bytes"] == 3 * GiB
+        assert out["levels"] == {"caches": GiB, "roles": GiB, "idle_side": 2 * GiB}
+        assert pool.stats["reclaims"] == 2 and pool.stats["reclaimed_bytes"] == 3 * GiB
+        # a request runs: the caches stay, the idle conversations still give way
+        app._lock_when_idle = lambda: False
+        calls.clear()
+        assert app._memory_release(GiB)["levels"] == {"roles": GiB}
+        assert calls == [("roles", GiB, "release")]
+        calls.clear()
+        assert app._memory_release(0)["released_bytes"] == 0 and calls == []
+    finally:
+        kvpool.POOL, app._kv_reclaim_caches, app._lock_when_idle = old
+
+
+def test_the_release_route_answers_trusted_local_and_the_admin_only():
+    import contextlib
+    import io
+    app = _app()
+    from server import auth
+
+    class Req(app.Handler):
+        def __init__(self, body, headers):
+            raw = json.dumps(body).encode()
+            self.rfile, self.wfile = io.BytesIO(raw), io.BytesIO()
+            self.headers = {"Content-Length": str(len(raw)), "Content-Type": "application/json",
+                            **headers}
+            self.path, self.command, self.request_version = ("/v1/cache/release", "POST",
+                                                             "HTTP/1.1")
+            self.requestline, self.client_address = "POST /v1/cache/release", ("127.0.0.1", 0)
+            self.close_connection = True
+
+    def call(body, headers=None):
+        r = Req(body, headers or {})
+        with contextlib.redirect_stdout(io.StringIO()):
+            r.do_POST()
+        head, _, raw = r.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(head.split()[1]), json.loads(raw)
+
+    asked = []
+    old = app._memory_release, dict(app.STATE)
+    app._memory_release = lambda want, why="sandbox": asked.append((want, why)) or {
+        "asked_bytes": want, "released_bytes": 0, "levels": {}, "mem_available_bytes": None}
+    try:
+        app.STATE["auth"] = auth.Auth("adm-" + "5e7u9" * 10, None)
+        code, out = call({"bytes": 2 * GiB, "why": "sandbox"})          # chatd on the box
+        assert code == 200 and out["asked_bytes"] == 2 * GiB and asked == [(2 * GiB, "sandbox")]
+        code, _ = call({"bytes": GiB}, {"X-Forwarded-For": "203.0.113.4",
+                                        "X-Real-IP": "203.0.113.4"})
+        assert code == 401 and len(asked) == 1, "through the reverse proxy: the admin token"
+        for bad in ({"bytes": -1}, {"bytes": "x"}, {"bytes": 1 << 41}):
+            assert call(bad)[0] == 400
+        assert len(asked) == 1
+    finally:
+        app._memory_release = old[0]
+        app.STATE.clear()
+        app.STATE.update(old[1])
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

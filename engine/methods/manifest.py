@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import itertools
 import json
 import os
 from dataclasses import dataclass
@@ -43,10 +44,17 @@ FORMULA = "fp4"
 #: ones; a whole rate's code is the same (its tile width 8 K words, no new branch taken), and on the Spark
 #: every dense, skinny-GEMM, slab, MoE and prefill-MoE output at rates 2..8 equalled the tree before's bit
 #: for bit (the same random blocks and inputs through both trees)
+#: SPD-125: tools/fn_kernels.py adds `dense_rows` (a verify block's EXL3 projections, opt-in) beside the
+#: kernels it had; their code is the same, and on the Spark `dense` at 1..32 rows at Bolt's, the 27B's and
+#: Flash-Next's shapes equalled 0.9.0-0.9.2's byte for byte (tools/fn_dense_rows_check.py same)
+#: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
+#: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
              "fa9277e004043d172d29b2dc2b8b7958b4b7b2834bc26a73e6130bb0f0d05441",
              ("tools/exl3_linear.py", "a75b6a3f1fd36ff9ecafe79c09cb797106ce48f53edc73b10d4ef19a0fe3c40f"):
              "5078b33c3d03eac42706d3b05650b0604f2ae96d267db2c996f59409929a3a48",
+             ("tools/fn_kernels.py", "152025a29380f1bc9c0a1d93b2382531260b443cbe542549f332fa245ac23b7f"):
+             "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93",
              ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
              "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
              ("tools/fn_prefill_kernels.py", "653b447087545778f29eb856e12681d0d1229847ada9ec7291477aeda8c54106"):
@@ -73,6 +81,29 @@ def files(root: str, m: Manifest) -> list[str]:
     """The manifest's modules and the `tools/` modules they import (absolute paths, in order)."""
     mods = [os.path.join(root, p) for p in m.modules]
     return mods + dc._tools_modules(root, mods)
+
+
+def same_variants(root: str, m: Manifest) -> list[dict]:
+    """`same` tables, one a combination of the bytes `m`'s files had (ENG-341): each file whose bytes
+    `SAME_ROWS` names as its own bytes or as any bytes they replaced, down the chain, the others as
+    they are. `SAME_ROWS` itself reads every named file one step back, which is no release's tree once
+    a release replaced one file's bytes and kept another's (0.9.x: fn_kernels.py's 0.9 bytes beside
+    exl3_linear.py's, which replaced 0.8.2's); one of these tables is that tree's. Without the one
+    that changes nothing."""
+    choices = []
+    for p in files(root, m):
+        rel = os.path.relpath(p, root)
+        if rel == dc.SETTINGS_FILE:
+            continue
+        with open(p, "rb") as f:
+            now = hashlib.sha256(f.read()).hexdigest()
+        olds, cur = [], now
+        while (rel, cur) in SAME_ROWS and SAME_ROWS[(rel, cur)] not in olds:
+            cur = SAME_ROWS[(rel, cur)]
+            olds.append(cur)
+        if olds:
+            choices.append([None] + [((rel, now), old) for old in olds])
+    return [dict(c for c in combo if c) for combo in itertools.product(*choices)][1:]
 
 
 #: tables a module reads when its knob names none (the knob's value, when set, is read instead)

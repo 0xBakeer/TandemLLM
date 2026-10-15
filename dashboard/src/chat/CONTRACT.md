@@ -98,7 +98,8 @@ interface ToolCallPart {
   source?: ToolSource;                           // v0.2
   risk?: 'read' | 'write' | 'exec' | 'network';  // v0.2
   input: string;                                 // JSON text, growing while the model writes it
-  output: { content: string; is_error: boolean; bytes: number; truncated?: boolean; exit_code?: number | null; images?: Attachment[] } | null;
+  output: { content: string; is_error: boolean; bytes: number; truncated?: boolean; exit_code?: number | null; images?: Attachment[];
+            data?: WebSearchData | { sandbox: SandboxCallData } | null } | null;   // data: web_search's results; why the sandbox could not run the call
   status: ToolStatus;
   started_at: string | null; ended_at: string | null;
   permission?: { summary: string; suggested_rule?: { tool: string; match?: string } } | null;   // suggested_rule: v0.2
@@ -113,6 +114,8 @@ interface Attachment {
   preview?: string | null;                       // a small image's data URL
   url?: string;                                  // v0.2: GET /attachments/{id}
   tokens?: number | null;                        // v0.2: its cost in context once read
+  inline?: boolean;                              // a text file: in the prompt whole; false: one line with its path (SRV-487)
+  path?: string;                                 // where the send saved it: /workspace/uploads/<name>
 }
 
 interface TurnStats {
@@ -237,6 +240,8 @@ interface Capabilities {
 }
 
 // ---- the sandbox (v2)
+// a failed call's output.data when the sandbox could not run it: no start within its wait (60 s), or a process the kernel killed at the limit
+interface SandboxCallData { reason: 'no_memory' | 'busy' | 'oom'; limit_gib: number; why?: string; waited_s?: number; mem_available_gib?: number; floor_gib?: number; engine_released_gib?: number }
 type SandboxState = 'running' | 'stopped' | 'creating' | 'error' | 'waiting_memory';   // waiting_memory: v0.2
 interface SandboxStatus {
   state: SandboxState; image: string; cwd: string;            // cwd = /workspace

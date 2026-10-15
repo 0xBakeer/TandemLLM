@@ -651,47 +651,321 @@ class FakeEngineAPI:
         return a, b""
 
 
-def test_the_memory_guard_admits_stops_and_kills_by_the_numbers():
-    d = tempfile.mkdtemp()
-    mem = {"avail": 60}
+def guarded(avail_gb, release=None):
+    """Sandboxes on the fake engine API with MemAvailable from `avail_gb["v"]` (GiB)."""
     clock = {"t": 1000.0}
-    api = FakeEngineAPI()
-    sb = sb_mod.Sandboxes(d, engine=api, meminfo_fn=lambda: {"MemAvailable": int(
-        mem["avail"] * sb_mod.GiB)}, clock=lambda: clock["t"])
+    sb = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=FakeEngineAPI(), meminfo_fn=lambda: {
+        "MemAvailable": int(avail_gb["v"] * sb_mod.GiB)}, clock=lambda: clock["t"],
+        release=release)
     sb._proxy = lambda b: None
     sb.run = lambda *a, **k: (0, False)
-    sb.min_start_gb = 30
+    sb.wait_s, sb.poll_s, sb.release_every_s = 0.4, 0.05, 0.0
+    return sb, clock
+
+
+def test_the_memory_guard_admits_stops_and_kills_by_the_numbers():
+    mem = {"v": 60}
+    sb, clock = guarded(mem)
+    assert sb_mod.LIMIT_BYTES == 1 * sb_mod.GiB and sb_mod.FLOOR_GB == 4.0
+    assert sb.max_running == 4 and sb.total_gb == 4.0, "the cap: max_running times 1 GiB"
     sb.max_running = 1
     assert sb.admit() is None
-    mem["avail"] = 25
-    assert "30 GiB start line" in sb.admit()
-    mem["avail"] = 22                                     # 22 - 4 = 18 < 19
-    sb.min_start_gb = 0
-    assert "leaves the engine under 19" in sb.admit()
-    mem["avail"] = 60
+    mem["v"] = 20.4                                       # chat 01M4ZPKR...: waited 21 minutes
+    assert sb.admit() is None
+    mem["v"] = 4.9                                        # 4.9 - 1 = 3.9 < 4
+    assert sb.admit() == ("MemAvailable 4.9 GiB: a 1 GiB sandbox would leave the engine under "
+                          "its 4 GiB floor")
+    mem["v"] = 5.0
+    assert sb.admit() is None
     sb.ensure("c1")
     assert sb.box("c1").state == "running"
+    mem["v"] = 4.0                                        # the sandbox took its 1 GiB
+    assert sb.guard_once() is None, "the guard leaves alone what the admission let in"
+    mem["v"] = 60
     sb.ensure("c2")                                       # the cap: the idle c1 makes room
     assert sb.box("c1").state == "stopped" and sb.box("c2").state == "running"
     assert sb.box("c1").stopped_reason == "idle"
-    mem["avail"] = 14
+    mem["v"] = 2.9
     assert sb.guard_once() == "stop c2" and sb.box("c2").stopped_reason == "memory_guard"
-    mem["avail"] = 60
+    mem["v"] = 60
     sb.ensure("c3")
-    mem["avail"] = 11
+    mem["v"] = 1.9
     assert sb.guard_once() == "kill" and sb.box("c3").state == "stopped"
-    mem["avail"] = 60
+    mem["v"] = 60
     sb.ensure("c4")
     clock["t"] += 31 * 60
     assert sb.guard_once() == "idle c4"
     cancel = threading.Event()
-    mem["avail"] = 20
+    mem["v"] = 3
+    sb.wait_s = 30
     threading.Timer(0.3, cancel.set).start()
     try:
         sb.ensure("c5", cancel=cancel)
         raise AssertionError("must wait, then give up when stopped")
-    except sb_mod.Unavailable:
-        assert sb.box("c5").state == "stopped"
+    except sb_mod.Unavailable as exc:
+        assert sb.box("c5").state == "stopped" and str(exc) == "stopped while waiting for memory"
+
+
+def test_the_old_start_line_is_gone():
+    os.environ["QSE_SANDBOX_MIN_START_GB"] = "30"
+    try:
+        sb, _ = guarded({"v": 20.4})
+        assert sb.admit() is None and not hasattr(sb, "min_start_gb")
+        sb.ensure("c1")
+        assert sb.box("c1").state == "running"
+    finally:
+        del os.environ["QSE_SANDBOX_MIN_START_GB"]
+
+
+def test_a_wait_for_memory_ends_after_wait_s_with_a_reason_the_model_and_the_chat_read():
+    mem = {"v": 3.2}
+    sb, _ = guarded(mem, release=lambda n: 0)
+    seen, changes = [], []
+    sb.on_change = lambda cid, st: changes.append(st)
+    for cancel in (threading.Event(), None):              # a tool call; a terminal or MCP pipe
+        t0 = time.monotonic()
+        try:
+            sb.ensure("c1", cancel=cancel, on_wait=seen.append)
+            raise AssertionError("must give up")
+        except sb_mod.Unavailable as exc:
+            took = time.monotonic() - t0
+            msg, data = str(exc), exc.data["sandbox"]
+        assert 0.4 <= took < 2.0, took
+        assert msg.startswith("no sandbox for this call: after waiting 0 s it still could not "
+                              "start (MemAvailable 3.2 GiB: a 1 GiB sandbox would leave the "
+                              "engine under its 4 GiB floor; the engine gave back 0.0 GiB)")
+        assert "The command did not run" in msg and "answer with what you already have, or " \
+            "without tools" in msg and "lack of memory" in msg
+        assert data == {"reason": "no_memory", "why": "MemAvailable 3.2 GiB: a 1 GiB sandbox "
+                        "would leave the engine under its 4 GiB floor", "waited_s": 0,
+                        "mem_available_gib": 3.2, "limit_gib": 1.0, "floor_gib": 4.0,
+                        "engine_released_gib": 0.0}
+        b = sb.box("c1")
+        assert b.state == "stopped" and b.error.startswith("did not start after 0 s: MemAvailable")
+        assert changes[-1]["state"] == "stopped" and changes[-1]["error"] == b.error
+    assert seen[0].endswith("; 0 of 0 s") and seen[0].startswith("MemAvailable 3.2 GiB")
+    mem["v"] = 30                                         # memory back: the next call starts it
+    sb.ensure("c1")
+    assert sb.box("c1").state == "running" and sb.box("c1").error is None
+
+
+def test_busy_sandboxes_of_other_chats_end_the_wait_with_their_own_reason():
+    sb, _ = guarded({"v": 60})
+    sb.max_running = 1
+    sb.ensure("c1")
+    sb.box("c1").busy = 1
+    try:
+        sb.ensure("c2")
+        raise AssertionError("must give up")
+    except sb_mod.Unavailable as exc:
+        assert exc.data["sandbox"]["reason"] == "busy"
+        assert "1 sandbox(es) of other chats are running commands" in str(exc)
+        assert "other chats' sandboxes are busy" in str(exc) and "engine gave" not in str(exc)
+
+
+def test_short_of_memory_the_engine_gives_way_before_the_sandbox_waits():
+    mem = {"v": 3.0}
+    asked = []
+
+    def release(n):
+        asked.append(n)
+        mem["v"] += n / sb_mod.GiB                        # the engine gave back all it was asked
+        return n
+    sb, _ = guarded(mem, release=release)
+    waits = []
+    sb.ensure("c1", on_wait=waits.append)
+    assert asked == [2 * sb_mod.GiB], "the floor plus the limit less MemAvailable: 4 + 1 - 3"
+    assert sb.box("c1").state == "running" and waits == [] and sb.released == 2 * sb_mod.GiB
+
+    # an engine that can give back only part: the sandbox waits, the reason names what it gave
+    mem["v"], asked[:] = 3.0, []
+    sb2, _ = guarded(mem, release=lambda n: asked.append(n) or (mem.__setitem__(
+        "v", mem["v"] + 0.5) or int(0.5 * sb_mod.GiB)))
+    sb2.release_every_s = 60.0                            # asked once, not every look
+    try:
+        sb2.ensure("c2")
+        raise AssertionError("must give up")
+    except sb_mod.Unavailable as exc:
+        assert len(asked) == 1 and "the engine gave back 0.5 GiB" in str(exc)
+        assert exc.data["sandbox"]["engine_released_gib"] == 0.5
+
+    # an engine without the route (0) or down (an exception) changes nothing but the wait
+    for rel in (lambda n: 0, lambda n: 1 / 0):
+        sb3, _ = guarded({"v": 3.0}, release=rel)
+        assert sb3.admit().startswith("MemAvailable 3.0 GiB")
+
+
+def test_the_guard_asks_the_engine_before_it_stops_a_sandbox():
+    mem = {"v": 60}
+    sb, _ = guarded(mem, release=lambda n: mem.__setitem__("v", mem["v"] + n / sb_mod.GiB) or n)
+    sb.ensure("c1")
+    mem["v"] = 2.5
+    assert sb.guard_once() == "engine released" and sb.box("c1").state == "running"
+    sb.release = lambda n: 0
+    mem["v"] = 2.5
+    assert sb.guard_once() == "stop c1"
+
+
+def test_the_memory_limit_follows_qse_sandbox_mem_gb():
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-c", "from chatd import sandbox as m; "
+                          "print(m.LIMIT_BYTES, m.limit_words(), m.FLOOR_GB, m.WAIT_S)"],
+                         capture_output=True, text=True, cwd=root, check=True, env=dict(
+                             os.environ, PYTHONPATH=root, QSE_SANDBOX_MEM_GB="2",
+                             QSE_SANDBOX_FLOOR_GB="6", QSE_SANDBOX_WAIT_S="30")).stdout.split()
+    assert out == [str(2 * sb_mod.GiB), "2", "GiB", "6.0", "30.0"], out
+    old = sb_mod.LIMIT_BYTES
+    sb_mod.LIMIT_BYTES = 2 * sb_mod.GiB
+    try:
+        api = FakeEngineAPI()
+        bodies = []
+        call = api.call
+        api.call = lambda method, path, body=None, timeout=60: (bodies.append(body),
+                                                                call(method, path, body))[1]
+        sb = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=api, meminfo_fn=lambda: {})
+        sb._proxy = lambda b: None
+        sb.run = lambda *a, **k: (0, False)
+        assert sb.total_gb == 8.0
+        sb.ensure("c1")
+        hc = next(x for x in bodies if x and "HostConfig" in x)["HostConfig"]
+        assert hc["Memory"] == hc["MemorySwap"] == 2 * sb_mod.GiB
+        assert sb.status("c1")["memory_limit_bytes"] == 2 * sb_mod.GiB
+        assert T.oom_words() == "out of memory (2 GiB sandbox limit)"
+    finally:
+        sb_mod.LIMIT_BYTES = old
+
+
+def test_oom_kills_are_read_from_the_cgroup():
+    d = tempfile.mkdtemp()
+    sb, _ = guarded({"v": 60})
+    old = sb_mod.CGROUP
+    sb_mod.CGROUP = d
+    try:
+        sb.ensure("c1")
+        ctr = sb.box("c1").container
+        assert sb.oom_kills("c1") is None                 # nothing to read
+        os.makedirs(os.path.join(d, "system.slice", f"docker-{ctr}.scope"))
+        with open(os.path.join(d, "system.slice", f"docker-{ctr}.scope", "memory.events"),
+                  "w") as fh:
+            fh.write("low 0\nhigh 0\nmax 12\noom 2\noom_kill 2\noom_group_kill 0\n")
+        assert sb.oom_kills("c1") == 2
+        assert sb.oom_kills("nobox") is None
+    finally:
+        sb_mod.CGROUP = old
+
+
+def test_a_command_killed_at_the_limit_says_out_of_memory():
+    c = chat_with_sandbox()
+    try:
+        boxes = c.svc.sandboxes
+        kills = {"n": 0}
+        boxes.oom_kills = lambda cid: kills["n"]
+        boxes.script["ffmpeg"] = (["frame 1\n"], 137, 0.0)
+        real_run = boxes.run
+
+        def run(cid, cmd, **kw):
+            if "ffmpeg" in cmd[-1]:
+                kills["n"] += 1                           # the kernel killed it at the limit
+            return real_run(cid, cmd, **kw)
+        boxes.run = run
+        c.ok("PATCH", "/tools/bash", {"policy": "always"})
+        cid = c.new()
+        c.send(cid, calls(("bash", {"command": "ffmpeg -i in.mp4 out.mp4"})))
+        s = c.wait_idle(cid, 20)
+        call = next(p for p in parts_of(s) if p["type"] == "tool_call")
+        assert call["status"] == "failed" and call["output"]["exit_code"] == 137
+        assert "[out of memory (1 GiB sandbox limit): the kernel killed a process of this " \
+               "command (exit code 137)" in call["output"]["content"]
+        assert call["output"]["data"] == {"sandbox": {"reason": "oom", "limit_gib": 1.0}}
+        tool_msg = [m for m in requests(c)[-1]["messages"] if m["role"] == "tool"][-1]
+        assert "out of memory (1 GiB sandbox limit)" in tool_msg["content"]
+
+        # ffmpeg killed under a pipe: its writer exits 1, the cgroup still counts the kill
+        boxes.script["render.py"] = (["BrokenPipeError: [Errno 32] Broken pipe\n"], 1, 0.0)
+        real = boxes.run
+        boxes.run = lambda cid, cmd, **kw: (kills.__setitem__("n", kills["n"] + (
+            "render.py" in cmd[-1])), real(cid, cmd, **kw))[1]
+        c.send(cid, calls(("bash", {"command": "python3 render.py"})))
+        s = c.wait_idle(cid, 20)
+        call = [p for p in parts_of(s) if p["type"] == "tool_call"][-1]
+        assert call["output"]["exit_code"] == 1 and "out of memory (1 GiB sandbox limit)" in \
+            call["output"]["content"] and "-threads 4" in call["output"]["content"]
+        # a plain failure is not called out of memory; nor is a 137 the cgroup does not count
+        boxes.script["false"] = ([], 1, 0.0)
+        boxes.script["kill9"] = ([], 137, 0.0)
+        for cmd in ("false", "kill9"):
+            c.send(cid, calls(("bash", {"command": cmd})))
+            s = c.wait_idle(cid, 20)
+            call = [p for p in parts_of(s) if p["type"] == "tool_call"][-1]
+            assert "out of memory" not in call["output"]["content"], cmd
+        # where the cgroup cannot be read, a SIGKILL chatd did not send counts as one: 137 from
+        # bash, 9 from setsid when the killed process was the command itself
+        boxes.oom_kills = lambda cid: None
+        boxes.script["setsid9"] = ([], 9, 0.0)
+        for cmd in ("kill9 again", "setsid9"):
+            c.send(cid, calls(("bash", {"command": cmd})))
+            s = c.wait_idle(cid, 20)
+            call = [p for p in parts_of(s) if p["type"] == "tool_call"][-1]
+            assert "out of memory (1 GiB sandbox limit)" in call["output"]["content"], cmd
+    finally:
+        c.close()
+
+
+def test_render_page_killed_at_the_limit_says_out_of_memory():
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("index.html", b"<p>hi</p>")
+
+    class Ctx:
+        call_id, oom = "call1", True
+
+        def __init__(self):
+            self.ws = ws
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            return 9, False
+
+        def output_text(self):
+            return ""
+    try:
+        T._render(Ctx(), {"path": "index.html"})
+        raise AssertionError("no screenshot: an error")
+    except T.ToolError as exc:
+        assert str(exc).startswith("the page did not render: out of memory (1 GiB sandbox "
+                                   "limit), the kernel killed Chromium")
+        assert exc.data == {"sandbox": {"reason": "oom", "limit_gib": 1.0}}
+    ctx = Ctx()
+    ctx.oom = False
+    try:
+        T._render(ctx, {"path": "index.html"})
+    except T.ToolError as exc:
+        assert str(exc) == "the page did not render: no screenshot" and exc.data is None
+
+
+def test_a_sandbox_that_never_starts_fails_the_call_with_the_reason_and_the_run_goes_on():
+    c = chat_with_sandbox()
+    try:
+        boxes = c.svc.sandboxes
+        boxes.meminfo = lambda: {"MemAvailable": int(3.2 * sb_mod.GiB)}
+        boxes.wait_s, boxes.poll_s = 0.5, 0.05
+        c.ok("PATCH", "/tools/bash", {"policy": "always"})
+        cid = c.new()
+        c.send(cid, calls(("bash", {"command": "make"})))
+        s = c.wait_idle(cid, 20)
+        call = next(p for p in parts_of(s) if p["type"] == "tool_call")
+        assert call["status"] == "failed" and call["output"]["is_error"]
+        assert call["output"]["content"].startswith("no sandbox for this call: after waiting")
+        assert call["output"]["data"]["sandbox"]["reason"] == "no_memory"
+        tool_msg = [m for m in requests(c)[-1]["messages"] if m["role"] == "tool"][-1]
+        assert "answer with what you already have" in tool_msg["content"]
+        assert s["messages"][-1]["status"] == "done", "the model answers after the failed call"
+        assert boxes.ran == [], "nothing ran"
+        sbx = c.ok("GET", f"/conversations/{cid}/sandbox")
+        assert sbx["state"] == "stopped" and sbx["error"].startswith("did not start after")
+        assert sbx["memory_limit_bytes"] == 1 * sb_mod.GiB
+    finally:
+        c.close()
 
 
 # ---------------------------------------------------------------------- terminals

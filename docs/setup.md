@@ -24,7 +24,7 @@ Until an admin password is set, anyone who reaches the port can run the setup, a
 Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. Install in setup mode, then switch to a profile:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.9.2/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.10.0/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # what it would download: each URL and size
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, or any name --list prints
@@ -41,7 +41,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.9.2`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.9.2'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.10.0`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.10.0'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 

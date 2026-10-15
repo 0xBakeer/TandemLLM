@@ -1,12 +1,12 @@
 """The sandbox on a real box (SRV-355, SRV-357, OPS-103): one real container, CPU only. Skipped
-unless QSE_SANDBOX_BOX=1, and it refuses to start a container under 30 GiB MemAvailable (the
-Spark's rule while other work runs memory fits). One container at a time; it is removed at the end.
+unless QSE_SANDBOX_BOX=1, and it refuses to start a container where the admission would not (the
+limit plus the floor, chatd/sandbox.py). One container at a time; it is removed at the end.
 
     QSE_SANDBOX_BOX=1 python3 tests/test_sandbox_box.py
 
 Checks: the lockdown (uid 1000, no capabilities, read-only root, no network, the limits, no
 devices); the LAN, this box and the engine unreachable while the public internet works through
-chatd's proxy; a 5 GiB allocation dies at the 4 GiB limit; the pids limit stops a fork storm;
+chatd's proxy; a 2 GiB allocation dies at the 1 GiB limit and the cgroup counts the kill; the pids limit stops a fork storm;
 render_page's Chromium writes a screenshot and reports a console error; a PTY; the port relay;
 a second runtime adopts the running container; stop. Then every built-in tool through chatd's loop
 (the fake model asks, the real sandbox and workspace answer; SRV-353).
@@ -41,10 +41,11 @@ def test_the_sandbox_on_this_box():
         print("skipped: set QSE_SANDBOX_BOX=1 on the box")
         return
     avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
-    assert avail >= 30, f"MemAvailable {avail:.1f} GiB: wait for 30"
+    need = sb_mod.FLOOR_GB + sb_mod.LIMIT_BYTES / sb_mod.GiB
+    assert avail >= need, f"MemAvailable {avail:.1f} GiB: wait for {need:g}"
     d = tempfile.mkdtemp(prefix="sbx-box-")
     sb = Sandboxes(d, log=print)
-    sb.min_start_gb, sb.max_running = 30, 1
+    sb.max_running = 1
     try:
         t0 = time.monotonic()
         ctr = sb.ensure(CID)
@@ -53,8 +54,8 @@ def test_the_sandbox_on_this_box():
         hc = info["HostConfig"]
         assert info["Config"]["User"] == "1000:1000"
         assert hc["CapDrop"] == ["ALL"] and hc["ReadonlyRootfs"] is True
-        assert hc["NetworkMode"] == "none" and hc["Memory"] == 4 * sb_mod.GiB
-        assert hc["MemorySwap"] == 4 * sb_mod.GiB and hc["PidsLimit"] == 512
+        assert hc["NetworkMode"] == "none" and hc["Memory"] == sb_mod.LIMIT_BYTES == sb_mod.GiB
+        assert hc["MemorySwap"] == sb_mod.GiB and hc["PidsLimit"] == 512
         assert not hc.get("Devices") and not hc.get("DeviceRequests")
         assert "no-new-privileges" in hc["SecurityOpt"]
 
@@ -78,8 +79,10 @@ def test_the_sandbox_on_this_box():
         print("network: LAN, box and engine refused; https://pypi.org 200 through the proxy")
 
         # the memory limit and the pids limit
-        code, out = _run(sb, "python3 -c 'x = bytearray(5 * 1024 ** 3)'; echo exit=$?")
+        before = sb.oom_kills(CID)
+        code, out = _run(sb, "python3 -c 'x = bytearray(2 * 1024 ** 3)'; echo exit=$?")
         assert "exit=137" in out, out
+        assert before is not None and sb.oom_kills(CID) == before + 1, (before, sb.oom_kills(CID))
         _run(sb, "nohup bash -c 'for i in $(seq 700); do sleep 15 & done; wait' >/dev/null "
                  "2>&1 & sleep 3", timeout=60)
         st, stats = sb.engine.call("GET", f"/containers/{ctr}/stats?stream=false")
@@ -88,7 +91,7 @@ def test_the_sandbox_on_this_box():
         time.sleep(16)
         code, out = _run(sb, "echo alive")
         assert out.strip() == "alive", out
-        print(f"limits: 5 GiB allocation killed (137), fork storm stopped at {n} processes")
+        print(f"limits: 2 GiB allocation killed (137, oom_kill counted), fork storm stopped at {n} processes")
 
         # render_page's Chromium
         page = ("<html><body><h1>box test</h1><script>console.error('boom from the page')"
@@ -152,7 +155,8 @@ def test_every_builtin_through_chatd_in_a_real_sandbox():
         print("skipped: set QSE_SANDBOX_BOX=1 on the box")
         return
     avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
-    assert avail >= 30, f"MemAvailable {avail:.1f} GiB: wait for 30"
+    need = sb_mod.FLOOR_GB + sb_mod.LIMIT_BYTES / sb_mod.GiB
+    assert avail >= need, f"MemAvailable {avail:.1f} GiB: wait for {need:g}"
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from chatd_util import Chat
 
@@ -161,7 +165,7 @@ def test_every_builtin_through_chatd_in_a_real_sandbox():
 
     c = Chat()
     sb = c.svc.sandboxes
-    sb.min_start_gb, sb.max_running = 30, 1
+    sb.max_running = 1
     cid = None
     try:
         assert sb.available(), "no sandbox runtime on this box"
@@ -236,13 +240,14 @@ def test_an_open_webui_tool_runs_in_a_real_sandbox():
         print("skipped: set QSE_SANDBOX_BOX=1 on the box")
         return
     avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
-    assert avail >= 30, f"MemAvailable {avail:.1f} GiB: wait for 30"
+    need = sb_mod.FLOOR_GB + sb_mod.LIMIT_BYTES / sb_mod.GiB
+    assert avail >= need, f"MemAvailable {avail:.1f} GiB: wait for {need:g}"
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from chatd_util import Chat
 
     c = Chat()
     sb = c.svc.sandboxes
-    sb.min_start_gb, sb.max_running = 30, 1
+    sb.max_running = 1
     cid = None
     try:
         kit = c.svc.owui.add("big.py", HUMANIZE)

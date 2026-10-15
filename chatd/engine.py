@@ -8,6 +8,9 @@
     Engine.facts()                 GET /v1/dashboard/system (else /health): weights, max_len, drafter,
                                    memory -- what our engine says about itself; {} for any other
     Engine.post_json(path, body)   the cache peek and prewarm (SRV-349), the title call
+    Engine.release_memory(n)       POST /v1/cache/release: the engine gives back what it holds
+                                   idle, for a chat's sandbox (chatd/sandbox.py); 0 from a server
+                                   without the route
     LiveTail                       ONE tail of GET /v1/dashboard/live for the whole service while a
                                    run is on (polls `?follow=0` once a second when the stream is
                                    refused); rows by conversation id and by request id
@@ -145,6 +148,15 @@ class Engine:
             return self.request("POST", path, json.dumps(obj).encode(), headers, timeout)
         except (OSError, http.client.HTTPException):
             return 0, None
+
+    def release_memory(self, nbytes: int, why: str = "sandbox") -> int:
+        """Bytes the engine gave back of the `nbytes` asked for; 0 when it gave none, is busy,
+        or has no such route (an engine from before it, another server)."""
+        st, obj = self.post_json("/v1/cache/release", {"bytes": int(nbytes), "why": why},
+                                 timeout=30.0)
+        if st != 200 or not isinstance(obj, dict):
+            return 0
+        return int(obj.get("released_bytes") or 0)
 
     def stream(self, body: bytes, headers: dict) -> Call:
         """Open a streamed completion. EngineError for a refusal (retryable for 429 and 5xx and a

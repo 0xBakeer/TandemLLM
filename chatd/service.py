@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 
+from chatd import attach as attach_mod
 from chatd import context as ctx_mod
 from chatd import render
 from chatd import tools as tools_mod
@@ -172,7 +173,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
         self.stopping = threading.Event()
         self.sandboxes = sandboxes or Sandboxes(data_dir, log=self.log,
                                                 on_change=self._sandbox_changed,
-                                                network_mode=self._network_mode)
+                                                network_mode=self._network_mode,
+                                                release=self.engine.release_memory)
         self.snaps = Snapshots(os.path.join(data_dir, "snapshots"))
         self._library: tuple[float, bool] | None = None
         from chatd.mcp import Mcp
@@ -666,6 +668,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
             row = self._row(cid)
             parent = body.get("parent_id") or row["head_id"]
             atts = self._attachments(cid, body.get("attachments") or [])
+            self._place(conv, row, atts)
             um = self._insert_message(cid, parent, "user", [{"type": "text", "text": text}],
                                       "done", client_msg_id=cmid, attachments=atts or None)
             self._title_from(conv, row, text)
@@ -1158,7 +1161,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
         files = 0
         for m in branch:
             for a in m.get("attachments") or []:
-                files += int(a.get("tokens") or 0)
+                files += (int(a.get("tokens") or 0) if render.inlined(a) else
+                          attach_mod.LINE_TOKENS)
         cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
         files += ctx_mod.file_tokens(branch, cp[1] if cp else 0,
                                      (cp[2][0], cp[2][1]) if cp and cp[2] else None)
@@ -1389,6 +1393,35 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
         except (ApiError, OSError, KeyError):
             return None
 
+    def _place(self, conv: Conv, row, atts: list[dict]) -> None:
+        """SRV-487, when a message is sent: each attachment is saved in the chat's workspace under
+        uploads/ (`path`), and a text file goes into the prompt whole only while the message's
+        text files stay within a quarter of the window's free room, at most INLINE_MAX_TOKENS
+        (`inline`); past it the prompt gets one line with its name, size and path
+        (chatd/attach.py, chatd/render.py)."""
+        if not atts:
+            return
+        settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+        window = int(self.model_info(settings.get("model")).get("max_len") or 0)
+        branch, _ = self._branch(conv, row["head_id"])
+        left = attach_mod.budget(window, _branch_tokens(branch))
+        ws_dir = self.workspace(conv.id).root
+        for a in atts:
+            try:
+                _, data = self.attachment(a["id"])
+            except (ApiError, OSError):
+                continue
+            a["path"] = attach_mod.save_upload(ws_dir, a.get("name") or "file", data)
+            if a.get("kind") != "text":
+                continue
+            tokens = int(a.get("tokens") or 0)
+            a["inline"] = tokens <= left
+            if a["inline"]:
+                left -= tokens
+            else:
+                self.log(f"[attach] {a['id']} {tokens} tokens over the budget: one line, the file "
+                         f"at {a['path']}")
+
     # ================================================================== the stream
     def attach(self, cid: str, after: int | None) -> tuple[Subscriber | None, list]:
         """A subscriber and the events to replay first; (None, []) means `reset` (too far behind,
@@ -1611,9 +1644,13 @@ def _queued(q) -> dict:
 def _attachment(att_id, name, kind, mime, size, tokens) -> dict:
     url = f"/v1/chat-app/attachments/{att_id}"
     # an image's thumbnail on every device is the file itself, from this origin
-    return {"id": att_id, "name": name, "kind": kind, "bytes": int(size), "mime": mime,
-            "url": url, "tokens": tokens,
-            "preview": url if kind == "image" and size <= 5 * 1024 * 1024 else None}
+    out = {"id": att_id, "name": name, "kind": kind, "bytes": int(size), "mime": mime,
+           "url": url, "tokens": tokens,
+           "preview": url if kind == "image" and size <= 5 * 1024 * 1024 else None}
+    if kind == "text" and tokens is not None:
+        # what the composer can say before the send places it (SRV-487, VIS-169)
+        out["inline"] = int(tokens) <= attach_mod.INLINE_MAX_TOKENS
+    return out
 
 
 def _empty_stats(finish: str) -> dict:

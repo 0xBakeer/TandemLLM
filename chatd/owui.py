@@ -35,6 +35,7 @@ import re
 import shlex
 import time
 
+from chatd import tools as tools_mod
 from chatd.ids import ulid
 from chatd.tools import Result, Tool, ToolError
 
@@ -413,5 +414,8 @@ class Owui:
                 return Result(result if result.strip() else "(no result)")
             if timed:
                 raise ToolError(f"the tool did not answer within {TIMEOUT_S} s")
+            if getattr(ctx, "oom", False):
+                raise ToolError(f"the tool failed: {tools_mod.oom_words()}, the kernel killed it "
+                                f"(exit {code}):\n" + out[-3000:], tools_mod.oom_data())
             raise ToolError(f"the tool failed (exit {code}):\n" + out[-3000:])
         return run

@@ -35,6 +35,7 @@ import shlex
 import time
 import urllib.parse
 
+from chatd import sandbox as sandbox_mod
 from chatd.workspace import ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
@@ -79,7 +80,20 @@ class Result:
 
 
 class ToolError(Exception):
-    """A call that cannot run as asked: its message is the tool result the model reads."""
+    """A call that cannot run as asked: its message is the tool result the model reads; `data`,
+    when set, is the call's `output.data` for the chat."""
+
+    def __init__(self, message: str, data: dict | None = None):
+        super().__init__(message)
+        self.data = data
+
+
+def oom_words() -> str:
+    return f"out of memory ({sandbox_mod.limit_words()} sandbox limit)"
+
+
+def oom_data() -> dict:
+    return {"sandbox": {"reason": "oom", "limit_gib": sandbox_mod.LIMIT_BYTES / sandbox_mod.GiB}}
 
 
 def _obj(props: dict, required: list) -> dict:
@@ -110,6 +124,13 @@ def _bash(ctx, a):
     if timed_out:
         return Result(out + f"\n[timed out after {timeout} s; the command was stopped]",
                       is_error=True, exit_code=code)
+    if getattr(ctx, "oom", False):
+        return Result(out + f"\n[{oom_words()}: the kernel killed a process of this command "
+                            f"(exit code {code}). Use less memory: fewer parallel jobs or threads "
+                            f"(the sandbox has 4 CPUs while nproc counts the whole box, so pass "
+                            f"-j4, -threads 4 and the like), smaller batches, files on disk "
+                            f"instead of data in memory]",
+                      is_error=True, exit_code=code, data=oom_data())
     tail = f"\n[exit code {code}]" if code else ""
     return Result(out + tail, is_error=bool(code), exit_code=code)
 
@@ -212,6 +233,10 @@ def _render(ctx, a):
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):
+        if getattr(ctx, "oom", False):
+            raise ToolError(f"the page did not render: {oom_words()}, the kernel killed Chromium. "
+                            f"A lighter page or a smaller width and height may fit",
+                            oom_data()) from None
         raise ToolError("the page did not render: " + (log.strip() or "no screenshot")) from None
     errors = [ln for ln in log.splitlines() if ln.strip()]
     # a new render of the page as it is now, each call (its own file): live (2026-10-13) the

@@ -87,6 +87,14 @@ weights_ok() {
 MISSING=""
 if pvset QSE_ASSETS; then
     for p in $(pv QSE_ASSETS); do [ -e "$p" ] || MISSING="$MISSING $p"; done
+    # SPD-121: a missing one the registry entry fetches (Bolt's GGUF, its profile's assets_required)
+    # is fetched, then every path is checked again
+    if [ -n "$MISSING" ] && [ "$MODE" != "--dry-run" ]; then
+        "$PY" "$HERE/fetch_weights.py" --assets "$NAME" --repo "$REPO_DIR" --extra-gb 0 \
+            --margin-gb "$DISK_MARGIN_GB" || { say "REFUSING: $NAME's assets did not fetch"; exit 5; }
+        MISSING=""
+        for p in $(pv QSE_ASSETS); do [ -e "$p" ] || MISSING="$MISSING $p"; done
+    fi
     # the tools' models still come from the registry entry (VIS-153; its assets_required is empty)
     if [ -n "${QSE_FETCH_ASSETS:-}" ] && [ "$MODE" != "--dry-run" ]; then
         "$PY" "$HERE/fetch_weights.py" --assets "$NAME" --repo "$REPO_DIR" --extra-gb 0 \

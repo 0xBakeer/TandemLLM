@@ -14,18 +14,34 @@ rather than relying on the runtime:
   chatd's filtering proxy for that chat only (chatd/egress.py), which refuses the LAN and this box;
 - mounts: /workspace (the chat's files, chatd/workspace.py), /home/agent (pip, npm, uv caches) and
   /run/tandem (the proxy's socket, read-only). Nothing of chatd's or the engine's is mounted;
-- limits: 4 GiB memory with no swap, 4 CPUs, 512 pids (a fork bomb stops there).
+- limits: 1 GiB memory with no swap (QSE_SANDBOX_MEM_GB), 4 CPUs, 512 pids (a fork bomb stops
+  there). A process the kernel kills at the limit is reported to the model as "out of memory (1 GiB
+  sandbox limit)" (`oom_kills`, the cgroup's memory.events).
 
-THE MEMORY GUARD (the engine comes first; unified memory makes a sandbox's RAM the engine's KV):
-- admission: a sandbox starts only when MemAvailable minus its limit stays at or above 19 GiB
-  (floor 15 + margin 4), and MemAvailable is at least QSE_SANDBOX_MIN_START_GB (0 by default; 30 on
-  the Spark while the Flash-Next builder runs its memory fits). Else the chat waits ("Waiting for
-  memory") until it fits or the run is stopped;
-- the running sandboxes' limits add up to at most QSE_SANDBOX_TOTAL_GB (16), and at most
-  QSE_SANDBOX_MAX_RUNNING run at once (the least recently used idle one is stopped to make room);
-- every second: under 15 GiB, stop the least recently used idle sandbox; under 12 GiB, kill every
-  sandbox. Stop, not pause: pausing frees nothing. The files stay; the chat says why
-  (`stopped_reason: memory_guard`);
+THE MEMORY GUARD. The sandbox has priority over the engine's idle memory (ruling of 2026-10-15): a
+chat's tool call gets its sandbox, and when memory is short the engine gives way. The engine keeps
+itself at its own floors: its KV pages pass the pool's hard floor and its requests the admission
+floor (10 GiB each on the Spark), and below them it gives back idle conversations or waits. What a
+sandbox must leave is only what the engine takes without asking: a prefill's workspace, beyond
+the free blocks its allocator already holds. Measured on the Spark (27B EXL3 6.0, 4 slots, KV pool,
+2026-10-15, the engine's own `last_prefill_peak` and `observed.workspace`): 2.7 GiB for a
+203,052-token prefill, 3.5 GiB scaled to the 262,144-token window; the allocator held 10 GiB of
+free blocks at the time. So:
+- admission: a sandbox starts when MemAvailable minus its limit stays at or above FLOOR_GB (4,
+  QSE_SANDBOX_FLOOR_GB). When it does not, chatd asks the engine to give back the difference
+  (`release`, the engine's POST /v1/cache/release: free allocator blocks, caches, the small models,
+  idle conversations) and looks again;
+- the running sandboxes' limits add up to at most QSE_SANDBOX_TOTAL_GB (QSE_SANDBOX_MAX_RUNNING
+  times the limit), and at most QSE_SANDBOX_MAX_RUNNING (4) run at once (the least recently used
+  idle one is stopped to make room);
+- a call waits at most WAIT_S (60 s, QSE_SANDBOX_WAIT_S). Then it fails with the reason and the
+  numbers, which the model reads as the tool's result and the chat shows on the call: it never
+  hangs;
+- every second: under STOP_GB (3) the engine is asked first, then the least recently used idle
+  sandbox stops (a busy one when none is idle); under KILL_GB (2) every sandbox is killed. Both
+  are under the admission's floor, so the guard never stops a sandbox the admission just let in.
+  Stop, not pause: pausing frees nothing. The files stay; the chat says why (`stopped_reason:
+  memory_guard`);
 - 30 minutes with no tool call and no terminal: stop (`idle`).
 
 chatd restarts adopt running containers by their label and do not recreate them.
@@ -48,19 +64,32 @@ from chatd.egress import Proxy
 GiB = 1024 ** 3
 IMAGE = os.environ.get("QSE_SANDBOX_IMAGE", "tandem-sandbox:1")
 SOCKET = os.environ.get("QSE_SANDBOX_SOCKET", "/var/run/docker.sock")
-LIMIT_BYTES = 4 * GiB
+LIMIT_BYTES = int(float(os.environ.get("QSE_SANDBOX_MEM_GB") or 1) * GiB)
 CPUS = 4
 PIDS = 512
 DISK_LIMIT = 10 * GiB
-FLOOR_GB, MARGIN_GB, STOP_GB, KILL_GB = 15.0, 4.0, 15.0, 12.0
+FLOOR_GB = float(os.environ.get("QSE_SANDBOX_FLOOR_GB") or 4)
+STOP_GB, KILL_GB = 3.0, 2.0
+WAIT_S = float(os.environ.get("QSE_SANDBOX_WAIT_S") or 60)
+RELEASE_EVERY_S = 10.0
 IDLE_S = 30 * 60
+CGROUP = "/sys/fs/cgroup"
 MEM_TTL_S = 5.0
 LABEL = "tandem.chat"
 
 
 class Unavailable(Exception):
-    """No sandbox for this call: the image is missing, the runtime is down, or the run stopped
-    while it waited for memory."""
+    """No sandbox for this call: the image is missing, the runtime is down, the run stopped while
+    it waited for memory, or memory stayed short for WAIT_S. The message is the tool result the
+    model reads; `data` is the call's `output.data` for the chat (the reason and the numbers)."""
+
+    def __init__(self, message: str, data: dict | None = None):
+        super().__init__(message)
+        self.data = data
+
+
+def limit_words() -> str:
+    return f"{LIMIT_BYTES / GiB:g} GiB"
 
 
 def meminfo(path: str = "/proc/meminfo") -> dict:
@@ -169,7 +198,8 @@ class Box:
 
 class Sandboxes:
     def __init__(self, data_dir: str, *, engine: Engine | None = None, image: str = IMAGE,
-                 log=None, on_change=None, network_mode=None, meminfo_fn=meminfo, clock=time.time):
+                 log=None, on_change=None, network_mode=None, meminfo_fn=meminfo, clock=time.time,
+                 release=None):
         self.data = data_dir
         self.engine = engine or Engine()
         self.image = image
@@ -180,9 +210,15 @@ class Sandboxes:
         self.clock = clock
         self.boxes: dict[str, Box] = {}
         self.lock = threading.Lock()
-        self.min_start_gb = float(os.environ.get("QSE_SANDBOX_MIN_START_GB") or 0)
-        self.total_gb = float(os.environ.get("QSE_SANDBOX_TOTAL_GB") or 16)
         self.max_running = int(os.environ.get("QSE_SANDBOX_MAX_RUNNING") or 4)
+        self.total_gb = float(os.environ.get("QSE_SANDBOX_TOTAL_GB") or
+                              self.max_running * LIMIT_BYTES / GiB)
+        # `release(nbytes) -> bytes given back`: the engine makes room (chatd/engine.py
+        # `release_memory`); None where there is no engine to ask
+        self.release = release
+        self.released = 0                    # bytes the engine gave back at the last ask
+        self._asked: float | None = None
+        self.wait_s, self.poll_s, self.release_every_s = WAIT_S, 2.0, RELEASE_EVERY_S
         self._avail: tuple[float, bool] | None = None
         self.stopping = threading.Event()
 
@@ -258,6 +294,25 @@ class Sandboxes:
         b.mem = (now, used)
         return used
 
+    def oom_kills(self, cid: str) -> int | None:
+        """How many processes the kernel has killed at this sandbox's memory limit: `oom_kill` in
+        its cgroup's memory.events (cgroup v2, Docker's systemd or cgroupfs layout); None where
+        the file cannot be read (another runtime, cgroup v1)."""
+        ctr = self.box(cid).container
+        if not ctr:
+            return None
+        for path in (f"{CGROUP}/system.slice/docker-{ctr}.scope/memory.events",
+                     f"{CGROUP}/docker/{ctr}/memory.events"):
+            try:
+                with open(path) as fh:
+                    for line in fh:
+                        k, _, v = line.partition(" ")
+                        if k == "oom_kill":
+                            return int(v)
+            except (OSError, ValueError):
+                continue
+        return None
+
     def status(self, cid: str) -> dict:
         b = self.box(cid)
         ws, _, _ = self.paths(cid)
@@ -283,13 +338,40 @@ class Sandboxes:
         with self.lock:
             return [b for b in self.boxes.values() if b.state == "running"]
 
+    def _avail_gb(self) -> float:
+        return self.meminfo().get("MemAvailable", 0) / GiB
+
+    def _ask_engine(self, short_gb: float) -> int:
+        """The engine gives way: it is asked for `short_gb` (at most every RELEASE_EVERY_S, since
+        what it holds idle does not come back between two looks). Bytes it gave back."""
+        now = time.monotonic()
+        if self.release is None or (self._asked is not None and
+                                    now - self._asked < self.release_every_s):
+            return 0
+        self._asked = now
+        try:
+            got = int(self.release(int(short_gb * GiB)) or 0)
+        except Exception:                                           # noqa: BLE001
+            got = 0
+        self.released = got
+        if got:
+            self.log(f"[sandbox] the engine gave back {got / GiB:.1f} GiB for a sandbox")
+        return got
+
+    def short_words(self, avail: float) -> str:
+        return (f"MemAvailable {avail:.1f} GiB: a {limit_words()} sandbox would leave the engine "
+                f"under its {FLOOR_GB:g} GiB floor")
+
     def admit(self) -> str | None:
-        """None when a new sandbox may start now, else the reason to wait."""
-        avail = self.meminfo().get("MemAvailable", 0) / GiB
-        if avail and avail < self.min_start_gb:
-            return f"MemAvailable {avail:.1f} GiB is under the {self.min_start_gb:.0f} GiB start line"
-        if avail and avail - LIMIT_BYTES / GiB < FLOOR_GB + MARGIN_GB:
-            return f"MemAvailable {avail:.1f} GiB leaves the engine under {FLOOR_GB + MARGIN_GB:.0f}"
+        """None when a new sandbox may start now, else the reason to wait. Short of memory, the
+        engine is asked to give back the difference first."""
+        avail = self._avail_gb()
+        short = FLOOR_GB + LIMIT_BYTES / GiB - avail
+        if avail and short > 0:
+            if self._ask_engine(short):
+                avail = self._avail_gb()
+            if avail and avail - LIMIT_BYTES / GiB < FLOOR_GB:
+                return self.short_words(avail)
         running = self._running()
         if (len(running) + 1) * LIMIT_BYTES / GiB > self.total_gb or \
                 len(running) >= self.max_running:
@@ -297,7 +379,8 @@ class Sandboxes:
             if idle:
                 self.stop(idle[0].cid, "idle")
                 return None if len(self._running()) < self.max_running else "making room"
-            return f"{len(running)} sandbox(es) running, the most at once"
+            return (f"{len(running)} sandbox(es) of other chats are running commands, the most "
+                    f"at once")
         return None
 
     def ensure(self, cid: str, cancel: threading.Event | None = None, on_wait=None) -> str:
@@ -310,22 +393,25 @@ class Sandboxes:
             b.last_used = self.clock()
             if b.state == "running" and b.container:
                 return b.container
-            waited = False
+            waited, t0 = False, time.monotonic()
             while True:
                 why = self.admit()
                 if why is None:
                     break
+                spent = time.monotonic() - t0
                 if not waited:
                     b.state, waited = "waiting_memory", True
                     self._changed(b)
+                if spent >= self.wait_s:
+                    raise self._gave_up(b, why, spent)
                 if on_wait is not None:
-                    on_wait(why)
-                if (cancel is not None and cancel.wait(2.0)) or self.stopping.is_set():
+                    on_wait(f"{why}; {spent:.0f} of {self.wait_s:.0f} s")
+                if (cancel is not None and cancel.wait(self.poll_s)) or self.stopping.is_set():
                     b.state = "stopped"
                     self._changed(b)
                     raise Unavailable("stopped while waiting for memory")
                 if cancel is None:
-                    time.sleep(2.0)
+                    time.sleep(self.poll_s)
             b.state, b.error = "creating", None
             self._changed(b)
             try:
@@ -343,6 +429,28 @@ class Sandboxes:
             self._changed(b)
             self.log(f"[sandbox] {cid} running")
             return b.container
+
+    def _gave_up(self, b: Box, why: str, spent: float) -> Unavailable:
+        """The wait's end: the reason and the numbers, for the model (the tool's result), the
+        chat (the call's `output.data`) and the Sandbox panel (`error`)."""
+        avail = self._avail_gb()
+        freed = self.released / GiB
+        b.state, b.error = "stopped", f"did not start after {spent:.0f} s: {why}"
+        self._changed(b)
+        self.log(f"[sandbox] {b.cid} not started after {spent:.0f} s (MemAvailable {avail:.1f} "
+                 f"GiB, the engine gave back {freed:.1f} GiB)")
+        memory = why.startswith("MemAvailable")
+        msg = (f"no sandbox for this call: after waiting {spent:.0f} s it still could not start "
+               f"({why}" + (f"; the engine gave back {freed:.1f} GiB" if memory else "") +
+               "). The command did not run. Do not call bash or render_page again for now: answer "
+               "with what you already have, or without tools, and tell the user the sandbox could "
+               "not start " + ("for lack of memory." if memory else "because other chats' "
+                                                                     "sandboxes are busy."))
+        return Unavailable(msg, {"sandbox": {
+            "reason": "no_memory" if memory else "busy", "why": why,
+            "waited_s": round(spent), "mem_available_gib": round(avail, 1),
+            "limit_gib": LIMIT_BYTES / GiB, "floor_gib": FLOOR_GB,
+            "engine_released_gib": round(freed, 1)}})
 
     def _proxy(self, b: Box) -> None:
         if b.proxy is None:
@@ -525,6 +633,10 @@ class Sandboxes:
             self.kill_all("memory_guard")
             return "kill"
         if avail < STOP_GB:
+            # the engine first: what it holds idle goes before a sandbox does
+            if self._ask_engine(STOP_GB + LIMIT_BYTES / GiB - avail) and \
+                    self._avail_gb() >= STOP_GB:
+                return "engine released"
             idle = sorted((b for b in running if not b.busy), key=lambda b: b.last_used)
             victim = idle[0] if idle else sorted(running, key=lambda b: b.last_used)[0]
             self.stop(victim.cid, "memory_guard")

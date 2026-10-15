@@ -33,9 +33,20 @@
 0.9.0 & 10-14 & a third model, LFM2.5-24B-A2B: six EXL3 sizes and BF16, the default 3.5 by a stated rule, the lookup drafting without a draft head; Wren beside it \\
 0.9.1 & 10-14 & web search and media playback in the Chat tab; the loop guard, the loop escape and memory notes on in the shipped conductor profiles; Setup Guide fixes; the 27B's EXL3 profiles fetch only the base tensors they read \\
 0.9.2 & 10-15 & install fixes: the checksum step reads a download's globs; after \code{install.sh --setup} the 27B's EXL3 profiles take \code{base-plain} \\
+0.10.0 & 10-15 & a fourth model, Nemotron 3.5 Bolt 74B-A9B: seven EXL3 sizes, NVIDIA's IQ2 GGUF and its LiLiCorr drafter; a 1~GiB limit for each Chat tab sandbox; attachments never inlined past the window \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.10.0, Nemotron 3.5 Bolt}\label{sec:changelog-0100}
+
+0.10.0 adds a fourth model, NVIDIA's Nemotron 3.5 Bolt 74B-A9B (Chapter~\ref{ch:nemotron}). The other models' text and speed do not change, and their saved conversations carry over.
+
+\paragraph{Bolt.} The NemotronH engine (Mamba2, attention without positional encoding, relu$^2$ experts behind a latent projection), our EXL3 packs at 2.0 to 6.0 bits a weight, NVIDIA's IQ2 GGUF read as stored, and NVIDIA's LiLiCorr drafter beside the lookup. The 2.0 pack is the default: KL 0.170 against BF16 (the GGUF 0.259), 44.2~tok/s for one request, and with LiLiCorr and the lookup 65.8~tok/s on prose and 99.0 on code. A verify block's EXL3 projections decode each trellis tile once for 16 rows, every output byte the one-row call's. Text only: the image tower is not served yet.
+
+\paragraph{Chat tab.} Each chat's sandbox has 1~GiB of memory, and a call the kernel kills at the limit says so. An attachment is never inlined past the window: every attachment is saved under the chat's \code{/workspace/uploads/}, and a text file past a quarter of the free window goes as one line with its path. A tool call no longer waits without end for its sandbox. \code{POST /v1/cache/release} gives back memory the engine holds idle.
+
+\paragraph{Saved conversations.} Fingerprint v2 leaves out modules under \code{engine/} that only another model imports, so the 27B's code fingerprints stay those of 0.9.x; the first Flash-Next or LFM2.5 start adopts the files 0.9.x wrote, once.
 
 \section{0.9.2, install fixes}\label{sec:changelog-092}
 

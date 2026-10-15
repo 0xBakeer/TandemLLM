@@ -759,6 +759,7 @@ export class QseChat extends LightElement {
 
   private renderComposer(c: Conversation | null): TemplateResult {
     return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .resources=${this.resources} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
+      .upload=${this.backend?.kind === 'remote' ? (f: File) => this.backend!.uploadAttachment(f) : null}
       @ch-send=${(e: CustomEvent<{ text: string; attachments: Attachment[] }>) => void this.send(e.detail.text, e.detail.attachments)}
       @ch-stop=${() => c && void this.guard(() => this.backend!.stop(c.id), 'Stop')}
       @ch-draft=${(e: CustomEvent<{ text: string }>) => c && lsSet(LS.draft(c.id), e.detail.text || null)}

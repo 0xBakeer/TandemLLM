@@ -4133,6 +4133,48 @@ def _kv_reclaim_idle(d: dict, owner) -> int:
     return got
 
 
+def _memory_release(want: int, why: str = "sandbox") -> dict:
+    """SRV-483, `POST /v1/cache/release`: room on the unified memory for something beside the
+    engine, a chat's sandbox (chatd/sandbox.py), which has priority over what the engine holds
+    idle (ruling of 2026-10-15). The KV pool's own order, cheapest first: the caches and the
+    allocator's free blocks (under the engine lock, only while it is idle), then the small models,
+    the idle side slots' conversations, slot 0's idle conversation (to the NVMe first when the
+    spill is on). Nothing a running request uses goes, and nothing loads back for `hold_s`
+    (server/rolemem.py `note_pressure`). `want` is a target: the answer says what was given back
+    and what MemAvailable is now."""
+    before = memsplit.mem_available()
+    got, levels = 0, {}
+    if want > 0 and _lock_when_idle():
+        try:
+            n = _kv_reclaim_caches(want, "release")
+        finally:
+            LOCK.release()
+        if n:
+            got, levels["caches"] = got + n, n
+    pool = kvpool.POOL
+    rm = dict.get(STATE, "role_mem")
+    if rm is not None and got < want:
+        rm.note_pressure(why)
+    for name, fn in list(pool.reclaimers) if pool is not None else []:
+        if name == "caches" or got >= want:
+            continue
+        try:
+            n = int(fn(want - got, "release") or 0)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+            n = 0
+        if n:
+            got, levels[name] = got + n, n
+            pool.stats["reclaims"] += 1
+            pool.stats["reclaimed_bytes"] += n
+    after = memsplit.mem_available()
+    print(f"[memory] release for {why}: asked {_gib(want)} GiB, gave back {_gib(got)} GiB "
+          f"({', '.join(levels) or 'nothing idle'}), MemAvailable {_gib(before)} -> "
+          f"{_gib(after)} GiB", flush=True)
+    return {"asked_bytes": int(want), "released_bytes": int(got), "levels": levels,
+            "mem_available_bytes": after}
+
+
 #: SRV-309: while another slot decodes, a prefill's layer-major window takes at most this many
 #: rows, so the GPU turn is offered to the decoders at least that often (0: no cap, the default).
 #: Bit-identical (tests/gpu/test_kvpool_identity_gpu.py --window-cap), but it did not help: on
@@ -6081,6 +6123,20 @@ class Handler(BaseHTTPRequestHandler):
                                                              "(--backends off)"}})
             from proxy import collect_api
             return collect_api.handle(self, px, path, body)
+        if path == "/v1/cache/release":
+            # SRV-483: a chat's sandbox needs room; the engine gives back what it holds idle
+            if not self._allowed("cache_clear"):
+                return
+            b = body if isinstance(body, dict) else {}
+            try:
+                want = int(b.get("bytes") or 0)
+            except (TypeError, ValueError):
+                want = -1
+            if want < 0 or want > 1 << 40:
+                return self._json(400, {"error": {"message": "bytes must be an integer from 0",
+                                                  "type": "invalid_request_error",
+                                                  "param": "bytes"}})
+            return self._json(200, _memory_release(want, str(b.get("why") or "sandbox")[:40]))
         if path == "/v1/cache/clear":
             if not self._allowed("cache_clear"):
                 return

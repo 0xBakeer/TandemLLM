@@ -15,6 +15,16 @@ bytes alone changed every 27B fingerprint, and the next 27B start would have swe
   * a directory whose fingerprint did not change (Flash-Next's: loader.py is not in its manifest)
     keeps what it had adopted when the new key adopts again.
 
+ENG-341: NemotronH's LiLiCorr draft head (engine/drafters/lilicorr.py) is in no 27B manifest, but v2
+walks every module under engine/, so it moved v2 of the 27B off 0.9.x's. v2 leaves it out
+(engine/disk_cache.py `_NOT_27B_FILES`); and SPD-125's new fn_kernels.py bytes, read one step back,
+gave a tree that never shipped for Flash-Next and LFM2.5, so their 0.9.x files would not be adopted:
+
+  * the 27B's v2 and v3 code fingerprints are 0.9.x's, on the bytes and with SAME_ROWS;
+  * a change to lilicorr.py moves no 27B fingerprint;
+  * Flash-Next's and LFM2.5's legacy fingerprints hold their 0.9.x fp4 (`same_variants`);
+  * a tree two releases on adopts the files the release before it wrote, and that one's.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -40,9 +50,16 @@ from engine.models.qwen3_5 import adapter  # noqa: E402
 from engine.models.flashnext import serving as fn_serving  # noqa: E402
 from server import diskcache  # noqa: E402
 
+from engine.models.lfm2_moe import serving as lfm_serving  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOADER = "engine/loader.py"
+LILICORR = "engine/drafters/lilicorr.py"
 M27 = adapter.manifest()
+#: the code fingerprints of 0.9.0-0.9.2 (extra {}), the first 16 hex digits: v2 on the bytes and with
+#: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
+V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
+FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 
 
 def _sha(path):
@@ -56,10 +73,85 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
     assert LOADER in M27.modules
     code = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
     same = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=mf.SAME_ROWS)
-    assert same.startswith("9ac3d8a94c8a9199"), same
-    assert not code.startswith("9ac3d8a94c8a9199"), "the loader's bytes count without the entry"
+    assert same.startswith(V2_072), same
+    assert not code.startswith(V2_072), "the loader's bytes count without the entry"
     assert mf.adoption() != mf.FORMULA and mf.adoption().startswith(mf.FORMULA + "+same-")
     return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS (0.7.2's)"
+
+
+def test_the_27bs_code_fingerprints_are_0_9s():
+    v2 = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
+    v3 = mf.fingerprint(ROOT, M27, {})
+    assert v2.startswith(V2_09), v2
+    assert v3.startswith(FP4_09["27b"]), v3
+    return f"v2 {v2[:16]}, fp4 {v3[:16]}"
+
+
+def test_lilicorr_is_in_no_27b_fingerprint():
+    assert os.path.isfile(os.path.join(ROOT, LILICORR))
+    with tempfile.TemporaryDirectory() as d:
+        t = _code(d)
+        before = (dc.fingerprint(t, {}, skip=sp.NOT_ARITHMETIC), dc.fingerprint_legacy(t, {}, skip=sp.NOT_ARITHMETIC),
+                  mf.fingerprint(t, M27, {}))
+        _edit(os.path.join(t, LILICORR), "from __future__", "# another draft\nfrom __future__")
+        assert (dc.fingerprint(t, {}, skip=sp.NOT_ARITHMETIC), dc.fingerprint_legacy(t, {}, skip=sp.NOT_ARITHMETIC),
+                mf.fingerprint(t, M27, {})) == before
+        # a module of the 27B's own under engine/drafters/ still counts
+        _edit(os.path.join(t, "engine", "drafters", "ngram.py"), "from __future__", "# x\nfrom __future__")
+        assert dc.fingerprint(t, {}, skip=sp.NOT_ARITHMETIC) != before[0]
+
+
+def test_flash_next_and_lfm25_adopt_their_0_9_files():
+    out = []
+    for name, m in (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest())):
+        now = mf.fingerprint(ROOT, m, {})
+        assert not now.startswith(FP4_09[name]), "fn_kernels.py's bytes are 0.9.x's: drop its SPD-125 entry"
+        one = mf.fingerprint(ROOT, m, {}, same=mf.SAME_ROWS)
+        assert not one.startswith(FP4_09[name]), "SAME_ROWS alone reads exl3_linear.py as 0.8.2's"
+        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
+        assert any(f.startswith(FP4_09[name]) for f in got), (name, [f[:16] for f in got])
+        out.append(f"{name} {len(got)} variants")
+    return ", ".join(out)
+
+
+def test_a_tree_two_releases_on_adopts_the_release_befores_files():
+    d = tempfile.mkdtemp(prefix="qse-same2-")
+    real = mf.SAME_ROWS
+    try:
+        # as 0.9.0 (exl3_linear.py and fn_kernels.py) and SPD-125 (fn_kernels.py again) did
+        r0 = _code(os.path.join(d, "r0"))
+        r1, r2 = os.path.join(d, "r1"), os.path.join(d, "r2")
+        tree = os.path.join("engine", "tree.py")
+        shutil.copytree(r0, r1)
+        _edit(os.path.join(r1, LOADER), "class Weights", "# release 1\nclass Weights")
+        _edit(os.path.join(r1, tree), "from __future__", "# release 1\nfrom __future__")
+        shutil.copytree(r1, r2)
+        _edit(os.path.join(r2, tree), "from __future__", "# release 2\nfrom __future__")
+        sha = lambda r, p: _sha(os.path.join(r, p))  # noqa: E731
+        t = _tree(d, "box", mtime=1.7e9)
+        tier = os.path.join(d, "tier")
+        os.makedirs(tier)
+        with Env(t, added=True):
+            extra = diskcache.fingerprint_extra(_args(t))
+            fp = {r: mf.fingerprint(r, M27, extra) for r in (r0, r1, r2)}
+            # release 1's start: its new bytes read as release 0's, release 0's files adopted
+            mf.SAME_ROWS = {(LOADER, sha(r1, LOADER)): sha(r0, LOADER), (tree, sha(r1, tree)): sha(r0, tree)}
+            assert fp[r0] in diskcache.legacy_fingerprints(r1, M27, _args(t), tree=t)
+            dc.equivalents(tier, fp[r1], diskcache.legacy_fingerprints(r1, M27, _args(t), tree=t),
+                           formula=mf.adoption())
+            # release 2: tree.py's bytes again; release 1's entries stay
+            mf.SAME_ROWS = {(LOADER, sha(r1, LOADER)): sha(r0, LOADER), (tree, sha(r1, tree)): sha(r0, tree),
+                            (tree, sha(r2, tree)): sha(r1, tree)}
+            leg = diskcache.legacy_fingerprints(r2, M27, _args(t), tree=t)
+            one = mf.fingerprint(r2, M27, extra, same=mf.SAME_ROWS)
+        assert one not in (fp[r0], fp[r1]), "SAME_ROWS alone reads a tree no release had"
+        assert fp[r1] in leg, "release 1's own files"
+        also = dc.equivalents(tier, fp[r2], leg, formula=mf.adoption())
+        assert {fp[r0], fp[r1]} <= set(also), also
+        return f"{fp[r2][:12]} adopts {fp[r1][:12]} and {fp[r0][:12]}"
+    finally:
+        mf.SAME_ROWS = real
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def test_flash_next_does_not_read_the_loader():
