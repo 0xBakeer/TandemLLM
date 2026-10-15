@@ -1596,20 +1596,28 @@ def _statvfs_free(path: str) -> int:
     return st.f_bavail * st.f_frsize
 
 
+#: modules under `engine/` that only another model's package imports, by path under `engine/`: v2
+#: leaves them out as it leaves out `engine/models/`. ENG-341: NemotronH's LiLiCorr draft head
+#: (SPD-123) moved v2 of the 27B off 0.9.x's, and 0.7.2's under `SAME_ROWS` (9ac3d8a94c8a9199)
+_NOT_27B_FILES = ("drafters/lilicorr.py",)
+
+
 def _engine_files(root: str, skip=()) -> list[str]:
     """The engine's own modules fingerprint v2 reads: every file under `engine/` but the model
-    layer's and the other packages, and the file names in `skip` (at the top of `engine/`), in a
-    fixed order. `engine/models/` (the model layer, ENG-221) is left out, so the 27B's fingerprint is
-    the bytes it always was; so is `engine/methods/` (the methods written once for every model,
-    ENG-E8). A model's own fingerprint is v3's, from its adapter's manifest (engine/methods/manifest.py,
-    ENG-243); v2 stays as it is, frozen, to adopt the files it wrote."""
+    layer's and the other packages, the other models' modules (`_NOT_27B_FILES`) and the file names
+    in `skip` (at the top of `engine/`), in a fixed order. `engine/models/` (the model layer, ENG-221)
+    is left out, so the 27B's fingerprint is the bytes it always was; so is `engine/methods/` (the
+    methods written once for every model, ENG-E8). A model's own fingerprint is v3's, from its
+    adapter's manifest (engine/methods/manifest.py, ENG-243); v2 stays as it is, frozen, to adopt the
+    files it wrote."""
     out = []
     base = os.path.join(root, "engine")
     for dirpath, dirnames, files in os.walk(base):
         dirnames[:] = sorted(d for d in dirnames if d not in ("decision", "generative", "methods",
                                                                "models", "__pycache__"))
         for name in sorted(files):
-            if name.endswith(".py") and not (dirpath == base and name in skip):
+            rel = os.path.relpath(os.path.join(dirpath, name), base).replace(os.sep, "/")
+            if name.endswith(".py") and not (dirpath == base and name in skip) and rel not in _NOT_27B_FILES:
                 out.append(os.path.join(dirpath, name))
     return out
 
