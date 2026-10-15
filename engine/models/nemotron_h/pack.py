@@ -1,0 +1,282 @@
+"""The NemotronH weights on disk: a BF16 safetensors checkpoint, one index over its shards.
+
+`PackIndex.open(dir)` reads `config.json` (engine/models/nemotron_h/config.py) and every shard's header
+(nothing else), and names each tensor canonically: the stored key without its `backbone.` prefix (an
+Omni checkpoint's `language_model.` first), so `backbone.layers.3.mixer.in_proj.weight` is
+`layers.3.mixer.in_proj.weight`; `lm_head.weight` and the MTP head's `mtp.layers.J.*` keep their
+names. Tensors outside the language model (an Omni checkpoint's vision and sound towers and their
+projectors) are counted and skipped.
+
+`audit()` checks every tensor the layer table expects, with its shape, against the index: a missing
+tensor, a shape the config does not give, a truncated shard (its size against its header) stops the
+load with the name. `verify_sha256(manifest)` checks the shards against a recorded manifest (the
+download's `SHA256-VERIFIED.json`, the Hub's LFS hashes).
+
+`decode_bytes()` is what one decode token reads, from the headers: every Mamba and attention
+projection, the router, the k routed experts of each MoE layer at that layer's expert size, the shared
+expert and latent pair, the head, one embedding row, the fp32 SSM states and conv states read and
+written, and the KV rows of `context` tokens. It is the ceiling a measured tok/s is held against.
+
+A GGUF reader (Bolt's IQ2_XXS release) plugs in beside this one with the same canonical names.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+
+import numpy as np
+import torch
+
+from engine.models.lfm2_moe.pack import DSIZE, DT, TensorInfo, safetensors_header
+from engine.models.nemotron_h.config import NemotronHConfig, config_from_dict
+
+PREFIXES = ("language_model.backbone.", "language_model.", "backbone.")
+#: an Omni checkpoint's towers: not the language model's, skipped by name
+SKIP_START = ("vision_model.", "vision_projector.", "mlp1.", "radio", "sound_encoder.", "sound_projection.",
+              "sound_model.", "language_model.vision")
+
+
+def canonical(key: str) -> str | None:
+    """The canonical name of a stored key, or None for a tensor the language model never reads."""
+    if key.startswith(SKIP_START):
+        return None
+    for p in PREFIXES:
+        if key.startswith(p):
+            key = key[len(p):]
+            break
+    if key.startswith("language_model."):
+        key = key[len("language_model."):]
+    return key
+
+
+def _mixer_tensors(c: NemotronHConfig, p: str, kind: str, moe: tuple | None) -> list[tuple[str, tuple]]:
+    H = c.hidden_size
+    m = p + "mixer."
+    if kind == "mamba":
+        return [(m + "in_proj.weight", (c.in_proj_dim, H)), (m + "conv1d.weight", (c.conv_dim, 1, c.conv_kernel)),
+                (m + "conv1d.bias", (c.conv_dim,)), (m + "dt_bias", (c.mamba_num_heads,)),
+                (m + "A_log", (c.mamba_num_heads,)), (m + "D", (c.mamba_num_heads,)),
+                (m + "norm.weight", (c.intermediate,)), (m + "out_proj.weight", (H, c.intermediate))]
+    if kind == "attention":
+        return [(m + "q_proj.weight", (c.q_dim, H)), (m + "k_proj.weight", (c.kv_dim, H)),
+                (m + "v_proj.weight", (c.kv_dim, H)), (m + "o_proj.weight", (H, c.q_dim))]
+    k, ffn, E = moe
+    X = c.expert_in
+    out = [(m + "gate.weight", (E, H)), (m + "gate.e_score_correction_bias", (E,)),
+           (m + "shared_experts.up_proj.weight", (c.shared_ffn, H)),
+           (m + "shared_experts.down_proj.weight", (H, c.shared_ffn))]
+    if c.moe_latent_size:
+        out += [(m + "fc1_latent_proj.weight", (c.moe_latent_size, H)), (m + "fc2_latent_proj.weight", (H, c.moe_latent_size))]
+    for e in range(E):
+        out += [(m + f"experts.{e}.up_proj.weight", (ffn, X)), (m + f"experts.{e}.down_proj.weight", (X, ffn))]
+    return out
+
+
+def expected(c: NemotronHConfig, mtp: bool = True) -> list[tuple[str, tuple]]:
+    """Every tensor the model reads (canonical name, shape); `mtp`: the head's too."""
+    H = c.hidden_size
+    out = [("embeddings.weight", (c.vocab_size, H)), ("norm_f.weight", (H,))]
+    if not c.tie_word_embeddings:
+        out.append(("lm_head.weight", (c.vocab_size, H)))
+    for li, t in enumerate(c.layer_types):
+        p = f"layers.{li}."
+        out.append((p + "norm.weight", (H,)))
+        out += _mixer_tensors(c, p, t, (c.moe_k[li], c.moe_ffn[li], c.moe_experts[li]) if t == "moe" else None)
+    if mtp and c.mtp_layer_types:
+        out += [("mtp.layers.0.enorm.weight", (H,)), ("mtp.layers.0.hnorm.weight", (H,)),
+                ("mtp.layers.0.eh_proj.weight", (H, 2 * H)),
+                (f"mtp.layers.{len(c.mtp_layer_types) - 1}.final_layernorm.weight", (H,))]
+        for j, t in enumerate(c.mtp_layer_types):
+            p = f"mtp.layers.{j}."
+            out.append((p + "norm.weight", (H,)))
+            out += _mixer_tensors(c, p, t, c.mtp_moe.get(j))
+    return out
+
+
+@dataclass
+class PackIndex:
+    path: str
+    cfg: NemotronHConfig
+    tensors: dict[str, TensorInfo]
+    files: dict[str, int]                       # shard file -> size on disk
+    skipped: int = 0                            # tensors outside the language model
+    has_mtp: bool = False
+    notes: list[str] = field(default_factory=list)
+
+    @classmethod
+    def open(cls, path: str) -> "PackIndex":
+        path = os.path.expanduser(path)
+        with open(os.path.join(path, "config.json")) as f:
+            raw = json.load(f)
+        gen = None
+        gp = os.path.join(path, "generation_config.json")
+        if os.path.isfile(gp):
+            with open(gp) as f:
+                gen = json.load(f)
+        cfg = config_from_dict(raw, path, gen)
+        ip = os.path.join(path, "model.safetensors.index.json")
+        if os.path.isfile(ip):
+            with open(ip) as f:
+                wm = json.load(f)["weight_map"]
+            names = sorted(set(wm.values()))
+        elif os.path.isfile(os.path.join(path, "model.safetensors")):
+            wm, names = None, ["model.safetensors"]
+        else:
+            raise FileNotFoundError(f"{path}: no model.safetensors.index.json and no model.safetensors")
+        tensors: dict[str, TensorInfo] = {}
+        files: dict[str, int] = {}
+        skipped = 0
+        for fn in names:
+            fp = os.path.join(path, fn)
+            if not os.path.isfile(fp):
+                raise FileNotFoundError(f"{fp}: the index names it, the checkpoint does not have it")
+            start, hdr = safetensors_header(fp)
+            files[fn] = os.path.getsize(fp)
+            listed = {k for k, v in wm.items() if v == fn} if wm is not None else set(hdr)
+            for k in listed:
+                if k not in hdr:
+                    raise ValueError(f"{fn}: the index puts {k} here, the file's header does not have it")
+            end = 0
+            for k, t in hdr.items():
+                b0, b1 = t["data_offsets"]
+                end = max(end, b1)
+                if k not in listed:
+                    continue
+                name = canonical(k)
+                if name is None:
+                    skipped += 1
+                    continue
+                if name in tensors:
+                    raise ValueError(f"{name} is in {tensors[name].file} and {fn}")
+                info = TensorInfo(name, k, fp, t["dtype"], tuple(t["shape"]), start + b0, b1 - b0)
+                if info.nbytes != int(np.prod(info.shape)) * DSIZE[info.dtype]:
+                    raise ValueError(f"{fn}: {k} has {info.nbytes} bytes for {info.shape} {info.dtype}")
+                info.kind = "expert" if ".experts." in name else "plain"
+                tensors[name] = info
+            if files[fn] != start + end:
+                raise ValueError(f"{fp}: {files[fn]} bytes on disk, the header describes {start + end}"
+                                 " (truncated or corrupt)")
+        idx = cls(path, cfg, tensors, files, skipped)
+        idx.has_mtp = "mtp.layers.0.eh_proj.weight" in tensors
+        return idx
+
+    # --------------------------------------------------------------------------- checks
+    def audit(self) -> list[str]:
+        """Every tensor the layer table expects, with its shape; the MTP head when the checkpoint has
+        one (whole, or not at all). Raises naming the first problem; returns notes."""
+        c = self.cfg
+        want = expected(c, mtp=self.has_mtp)
+        for name, shape in want:
+            t = self.tensors.get(name)
+            if t is None:
+                raise ValueError(f"{name} is missing from the checkpoint")
+            if tuple(t.shape) != tuple(shape):
+                raise ValueError(f"{name} {t.shape}: the config wants {shape}")
+            if t.dtype not in ("BF16", "F32", "F16"):
+                raise ValueError(f"{name}: dtype {t.dtype}; this reader takes BF16, F16 and F32")
+        extra = sorted(set(self.tensors) - {n for n, _ in want})
+        if extra and not (not self.has_mtp and all(e.startswith("mtp.") for e in extra)):
+            raise ValueError(f"{len(extra)} tensor(s) the layer table does not read, first {extra[0]}")
+        dt = Counter(t.dtype for t in self.tensors.values())
+        self.notes = [f"tensors {len(self.tensors)} ({dict(dt)}), mtp {'yes' if self.has_mtp else 'no'}"
+                      + (f", {self.skipped} tower tensors skipped" if self.skipped else "")]
+        return self.notes
+
+    def verify_sha256(self, manifest: dict) -> dict:
+        """Every shard against a manifest {file: {"sha256": hex}} (a missing entry is reported, a wrong
+        hash raises with the file's name)."""
+        out = {}
+        for fn in self.files:
+            want = (manifest.get(fn) or {}).get("sha256")
+            if not want:
+                out[fn] = "no hash recorded"
+                continue
+            h = hashlib.sha256()
+            with open(os.path.join(self.path, fn), "rb") as f:
+                for b in iter(lambda: f.read(1 << 24), b""):
+                    h.update(b)
+            if h.hexdigest() != want:
+                raise ValueError(f"{fn}: sha256 {h.hexdigest()} != recorded {want}")
+            out[fn] = "ok"
+        return out
+
+    # --------------------------------------------------------------------------- summaries
+    def nbytes(self, name: str) -> int:
+        return self.tensors[name].nbytes
+
+    def decode_bytes(self, context: int = 0) -> dict:
+        """What one decode token reads (bytes), by part; `context`: the KV rows attention reads."""
+        c = self.cfg
+        parts: dict[str, float] = defaultdict(float)
+        for li, t in enumerate(c.layer_types):
+            m = f"layers.{li}.mixer."
+            if t == "mamba":
+                parts["mamba_proj"] += self.nbytes(m + "in_proj.weight") + self.nbytes(m + "out_proj.weight")
+                parts["mamba_small"] += sum(self.nbytes(m + s) for s in ("conv1d.weight", "conv1d.bias", "dt_bias",
+                                                                          "A_log", "D", "norm.weight"))
+            elif t == "attention":
+                parts["attn_proj"] += sum(self.nbytes(m + f"{x}_proj.weight") for x in "qkvo")
+            else:
+                E = c.moe_experts[li]
+                eb = self.nbytes(m + "experts.0.up_proj.weight") + self.nbytes(m + "experts.0.down_proj.weight")
+                parts["experts"] += c.moe_k[li] * eb
+                parts["shared"] += self.nbytes(m + "shared_experts.up_proj.weight") + self.nbytes(
+                    m + "shared_experts.down_proj.weight")
+                parts["router"] += self.nbytes(m + "gate.weight") + self.nbytes(m + "gate.e_score_correction_bias")
+                if c.moe_latent_size:
+                    parts["latent"] += self.nbytes(m + "fc1_latent_proj.weight") + self.nbytes(m + "fc2_latent_proj.weight")
+                del E
+            parts["norms"] += self.nbytes(f"layers.{li}.norm.weight")
+        parts["head"] += self.nbytes("lm_head.weight" if "lm_head.weight" in self.tensors else "embeddings.weight")
+        e = self.tensors["embeddings.weight"]
+        parts["embed_row"] += e.shape[1] * DSIZE[e.dtype]
+        parts["ssm_state_rw"] += 2 * c.ssm_state_bytes()
+        parts["conv_state_rw"] += 2 * c.conv_state_bytes()
+        if context:
+            parts["kv_read"] += context * c.kv_bytes_per_token()
+        parts = {k: int(v) for k, v in parts.items()}
+        return {"parts": parts, "total": sum(parts.values()), "context": context}
+
+    def resident_bytes(self, mtp: bool = True) -> int:
+        return sum(t.nbytes for n, t in self.tensors.items() if mtp or not n.startswith("mtp."))
+
+    # --------------------------------------------------------------------------- reading
+    def drop_cache(self) -> None:
+        """Drop the shards' page cache (posix_fadvise DONTNEED): on a unified-memory board the cache
+        of a 66 GB checkpoint beside its device copy exceeds the memory, and the GPU's allocations do
+        not wait for the kernel to reclaim it (tools/drop_page_cache.py)."""
+        if not hasattr(os, "posix_fadvise"):
+            return
+        for fn in self.files:
+            try:
+                fd = os.open(os.path.join(self.path, fn), os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+
+    def read(self, name: str, device=None) -> torch.Tensor:
+        """One tensor as stored (a CPU copy, or on `device`)."""
+        t = self.tensors[name]
+        arr = np.fromfile(t.file, dtype=np.uint8, count=t.nbytes, offset=t.offset)
+        out = torch.from_numpy(arr).view(DT[t.dtype]).reshape(t.shape)
+        return out.to(device) if device is not None else out
+
+
+def summary(idx: PackIndex) -> dict:
+    """The audit record: counts, dtypes, the layer table, resident and decode bytes."""
+    c = idx.cfg
+    return {
+        "path": idx.path, "tensors": len(idx.tensors), "skipped": idx.skipped, "files": len(idx.files),
+        "dtypes": dict(Counter(t.dtype for t in idx.tensors.values())), "mtp": idx.has_mtp,
+        "layers": dict(Counter(c.layer_types)), "resident": idx.resident_bytes(),
+        "resident_no_mtp": idx.resident_bytes(mtp=False),
+        "decode_bytes": idx.decode_bytes(), "decode_bytes_8k": idx.decode_bytes(context=8192),
+        "notes": idx.notes,
+    }

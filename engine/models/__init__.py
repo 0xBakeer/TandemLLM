@@ -3,7 +3,8 @@
 The engine served one architecture, the Qwen3.8-27B (`engine/model.py`, `Qwen38Engine`), and every
 caller knew it. A second one, Qwen3.8-Flash-Next (`qwen4_exp`, `engine/models/flashnext/`), is
 selected here by the checkpoint's own config, never by its file name, and so is LiquidAI's LFM2 MoE
-(`lfm2_moe`, `engine/models/lfm2_moe/`, ENG-E10):
+(`lfm2_moe`, `engine/models/lfm2_moe/`, ENG-E10) and NVIDIA's NemotronH hybrid (`nemotron_h`,
+`engine/models/nemotron_h/`):
 
     arch = architecture(raw_config)       # an Arch, or ValueError naming the registered ones
     cfg = arch.load_config(snapshot)      # that model's config object
@@ -73,6 +74,16 @@ register(Arch(
     serve="engine.models.flashnext.serving:serve",
 ))
 register(Arch(
+    name="nemotron_h",
+    architectures=("NemotronHForCausalLM", "NemotronHPuzzleForCausalLM", "NemotronH_Nano_Omni_Reasoning_V3",
+                   "NemotronH_Omni_Reasoning_V3"),
+    model_types=("nemotron_h", "nemotron_h_puzzle"),
+    config="engine.models.nemotron_h.config:load_nemotron_h_config",
+    engine="engine.models.nemotron_h.engine:NemotronHEngine",
+    package="models/nemotron_h",
+    serve="engine.models.nemotron_h.serving:serve",
+))
+register(Arch(
     name="lfm2_moe",
     architectures=("Lfm2MoeForCausalLM",),
     model_types=("lfm2_moe",),
@@ -85,9 +96,10 @@ register(Arch(
 
 def architecture(raw: dict) -> Arch:
     """The registered architecture of a checkpoint's config.json, by its `architectures` list
-    first, then by `model_type` (top level, then `text_config`)."""
+    first, then by `model_type` (top level, then `text_config`, then an Omni wrapper's `llm_config`)."""
     names = [str(a) for a in (raw.get("architectures") or [])]
-    types = [str(raw.get("model_type", "")), str((raw.get("text_config") or {}).get("model_type", ""))]
+    types = [str(raw.get("model_type", "")), str((raw.get("text_config") or {}).get("model_type", "")),
+             str((raw.get("llm_config") or {}).get("model_type", ""))]
     for arch in REGISTRY.values():
         if any(a in arch.architectures for a in names) or any(t in arch.model_types for t in types if t):
             return arch
