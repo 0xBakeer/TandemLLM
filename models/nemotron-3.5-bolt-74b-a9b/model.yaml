@@ -120,7 +120,16 @@ measurements:
     StairCut (its price file from tools/nh_check.py staircase), the suffix store off. One run a cell. Raw data:
     models/nemotron-3.5-bolt-74b-a9b/measurements/0.9.1-summary.json.
   source: models/nemotron-3.5-bolt-74b-a9b/measurements/0.9.1-summary.json
-  rows: []
+  rows:
+  - profile: nemotron-bolt-iq2
+    build: 0.9.1
+    date: '2026-10-15'
+    comparable: true
+    note: 'The lookup, store off; plain prose / chat / code 27.47 / 27.45 / 27.44 tok/s; edit and copy asks 57.70 and 58.90 (27.39 plain); every text the plain run''s. llama.cpp on the same GGUF: 35.37 tok/s (llama-bench tg128).'
+    cells:
+      greedy_512: {prose: [27.53, 27.53, 37.05, 1.02, 1], chat: [27.31, 27.31, 37.35, 1.02, 1], code: [29.34, 29.34, 39.88, 1.17, 1]}
+    ttft_s: {}
+    lossless: null
 
 memory:
   parts:

@@ -1,27 +1,50 @@
 # NemotronH (Nemotron 3.5 Lightning, Bolt)
 
-NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks with an MTP head. The engine is built and measured on Nemotron 3.5 Lightning 30B-A3B (BF16, the test model) for Nemotron 3.5 Bolt 74B-A9B, which shares its block types and is released as a GGUF with IQ2_XXS experts.
+NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on.
 
-Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`. IQ2_XXS: `tools/iq2_linear.py`.
+Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`.
 
 ## The model
 
-| part | Lightning 30B-A3B | Puzzle 75B-A9B (Bolt's trunk design) |
-|-|-|-|
-| layers | 52: 23 Mamba2, 23 MoE, 6 attention | 88: 40 Mamba2, 40 MoE, 8 attention |
-| hidden | 2,688 | 4,096 |
-| Mamba2 | 64 heads of 64, state 128, 8 groups, conv 4 taps with bias | 128 heads of 64, state 96, 8 groups |
-| attention | 32 query heads, 2 KV heads of 128, no positional encoding | the same |
-| MoE | 128 experts, top 6, relu^2 experts 1,856 wide, shared expert 3,712 | 512 experts, top 4..18 and width 1,280..2,688 a layer, latent 1,024, shared 5,376 |
-| router | sigmoid, correction bias for the choice, top k / (sum + 1e-20) x 2.5 | the same, x 5.0 |
-| MTP | one block pair, attention + MoE | the same, top 22, width 2,688 |
-| vocabulary, context | 131,072, 262,144 | the same |
+| part | Lightning 30B-A3B | Bolt 74B-A9B | Puzzle 75B-A9B (Bolt's trunk design) |
+|-|-|-|-|
+| layers | 52: 23 Mamba2, 23 MoE, 6 attention | 88: 40 Mamba2, 40 MoE, 8 attention | the same as Bolt |
+| hidden | 2,688 | 4,096 | 4,096 |
+| Mamba2 | 64 heads of 64, state 128, 8 groups, conv 4 taps with bias | 128 heads of 64, state 128, 8 groups | 128 heads of 64, state 96, 8 groups |
+| attention | 32 query heads, 2 KV heads of 128, no positional encoding | the same | the same |
+| MoE | 128 experts, top 6, relu^2 experts 1,856 wide, shared expert 3,712 | 240, 304, 368, 432 or 496 experts a layer, top 9, width 1,536..2,560, latent 1,024, shared 5,376 | 512 experts, top 4..18 and width 1,280..2,688 a layer, latent 1,024, shared 5,376 |
+| router | sigmoid, correction bias for the choice, top k / (sum + 1e-20) x 2.5 | the same, x 5.0 | the same, x 5.0 |
+| MTP | one block pair, attention + MoE | none | the same as Lightning, top 22, width 2,688 |
+| vocabulary, context | 131,072, 262,144 | the same | the same |
+
+Bolt's checkpoint is an Omni wrapper (`NemotronH_Omni_Reasoning_V3`) with a RADIO image tower; its GGUF holds the text trunk only (the tower is the separate `mmproj` file), and TandemLLM serves text.
 
 The config reader (`config.py`) builds one layer table from `hybrid_override_pattern`, `layers_block_type` or `block_configs` (per-block `num_experts_per_tok`, `moe_intermediate_size` and `n_routed_experts`), and from an Omni checkpoint's `llm_config`. An unknown field stops the load with its name.
 
-A decode token reads 6.55 GB of Lightning's BF16 weights: experts 2.75 GB, Mamba2 projections 1.78, shared experts 0.92, head 0.70, attention 0.28 (`PackIndex.decode_bytes`); 41.7 tok/s at 273 GB/s is the bytes ceiling.
+A decode token reads 5.16 GB on Bolt: the NVFP4 Mamba2 projections 2.47 GB, the Q8_0 head 0.57, shared experts 0.45 and routed experts 0.44 (IQ2_XXS, 9 a layer), latent projections 0.36 and attention 0.30 (Q8_0), the SSM states 0.34 (read and written), the F32 routers 0.23 (`GGUFIndex.decode_bytes`); 52.9 tok/s at 273 GB/s is the bytes ceiling. A decode token reads 6.55 GB of Lightning's BF16 weights: experts 2.75 GB, Mamba2 projections 1.78, shared experts 0.92, head 0.70, attention 0.28 (`PackIndex.decode_bytes`); 41.7 tok/s at 273 GB/s is the bytes ceiling.
 
-## Profile
+## Profiles
+
+### Bolt: nemotron-bolt-iq2
+
+`nemotron-bolt-iq2` (`ops/profiles/nemotron-bolt-iq2.env`): NVIDIA's GGUF of revision 18828290 of nvidia/Nemotron-3.5-Bolt-74B-A9B-IQ2-GGUF (22.0 GB, the registry entry's asset, fetched from NVIDIA's repository and never re-hosted; `QSE_NH_GGUF` names it), with the config, tokenizer and chat template of the BF16 repository (revision 153d4551) in the profile's weights directory; 22.19 GiB at load; 262,144 tokens; 3 slots; the lookup cut by StairCut (Bolt has no MTP head). Setup Guide entry: [models/nemotron-3.5-bolt-74b-a9b/model.yaml](../models/nemotron-3.5-bolt-74b-a9b/model.yaml).
+
+DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off.
+
+| measurement | plain | lookup |
+|-|-|-|
+| decode step from its graph (`nh_check.py bench`, 256 tokens) | 27.72 tok/s (36.08 ms) | |
+| prose / chat / code, 512 greedy tokens, thinking off (`fn_lookup_ab.py`) | 27.47 / 27.45 / 27.44 | 27.53 / 27.31 / 29.34 |
+| edit / copy asks | 27.39 / 27.39 | 57.70 / 58.90 (4.52 / 9.46 tokens a block) |
+| 1 / 2 / 3 requests at once, 256 tokens each, total (`lfm_parallel.py`) | | 26.94 / 32.57 / 38.30 tok/s, 2 and 3 slots decoding together (254 joint rounds), each text its request's alone |
+| verify chain of 1 / 2 / 4 / 8 / 16 rows at 1,024 tokens (`nh_check.py staircase`) | | 35.7 / 49.7 / 69.7 / 110.6 / 195.7 ms |
+
+- llama.cpp on the same GGUF (master 620d2225c with #30520, same board): `llama-bench -ngl 99 -p 0 -n 128` 35.37 tok/s; llama-server greedy on the 8 prompts below 38.6-39.4 tok/s. The engine's 27.72 is 1.28x below llama-bench.
+- Every lookup answer is the plain run's text. Through `fn_server_check.py`, 19 of 20 answers are identical; the thinking-on one is identical up to the reasoning budget's forced close, which lands one token later at the end of the verified block (docs/exactness.md, output changes).
+- A verify row costs about 10 ms more than the one before it: the IQ2_XXS shared expert runs one row a program (row-invariant by construction, 0.10 ms a row a projection) and the routed experts one (row, expert) pair a program, so the lookup pays off on edit and copy asks and not on prose.
+- Prefill (random tokens, one engine): 246 tok/s at 1,024 tokens, 799 at 8,192, 752 at 32,768, 698 at 131,072, 680 at 262,000 (385 s; 28.9 GiB reserved at the peak, the box never under 82 GiB available). Decode at 32,768 and 131,072 tokens of context: 26.06 and 23.27 tok/s.
+
+### Lightning: nemotron-lightning-bf16
 
 `nemotron-lightning-bf16` (`ops/profiles/nemotron-lightning-bf16.env`): the BF16 checkpoint at revision a9904d24, 65.8 GB, 59.04 GiB at load without the MTP head; 262,144 tokens; 3 slots; the lookup cut by StairCut. The checkpoint's MTP head joins the lookup with `QSE_NH_HEAD=mtp` (off in the profile, see [Speculation](#speculation)). Setup Guide entry: [models/nemotron-3.5-lightning-30b-a3b/model.yaml](../models/nemotron-3.5-lightning-30b-a3b/model.yaml), a test model (order 90, not recommended). Raw data: `models/nemotron-3.5-lightning-30b-a3b/measurements/0.9.1-summary.json`.
 
@@ -66,13 +89,22 @@ The reference forward (`ref.py`) follows transformers' NemotronH and the CUDA pa
 | source | reader | notes |
 |-|-|-|
 | BF16 safetensors | `pack.py`, `load.py` | `backbone.` and an Omni wrapper's `language_model.` stripped, tower tensors skipped; experts stacked; page cache dropped while loading |
-| GGUF (`nemotron_h_moe`) | `gguf.py`, `gguf_load.py` | config from the metadata (per-layer expert counts from the router's rows); IQ2_XXS weights and expert banks kept packed; Q8_0 dequantised at load; other types refused by name |
+| GGUF (`nemotron_h_moe`) | `gguf.py`, `gguf_load.py` | config from the metadata (per-layer expert counts from the router's rows), checked against the checkpoint's config.json when there is one; IQ2_XXS, NVFP4 and Q8_0 matrices and the expert banks kept packed (the embedding dequantised to bf16 for its row gather); other types refused by name |
 
-IQ2_XXS: 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign. The twin equals gguf-py's dequant bit for bit; the GEMM and the expert bank decode blocks on the fly and are row-invariant (`tests/test_iq2_kernels.py`). IQ2_XXS needs K a multiple of 256: Lightning's 2,688 and 1,856 are not, so its community IQ2 GGUFs hold IQ4_NL / Q5_0 experts. Bolt's Puzzle widths 1,280..2,048 and latent 1,024 are multiples; its 2,688-wide down projections are not.
+The GGUF types Bolt holds, each with a twin equal to gguf-py's dequant bit for bit (`tests/test_iq2_kernels.py`; NVFP4 needs gguf-py from llama.cpp after GGML_TYPE_NVFP4):
+
+| type | where in Bolt | format | kernel (rows 1..32 row-invariant) | prompt chunk |
+|-|-|-|-|-|
+| IQ2_XXS (16) | routed and shared experts | 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign | dense: one row a program, 8 outputs and 4 groups a step (`IQ2Linear`); bank: one (row, expert) pair a program (`IQ2Bank`) | decoded to bf16 on `_iq2_dequant`, cuBLAS |
+| NVFP4 (40) | every Mamba2 in_proj and out_proj | 64 weights in 36 bytes: 4 UE4M3 scales (one a 16) and E2M1 nibbles, w = kvalue x ue4m3; a per-tensor fp32 scale (`blk.N.ssm_in.scale`, `ssm_out.scale`) multiplies the matmul's output, as llama.cpp's build_lora_mm does | repacked at load into the checkpoints' NVFP4 layout without changing a value (kvalues = 2 E2M1, ue4m3 = E4M3 / 2) and run on `tools/nvfp4_skinny.py`, the tensor scale on the fp32 sum (tiles in `ops/skinny-tiles.json`) | `nvfp4_matmul` |
+| Q8_0 (8) | head, attention, latent projections, embedding | 32 int8 and an fp16 scale | 16-row tiles, one bf16 tensor-core product a block of 32 (int8 is exact in bf16) times its scale: the same time for 1..32 rows (`Q8Linear`) | the twin in bf16, cuBLAS |
+
+IQ2_XXS needs K a multiple of 256: Lightning's 2,688 and 1,856 are not, so its community IQ2 GGUFs hold IQ4_NL / Q5_0 experts. Bolt's widths 1,536..2,560, latent 1,024 and shared 5,376 are multiples.
 
 ## Speculation
 
-- The lookup (the request's text, the corpus, the suffix store) cut by StairCut through the shared tree drafter, from the staircase's prices (`ops/prices/nemotron-3.5-lightning-30b-a3b/`).
+- The lookup (the request's text, the corpus, the suffix store) cut by StairCut through the shared tree drafter, from the staircase's prices (`ops/prices/nemotron-3.5-bolt-74b-a9b/`, `ops/prices/nemotron-3.5-lightning-30b-a3b/`).
+- Bolt ships no MTP head (its config lists no MTP blocks and the BF16 index no `mtp.*` tensors). NVIDIA's drafter for it is LiLiCorr (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr): a 5-layer block drafter (block 8) on Bolt's hidden states at layers 1, 18, 35, 51, 68 and 85 with a candidate-lattice reranker; not served by this engine yet.
 - The checkpoint's MTP head (`mtp.py`, `--draft-head mtp`): one native depth, deeper drafts iterate the head on its own final normed row and the drafted token; its attention KV is a cache view. On Lightning BF16 (`nh_check.py mtp`, 8 chat prompts, 1,000 positions, depth 3): the head's draft equals the trunk's greedy token at depth 1, 2 and 3 in 91.9, 80.6 and 69.5 % of positions; mean accepted run 2.38 of 3.
 - Verify cost (chain, `nh_check.py staircase`, 1k context): 1, 2, 4, 8 and 16 rows take 29.5, 37.0, 51.6, 74.8 and 103.4 ms.
 
@@ -80,11 +112,14 @@ IQ2_XXS: 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign. The twin eq
 
 | check | result |
 |-|-|
-| config: the four published configs | `tests/test_nemotron_h_config.py` |
+| config: the five published configs | `tests/test_nemotron_h_config.py` |
 | reference vs transformers fp32 | within 2e-5, three tiny models |
 | kernels: chain rows = decode steps, commit = decode state | bit for bit, GB10 and the CPU interpreter |
 | engine: verify = decode, tree, moved-path commit, rollback, joint passes, graphs | 8 tests, GB10 |
-| GGUF: tiny IQ2_XXS / Q8_0 file through the engine | self-check bit for bit on the packed kernels |
+| GGUF: tiny IQ2_XXS / Q8_0 / NVFP4 (with a tensor scale) file through the engine | self-check bit for bit on the packed kernels |
+| Bolt's GGUF against llama.cpp on the same file, teacher-forced on llama.cpp's greedy tokens (`nh_check.py llamacpp`, `engine --force`, `llamacmp`; 8 chat prompts x 128 tokens) | top-1 97.75 % of 1,024 positions; all 23 differences near ties by llama.cpp's own margin, none other; mean absolute log-prob difference over llama.cpp's top 10: 0.17 |
+| Bolt load-time self-check | PASS, 24 rows and the committed states |
+| Bolt server: plain vs lookup, 20 requests | 19 the same; the thinking-on one the same up to the reasoning budget's close (one token later) |
 | Lightning BF16 against transformers BF16, teacher-forced (`nh_check.py hf --shared`, 8 chat prompts x 128 tokens) | top-1 98.63 % of 1,024 positions; all 14 differences near ties (margin under 8 bf16 steps), none other; mean relative logit difference 0.0075 |
 | Lightning BF16 load-time self-check | PASS, 24 rows and the committed states |
 | server: plain vs lookup, 20 requests (greedy, streaming, tools, JSON, penalties, seeds, stop) | every answer the same |
