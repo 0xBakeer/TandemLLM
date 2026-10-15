@@ -1,0 +1,50 @@
+{
+ "0": {
+  "chain": {
+   "1": 35.749,
+   "2": 49.725,
+   "3": 59.388,
+   "4": 69.731,
+   "5": 79.283,
+   "6": 90.009,
+   "7": 99.639,
+   "8": 110.596,
+   "9": 120.838,
+   "10": 130.423,
+   "11": 141.559,
+   "12": 153.624,
+   "13": 163.05,
+   "14": 174.455,
+   "15": 183.389,
+   "16": 195.696
+  },
+  "plain": {
+   "1": 36.403
+  }
+ },
+ "16384": {
+  "chain": {
+   "1": 36.021,
+   "2": 50.171,
+   "3": 60.546,
+   "4": 69.989,
+   "5": 79.81,
+   "6": 91.015,
+   "7": 100.551,
+   "8": 111.678,
+   "9": 122.364,
+   "10": 131.918,
+   "11": 142.96,
+   "12": 154.549,
+   "13": 163.903,
+   "14": 175.284,
+   "15": 184.351,
+   "16": 197.208
+  },
+  "plain": {
+   "1": 36.403
+  }
+ },
+ "step_ms": 12.86,
+ "measured": "tools/nh_check.py staircase and bench on stair.json, bench.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut drafts and learns them online."
+}
