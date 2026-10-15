@@ -655,6 +655,44 @@ def test_head_interface_counts_rows_and_reads_tokens():
     return f"tokens {[t[0] for t in tok]}"
 
 
+def test_serving_drafts_a_round_with_the_head_and_a_long_lookup():
+    """The NemotronH adapter's tree drafter with LiLiCorr: a round after a prompt drafts the head's block
+    beside a lookup of the longer minimum match; QSE_NH_LOOKUP=off drafts with the head alone; a side
+    slot gets its own head over the same weights and slot 0's lookup."""
+    if SKIP:
+        return SKIP
+    from engine.drafters.lilicorr import LiLiCorrConfig, LiLiCorrModel
+    from engine.models.nemotron_h.serving import LOOK_MIN_ORDER_HEAD, NemotronHServing, lookup_drafter
+    cfg, eng = engine()
+    c = LiLiCorrConfig(LC_CFG)
+    model = LiLiCorrModel(c, {k: v.to(DEV, torch.bfloat16) for k, v in lc_weights().items()}, eng.W["embeddings.weight"],
+                          eng.head)
+    srv = NemotronHServing(eng, 256)
+    head = srv.add_lilicorr(model=model)
+    quiet = lambda m: None                               # noqa: E731
+    d = lookup_drafter(srv, "", None, log=quiet, head=head)
+    assert d.head is head and d.ngram.min_order == LOOK_MIN_ORDER_HEAD
+    srv.kv.length = 0
+    lg = srv.forward(PROMPT, 0)
+    d.reset()
+    d.prime(PROMPT.tolist())
+    d.sync(PROMPT.tolist(), srv.hidden_post_norm[0], 0)
+    anchor = int(lg[0, -1].argmax())
+    tree = d.propose_tree(PROMPT.tolist() + [anchor], 16)
+    assert tree is not None and tree.tokens[0] == anchor and len(tree.tokens) == 1 + head.depth, tree.tokens
+    # the prompt's rows within the window, from the engine's ring
+    assert head.stats["context_rows"] == min(len(PROMPT), WINDOW - 1), head.stats
+    e2, d2 = srv.side_slot(256, d)
+    assert d2.head is not head and d2.head.m is model and d2.ngram.min_order == LOOK_MIN_ORDER_HEAD
+    os.environ["QSE_NH_LOOKUP"] = "off"
+    try:
+        d3 = lookup_drafter(srv, "", None, log=quiet, head=head)
+    finally:
+        del os.environ["QSE_NH_LOOKUP"]
+    assert d3.ngram is None and srv.side_slot(256, d3)[1].ngram is None
+    return f"a round of {len(tree.tokens) - 1} drafted tokens; lookup min order {LOOK_MIN_ORDER_HEAD}"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

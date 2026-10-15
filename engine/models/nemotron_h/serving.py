@@ -376,8 +376,9 @@ class NemotronHServing:
             from engine.drafters.ngram import NgramDrafter
             from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
             from engine.methods.staircut import PriceModel, StairCut
-            ng = NgramDrafter(corpus_path="", min_order=3, max_depth=16, min_corpus_order=8)
+            ng = None
             if drafter0.ngram is not None:
+                ng = NgramDrafter(corpus_path="", min_order=drafter0.ngram.min_order, max_depth=16, min_corpus_order=8)
                 ng.corpus = drafter0.ngram.corpus
             c0 = drafter0.cut
             if "lilicorr" in self.heads and drafter0.head is self.heads["lilicorr"]:
@@ -461,6 +462,13 @@ def prices(path: str, log=print) -> PriceModel:
                            log=log)
 
 
+#: the lookup's shortest match beside a block drafter (LiLiCorr drafts 7 tokens a round): Bolt IQ2, 512 greedy tokens
+#: a class, LiLiCorr + lookup at min order 3 / 6 / 8 / 12 (tok/s): code 71.4 / 73.5 / 74.1 / 73.7, chat 46.3 / 48.0 /
+#: 50.2 / 49.1, edit 115.8 / 101.8 / 91.2 / 79.1, copy 147.4 / 147.9 / 146.5 / 105.6 (LiLiCorr alone: 74.0, 49.7,
+#: 79.0, 106.6; the lookup alone: edit 103.4, copy 121.6): short matches pay on a rename and cost chat their rows
+LOOK_MIN_ORDER_HEAD = 6
+
+
 def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=print, depth: int = 0,
                    head=None):
     """The lookup (the request's own text, `corpus` and the server's suffix store) cut by StairCut,
@@ -470,8 +478,8 @@ def lookup_drafter(srv: "NemotronHServing", path: str, corpus: str | None, log=p
     from engine.methods.mtp_drafter import MTPTreeDrafter, NoHead
     from engine.methods.staircut import StairCut
     from engine.tokfp import fingerprint
-    ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path), min_order=3, max_depth=16,
-                      min_corpus_order=8)
+    ng = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(path),
+                      min_order=3 if head is None else LOOK_MIN_ORDER_HEAD, max_depth=16, min_corpus_order=8)
     if head is not None and os.environ.get("QSE_NH_LOOKUP", "on") == "off":
         ng = None                            # the head alone (a measurement's row: LiLiCorr without the lookup)
     what = ("LiLiCorr, block of " + str(head.depth) if head is not None else
