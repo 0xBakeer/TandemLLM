@@ -52,13 +52,19 @@ KNOWN = {
     "moe_shared_expert_intermediate_size", "routed_scaling_factor", "num_nextn_predict_layers",
     "mtp_layers_block_type", "mtp_hybrid_override_pattern", "mtp_block_configs", "tie_word_embeddings",
     "eos_token_id", "bos_token_id", "pad_token_id", "model_type", "architectures", "intermediate_size",
+    "rms_norm_eps",
 }
 # training, initialisation, other runtimes' switches, or fields with no effect on this arithmetic
 IGNORED = {
     "dtype", "torch_dtype", "initializer_range", "use_cache", "transformers_version", "auto_map",
     "attention_dropout", "hidden_dropout", "rescale_prenorm_residual", "num_logits_to_keep", "use_mamba_kernels",
     "moe_shared_expert_overlap", "time_step_floor", "time_step_min", "time_step_max", "expand",
-    "blockwise_members", "quantization_config",
+    "blockwise_members", "quantization_config", "_megatron_bridge_hf_prefix", "aux_loss_alpha",
+    "router_aux_loss_coef",
+    # the unpruned expert count (Bolt: 512); each MoE block's own n_routed_experts is read
+    "num_experts", "num_local_experts",
+    # the MTP blocks come from mtp_layers_block_type / mtp_block_configs
+    "mtp_num_hidden_layers",
     # NoPE: the rotary fields are dead config (the reference applies no positional encoding)
     "partial_rotary_factor", "rope_theta",
 }
@@ -66,7 +72,7 @@ IGNORED = {
 FIXED = {"mlp_hidden_act": "relu2", "mamba_hidden_act": "silu", "n_group": 1, "topk_group": 1, "norm_topk_prob": True,
          "residual_in_fp32": False, "use_conv_bias": True, "mamba_proj_bias": False, "attention_bias": False,
          "mlp_bias": False, "use_bias": False, "sliding_window": None, "n_shared_experts": 1,
-         "mamba_ssm_cache_dtype": "float32"}
+         "mamba_ssm_cache_dtype": "float32", "hidden_act": "relu2", "scoring_func": "sigmoid", "use_qk_norm": False}
 # the Omni wrapper's own keys: the towers and their tokens (text is served, these are not read)
 OMNI_IGNORED = {
     "llm_config", "vision_config", "sound_config", "max_sequence_length", "downsample_ratio", "force_image_size",
@@ -75,6 +81,8 @@ OMNI_IGNORED = {
     "vit_hidden_size", "projector_hidden_size", "norm_mean", "norm_std", "video_pruning_rate",
     "sound_context_token_id", "sound_context_token", "eos_token_id", "model_type", "architectures", "auto_map",
     "torch_dtype", "dtype", "transformers_version", "bos_token_id", "pad_token_id", "tie_word_embeddings",
+    # Bolt's wrapper (NemotronH_Omni_Reasoning_V3): the processor, the video patches, the tower's last norm
+    "processor_class", "video_temporal_patch_size", "vision_final_layernorm",
 }
 
 
@@ -276,8 +284,9 @@ def config_from_dict(raw: dict, path: str = "", gen: dict | None = None) -> Nemo
         if ty == "moe":
             mtp_moe[j] = _moe_of(mblocks[j] if mblocks is not None else None, t, f"MTP block {j}")
     eps = float(t.get("layer_norm_epsilon", t.get("norm_eps", 1e-5)))
-    if "norm_eps" in t and "layer_norm_epsilon" in t and float(t["norm_eps"]) != eps:
-        raise ValueError(f"NemotronH norm_eps {t['norm_eps']} != layer_norm_epsilon {eps}")
+    for name in ("norm_eps", "rms_norm_eps"):
+        if name in t and float(t[name]) != eps:
+            raise ValueError(f"NemotronH {name} {t[name]} != layer_norm_epsilon {eps}")
     eos = raw.get("eos_token_id", t.get("eos_token_id")) if omni else t.get("eos_token_id")
     eos_list = eos if isinstance(eos, list) else [eos]
     if omni and t.get("eos_token_id") is not None and t["eos_token_id"] not in eos_list:
@@ -336,7 +345,10 @@ def validate_fields(t: dict) -> None:
         if k in t and t[k] != want:
             raise ValueError(f"NemotronH config {k}={t[k]!r}: this engine implements {want!r} only")
     lim = t.get("time_step_limit")
-    if lim is not None and (float(lim[0]) != 0.0 or not (math.isinf(float(lim[1])) or float(lim[1]) >= 1e30)):
+    if lim is not None:
+        # Bolt's config spells infinity as {"__float__": "Infinity"} (JSON has no inf)
+        lim = [float(v["__float__"]) if isinstance(v, dict) else float(v) for v in lim]
+    if lim is not None and (lim[0] != 0.0 or not (math.isinf(lim[1]) or lim[1] >= 1e30)):
         raise ValueError(f"NemotronH time_step_limit {lim!r}: this engine implements [0, inf] only (no dt clamp)")
 
 
