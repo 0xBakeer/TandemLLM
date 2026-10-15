@@ -34,6 +34,7 @@ bits do not change.
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -54,9 +55,15 @@ CAPTURE_ROWS = 64
 DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
 
 
+#: SPD-125: the EXL3 projections of decode steps and verify blocks on tools/fn_kernels.dense_rows (each trellis
+#: tile decoded once for 16 rows, the cluster's partials added by every rank; every byte the one-row `dense`
+#: call's); "off" = `dense`, one CTA a row
+DENSE_ROWS = os.environ.get("QSE_NH_DENSE_ROWS", "on") != "off"
+
+
 def _exl3_mm(x2: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tensor:
-    """An EXL3 projection (ENG-E12): tools/fn_kernels.dense up to 32 rows (row-invariant, the input rotation
-    fused), the library's GEMM above that or at a rate dense does not take; on the CPU the torch reference a
+    """An EXL3 projection (ENG-E12): tools/fn_kernels.dense_rows up to 32 rows (`dense`'s bytes, row-invariant,
+    DENSE_ROWS), the library's GEMM above that or at a rate dense does not take; on the CPU the torch reference a
     row at a time (row-invariant as the kernels are: a verify block's rows are the decode step's)."""
     from tools import fn_kernels as FK
     from tools.exl3_linear import exl3_matmul
@@ -64,7 +71,7 @@ def _exl3_mm(x2: torch.Tensor, w, out: torch.Tensor | None = None) -> torch.Tens
         y = torch.cat([exl3_matmul(x2[i:i + 1], w) for i in range(x2.shape[0])])
         return y if out is None else out.copy_(y)
     if x2.shape[0] <= ROWS_MAX and w.kb in DENSE_K:
-        return FK.dense(x2, w, out=out)
+        return (FK.dense_rows if DENSE_ROWS else FK.dense)(x2, w, out=out)
     return exl3_matmul(x2, w, out=out)
 
 
