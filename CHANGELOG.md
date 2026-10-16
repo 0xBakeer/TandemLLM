@@ -18,6 +18,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - A sandbox container removed or stopped outside chatd starts again at the next tool call, which says once that the sandbox restarted (files kept, processes gone). Before, chatd kept the box as running and every bash and render_page call answered `exec failed (404)`. The same sandbox failure three calls in a row ends the run as interrupted with a notice, whatever the calls were; Continue goes on once the sandbox is back (SRV-526).
 - The Continue card of an interrupted answer says why it stopped: its limit of model calls or the sandbox failing (the notice, in the card's place), the engine not answering, or chatd restarting. It said "The engine restarted" for every one, a run at its limit included. chatd records the reason in the answer's `stats.interrupted`; an answer from before has neutral words (VIS-197).
 
+### Setup Guide
+
+- Parallel chats is a stepper: minus, a number field and plus (VIS-199). A model card's range is how far the model was measured, not a cap. Above it the step says the count is untested, and the memory estimate decides, up to the engine's 16: a joint verify pass holds 32 rows and each chat keeps 2. The memory bar and a line with one extra chat's cost follow every change. The step names a count that does not fit, or one the engine does not take, next to the field; Next stays on the step and `POST /v1/setup/apply` refuses it (`over_budget`, `out_of_range`). The extra chats' window names chats 2 to N.
+
 Upgrade: run the installer again; chatd then starts with the engine, and `bin/tandem`, `run/ops/serve.env` and the scripts in `run/ops` are rewritten. A chatd started earlier keeps the old code until `tandem chat restart`.
 
 ## 0.11.1, 2026-10-16

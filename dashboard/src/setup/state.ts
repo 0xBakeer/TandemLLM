@@ -6,7 +6,7 @@
 import type { SetupChatMessage, SetupModel, SetupSelection, SetupStepId, SetupValue } from '../api/types';
 import { packVisionOff } from './community';
 import { normaliseComponents, toggleComponent } from './deps';
-import { fieldError, isStepId, registryField, STEP_IDS, stepIndex } from './fields';
+import { ENGINE_MAX_SLOTS, fieldError, isStepId, registryField, STEP_IDS, stepIndex } from './fields';
 import { S } from './strings';
 
 export const STORAGE_KEY = 'tandem.setup.v1';
@@ -88,7 +88,7 @@ export function restoreSelection(m: SetupModel, saved: unknown): { selection: Se
     notices.push(S.savedValueBad(label));
     return fb;
   };
-  out.slots = num(s.slots, par.slots.min, par.slots.max, true, S.slots, d.slots);
+  out.slots = num(s.slots, par.slots.min, ENGINE_MAX_SLOTS, true, S.slots, d.slots);
   const wmax = windowMax(m, out.profile);
   out.window = num(s.window, par.window.min, wmax, true, S.window, Math.min(d.window, wmax));
   out.side_window = num(s.side_window, par.side_window.min, par.side_window.max, true, S.sideWindow, d.side_window ?? d.window);
@@ -232,7 +232,10 @@ export function setupReducer(st: WizardState, a: SetupAction, m: SetupModel | nu
         return done({ selection: next, notice: clamped ? S.windowClamped(value) : null });
       }
       const r = p[a.key];
-      const v = Math.min(r.max, Math.max(r.min, a.key === 'slots' ? Math.round(a.value) : a.value));
+      // slots: the card's max is how far it was measured, the engine's limit is the cap (VIS-199);
+      // the stepper refuses a typed value outside it before it gets here
+      const max = a.key === 'slots' ? ENGINE_MAX_SLOTS : r.max;
+      const v = Math.min(max, Math.max(r.min, a.key === 'slots' ? Math.round(a.value) : a.value));
       return done({ selection: { ...sel, [a.key]: v } });
     }
     case 'field': {

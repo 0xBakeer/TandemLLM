@@ -1,7 +1,7 @@
 // QA VIS-79 (VIS-78): the setup wizard at #/setup against the mock, desktop and 390 px. @mock
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, noHorizontalOverflow } from './helpers';
-import { open, setupMock } from './setup-helpers';
+import { open, setupMock, setSlots } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
 
@@ -130,7 +130,7 @@ test('the estimate route down: the bar keeps working from the page and says so',
   await setupMock(request, { estimateDown: true });
   await open(page, `#/setup/${MODEL}/parallelism`);
   const before = await page.locator('.membar').getAttribute('data-total');
-  await page.locator('[data-field="parallelism.slots"] .seg-btn', { hasText: '2' }).click();
+  await setSlots(page, 2);
   await expect(page.locator('[data-local-estimate]')).toHaveText('Using a local estimate: the box did not answer.');
   await expect(page.locator('.membar')).not.toHaveAttribute('data-total', before!);
 });

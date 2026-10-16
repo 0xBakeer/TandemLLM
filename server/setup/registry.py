@@ -64,6 +64,12 @@ MAKER_KINDS = ("ours", "vendor", "community")
 MODEL_ID = r"^[a-z0-9][a-z0-9.-]{0,63}$"
 # a string field without a pattern of its own: what a value written into serve.env may hold
 SAFE_VALUE = r"^[A-Za-z0-9._:-]{1,64}$"
+#: VIS-199: the most parallel chats (sequence slots) the guide and apply take, whatever a card
+#: measured. A joint verify pass holds at most 32 rows (server/slots.py `Meeting`,
+#: `--parallel-max-rows`) and a decoding chat keeps at least 2 of them (`share`), so 16 is the most
+#: that verify in one pass. A card's `slots.max` is how far it was measured; above it the guide says
+#: untested, and memory decides the rest (the estimate's `fits`).
+ENGINE_MAX_SLOTS = 16
 
 _NUM = {"type": "number"}
 _NUM0 = {"type": "number", "minimum": 0}
@@ -622,7 +628,7 @@ def wizard_fields(m: dict) -> list[dict]:
                        for c in m["components"]],
         "parallelism": [
             {"field": "slots", "label": "Parallel requests", "type": "int",
-             "min": p["slots"]["min"], "max": p["slots"]["max"]},
+             "min": p["slots"]["min"], "max": ENGINE_MAX_SLOTS},
             {"field": "window", "label": "Context window, first slot", "type": "int",
              "min": p["window"]["min"], "max": p["window"]["max"]},
             {"field": "side_window", "label": "Context window, other slots", "type": "int",

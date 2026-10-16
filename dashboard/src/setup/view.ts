@@ -33,6 +33,7 @@ import './memory-bar';
 import './reset';
 import './signin';
 import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, windowMax, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
+import { parseSlots, slotsBlocker, slotsRange, slotsVerdict, stepSlots, type SlotsParse } from './slots';
 import { S, STEP_INTRO, STEP_LABEL, STEP_SHORT, STEP_TITLE } from './strings';
 import { fieldKey, planToolCall } from './tools';
 import './wren';
@@ -66,6 +67,12 @@ export class QseSetup extends LightElement {
   @state() private resetOpen = false;
   @state() private unauthorized = false;
   @state() private winNarrow = false;
+  /** VIS-199: what is typed in the parallel-chats field while it is not a count the engine takes
+   *  (empty, 0, 2.5, 40): kept as typed with the reason, never clamped; null when the field shows
+   *  the selection's count */
+  @state() private slotsDraft: string | null = null;
+  /** Next was pressed while the count stops it: the reason shows beside Next until it is fixed */
+  @state() private nextRefused = false;
   /** the community list's sync with GitHub (CONTRACT.md addition 3: on the weights step's open and on Refresh) */
   @state() private communitySyncing = false;
 
@@ -232,6 +239,10 @@ export class QseSetup extends LightElement {
     if (location.hash !== h) {
       if (push) location.hash = h;
       else history.replaceState(null, '', h);
+    }
+    if (stepChanged || a.type === 'recommended' || (a.type === 'parallel' && a.key === 'slots')) {
+      this.slotsDraft = null;
+      this.nextRefused = false;
     }
     if (stepChanged) {
       if (push) window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
@@ -622,13 +633,38 @@ export class QseSetup extends LightElement {
     const step = this.wiz.step;
     if (step === 'install') return nothing;
     const i = stepIndex(step);
-    return html`<nav class="setup-nav" aria-label="Step navigation">
+    const why = this.nextRefused ? this.nextBlocker() : null;
+    return html`<nav class="setup-nav ${why ? 'has-why' : ''}" aria-label="Step navigation">
+      ${why ? html`<p class="setup-nav-why" id="setup-nav-why" role="alert" data-next-refused>${icon('info')} <span>${S.nextRefused(why)}</span></p>` : nothing}
       <button class="btn setup-prev" @click=${() => (i <= 1 ? this.dispatch({ type: 'tiles' }) : this.dispatch({ type: 'previous' }))}>${S.previous}</button>
       <span class="setup-nav-mid muted small num">${S.stepOf(i + 1, STEP_IDS.length)}</span>
       ${step === 'review'
         ? html`<button class="btn btn-primary setup-finish" ?disabled=${this.finishBlockers().length > 0 || this.plan?.state !== 'ready'} @click=${() => (this.confirmOpen = true)}>${S.finish}</button>`
-        : html`<button class="btn btn-primary setup-next" @click=${() => this.dispatch({ type: 'next' })}><span>${S.next}<span class="setup-next-to">: ${STEP_LABEL[STEP_IDS[i + 1]]}</span></span></button>`}
+        : html`<button class="btn btn-primary setup-next" aria-describedby=${why ? 'setup-nav-why' : nothing} @click=${() => this.next()}><span>${S.next}<span class="setup-next-to">: ${STEP_LABEL[STEP_IDS[i + 1]]}</span></span></button>`}
     </nav>`;
+  }
+
+  /** VIS-199: Next refuses a parallel-chats count the engine does not take or that does not fit,
+   *  says why beside it and puts the focus on the field */
+  private nextBlocker(): string | null {
+    const m = this.m;
+    const sel = this.wiz.selection;
+    if (this.wiz.step !== 'parallelism' || !m || !sel) return null;
+    return slotsBlocker(slotsVerdict(m, sel), this.slotsParse(m));
+  }
+
+  private slotsParse(m: SetupModel): SlotsParse | null {
+    return this.slotsDraft == null ? null : parseSlots(this.slotsDraft, slotsRange(m));
+  }
+
+  private next(): void {
+    if (this.nextBlocker()) {
+      this.nextRefused = true;
+      this.querySelector<HTMLInputElement>('#pf-slots-in')?.focus();
+      return;
+    }
+    this.nextRefused = false;
+    this.dispatch({ type: 'next' });
   }
 
   private renderStep(m: SetupModel, sel: SetupSelection, est: SetupEstimate | null): TemplateResult {
@@ -805,19 +841,14 @@ export class QseSetup extends LightElement {
     </div>`;
     return html`<div class="spar">
       <div class="spar-fields">
-        <div class="pfield" data-field="parallelism.slots">
-          <div class="pfield-k"><span class="pfield-label" id="pf-slots">${S.slots}</span><span class="pfield-what">${S.slotsWhat}</span></div>
-          <div class="seg" role="radiogroup" aria-labelledby="pf-slots">
-            ${Array.from({ length: p.slots.max - p.slots.min + 1 }, (_, i) => p.slots.min + i).map((n) => html`<button class="seg-btn ${sel.slots === n ? 'is-on' : ''}" role="radio" aria-checked=${sel.slots === n} @click=${() => set('slots', n)}>${n}${n === p.slots.default ? html`<span class="seg-rec" title=${S.recommended}>•</span>` : nothing}</button>`)}
-          </div>
-        </div>
+        ${this.slotsField(m, sel)}
         <div class="pfield" data-field="parallelism.window">
           <div class="pfield-k"><span class="pfield-label">${S.window}</span><span class="pfield-what">${S.windowWhat}</span></div>
           ${winCtl('window', sel.window, windowMax(m, sel.profile))}
         </div>
         ${sel.slots > 1
           ? html`<div class="pfield" data-field="parallelism.side_window">
-              <div class="pfield-k"><span class="pfield-label">${S.sideWindow}</span><span class="pfield-what">${S.sideWindowWhat}</span></div>
+              <div class="pfield-k"><span class="pfield-label">${S.sideWindow}</span><span class="pfield-what">${S.sideWindowWhat(sel.slots)}</span></div>
               ${winCtl('side_window', side, sel.window)}
             </div>`
           : nothing}
@@ -839,18 +870,92 @@ export class QseSetup extends LightElement {
         <p class="spar-big num">${fit.toLocaleString('en-US')}</p>
         <p class="spar-big-u">${S.fitsUnit}</p>
         <div class="spar-slots" aria-hidden="true">
-          ${Array.from({ length: sel.slots }, (_, i) => {
-            const w = i === 0 ? sel.window : side;
-            return html`<div class="spar-slot">
-              <span class="spar-slot-n num">${i + 1}</span>
-              <span class="spar-slot-track"><span class="spar-slot-win" style="width:${(w / p.window.max) * 100}%"></span><span class="spar-slot-fit" style="width:${(Math.min(w, perSlot) / p.window.max) * 100}%"></span></span>
-              <span class="spar-slot-k num">${kTok(w)}</span>
-            </div>`;
-          })}
+          ${[
+            { n: '1', w: sel.window, on: true },
+            { n: sel.slots > 2 ? `2–${sel.slots}` : '2', w: side, on: sel.slots > 1 },
+          ].map(
+            (r) => html`<div class="spar-slot ${r.on ? '' : 'is-off'}">
+              <span class="spar-slot-n num">${r.n}</span>
+              <span class="spar-slot-track"><span class="spar-slot-win" style="width:${(r.w / p.window.max) * 100}%"></span><span class="spar-slot-fit" style="width:${(Math.min(r.w, perSlot) / p.window.max) * 100}%"></span></span>
+              <span class="spar-slot-k num">${kTok(r.w)}</span>
+            </div>`,
+          )}
         </div>
         <p class="small">${S.fitsPerSlot(perSlot, sel.slots)}</p>
         ${est ? html`<p class="small muted">${S.worstCase(est.kv_worst_gb, est.fits_worst ?? false)}</p>` : nothing}
       </aside>
+    </div>`;
+  }
+
+  /** VIS-199: parallel chats as a stepper, − / a number field / +. Typing, the buttons and the arrow
+   *  keys change the selection at once, so the memory bar and the readout follow on every change.
+   *  No card cap: above the card's measured range is a quiet note, a count that does not fit or that
+   *  the engine does not take says why here, in the bar, and beside Next, which refuses it. */
+  private slotsField(m: SetupModel, sel: SetupSelection): TemplateResult {
+    const r = slotsRange(m);
+    const v = slotsVerdict(m, sel);
+    const draft = this.slotsParse(m);
+    const typedBad = draft && !draft.ok ? draft.why : null;
+    const err = typedBad ?? (v.over ? S.slotsOver(v.n, v.overGb, v.fitMax) : null);
+    const set = (n: number) => this.user('parallelism', 'slots', { type: 'parallel', key: 'slots', value: n });
+    const step = (d: number) => {
+      const base = draft?.ok ? draft.n : sel.slots;
+      const n = stepSlots(base, d, r);
+      if (n !== sel.slots) set(n);
+      else this.slotsDraft = null;
+    };
+    const onInput = (e: Event) => {
+      const raw = (e.target as HTMLInputElement).value;
+      const p = parseSlots(raw, r);
+      if (p.ok) {
+        this.slotsDraft = null;
+        if (p.n !== sel.slots) set(p.n);
+      } else this.slotsDraft = raw;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        step(e.key === 'ArrowUp' ? 1 : -1);
+      }
+    };
+    const shown = this.slotsDraft ?? String(sel.slots);
+    const atMax = sel.slots >= r.max && !typedBad;
+    return html`<div class="pfield pfield-slots ${err ? 'is-bad' : ''}" data-field="parallelism.slots">
+      <div class="pfield-k"><label class="pfield-label" id="pf-slots" for="pf-slots-in">${S.slots}</label><span class="pfield-what">${S.slotsWhat}</span></div>
+      <div class="stepper ${err ? 'is-bad' : ''}" role="group" aria-labelledby="pf-slots">
+        <button class="stepper-btn" type="button" aria-label=${S.slotsFewer} aria-controls="pf-slots-in" ?disabled=${sel.slots <= r.min && !typedBad} @click=${() => step(-1)}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+        </button>
+        <input
+          id="pf-slots-in"
+          class="stepper-in num"
+          type="text"
+          inputmode="numeric"
+          enterkeyhint="done"
+          autocomplete="off"
+          spellcheck="false"
+          role="spinbutton"
+          aria-valuemin=${r.min}
+          aria-valuemax=${r.max}
+          aria-valuenow=${draft && !draft.ok ? nothing : sel.slots}
+          aria-valuetext=${draft && !draft.ok ? nothing : `${sel.slots} ${sel.slots === 1 ? 'chat' : 'chats'}`}
+          aria-invalid=${err ? 'true' : 'false'}
+          aria-describedby="pf-slots-say"
+          maxlength="3"
+          .value=${shown}
+          @input=${onInput}
+          @keydown=${onKey}
+          @focus=${(e: FocusEvent) => (e.target as HTMLInputElement).select()}
+        />
+        <button class="stepper-btn" type="button" aria-label=${S.slotsMore} aria-controls="pf-slots-in" ?disabled=${atMax} title=${atMax ? S.slotsAtMax(r.max) : nothing} @click=${() => step(1)}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" /></svg>
+        </button>
+      </div>
+      <div class="slots-say" id="pf-slots-say">
+        ${err ? html`<p class="slots-err" role="alert" data-slots-error>${err}</p>` : nothing}
+        <p class="slots-cost" data-slots-cost>${S.slotsCost(v.cost.now, v.cost.full, v.cost.window)}</p>
+        ${v.untested && !typedBad ? html`<p class="slots-note" data-slots-untested>${S.slotsUntested(r.measured)}</p>` : nothing}
+      </div>
     </div>`;
   }
 
