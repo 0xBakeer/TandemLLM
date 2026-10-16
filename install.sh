@@ -837,10 +837,14 @@ set -euo pipefail
 RUN="$TANDEM_DIR/run"
 ENV_FILE="$RUN/ops/serve.env"
 [ -f "$ENV_FILE" ] || { echo "[tandem] no $ENV_FILE; re-run install.sh" >&2; exit 1; }
+# a command that fails in the config (or a file it sources) names its file and line instead of
+# ending this script silently under set -e (OPS-159)
+trap 'echo "[tandem] ${BASH_SOURCE[0]:-$ENV_FILE}: line $LINENO failed (status $?); the config did not load" >&2; exit 1' ERR
 set -a
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 set +a
+trap - ERR
 URL="http://127.0.0.1:$PORT"
 healthy() { curl -sf -m 3 "$URL/health" >/dev/null 2>&1; }
 engine_alive() { [ -f "$REPO/logs/engine.pid" ] && kill -0 "$(cat "$REPO/logs/engine.pid")" 2>/dev/null; }
@@ -893,10 +897,13 @@ start() {
             sleep 10
         done
     fi
-    # the weights are on the device now: drop their page cache (docs/operations.md)
-    local -a nv
+    # the weights are on the device now: drop their page cache (docs/operations.md). Only the paths
+    # serve.env names: an empty one (setup mode has no weights) was ".", the whole working directory
+    local -a nv drop=()
+    local f
     IFS=, read -r -a nv <<<"$NV"
-    "$PY" "$REPO/tools/drop_page_cache.py" "$QWEN38_MODEL" "${nv[@]}" "$HEAD" "$CKPT8" "$CKPT16" 2>&1 | tail -1 || true
+    for f in "$QWEN38_MODEL" ${nv[@]+"${nv[@]}"} "$HEAD" "$CKPT8" "$CKPT16"; do [ -n "$f" ] && drop+=("$f"); done
+    [ "${#drop[@]}" = 0 ] || "$PY" "$REPO/tools/drop_page_cache.py" "${drop[@]}" 2>&1 | tail -1 || true
     echo "[tandem] healthy: $URL/v1"
     chat_auto
 }
