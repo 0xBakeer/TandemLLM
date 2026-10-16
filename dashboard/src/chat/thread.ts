@@ -108,7 +108,7 @@ export class QseChatThread extends LightElement {
       <qse-wren-figure class="ch-now-fig" .state=${fig} .size=${30}></qse-wren-figure>
       <div class="ch-now-main">
         <div class="ch-now-line">
-          <span class="ch-now-words">${r.now}</span>
+          <span class="ch-now-words" title=${r.now}>${r.now}</span>
           <span class="ch-now-nums num">
             ${r.decode_tps != null ? html`<span title="decode tok/s now">${fixed(r.decode_tps, 1)} tok/s</span>` : nothing}
             ${r.tokens ? html`<span title="completion tokens so far">${exact(r.tokens)} tok</span>` : nothing}
@@ -202,7 +202,7 @@ export class QseChatThread extends LightElement {
   private renderFoot(m: Message, isLast: boolean, c: Conversation): TemplateResult {
     const s = m.stats;
     return html`<footer class="ch-foot">
-      <span class="ch-figs num" data-testid="turn-figures">${s ? figsLine(s) : m.status === 'stopped' ? 'stopped' : m.status === 'interrupted' ? 'interrupted' : ''}${m.status === 'stopped' && s ? html` <span class="warn-ink">stopped</span>` : nothing}</span>
+      <span class="ch-figs num" data-testid="turn-figures" title=${s ? figsLine(s) : nothing}>${s ? figsParts(s).map((f) => html`<span class="ch-tf ch-tf-${f.k}">${f.pre ? f.w : nothing}${f.n ? html`<b>${f.n}</b>` : nothing}${f.pre ? nothing : f.w}${f.sub ? html`<span class="ch-tf-sub"> ${f.sub}</span>` : nothing}</span>`) : m.status === 'stopped' ? 'stopped' : m.status === 'interrupted' ? 'interrupted' : ''}${m.status === 'stopped' && s ? html`<span class="ch-tf warn-ink">stopped</span>` : nothing}</span>
       <span class="ch-tools">
         ${copyButton(messageText(m), 'Copy answer')}
         <button type="button" class="btn btn-ghost btn-sm" aria-label="Regenerate" title="Regenerate" ?disabled=${!!c.run} @click=${() => this.fire('ch-regenerate', { messageId: m.id })}>${icon('refresh')}</button>
@@ -274,7 +274,7 @@ export class QseChatThread extends LightElement {
         <span class="ch-call-args num">${args}</span>
         <span class="grow"></span>
         ${dur ? html`<span class="ch-call-dur num">${dur}</span>` : nothing}
-        <span class="ch-call-word">${word}</span>
+        <span class="ch-call-word ${word === 'done' ? 'sr-only' : ''}">${word}</span>
         <span class="ch-call-chev" aria-hidden="true"></span>
       </button>
       ${found?.length ? renderResults(found) : nothing}
@@ -334,6 +334,20 @@ export function figsLine(s: TurnStats): string {
   if (s.tokens_per_round != null) parts.push(`${fixed(s.tokens_per_round, 1)} per round`);
   if (s.acceptance != null) parts.push(`${pct(s.acceptance, 0)} accepted`);
   return parts.join(' · ');
+}
+
+/** the figures line as readings: the number apart from its words, so the line can set them in two
+ *  inks (`pre`: the word reads before it), and a key per reading, so a phone can keep the ones
+ *  that fit (VIS-185). A plain finish ("done") is left out: the line under an answer says that. */
+export function figsParts(s: TurnStats): { k: string; n: string; w: string; sub?: string; pre?: boolean }[] {
+  const out: { k: string; n: string; w: string; sub?: string; pre?: boolean }[] = [];
+  if (s.finish !== 'stop') out.push({ k: 'finish', n: '', w: s.finish });
+  if (s.decode_tps != null) out.push({ k: 'tps', n: fixed(s.decode_tps, 1), w: ' tok/s' });
+  out.push({ k: 'tok', n: exact(s.completion_tokens), w: ' tok', sub: s.reasoning_tokens ? `(${exact(s.reasoning_tokens)} thinking)` : undefined });
+  if (s.ttft_ms != null) out.push({ k: 'ttft', n: ms(s.ttft_ms), w: 'first token ', pre: true });
+  if (s.tokens_per_round != null) out.push({ k: 'round', n: fixed(s.tokens_per_round, 1), w: ' per round' });
+  if (s.acceptance != null) out.push({ k: 'acc', n: pct(s.acceptance, 0), w: ' accepted' });
+  return out;
 }
 
 export function elapsedWords(sec: number): string {

@@ -10,6 +10,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { bytes } from '../lib/format';
+import { stripEdge, type Edge } from '../lib/phone';
 import { renderMarkdown } from '../playground/markdown';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
@@ -51,6 +52,8 @@ export class QseChatPanes extends LightElement {
   @state() private file: FileView | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
   @state() private ctrlArmed = false;
+  /** where the tab strip stands when it scrolls sideways: its edge with more behind it fades */
+  @state() private tabEdge: Edge = 'none';
   @state() private editText = '';
   @state() private editNote: { ok: boolean; text: string } | null = null;
   private loadingFile = false;
@@ -128,6 +131,8 @@ export class QseChatPanes extends LightElement {
   }
 
   updated(changed: Map<string, unknown>): void {
+    if (changed.has('active') || changed.has('panes')) this.showActiveTab();
+    if (!changed.has('tabEdge')) this.measureTabs();
     const p = this.panes.find((x) => x.id === this.active);
     if (!p || !this.backend || !this.convId) return;
     if (p.kind === 'preview' || p.kind === 'diff' || p.kind === 'markdown' || p.kind === 'image' || (MEDIA_KINDS.has(p.kind) && p.ref.startsWith('file:'))) {
@@ -217,6 +222,23 @@ export class QseChatPanes extends LightElement {
     if (p?.kind === 'terminal') this.screens.get(p.id)?.term?.fit();
   }
 
+  /** the open tab in view inside the strip (it scrolls on its own, never the page) */
+  private showActiveTab(): void {
+    const strip = this.querySelector<HTMLElement>('.ch-pane-tabs');
+    const tab = strip?.querySelector<HTMLElement>('.ch-pane-tab.is-on');
+    if (!strip || !tab) return;
+    const left = tab.offsetLeft - strip.offsetLeft;
+    if (left < strip.scrollLeft) strip.scrollLeft = left - 8;
+    else if (left + tab.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = left + tab.offsetWidth - strip.clientWidth + 8;
+  }
+
+  private measureTabs(): void {
+    const strip = this.querySelector<HTMLElement>('.ch-pane-tabs');
+    if (!strip) return;
+    const e = stripEdge(strip.scrollLeft, strip.scrollWidth, strip.clientWidth);
+    if (e !== this.tabEdge) this.tabEdge = e;
+  }
+
   /** the phone's key row: what each key sends to the shell */
   private sendKey(p: OpenPane, key: string): void {
     const e = this.screens.get(p.id);
@@ -235,8 +257,10 @@ export class QseChatPanes extends LightElement {
   render() {
     const p = this.panes.find((x) => x.id === this.active) ?? this.panes[0];
     return html`<div class="ch-panes ${this.sheet ? 'is-sheet' : ''}" data-dock=${this.dock}>
-      <div class="ch-pane-tabs" role="tablist" aria-label="panes">
-        ${this.panes.map((x) => html`<span class="ch-pane-tab ${x.id === p?.id ? 'is-on' : ''}" role="tab" aria-selected=${x.id === p?.id}><button type="button" class="ch-pane-tab-btn" @click=${() => this.fire('ch-pane-activate', { id: x.id })}>${icon(paneIcon(x.kind))}<span>${x.title ?? paneWord(x.kind)}</span></button><button type="button" class="ch-pane-tab-x" aria-label=${`Close ${x.title ?? paneWord(x.kind)}`} @click=${() => this.fire('ch-pane-close', { id: x.id })}>${icon('x')}</button></span>`)}
+      <div class="ch-pane-strip">
+        <div class="ch-pane-tabs" role="tablist" aria-label="panes" data-edge=${this.tabEdge} @scroll=${() => this.measureTabs()}>
+          ${this.panes.map((x) => html`<span class="ch-pane-tab ${x.id === p?.id ? 'is-on' : ''}" role="tab" aria-selected=${x.id === p?.id} title=${x.title ?? paneWord(x.kind)}><button type="button" class="ch-pane-tab-btn" @click=${() => this.fire('ch-pane-activate', { id: x.id })}>${icon(paneIcon(x.kind))}<span>${x.title ?? paneWord(x.kind)}</span></button><button type="button" class="ch-pane-tab-x" aria-label=${`Close ${x.title ?? paneWord(x.kind)}`} @click=${() => this.fire('ch-pane-close', { id: x.id })}>${icon('x')}</button></span>`)}
+        </div>
         <span class="ch-pane-plus">
           <button type="button" class="btn btn-ghost btn-sm" aria-label="Open a pane" aria-haspopup="menu" aria-expanded=${this.plus} @click=${(e: Event) => this.togglePlus(e.currentTarget as HTMLElement)}>${icon('plus')}</button>
         </span>
