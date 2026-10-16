@@ -17,7 +17,7 @@ from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
 from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
 from chatd.runs import NUDGE, GuardError
-from chatd.sandbox import Unavailable
+from chatd.sandbox import Gone, Unavailable
 from chatd.store import dumps
 from chatd.tools import PathError, Result, ToolError
 
@@ -67,6 +67,7 @@ class ToolCtx:
         self._out: list[str] = []
         self.quiet = False
         self.oom = False                     # the last exec lost a process at the memory limit
+        self.note: str | None = None         # for the result: the sandbox restarted
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
@@ -77,8 +78,16 @@ class ToolCtx:
         self.run.set_phase("tool", self._running_words())
         self.quiet = quiet
         before = sb.oom_kills(self.cid)
-        code, timed_out = sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
-                                 cancel=self.run.cancel)
+        try:
+            code, timed_out = sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
+                                     cancel=self.run.cancel)
+        except Gone:
+            # gone between the look and the exec: a new one, for this call
+            sb.ensure(self.cid, cancel=self.run.cancel, on_wait=waiting)
+            before = sb.oom_kills(self.cid)
+            code, timed_out = sb.run(self.cid, cmd, timeout=timeout, on_output=self.output,
+                                     cancel=self.run.cancel)
+        self.note = self.note or sb.take_restarted(self.cid)
         after = sb.oom_kills(self.cid)
         # the cgroup's count when it can be read (a pipe's writer killed at the limit leaves its
         # reader an exit 1); else a SIGKILL chatd did not send: 137 from bash, 9 from setsid when
@@ -496,6 +505,11 @@ class AgentMixin:
                 for part, _, _ in jobs[i:]:
                     self._finish_call(run, part, Result("stopped"), status="cancelled")
                 return "cancelled"
+            if run.sandbox_stuck:
+                for part, _, _ in jobs[i:]:
+                    self._finish_call(run, part, Result("Not run: the sandbox failed three times "
+                                                        "in a row.", is_error=True))
+                return "ok"
             part, tool, args = jobs[i]
             group = [jobs[i]]
             if tool.risk == "read" and not tool.sandbox:
@@ -539,10 +553,13 @@ class AgentMixin:
                 self.snaps.take(conv.id, ctx.ws, run.id, "before")
             except OSError:
                 pass
+        failure = None                       # the sandbox's own, not the command's
         try:
             res = tool.executor(ctx, args)
         except (ToolError, PathError, Unavailable, egress.Refused) as exc:
             res = Result(str(exc), is_error=True, data=getattr(exc, "data", None))
+            if isinstance(exc, Unavailable):
+                failure = ((exc.data or {}).get("sandbox") or {}).get("reason") or str(exc)
         except tools_mod.ChangedError:
             res = Result("the file changed meanwhile; read it again", is_error=True)
         except FileNotFoundError:
@@ -550,8 +567,26 @@ class AgentMixin:
         except Exception as exc:                                    # noqa: BLE001
             self.log(f"[tool] {part['id']} {tool.name} failed: {type(exc).__name__}")
             res = Result(f"the tool failed ({type(exc).__name__})", is_error=True)
+            failure = res.content
+        if ctx.note:
+            res.content = f"{ctx.note}\n{res.content}"
+        if tool.sandbox:
+            self._sandbox_streak(run, failure, res.content)
         status = "cancelled" if run.cancel.is_set() and run.stop_mode else None
         self._finish_call(run, part, res, status=status, ctx=ctx)
+
+    def _sandbox_streak(self, run, failure: str | None, words: str) -> None:
+        """The same sandbox failure three calls in a row ends the run, whatever the calls were
+        (the same-call guard does not see a model that changes its command each time)."""
+        if failure is None:
+            run.sandbox_errors.clear()
+            return
+        run.sandbox_errors.append(failure)
+        if len(run.sandbox_errors) == 3 and len(set(run.sandbox_errors)) == 1 and \
+                not run.notice:
+            run.sandbox_stuck = True
+            run.notice = (f"The sandbox failed three times in a row ({words[:200]}); the run "
+                          f"stopped here. Continue goes on from here.")
 
     def _finish_call(self, run, part: dict, res: Result, status: str | None = None,
                      ctx: ToolCtx | None = None) -> None:

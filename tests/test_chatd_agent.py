@@ -56,6 +56,9 @@ class FakeBoxes(sb_mod.Sandboxes):
     def _proxy(self, b):
         pass
 
+    def _alive(self, b):
+        return True
+
     def stop(self, cid, reason="user"):
         b = self.box(cid)
         b.state, b.stopped_reason = "stopped", reason

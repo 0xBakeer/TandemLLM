@@ -382,7 +382,7 @@ type ChatEvent =
 
 Rules:
 - A permission prompt closes on any later `tool.*` event for its `call_id` (another device answered).
-- `run.done` with status `interrupted` means chatd or the engine restarted; the UI offers Continue.
+- `run.done` with status `interrupted`: the run stopped before its end and the UI offers Continue. `stats.interrupted` says why: `limit` (its limit of model calls) or `sandbox` (the same sandbox failure three calls in a row), both with the notice as the message's last part; `engine` (the engine did not answer for the retry window); `restart` (chatd restarted during the run). Absent on answers from before 0.11.2 (VIS-197).
 - The global stream (`/events`) sends `conversation.updated` (with `id` in the patch), `conversation.created`
   `{conversation: ConversationSummary}`, `conversation.deleted` `{id}`, `run.started`, `run.done`,
   `tool.asking` (with `conversation_id`), each persisted with its own sequence.
