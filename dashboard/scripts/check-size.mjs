@@ -17,6 +17,9 @@
 // 424.2 KB.
 // 428 KB with a live run's reasons on the Now figures and the slot row's owner (VIS-181) and the
 // Chat tab's panel for a box whose chatd is down, its re-probe and banner (VIS-179): 427.3 KB.
+// 431 KB with the Chat tab's design pass (VIS-185: the figures line as readings, the panes' tab
+// strip that scrolls on its own, the thread's wrap rules, a mock answer with long inline code and a
+// table): 429.9 KB, from 428.3 KB for integ-0112 in the same build (2026-10-16).
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -35,8 +38,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 428 KB)`);
-if (total > 428 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 431 KB)`);
+if (total > 431 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
