@@ -21,6 +21,7 @@ import { approvedTitle, approvedWord } from './permission';
 import { callMedia, callPane, loadMediaView } from './file-panes';
 import { hostOf, resultsWord, searchResults } from './websearch';
 import { attachmentWords, sandboxCallWords } from './context-words';
+import { figsParts } from './turn-figures';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -108,7 +109,7 @@ export class QseChatThread extends LightElement {
       <qse-wren-figure class="ch-now-fig" .state=${fig} .size=${30}></qse-wren-figure>
       <div class="ch-now-main">
         <div class="ch-now-line">
-          <span class="ch-now-words">${r.now}</span>
+          <span class="ch-now-words" title=${r.now}>${r.now}</span>
           <span class="ch-now-nums num">
             ${r.decode_tps != null ? html`<span title="decode tok/s now">${fixed(r.decode_tps, 1)} tok/s</span>` : nothing}
             ${r.tokens ? html`<span title="completion tokens so far">${exact(r.tokens)} tok</span>` : nothing}
@@ -202,7 +203,7 @@ export class QseChatThread extends LightElement {
   private renderFoot(m: Message, isLast: boolean, c: Conversation): TemplateResult {
     const s = m.stats;
     return html`<footer class="ch-foot">
-      <span class="ch-figs num" data-testid="turn-figures">${s ? figsLine(s) : m.status === 'stopped' ? 'stopped' : m.status === 'interrupted' ? 'interrupted' : ''}${m.status === 'stopped' && s ? html` <span class="warn-ink">stopped</span>` : nothing}</span>
+      <span class="ch-figs num" data-testid="turn-figures" title=${s ? figsLine(s) : nothing}>${s ? figsParts(s).map((f) => html`<span class="ch-tf ch-tf-${f.k}">${f.pre ? f.w : nothing}${f.n ? html`<b>${f.n}</b>` : nothing}${f.pre ? nothing : f.w}${f.sub ? html`<span class="ch-tf-sub"> ${f.sub}</span>` : nothing}</span>`) : m.status === 'stopped' ? 'stopped' : m.status === 'interrupted' ? 'interrupted' : ''}${m.status === 'stopped' && s ? html`<span class="ch-tf warn-ink">stopped</span>` : nothing}</span>
       <span class="ch-tools">
         ${copyButton(messageText(m), 'Copy answer')}
         <button type="button" class="btn btn-ghost btn-sm" aria-label="Regenerate" title="Regenerate" ?disabled=${!!c.run} @click=${() => this.fire('ch-regenerate', { messageId: m.id })}>${icon('refresh')}</button>
@@ -274,7 +275,7 @@ export class QseChatThread extends LightElement {
         <span class="ch-call-args num">${args}</span>
         <span class="grow"></span>
         ${dur ? html`<span class="ch-call-dur num">${dur}</span>` : nothing}
-        <span class="ch-call-word">${word}</span>
+        <span class="ch-call-word ${word === 'done' ? 'sr-only' : ''}">${word}</span>
         <span class="ch-call-chev" aria-hidden="true"></span>
       </button>
       ${found?.length ? renderResults(found) : nothing}

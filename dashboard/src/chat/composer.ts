@@ -283,7 +283,7 @@ export class QseChatComposer extends LightElement {
             ${this.pop === 'model' && caps ? this.renderModelPop(caps, s) : nothing}
           </span>
           <span class="ch-pillwrap">
-            <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'effort'} @click=${() => (this.pop = this.pop === 'effort' ? 'none' : 'effort')} title="thinking effort"><span class="ch-pill-main">${s?.thinking === false ? 'no thinking' : effortWord(s?.effort ?? 'high')}</span></button>
+            <button type="button" class="ch-pill ch-pill-effort" aria-haspopup="menu" aria-expanded=${this.pop === 'effort'} @click=${() => (this.pop = this.pop === 'effort' ? 'none' : 'effort')} title="thinking effort">${effortPill(s?.thinking === false ? 'no thinking' : effortWord(s?.effort ?? 'high'))}</button>
             ${this.pop === 'effort' && s ? this.renderEffortPop(s) : nothing}
           </span>
           <span class="ch-pillwrap">
@@ -368,6 +368,12 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-foot"><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'tools' }), (this.pop = 'none'))}>All tools and policies</button><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'mcp' }), (this.pop = 'none'))}>MCP servers</button></div>
     </div>`;
   }
+}
+
+/** "auto effort" as the value and its word, the word in the quieter ink (VIS-185) */
+function effortPill(word: string): TemplateResult {
+  const m = / effort$/.exec(word);
+  return m ? html`<span class="ch-pill-main">${word.slice(0, m.index)}</span><span class="ch-pill-sub">effort</span>` : html`<span class="ch-pill-main">${word}</span>`;
 }
 
 function effortDesc(e: EffortChoice): string {
