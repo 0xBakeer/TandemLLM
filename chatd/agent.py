@@ -775,11 +775,10 @@ class AgentMixin:
             # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
-            if getattr(run, "shrink_to", 0):
-                # the engine counted this prompt past the estimate — one retry runs capped at
-                # the room the engine itself left (runs.py)
-                body["max_tokens"] = max(256, min(int(body["max_tokens"]), run.shrink_to))
-                run.shrink_to = 0
+            if getattr(run, "shrink_half", False):
+                # the previous request was refused as an overrun: half the output, one retry
+                run.shrink_half = False
+                body["max_tokens"] = max(256, int(body["max_tokens"]) // 2)
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)
         run.request_est = est

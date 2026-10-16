@@ -70,21 +70,16 @@ _MEMORY = re.compile(r"a (\d+)-token prefill needs ([\d.]+) GiB with every cache
 # engine's own counts are the prompt's exact sizes, which the guard can only estimate. One retry
 # recomputes the room from them (2026-10-16: a relay backend with no max_output on its card asked
 # a 262,144-token window for 260,976 output tokens against 1,169 of input — 1 token over, died).
-_OVERRUN_MAX = re.compile(r"maximum context(?: length)? is ([\d,]+) tokens", re.I)
-_OVERRUN_IN = re.compile(r"([\d,]+)\s+(?:prompt|input) tokens", re.I)
+_OVERRUN = re.compile(r"maximum context(?: length)? is [\d,]+ tokens", re.I)
 
 
-def _overrun_room(message: str) -> int:
-    """The output room the engine's own numbers leave for a retried request, or 0 when this 400
-    is not a window overrun — or leaves no room to retry into."""
-    m = _OVERRUN_MAX.search(message or "")
-    n = _OVERRUN_IN.search(message or "")
-    if not m or not n:
-        return 0
-    # the margin is not 256: the engine refused a retried request by 1 token when its own
-    # count of the same prompt had drifted +257 between two prefills (2026-10-17, 00:13)
-    room = int(m.group(1).replace(",", "")) - int(n.group(1).replace(",", "")) - 4096
-    return room if room >= 256 else 0
+def is_overrun(message: str) -> bool:
+    """A 400 saying the request is over the engine's window, in the shapes vLLM and OpenAI
+    answer with. What the engine claims about the split is not information: two refusals of
+    requests 4,097 tokens apart both said 'a total of at least 262,145' — the input number is
+    back-computed from the refusal total (window + 1) against whatever output was asked. The
+    run halves its output instead of sizing by these numbers."""
+    return bool(_OVERRUN.search(message or ""))
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
 # anything else in it is replaced (the part's id is the one the next request sends back)
@@ -144,7 +139,7 @@ class Run:
         self.request_ids: set[str] = set()     # every call of the run
         self.stop_mode: str | None = None
         self.call = None
-        self.shrink_to = 0               # the room an oversized-output 400 left for a retry
+        self.shrink_half = False         # the next request is the overrun retry: half output
         self.overload_retried = False    # one retry per run: a loop of shrinks is a stall
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
@@ -394,14 +389,14 @@ class Run:
             except EngineError as exc:
                 self.call = None
                 if not exc.retryable:
-                    room = _overrun_room(exc.args[0]) if exc.status == 400 else 0
-                    if room and not self.overload_retried:
-                        # the engine's counts beat the guard's estimate: one retry, capped at the
-                        # room the engine itself reported, instead of failing the run
+                    if exc.status == 400 and is_overrun(exc.args[0]) and \
+                            not self.overload_retried:
+                        # one retry at half the output: the engine's refusal numbers are
+                        # self-referential (above), the guard's estimate is the only estimate
                         self.overload_retried = True
-                        self.shrink_to = room
+                        self.shrink_half = True
                         self.svc.log(f"[guard] {self.id} step {self.step}: {exc.args[0][:120]} — "
-                                     f"retrying with output capped at {room:,} tokens")
+                                     f"retrying at half the output")
                         continue
                     self.error = exc.args[0]
                     return "failed"
