@@ -1,7 +1,7 @@
 // the chat reducer: a run's events in order, a tool call's life, a catch-up replay equals the
 // live path, and the attachment state machine's words.
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { adopt, applyEvent, applyEvents, firstLine, interruptWords, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
+import { adopt, applyEvent, applyEvents, firstLine, interruptCard, interruptWords, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
 import { attachLabel, initialAttachment, onEvent, onStreamState, onTick, LOST_AFTER_MS } from '../src/chat/connection';
 import type { ChatEvent, Conversation, Run, StampedEvent, TurnStats } from '../src/chat/types';
 
@@ -327,5 +327,16 @@ describe('a tool card head', () => {
     expect(argsSummary(call('{"items": [{"text": "a"}, {"text": "b"}, {"text": "c"}]}'))).toBe('3 items');
     expect(argsSummary(call('{"opts": {"a": 1}}'))).toBe('1 field');
     expect(argsSummary(call('not json'))).toBe('not json');
+  });
+});
+
+describe('interruptCard', () => {
+  const m = { id: 'a1', role: 'assistant', status: 'interrupted', parts: [{ type: 'text', text: 'x' }], stats: null } as unknown as Parameters<typeof interruptCard>[0];
+  it('shows the card when no run writes into the message', () => {
+    expect(interruptCard(m, null)?.text).toContain('stopped before it was finished');
+    expect(interruptCard(m, 'other')).not.toBeNull();
+  });
+  it('hides it while a Continue run writes into the same message', () => {
+    expect(interruptCard(m, 'a1')).toBeNull();
   });
 });

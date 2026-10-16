@@ -15,7 +15,7 @@ import { copyButton, icon } from '../ui/bits';
 import type { QseWrenFigure } from '../setup/figure';
 import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
-import { argsSummary, dividersByMessage, dividerWords, interruptWords, messageText } from './store';
+import { argsSummary, dividersByMessage, dividerWords, interruptCard, interruptWords, messageText } from './store';
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type ToolCallPart, type TurnStats } from './types';
 import { approvedTitle, approvedWord } from './permission';
 import { callMedia, callPane, loadMediaView } from './file-panes';
@@ -132,7 +132,7 @@ export class QseChatThread extends LightElement {
     const live = m.status === 'streaming' && !!c.run && c.run.message_id === m.id;
     if (m.role === 'user') return this.renderUser(c, m, live);
     const isLast = i === c.messages.length - 1;
-    const cut = interruptWords(m);
+    const cut = interruptCard(m, c.run?.message_id);
     return html`<article class="ch-msg ch-assistant ${live ? 'is-live' : ''}" data-mid=${m.id} data-role="assistant" data-status=${m.status}>
       ${(cut?.notice ? m.parts.slice(0, -1) : m.parts).map((p, k) => this.renderPart(c, m, p, k, live))}
       ${!m.parts.length && live ? html`<p class="ch-waiting"><span class="pulse"></span> ${c.run?.phase === 'prefill' ? 'reading the prompt' : c.run?.phase === 'queued' ? (c.run.queue_position ? `in line, ${c.run.queue_position} ahead` : 'in line') : 'first token'}</p>` : nothing}
