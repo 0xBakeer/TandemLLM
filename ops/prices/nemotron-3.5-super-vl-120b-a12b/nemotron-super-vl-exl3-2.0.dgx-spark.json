@@ -52,5 +52,5 @@
   }
  },
  "step_ms": 1.85,
- "measured": "tools/nh_check.py staircase and bench on stair.json, bench.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut drafts and learns them online. spec prior 22.3 ms a token: (8-row chain + draft) / (0.75 x LiLiCorr's offline accepted length)."
+ "measured": "tools/nh_check.py staircase and bench on stair.json, bench.json: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the median), at the staircase's contexts (the lowest as class 0); plain = the captured decode step's ms a token, host wall clock with a sync a token. No prime prior (learned online). Spec prior 22.3 ms a token: (8-row chain + draft) / (0.75 x LiLiCorr's offline accepted length)."
 }
