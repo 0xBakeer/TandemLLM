@@ -27,6 +27,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import stat
 import urllib.parse
 
 from chatd.ids import ulid
@@ -180,7 +181,7 @@ class PanesMixin:
         ws = self._ws_for(cid)
         try:
             st = ws.stat(path)
-            if os.path.isdir(ws.resolve(path)):
+            if stat.S_ISDIR(st.st_mode):
                 raise self._api_error(400, "bad_path", "a directory")
             # the JSON view holds text up to TEXT_LIMIT; bigger files stream from the view route
             data = ws.read(path, limit=TEXT_LIMIT + 1) if st.st_size <= TEXT_LIMIT else b""
