@@ -1,6 +1,6 @@
 // VIS-199 (QA VIS-200): parallel chats as a stepper on the memory step, against the mock (Super VL:
-// the card measured 1 to 3, three by default, the pool off, so one more chat is 2.0 GiB at a
-// 262,144-token window; 15 fit the mock box, 16 do not). Minus, plus, typing and the arrow keys
+// the card measured 1 to 3, three by default, the pool off, so one more chat is 3.1 GiB at a
+// 262,144-token window, its KV and the slot's measured fixed part; 8 fit the mock box, 9 do not). Minus, plus, typing and the arrow keys
 // move the memory bar at once; above 3 is a quiet note; a count that does not fit, or one the
 // engine does not take, says why next to the field and beside Next, which refuses it.
 import { expect, test, type Page } from '@playwright/test';
@@ -28,18 +28,18 @@ test('minus, a number field and plus, labelled; the bar and the cost line follow
   await expect(input(page)).toHaveAttribute('role', 'spinbutton');
   await expect(input(page)).toHaveAttribute('aria-valuenow', '3');
   await expect(input(page)).toHaveAttribute('aria-valuemax', '16');
-  await expect(page.locator('[data-slots-cost]')).toHaveText('Each extra chat takes about 2.0 GiB at a 262,144-token window.');
+  await expect(page.locator('[data-slots-cost]')).toHaveText('Each extra chat takes about 3.1 GiB at a 262,144-token window.');
   await expect(page.locator('[data-slots-untested]')).toHaveCount(0);
   const t3 = await total(page);
   await f.getByRole('button', { name: 'One chat more' }).click();
   await expect(input(page)).toHaveValue('4');
-  await expect.poll(() => total(page)).toBeCloseTo(t3 + 2.0, 1);
+  await expect.poll(() => total(page)).toBeCloseTo(t3 + 3.1, 1);
   await expect(page.locator('[data-slots-untested]')).toHaveText('Measured up to 3 on this model. More is untested.');
   await expect(page.locator('[data-field="parallelism.side_window"] .pfield-what')).toContainText('chats 2 to 4');
   await f.getByRole('button', { name: 'One chat fewer' }).click();
   await f.getByRole('button', { name: 'One chat fewer' }).click();
   await expect(input(page)).toHaveValue('2');
-  await expect.poll(() => total(page)).toBeCloseTo(t3 - 2.0, 1);
+  await expect.poll(() => total(page)).toBeCloseTo(t3 - 3.1, 1);
   await expect(page.locator('[data-field="parallelism.side_window"] .pfield-what')).toContainText('chat 2.');
   await f.getByRole('button', { name: 'One chat fewer' }).click();
   await expect(input(page)).toHaveValue('1');
@@ -50,35 +50,35 @@ test('minus, a number field and plus, labelled; the bar and the cost line follow
 
 test('typing a count and the arrow keys change it at once; the readout keeps two rows', async ({ page }) => {
   const t3 = await total(page);
-  await setSlots(page, 9);
-  await expect.poll(() => total(page)).toBeCloseTo(t3 + 6 * 2.0, 1);
+  await setSlots(page, 7);
+  await expect.poll(() => total(page)).toBeCloseTo(t3 + 4 * 3.1, 1);
   await expect(page.locator('.membar')).toHaveAttribute('data-fits', 'true');
-  await expect(page.locator('.spar-slot').nth(1).locator('.spar-slot-n')).toHaveText('2–9');
+  await expect(page.locator('.spar-slot').nth(1).locator('.spar-slot-n')).toHaveText('2–7');
   await expect(page.locator('.spar-slot')).toHaveCount(2);
   await input(page).press('ArrowUp');
-  await expect(input(page)).toHaveValue('10');
-  await input(page).press('ArrowDown');
-  await input(page).press('ArrowDown');
   await expect(input(page)).toHaveValue('8');
+  await input(page).press('ArrowDown');
+  await input(page).press('ArrowDown');
+  await expect(input(page)).toHaveValue('6');
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('tandem.setup.v1') ?? '{}'));
-  expect(saved.selection.slots).toBe(8);
+  expect(saved.selection.slots).toBe(6);
 });
 
 test('a count that does not fit: said next to the field and in the bar, Next refuses it until it fits', async ({ page }) => {
-  await setSlots(page, 16);
+  await setSlots(page, 9);
   await expect(page.locator('.membar')).toHaveAttribute('data-fits', 'false');
   await expect(page.locator('.membar')).toHaveClass(/is-over/);
   const err = page.locator('[data-slots-error]');
-  await expect(err).toHaveText(/^16 chats do not fit: \d+\.\d GiB over\. At most 15 fit with these settings\.$/);
+  await expect(err).toHaveText(/^9 chats do not fit: \d+\.\d GiB over\. At most 8 fit with these settings\.$/);
   await expect(input(page)).toHaveAttribute('aria-invalid', 'true');
   await page.locator('.setup-next').click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'parallelism');
-  await expect(page.locator('[data-next-refused]')).toContainText('Next stays on this step. 16 chats do not fit');
+  await expect(page.locator('[data-next-refused]')).toContainText('Next stays on this step. 9 chats do not fit');
   await expect(input(page)).toBeFocused();
   // never clamped: the count stays what was asked for
-  await expect(input(page)).toHaveValue('16');
+  await expect(input(page)).toHaveValue('9');
   await field(page).getByRole('button', { name: 'One chat fewer' }).click();
-  await expect(input(page)).toHaveValue('15');
+  await expect(input(page)).toHaveValue('8');
   await expect(err).toHaveCount(0);
   await expect(page.locator('[data-next-refused]')).toHaveCount(0);
   await page.locator('.setup-next').click();

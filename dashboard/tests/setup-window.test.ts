@@ -112,7 +112,7 @@ describe('the memory follows the window', () => {
     const sel = { ...defaults(VL1M), window: 1_048_576, side_window: 524_288 };
     const e = estimate(VL1M, sel);
     expect(e.parts.find((p) => p.id === 'kv')!.gb).toBeGreaterThan(estimate(VL1M, defaults(VL1M)).parts.find((p) => p.id === 'kv')!.gb);
-    expect(chatCost(VL1M, sel)).toMatchObject({ window: 524_288, full: 4 });
+    expect(chatCost(VL1M, sel)).toMatchObject({ window: 524_288, full: 5.1 });
   });
   it('the short form', () => {
     expect([8192, 131_072, 262_144, 258_048, 1_048_576].map(shortTokens)).toEqual(['8k', '128k', '256k', '252k', '1M']);

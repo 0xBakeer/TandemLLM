@@ -60,15 +60,16 @@ describe('stepSlots: minus, plus and the arrow keys', () => {
 });
 
 describe('chatCost: what one more chat adds', () => {
-  it('Super VL, the pool off: its whole 262,144-token window, 2.0 GiB, from the start', () => {
+  it('Super VL, the pool off: its whole 262,144-token window and the slot\'s fixed part, 3.1 GiB, from the start', () => {
+    // 2.0 GiB of KV and side_slot_const_gib 1.1 (measured at load: 3.10 GiB of MemAvailable a side slot, ENG-363)
     const c = chatCost(VL, defaults(VL));
-    expect(c).toEqual({ now: 2, full: 2, window: 262_144 });
-    expect(S.slotsCost(c.now, c.full, c.window)).toBe('Each extra chat takes about 2.0 GiB at a 262,144-token window.');
+    expect(c).toEqual({ now: 3.1, full: 3.1, window: 262_144 });
+    expect(S.slotsCost(c.now, c.full, c.window)).toBe('Each extra chat takes about 3.1 GiB at a 262,144-token window.');
   });
   it('the pool on: its typical fill to start, its window at most', () => {
     const c = chatCost(VL, { ...defaults(VL), kv_pool: true });
-    expect(c.now).toBeCloseTo(0.25, 5);
-    expect(S.slotsCost(c.now, c.full, c.window)).toBe('Each extra chat takes about 0.3 GiB to start, up to 2.0 GiB at a 262,144-token window.');
+    expect(c.now).toBeCloseTo(1.35, 5);
+    expect(S.slotsCost(c.now, c.full, c.window)).toBe('Each extra chat takes about 1.4 GiB to start, up to 3.1 GiB at a 262,144-token window.');
   });
   it('follows the extra chats\' window, never longer than the first chat\'s', () => {
     expect(chatCost(VL, { ...defaults(VL), side_window: 65_536 }).window).toBe(65_536);
@@ -94,7 +95,7 @@ describe('fitMax and the verdict: memory decides', () => {
         if (n < 16) expect(estimate(m, { ...sel, slots: n + 1 }).fits).toBe(false);
       }
     }
-    expect(fitMax(VL, defaults(VL))).toBe(15);
+    expect(fitMax(VL, defaults(VL))).toBe(8);
   });
   it('above the card\'s measured range: allowed, with the untested note', () => {
     const v = slotsVerdict(VL, { ...defaults(VL), slots: 5 });
