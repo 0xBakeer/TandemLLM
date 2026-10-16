@@ -2,6 +2,18 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.11.3 (unreleased)
+
+### Chat tab
+
+- A run that builds or changes a web page or app checks it in a browser before it ends. When the model's answer would end the run and web files changed since its start (the run's snapshot, so files written by bash count), chatd loads the page it presented, the project's running dev server or the changed page in the sandbox's headless Chromium at 1280 and 390 px with the laya kit's page check, as a call of its own (a `verify` card with a `harness` badge, the Now line "Verifying the app ..."). The model reads the console errors, failed loads, visible text, controls, the page's state hook, overflow and the screenshot's brightness and colours, and the 1280 px screenshot when it reads images, then fixes what is wrong or answers. A page that needs its dev server with none running gets the command instead. At most two checks a run, a second only after more changes; a sandbox failure counts in the run's failure streak (SRV-526). The answer ends with a "Checked / Not checked" block from the run's evidence: the checks, whether the model saw the screenshot, its own render_page, preview and kit calls, and files changed after the last check; with no sandbox, the step limit reached or a check that could not run, it says not verified and why. The chat setting `verify` (on by default, a switch in the composer's tools menu) turns it off. Before, a run that built a Three.js scene said it was done from a count of colours in a screenshot, and tested it only when asked (SRV-532).
+- A library text that downloads the laya kit (laya-playtest) gets the kit copied into the chat's files (`/workspace/.tandem/`) and a line that says so: the sandbox cannot reach TandemLLM's address, so the download failed. Its `page` check runs in the sandbox; the modes that ask Laya for each move do not (SRV-532).
+
+### Packages
+
+- threejs-scene: tone mapping and colour space, a day scene by default (a sky background with matching fog beyond the subject, hemisphere light about 1.5, a sun about 3 with shadows), a day/night switch that changes background, fog, lights and exposure together, saturated non-metal materials, foliage as clustered shapes, and a check of the screenshot against the request. Its skeleton had a near-black background and light strengths from before three.js r155, which render dim. The creative-coding Three.js skeleton gets the same light strengths and tone mapping (SRV-532).
+- The laya kit's page check reports each screenshot's look in numbers: brightness, the share of its most common colour, the colours over 1 % and saturation (SRV-532).
+
 ## 0.11.2 (unreleased)
 
 0.11.2 starts chatd, the Chat tab's service, with the engine, and the Chat tab says when chatd is down instead of switching to the in-browser mock. Every model writes the same text as in 0.11.1.
