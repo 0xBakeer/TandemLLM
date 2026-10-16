@@ -5450,10 +5450,34 @@ class Handler(BaseHTTPRequestHandler):
         if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
             raw = self._read_chunked()           # Transfer-Encoding outranks Content-Length
         else:
-            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                n = self._content_length()
+            except BodyError:
+                self.close_connection = True     # the promised bytes, if they ever come,
+                raise                           # would be read as the next request
             raw = self.rfile.read(n)
         self._body_done = True
         return raw
+
+    def _content_length(self) -> int:
+        """The promised body size, validated before a single byte of it is read. This header
+        is the client's and it sizes a pre-auth allocation: 4294967296 was once a
+        multi-GB read on a handler thread, and -1 was rfile.read(-1) -- read-until-EOF, a
+        permanently hung thread on a keep-alive connection."""
+        raw = self.headers.get("Content-Length")
+        if raw is None or not raw.strip():
+            return 0                             # an absent header is no body, as before
+        try:
+            n = int(raw)
+        except ValueError:
+            raise BodyError(400, "invalid_request_error",
+                            "Content-Length: not a number") from None
+        if n < 0:
+            raise BodyError(400, "invalid_request_error", "Content-Length: negative")
+        if n > MAX_BODY_BYTES:
+            raise BodyError(413, "too_large",
+                            f"a request body is at most {MAX_BODY_BYTES} bytes")
+        return n
 
     def _read_chunked(self) -> bytes:
         """A chunked body, RFC 9112 7.1: size line, that many bytes, CRLF, until the zero
