@@ -32,7 +32,8 @@ from engine.models.state import SectionState
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/config.py",
-           "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/kernels.py",
+           "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/gguf.py",
+           "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py")
