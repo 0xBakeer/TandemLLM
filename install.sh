@@ -319,6 +319,8 @@ if [ "$UNINSTALL" = 1 ]; then
         fi
     fi
     if [ -x "$DIR/bin/tandem" ]; then run "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
+    # chatd too, should this tandem predate its stop (OPS-155)
+    if [ -f "$SRC/ops/chatd.sh" ]; then run bash "$SRC/ops/chatd.sh" stop || true; fi
     if [ -f "$UNIT" ] && grep -q "$DIR/bin/tandem" "$UNIT" 2>/dev/null; then
         run systemctl --user disable --now tandemllm.service || true
         run rm -f "$UNIT"
@@ -494,6 +496,16 @@ cat <<EOF
     downloads into $HF_HUB_DIR, $([ "$CORPUS_MODE" = build ] && echo "a public lookup corpus," || echo "no corpus,") the config$([ "$START" = 1 ] && echo ", then start on port $PORT" || echo " (no start)").
 EOF
 confirm "Go ahead?" || die "cancelled"
+# a chatd running now keeps the code it started with: the last message says how to restart it
+CHATD_WAS_UP=0
+if [ "$DRY" != 1 ] && [ -f "$SRC/ops/chatd.sh" ] && bash "$SRC/ops/chatd.sh" status >/dev/null 2>&1; then
+    CHATD_WAS_UP=1
+fi
+chat_note() {
+    if [ "$CHATD_WAS_UP" = 1 ] && bash "$SRC/ops/chatd.sh" status >/dev/null 2>&1; then
+        printf '\n  chatd was running before this update and keeps the old code until: %s/bin/tandem chat restart\n' "$DIR"
+    fi
+}
 if [ "$DRY" != 1 ]; then mkdir -p "$DIR" "$RUN/ops" "$DIR/bin" "$DIR/state"; touch "$MARK"; fi
 
 # ---------------------------------------------------------------------------------------------
@@ -817,7 +829,7 @@ else
     fi
 fi
 
-# DIR/bin/tandem: start | stop | restart | status | smoke | logs
+# DIR/bin/tandem: start | stop | restart | status | smoke | logs | env | chat
 write_control() {
     printf '#!/usr/bin/env bash\n# TandemLLM control script, written by install.sh.\nTANDEM_DIR=%q\n' "$DIR"
     cat <<'CTL'
@@ -832,6 +844,21 @@ set +a
 URL="http://127.0.0.1:$PORT"
 healthy() { curl -sf -m 3 "$URL/health" >/dev/null 2>&1; }
 engine_alive() { [ -f "$REPO/logs/engine.pid" ] && kill -0 "$(cat "$REPO/logs/engine.pid")" 2>/dev/null; }
+# chatd, the Chat tab's service (OPS-155): its own process, from the checkout's ops/chatd.sh. start
+# starts it once the engine answers, stop stops it first (open runs end `interrupted`, Continue
+# resumes them), restart leaves it running; QSE_CHATD=off (local.env) keeps start from starting it.
+CHATD="$REPO/ops/chatd.sh"
+chat_up() { bash "$CHATD" status >/dev/null 2>&1; }
+chat_auto() {
+    [ "${QSE_CHATD:-on}" = off ] && return 0
+    [ -f "$REPO/run/setup-pending" ] && return 0       # setup mode: the Chat tab waits for the setup
+    chat_up && return 0
+    bash "$CHATD" start || echo "[tandem] WARNING: chatd did not start (above); the engine serves without the Chat tab. Log: $REPO/logs/chatd.log" >&2
+}
+chat_line() {
+    if [ "${QSE_CHATD:-on}" = off ] && ! chat_up; then echo "[tandem] chat: off (QSE_CHATD=off)"; return 0; fi
+    bash "$CHATD" status 2>&1 | head -1 || true
+}
 
 memcheck() {
     local avail need
@@ -851,7 +878,7 @@ memcheck() {
 }
 
 start() {
-    if healthy; then echo "[tandem] already healthy on :$PORT"; return 0; fi
+    if healthy; then echo "[tandem] already healthy on :$PORT"; chat_auto; return 0; fi
     memcheck
     local rc=0 t0 limit
     bash "$RUN/ops/start.sh" || rc=$?
@@ -871,6 +898,7 @@ start() {
     IFS=, read -r -a nv <<<"$NV"
     "$PY" "$REPO/tools/drop_page_cache.py" "$QWEN38_MODEL" "${nv[@]}" "$HEAD" "$CKPT8" "$CKPT16" 2>&1 | tail -1 || true
     echo "[tandem] healthy: $URL/v1"
+    chat_auto
 }
 
 smoke() {
@@ -915,21 +943,30 @@ PY
 
 case "${1:-}" in
     start) start ;;
-    stop) bash "$RUN/ops/stop.sh" "${2:-60}" ;;
+    stop) bash "$CHATD" stop || true; bash "$RUN/ops/stop.sh" "${2:-60}" ;;
     restart) bash "$RUN/ops/stop.sh" "${2:-60}"; start ;;
     status)
+        rc=0
         if healthy; then echo "[tandem] healthy on :$PORT"; curl -s -m 5 "$URL/v1/models"; echo
         elif engine_alive; then echo "[tandem] loading (pid $(cat "$REPO/logs/engine.pid"))"
-        else echo "[tandem] not running"; exit 1; fi ;;
+        else echo "[tandem] not running"; rc=1; fi
+        chat_line
+        exit "$rc" ;;
     smoke) smoke ;;
     logs) tail -n "${2:-100}" -f "$REPO/logs/engine.log" ;;
     env) cat "$ENV_FILE" ;;
-    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env" >&2; exit 2 ;;
+    chat)
+        case "${2:-status}" in
+            start|stop|restart|status) bash "$CHATD" "${2:-status}" ;;
+            logs) tail -n "${3:-100}" -f "$REPO/logs/chatd.log" ;;
+            *) echo "usage: $0 chat start | stop | restart | status | logs [n]" >&2; exit 2 ;;
+        esac ;;
+    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env | chat start|stop|restart|status|logs" >&2; exit 2 ;;
 esac
 CTL
 }
 if [ "$DRY" = 1 ]; then
-    note "would write $DIR/bin/tandem (start | stop | restart | status | smoke | logs | env)"
+    note "would write $DIR/bin/tandem (start | stop | restart | status | smoke | logs | env | chat)"
 else
     write_control > "$DIR/bin/tandem.tmp" && chmod 755 "$DIR/bin/tandem.tmp" && mv "$DIR/bin/tandem.tmp" "$DIR/bin/tandem"
     ok "wrote $DIR/bin/tandem"
@@ -950,7 +987,9 @@ After=network-online.target
 
 [Service]
 # bin/tandem start runs the release's ops/start.sh, which starts the server in the background
-# and returns once /health answers; the server stays in this unit's cgroup.
+# and returns once /health answers, then chatd (the Chat tab's service); both stay in this unit's
+# cgroup. bin/tandem stop stops chatd first, then the engine, so systemctl restart restarts chatd
+# too; tandem restart leaves chatd and its runs alone.
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=$DIR/bin/tandem start
@@ -983,7 +1022,8 @@ if [ "$SETUP" = 1 ]; then
         bash "$RUN/ops/start.sh" --setup --host "$HOST" || die "setup mode did not come up; log: $SRC/logs/engine.log"
     fi
     # no model is loaded yet: the user picks one in the Setup Guide (OPS-149)
-    printf '\n%sSetup mode%s: no model is loaded yet. Open the Setup Guide in a browser and pick a model there.\n\n' "$B" "$N"
+    printf '\n%sSetup mode%s: no model is loaded yet. Open the Setup Guide in a browser and pick a model there.\n' "$B" "$N"
+    printf 'The Chat tab starts with the engine once the setup is done (%s/bin/tandem chat status).\n\n' "$DIR"
     case "$HOST" in 127.0.0.1|0.0.0.0) printf '  On this machine:        http://127.0.0.1:%s/dashboard/#/setup\n' "$PORT" ;; esac
     if [ "$HOST" = 127.0.0.1 ]; then
         printf '  From another computer:  ssh -L %s:127.0.0.1:%s %s@%s\n' "$PORT" "$PORT" \
@@ -996,6 +1036,7 @@ if [ "$SETUP" = 1 ]; then
         printf '\n%sWARNING:%s no admin password is set, so anyone who reaches port %s can run the setup.\n' "$Y" "$N" "$PORT"
         printf '  Set one with: bash %s/ops/make-secrets.sh --admin   (then restart setup mode)\n' "$RUN"
     fi
+    chat_note
     exit 0
 fi
 if [ "$START" != 1 ]; then
@@ -1018,12 +1059,15 @@ cat <<EOF
 
 ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
-  Control:   $DIR/bin/tandem start | stop | status | smoke | logs
+  Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read
              and change it, the memory included; keep the port on a trusted network)
+  Chat:      http://$API_HOST:$PORT/dashboard/#/chat  chatd starts and stops with the engine
+             ($DIR/bin/tandem chat status). The sandbox is optional: without a container runtime
+             the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest
 
   OpenAI-compatible API at http://$API_HOST:$PORT/v1, model "$SERVED_MODEL", no API key needed:
 
@@ -1045,3 +1089,4 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
       }
     }
 EOF
+chat_note
