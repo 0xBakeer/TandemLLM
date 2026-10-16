@@ -266,7 +266,7 @@ COMMUNITY_SCHEMA = _obj({
                                 "notes": {"type": ["string", "null"], "maxLength": 300,
                                           "pattern": r"^[^\x00-\x1f<>]*$"}}},
     "links": {"type": "object", "additionalProperties": _HTTPS},
-    # VIS-175: the model's own profile that serves this pack (turboderp's Flash-Next branches): Use
+    # VIS-175: the model's own profile that serves this pack (turboderp's EXL3 branches): Use
     # selects that profile, and the pack never becomes a community/<id> profile of its own
     "profile": _ID,
 }, required=("schema", "id", "name", "base_model", "author", "hf", "format", "bpw", "size_gb", "load",

@@ -4,7 +4,7 @@
     models/community-index.json          the bundle: every entry of those folders (`--index`), shipped
                                          with the release
     models/community-builtin.json        the entries one of the model's own profiles serves (`profile`,
-                                         VIS-175: turboderp's Flash-Next packs), written by `--index`
+                                         VIS-175: turboderp's packs of one model), written by `--index`
                                          beside it; read from the release only, never fetched, since
                                          the profile ships with the release (and a box before 0.11.1
                                          would drop such an entry from the fetched index)
