@@ -13,6 +13,11 @@ the head with fp32 logits), q | k | v one EXL3 group where the three share a rat
 of a layer a `Relu2Bank` (tools/exl3_relu2.py); what the pack stored in fp16 (the norms, the conv taps, the
 router, the embedding) is cast back to bf16, which is exact for the BF16 checkpoint's values.
 
+From NVIDIA's ModelOpt checkpoint (Super VL's NVFP4: routed and shared experts NVFP4, the Mamba2 and attention
+projections and the head FP8) an NVFP4 projection is an `NVFP4Wide` on the W4A16 kernels (tools/nvfp4_relu2.py;
+a down projection with its input scaled into fp16's range), an FP8 one an `FP8Linear` (the head with fp32 logits),
+and the routed experts of a layer an `NVFP4Bank`.
+
 `load_any` takes either form of checkpoint: a GGUF (a `*.gguf` file, a directory holding one, or the file
 QSE_NH_GGUF names for a directory of config and tokenizer: gguf_load.py) or the BF16 safetensors below.
 
@@ -63,6 +68,36 @@ def _exl3_experts(idx: PackIndex, prefix: str, E: int, device):
                       for e in range(E)])
 
 
+def _modelopt_part(idx: PackIndex, base: str) -> tuple:
+    """(codes, scale, tensor scale) of a ModelOpt NVFP4 projection, host tensors as stored."""
+    return idx.read(base + ".weight"), idx.read(base + ".weight_scale"), idx.scale(base + ".weight_scale_2")
+
+
+def _nvfp4_experts(idx: PackIndex, prefix: str, E: int, device):
+    from tools.nvfp4_relu2 import NVFP4Bank
+    return NVFP4Bank.stack([(_modelopt_part(idx, prefix + f"experts.{e}.up_proj"),
+                             _modelopt_part(idx, prefix + f"experts.{e}.down_proj")) for e in range(E)], device)
+
+
+def _modelopt_linear(idx: PackIndex, base: str, fmt: str, device):
+    """A ModelOpt projection on the device: NVFP4 on the W4A16 kernels, FP8 with its tensor scale."""
+    from tools.nvfp4_linear import NVFP4Block
+    from tools.nvfp4_relu2 import FP8Linear, NVFP4Wide
+    if fmt == "fp8":
+        return FP8Linear(idx.read(base + ".weight", device), idx.scale(base + ".weight_scale"))
+    w, s, s2 = _modelopt_part(idx, base)
+    return NVFP4Wide(NVFP4Block(w.to(device), s.to(device), s2), wide=base.endswith("down_proj"))
+
+
+def _experts_any(idx: PackIndex, prefix: str, E: int, ffn: int, X: int, device, dtype):
+    fmt = idx.formats.get(prefix + "experts.0.up_proj")
+    if fmt == "exl3":
+        return _exl3_experts(idx, prefix, E, device)
+    if fmt == "nvfp4":
+        return _nvfp4_experts(idx, prefix, E, device)
+    return _experts(idx, prefix, E, ffn, X, device, dtype)
+
+
 def _fuse_qkv(W: dict, m: str) -> None:
     """q | k | v in one weight: a bf16 concatenation, or one EXL3 group when the three share a rate (else
     the engine launches them apart)."""
@@ -96,6 +131,9 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
         if idx.formats.get(base) == "exl3":
             W[name] = idx.exl3(base, device, out_fp32=name == "lm_head.weight")
             continue
+        if idx.formats.get(base) in ("nvfp4", "fp8"):
+            W[name] = _modelopt_linear(idx, base, idx.formats[base], device)
+            continue
         t = idx.read(name)
         want = torch.float32 if name.endswith(FP32) else dtype
         W[name] = t.to(device=device, dtype=want).contiguous()
@@ -109,18 +147,14 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, mtp: bool = True, log=p
     experts: dict = {}
     for n, li in enumerate(c.moe_layers):
         p = f"layers.{li}.mixer."
-        if idx.formats.get(p + "experts.0.up_proj") == "exl3":
-            experts[li] = _exl3_experts(idx, p, c.moe_experts[li], device)
-        else:
-            experts[li] = _experts(idx, p, c.moe_experts[li], c.moe_ffn[li], c.expert_in, device, dtype)
+        experts[li] = _experts_any(idx, p, c.moe_experts[li], c.moe_ffn[li], c.expert_in, device, dtype)
         idx.drop_cache()
         if log and n % 8 == 7:
             log(f"[nh-load] experts through layer {li}: {time.time() - t1:.1f} s")
     if mtp:
         for j, (k, ffn, E) in c.mtp_moe.items():
             p = f"mtp.layers.{j}.mixer."
-            experts[("mtp", j)] = _exl3_experts(idx, p, E, device) if idx.formats.get(p + "experts.0.up_proj") == "exl3" \
-                else _experts(idx, p, E, ffn, c.expert_in, device, dtype)
+            experts[("mtp", j)] = _experts_any(idx, p, E, ffn, c.expert_in, device, dtype)
         idx.drop_cache()
         m = "mtp.layers.0.mixer."
         if m + "q_proj.weight" in W:

@@ -89,6 +89,10 @@ class LiLiCorrConfig:
         self.factor_dim = int(d.get("lilicorr_factor_dim") or self.lc_hidden)
         self.vector_eps = float(d.get("lilicorr_vector_eps", 1e-4))
         self.logit_scale = float(d.get("lilicorr_logit_scale", 1.0))
+        # Super VL's drafter carries its own LM head (NVFP4, the target's vocabulary); Bolt's borrows the target's
+        self.own_head = bool(raw.get("has_own_lm_head", False))
+        if self.own_head and int(raw.get("draft_vocab_size") or self.vocab_size) != self.vocab_size:
+            raise ValueError("LiLiCorr with its own head over a draft vocabulary: unsupported")
         if not self.window:
             raise ValueError("LiLiCorr without a sliding window: the context ring needs one")
         if self.topk < 1 or self.topk > 16 or self.topk & (self.topk - 1):
@@ -508,9 +512,16 @@ def build_head(srv, path: str, log=print) -> LiLiCorrHead:
     if tuple(eng.taps) != tuple(cfg.target_layer_ids):
         raise ValueError(f"the engine taps {eng.taps}, the draft reads {cfg.target_layer_ids}")
     W = load_weights(path, str(eng.device))
-    model = LiLiCorrModel(cfg, W, eng.W["embeddings.weight"], eng.head)
+    head = eng.head
+    if cfg.own_head:
+        if "lm_head.weight" not in W:
+            raise ValueError("LiLiCorr config says has_own_lm_head, the checkpoint has no lm_head.weight")
+        hw = W["lm_head.weight"]
+        head = (lambda rows: F.linear(rows, hw).float()) if isinstance(hw, torch.Tensor) else \
+            (lambda rows: _lin_wide(rows, hw).float())
+    model = LiLiCorrModel(cfg, W, eng.W["embeddings.weight"], head)
     log(f"[lilicorr] {path}: {cfg.num_hidden_layers} layers, block {cfg.block_size}, window {cfg.window}, "
-        f"taps {cfg.target_layer_ids}, lattice top {cfg.topk}")
+        f"taps {cfg.target_layer_ids}, lattice top {cfg.topk}, head {'its own' if cfg.own_head else 'the target'}'s")
     return LiLiCorrHead(srv, model)
 
 
