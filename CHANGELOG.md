@@ -4,7 +4,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## 0.11.2, 2026-10-16
 
-0.11.2 starts chatd, the Chat tab's service, with the engine, and the Chat tab says when chatd is down instead of switching to the in-browser mock; update every box that runs the Chat tab. It fixes the install's scripts and secrets file, keeps a second chatd on the same Docker from taking another's sandboxes, makes the port preview open the app the model built, and reads the Context panel's live figures. Every model writes the same text as in 0.11.1.
+0.11.2 starts chatd, the Chat tab's service, with the engine, and the Chat tab says when chatd is down instead of switching to the in-browser mock; update every box that runs the Chat tab. It fixes the install's scripts and secrets file, keeps a second chatd on the same Docker from taking another's sandboxes, makes the port preview open the app the model built, and reads the Context panel's live figures. The Setup Guide sets the number of chats and both windows with steppers, and Nemotron 3.5 Super VL takes a window up to 1,048,576 tokens, its checkpoint's own. Every model writes the same text as in 0.11.1.
 
 ### Chat tab and install
 
@@ -21,7 +21,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - Chat tab design pass: no horizontal overflow from 320 px to 1440 px (a phone included), a quieter thread, cards, a figures line, and a tidier composer and panes (VIS-185).
 - chatd adopts, reaps, stops, kills and removes only its own sandbox containers. Each chatd labels its containers with an instance id kept in its data dir (`tandem.chat.instance`); a container from before the label counts as its own only when the chat's workspace folder is in that data dir, and is created again with the label at its next start. Before, a second chatd on the same Docker (a test install with its own `--data`) adopted the first one's containers and removed them as containers of chats it did not know (SRV-524).
 - A sandbox container removed or stopped outside chatd starts again at the next tool call, which says once that the sandbox restarted (files kept, processes gone). Before, chatd kept the box as running and every bash and render_page call answered `exec failed (404)`. The same sandbox failure three calls in a row ends the run as interrupted with a notice, whatever the calls were; Continue goes on once the sandbox is back (SRV-526).
-- The Continue card of an interrupted answer says why it stopped: its limit of model calls or the sandbox failing (the notice, in the card's place), the engine not answering, or chatd restarting. It said "The engine restarted" for every one, a run at its limit included. chatd records the reason in the answer's `stats.interrupted`; an answer from before has neutral words (VIS-197).
+- The Continue card of an interrupted answer says why it stopped: its limit of model calls or the sandbox failing (the notice, in the card's place), the engine not answering, or chatd restarting. It said "The engine restarted" for every one, a run at its limit included. chatd records the reason in the answer's `stats.interrupted`; an answer from before has neutral words. The card hides while a Continue run writes into the same answer (VIS-197).
 
 ### Setup Guide
 
