@@ -108,6 +108,8 @@ export class QseSetup extends LightElement {
   }
   disconnectedCallback(): void {
     this.devPoll?.stop();
+    if (this.estTimer) clearTimeout(this.estTimer);
+    if (this.planTimer) clearTimeout(this.planTimer);
     this.estCtrl?.abort();
     this.planCtrl?.abort();
     this.commCtrl?.abort();
