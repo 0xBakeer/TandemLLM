@@ -11,7 +11,7 @@ the user's shell and the agent never type into the same PTY.
                                                     text frames = {"type":"resize","cols","rows"}
 
 THE PORT PREVIEW. The container has no network, so a dev server inside it is reached through an
-exec of `relay.py connect <port>`: chatd writes the HTTP request to its stdin and reads the answer
+exec of `relay.py connect <port>` (localhost: ::1, then 127.0.0.1): chatd writes the HTTP request to its stdin and reads the answer
 from its stdout. Each answer carries the preview CSP (CONTRACT section 5); an HTML answer's
 absolute `/` URLs are rewritten to the port's prefix (a dev server started without `--base`).
 WebSocket upgrades (hot reload) are not passed through yet.
@@ -29,7 +29,7 @@ import threading
 import time
 
 from chatd.events import Subscriber
-from chatd.sandbox import Unavailable, demux
+from chatd.sandbox import Unavailable, demux, relay_cmd
 
 RING = 1024 * 1024
 IDLE_CLOSE_S = 30 * 60
@@ -329,7 +329,7 @@ class TerminalsMixin:
                 continue
             lines.append(f"{k}: {v}")
         exec_id, sock, first = self.sandboxes.open_exec(
-            cid, ["python3", "/opt/tandem/relay.py", "connect", str(port)], stdin=True)
+            cid, relay_cmd("connect", str(port)), stdin=True)
         box.busy += 1
         try:
             sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body)
@@ -381,7 +381,7 @@ class TerminalsMixin:
                 lines.append(f"{k}: {v}")
         box = self.sandboxes.box(cid)
         exec_id, sock, first = self.sandboxes.open_exec(
-            cid, ["python3", "/opt/tandem/relay.py", "connect", str(port)], stdin=True)
+            cid, relay_cmd("connect", str(port)), stdin=True)
         box.busy += 1
         handler.close_connection = True
         out = handler.wfile

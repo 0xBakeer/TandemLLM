@@ -215,11 +215,40 @@ def _search(ctx, a):
                                       "results": res["results"]})
 
 
+def _ports(ctx) -> list[dict] | None:
+    """What listens in the sandbox now (relay.py ports); None when that could not be read."""
+    mark = len(ctx.output_text())
+    ctx.exec(sandbox_mod.relay_cmd("ports"), timeout=20, quiet=True)
+    lines = ctx.output_text()[mark:].strip().splitlines()
+    try:
+        got = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return got if isinstance(got, list) else None
+
+
+def _ports_words(ports: list[dict] | None) -> str:
+    if ports is None:
+        return "what listens in the sandbox could not be read"
+    if not ports:
+        return "nothing listens on any port in the sandbox"
+    return "listening now: " + ", ".join(
+        f"{p['port']} on {' and '.join(p.get('addresses') or [])}" +
+        (f" ({p['command']})" if p.get("command") else "") for p in ports)
+
+
 def _render(ctx, a):
     w = min(2400, max(320, int(a.get("width") or 1280)))
     h = min(2400, max(240, int(a.get("height") or 800)))
     if a.get("port"):
-        url = f"http://127.0.0.1:{int(a['port'])}/{str(a.get('path') or '').lstrip('/')}"
+        # localhost, as curl in the sandbox dials it (::1, then 127.0.0.1): live (2026-10-16)
+        # Vite 5 listened on [::1]:5173 only and Chromium sent to 127.0.0.1 was refused
+        port = int(a["port"])
+        ports = _ports(ctx)
+        if ports is not None and port not in {p.get("port") for p in ports}:
+            raise ToolError(f"nothing listens on port {port} in the sandbox, on any address; "
+                            f"{_ports_words(ports)}")
+        url = f"http://localhost:{port}/{str(a.get('path') or '').lstrip('/')}"
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
@@ -229,8 +258,9 @@ def _render(ctx, a):
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
            f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught|ERROR' | grep -v -E "
            f"'dbus|Fontconfig|gpu|GPU|sandbox' | head -40")
+    mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
-    log = ctx.output_text()
+    log = ctx.output_text()[mark:]
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):
@@ -238,7 +268,9 @@ def _render(ctx, a):
             raise ToolError(f"the page did not render: {oom_words()}, the kernel killed Chromium. "
                             f"A lighter page or a smaller width and height may fit",
                             oom_data()) from None
-        raise ToolError("the page did not render: " + (log.strip() or "no screenshot")) from None
+        raise ToolError("the page did not render: " + (log.strip() or "no screenshot") +
+                        (f" ({url}; {_ports_words(_ports(ctx))})" if a.get("port") else "")
+                        ) from None
     errors = [ln for ln in log.splitlines() if ln.strip()]
     # a new render of the page as it is now, each call (its own file): live (2026-10-13) the
     # model read a correct clock as "still tilted" four times and took the screenshots for stale

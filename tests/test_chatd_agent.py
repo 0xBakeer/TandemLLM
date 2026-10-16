@@ -943,6 +943,132 @@ def test_render_page_killed_at_the_limit_says_out_of_memory():
         assert str(exc) == "the page did not render: no screenshot" and exc.data is None
 
 
+def test_render_page_on_a_port_dials_localhost_and_says_what_listens():
+    """Live (2026-10-16): Vite on `localhost` listened on [::1]:5173 only, Chromium sent to
+    127.0.0.1 was refused and the model read "Connection refused" as a network restriction."""
+    ws = Workspace(tempfile.mkdtemp())
+    listening = [{"port": 5174, "addresses": ["::1"], "command": "node /w/node_modules/.bin/vite"},
+                 {"port": 8001, "addresses": ["127.0.0.1", "::"], "command": ""}]
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self):
+            self.ws, self.cmds, self.out = ws, [], ""
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                assert cmd[:2] == ["python3", "-c"] and "def listening(" in cmd[2]
+                self.out += json.dumps(listening) + "\n"
+            elif "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx()
+    try:
+        T._render(ctx, {"port": 5173})
+        raise AssertionError("nothing on 5173: an error")
+    except T.ToolError as exc:
+        assert str(exc) == ("nothing listens on port 5173 in the sandbox, on any address; "
+                            "listening now: 5174 on ::1 (node /w/node_modules/.bin/vite), "
+                            "8001 on 127.0.0.1 and ::")
+    assert not any("chromium" in c[-1] for c in ctx.cmds)        # no Chromium for a closed port
+    ctx = Ctx()
+    res = T._render(ctx, {"port": 5174, "path": "/app"})
+    assert "http://localhost:5174/app" in ctx.cmds[-1][-1] and "127.0.0.1" not in ctx.cmds[-1][-1]
+    assert res.content.startswith("rendered http://localhost:5174/app at 1280x800")
+    listening.clear()
+    try:
+        T._render(Ctx(), {"port": 5173})
+    except T.ToolError as exc:
+        assert str(exc).endswith("; nothing listens on any port in the sandbox")
+
+
+def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():
+    """ops/sandbox/relay.py as chatd sends it (python3 -c): a server on ::1 only and one on
+    127.0.0.1 only both answer through `connect`; a closed port says what listens instead."""
+    import subprocess
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            body = f"hi {self.server.server_address[0]}".encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class H6(ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), H)]
+    try:
+        servers.append(H6(("::1", 0), H))
+    except OSError:
+        print("no IPv6 loopback here: the ::1 half is skipped")
+    for srv in servers:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def relay(*args, stdin=b""):
+        return subprocess.run(sb_mod.relay_cmd(*args), input=stdin, capture_output=True,
+                              timeout=30).stdout
+    try:
+        for srv in servers:
+            got = relay("connect", str(srv.server_address[1]),
+                        stdin=b"GET / HTTP/1.0\r\nHost: x\r\n\r\n")
+            assert got.startswith(b"HTTP/1.0 200") and got.endswith(
+                f"hi {srv.server_address[0]}".encode()), got
+        free = socket.socket()
+        free.bind(("127.0.0.1", 0))
+        closed = free.getsockname()[1]
+        free.close()
+        got = relay("connect", str(closed)).decode()
+        assert got.startswith("HTTP/1.1 502") and \
+            f"Nothing listens on port {closed} in the sandbox (dialed localhost: ::1 and " \
+            "127.0.0.1)" in got, got
+    finally:
+        for srv in servers:
+            srv.shutdown()
+            srv.server_close()
+
+
+def test_the_relay_reads_the_listening_ports_from_proc():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("relay", sb_mod.RELAY)
+    relay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(relay)
+    proc = tempfile.mkdtemp()
+    os.makedirs(os.path.join(proc, "net"))
+    head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  " \
+           "timeout inode\n"
+
+    def row(addr, port, st, ino):
+        return f"   0: {addr}:{port:04X} 00000000:0000 {st} 0:0 00:0 0 1000 0 {ino} 1 0 100 0 0\n"
+    with open(os.path.join(proc, "net", "tcp"), "w") as fh:
+        fh.write(head + row("0100007F", 3128, "0A", 11) + row("00000000", 8000, "0A", 12) +
+                 row("0100007F", 40000, "01", 13))                 # 01: a connection, not a listener
+    with open(os.path.join(proc, "net", "tcp6"), "w") as fh:
+        fh.write(head + row("00000000000000000000000001000000", 5173, "0A", 21) +
+                 row("0" * 32, 8000, "0A", 22))
+    for pid, cmd, inos in (("1", b"python3\0/opt/tandem/relay.py\0serve\0", [11]),
+                           ("40", b"node\0/w/node_modules/.bin/vite\0", [21]),
+                           ("41", b"python3\0-m\0http.server\0", [12, 22])):
+        os.makedirs(os.path.join(proc, pid, "fd"))
+        with open(os.path.join(proc, pid, "cmdline"), "wb") as fh:
+            fh.write(cmd)
+        for i, ino in enumerate(inos):
+            os.symlink(f"socket:[{ino}]", os.path.join(proc, pid, "fd", str(i + 3)))
+    assert relay.listening(proc) == [
+        {"port": 5173, "addresses": ["::1"], "command": "node /w/node_modules/.bin/vite"},
+        {"port": 8000, "addresses": ["0.0.0.0", "::"], "command": "python3 -m http.server"}]
+    assert relay.ports_words([]) == "nothing listens on any port in the sandbox"
+
+
 def test_a_sandbox_that_never_starts_fails_the_call_with_the_reason_and_the_run_goes_on():
     c = chat_with_sandbox()
     try:
@@ -1114,8 +1240,9 @@ class RelayBoxes(FakeBoxes):
         self.relays = 0
 
     def open_exec(self, cid, cmd, *, tty=False, stdin=False, env=None, workdir="/workspace"):
-        if "/opt/tandem/relay.py" not in cmd:
+        if cmd[-2:-1] != ["connect"]:
             return super().open_exec(cid, cmd, tty=tty, stdin=stdin, env=env, workdir=workdir)
+        assert cmd[:2] == ["python3", "-c"] and "def connect(port)" in cmd[2]  # this release's
         a, b = socket.socketpair()
         srv = socket.create_connection(("127.0.0.1", int(cmd[-1])))
         self.relays += 1

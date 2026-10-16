@@ -88,6 +88,21 @@ class Unavailable(Exception):
         self.data = data
 
 
+RELAY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ops", "sandbox",
+                     "relay.py")
+
+
+def relay_cmd(*args: str) -> list[str]:
+    """`relay.py <args>` in the sandbox, with this release's relay sent in the exec (python3 -c):
+    a container keeps the image it was made from, and its /opt/tandem/relay.py with it. Without
+    the source tree (an installed package), the image's own."""
+    try:
+        with open(RELAY) as fh:
+            return ["python3", "-c", fh.read(), *args]
+    except OSError:
+        return ["python3", "/opt/tandem/relay.py", *args]
+
+
 def limit_words() -> str:
     return f"{LIMIT_BYTES / GiB:g} GiB"
 
