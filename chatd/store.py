@@ -253,7 +253,13 @@ class _Tx:
 
     def __enter__(self):
         self.s.lock.acquire()
-        self.s.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.s.db.execute("BEGIN IMMEDIATE")
+        except Exception:
+            # BEGIN failed: __exit__ will never run, so release the lock here or every later
+            # transaction in this process deadlocks on it forever (issue #8).
+            self.s.lock.release()
+            raise
         return self.s.db
 
     def __exit__(self, kind, exc, tb):
