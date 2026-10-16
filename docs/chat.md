@@ -32,14 +32,57 @@ Continue resumes it. Stopping chatd ends its open runs `interrupted` the same wa
 
 ## Starting and stopping
 
+chatd starts with the engine and stops with `tandem stop` (OPS-155). `tandem start` and
+`ops/start.sh` (the `@reboot` line, the watchdog, the Setup Guide's apply job) start it once the
+engine answers `/health`; `tandem stop` stops it first, so open runs end `interrupted`. `tandem
+restart`, `ops/stop.sh` and every engine restart (the watchdog's, a hold's, a Setup Guide switch)
+leave it running. Setup mode and a hold's restart (`HOLD_RESTART=1`) do not start it. When the
+engine answers and chatd does not, the watchdog starts chatd, at most 3 times an hour, and never
+restarts the engine for it. A chatd that cannot start is a warning; the engine starts either way.
+
 ```
-bash ops/make-secrets.sh            # once: adds QSE_CHAT_FORWARD_KEY to secrets.env
-bash ops/chatd.sh start             # 127.0.0.1:8016, log in logs/chatd.log
-bash ops/chatd.sh status
-bash ops/chatd.sh stop
+~/TandemLLM/bin/tandem chat status            # pid, interpreter, data folder, URL, /health
+~/TandemLLM/bin/tandem chat start | stop | restart
+~/TandemLLM/bin/tandem chat logs [n]          # src/logs/chatd.log
 ```
 
-`ops/chatd.service` is the systemd user unit for when linger is enabled. At most 2 runs talk to the
+`tandem status` has one chatd line. `QSE_CHATD=off` in `run/local.env` keeps the engine's start
+from starting chatd. The script behind these commands is `~/TandemLLM/src/ops/chatd.sh` (`bash
+ops/chatd.sh start|stop|restart|status` in a checkout); `start` exits 1 with the log's last lines
+when chatd does not answer `/health`. It runs chatd under the first of: `CHATD_PY`, serve.env's
+`PY`, the install's venv (`~/TandemLLM/venv`), `./venv`, `$VIRTUAL_ENV`, `python3` (said so, with a
+warning below 3.11); chatd needs only the standard library, and the venv's `cryptography` for the
+MCP servers' stored secrets. chatd and the engine read one secrets file, `QSE_SECRETS`
+(`~/TandemLLM/state/secrets.env` in an install), which `ops/make-secrets.sh` writes; with no key
+there chatd makes `forward.key` in its data folder, which the engine reads too. chatd's address is
+`QSE_CHAT_URL` (`http://127.0.0.1:8016`), its data `QSE_CHAT_DATA` (`~/.tandemllm/chat`).
+
+Under the `--systemd` unit `systemctl --user stop tandemllm` stops chatd too, and `systemctl
+restart` restarts it (runs end `interrupted`); `tandem restart` keeps runs. `ops/chatd.service` is
+a unit for chatd alone, for the installer's layout; with it set `QSE_CHATD=off`.
+
+The sandbox is optional: without a container runtime the chat answers and uses the file tools;
+`ops/sandbox/install.sh` adds the rest.
+
+## When the Chat tab says the chat service is not running
+
+The tab probes `GET /v1/chat-app/capabilities` and never falls back to an in-browser mock (VIS-179).
+Any other answer than the chat API's is a panel with the cause, the server's message, the command
+and Check again; it checks again by itself every 5 s, growing to 30 s, and turns live without a
+reload.
+
+| the tab says | why | on the box |
+|---|---|---|
+| The chat service is not running. | 502 `chat_unavailable`: chatd does not answer | `tandem chat start` |
+| chatd is running but does not accept this server's key. | 403 `forbidden` from chatd | `tandem chat restart && tandem restart` |
+| This engine build has no Chat tab server. | 404 | run the installer again |
+| Cannot reach the engine server. | no answer | `tandem status` |
+
+A live tab that loses chatd shows one banner, "The chat service stopped", and recovers by itself.
+`?chat=mock` (and the Vite dev server) loads the in-browser mock, with a "mock data" badge; it is
+for dashboard development only.
+
+At most 2 runs talk to the
 engine at once (`QSE_CHAT_MAX_RUNS`); the others wait as `queued`. A run that waits for a
 permission prompt gives its slot back until the answer comes, and takes one again for its next call.
 
@@ -108,7 +151,7 @@ starts a thread per core (x264, make -j, xargs -P) takes more memory than it nee
   once, and their limits' sum
 - `QSE_SANDBOX_IMAGE` (`tandem-sandbox:1`)
 
-Export them before `ops/chatd.sh start`. Without a runtime, starting a sandbox answers 503
+Set them in `run/local.env` (chatd reads serve.env and local.env), then `tandem chat restart`. Without a runtime, starting a sandbox answers 503
 `sandbox_unavailable`, bash, render_page and the terminals are not offered, and the file tools work
 on the chat's workspace folder.
 

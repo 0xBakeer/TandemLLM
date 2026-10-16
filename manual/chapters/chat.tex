@@ -6,11 +6,14 @@ The dashboard's Chat tab (\texttt{\#/chat}) is a chat whose runs live on the ser
 
 The browser talks to the engine server on port 8000, which passes \code{/v1/chat-app/*} to chatd after the dashboard's own auth check. chatd (\code{python -m chatd}, on \code{127.0.0.1:8016}) is a standard-library Python process. It holds the stream to the engine, so a run does not end when a browser closes, and it writes every change of a conversation to an event log with a sequence number. A device that attaches gets a snapshot and then follows the log from there. chatd reaches the model as any client does, through \code{POST /v1/chat/completions}, and reads what the model can do from its card in \code{/v1/models}, never from its name.
 
+chatd starts with the engine (\code{tandem start}, \code{ops/start.sh}) and stops with \code{tandem stop}; \code{tandem restart} and every engine restart leave it running, and the watchdog starts a chatd that died. \code{QSE_CHATD=off} in \code{run/local.env} opts out.
+
 \begin{shell}
-bash ops/make-secrets.sh            # once: adds QSE_CHAT_FORWARD_KEY to secrets.env
-bash ops/chatd.sh start             # 127.0.0.1:8016, log in logs/chatd.log
-bash ops/chatd.sh status
+~/TandemLLM/bin/tandem chat status   # pid, interpreter, data folder, URL
+~/TandemLLM/bin/tandem chat start | stop | restart | logs
 \end{shell}
+
+chatd runs under the install's venv and reads the engine's secrets file (\code{QSE_SECRETS}). When chatd is down the tab says so, with the command to start it, and checks again by itself; the in-browser mock loads only for \code{?chat=mock}.
 
 At most two runs talk to the engine at once (\code{QSE_CHAT_MAX_RUNS}); the others wait as \code{queued}. A run that waits for a permission prompt gives its slot back until the answer comes. An engine restart does not touch chatd: a run that loses the engine retries for 10 minutes, then ends \code{interrupted} with its text kept, and Continue resumes it.
 
