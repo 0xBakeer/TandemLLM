@@ -80,7 +80,7 @@ def test_the_patch_entry():
     entry = head.group(2)
     assert log.index("## 0.11.2") < log.index("## 0.11.1")
     assert "### Chat tab and install" in entry
-    assert "Upgrade: run the installer again; chatd then starts with the engine." in entry
+    assert "Upgrade: run the installer again; chatd then starts with the engine" in entry
     assert "`tandem chat restart`" in entry and "Reported by Aron (issue #3)." in entry
     assert "aiohttp" not in entry.lower()
     assert "chatd.sh stop" not in entry
