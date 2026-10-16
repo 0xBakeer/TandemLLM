@@ -246,7 +246,9 @@ def pick(ports: list[dict] | None, want: int | None = None, project: str | None 
 
 
 def server_words(p: dict) -> str:
-    cmd = (p.get("command") or "").strip()
+    """`port 5173 (node vite)`: the command with its paths cut to their last part."""
+    cmd = " ".join(posixpath.basename(w) if "/" in w else w
+                   for w in (p.get("command") or "").split())[:80]
     return f"port {p['port']}" + (f" ({cmd})" if cmd else "")
 
 
@@ -430,7 +432,7 @@ def report_words(rep: dict | None, viewers: int) -> tuple[str, bool]:
     if not bad:
         empty = rep["elements"] == 0 and rep["text"] == 0 and rep["canvas"] == 0
         words += ("; the page is EMPTY (no elements, no text)" if empty else
-                  f"; no errors, {rep['elements']} elements" +
+                  f"; no errors, {rep['elements']} element{'' if rep['elements'] == 1 else 's'}" +
                   (f", {rep['canvas']} canvas" if rep["canvas"] else ""))
         bad = empty
     return words + ".", bool(bad)

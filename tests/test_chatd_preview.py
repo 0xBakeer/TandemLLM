@@ -246,7 +246,8 @@ def test_a_port_or_page_artifact_resolves_to_what_listens_or_waits():
                          "started": 9, "command": "node /workspace/pagoda-garden/node_modules/.bin/vite"}]
         a = c.ok("GET", f"/conversations/{cid}/artifacts/port%3A4173")
         assert a["url"].endswith("/sandbox/ports/5173/") and a["port"] == 5173
-        assert a["note"].startswith("Nothing listens on port 4173; this is port 5173 (node ")
+        assert a["note"] == ("Nothing listens on port 4173; this is port 5173 (node vite), the server "
+                             "that runs in the sandbox.")
         a = c.ok("GET", f"/conversations/{cid}/artifacts/port%3A5173")
         assert a["url"].endswith("/sandbox/ports/5173/") and "note" not in a
         a = c.ok("GET", f"/conversations/{cid}/artifacts/{page}")
