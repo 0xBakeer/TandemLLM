@@ -25,6 +25,7 @@ from __future__ import annotations
 import threading
 
 from proxy import config as config_mod
+from proxy.adapters import KINDS, Generic
 
 
 class Route:
@@ -92,11 +93,14 @@ class Table:
             bare = len(rows) == 1 and pub not in self.reserved
             for m in rows:
                 b = s["backends"][m["backend"]]
+                cls = KINDS.get(b["kind"], Generic)
                 out.append({"id": pub if bare else f"{b['id']}/{pub}", "object": "model",
                             "created": created, "owned_by": b["id"],
                             "tandem": {"backend": b["id"], "kind": b["kind"],
                                        "label": b["label"], "upstream_id": m["model"],
+                                       "name": cls.names.get(m["model"]), "cloud": cls.cloud,
                                        "context_length": m["context_length"],
+                                       "max_output": cls.max_output.get(m["model"]),
                                        "features": m["features"]}})
         return out
 

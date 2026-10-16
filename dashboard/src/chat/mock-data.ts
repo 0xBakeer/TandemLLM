@@ -7,7 +7,7 @@ export const MODEL = 'TandemLLM';
 
 export const DEFAULT_SETTINGS: ChatSettings = {
   model: MODEL,
-  profile: 'coding',
+  profile: null,
   effort: 'auto',
   thinking: true,
   tools: ['bash', 'read_file', 'write_file', 'edit_file', 'web_search', 'web_fetch'],
@@ -30,19 +30,16 @@ export const CAPABILITIES: Capabilities = {
       name: 'TandemLLM',
       weights: 'EXL3 4.5 bpw',
       max_len: 262_144,
-      profiles: [
-        { id: 'chat', name: 'chat', description: 'short answers, thinking off by default' },
-        { id: 'coding', name: 'coding', description: 'tools on, high effort, the sandbox ready' },
-        { id: 'writing', name: 'writing', description: 'longer prose, no tools' },
-        { id: 'research', name: 'research', description: 'web search and notes, citations kept' },
-      ],
+      profiles: [],
     },
+    { id: 'deepseek-flash', name: 'DeepSeek V4 Flash (cloud)', weights: '', max_len: 1_048_576, profiles: [], backend: 'cloud' },
+    { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (cloud)', weights: '', max_len: 1_048_576, profiles: [], backend: 'cloud' },
   ],
   efforts: ['auto', 'low', 'medium', 'high', 'xhigh'],
   commands: [
     { command: 'clear', description: 'start a new chat' },
     { command: 'compact', description: 'fold the older turns into a summary' },
-    { command: 'model', description: 'pick the model and the profile' },
+    { command: 'model', description: 'pick the model' },
     { command: 'effort', description: 'set the thinking effort' },
     { command: 'pane', description: 'open a pane: terminal, preview, files, diff' },
     { command: 'mcp', description: 'the MCP servers and their tools' },
@@ -96,9 +93,9 @@ export const PROMPTS: Prompt[] = [
 ];
 
 export const PRESETS: Preset[] = [
-  { id: 'ps_coding', name: 'Coding, high effort', model: MODEL, profile: 'coding', effort: 'high', thinking: true, tools: ['bash', 'read_file', 'write_file', 'edit_file'], prompt_id: null },
-  { id: 'ps_quick', name: 'Quick chat', model: MODEL, profile: 'chat', effort: 'low', thinking: false, tools: [], prompt_id: null },
-  { id: 'ps_research', name: 'Research', model: MODEL, profile: 'research', effort: 'high', thinking: true, tools: ['search', 'fetch_page', 'notes_search'], prompt_id: null },
+  { id: 'ps_coding', name: 'Coding, high effort', model: MODEL, profile: null, effort: 'high', thinking: true, tools: ['bash', 'read_file', 'write_file', 'edit_file'], prompt_id: null },
+  { id: 'ps_quick', name: 'Quick chat', model: MODEL, profile: null, effort: 'low', thinking: false, tools: [], prompt_id: null },
+  { id: 'ps_research', name: 'Research', model: MODEL, profile: null, effort: 'high', thinking: true, tools: ['search', 'fetch_page', 'notes_search'], prompt_id: null },
 ];
 
 export function sandboxFor(running: boolean, stopped_reason: SandboxStatus['stopped_reason'] = running ? null : 'idle'): SandboxStatus {

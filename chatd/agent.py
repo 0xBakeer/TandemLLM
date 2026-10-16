@@ -742,9 +742,11 @@ class AgentMixin:
             est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:
             raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio))
-        if window:
+        cap = int(info.get("max_output") or 0)
+        if window and (ours or cap):
+            # a backend's model without a known output limit gets none: its window is no limit
+            # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
-            cap = int(info.get("max_output") or 0)
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)
@@ -753,7 +755,7 @@ class AgentMixin:
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
                                "continue": run.continue_final, "estimate": est}),
                         run.step, run.id))
-        return render.encode(body), render.headers(conv.id, settings)
+        return render.encode(body), render.headers(conv.id)
 
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False) -> bool:
@@ -807,7 +809,7 @@ class AgentMixin:
             run.set_phase("prefill", "Compacting the conversation")
         t0 = time.monotonic()
         st, obj = self.engine.post_json("/v1/chat/completions", body,
-                                        render.headers(conv.id, settings), timeout=900.0)
+                                        render.headers(conv.id), timeout=900.0)
         if st != 200 or not isinstance(obj, dict):
             self.log(f"[compact] {conv.id} failed ({st})")
             return False

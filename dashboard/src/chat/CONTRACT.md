@@ -185,7 +185,7 @@ interface ConversationUsage {
 // ---- settings
 type Effort = 'low' | 'medium' | 'high' | 'xhigh';
 interface ChatSettings {
-  model: string; profile: string | null;
+  model: string; profile: string | null;          // VIS-203: always null; the Chat tab runs under the conductor's chat-app profile (client kind)
   effort: Effort | 'auto';                       // v0.2: 'auto' (the default) = the harness decides per turn
   thinking: boolean;                             // false = thinking off whatever the effort
   tools: string[];                               // tool ids on for this chat
@@ -228,7 +228,7 @@ interface SlashCommand { command: string; description: string; prompt_id?: strin
 interface Capabilities {
   models: {
     id: string; name: string; weights: string; max_len: number;
-    profiles: { id: string; name: string; description: string }[];
+    profiles: { id: string; name: string; description: string }[];                 // VIS-203: always []; the picker lists models only
     backend?: 'engine' | 'proxy' | 'cloud';                                         // v0.2
     capabilities?: { thinking: boolean; effort_levels: string[]; tools: boolean; vision: boolean; structured: boolean };   // v0.2, from the model card
     loaded?: boolean;

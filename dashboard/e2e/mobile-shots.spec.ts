@@ -35,7 +35,7 @@ for (const size of [390, 320] as Size[]) {
       const bar = page.locator('.rail-tab:visible');
       await expect(bar).toHaveText(['Chat', 'Usage', 'Performance', 'More']);
       // every control of the composer is in the document and reachable
-      for (const t of ['model and profile', 'thinking effort', 'tools, skills and MCP servers']) await expect(page.locator(`.ch-pill[title="${t}"]`)).toBeVisible();
+      for (const t of ['model', 'thinking effort', 'tools, skills and MCP servers']) await expect(page.locator(`.ch-pill[title="${t}"]`)).toBeVisible();
       await expect(page.locator('.ch-pill', { hasText: 'plan' })).toBeAttached();
       await expect(page.locator('.ch-stop')).toBeVisible();
       await expect(page.locator('.ch-queue-btn')).toBeVisible();
@@ -97,7 +97,7 @@ for (const size of [390, 320] as Size[]) {
       await expect(page.locator('.ch-pop')).toBeVisible();
       await page.waitForTimeout(250);
       await shot(page, `options-effort-${size}-${theme}`);
-      await page.locator('.ch-pill[title="model and profile"]').click();
+      await page.locator('.ch-pill[title="model"]').click();
       await expect(page.locator('.ch-pop')).toBeVisible();
       await page.waitForTimeout(250);
       await shot(page, `options-model-${size}-${theme}`);

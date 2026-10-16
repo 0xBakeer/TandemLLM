@@ -206,19 +206,6 @@ class Engine:
             return {"engine": health, "memory": health.get("memory") or {}}
         return {}
 
-    def profiles(self) -> list[dict]:
-        """The conductor's profiles, when the server runs one; [] otherwise."""
-        st, obj = self.get_json("/v1/conductor/profiles")
-        if st != 200 or not isinstance(obj, dict):
-            return []
-        rows = obj.get("profiles") or obj.get("data") or []
-        out = []
-        for p in rows if isinstance(rows, list) else []:
-            if isinstance(p, dict) and p.get("name") and not p.get("locked"):
-                out.append({"id": p["name"], "name": p["name"],
-                            "description": str(p.get("description") or "")[:200]})
-        return out
-
 
 def _newer(a: dict, b: dict) -> bool:
     """Is row `a` the one to show over `b`: in flight over finished, then the later end."""
