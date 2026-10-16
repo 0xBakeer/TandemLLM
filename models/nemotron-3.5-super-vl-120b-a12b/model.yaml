@@ -115,24 +115,24 @@ profiles:
   label: EXL3 2.0 bpw experts, 4-bit dense
   format: exl3
   bpw: 2.11
-  disk_gb: 35.0
-  weights_gib: 32.0
+  disk_gb: 36.84
+  weights_gib: 31.24
   drafters_gib: 1.32
   hf_repo: 0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-2.0
   hf_private: true
   recommended: false
   badges: []
   quality:
-    kl_vs_bf16: null
-    top1_pct: null
-    ppl: null
+    kl_vs_bf16: 0.3251
+    top1_pct: 82.12
+    ppl: 4.933
     date: '2026-10-16'
     source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, 8 wikitext-2 rows of 1,024 tokens
       from an HF job, BF16 ppl 3.84)'
   assets_required:
   - nemotron-super-vl-lilicorr
-  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt''s 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6. Size and memory estimated until measured.'
-  hf_revision: null
+  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt''s 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 31.24 GiB at load, decode 36.8 tok/s (the 4.0 pack 31.4) at a much larger loss (KL 0.325 against 0.049). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is not public yet.'
+  hf_revision: 612742ce7f5a3426742006470816810dd8d47082
   max_window: 262144
 - id: nemotron-super-vl-nvfp4
   label: NVFP4 (NVIDIA's checkpoint)
