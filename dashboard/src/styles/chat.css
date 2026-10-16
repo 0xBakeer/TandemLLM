@@ -426,9 +426,17 @@ qse-chat-thread {
 .ch-more {
   position: relative;
 }
-.ch-more-pop {
+/* the header's menu opens down from its button, right-aligned: `.ch-pop` rises (the composer's
+   pills), and up here it went under the top bar; on a phone `.ch-pop` spans its anchor, which here
+   is the button */
+.ch-more > .ch-more-pop {
+  top: calc(100% + 6px);
+  bottom: auto;
   right: 0;
   left: auto;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100dvh - var(--topbar-h) - 120px);
 }
 .ch-body {
   flex: 1;
