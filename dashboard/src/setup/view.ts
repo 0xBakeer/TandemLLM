@@ -483,6 +483,9 @@ export class QseSetup extends LightElement {
     const selection: SetupSelection = sel;
     try {
       const res = await setupApi.apply({ selection });
+      // the user may have left while apply was in flight: a response that lands elsewhere must
+      // not push its job's hash and drag them back into a setup wizard they abandoned
+      if (!this.isConnected || this.path[0] !== selection.model || this.wiz.step !== 'review') return;
       this.jobInitial = res.job;
       this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
