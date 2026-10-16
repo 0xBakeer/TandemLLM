@@ -354,6 +354,9 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-group"><div class="ch-pop-title">Tools in this chat</div>
         ${builtin.map((t) => html`<label class="ch-pop-check" data-pop-tool=${t.id}><input type="checkbox" .checked=${s.tools.includes(t.id)} @change=${() => toggle(t.id)} /><code>${toolLabel(t.name)}</code>${t.id === 'web_search' ? this.renderSearchWord(s) : html`<span class="ch-pop-desc">${t.description}</span>`}<span class="ch-policy">${s.policies[t.id] ?? t.policy}</span></label>`)}
       </div>
+      <div class="ch-pop-group"><div class="ch-pop-title">Checks</div>
+        <label class="ch-pop-check" data-pop-verify><input type="checkbox" .checked=${s.verify !== false} @change=${() => this.patch({ verify: s.verify === false })} /><code>verify apps</code><span class="ch-pop-desc">a run that builds or changes a page or app loads it in a browser before it ends, and the model reads what the check found</span></label>
+      </div>
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}
         ${this.resources.map((r) => html`<button type="button" class="ch-pop-item" @click=${() => (this.fire('ch-mcp-resource', { serverId: r.server, uri: r.uri }), (this.pop = 'none'))}><span class="ch-pop-name">${icon('file')} ${r.name}</span><span class="ch-pop-desc">attach, from ${r.serverName}</span></button>`)}

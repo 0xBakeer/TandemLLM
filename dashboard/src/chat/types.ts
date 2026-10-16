@@ -105,7 +105,21 @@ export interface Message {
   stats?: TurnStats;
 }
 
-export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart | TodosPart;
+export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart | TodosPart | VerifyPart;
+
+/** SRV-532: the end of an answer whose run built or changed a page or app: what the harness's
+ *  browser check and the model's own checks covered, and what they did not. `text` is a lead line,
+ *  then "Checked: ..." and "Not checked: ..." lines (copied as it is) */
+export interface VerifyPart {
+  type: 'verify';
+  /** passed; problems: the last check's, not fixed; not_run: no check could run (why in the text);
+   *  stale: files changed after the last check */
+  state: 'passed' | 'problems' | 'not_run' | 'stale';
+  text: string;
+  /** the items of the text's "Checked:" and "Not checked:" lines */
+  checked?: string[];
+  not_checked?: string[];
+}
 
 /** the open todo list as the model read it at the run's start; never drawn */
 export interface TodosPart {
@@ -142,7 +156,7 @@ export interface ToolCallPart {
   id: string;
   /** MCP tools: "mcp__<server>__<tool>" */
   name: string;
-  source?: ToolSource;
+  source?: ToolSource | { kind: 'harness' };
   risk?: ToolRisk;
   /** JSON text, growing while the model writes it */
   input: string;
@@ -156,6 +170,9 @@ export interface ToolCallPart {
   approved?: ToolApproval | null;
   /** a pane that can show this call's work */
   pane?: PaneRef | null;
+  /** SRV-532: a call the harness made itself, not the model (`verify`: the browser check before
+   *  the run ends) */
+  harness?: 'verify';
 }
 /** a tool call that ran without a prompt says who allowed it (the badge on its card) */
 export type ToolApproval = 'user' | 'rule' | 'auto' | 'yolo';
@@ -213,7 +230,7 @@ export interface TurnStats {
 
 // ---- the run ----------------------------------------------------------------------------------
 
-export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'finishing';
+export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing';
 
 export interface Run {
   id: string;
@@ -379,6 +396,9 @@ export interface ChatSettings {
   permission_mode?: PermissionMode;
   /** SRV-469: null = the global web search settings; else this chat's own choices */
   web_search?: WebSearchOverride | null;
+  /** SRV-532: a run that built or changed a page or app checks it in a browser before it ends;
+   *  absent on an older server */
+  verify?: boolean;
 }
 /** ask: every tool asks unless its policy says always; auto (the default): what stays in the
  *  sandbox runs (commands, reads, workspace writes), the internet asks; yolo: nothing asks */
