@@ -131,9 +131,60 @@ export interface ChatBackend {
   writeFile(id: string, path: string, content: string, etag?: string): Promise<void>;
   /** an artifact the model produced (an html preview, a diff, an image) */
   /** `url`: a same-origin address the preview loads in its sandboxed iframe (the server's files) */
-  artifact(id: string, ref: string): Promise<{ kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>;
+  artifact(id: string, ref: string): Promise<Artifact>;
+  /** SRV-511: what listens in the sandbox ([] when it is stopped) */
+  sandboxPorts(id: string): Promise<ListeningPort[]>;
+  /** start the dev server of the project in `dir` (the command comes from its package.json) */
+  serve(id: string, dir: string): Promise<{ dir: string; command: string; log: string }>;
+  /** what the preview pane loaded, for `present`'s answer to the model */
+  previewReport(id: string, report: PreviewReport): Promise<void>;
   /** PTY bytes as they come (the mock sends text) */
   terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession;
+}
+
+/** What a pane shows (chatd/panes.py `artifact`). A preview's target (SRV-511): `port` the server
+ *  it shows, `note` why that one (the port asked for does not listen; a bundler project's page runs
+ *  from its dev server), `waiting` when nothing can show yet (no `url` then). */
+export interface Artifact {
+  kind: string;
+  content: string;
+  mime: string;
+  title: string;
+  url?: string;
+  bytes?: number;
+  port?: number;
+  server?: string;
+  note?: string;
+  waiting?: PreviewWaiting;
+}
+export interface PreviewWaiting {
+  /** the port asked for, null for a page */
+  port: number | null;
+  /** the project whose dev server the page needs, and the command that starts it */
+  dir: string | null;
+  command: string | null;
+  message: string;
+}
+/** a listening TCP port in the sandbox: its process, working directory and start (clock ticks) */
+export interface ListeningPort {
+  port: number;
+  addresses?: string[];
+  command?: string;
+  cwd?: string;
+  started?: number;
+  /** false: it did not answer an HTTP request (a database, a language server) */
+  http?: boolean;
+}
+/** what a previewed page posted: its errors, the files that failed, how much it drew */
+export interface PreviewReport {
+  ref: string;
+  url: string;
+  title: string;
+  errors: string[];
+  failed: string[];
+  elements: number;
+  text: number;
+  canvas: number;
 }
 
 /** Why the chat API is not there, from the probe's status and `error.type` (never its text):

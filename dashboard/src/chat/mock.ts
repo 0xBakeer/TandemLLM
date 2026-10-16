@@ -862,6 +862,14 @@ export class MockChatBackend implements ChatBackend {
     if (!a) throw new Error(`no artifact ${ref}`);
     return a;
   }
+  // the mock's sandbox runs no server: the preview shows its seeded pages
+  async sandboxPorts(_id: string) {
+    return [];
+  }
+  async serve(_id: string, dir: string) {
+    return { dir, command: 'npm run dev', log: '/workspace/.tandem/outputs/dev-server.log' };
+  }
+  async previewReport(): Promise<void> {}
 
   terminal(id: string, session: string, onData: (data: string) => void): TerminalSession {
     const st = this.get(id);

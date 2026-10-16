@@ -17,6 +17,8 @@
 // 424.2 KB.
 // 428 KB with a live run's reasons on the Now figures and the slot row's owner (VIS-181) and the
 // Chat tab's panel for a box whose chatd is down, its re-probe and banner (VIS-179): 427.3 KB.
+// 430 KB with the preview's target, its waiting state and Start button, the page's report and the
+// new-server watch (SRV-511): 429.7 KB.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -35,8 +37,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 428 KB)`);
-if (total > 428 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 430 KB)`);
+if (total > 430 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

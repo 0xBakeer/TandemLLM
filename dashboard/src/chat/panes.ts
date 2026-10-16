@@ -5,7 +5,9 @@
 // iframe for an html or svg artifact, with a 390 px and a 1200 px width), Files (the sandbox's tree
 // and a viewer), Diff (unified, coloured), Markdown, Image, and a video, audio, PDF or binary file in
 // <qse-media-view> (its own chunk, loaded on first use; VIS-159). On a phone the view wraps this in
-// a full-screen sheet.
+// a full-screen sheet. A preview shows the server that runs when what it was asked for cannot show,
+// waits for one when none runs, and a server that starts listening opens in a Preview tab (the rules:
+// preview.ts, SRV-511).
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -13,13 +15,15 @@ import { bytes } from '../lib/format';
 import { renderMarkdown } from '../playground/markdown';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
+import { keyed } from 'lit/directives/keyed.js';
 import { LightElement } from '../ui/base';
 import { copyButton, icon } from '../ui/bits';
-import type { ChatBackend, TerminalSession } from './backend';
+import type { Artifact, ChatBackend, TerminalSession } from './backend';
 import { diffCounts, parseDiff, type DiffRow } from './terminal';
 import type { XtermHandle } from './xterm-pane';
 import { paneIcon, paneWord } from './thread';
 import { MEDIA_KINDS, filePane, latestPage, loadMediaView } from './file-panes';
+import { PORT_POLL_MS, WAIT_POLL_MS, freshServers, newestServer, portPane, readReport, reportWords } from './preview';
 import type { Conversation, PaneKind, PaneRef, SandboxFile } from './types';
 import './context-panel';
 
@@ -46,7 +50,18 @@ export class QseChatPanes extends LightElement {
   /** the plus menu's left edge in the panes box: under the plus button, inside the box */
   @state() private plusLeft = 6;
   @state() private plusTop = 40;
-  @state() private artifacts = new Map<string, { kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>();
+  @state() private artifacts = new Map<string, Artifact>();
+  /** a preview's state from its page's own report ("2 errors"), by ref */
+  @state() private reports = new Map<string, string>();
+  /** what the Start button did, by ref */
+  @state() private starting = new Map<string, string>();
+  /** bumped by a reload: a new iframe, even when its address stays */
+  @state() private reloads = 0;
+  /** the ports that listened at the last look (null: not looked yet), for the chat `portConv` */
+  private portSeen: Set<number> | null = null;
+  private portConv: string | null = null;
+  private portTimer: ReturnType<typeof setInterval> | null = null;
+  private waitTimer: ReturnType<typeof setTimeout> | null = null;
   @state() private files = new Map<string, SandboxFile[]>();
   @state() private file: FileView | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
@@ -66,12 +81,19 @@ export class QseChatPanes extends LightElement {
   connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('qse-theme', this.onTheme);
+    window.addEventListener('message', this.onMessage);
     document.addEventListener('pointerdown', this.onDocDown, true);
+    this.portTimer = setInterval(() => void this.watchPorts(), PORT_POLL_MS);
+    void this.watchPorts();
   }
 
   disconnectedCallback(): void {
     window.removeEventListener('qse-theme', this.onTheme);
+    window.removeEventListener('message', this.onMessage);
     document.removeEventListener('pointerdown', this.onDocDown, true);
+    if (this.portTimer) clearInterval(this.portTimer);
+    if (this.waitTimer) clearTimeout(this.waitTimer);
+    this.portTimer = this.waitTimer = null;
     this.resizeObs?.disconnect();
     for (const s of this.screens.values()) {
       s.session?.close();
@@ -103,11 +125,17 @@ export class QseChatPanes extends LightElement {
     this.plus = true;
   }
 
-  /** a kind from the plus menu; Preview opens the page the chat made last, or the Files pane */
+  /** a kind from the plus menu; Preview opens the newest running server, else the page the chat
+   *  made last, else the Files pane */
   private async pick(k: PaneKind): Promise<void> {
     this.plus = false;
     if (k !== 'preview') {
       this.fire('ch-pane-open', { pane: defaultPane(k) });
+      return;
+    }
+    const server = this.backend && this.convId ? newestServer(await this.backend.sandboxPorts(this.convId).catch(() => [])) : null;
+    if (server) {
+      this.fire('ch-pane-open', { pane: portPane(server) });
       return;
     }
     const page = latestPage(this.conv?.messages ?? []) ?? (await this.newestPage());
@@ -127,9 +155,71 @@ export class QseChatPanes extends LightElement {
     this.dispatchEvent(new CustomEvent(name, { detail, bubbles: true, composed: true }));
   }
 
+  /** A server that started listening opens in a Preview tab (preview.ts rule 2): not when a
+   *  preview already shows that port, and a waiting preview takes it itself. */
+  private async watchPorts(): Promise<void> {
+    if (!this.backend || !this.convId || document.hidden) return;
+    const id = this.convId;
+    const ports = await this.backend.sandboxPorts(id).catch(() => null);
+    if (!ports || id !== this.convId) return;
+    if (this.portConv !== id) {
+      this.portConv = id;
+      this.portSeen = null;
+    }
+    const { seen, fresh } = freshServers(this.portSeen, ports);
+    this.portSeen = seen;
+    const server = newestServer(fresh);
+    if (!server) return;
+    const active = this.panes.find((x) => x.id === this.active);
+    if (active?.kind === 'preview' && this.artifacts.get(active.ref)?.waiting) return void this.loadArtifact(active.ref);
+    const shown = this.panes.some((x) => x.kind === 'preview' && (x.ref === `port:${server.port}` || this.artifacts.get(x.ref)?.port === server.port));
+    if (!shown) this.fire('ch-pane-open', { pane: portPane(server) });
+  }
+
+  /** a previewed page's report (chatd/preview.py's shim) from the active preview's iframe: shown in
+   *  the pane's bar and passed to chatd, where `present` waits for it */
+  private onMessage = (e: MessageEvent) => {
+    const r = readReport(e.data);
+    if (!r) return;
+    const frame = this.querySelector<HTMLIFrameElement>('.ch-preview iframe');
+    const p = this.panes.find((x) => x.id === this.active);
+    if (!frame || e.source !== frame.contentWindow || p?.kind !== 'preview' || p.inline) return;
+    this.reports = new Map(this.reports).set(p.ref, reportWords(r));
+    if (this.backend && this.convId) void this.backend.previewReport(this.convId, { ref: p.ref, ...r }).catch(() => undefined);
+  };
+
+  /** a preview resolved again and loaded anew: the Reload button, and the model presenting it again */
+  refresh(ref: string): void {
+    const m = new Map(this.artifacts);
+    m.delete(ref);
+    this.artifacts = m;
+    const r = new Map(this.reports);
+    r.delete(ref);
+    this.reports = r;
+    this.reloads++;
+  }
+
+  private async startServer(ref: string, dir: string, command: string): Promise<void> {
+    if (!this.backend || !this.convId) return;
+    this.starting = new Map(this.starting).set(ref, `Starting ${command} in ${dir}...`);
+    try {
+      const r = await this.backend.serve(this.convId, dir);
+      this.starting = new Map(this.starting).set(ref, `Started ${r.command} in ${r.dir}; its output goes to ${r.log}. This pane opens the server when it listens.`);
+    } catch (e) {
+      this.starting = new Map(this.starting).set(ref, (e as Error).message);
+    }
+  }
+
   updated(changed: Map<string, unknown>): void {
     const p = this.panes.find((x) => x.id === this.active);
     if (!p || !this.backend || !this.convId) return;
+    if (p.kind === 'preview' && !p.inline && this.artifacts.get(p.ref)?.waiting && !this.waitTimer) {
+      // a waiting preview asks again until a server listens
+      this.waitTimer = setTimeout(() => {
+        this.waitTimer = null;
+        if (this.panes.find((x) => x.id === this.active)?.ref === p.ref) void this.loadArtifact(p.ref);
+      }, WAIT_POLL_MS);
+    }
     if (p.kind === 'preview' || p.kind === 'diff' || p.kind === 'markdown' || p.kind === 'image' || (MEDIA_KINDS.has(p.kind) && p.ref.startsWith('file:'))) {
       if (!p.inline && !this.artifacts.has(p.ref)) void this.loadArtifact(p.ref);
     } else if (p.kind === 'files') {
@@ -339,26 +429,38 @@ export class QseChatPanes extends LightElement {
   }
 
   private renderPreview(p: OpenPane): TemplateResult {
-    const a = p.inline ? { kind: 'preview', content: p.inline.content, mime: p.inline.lang === 'svg' ? 'image/svg+xml' : 'text/html', title: p.title ?? 'preview' } : this.artifacts.get(p.ref);
+    const a: Artifact | undefined = p.inline ? { kind: 'preview', content: p.inline.content, mime: p.inline.lang === 'svg' ? 'image/svg+xml' : 'text/html', title: p.title ?? 'preview' } : this.artifacts.get(p.ref);
     if (!a) return html`<p class="muted small ch-pane-empty">loading</p>`;
     if (a.kind === 'error') return html`<p class="ch-pane-empty err-ink">${a.content}</p>`;
+    const reload = html`<button type="button" class="btn btn-ghost btn-sm" title="Reload" aria-label="Reload" @click=${() => (p.inline ? (this.reloads++) : this.refresh(p.ref))}>${icon('refresh')}</button>`;
+    const w = a.waiting;
+    if (w) {
+      // nothing can show yet: why, the project's dev server to start, and a look every few seconds
+      const started = this.starting.get(p.ref);
+      return html`<div class="ch-preview">
+        <div class="ch-pane-bar"><span class="muted small">${a.title}</span><span class="grow"></span>${reload}</div>
+        <div class="ch-pane-empty ch-preview-wait">
+          <p>${w.message}</p>
+          ${w.command && w.dir ? html`<p><button type="button" class="btn btn-sm" ?disabled=${!!started} @click=${() => void this.startServer(p.ref, w.dir!, w.command!)}>${icon('terminal')} Start ${w.command}</button></p>` : nothing}
+          ${started ? html`<p class="muted small">${started}</p>` : nothing}
+        </div>
+      </div>`;
+    }
     const doc = a.mime === 'image/svg+xml' ? `<!doctype html><html><body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#fff">${a.content}</body></html>` : a.content;
     // a file or a port in the sandbox loads by its address, so its own scripts and styles load too;
     // the iframe never gets allow-same-origin (CONTRACT section 5)
-    const url = 'url' in a ? a.url : undefined;
-    const w = this.previewWidth === 'phone' ? 390 : this.previewWidth === 'desktop' ? 1200 : null;
+    const url = a.url;
+    const size = this.previewWidth === 'phone' ? 390 : this.previewWidth === 'desktop' ? 1200 : null;
+    const state = this.reports.get(p.ref);
     return html`<div class="ch-preview">
       <div class="ch-pane-bar">
         <span class="muted small">${a.title}</span>
+        ${state ? html`<span class="small err-ink" title="what the page reported">${state}</span>` : nothing}
         <span class="grow"></span>
         <div class="seg" role="radiogroup" aria-label="preview width">
           ${(['fit', 'phone', 'desktop'] as const).map((k) => html`<button type="button" class="seg-btn ${this.previewWidth === k ? 'is-on' : ''}" role="radio" aria-checked=${this.previewWidth === k} @click=${() => (this.previewWidth = k)}>${k === 'fit' ? 'fit' : k === 'phone' ? '390' : '1200'}</button>`)}
         </div>
-        <button type="button" class="btn btn-ghost btn-sm" title="Reload" aria-label="Reload" @click=${() => {
-          const f = this.querySelector<HTMLIFrameElement>('.ch-preview iframe');
-          if (f && url) f.src = url;
-          else if (f) f.srcdoc = f.srcdoc;
-        }}>${icon('refresh')}</button>
+        ${reload}
         <button type="button" class="btn btn-ghost btn-sm" title="Open in a new tab" aria-label="Open in a new tab" @click=${() => {
           if (url) {
             window.open(url, '_blank', 'noopener');
@@ -369,9 +471,10 @@ export class QseChatPanes extends LightElement {
           setTimeout(() => URL.revokeObjectURL(blob), 10_000);
         }}>${icon('external')}</button>
       </div>
-      <div class="ch-preview-frame ${w ? 'is-sized' : ''}">${url
-        ? html`<iframe title=${a.title} sandbox="allow-scripts allow-forms allow-popups allow-modals" referrerpolicy="no-referrer" src=${url} style=${w ? `width:${w}px` : ''}></iframe>`
-        : html`<iframe title=${a.title} sandbox="allow-scripts" referrerpolicy="no-referrer" .srcdoc=${doc} style=${w ? `width:${w}px` : ''}></iframe>`}</div>
+      ${a.note ? html`<div class="ch-pane-bar ch-preview-note"><span class="muted small">${a.note}</span></div>` : nothing}
+      <div class="ch-preview-frame ${size ? 'is-sized' : ''}">${keyed(`${this.reloads}:${url ?? ''}`, url
+        ? html`<iframe title=${a.title} sandbox="allow-scripts allow-forms allow-popups allow-modals" referrerpolicy="no-referrer" src=${url} style=${size ? `width:${size}px` : ''}></iframe>`
+        : html`<iframe title=${a.title} sandbox="allow-scripts" referrerpolicy="no-referrer" .srcdoc=${doc} style=${size ? `width:${size}px` : ''}></iframe>`)}</div>
     </div>`;
   }
 

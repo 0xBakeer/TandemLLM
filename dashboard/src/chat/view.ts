@@ -28,7 +28,7 @@ import { attachLabel, initialAttachment, onEvent as attachEvent, onStreamState, 
 import { adopt, applyEvent, messageText } from './store';
 import { badge, notify, notifyKind } from './notify';
 import type { QseChatComposer } from './composer';
-import { defaultPane, type OpenPane, type Dock } from './panes';
+import { defaultPane, type OpenPane, type Dock, type QseChatPanes } from './panes';
 import type { SettingsSection } from './settings';
 import { SECTIONS } from './settings';
 import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type PackageInfo, type Prompt, type StampedEvent, type ToolInfo, type WebSearchProvider } from './types';
@@ -383,7 +383,8 @@ export class QseChat extends LightElement {
       return;
     }
     if (e.type === 'pane.open' && !replay) {
-      void this.openPane(e.pane);
+      // a preview the model presents again resolves and loads anew: `present` waits for its report
+      void this.openPane(e.pane).then(() => e.pane.kind === 'preview' && this.querySelector<QseChatPanes>('qse-chat-panes')?.refresh(e.pane.ref));
       return;
     }
     const next = applyEvent(this.conv, e);
