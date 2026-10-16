@@ -179,6 +179,30 @@ def test_the_carry_guard_does_not_move_a_conversation():
     return "599 s and 601 s: slot 2 both times"
 
 
+def test_a_side_slot_that_holds_more_than_slot_0_beats_slot_0s_view():
+    """Live, 2026-10-17 01:45: a chat whose first prompt was the one slot 0 had just served (the same
+    system prompt and first message) counted as continuing slot 0's view at every turn, waited
+    SIDE_SLOT0_WAIT_S (3.0 s) for the busy slot 0 and took the lowest free side slot, its own by
+    luck. The side slot that holds more of the prompt than slot 0 is its home."""
+    with world([]) as (pool, clock):
+        first = conv(2, 12_000)                         # the first prompt both chats share
+        other = first + [6_000_000 + i for i in range(1_000)]
+        A.STATE["resident"] = Res(other, end=True)
+        assert A._par_view_keep(other, other)
+        mine = first + [7_000_000 + i for i in range(1_500)]
+        hold(pool.slots[2], mine[:13_000], mine[:12_900], end=True)
+        need, why = _need(mine)
+        assert why.get("wait") == "view" and why.get("home") == 2, why
+        assert "slot0_first" not in why and why["home_share"] > why["view_common"], why
+        # slot 0 holds more of it: slot 0 first, as before
+        hold(pool.slots[2], first, first, end=True)
+        A.STATE["resident"] = Res(mine[:13_400], end=True)
+        assert A._par_view_keep(mine[:13_400], mine[:13_400])
+        need, why = _need(mine)
+        assert why.get("slot0_first") and "home" not in why, why
+    return "home slot 2 (13,000 held) over slot 0's view (12,000 shared)"
+
+
 def test_the_longest_share_wins_and_a_free_slot_within_a_chunk_goes_first():
     with world([]) as (pool, clock):
         mine = conv(2, 46_444)
