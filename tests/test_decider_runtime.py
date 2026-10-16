@@ -4,7 +4,7 @@ The test matrix is ENG-179's Gherkin (ENG-180's table); row 1 (the SDK equivalen
 tests/test_decider_laya.py and on the box (tools/decider_equivalence.py).
 
   2  any decision model works         test_2_* (the fake model "other-decider", limits 256 and 96)
-  3  the planner refuses a load        test_3_* (MemAvailable 28 GiB, claim 8.2: refused_memory,
+  3  the planner refuses a load        test_3_* (MemAvailable 23 GiB, claim 3.0: refused_memory,
                                        nothing loaded, residency.jsonl has it)
   4  no load during a hold             test_4_* (the hold's pause file; the box lock)
   5  no two loads at once              test_5_* (a load held open in its thread)
@@ -121,13 +121,21 @@ def _planner_on(mem_gib, root, *, hold_file=None):
 
 def test_3_the_planner_refuses_a_load_that_breaks_the_floor():
     root = tempfile.mkdtemp(prefix="dec-res-")
-    plan, restore = _planner_on(28.0, root)
+    plan, restore = _planner_on(23.0, root)
     try:
         m = FakeModel("other-decider")
         reg = _reg(m, planner=plan)
+        said = []
+        reg.log = said.append
         d = reg.load("other-decider", wait=True)
         assert not d["allowed"] and d["reason"] == "refused_memory", d
-        assert d["claim_gib"] == 8.2 and d["need_gib"] == 21.0 and d["after_gib"] == 19.8, d
+        assert d["claim_gib"] == 3.0 and d["need_gib"] == 21.0 and d["after_gib"] == 20.0, d
+        # SRV-534: with no model loaded the refusal is said once, loudly, and /health has it
+        loud = [x for x in said if "WARNING: no decision model is loaded" in x]
+        assert len(loud) == 1 and "refused_memory" in loud[0] and "20.0 GiB" in loud[0], said
+        r = reg.refused()
+        assert (r["model"], r["reason"], r["after_gib"], r["need_gib"]) == \
+            ("other-decider", "refused_memory", 20.0, 21.0), r
         assert m.loads == 0 and reg.state["other-decider"] == "not_loaded"
         assert reg.refusal["other-decider"]["reason"] == "refused_memory"
         last = residency.Journal(root).last_refusal()
@@ -143,13 +151,15 @@ def test_3_the_planner_refuses_a_load_that_breaks_the_floor():
             "questions reuse a fresh refusal: no planner check, no journal line, per request"
         reg.load("other-decider", wait=True)               # an explicit Load asks again
         assert len(residency.Journal(root).tail(100)) == lines + 1
+        assert len([x for x in said if "WARNING" in x]) == 1, "the loud line goes out once"
     finally:
         restore()
     plan, restore = _planner_on(40.0, root)
     try:
         reg = _reg(FakeModel("other-decider"), planner=plan)
-        assert reg.load("other-decider", wait=True)["allowed"], "40 - 8.2 >= 21"
+        assert reg.load("other-decider", wait=True)["allowed"], "40 - 3 >= 21"
         assert reg.state["other-decider"] == "loaded"
+        assert reg.refused() is None, "a loaded model: nothing to report"
     finally:
         restore()
 
@@ -451,7 +461,7 @@ def test_the_seed_documents():
     assert schema.check("deciders", dict(d, models=[{"name": "x", "load": "sometimes"}]))
     roles = schema.seed("roles")
     assert roles["decider"]["endpoint"] == "self" and roles["decider"]["contract"] == "jev"
-    assert residency.claims(schema.seed("residency"), roles)["decider"]["gib"] == 8.2
+    assert residency.claims(schema.seed("residency"), roles)["decider"]["gib"] == 3.0
 
 
 if __name__ == "__main__":

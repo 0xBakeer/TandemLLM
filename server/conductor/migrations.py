@@ -21,6 +21,15 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  off after it was on stays off); chat's C3 to act by the same rule
                                  on its mode; `sampling` (greedy, loop escape on) when the
                                  document has none. The record lists what changed
+    2026-10-17-coding-narrator-off  SRV-534: the narrator off by default (0.11.3):
+    2026-10-17-chat-narrator-off    `ui.narrator` from "live" (0.3.28's shipped value) to "off"
+                                 when no stored version of the profile set another value
+                                 ("off", "on", "thoughts"; absent is the key's age, no choice)
+    2026-10-17-roles-narrator-off   the same for the roles document's `narrator.mode`, "on" to
+                                 "off" unless a stored version had "off" or "shadow"
+    2026-10-17-residency-decider    the decider's claim 8.2 GiB (the arbiter sidecar's) to the 3.0
+                                 measured with Laya in the engine (OPS-69), unless a stored
+                                 version had another value
 """
 
 from __future__ import annotations
@@ -83,6 +92,40 @@ def _guard(c3: bool = False):
     return change
 
 
+def _unless_chosen(get, old, new_value, put, what: str):
+    """A change of a value from its old shipped one to the new default, unless a stored version
+    held another value (someone chose); a missing key is no choice. `put(doc, value)` returns the
+    changed document."""
+    def change(doc, past):
+        try:
+            cur = get(doc)
+        except (KeyError, TypeError, AttributeError):
+            return None
+        if cur != old or _ever(past, get) - {old, None}:
+            return None
+        return put(doc, new_value), [f"{what}={new_value}"]
+    change.history = True
+    return change
+
+
+def _ui_narrator(doc, value):
+    return dict(doc, ui=dict(doc["ui"], narrator=value))
+
+
+def _role_narrator(doc, value):
+    return dict(doc, narrator=dict(doc["narrator"], mode=value))
+
+
+def _decider_claim(doc, value):
+    claim = dict(doc["claims"]["decider"], gib=value, basis="measured",
+                 note="Laya's three checkpoints in the engine's process, measured beside a side "
+                      "slot (OPS-69, 2026-10-06); the arbiter sidecar took 8.2")
+    return dict(doc, claims=dict(doc["claims"], decider=claim))
+
+
+_NARRATOR_OFF = _unless_chosen(lambda d: d["ui"]["narrator"], "live", "off", _ui_narrator,
+                               "ui.narrator")
+
 # (id, kind, name, change): `change(doc)`, or `change(doc, past)` when it has `history`; it
 # returns the new document, (the document, [what changed]), or None
 MIGRATIONS = [
@@ -95,6 +138,14 @@ MIGRATIONS = [
     ("2026-10-14-hermes-loop-guard", "profiles", "hermes", _guard()),
     ("2026-10-14-overnight-loop-guard", "profiles", "overnight", _guard()),
     ("2026-10-14-chat-loop-guard", "profiles", "chat", _guard(c3=True)),
+    ("2026-10-17-coding-narrator-off", "profiles", "coding", _NARRATOR_OFF),
+    ("2026-10-17-chat-narrator-off", "profiles", "chat", _NARRATOR_OFF),
+    ("2026-10-17-roles-narrator-off", "roles", None,
+     _unless_chosen(lambda d: d["narrator"]["mode"], "on", "off", _role_narrator,
+                    "narrator.mode")),
+    ("2026-10-17-residency-decider", "residency", None,
+     _unless_chosen(lambda d: d["claims"]["decider"]["gib"], 8.2, 3.0, _decider_claim,
+                    "claims.decider.gib")),
 ]
 
 

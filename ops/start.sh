@@ -264,14 +264,18 @@ for i in $(seq 1 60); do
         fi
         # v3: the narrator's model (the live lines) loads after the decision models (one load at a
         # time), in the start's idle window, through the residency planner; the server's keeper
-        # loads it again whenever it is not loaded
+        # loads it again whenever it is not loaded. 0.11.3: the role is off by default, and the
+        # engine answers 409 role_off without loading it
         if [ -n "${QWEN38_NARRATOR_MODEL:-}" ]; then
             HR=false; [ "${HOLD_RESTART:-0}" = "1" ] && HR=true
-            curl -s -m 10 -X POST -H 'Content-Type: application/json' \
+            NC="$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
                 -d "{\"service_start\": true, \"hold_restart\": $HR}" \
-                "http://127.0.0.1:$PORT/v1/conductor/narrator/load" >/dev/null \
-                && echo "[start] narrator: load asked" \
-                || echo "[start] narrator: the load did not answer (conductor off?)"
+                "http://127.0.0.1:$PORT/v1/conductor/narrator/load" || true)"
+            case "$NC" in
+                2*) echo "[start] narrator: load asked" ;;
+                409) echo "[start] narrator: not loaded (the narrator role is off, or the planner refused it; the engine log says which)" ;;
+                *) echo "[start] narrator: the load did not answer (conductor off?)" ;;
+            esac
         fi
         start_chatd
         exit 0

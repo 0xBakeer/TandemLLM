@@ -141,11 +141,15 @@ def test_device():
 
 def test_estimate_route():
     _setup(mem={"MemTotal": 121.63, "MemAvailable": 61.0})
-    code, e = call("POST", "/v1/setup/estimate", {"model": "qwen3.8-27b"})
+    # the reference box's tools: the narrator on (off by default since 0.11.3, SRV-534)
+    ref = {"model": "qwen3.8-27b", "components": {"narrator": True}}
+    code, e = call("POST", "/v1/setup/estimate", ref)
     assert code == 200 and e["fits"] is True and e["fits_worst"] is False, e
     assert e["total_gb"] == 67.35 and e["available_gb"] == 61.0
-    code, e2 = call("POST", "/v1/setup/estimate", {"selection": {"model": "qwen3.8-27b"}})
+    code, e2 = call("POST", "/v1/setup/estimate", {"selection": ref})
     assert code == 200 and e2["total_gb"] == e["total_gb"]
+    code, e3 = call("POST", "/v1/setup/estimate", {"model": "qwen3.8-27b"})
+    assert code == 200 and e3["total_gb"] == round(67.35 - 3.6, 2), e3["total_gb"]
     for body, status, kind in (
             ({"model": "qwen3.8-27b", "profile": "exl3-9.9"}, 400, "unknown_profile"),
             ({"model": "nope"}, 400, "unknown_model"),
@@ -156,7 +160,8 @@ def test_estimate_route():
         assert (code, err["error"]["code"]) == (status, kind), (body, code, err)
         assert err["error"]["message"]
     code, err = call("POST", "/v1/setup/estimate",
-                     {"model": "qwen3.8-27b", "components": {"conductor": False}})
+                     {"model": "qwen3.8-27b", "components": {"conductor": False,
+                                                              "narrator": True}})
     assert code == 422 and err["error"]["code"] == "invalid_combination"
     named = {x["component"] for x in err["error"]["errors"]}
     assert named == {"narrator", "laya", "shadow"}, err

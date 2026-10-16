@@ -113,11 +113,14 @@ def plan(mem_available_gib: float | None, doc: dict, roles: dict | None = None,
          engine_now_gib: float | None = None) -> dict:
     """The load order and what fits now, loading one after the other: each role that fits takes
     its claim from what the next one sees. `wanted`: these roles (default: the order, then any
-    other role with a claim). The engine's growth to its peak is counted once, up front."""
+    other role with a claim, less a role the roles document switches off: it never loads, so it
+    claims nothing). The engine's growth to its peak is counted once, up front."""
     cl = claims(doc, roles)
     order = [r for r in doc.get("order") or [] if r in cl]
     order += sorted(r for r in cl if r not in order)
-    if wanted is not None:
+    if wanted is None:
+        order = [r for r in order if ((roles or {}).get(r) or {}).get("mode") != "off"]
+    else:
         order = [r for r in order if r in wanted] + [r for r in wanted if r not in order]
     need = float(doc["floor_gib"]) + float(doc["margin_gib"])
     grow = growth(engine_peak_gib, engine_now_gib)

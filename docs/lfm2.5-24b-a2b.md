@@ -60,7 +60,7 @@ The conductor (Laya's three decision models, the narrator, the session monitor) 
 | key | LFM2.5 | effect |
 |-|-|-|
 | `served_classifier` | false | Laya alone answers the class question, also where the router document leaves its stage off |
-| `fallback` | `lean` | a turn no stage classified at its bar thinks at the profile's default level, with nothing added, and its tool turns too |
+| `fallback` | `lean` | a turn no stage classified at its bar thinks at the profile's default level, with no effort sentence, and its tool turns too; since 0.11.3 its class's core still goes in (SRV-534) |
 | `packages` | `core` | a class's core skill and the client's pins; no general package, no package question |
 | `no_package_classes` | `chat` | no package on the chat class |
 | `effort_notes`, `rules`, `memory` | false | the level sets the switch and the budget alone; no rules, no memory card or index |

@@ -62,8 +62,13 @@ def _est(**kw) -> dict:
     return E.estimate(m, E.check(m, dict({"model": m["id"]}, **kw)))
 
 
+# the reference box's tools: the narrator on beside Laya and the shadow reader (off by default since
+# 0.11.3, SRV-534)
+REF = {"narrator": True}
+
+
 def test_the_worked_example():
-    e = _est()
+    e = _est(components=REF)
     # by hand: os 10.0, weights 16.14, graphs 6.63, engine 1.28, allocator 2.6, 3 side slots x
     # 1.19, drafters 5.41, lookup 0.19, narrator 3.6, laya 1.6, shadow 1.52, vision 0.86, prompt
     # cache 0.43, state store 0.49; KV 4 x 32,768 x 106,752 bytes
@@ -85,7 +90,7 @@ def test_the_worked_example():
 def test_the_parts_match_the_live_split():
     # memory.split of /v1/dashboard/system, 2026-10-10 22:30: in_use 63,713,701,888 bytes of
     # which 603,979,776 committed KV; the estimate of the same selection with that KV
-    e = _est(profile="exl3-6.0")
+    e = _est(profile="exl3-6.0", components=REF)
     kv = next(p for p in e["parts"] if p["id"] == "kv")["gb"]
     est = e["total_gb"] - kv + 603_979_776 / GIB
     live = 63_713_701_888 / GIB
@@ -149,7 +154,7 @@ def test_the_selection_check():
     _refused(dict(base, profile="exl3-9.9"), 400, "unknown_profile")
     _refused(dict(base, components={"turbo": True}), 400, "unknown_component")
     _refused(dict(base, device="mac"), 400, "unknown_device")
-    _refused(dict(base, components={"conductor": False}), 422, "invalid_combination", "narrator")
+    _refused(dict(base, components={"conductor": False}), 422, "invalid_combination", "laya")
     _refused(dict(base, components={"drafters": False}), 422, "invalid_combination", "drafters")
     _refused(dict(base, components={"disk_tier": False}), 422, "invalid_combination", "nvme_spill")
     _refused(dict(base, components={"vision": "yes"}), 422, "invalid_selection")
@@ -174,7 +179,8 @@ def test_the_selection_check():
     assert E.check(m, dict(base, window=32_768, side_window=262_144))["side_window"] == 32_768
     _refused(dict(base, window=100_000), 422, "off_step", "window")
     _refused(dict(base, side_window=20_000), 422, "off_step", "side_window")
-    assert s["components"]["narrator"] is True and s["components"]["response_cache"] is False
+    # SRV-534: the narrator is off by default (0.11.3)
+    assert s["components"]["narrator"] is False and s["components"]["response_cache"] is False
     assert s["methods"]["sampled_tree"] == "det" and s["advanced"]["port"] == 8000
     s = E.check(m, dict(base, components={"conductor": False, "narrator": False, "laya": False,
                                           "shadow": False}))

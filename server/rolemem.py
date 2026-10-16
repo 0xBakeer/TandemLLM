@@ -181,6 +181,11 @@ class RegistryRole:
                 return "loading" if s == "warming" else s
         return "not_loaded"
 
+    def detail(self) -> dict:
+        """0.11.3: the planner's refusal while no model is loaded (`Registry.refused`)."""
+        return {"error": None, "refused": self.reg.refused() if hasattr(self.reg, "refused")
+                else None}
+
     def loaded(self) -> bool:
         return bool(self.reg.loaded()) and all(self.reg.state.get(n) == "loaded"
                                                for n in (self.out or self.reg.loaded()))

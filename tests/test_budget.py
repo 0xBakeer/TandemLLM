@@ -446,7 +446,7 @@ def test_the_planner_refuses_a_12_gib_role_at_37_9_free_with_the_engine_at_70_of
     # the old rule (no peak) admitted it -- the bug
     old = residency.check("reader", 37.9, doc)
     assert old["allowed"] and old["after_gib"] == 25.9
-    # the decider (8.2) still fits: 37.9 - 7 - 8.2 = 22.7 >= 21
+    # the decider (3.0) still fits: 37.9 - 7 - 3 = 27.9 >= 21
     assert residency.check("decider", 37.9, doc, engine_peak_gib=77, engine_now_gib=70)["allowed"]
     # with no reading of the engine the whole peak counts
     assert residency.check("decider", 60, doc, engine_peak_gib=77)["engine_growth_gib"] == 77
@@ -457,7 +457,7 @@ def test_the_plan_takes_the_growth_once():
     p = residency.plan(37.9, _residency_doc(), engine_peak_gib=77, engine_now_gib=70)
     assert p["engine_growth_gib"] == 7 and p["spendable_gib"] == 9.9
     rows = {r["role"]: r for r in p["rows"]}
-    assert rows["decider"]["allowed"] and rows["decider"]["after_gib"] == 22.7
+    assert rows["decider"]["allowed"] and rows["decider"]["after_gib"] == 27.9
     assert not rows["reader"]["allowed"]
 
 
