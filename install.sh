@@ -811,9 +811,14 @@ else
         bash -n "$RUN/ops/serve.env.tmp" || die "the generated serve.env does not parse"
         mv "$RUN/ops/serve.env.tmp" "$RUN/ops/serve.env"
         # the release's own service scripts, next to this env file (they source ./serve.env)
-        # and what the setup guide's apply job runs beside them (server/setup/apply.py)
+        # and what the setup guide's apply job runs beside them (server/setup/apply.py); roles.sh is
+        # what start.sh runs after /health, watchdog.sh the cron line of docs/operations.md, hold.sh
+        # a box-alone command (OPS-161). Not copied: chatd.sh runs from the checkout (it finds the
+        # chatd package there and this file through DIR), gate.sh is the release gate of a
+        # development checkout. tests/test_install_ops_copy.py keeps this list and their "$HERE/"
+        # calls in step.
         for s in start.sh stop.sh engines.sh use-profile.sh make-secrets.sh engine_status.py \
-                 fetch_weights.py; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
+                 fetch_weights.py roles.sh watchdog.sh hold.sh; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
         if [ "$SETUP" = 1 ]; then
             # setup mode until the setup guide's apply job removes it (a reboot comes back to it)
             mkdir -p "$SRC/run"
@@ -837,10 +842,14 @@ set -euo pipefail
 RUN="$TANDEM_DIR/run"
 ENV_FILE="$RUN/ops/serve.env"
 [ -f "$ENV_FILE" ] || { echo "[tandem] no $ENV_FILE; re-run install.sh" >&2; exit 1; }
+# a command that fails in the config (or a file it sources) names its file and line instead of
+# ending this script silently under set -e (OPS-159)
+trap 'echo "[tandem] ${BASH_SOURCE[0]:-$ENV_FILE}: line $LINENO failed (status $?); the config did not load" >&2; exit 1' ERR
 set -a
 # shellcheck source=/dev/null
 . "$ENV_FILE"
 set +a
+trap - ERR
 URL="http://127.0.0.1:$PORT"
 healthy() { curl -sf -m 3 "$URL/health" >/dev/null 2>&1; }
 engine_alive() { [ -f "$REPO/logs/engine.pid" ] && kill -0 "$(cat "$REPO/logs/engine.pid")" 2>/dev/null; }
@@ -893,10 +902,13 @@ start() {
             sleep 10
         done
     fi
-    # the weights are on the device now: drop their page cache (docs/operations.md)
-    local -a nv
+    # the weights are on the device now: drop their page cache (docs/operations.md). Only the paths
+    # serve.env names: an empty one (setup mode has no weights) was ".", the whole working directory
+    local -a nv drop=()
+    local f
     IFS=, read -r -a nv <<<"$NV"
-    "$PY" "$REPO/tools/drop_page_cache.py" "$QWEN38_MODEL" "${nv[@]}" "$HEAD" "$CKPT8" "$CKPT16" 2>&1 | tail -1 || true
+    for f in "$QWEN38_MODEL" ${nv[@]+"${nv[@]}"} "$HEAD" "$CKPT8" "$CKPT16"; do [ -n "$f" ] && drop+=("$f"); done
+    [ "${#drop[@]}" = 0 ] || "$PY" "$REPO/tools/drop_page_cache.py" "${drop[@]}" 2>&1 | tail -1 || true
     echo "[tandem] healthy: $URL/v1"
     chat_auto
 }
@@ -1061,6 +1073,7 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
   Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
+  Watchdog:  $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read

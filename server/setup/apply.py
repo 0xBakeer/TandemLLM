@@ -347,7 +347,13 @@ CLIENT_FACING = {
 
 
 def secrets_file() -> str:
-    return os.environ.get("QSE_SECRETS") or os.path.expanduser("~/.qwen38-spark-engine/secrets.env")
+    """The secrets file the engine reads, in ops/start.sh's order: QSE_SECRETS (an install's
+    DIR/state/secrets.env), $QSE_STATE_DIR/secrets.env, ~/.qwen38-spark-engine/secrets.env."""
+    if os.environ.get("QSE_SECRETS"):
+        return os.path.expanduser(os.environ["QSE_SECRETS"])
+    if os.environ.get("QSE_STATE_DIR"):
+        return os.path.join(os.path.expanduser(os.environ["QSE_STATE_DIR"]), "secrets.env")
+    return os.path.expanduser("~/.qwen38-spark-engine/secrets.env")
 
 
 def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,

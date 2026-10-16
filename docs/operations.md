@@ -54,6 +54,13 @@ At boot, two cron lines bring the service up:
     @reboot sleep 90 && $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
     * * * * * $HOME/<checkout>/ops/watchdog.sh
 
+On a box that `install.sh` set up, the scripts run from `run/ops`, beside the `serve.env` the installer rendered with this box's paths; the checkout's `src/ops/serve.env` is the release's template. The installer copies `start.sh`, `stop.sh`, `engines.sh`, `roles.sh`, `watchdog.sh`, `hold.sh`, `use-profile.sh`, `make-secrets.sh`, `engine_status.py` and `fetch_weights.py` there on every run; `chatd.sh` stays in `src/ops`. The lines are:
+
+    @reboot sleep 90 && $HOME/TandemLLM/bin/tandem start >> $HOME/TandemLLM/src/logs/boot.log 2>&1
+    * * * * * $HOME/TandemLLM/run/ops/watchdog.sh
+
+`bin/tandem` reads `run/ops/serve.env` under `set -e`. A missing `ops/active-profile` is the normal state of a plain install and loads the template's values; a command in the config that fails stops it with the file and the line. Boxes installed before 0.11.2 need one run of the installer to get both, and the scripts above (OPS-159, OPS-161).
+
 `ops/qwen38-engine.service` is a systemd user unit for the same job. A user unit only survives logout with `loginctl enable-linger`, which needs root. Install one mechanism, never both: two supervisors for one port start the service twice.
 
 ## Setup mode and the setup guide
