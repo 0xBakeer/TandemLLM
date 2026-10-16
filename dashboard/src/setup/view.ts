@@ -487,8 +487,11 @@ export class QseSetup extends LightElement {
     try {
       const old = this.device?.active_profile;
       const res = await setupApi.apply({ selection, ...(this.removeAfter && old && old !== selection.profile ? { remove_after: [old] } : {}) });
+      // the user may have left while apply was in flight: a response that lands elsewhere must
+      // not push its job's hash and drag them back into a setup wizard they abandoned
+      this.confirmOpen = false;     // a Back press during apply must not leave the modal up,
+      if (!this.isConnected || this.path[0] !== selection.model || this.wiz.step !== 'review') return;   // even when the answer owns nothing
       this.jobInitial = res.job;
-      this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
     } catch (e) {
       this.applyError = this.applyErrorText(e);
