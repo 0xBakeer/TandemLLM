@@ -159,6 +159,29 @@ def test_tokens_and_rates_while_decoding():
     assert r["decode_tps_now"] is None            # no two samples yet
 
 
+def test_a_side_slots_request_reads_its_own_slots_blocks():
+    """`--parallel N`: a side slot's generation publishes its BlockStats in the slot's values,
+    which `STATE` read from the live thread does not see; live (2026-10-16, Nemotron 3.5 Super VL,
+    QSE_PARALLEL=3) a request on slot 1 had no rounds until it ended."""
+    c = Clock()
+    own = Blocks(8)
+    own.t_first, own.t_last, own.accept = None, None, {3: {2: 8}}
+    side = {1: own}
+    reg = _reg(c, blocks=Blocks(20), slot_blocks=side.get, hz=4)
+    rec, _, lp = _decoding(c, reg)
+    rec.slot = 1
+    reg.last_prefill_fn = lambda: lp
+    r = _row(_valid(reg.snapshot()), "chatcmpl-1")
+    assert r["blocks"] == 8 and r["tokens_per_block"] == 5.0, r
+    assert r["activity"]["decode"]["rounds"] == 8 and \
+        r["activity"]["decode"]["accept_mean"] == 2.0, r["activity"]["decode"]
+    rec.slot = 0                                   # slot 0 is STATE's own
+    assert _row(reg.snapshot(), "chatcmpl-1")["blocks"] == 20
+    side.clear()                                   # a side slot without counts: none, not slot 0's
+    rec.slot = 1
+    assert _row(reg.snapshot(), "chatcmpl-1")["blocks"] is None
+
+
 def test_the_final_row_equals_the_response_timings():
     c = Clock()
     reg = _reg(c, blocks=Blocks(10))

@@ -94,11 +94,19 @@ from server.activity import REPLAY
 from server.usage import client_cached_of
 
 
-def _own_blocks(rec, bs):
-    """The block counts a row reads: a side-lane job's own (server/preempt.py), else
-    the running generation's."""
+def _own_blocks(rec, bs, slot_blocks=None):
+    """The block counts a row reads: a side-lane job's own (server/preempt.py), a side slot's
+    request its slot's (`slot_blocks(index)`, `--parallel N`: the generation publishes them in
+    the slot's own values, which `STATE` read from this thread does not see; live 2026-10-16 a
+    request on slot 1 had no rounds until it ended, and beside one on slot 0 it read slot 0's),
+    else the running generation's."""
     job = getattr(rec, "lane_job", None)
-    return job.blocks if job is not None else bs
+    if job is not None:
+        return job.blocks
+    slot = getattr(rec, "slot", None)
+    if slot_blocks is not None and isinstance(slot, int) and slot > 0:
+        return slot_blocks(slot)
+    return bs
 
 CONTRACT = "1.2"
 INTERVAL_S = 1.0
@@ -210,8 +218,10 @@ class LiveRegistry:
     def __init__(self, *, blocks=None, last_prefill=None, engine=None, clock=time.time,
                  perf=time.perf_counter, keep_s: float = KEEP_S, history: int = HISTORY,
                  interval: float = INTERVAL_S, hz: int = DEFAULT_HZ, activity: bool = True,
-                 queue_timeout=None, sock_closed=None, windows: dict | None = None):
+                 queue_timeout=None, sock_closed=None, windows: dict | None = None,
+                 slot_blocks=None):
         self.blocks_fn = blocks or (lambda: None)
+        self.slot_blocks_fn = slot_blocks or (lambda i: None)
         self.last_prefill_fn = last_prefill or (lambda: None)
         self.engine_fn = engine or (lambda: {})
         self.queue_timeout_fn = queue_timeout or (lambda: None)
@@ -468,7 +478,7 @@ class LiveRegistry:
                         ring = self._fast[r.request_id] = collections.deque(
                             maxlen=2 * max(1, self.hz) + 2)
                     n = int(r.n_live)
-                    rbs = _own_blocks(r, bs)
+                    rbs = _own_blocks(r, bs, self.slot_blocks_fn)
                     ring.append((now_p, n, int(getattr(rbs, "blocks", 0) or 0)
                                  if rbs is not None and r.t_first is not None else 0))
                     self._tool_mark(r, n)
@@ -797,7 +807,7 @@ class LiveRegistry:
         return None
 
     def _activity(self, rec, now_p: float, bs, lp, place) -> tuple[dict, list]:
-        bs = _own_blocks(rec, bs)
+        bs = _own_blocks(rec, bs, self.slot_blocks_fn)
         state = act.state_of(rec)
         events = act.events_of(rec)
         since = (now_p - events[-1][0]) * 1e3 if events else None
@@ -934,7 +944,7 @@ class LiveRegistry:
         return fwd / (ms / 1e3) if fwd and ms else None
 
     def _row(self, rec, now_p: float, ended: float | None, bs) -> dict:
-        bs = _own_blocks(rec, bs)
+        bs = _own_blocks(rec, bs, self.slot_blocks_fn if ended is None else None)
         live = ended is None
         if not live:
             phase = "done"

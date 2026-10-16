@@ -5148,6 +5148,14 @@ def _monitor_mode() -> dict:
     return {"conductor": {"mode": "off" if mon.mode == "raw" else mon.mode}}
 
 
+def _slot_blocks(i: int):
+    """Side slot `i`'s running `BlockStats` (its own values; None without side slots)."""
+    pool = dict.get(STATE, "pool")
+    slots = getattr(pool, "slots", None) or []
+    v = slots[i].values if 0 < i < len(slots) else None
+    return v.get("blocks") if v else None
+
+
 def live_registry() -> "live_mod.LiveRegistry":
     """The in-flight view behind `/v1/dashboard/live`. Reads the running
     `BlockStats`, `last_prefill` and the engine block off STATE; never the engine lock."""
@@ -5156,7 +5164,7 @@ def live_registry() -> "live_mod.LiveRegistry":
         hz = int(STATE.get("live_hz", live_mod.DEFAULT_HZ))
         reg = STATE["live"] = live_mod.LiveRegistry(
             blocks=lambda: STATE.get("blocks"), last_prefill=lambda: STATE.get("last_prefill"),
-            engine=_live_engine, hz=hz,
+            slot_blocks=_slot_blocks, engine=_live_engine, hz=hz,
             activity=bool(STATE.get("live_activity", True)) and hz > 0,
             queue_timeout=lambda: float(STATE.get("queue_timeout", 120.0)),
             windows=STATE.get("live_windows"))
