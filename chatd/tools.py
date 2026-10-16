@@ -371,8 +371,10 @@ def _library_read(ctx, a):
     if st != 200 or not isinstance(obj, dict):
         raise ToolError(f"no skill {name!r} in the library")
     ref = obj.get("reference") or ""
-    return Result(f"# {obj.get('name')}\n\n{obj.get('body') or ''}" +
-                  (f"\n\n## Reference\n\n{ref}" if ref else ""))
+    from chatd.verify import kit_note
+    text = f"# {obj.get('name')}\n\n{obj.get('body') or ''}" + (f"\n\n## Reference\n\n{ref}"
+                                                                if ref else "")
+    return Result(text + kit_note(text, ctx.ws))
 
 
 def _todo_write(ctx, a):
