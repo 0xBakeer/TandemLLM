@@ -35,9 +35,14 @@
 0.9.2 & 10-15 & install fixes: the checksum step reads a download's globs; after \code{install.sh --setup} the 27B's EXL3 profiles take \code{base-plain} \\
 0.10.0 & 10-15 & a fourth model, Nemotron 3.5 Bolt 74B-A9B: seven EXL3 sizes, NVIDIA's IQ2 GGUF and its LiLiCorr drafter; a 1~GiB limit for each Chat tab sandbox; attachments never inlined past the window \\
 0.11.0 & 10-16 & a fifth model, Nemotron 3.5 Super VL 120B-A12B: EXL3 packs at 4.0 and 2.0, NVIDIA's NVFP4 release read as stored, its LiLiCorr drafter \\
+0.11.1 & 10-16 & chatd's access to the sandbox's folders follows no symlink; StairCut price files for Bolt's EXL3 2.5 to 6.0; each weight pack's maker in the setup guide; the install through the setup guide \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.11.1, the Chat tab's sandbox folders}\label{sec:changelog-0111}
+
+0.11.1 is a security fix: chatd reads and writes the chat's workspace and the sandbox's home without following a symlink, for uploads, the file tools, snapshots and the Open WebUI runner's files. Update every box that runs the Chat tab, and restart chatd (\code{ops/chatd.sh stop}, then \code{start}). Bolt's EXL3 packs 2.5 to 6.0 get their StairCut price files, so every pack drafts at least as fast as it decodes plain (Table~\ref{tab:nh-profiles}). Two contributions: a pinned asset downloads at its revision, and NemotronH's fingerprint covers its GGUF reader and file, so Bolt's and Super VL's saved conversations from 0.10.0 and 0.11.0 read their prompt again once. The setup guide names each weight pack's maker, and the install goes through the setup guide. Every model writes the same text as in 0.11.0.
 
 \section{0.11.0, Nemotron 3.5 Super VL}\label{sec:changelog-0110}
 
