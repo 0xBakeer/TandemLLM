@@ -9,7 +9,7 @@ The container runs with no network but its loopback. Two jobs:
     relay.py connect PORT   (an exec per request) connect to localhost:PORT and pipe stdin to it
                             and its answer to stdout: chatd's way to a dev server in the sandbox
                             for the preview pane. ::1, then 127.0.0.1, by address (not /etc/hosts).
-                            Live (2026-10-16) Vite 5 on `localhost` listened on [::1]:5173 only
+                            Seen: Vite 5 on `localhost` listened on [::1]:5173 only
                             (Node 17+ takes the resolver's order) and a dial to 127.0.0.1 alone
                             was refused while curl in the sandbox answered 200
     relay.py ports [--http] the TCP ports something listens on in the sandbox, as JSON: [{port,

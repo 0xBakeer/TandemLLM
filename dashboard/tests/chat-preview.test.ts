@@ -35,7 +35,7 @@ describe('a server that starts listening', () => {
 });
 
 describe("a previewed page's report", () => {
-  const msg = { tandemPreview: 1, url: 'https://tandem.khaled.de/v1/chat-app/conversations/C/sandbox/ports/5173/', title: 'Pagoda', errors: ['TypeError: x'], failed: ['script https://x/src/main.js'], elements: 4, text: 0, canvas: 1 };
+  const msg = { tandemPreview: 1, url: 'https://tandem.example/v1/chat-app/conversations/C/sandbox/ports/5173/', title: 'Pagoda', errors: ['TypeError: x'], failed: ['script https://x/src/main.js'], elements: 4, text: 0, canvas: 1 };
   it('is read only from the shim, with its lists capped', () => {
     expect(readReport({ type: 'other' })).toBeNull();
     expect(readReport('tandemPreview')).toBeNull();
