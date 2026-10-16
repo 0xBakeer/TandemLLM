@@ -13,7 +13,8 @@ the user's shell and the agent never type into the same PTY.
 THE PORT PREVIEW. The container has no network, so a dev server inside it is reached through an
 exec of `relay.py connect <port>` (localhost: ::1, then 127.0.0.1): chatd writes the HTTP request to its stdin and reads the answer
 from its stdout. Each answer carries the preview CSP (CONTRACT section 5); an HTML answer's
-absolute `/` URLs are rewritten to the port's prefix (a dev server started without `--base`).
+absolute `/` URLs, a script's absolute imports and a style sheet's `url(/...)` are rewritten to the
+port's prefix (a dev server started without `--base`).
 WebSocket upgrades (hot reload) are not passed through yet.
 """
 
@@ -324,8 +325,10 @@ class TerminalsMixin:
         lines = [f"{handler.command} {path} HTTP/1.1", f"Host: 127.0.0.1:{port}",
                  "Connection: close"]
         for k, v in handler.headers.items():
+            # no accept-encoding: the rewrites below read the answer's bytes
             if k.lower() in ("host", "connection", "cookie", "authorization", "upgrade",
-                             "keep-alive", "x-tandem-forward") or k.lower().startswith("x-tandem"):
+                             "keep-alive", "x-tandem-forward", "accept-encoding") or \
+                    k.lower().startswith("x-tandem"):
                 continue
             lines.append(f"{k}: {v}")
         exec_id, sock, first = self.sandboxes.open_exec(
@@ -360,10 +363,14 @@ class TerminalsMixin:
             keep.append((k.strip(), v.strip()))
         if b"transfer-encoding: chunked" in hdrs.lower():
             payload = _dechunk(payload)
+        prefix = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}/".encode()
         if ctype.startswith("text/html"):
-            prefix = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}/"
             payload = re.sub(rb'(src|href|action)=(["\'])/(?!/)',
-                             lambda m: m.group(1) + b"=" + m.group(2) + prefix.encode(), payload)
+                             lambda m: m.group(1) + b"=" + m.group(2) + prefix, payload)
+        elif "javascript" in ctype:
+            payload = _JS_ABS.sub(lambda m: m.group(1) + m.group(2) + prefix, payload)
+        elif ctype.startswith("text/css"):
+            payload = _CSS_ABS.sub(lambda m: m.group(1) + prefix, payload)
         handler._send(status, payload, ctype, tuple(keep) + (
             ("Content-Security-Policy", PREVIEW_CSP), ("X-Content-Type-Options", "nosniff")))
 
@@ -419,6 +426,13 @@ class TerminalsMixin:
                 sock.close()
             except OSError:
                 pass
+
+
+#: a module's absolute imports (`from "/src/a.js"`, `import "/@vite/client"`, `import("/x")`): a
+#: dev server that serves ES modules (Vite) writes them so, and the browser asked the dashboard's
+#: origin for them; live (2026-10-16) a Vite app's index came through and its 18 modules were 404
+_JS_ABS = re.compile(rb'((?:\bfrom|\bimport)\s*\(?\s*)(["\'])/(?![/*])')
+_CSS_ABS = re.compile(rb'(url\(\s*["\']?)/(?![/*])')
 
 
 def _dechunk(data: bytes) -> bytes:

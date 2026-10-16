@@ -1301,9 +1301,18 @@ def app_server():
                     if m is None:
                         return
                     ws.send(m[0], b"echo:" + m[1])
+            ctype = "text/html"
             body = b'<script src="/app.js"></script><a href="/about">about</a>'
+            if self.path.endswith(".js"):          # Vite's way: a module's absolute imports
+                ctype = "text/javascript"
+                body = (b'import "/@vite/client";\nimport { a } from "/src/a.js?v=1";\n'
+                        b'import b from "./b.js"; const c = import("/c.js"); const s = "/x";')
+                assert "Accept-Encoding" not in self.headers, "the rewrite reads plain bytes"
+            elif self.path.endswith(".css"):
+                ctype = "text/css"
+                body = b'a{background:url(/img/x.png)} b{background:url(//cdn/y.png)}'
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", ctype)
             self.send_header("Set-Cookie", "x=1")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -1331,6 +1340,14 @@ def test_the_port_preview_proxies_pages_and_websockets():
         body = body.decode()
         assert st == 200 and f'src="{base}/app.js"' in body and f'href="{base}/about"' in body
         assert "frame-ancestors 'self'" in h["Content-Security-Policy"] and "Set-Cookie" not in h
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/src/main.js",
+                             headers={"Accept-Encoding": "gzip"})
+        assert st == 200 and body.decode() == (
+            f'import "{base}/@vite/client";\nimport {{ a }} from "{base}/src/a.js?v=1";\n'
+            f'import b from "./b.js"; const c = import("{base}/c.js"); const s = "/x";'), body
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/s.css")
+        assert body.decode() == (f"a{{background:url({base}/img/x.png)}} "
+                                 "b{background:url(//cdn/y.png)}")
         sock = ws_open(c.port, base + "/socket")
         ws_send(sock, b"hello", op=1)
         assert ws_recv(sock) == b"echo:hello"
