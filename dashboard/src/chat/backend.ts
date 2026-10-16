@@ -1,6 +1,8 @@
 // What the Chat tab needs from a server, as one interface. Two implementations: remote.ts
-// speaks the contract in CONTRACT.md; mock.ts plays it in the browser so the tab runs with no
-// backend. pickBackend() probes the server once and falls back to the mock with a badge.
+// speaks the contract in CONTRACT.md; mock.ts plays it in the browser for `?chat=mock` and the
+// Vite dev server. pickBackend() probes the server; any other answer than the chat API's is a
+// named state the tab shows (chatd not running, its key refused, no chat routes, ...), never the
+// mock (VIS-179).
 
 import { apiBase } from '../api/client';
 import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
@@ -134,18 +136,73 @@ export interface ChatBackend {
   terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession;
 }
 
-export type BackendChoice = { backend: ChatBackend; reason: 'forced' | 'probed' | 'fallback' };
+/** Why the chat API is not there, from the probe's status and `error.type` (never its text):
+ *  chatd_down     502 `chat_unavailable`: the engine server answers, chatd does not
+ *  chatd_refused  403 `forbidden`: chatd answers and refuses the server's forward key
+ *  no_chat_routes 404: an engine build without the Chat tab's server
+ *  setup_mode     503 `setup_mode`: the box is in the Setup Guide
+ *  not_an_engine  200 that is not JSON: a static server or a proxy's index.html
+ *  server_error   any other status (a proxy's 502 page included)
+ *  offline        the fetch failed: no server reached */
+export type ChatDownCause = 'chatd_down' | 'chatd_refused' | 'no_chat_routes' | 'setup_mode' | 'not_an_engine' | 'server_error' | 'offline';
+export interface ChatDown {
+  cause: ChatDownCause;
+  /** the HTTP status, null when nothing answered */
+  status: number | null;
+  /** the server's own message, shown as it wrote it ('' when there is none) */
+  message: string;
+}
 
-/** `?chat=mock` forces the mock; else the server's chat routes are probed once (a 404 or a
- *  network failure means the mock, with the badge). */
-export async function pickBackend(params: URLSearchParams, load: { mock: () => Promise<ChatBackend>; remote: () => Promise<ChatBackend> }): Promise<BackendChoice> {
-  if (params.get('chat') === 'mock') return { backend: await load.mock(), reason: 'forced' };
+export type BackendChoice = { backend: ChatBackend; reason: 'forced' | 'probed' | 'dev'; down?: undefined } | { backend: null; reason: 'unavailable'; down: ChatDown };
+
+/** The probe's answer as a state: null is the live chat API. */
+export function classifyProbe(status: number, json: boolean, body: unknown): ChatDown | null {
+  const err = body && typeof body === 'object' ? (body as { error?: { type?: unknown; message?: unknown } }).error : undefined;
+  const type = typeof err?.type === 'string' ? err.type : '';
+  const message = typeof err?.message === 'string' ? err.message : '';
+  const at = (cause: ChatDownCause): ChatDown => ({ cause, status, message });
+  if (status >= 200 && status < 300) return json ? null : at('not_an_engine');
+  if (status === 502 && type === 'chat_unavailable') return at('chatd_down');
+  if (status === 403 && type === 'forbidden') return at('chatd_refused');
+  if (status === 404) return at('no_chat_routes');
+  if (status === 503 && type === 'setup_mode') return at('setup_mode');
+  return at('server_error');
+}
+
+/** A failed call of the live backend (remote.ts's ChatApiError: `status`, `body`) that says chatd
+ *  went away: the tab shows its banner and probes again, instead of a toast per call. */
+export function isChatDown(e: unknown): boolean {
+  const x = e as { status?: unknown; body?: unknown } | null;
+  return !!x && x.status === 502 && classifyProbe(502, true, x.body)?.cause === 'chatd_down';
+}
+
+/** GET /v1/chat-app/capabilities: null when the chat API answers, else why not. */
+export async function probeChat(): Promise<ChatDown | null> {
+  let res: Response;
   try {
-    const res = await fetch(apiBase() + '/v1/chat-app/capabilities', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
-    // a 200 that is not JSON is a static fallback (vite's index.html), not a chat server
-    if (res.ok && (res.headers.get('Content-Type') ?? '').includes('json')) return { backend: await load.remote(), reason: 'probed' };
-  } catch {
-    /* no server: the mock */
+    res = await fetch(apiBase() + '/v1/chat-app/capabilities', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
+  } catch (e) {
+    return { cause: 'offline', status: null, message: (e as Error)?.message ?? '' };
   }
-  return { backend: await load.mock(), reason: 'fallback' };
+  let json = (res.headers.get('Content-Type') ?? '').includes('json');
+  let body: unknown = null;
+  if (json) {
+    try {
+      body = await res.json();
+    } catch {
+      json = false; // a JSON type with no JSON in it is no chat API either
+    }
+  }
+  return classifyProbe(res.status, json, body);
+}
+
+/** `?chat=mock` forces the mock; else the server's chat routes are probed. Only the Vite dev
+ *  server (`dev`), which has no chat routes, falls back to the mock (with its badge); anywhere else
+ *  a probe that does not find the chat API is a state the tab names. */
+export async function pickBackend(params: URLSearchParams, load: { mock: () => Promise<ChatBackend>; remote: () => Promise<ChatBackend> }, dev: boolean = import.meta.env.DEV): Promise<BackendChoice> {
+  if (params.get('chat') === 'mock') return { backend: await load.mock(), reason: 'forced' };
+  const down = await probeChat();
+  if (!down) return { backend: await load.remote(), reason: 'probed' };
+  if (dev && (down.cause === 'no_chat_routes' || down.cause === 'not_an_engine')) return { backend: await load.mock(), reason: 'dev' };
+  return { backend: null, reason: 'unavailable', down };
 }

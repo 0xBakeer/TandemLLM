@@ -1574,9 +1574,6 @@ qse-chat-composer {
 .ch-starter:hover {
   border-color: var(--cobalt);
 }
-.ch-empty-note {
-  margin-top: 6px;
-}
 
 /* ---- the Context panel -------------------------------------------------------------------------- */
 .ch-ctx {
@@ -2926,8 +2923,23 @@ qse-chat-panes {
   .ch-head-model {
     display: none;
   }
+  /* the mock's badge stays on a phone: a slim bar under the header (VIS-179) */
+  .ch-head {
+    position: relative;
+  }
   .ch-mock-head {
-    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    margin: 0;
+    padding: 0 8px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+    background: var(--bg-2);
+    text-align: center;
+    line-height: 18px;
   }
   .ch-col {
     padding: 12px 12px 8px;

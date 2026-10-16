@@ -15,6 +15,8 @@
 // (VIS-151, VIS-155) on top: 423.7 KB; a lazy install view measured 424.0 KB, so no split.
 // 425 KB with the sandbox's reason on a call and the attachment chip's tokens (VIS-167, VIS-169):
 // 424.2 KB.
+// 428 KB with the Chat tab's panel for a box whose chatd is down, its re-probe and banner (VIS-179):
+// 427.0 KB, from 424.8 KB.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -33,8 +35,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 425 KB)`);
-if (total > 425 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 428 KB)`);
+if (total > 428 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
