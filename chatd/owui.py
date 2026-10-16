@@ -14,11 +14,12 @@ or `Action` class is refused: those are Open WebUI's filter layer and custom mod
 harness and the presets cover here.
 
 RUN. In the chat's sandbox, never on the host: the file and a small runner go to the sandbox's
-home (`~/.tandem/owui/`), the requirements install once per sandbox with `pip install --user`
-(pydantic too when the image lacks it), and the runner imports the file, sets the valves, fills
-Open WebUI's parameters with stand-ins (an event emitter that does nothing, a `__user__` with no
-personal data), calls the method and prints the result after a marker line. The call's other
-output is the tool's own printing.
+home (`~/.tandem/owui/`, written through SandboxDir: the sandbox owns that folder, so no symlink
+in it is followed and each file is a new one renamed into place), the requirements install once
+per sandbox with `pip install --user` (pydantic too when the image lacks it), and the runner
+imports the file, sets the valves, fills Open WebUI's parameters with stand-ins (an event emitter
+that does nothing, a `__user__` with no personal data), calls the method and prints the result
+after a marker line. The call's other output is the tool's own printing.
 
 STORE. `user_tools`: the source, the parsed spec, the valves' values sealed with the same vault as
 MCP secrets (the toolkit id as associated data). A valve whose name says key, token, secret or
@@ -38,12 +39,14 @@ import time
 from chatd import tools as tools_mod
 from chatd.ids import ulid
 from chatd.tools import Result, Tool, ToolError
+from chatd.workspace import SandboxDir
 
 MAX_SOURCE = 512 * 1024
 MARKER = "\x1eTANDEM-OWUI-RESULT "
 SECRET_VALVE = re.compile(r"key|token|secret|password|passwd|credential", re.I)
 OWUI_PARAMS = re.compile(r"^__\w+__$")
 TIMEOUT_S = 120
+OWUI_DIR = ".tandem/owui"           # in the sandbox's home
 
 RUNNER = r'''
 import asyncio, importlib.util, inspect, json, os, sys
@@ -380,18 +383,17 @@ class Owui:
         def run(ctx, args):
             r = self._row(tid)
             spec = json.loads(r["spec"])
+            # the home is the sandbox's (/home/agent, rw): a symlink it left at .tandem, owui
+            # or a file name is refused or replaced, never followed (SandboxDir)
             _, home, _ = self.svc.sandboxes.paths(ctx.cid)
-            d = os.path.join(home, ".tandem", "owui")
-            os.makedirs(d, exist_ok=True)
-            with open(os.path.join(d, f"{r['name']}.py"), "w") as fh:
-                fh.write(r["source"])
-            with open(os.path.join(d, "run.py"), "w") as fh:
-                fh.write(RUNNER)
+            d = SandboxDir(home, "/home/agent")
+            d.ensure()
+            d.write(f"{OWUI_DIR}/{r['name']}.py", r["source"].encode(), over_link=True)
+            d.write(f"{OWUI_DIR}/run.py", RUNNER.encode(), over_link=True)
             req_name = f"req-{ctx.call_id}.json"
-            fd = os.open(os.path.join(d, req_name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as fh:
-                json.dump({"file": f"{r['name']}.py", "method": method,
-                           "args": args, "valves": self._valves(r)}, fh)
+            d.write(f"{OWUI_DIR}/{req_name}", json.dumps(
+                {"file": f"{r['name']}.py", "method": method, "args": args,
+                 "valves": self._valves(r)}).encode(), mode=0o600, over_link=True)
             reqs = spec["requirements"]
             stamp = hashlib.sha256(" ".join(sorted(reqs)).encode()).hexdigest()[:12]
             q = " ".join(shlex.quote(x) for x in reqs)
