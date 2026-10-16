@@ -5,56 +5,51 @@ description: Building a WebGL scene with Three.js - renderer, camera, lights, me
 # Three.js scene
 
 Rules:
-- Import from one source (an ES module import map or a bundler), one version. Never mix a CDN build and a bundled one.
-- Order: renderer with `antialias`, `setPixelRatio(min(dpr, 2))`, `setSize`; a `PerspectiveCamera` placed to see the subject; one ambient or hemisphere light plus one directional light; then meshes.
-- Camera first. If nothing shows, the camera is inside, behind, or too far: print `camera.position` and the object's bounding box.
-- Reuse geometries and materials. Many identical objects: `InstancedMesh`. Target under 1,000 draw calls (`renderer.info.render.calls`).
+- One import source (an import map or a bundler), one version.
+- Renderer: `antialias`, `setPixelRatio(min(dpr, 2))`, `toneMapping = ACESFilmicToneMapping`; colour textures get `colorSpace = SRGBColorSpace`.
+- Light for the mood asked. Day: a sky-blue background, fog of the same colour starting beyond the subject, a `HemisphereLight` (sky, warm ground, ~1.5) and a sun `DirectionalLight` (~3) with shadows. Night is a choice, never the default; a day/night switch changes background, fog, both lights and exposure together.
+- Materials: a distinct, saturated colour per part; `metalness: 0` for wood, stone and leaves (metal without an environment map renders black); `flatShading` for low-poly forms. Foliage is clustered icosahedra or cones, never flat squares.
+- Camera first: if nothing shows, print `camera.position` and the subject's bounding box. Reuse geometries and materials; `InstancedMesh` for many of one.
 
-What goes wrong:
-- A black canvas: no light, a material that needs light (`MeshStandardMaterial`) with none, or the camera not looking at the object.
-- Shaking or z-fighting: `near` too small (use 0.1) or `far` too large for the scene scale.
-- Textures black: loaded after the first render with no `needsUpdate`, or a CORS block; read the console.
-
-Check: run 3 s, read `renderer.info.render` (calls, triangles) and the measured fps; screenshot at 1280 and 390; console 0 errors.
+Check: screenshot at 1280 and 390 and compare it with the request: daylight reads bright, the subject is recognisable, the colours differ. Console 0 errors; `renderer.info.render.calls` under 1,000.
 
 Done when:
-- [ ] Screenshot shows the lit subject centered at both widths.
-- [ ] Draw calls, triangles and fps read from `renderer.info` (through the state hook; the delivered page shows no fps or stats readout).
-- [ ] Orbit or key input through the browser tool moves the camera; position read back.
+- [ ] The screenshot shows the lit subject centered at both widths, in the light the request names.
+- [ ] Draw calls and fps read through the state hook (the page shows no stats readout).
+- [ ] Orbit or key input moves the camera; position read back.
 
 ## Reference
 
-Import map (no bundler):
+Import map:
 ```html
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.170.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.170.0/examples/jsm/"}}</script>
 ```
-Minimal scene:
+A day scene:
 ```js
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.shadowMap.enabled = true;
 document.body.appendChild(renderer.domElement);
-const scene = new THREE.Scene(); scene.background = new THREE.Color(0x111318);
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
-camera.position.set(4, 3, 6); camera.lookAt(0, 0, 0);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 0.8));
-const sun = new THREE.DirectionalLight(0xffffff, 1.2); sun.position.set(5, 10, 4); scene.add(sun);
-const cube = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ color: 0x3b82f6 }));
-scene.add(cube);
+const sky = 0x9fd3ff, scene = new THREE.Scene();
+scene.background = new THREE.Color(sky); scene.fog = new THREE.Fog(sky, 30, 120);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(8, 6, 12);
+scene.add(new THREE.HemisphereLight(0xdcefff, 0x8a7350, 1.5));
+const sun = new THREE.DirectionalLight(0xfff1d6, 3); sun.position.set(10, 18, 6); sun.castShadow = true; scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.MeshStandardMaterial({ color: 0x6fa04a }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+const cube = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshStandardMaterial({ color: 0xc8402c, metalness: 0 }));
+cube.position.y = 0.5; cube.castShadow = true; scene.add(cube);
 const controls = new OrbitControls(camera, renderer.domElement);
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 let frames = 0;
-renderer.setAnimationLoop(() => { frames++; cube.rotation.y += 0.01; controls.update(); renderer.render(scene, camera); });
-window.__state = () => ({ tandem_state: 1, frames, calls: renderer.info.render.calls, tris: renderer.info.render.triangles, cam: camera.position.toArray() });
+renderer.setAnimationLoop(() => { frames++; controls.update(); renderer.render(scene, camera); });
+window.__state = () => ({ tandem_state: 1, frames, calls: renderer.info.render.calls, cam: camera.position.toArray() });
 ```
-Instancing: `const m = new THREE.InstancedMesh(geo, mat, n); m.setMatrixAt(i, matrix); m.instanceMatrix.needsUpdate = true;`
-Disposal: `mesh.geometry.dispose(); mesh.material.dispose(); scene.remove(mesh);`
+Night: background and fog 0x0b1530, hemisphere 0.3, moon 0.8 (0xaac4ff), lanterns as `PointLight`s.
 
-More rules:
-- Resize handler updates `camera.aspect`, `updateProjectionMatrix()`, `renderer.setSize`.
-- Dispose geometries, materials, textures when removed; otherwise memory grows.
-
-More pitfalls:
-- Frame rate collapses: shadows on every light, per-frame `new` objects, thousands of meshes instead of one instanced mesh.
-- Controls do nothing: `controls.update()` missing in the loop, or the renderer canvas is behind another element.
+What goes wrong:
+- Dull, grey or dark: lights at 1 or less (dim since r155), a dark or grey background, fog nearer than the subject, metalness above 0. Black: no light, or the camera looks away.
+- Frame rate collapses: shadows on every light, `new` objects each frame, thousands of meshes instead of an `InstancedMesh`; dispose what you remove.
