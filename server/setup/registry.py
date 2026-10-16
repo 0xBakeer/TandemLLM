@@ -29,8 +29,10 @@ Community packs (models/<id>/community/<pack>.json, docs/community-weights.md) a
 community_errors: COMMUNITY_SCHEMA, the file's name is the id, the folder is the base model, the
 revision is a commit, the format has a load path, and the modalities are ones that load path serves
 (standalone: text only, ENG-271). `--check` reads them from the folders and checks that
-models/community-index.json is their index; the API reads the index in use (server/setup/community.py)
-and gives each model its `community` list, with the profiles community/<pack> (`profile`).
+models/community-index.json is their index (models/community-builtin.json for the entries one of the
+model's own profiles serves, VIS-175); the API reads the index in use (server/setup/community.py) and
+gives each model its `community` list, with the profiles community/<pack> (`profile`), or the own
+profile that serves the pack.
 """
 
 from __future__ import annotations
@@ -56,6 +58,9 @@ TASKS = ("prose", "chat", "code", "long32k", "long64k")
 GROUPS = ("speed", "roles", "caches", "disk", "features")
 FIELD_TYPES = ("enum", "int", "number", "bool", "string")
 ENV_KEY = r"^[A-Z][A-Z0-9_]*$"
+HF_REPO_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+GITHUB_LOGIN = r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$"
+MAKER_KINDS = ("ours", "vendor", "community")
 MODEL_ID = r"^[a-z0-9][a-z0-9.-]{0,63}$"
 # a string field without a pattern of its own: what a value written into serve.env may hold
 SAFE_VALUE = r"^[A-Za-z0-9._:-]{1,64}$"
@@ -95,7 +100,15 @@ _ASSET = _obj({"id": _ID, "label": _STR, "path": _STR, "also": {"type": "array",
                "satisfied_by": _IDS},
               required=("id", "label", "path", "also", "fetchable", "protected", "hf_repo", "source"))
 _PROFILE_REQUIRED = ("id", "label", "format", "bpw", "disk_gb", "weights_gib", "drafters_gib", "hf_repo",
-                     "hf_private", "recommended", "badges", "quality", "assets_required", "note")
+                     "hf_private", "recommended", "badges", "quality", "assets_required", "note", "made_by")
+# VIS-175: who made the weights: our own pack (ours), the vendor's release (vendor) or someone else's
+# (community, with the author's GitHub login); `repo` names the Hugging Face repository of the weights
+# when it is not hf_repo (Bolt's IQ2: hf_repo holds its text files, NVIDIA's GGUF repository the weights)
+_MADE_BY = _obj({"kind": {"enum": list(MAKER_KINDS)},
+                 "name": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^[^\x00-\x1f<>]+$"},
+                 "github": {"type": ["string", "null"], "pattern": GITHUB_LOGIN},
+                 "repo": {"type": ["string", "null"], "pattern": HF_REPO_ID}},
+                required=("kind", "name"))
 # SRV-337, all optional (a 27B profile has none of them): the repository branch, the largest window
 # that fits the device preset (null: none fits), a lookup table beside the weights (warm: in the page
 # cache; cold: read past it through a row cache), a tool's memory under this profile
@@ -109,7 +122,8 @@ _PROFILE = _obj({"id": _ID, "label": _STR, "format": {"enum": ["exl3", "nvfp4", 
                  "table": {"type": ["object", "null"],
                            "properties": {"gib": _NUM0, "policy": {"enum": ["warm", "cold"]}, "cache_gib": _NUM0},
                            "required": ["gib", "policy", "cache_gib"], "additionalProperties": False},
-                 "components_gib": {"type": "object", "additionalProperties": _NUM0}},
+                 "components_gib": {"type": "object", "additionalProperties": _NUM0},
+                 "made_by": _MADE_BY},
                 required=_PROFILE_REQUIRED)
 _LOSSLESS = _obj({"identical": {"type": "integer", "minimum": 0},
                   "near_tie": {"type": "integer", "minimum": 0},
@@ -207,7 +221,7 @@ MODALITIES = ("text", "image", "audio", "video")
 # the files under ~/.tandemllm/community/ that are not a pack's folder (community.py)
 _RESERVED_SUFFIXES = (".json", ".partial", ".env", ".tmp")
 _HTTPS = {"type": "string", "pattern": r"^https://[^\s\"'<>`]{1,400}$"}
-_HF_ID = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"}
+_HF_ID = {"type": "string", "pattern": HF_REPO_ID}
 _DATE = {"type": "string", "pattern": r"^20[0-9]{2}-[01][0-9]-[0-3][0-9]$"}
 _LINE = {"type": "string", "minLength": 1, "maxLength": 120, "pattern": r"^[^\x00-\x1f<>]+$"}
 _SOCIAL = {"type": "object", "additionalProperties": False, "required": [], "properties": {
@@ -224,8 +238,7 @@ COMMUNITY_SCHEMA = _obj({
     "name": _LINE,
     "base_model": {"type": "string", "pattern": MODEL_ID},
     "finetune_of": {"type": ["string", "null"], "pattern": _HF_ID["pattern"]},
-    "author": _obj({"github": {"type": "string",
-                               "pattern": r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$"},
+    "author": _obj({"github": {"type": "string", "pattern": GITHUB_LOGIN},
                     "name": {"type": ["string", "null"], "maxLength": 80, "pattern": r"^[^\x00-\x1f<>]*$"},
                     "social": _SOCIAL}, required=("github",)),
     "hf": _obj({"repo": _HF_ID, "revision": {"type": "string", "pattern": r"^[0-9a-f]{40}$"}}),
@@ -235,7 +248,7 @@ COMMUNITY_SCHEMA = _obj({
     "load": {"enum": list(COMMUNITY_LOADS)},
     "modalities": _obj({k: {"type": "boolean"} for k in MODALITIES}),
     "modalities_in_pack": {"type": "array", "maxItems": 4, "items": {"enum": list(MODALITIES)}},
-    "drafters": {"enum": ["tandem-exl3", "dflash2", "none"]},
+    "drafters": {"enum": ["tandem-exl3", "dflash2", "in-pack", "none"]},
     "license": _LINE,
     "license_url": {"type": ["string", "null"], "pattern": _HTTPS["pattern"]},
     "description": {"type": "string", "maxLength": 500, "pattern": r"^[^\x00-\x08\x0b-\x1f<>]*$"},
@@ -253,6 +266,9 @@ COMMUNITY_SCHEMA = _obj({
                                 "notes": {"type": ["string", "null"], "maxLength": 300,
                                           "pattern": r"^[^\x00-\x1f<>]*$"}}},
     "links": {"type": "object", "additionalProperties": _HTTPS},
+    # VIS-175: the model's own profile that serves this pack (turboderp's Flash-Next branches): Use
+    # selects that profile, and the pack never becomes a community/<id> profile of its own
+    "profile": _ID,
 }, required=("schema", "id", "name", "base_model", "author", "hf", "format", "bpw", "size_gb", "load",
              "modalities", "drafters", "license", "added", "status"))
 
@@ -325,6 +341,9 @@ def _cross(m: dict, root: str) -> list[str]:
     rec = [p["id"] for p in m["profiles"] if p["recommended"]]
     if len(rec) != 1:
         errs.append(f"$.profiles: exactly one recommended profile, not {len(rec)}")
+    for i, p in enumerate(m["profiles"]):
+        if p["made_by"]["kind"] == "community" and not p["made_by"].get("github"):
+            errs.append(f"$.profiles[{i}].made_by.github: a community pack names its author's GitHub login")
     assets = {a["id"] for a in m["assets"]}
     for i, a in enumerate(m["assets"]):
         if a.get("fetch") and not a["fetchable"]:
@@ -465,7 +484,8 @@ def load_all(models_dir: str | None = None) -> tuple[dict[str, dict], list[dict]
     d = models_dir or MODELS_DIR
     paths = sorted(glob.glob(os.path.join(d, "*", "model.yaml")))
     doc, _src, ckey = community_mod.current(d)
-    key = (d, tuple((p, os.path.getmtime(p)) for p in paths), ckey)
+    bdoc, bkey = community_mod.builtin(d)
+    key = (d, tuple((p, os.path.getmtime(p)) for p in paths), ckey, bkey)
     with _LOCK:
         if _CACHE["key"] == key:
             return _CACHE["models"], _CACHE["errors"]
@@ -479,9 +499,13 @@ def load_all(models_dir: str | None = None) -> tuple[dict[str, dict], list[dict]
                 continue
             models[m["id"]] = m
         models = dict(sorted(models.items(), key=lambda kv: int(kv[1].get("order") or 0)))
-        packs, dropped = community_mod.entries(doc, models)
+        # the release's profile-backed entries (VIS-175) first; a fetched entry of the same id is dropped
+        own, dropped = community_mod.entries(bdoc, models)
+        packs, more = community_mod.entries(doc, models)
+        dropped += more
         for m in models.values():
-            m["community"] = packs.get(m["id"], [])
+            ids = {c["id"] for c in own.get(m["id"], [])}
+            m["community"] = own.get(m["id"], []) + [c for c in packs.get(m["id"], []) if c["id"] not in ids]
         _CACHE.update(key=key, models=models, errors=errors, dropped=dropped)
         return models, errors
 
@@ -715,7 +739,7 @@ COMMUNITY_PREFIX = "community/"
 # the base model's assets a community pack reads besides its own folder, by its drafters and its
 # load path (the K3 files are named after the BF16 drafter folders, which give the rest of each arm)
 _COMMUNITY_ASSETS = {"tandem-exl3": ["exl3-drafters-k3", "exl3-draft-head-k4", "nvfp4-drafters"],
-                     "dflash2": ["nvfp4-drafters"], "none": []}
+                     "dflash2": ["nvfp4-drafters"], "in-pack": [], "none": []}
 _SOCIAL_URL = (("x", "X", "https://x.com/{}"), ("huggingface", "Hugging Face", "https://huggingface.co/{}"),
                ("bluesky", "Bluesky", "https://bsky.app/profile/{}"), ("mastodon", "Mastodon", "{}"),
                ("website", "Website", "{}"))
@@ -759,20 +783,35 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
     if folder is not None and e["base_model"] != folder:
         errs.append(f"$.base_model: {e['base_model']!r} is not the folder's model {folder!r}")
     m = models.get(e["base_model"])
+    own = e.get("profile")
     if m is None:
         errs.append(f"$.base_model: no model {e['base_model']!r} in models/")
+    elif own is not None:
+        # VIS-175: a pack the model's own profile serves is that profile's repository, format and size
+        p = next((x for x in m["profiles"] if x["id"] == own), None)
+        if p is None:
+            errs.append(f"$.profile: {e['base_model']} has no profile {own!r}")
+        else:
+            if p["hf_repo"] != e["hf"]["repo"]:
+                errs.append(f"$.hf.repo: {e['hf']['repo']!r} is not profile {own}'s {p['hf_repo']!r}")
+            if p["format"] != e["format"] or p["bpw"] != e["bpw"]:
+                errs.append(f"$.format: {e['format']} {e['bpw']:g} bpw is not profile {own}'s "
+                            f"{p['format']} {p['bpw']} bpw")
     elif e["base_model"] not in COMMUNITY_BASES:
         errs.append(f"$.base_model: community packs load on {', '.join(COMMUNITY_BASES)} only")
-    if e["format"] not in COMMUNITY_SUPPORTED:
+    if own is None and e["format"] not in COMMUNITY_SUPPORTED:
         errs.append(f"$.format: TandemLLM has no load path for {e['format']} packs yet "
                     f"({', '.join(COMMUNITY_SUPPORTED)} only)")
     mods = e["modalities"]
     if not mods["text"]:
         errs.append("$.modalities.text: a pack serves text")
+    # a profile-backed pack serves what its model serves: images where the model has a Vision tool
+    served = (("text", "image") if m and any("VISION" in c["knobs"] for c in m["components"]) else ("text",)) \
+        if own is not None else COMMUNITY_LOADS[e["load"]]
     for k in MODALITIES:
-        if mods[k] and k not in COMMUNITY_LOADS[e["load"]]:
+        if mods[k] and k not in served:
             errs.append(f"$.modalities.{k}: the {e['load']} load path does not serve {k} yet"
-                        + (" (ENG-271)" if e["load"] == "standalone" and k == "image" else ""))
+                        + (" (ENG-271)" if own is None and e["load"] == "standalone" and k == "image" else ""))
     pack = e.get("modalities_in_pack")
     if pack is not None:
         if len(set(pack)) != len(pack):
@@ -780,6 +819,9 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         for k in MODALITIES:
             if mods[k] and k not in pack:
                 errs.append(f"$.modalities_in_pack: {k} works but the pack does not list it")
+    if e["drafters"] == "in-pack" and own is None:
+        errs.append("$.drafters: a draft layer in the pack runs on one of the model's own profiles only "
+                    "(`profile`)")
     if len(set(e.get("tags") or [])) != len(e.get("tags") or []):
         errs.append("$.tags: a tag is listed twice")
     if not _date_ok(e["added"]):
@@ -789,7 +831,7 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append("$.verified: a verified entry says what was measured (build, device, date)")
     if v and not _date_ok(v["date"]):
         errs.append(f"$.verified.date: {v['date']!r} is not a date")
-    if m is not None and e["base_model"] in COMMUNITY_BASES:
+    if m is not None and own is None and e["base_model"] in COMMUNITY_BASES:
         have = {a["id"] for a in m["assets"]}
         for a in community_assets(e):
             if a not in have:
@@ -803,10 +845,12 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
 
 def community_entry(e: dict, m: dict) -> dict:
     """A checked entry as the API gives it: every key filled, and the computed ones (the
-    profile's name, the avatar, the links, the memory the estimate counts)."""
+    profile's name, the avatar, the links, the memory the estimate counts). A pack the model's own
+    profile serves (`profile`, VIS-175) keeps that profile's name and figures."""
     a = e["author"]
     social = dict(a.get("social") or {})
-    like = _like(m, e["format"], e["bpw"])
+    like = (next(p for p in m["profiles"] if p["id"] == e["profile"]) if e.get("profile")
+            else _like(m, e["format"], e["bpw"]))
     mods = e["modalities"]
     return dict(
         e, finetune_of=e.get("finetune_of"),
@@ -820,7 +864,7 @@ def community_entry(e: dict, m: dict) -> dict:
             "tokens_per_round": dict(e["verified"].get("tokens_per_round") or {}),
             "notes": e["verified"].get("notes")},
         links=dict(e.get("links") or {}),
-        profile=COMMUNITY_PREFIX + e["id"],
+        profile=e.get("profile") or COMMUNITY_PREFIX + e["id"],
         avatar_url=f"https://github.com/{a['github']}.png?size=96",
         author_url=f"https://github.com/{a['github']}",
         social_links=[{"network": k, "label": label, "url": fmt.format(social[k])}
@@ -847,18 +891,27 @@ def community_profile(m: dict, c: dict) -> dict:
                         "source": f"community entry {c['profile']} ({c['status']})"},
             "assets_required": community_assets(c), "note": c["description"] or None,
             "components_gib": dict(like.get("components_gib") or {}),
+            "made_by": {"kind": "community", "name": c["author"]["github"], "github": c["author"]["github"],
+                        "repo": None},
             "community": c["id"], "vision": c["modalities"]["image"]}
 
 
+def community_packs(m: dict) -> list[dict]:
+    """The model's community entries that are profiles of their own (community/<id>); not the ones
+    one of the model's own profiles serves (VIS-175)."""
+    return [c for c in m.get("community") or [] if c["profile"].startswith(COMMUNITY_PREFIX)]
+
+
 def community(m: dict, cid: str) -> dict | None:
-    """The model's community entry `cid` (its id, or its profile name community/<id>)."""
+    """The model's community entry `cid` (its id, or its profile name community/<id>), when it is a
+    profile of its own (community_packs)."""
     cid = cid[len(COMMUNITY_PREFIX):] if cid.startswith(COMMUNITY_PREFIX) else cid
-    return next((c for c in m.get("community") or [] if c["id"] == cid), None)
+    return next((c for c in community_packs(m) if c["id"] == cid), None)
 
 
 def profiles(m: dict) -> list[dict]:
     """The model's own profiles, then its community packs as profiles."""
-    return m["profiles"] + [community_profile(m, c) for c in m.get("community") or []]
+    return m["profiles"] + [community_profile(m, c) for c in community_packs(m)]
 
 
 def json_schema() -> dict:
@@ -923,16 +976,19 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {line}")
         n = len(glob.glob(os.path.join(MODELS_DIR, "*", "community", "*.json")))
         from server.setup import community as community_mod
-        try:
-            same = community_mod.render_index(community_mod.build_index()) == \
-                open(community_mod.bundled_path(), encoding="utf-8").read()
-        except (OSError, ValueError):
-            same = False
-        if not same:
+        stale = []
+        for path, built in ((community_mod.bundled_path(), False), (community_mod.builtin_path(), True)):
+            try:
+                same = community_mod.render_index(community_mod.build_index(builtin=built)) == \
+                    open(path, encoding="utf-8").read()
+            except (OSError, ValueError):
+                same = False
+            if not same:
+                stale.append(os.path.basename(path))
+        for name in stale:
             bad += 1
-            print("FAIL models/community-index.json is not the folders' index: "
-                  "python -m server.setup.community --index")
-        else:
+            print(f"FAIL models/{name} is not the folders' index: python -m server.setup.community --index")
+        if not stale:
             print(f"ok   models/*/community: {n} packs, models/community-index.json matches")
     return 1 if bad else 0
 

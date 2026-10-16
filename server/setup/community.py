@@ -3,6 +3,11 @@
     models/<model>/community/<id>.json   one pack a file; the public repository's main is the source
     models/community-index.json          the bundle: every entry of those folders (`--index`), shipped
                                          with the release
+    models/community-builtin.json        the entries one of the model's own profiles serves (`profile`,
+                                         VIS-175: turboderp's Flash-Next packs), written by `--index`
+                                         beside it; read from the release only, never fetched, since
+                                         the profile ships with the release (and a box before 0.11.1
+                                         would drop such an entry from the fetched index)
     ~/.tandemllm/community/index.json    the index last fetched from QSE_COMMUNITY_URL, and beside it
                                          index.meta.json (its URL, ETag and when it came)
     ~/.tandemllm/community/<id>/         a pack's download (ops/use-profile.sh community/<id>)
@@ -80,6 +85,10 @@ def bundled_path(models_dir: str | None = None) -> str:
     return os.path.join(models_dir or registry.MODELS_DIR, "community-index.json")
 
 
+def builtin_path(models_dir: str | None = None) -> str:
+    return os.path.join(models_dir or registry.MODELS_DIR, "community-builtin.json")
+
+
 def url() -> str | None:
     """QSE_COMMUNITY_URL, else the public repository's; None for `off`."""
     u = (os.environ.get("QSE_COMMUNITY_URL") or DEFAULT_URL).strip()
@@ -92,18 +101,23 @@ def pack_dir(cid: str) -> str:
 
 
 # ---------------------------------------------------------------------- the index
-def build_index(models_dir: str | None = None) -> dict:
+def build_index(models_dir: str | None = None, builtin: bool = False) -> dict:
     """The bundle from the folders: every models/<model>/community/<id>.json as written, with its
-    sha256, sorted by model and id. A file that is not JSON stops it (the check names it)."""
+    sha256, sorted by model and id; the entries with a `profile` of the model's own when `builtin`
+    (community-builtin.json), the others when not (community-index.json). A file that is not JSON
+    stops it (the check names it)."""
     d = models_dir or registry.MODELS_DIR
     entries = []
     for p in sorted(glob.glob(os.path.join(d, "*", "community", "*.json"))):
         with open(p, "rb") as fh:
             raw = fh.read()
         model = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        data = json.loads(raw)
+        if bool(isinstance(data, dict) and data.get("profile")) != builtin:
+            continue
         entries.append({"model": model, "id": os.path.basename(p)[:-len(".json")],
                         "path": f"models/{model}/community/{os.path.basename(p)}",
-                        "sha256": hashlib.sha256(raw).hexdigest(), "entry": json.loads(raw)})
+                        "sha256": hashlib.sha256(raw).hexdigest(), "entry": data})
     return {"schema": INDEX_SCHEMA_VERSION, "generator": GENERATOR, "entries": entries}
 
 
@@ -147,6 +161,13 @@ def entries(doc: dict, models: dict[str, dict]) -> tuple[dict[str, list[dict]], 
 _STATE: dict = {"fetched": False, "checked_at": None, "error": None, "note": None}
 _GUARD = threading.Lock()
 _INFLIGHT: dict | None = None
+
+
+def builtin(models_dir: str | None = None) -> tuple[dict, tuple]:
+    """The release's community-builtin.json and a key that moves when it changes."""
+    bp = builtin_path(models_dir)
+    doc = _read_index(bp) or {"schema": INDEX_SCHEMA_VERSION, "generator": "", "entries": []}
+    return doc, (bp, os.path.getmtime(bp) if os.path.isfile(bp) else 0.0)
 
 
 def current(models_dir: str | None = None) -> tuple[dict, str, tuple]:
@@ -344,29 +365,38 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     if a.index:
-        text, path = render_index(build_index()), bundled_path()
-        if a.check:
-            try:
-                same = open(path, encoding="utf-8").read() == text
-            except OSError:
-                same = False
-            if not same:
-                print(f"FAIL {os.path.relpath(path, registry.ROOT)} is not the folders' index: "
-                      f"python -m server.setup.community --index")
-                return 1
-            print(f"ok   {os.path.relpath(path, registry.ROOT)}")
-            return 0
-        _write(path, text)
-        print(f"wrote {os.path.relpath(path, registry.ROOT)}")
-        return 0
+        bad = 0
+        for text, path in ((render_index(build_index()), bundled_path()),
+                           (render_index(build_index(builtin=True)), builtin_path())):
+            if a.check:
+                try:
+                    same = open(path, encoding="utf-8").read() == text
+                except OSError:
+                    same = False
+                if not same:
+                    print(f"FAIL {os.path.relpath(path, registry.ROOT)} is not the folders' index: "
+                          f"python -m server.setup.community --index")
+                    bad = 1
+                else:
+                    print(f"ok   {os.path.relpath(path, registry.ROOT)}")
+                continue
+            _write(path, text)
+            print(f"wrote {os.path.relpath(path, registry.ROOT)}")
+        return bad
     if a.cmd == "sync":
         print(json.dumps(sync(), indent=1))
         return 0
     if a.cmd == "env":
         hit = find(a.profile or "") if (a.profile or "").startswith(registry.COMMUNITY_PREFIX) else None
         if hit is None:
-            print(f"no community entry {a.profile!r} (models/<model>/community/<id>.json; "
-                  f"python -m server.setup.registry --check)", file=sys.stderr)
+            cid = (a.profile or "")[len(registry.COMMUNITY_PREFIX):]
+            own = next((c["profile"] for m in registry.load_all()[0].values() for c in m.get("community") or []
+                        if c["id"] == cid), None)
+            if own:   # VIS-175: a pack one of the model's own profiles serves
+                print(f"{a.profile} is served by the profile {own}: ops/use-profile.sh {own}", file=sys.stderr)
+            else:
+                print(f"no community entry {a.profile!r} (models/<model>/community/<id>.json; "
+                      f"python -m server.setup.registry --check)", file=sys.stderr)
             return 2
         text = env(*hit)
         if a.out:

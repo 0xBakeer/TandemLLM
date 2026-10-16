@@ -1199,6 +1199,43 @@
             "maxLength": 2000,
             "type": "string"
           },
+          "made_by": {
+            "additionalProperties": false,
+            "properties": {
+              "github": {
+                "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "ours",
+                  "vendor",
+                  "community"
+                ]
+              },
+              "name": {
+                "maxLength": 80,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f<>]+$",
+                "type": "string"
+              },
+              "repo": {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
           "max_window": {
             "minimum": 0,
             "type": [
@@ -1302,7 +1339,8 @@
           "badges",
           "quality",
           "assets_required",
-          "note"
+          "note",
+          "made_by"
         ],
         "type": "object"
       },
