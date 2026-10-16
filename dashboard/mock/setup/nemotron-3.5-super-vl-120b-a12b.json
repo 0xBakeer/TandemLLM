@@ -114,6 +114,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-4.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": true,
    "badges": [
     "recommended"
@@ -142,6 +147,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-2.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -168,6 +178,10 @@
    "drafters_gib": 1.32,
    "hf_repo": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
    "hf_private": false,
+   "made_by": {
+    "kind": "vendor",
+    "name": "NVIDIA"
+   },
    "recommended": false,
    "badges": [
     "NVIDIA's own quantization"

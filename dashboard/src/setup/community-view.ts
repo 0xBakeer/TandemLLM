@@ -3,8 +3,10 @@
 // (GitHub avatar, @login, the networks the entry lists), the pack's name and what it is a fine-tune
 // of, the readout (format, bits a weight, download), the modalities it holds (greyed where
 // TandemLLM cannot run one yet, with the reason), the drafters, the speeds we measured when it is
-// verified, the license, the Hugging Face link and Use, which selects the pack like one of our
-// radio cards: the memory bar, Review and Finish are the same flow.
+// verified, the license, the Hugging Face repository as owner/name (linked) and Use, which selects
+// the pack like one of our radio cards: the memory bar, Review and Finish are the same flow. A pack
+// one of the model's own profiles serves (VIS-175: turboderp's Flash-Next branches) has a card here
+// too, and its Use selects that profile.
 //
 // The list is fetched from GitHub when the step opens and on Refresh (the parent does the request;
 // this element shows the state). Every string of an entry is untrusted: lit renders it as text, and
@@ -175,7 +177,7 @@ export class QseCommunity extends LightElement {
           ${c.licenseUrl
             ? html`<a class="sbadge ccard-license" href=${c.licenseUrl} target="_blank" rel="noopener noreferrer" title=${`${C.license}: ${c.license}`}>${c.license}</a>`
             : html`<span class="sbadge ccard-license" title=${`${C.license}: ${c.license}`}>${c.license}</span>`}
-          ${c.hfUrl ? html`<a class="ccard-hf" href=${c.hfUrl} target="_blank" rel="noopener noreferrer" title=${c.hfRepo}>${glyph('huggingface')} ${C.hf} ${icon('external')}</a>` : nothing}
+          ${c.hfUrl ? html`<a class="ccard-hf" href=${c.hfUrl} target="_blank" rel="noopener noreferrer" title=${C.onHf(c.hfRepo)} data-hf-repo>${glyph('huggingface')} <span class="ccard-repo">${c.hfRepo}</span> ${icon('external')}</a>` : html`<span class="ccard-hf" data-hf-repo>${glyph('huggingface')} <span class="ccard-repo">${c.hfRepo}</span></span>`}
         </span>
         <button class="btn ${on ? '' : 'btn-primary'} ccard-use" ?disabled=${broken} aria-pressed=${on} title=${broken ? C.brokenWhy : nothing} @click=${() => !on && this.onUse(c.id)}>${on ? html`${icon('check')} ${C.selected}` : C.use}</button>
       </footer>

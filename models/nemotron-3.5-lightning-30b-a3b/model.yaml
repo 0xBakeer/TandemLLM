@@ -76,6 +76,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
   hf_private: false
+  made_by: {kind: vendor, name: NVIDIA}
   recommended: true
   badges:
   - reference quality

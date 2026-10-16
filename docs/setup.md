@@ -4,14 +4,20 @@ The dashboard's `#/setup` page walks through an install in eight steps, from pic
 
 ## Setup mode
 
-A new box has no configured engine yet. `install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB), writes the config with no weights, and starts setup mode:
+A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-bash install.sh --setup                     # on the box; binds 127.0.0.1 and prints the ssh tunnel
-bash install.sh --setup --host 0.0.0.0      # the setup page on the network (no password yet!)
-ssh -L 8000:localhost:8000 <the box>        # from your computer, then open
-                                            # http://localhost:8000/dashboard/#/setup
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh
+bash install.sh --setup --yes
 ```
+
+`install.sh --setup` installs the code and the Python environment, downloads only Wren's model (Qwen3.5-2B, 4.3 GB), writes the config with no weights, and starts setup mode. Then open the Setup Guide in a browser and pick a model:
+
+- On the box itself: `http://127.0.0.1:8000/dashboard/#/setup`.
+- From another computer: setup mode listens on 127.0.0.1 only, so open an SSH tunnel first, `ssh -L 8000:127.0.0.1:8000 <user>@<box>`, and then open `http://127.0.0.1:8000/dashboard/#/setup` on that computer.
+- On your network: install with `--host 0.0.0.0` (`bash install.sh --setup --yes --host 0.0.0.0`) and open `http://<box>:8000/dashboard/#/setup` from any computer that reaches the box. Until an admin password is set, anyone who reaches the port can run the setup.
+
+The installer prints the addresses when it finishes, and the dashboard opens on the Setup Guide by itself while the box is in setup mode.
 
 On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no model of Qwen's, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
 
@@ -19,18 +25,17 @@ The installer writes the marker `run/setup-pending` (with the host to bind). Whi
 
 Until an admin password is set, anyone who reaches the port can run the setup, apply it and reset the box. The review step says so. `ops/make-secrets.sh --admin` sets one; the setup page's "generate" option does the same on a box that has no `secrets.env` yet.
 
-## A new box from the command line
+## Advanced: from the command line
 
-Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. Install in setup mode, then switch to a profile:
+Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. The Setup Guide runs `ops/use-profile.sh` for you; to pick the weights from a shell instead, install with the two commands above, then:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh
-bash install.sh --setup --yes
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # what it would download: each URL and size
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, or any name --list prints
+~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
+~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # what it would download: each URL and size
+~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
 ```
 
-Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installer wrote. The switch downloads what the profile needs, checks it, and starts the engine on port 8000:
+Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installer wrote. The switch downloads what the profile needs, checks it, and starts the engine on port 8000. Two examples:
 
 | profile | downloads | size |
 |-|-|-|
@@ -45,7 +50,7 @@ The `curl` line fetches the installer from the tag `v0.11.0`, and the installer 
 
 ## The model registry
 
-Each model the guide offers is a folder under `models/` with a `model.yaml` ([models/README.md](../models/README.md) lists the fields). `models/qwen3.8-27b/model.yaml` and `models/qwen3.8-flash-next/model.yaml` are the two models today. Every number in it says where it comes from:
+Each model the guide offers is a folder under `models/` with a `model.yaml` ([models/README.md](../models/README.md) lists the fields). The 27B's file, `models/qwen3.8-27b/model.yaml`, is the first; every number in it says where it comes from:
 
 - The weights and the drafters per profile are the `[memory] load stages` lines of the 0.6.2 runs of 2026-10-10, GiB allocated, one run per EXL3 size. NVFP4's are from the 0.5.0 load of 2026-10-09.
 - The tools' memory is the dashboard's live memory split of the same evening (the reference box on `exl3-6.0` with 4 slots, the narrator, Laya and the shadow reader loaded). The registry's parts add up to that split's 59.34 GiB in use within 0.1 GiB.
@@ -53,7 +58,9 @@ Each model the guide offers is a folder under `models/` with a `model.yaml` ([mo
 
 Memory is in GiB (2^30 bytes) and disk in GB (10^9 bytes) everywhere in the registry and the API. `python -m server.setup.registry --check` checks a file.
 
-Packs that other people published sit beside our profiles as community packs, one JSON file each under `models/<model>/community/`. The weights step lists them after our own, as profiles named `community/<id>`. The page fetches the list from GitHub when it opens and when you press Refresh, never on a timer, and an unchanged list costs one 304 answer. Without the network it shows the last list it fetched, or the one that came with the release. A 404 from GitHub means the public repository has published no list yet: the section shows the note "no published list yet" and the release's list, with no error. A real failure is one short line, such as "GitHub could not be reached", and the server's log has the URL. On the command line, `ops/use-profile.sh community/<id>` runs a pack as it runs our profiles, with `--dry-run` and the same disk, memory and smoke checks. [docs/community-weights.md](community-weights.md) says how to add a pack.
+Every weight profile names who made it (`made_by`): TandemLLM's own packs (0xBakeer), the vendor's release (NVIDIA, LiquidAI), or a community author with a GitHub login (turboderp for Qwen3.8-Flash-Next). Each weight card shows the pack's Hugging Face repository as owner/name, linked, and its maker.
+
+Packs that other people published sit beside our profiles as community packs, one JSON file each under `models/<model>/community/`. The weights step lists them after our own, as profiles named `community/<id>`. A pack that one of the model's own profiles serves names that profile (`profile`): turboderp's Flash-Next branches are community cards whose Use selects `flashnext-<bpw>`, and they come with the release in `models/community-builtin.json`, not from GitHub. The page fetches the list from GitHub when it opens and when you press Refresh, never on a timer, and an unchanged list costs one 304 answer. Without the network it shows the last list it fetched, or the one that came with the release. A 404 from GitHub means the public repository has published no list yet: the section shows the note "no published list yet" and the release's list, with no error. A real failure is one short line, such as "GitHub could not be reached", and the server's log has the URL. On the command line, `ops/use-profile.sh community/<id>` runs a pack as it runs our profiles, with `--dry-run` and the same disk, memory and smoke checks. [docs/community-weights.md](community-weights.md) says how to add a pack.
 
 ### The KV bytes a token
 

@@ -1038,6 +1038,8 @@ export interface SetupProfile {
   table?: { gib: number; policy: 'warm' | 'cold'; cache_gib: number } | null;
   /** SRV-337: a tool's memory under this profile, by component id */
   components_gib?: Record<string, number>;
+  /** VIS-175: who made the weights; `repo` when they are not hf_repo's files (Bolt's IQ2 GGUF) */
+  made_by: SetupMaker;
   /** page-side only (setup/community.ts withCommunityProfiles): the community entry this profile
    *  stands for, so the reducer, the estimate and Wren's select_profile treat a pack like one of
    *  ours; absent on our own profiles and in the API */
@@ -1047,7 +1049,16 @@ export interface SetupProfile {
 // ---- community weights (CONTRACT.md 2026-10-13, "API (as built)") -----------------------------
 export type SetupModality = 'text' | 'image' | 'audio' | 'video';
 export type SetupCommunityStatus = 'submitted' | 'verified' | 'broken';
-export type SetupCommunityDrafters = 'tandem-exl3' | 'dflash2' | 'none';
+export type SetupCommunityDrafters = 'tandem-exl3' | 'dflash2' | 'in-pack' | 'none';
+/** VIS-175: who made a weight pack: our own (0xBakeer), the vendor's release, or a community author */
+export interface SetupMaker {
+  kind: 'ours' | 'vendor' | 'community';
+  name: string;
+  /** the GitHub login (ours and community) */
+  github?: string | null;
+  /** the weights' Hugging Face repository when it is not the profile's hf_repo */
+  repo?: string | null;
+}
 export type SetupSocialNetwork = 'x' | 'huggingface' | 'bluesky' | 'mastodon' | 'website';
 /** One community pack as GET models/{id} lists it in `community` (newest first): the entry as
  *  written in models/<model>/community/<id>.json with every default filled in, plus what the server
@@ -1090,7 +1101,8 @@ export interface CommunityEntry {
   /** https URLs, e.g. { pr } */
   links: Record<string, string>;
   // computed by the server
-  /** "community/<id>": the selection's profile value */
+  /** "community/<id>": the selection's profile value; or the model's own profile that serves the
+   *  pack (VIS-175: turboderp's Flash-Next packs, `flashnext-3.05`) */
   profile: string;
   /** https://github.com/<github>.png?size=96 */
   avatar_url: string;

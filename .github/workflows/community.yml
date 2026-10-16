@@ -40,7 +40,7 @@ jobs:
         run: |
           python -m server.setup.community --index --check || {
             python -m server.setup.community --index >/dev/null
-            echo "models/community-index.json differs from the folders. Regenerate it and commit:"
-            git --no-pager diff --stat -- models/community-index.json
+            echo "models/community-index.json or models/community-builtin.json differs from the folders. Regenerate and commit:"
+            git --no-pager diff --stat -- models/community-index.json models/community-builtin.json
             exit 1
           }

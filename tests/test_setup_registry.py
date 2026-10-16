@@ -39,6 +39,12 @@ The test matrix:
      greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same text in every run,
      no request from a cache; the tile's speed is the recommended row's best cell
                                                             test_the_nemotron_tables_are_the_raw_data
+ 15  every weight profile says who made it (VIS-175): ours (0xBakeer), the vendor (NVIDIA, LiquidAI) or a
+     community author with a GitHub login (turboderp); Bolt's IQ2 names NVIDIA's GGUF repository; a
+     profile without `made_by`, a community maker without a login, an unknown kind and a repo that is
+     not owner/name are refused                             test_every_pack_names_its_maker
+ 16  dashboard/mock/setup/community-qwen3.8-flash-next.json is the API's list of turboderp's packs
+                                                            test_the_builtin_community_mock
 
 Run: python tests/test_setup_registry.py
 """
@@ -260,6 +266,26 @@ def _refused(data: dict, want: str) -> None:
     raise AssertionError(f"accepted a file that should fail with {want!r}")
 
 
+def test_every_pack_names_its_maker():
+    """VIS-175: our packs are 0xBakeer's, NVIDIA's and LiquidAI's releases are the vendor's, and
+    turboderp's Flash-Next packs are a community author's; the weights' repository is hf_repo except
+    Bolt's IQ2, whose weights are NVIDIA's GGUF repository"""
+    kinds = {"0xBakeer": ("ours", "0xBakeer"), "nvidia": ("vendor", "NVIDIA"), "LiquidAI": ("vendor", "LiquidAI"),
+             "turboderp": ("community", "turboderp")}
+    seen = set()
+    for m in registry.load_all()[0].values():
+        for p in m["profiles"]:
+            mb = p["made_by"]
+            assert (mb["kind"], mb["name"]) == kinds[p["hf_repo"].split("/")[0]], (p["id"], mb)
+            assert mb.get("github") == ({"ours": "0xBakeer", "community": mb["name"]}.get(mb["kind"])), (p["id"], mb)
+            seen.add(mb["kind"])
+            if p["id"] == "nemotron-bolt-iq2":
+                assert mb["repo"] == "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF"
+            else:
+                assert mb.get("repo") is None, p["id"]
+    assert seen == {"ours", "vendor", "community"}
+
+
 def test_the_validator_rules():
     d = _seed()
     registry.parse(copy.deepcopy(d), "seed")                       # the seed itself passes
@@ -311,6 +337,19 @@ def test_the_validator_rules():
     x = copy.deepcopy(d)
     x["profiles"][0]["speed"] = 1
     _refused(x, "unknown key 'speed'")
+    # VIS-175: every profile says who made it; a community pack names its author's GitHub login
+    x = copy.deepcopy(d)
+    del x["profiles"][0]["made_by"]
+    _refused(x, "made_by")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"] = {"kind": "community", "name": "someone"}
+    _refused(x, "$.profiles[0].made_by.github: a community pack names its author's GitHub login")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"]["kind"] = "friend"
+    _refused(x, "made_by.kind")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"]["repo"] = "not a repo"
+    _refused(x, "made_by.repo")
     x = copy.deepcopy(d)
     x["parallelism"]["slots"]["default"] = 9
     _refused(x, "$.parallelism.slots: the default is outside min..max")
@@ -439,6 +478,28 @@ def _mock_copy(mid: str) -> str:
     return os.path.join(ROOT, "dashboard", "mock", "setup", mid + ".json")
 
 
+# VIS-175: Flash-Next's community list is the release's own (models/community-builtin.json), so the mock
+# keeps the API's list as it is
+BUILTIN_MOCKED = ("qwen3.8-flash-next",)
+
+
+def _builtin_copy(mid: str) -> str:
+    return os.path.join(ROOT, "dashboard", "mock", "setup", f"community-{mid}.json")
+
+
+def _builtin_served(mid: str) -> dict:
+    return json.loads(json.dumps({"community": registry.get(mid)["community"]}))
+
+
+def test_the_builtin_community_mock():
+    """dashboard/mock/setup/community-qwen3.8-flash-next.json is the API's community list of Flash-Next
+    (turboderp's packs). Write it again with: python tests/test_setup_registry.py --write-mock"""
+    for mid in BUILTIN_MOCKED:
+        with open(_builtin_copy(mid)) as fh:
+            assert json.load(fh) == _builtin_served(mid), (
+                f"{_builtin_copy(mid)} is not the registry's list; run python tests/test_setup_registry.py --write-mock")
+
+
 def _served(m: dict) -> dict:
     """GET /v1/setup/models/{id} (server/setup_api.py), as JSON, without the community packs: the
     dashboard's mock keeps those in mock/setup/community-<id>.json (tests/test_community_weights.py
@@ -455,6 +516,11 @@ if __name__ == "__main__":
                 json.dump(_served(registry.get(mid)), fh, indent=1, ensure_ascii=False)
                 fh.write("\n")
             print(f"wrote {_mock_copy(mid)}")
+        for mid in BUILTIN_MOCKED:
+            with open(_builtin_copy(mid), "w") as fh:
+                json.dump(_builtin_served(mid), fh, indent=1, ensure_ascii=False)
+                fh.write("\n")
+            print(f"wrote {_builtin_copy(mid)}")
         sys.exit(0)
     passed = 0
     for name, fn in sorted(globals().items()):

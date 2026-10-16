@@ -111,6 +111,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
    "hf_private": false,
+   "made_by": {
+    "kind": "community",
+    "name": "turboderp",
+    "github": "turboderp"
+   },
    "recommended": false,
    "badges": [
     "smallest"
@@ -142,6 +147,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
    "hf_private": false,
+   "made_by": {
+    "kind": "community",
+    "name": "turboderp",
+    "github": "turboderp"
+   },
    "recommended": true,
    "badges": [
     "recommended"
@@ -154,7 +164,7 @@
     "source": "not measured: the BF16 reference run (ENG-159) is deferred"
    },
    "assets_required": [],
-   "note": "The default profile (decided 2026-10-11): the pack the fork's numbers are measured on. Disk size measured on the reference box.",
+   "note": "The default profile (decided 2026-10-11): the pack the measured table comes from. Disk size measured on the reference box.",
    "hf_revision": "3.05bpw_h5_ng5",
    "max_window": 262144,
    "table": {
@@ -173,6 +183,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
    "hf_private": false,
+   "made_by": {
+    "kind": "community",
+    "name": "turboderp",
+    "github": "turboderp"
+   },
    "recommended": false,
    "badges": [
     "higher quality"
@@ -204,6 +219,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
    "hf_private": false,
+   "made_by": {
+    "kind": "community",
+    "name": "turboderp",
+    "github": "turboderp"
+   },
    "recommended": false,
    "badges": [
     "does not load yet"
@@ -235,6 +255,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "turboderp/Qwen3.8-Flash-Next-exl3",
    "hf_private": false,
+   "made_by": {
+    "kind": "community",
+    "name": "turboderp",
+    "github": "turboderp"
+   },
    "recommended": false,
    "badges": [],
    "quality": {

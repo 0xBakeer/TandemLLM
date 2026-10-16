@@ -49,7 +49,7 @@ Page cache\index{page cache} counts as available memory but is not always given 
 
 Inside the engine three limits hold the caches and the prefill workspace: 70~GiB between requests, 77~GiB during a prefill, and 2~GiB of free allocator blocks kept between requests. Section~\ref{sec:memory-gate} explains how the memory gate enforces them.
 
-\section{Two models, one at a time}\label{sec:two-models}\index{Flash-Next!operations}\index{weight profile}
+\section{One model at a time}\label{sec:two-models}\index{Flash-Next!operations}\index{weight profile}
 
 The board serves one big model at a time, the 27B or Qwen3.8-Flash-Next, and \code{ops/active-profile} names the profile it serves. The 27B's profiles are \code{nvfp4} and \code{exl3-<bpw>}; Flash-Next's are \code{flashnext-2.05} to \code{flashnext-6.05}, one per EXL3 pack (\code{ops/profiles/_flashnext.env} and one small file each). The same scripts serve both:
 

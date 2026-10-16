@@ -1,6 +1,8 @@
 # Community weights
 
-A community pack is a set of weights someone else published on Hugging Face that TandemLLM can load: a smaller quantisation, or a fine-tune of a model we serve. The setup guide lists each one under its model, after our own profiles, with the author's GitHub avatar, the format, the size and the speed a maintainer measured.
+A community pack is a set of weights someone else published on Hugging Face that TandemLLM can load: a smaller quantisation, or a fine-tune of a model we serve. The setup guide lists each one under its model, after our own profiles, with the author's GitHub avatar, the Hugging Face repository as owner/name, the format, the size and the speed a maintainer measured.
+
+Some community quants are the packs one of the model's own profiles serves: turboderp's EXL3 packs of Qwen3.8-Flash-Next are the `flashnext-<bpw>` profiles. Their entries (`models/qwen3.8-flash-next/community/turboderp-flashnext-<bpw>.json`) name that profile in `profile`, so the card says who made the pack and its Use button selects the profile. They ship with the release in `models/community-builtin.json`, beside the profiles they describe; a box never fetches them.
 
 Listing a pack takes one JSON file. You send a pull request that adds `models/<model>/community/<id>.json`, and nothing else.
 
@@ -21,7 +23,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `schema` | yes | `1` |
 | `id` | yes | The file name without `.json`. Lowercase letters and digits, with single dots or dashes between them, at most 80 characters. |
 | `name` | yes | The name the card shows and the model calls itself when asked, at most 120 characters. |
-| `base_model` | yes | The TandemLLM model it runs on, which is the folder it sits in. Today only `qwen3.8-27b`. |
+| `base_model` | yes | The TandemLLM model it runs on, which is the folder it sits in. Today only `qwen3.8-27b`, or any model when `profile` names one of its own profiles. |
 | `finetune_of` | no | The Hugging Face id of the fine-tune, or `null` for a quantisation of the stock model. |
 | `author.github` | yes | Your GitHub user name. The card shows `https://github.com/<you>.png` and links to your profile. |
 | `author.name` | no | The name you go by. |
@@ -34,7 +36,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `load` | yes | `standalone` when the pack is the whole model, or `overlay` when it holds EXL3 projections that go over the base checkpoint. |
 | `modalities` | yes | `text`, `image`, `audio` and `video`, each `true` or `false`: what works in TandemLLM today. |
 | `modalities_in_pack` | no | What the pack contains, even when TandemLLM cannot serve it yet. The card shows those in grey. |
-| `drafters` | yes | `tandem-exl3` for our EXL3 draft models (K3 drafters and K4 draft head), `dflash2` for our BF16 draft models, or `none`. |
+| `drafters` | yes | `tandem-exl3` for our EXL3 draft models (K3 drafters and K4 draft head), `dflash2` for our BF16 draft models, `in-pack` for a draft layer inside the pack (only with `profile`), or `none`. |
 | `license` | yes | The license as its SPDX names, e.g. `Apache-2.0`. |
 | `license_url` | no | An https link to the license file, best at your commit. |
 | `description` | no | One or two plain sentences, at most 500 characters. The card shows it as text: no HTML, no Markdown. |
@@ -43,6 +45,7 @@ The file name is the id: `models/qwen3.8-27b/community/thinkingcap-27b-kearuga-e
 | `status` | yes | `submitted`. A maintainer changes it. |
 | `verified` | no | Filled by the maintainer who ran it: `build`, `device`, `date`, tok/s per kind of text (`prose`, `code`, `chat`, `plain`), tokens per round, and a note. |
 | `links` | no | https links, such as `pr` for a pull request that made the pack load. |
+| `profile` | no | The model's own profile that serves this pack, for a pack TandemLLM already runs as one of its profiles. The entry must have that profile's repository, format and bits a weight. Set by a maintainer. |
 
 The check refuses a modality the load path cannot serve. A standalone pack is text only for now (ENG-271), even when it carries a vision tower: write `"image": false` and list `image` in `modalities_in_pack`. An overlay keeps the base checkpoint's vision tower, so `"image": true` is allowed there. No path serves audio or video yet.
 
@@ -51,11 +54,11 @@ The check refuses a modality the load path cannot serve. A standalone pack is te
 - A pack that is private or gated, or that needs a token to download.
 - A branch or tag in `hf.revision` instead of a commit.
 - A format other than EXL3, until a loader for it is in TandemLLM.
-- A base model other than `qwen3.8-27b`.
+- A base model other than `qwen3.8-27b`, unless the entry names one of that model's own profiles in `profile`.
 - A claim in `modalities` that the load path does not serve.
 - Links that are not https, and HTML or Markdown in any text field.
 - A license that does not let others download and run the weights.
-- A pull request that changes anything besides the one JSON file. A maintainer regenerates the index `models/community-index.json`, or you run `python -m server.setup.community --index`.
+- A pull request that changes anything besides the one JSON file. A maintainer regenerates the index `models/community-index.json` (and `models/community-builtin.json` for the entries with `profile`), or you run `python -m server.setup.community --index`.
 
 ## Running a pack
 
