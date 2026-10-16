@@ -319,22 +319,64 @@ profiles:
   hf_revision: 9cfd11612f08fca7588eb0e7a2e5199796ad943b
   max_window: 262144
 measurements:
-  build: 0.9.1
-  date: '2026-10-15'
+  build: 0.11.0
+  date: '2026-10-16'
   method: >-
-    tools/fn_lookup_ab.py through one fresh server a run on the Spark, the GPU to itself: prompts prose / chat /
-    code, one greedy request each, thinking off, 512 new tokens, conductor raw, max_len 32,768; the lookup cut by
-    StairCut (its price file from tools/nh_check.py staircase), the suffix store off. One run a cell. Raw data:
-    models/nemotron-3.5-bolt-74b-a9b/measurements/0.9.1-summary.json.
-  source: models/nemotron-3.5-bolt-74b-a9b/measurements/0.9.1-summary.json
+    the prose, chat and code asks of tools/fn_lookup_ab.py, one request at a time through one fresh server a run on
+    the DGX Spark, the GPU to itself: greedy, thinking off, 512 new tokens; tok/s and tokens a round are the
+    server's own timings. The profile's drafting (EXL3: NVIDIA's LiLiCorr drafter and the lookup; IQ2: the lookup
+    alone; the cut by StairCut with the price files the release ships, none for 2.5 to 4.0), 3 slots, conductor raw,
+    caches and the suffix store off, max_len 32,768. Three runs a cell on the 0.11.0 release, the same text in every
+    run. Not measured yet: EXL3 5.0 and 6.0, sampled, 128 tokens, long context, first-token times. Raw data:
+    models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.0-summary.json.
+  source: models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.0-summary.json
   rows:
   - profile: nemotron-bolt-iq2
-    build: 0.9.1
-    date: '2026-10-15'
+    build: 0.11.0
+    date: '2026-10-16'
     comparable: true
-    note: 'The lookup, store off; plain prose / chat / code 27.47 / 27.45 / 27.44 tok/s; edit and copy asks 57.70 and 58.90 (27.39 plain); every text the plain run''s. llama.cpp on the same GGUF: 35.37 tok/s (llama-bench tg128).'
     cells:
-      greedy_512: {prose: [27.53, 27.53, 37.05, 1.02, 1], chat: [27.31, 27.31, 37.35, 1.02, 1], code: [29.34, 29.34, 39.88, 1.17, 1]}
+      greedy_512: {prose: [27.96, 27.87, 36.5, 1.02, 3], chat: [28.08, 28.0, 36.7, 1.03, 3], code: [32.22, 32.13, 37.9, 1.22, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-bolt-exl3-2.0
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [65.84, 65.52, 45.7, 3.01, 3], chat: [70.88, 70.45, 43.9, 3.11, 3], code: [102.72, 102.0, 47.5, 4.88, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-bolt-exl3-2.5
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [42.39, 42.24, 41.8, 1.77, 3], chat: [41.67, 40.93, 36.0, 1.5, 3], code: [89.33, 87.23, 49.8, 4.45, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-bolt-exl3-3.0
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [31.49, 31.27, 38.5, 1.21, 3], chat: [39.65, 39.62, 36.3, 1.44, 3], code: [73.66, 72.14, 50.9, 3.75, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-bolt-exl3-3.5
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [32.88, 32.85, 39.5, 1.3, 3], chat: [40.33, 39.73, 37.0, 1.49, 3], code: [75.58, 73.54, 47.3, 3.57, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-bolt-exl3-4.0
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [30.96, 30.55, 39.7, 1.23, 3], chat: [39.04, 38.61, 37.1, 1.45, 3], code: [84.58, 84.24, 49.1, 4.15, 3]}
     ttft_s: {}
     lossless: null
 
