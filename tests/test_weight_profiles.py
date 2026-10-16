@@ -319,7 +319,7 @@ class _Hub:
     def __init__(self, fw, cache: str, bad: tuple = ()):
         import hashlib
         import huggingface_hub
-        self.fw, self.cache, self.calls, self.bad = fw, cache, [], set(bad)
+        self.fw, self.cache, self.calls, self.bad, self.revisions = fw, cache, [], set(bad), []
         self.body = {}
         for repo, names in {
                 "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters": [
@@ -328,7 +328,9 @@ class _Hub:
                 "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8": ["config.json", "model.safetensors", "README.md"],
                 "0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16": ["config.json", "model.safetensors", "README.md"],
                 "Qwen/Qwen3.8-27B-FP8": ["config.json", "tokenizer.json", "layers-0.safetensors",
-                                         "outside.safetensors", "mtp.safetensors", "README.md"]}.items():
+                                         "outside.safetensors", "mtp.safetensors", "README.md"],
+                "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF": [
+                    "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf", "README.md"]}.items():
             for n in names:
                 self.body[(repo, n)] = f"{repo}/{n}".encode() * 3
         # the base's safetensors files are real ones (OPS-133: the EXL3 profiles' plain base reads
@@ -367,15 +369,18 @@ class _Hub:
         return r
 
     def hub_files(self, repo, revision=None):
-        files = {n: {"size": len(b), "sha256": self.sha[(r, n)] if n.endswith((".safetensors", ".json"))
-                     and not n.endswith("config.json") else None}
+        files = {n: {"size": len(b), "sha256": self.sha[(r, n)]
+                     if n.endswith((".safetensors", ".json", ".gguf")) and not n.endswith("config.json") else None}
                  for (r, n), b in self.body.items() if r == repo}
-        return {"repo": repo, "revision": revision, "commit": "c0ffee", "files": files}
+        # the GGUF repository's branch has moved past its pin: an unpinned read gets another commit
+        head = "moved" if repo.startswith("nvidia/") and revision is None else "c0ffee"
+        return {"repo": repo, "revision": revision, "commit": revision or head, "files": files}
 
     def snapshot_download(self, repo_id, revision=None, local_dir=None, allow_patterns=None,
                           ignore_patterns=None, token=None, **_kw):
         import fnmatch
         self.calls.append((repo_id, local_dir, tuple(allow_patterns or ())))
+        self.revisions.append((repo_id, revision))
         out = local_dir or os.path.join(self.cache, "models--" + repo_id.replace("/", "--"), "snapshots", revision)
         for (r, n), b in self.body.items():
             if r == repo_id and (not allow_patterns or any(fnmatch.fnmatch(n, p) for p in allow_patterns)):
@@ -510,6 +515,24 @@ def test_the_disk_is_checked_before_any_download_and_a_dry_run_downloads_nothing
             assert fw.assets("exl3-4.5", repo, margin_gb=0) == 3
         assert "base-plain" in out.getvalue() and "has no download" in out.getvalue(), out.getvalue()
         assert [c[0] for c in hub.calls] == [], hub.calls
+    finally:
+        _fetch_box_close(tmp, old, hub)
+
+
+def test_an_asset_with_a_pinned_revision_is_downloaded_at_that_revision():
+    """SPD-121: the Bolt GGUF asset names a revision in model.yaml; its download reads that commit, not
+    the repository's branch, which may have moved on."""
+    import contextlib
+    import io
+    fw, tmp, home, repo, old = _fetch_box()
+    hub = _Hub(fw, os.path.join(home, ".cache", "huggingface", "hub"))
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert fw.assets("nemotron-bolt-iq2", repo, margin_gb=0) == 0
+        pin = "724e3fee41becc4048998e2204748147876ed56b"
+        assert hub.revisions == [("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF", pin)], hub.revisions
+        assert os.path.isfile(os.path.join(home, "models", "nemotron-3.5-bolt-74b-a9b-iq2-gguf",
+                                           "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf"))
     finally:
         _fetch_box_close(tmp, old, hub)
 

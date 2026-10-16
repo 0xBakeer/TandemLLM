@@ -551,7 +551,8 @@ def assets(profile: str, repo: str, dry_run: bool = False, extra_gb: float = 0.0
         elif to == hf_hub():
             rc = fetch_cache(aid, e["repo"], e["files"], hm)
         else:
-            rc = fetch(e["repo"], to, list(e["files"]), part=to.rstrip("/") + ".partial-" + aid)
+            rc = fetch(e["repo"], to, list(e["files"]), revision=e.get("revision"),
+                       part=to.rstrip("/") + ".partial-" + aid)
         if rc != 0:
             return 5
     missing = [aid for aid in ids if not here(aid)]
