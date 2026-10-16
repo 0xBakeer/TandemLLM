@@ -842,6 +842,10 @@ class AgentMixin:
                 # the room the engine itself left (runs.py)
                 body["max_tokens"] = max(256, min(int(body["max_tokens"]), run.shrink_to))
                 run.shrink_to = 0
+            if getattr(run, "shrink_half", False):
+                # the previous request was refused as an overrun: half the output, one retry
+                run.shrink_half = False
+                body["max_tokens"] = max(256, int(body["max_tokens"]) // 2)
         if run.salvage:                             # a worker's report-only call (chatd/tasks.py)
             body["max_tokens"] = min(int(body.get("max_tokens") or SALVAGE_TOKENS), SALVAGE_TOKENS)
         run.tail = None                             # a tail goes with one call only
