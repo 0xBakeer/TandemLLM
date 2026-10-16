@@ -145,7 +145,7 @@ interface Run {
 }
 
 // ---- the Context panel
-type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'messages' | 'thinking' | 'reserved';
+type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'images' | 'messages' | 'thinking' | 'reserved';  // images: the engine's split (VIS-205)
 interface ContextPart { kind: ContextPartKind; label: string; tokens: number }
 interface ContextReport {
   window: number; used: number;

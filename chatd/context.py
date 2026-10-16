@@ -56,8 +56,9 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     """`model`: the chat's model as `service.model_info` gives it. `branch_tokens`: the branch as
     the next request carries it (the last request's prompt plus its answer, plus what came since).
     `stats`: the last finished answer's TurnStats; `run`/`row`: the run in flight and its live row.
-    `split`: the last usage frame's `tandem.parts` (SRV-349): the system prompt's and the tool
-    schemas' tokens as the engine counted them, which come out of the conversation's share.
+    `split`: the last usage frame's `tandem.parts` (SRV-349): the system prompt's, the tool
+    schemas' and the images' tokens as the engine counted them, which come out of the conversation's
+    share.
     `session`: the session key the chat's requests carry, to find its rows in the engine's
     caches (`holding`)."""
     window = int(model.get("max_len") or 0)
@@ -78,12 +79,15 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     reserved = int(model.get("max_output") or 0)
     system = int((split or {}).get("system") or 0)
     tools = int((split or {}).get("tools") or 0)
-    messages = max(0, messages - system - tools)
+    # the prompt's image rows as the engine counted them (VIS-205: a screenshot is 1,000 rows on Super VL)
+    images = int((split or {}).get("images") or 0)
+    messages = max(0, messages - system - tools - images)
     parts = [
         {"kind": "system", "label": "system prompt", "tokens": system},
         {"kind": "tools", "label": "tool schemas", "tokens": tools},
         {"kind": "skills", "label": "skills and packages", "tokens": skills},
         {"kind": "files", "label": "files", "tokens": files_tokens},
+        {"kind": "images", "label": "images", "tokens": images},
         {"kind": "messages", "label": "conversation", "tokens": messages},
         {"kind": "thinking", "label": "thinking, this turn" if run or not thinking else
          "thinking, last turn", "tokens": thinking},

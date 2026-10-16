@@ -4,6 +4,18 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ## 0.11.3 (unreleased)
 
+0.11.3 serves Nemotron 3.5 Super VL with its image tower: the model reads the images of a chat, user uploads and the screenshots of `render_page` alike. Every request without an image writes the same text as in 0.11.2.
+
+### Models and engine
+
+- Super VL reads images (ENG-365). The checkpoint's C-RADIO ViT-H/16 tower and projector (BF16 in the EXL3 packs and in NVIDIA's NVFP4 checkpoint, 1.57 GB of tensors) load beside the trunk: 1.60 GiB allocated on EXL3 4.0. An image is one tile at a dynamic resolution, 1,024 to 13,312 16-pixel patches, 256 to 3,328 prompt rows between `<img>` and `</img>` (1,000 for a 1,280 x 800 screenshot); the trunk has no positional encoding, so an image row is only an embedding over its placeholder. The processor is the checkpoint's, without remote code. Against the checkpoint's own processor and modeling code on three pictures (DGX Spark, 2026-10-17): pixel values and prompt ids identical, the tower's rows bit-identical to the reference's bf16 run (cosine 0.99973 to 0.99990 against its fp32 run, as the reference's own), greedy answers with our rows and with the reference's identical. The caches key image rows on the image's content. The NemotronH tier fingerprint counts `vision.py`, and `engine.py` changed: Bolt's, Lightning's and Super VL's saved conversations from 0.11.2 are not reused, their first request reads the prompt again.
+- The three Super VL profiles set `VISION=on`; their memory need, ceiling and peak grow by 2 GiB (the tower and the 512 MB image cache). The setup guide has a Vision switch for Super VL with that figure. Bolt and Lightning stay text only.
+
+### Chat tab
+
+- Super VL's card says vision, so the Chat tab sends it the chat's images: uploads in the user message, the newest tool screenshot in its tool message (VIS-205).
+- The Context panel lists the prompt's images as a part of their own, the engine's count, out of the conversation's share (VIS-205).
+
 ### Conductor
 
 - A turn whose class nobody decided keeps its class's packages under a model fit with `fallback: lean` (Super VL, Bolt, Lightning, LFM2.5): the profile's default class on a new session, the session's class after it, filtered by the fit's `packages` and `rules` as for a decided class. The lean fallback dropped every package, rule and core, so with Laya refused every Chat-tab turn on Super VL went out with no package at all; the Chat tab now gets code_edit's core. The effort stays the profile's default and no effort sentence goes in. A tool turn keeps the note of its user message, so a run's prompt prefix does not change between its steps (SRV-534).

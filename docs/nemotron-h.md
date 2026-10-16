@@ -1,8 +1,8 @@
 # NemotronH (Nemotron 3.5 Lightning, Bolt, Super VL)
 
-NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and from EXL3 packs converted from NVIDIA's BF16 checkpoint (2.0 to 6.0 bpw; the 2.0 pack has 4-bit dense projections), all with NVIDIA's LiLiCorr drafter; Nemotron 3.5 Super VL 120B-A12B from NVIDIA's ModelOpt checkpoint (NVFP4 experts, FP8 Mamba2 and attention projections and head) and from EXL3 packs of its BF16 checkpoint, with its own LiLiCorr drafter; and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on. Text only: the RADIO image towers are not served yet.
+NVIDIA's NemotronH hybrid is the fourth model family TandemLLM runs: Mamba2, NoPE attention and mixture-of-experts blocks, with an MTP head on some checkpoints. The engine serves Nemotron 3.5 Bolt 74B-A9B from NVIDIA's own 24 GB GGUF (IQ2_XXS experts, NVFP4 Mamba2 projections, Q8_0 head and attention), read as stored, and from EXL3 packs converted from NVIDIA's BF16 checkpoint (2.0 to 6.0 bpw; the 2.0 pack has 4-bit dense projections), all with NVIDIA's LiLiCorr drafter; Nemotron 3.5 Super VL 120B-A12B from NVIDIA's ModelOpt checkpoint (NVFP4 experts, FP8 Mamba2 and attention projections and head) and from EXL3 packs of its BF16 checkpoint, with its own LiLiCorr drafter; and Nemotron 3.5 Lightning 30B-A3B in BF16, the test model it was built on. Super VL reads images through its checkpoint's RADIO tower ([Super VL: images](#super-vl-images)); Bolt and Lightning are served text only.
 
-Code: `engine/models/nemotron_h/` (registry name `nemotron_h`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`; quality against BF16 logits: `tools/nh_quality.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`. EXL3 packs: `tools/fn_kernels.py` (`dense_rows`) and `tools/exl3_relu2.py`. ModelOpt NVFP4 / FP8 checkpoints: `tools/nvfp4_relu2.py`. Draft head: `engine/drafters/lilicorr.py`.
+Code: `engine/models/nemotron_h/` (registry name `nemotron_h`; the image path `vision.py`, selected by `NemotronHForCausalLM`, `NemotronHPuzzleForCausalLM` and the Omni architectures `NemotronH_*Omni_Reasoning_V3`). Ladder tool: `tools/nh_check.py`; quality against BF16 logits: `tools/nh_quality.py`. GGUF weights (IQ2_XXS, NVFP4, Q8_0): `tools/iq2_linear.py`. EXL3 packs: `tools/fn_kernels.py` (`dense_rows`) and `tools/exl3_relu2.py`. ModelOpt NVFP4 / FP8 checkpoints: `tools/nvfp4_relu2.py`. Draft head: `engine/drafters/lilicorr.py`.
 
 ## The model
 
@@ -100,7 +100,7 @@ Without a price file (0.11.0, 2.5 to 6.0) the one-row block kept a price of 1 ms
 
 ### Super VL: nemotron-super-vl-exl3-4.0, nemotron-super-vl-exl3-2.0, nemotron-super-vl-nvfp4
 
-Nemotron 3.5 Super VL 120B-A12B, text only (the RADIO tower of the Omni checkpoint is not loaded), each profile with NVIDIA's LiLiCorr drafter for Super VL (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr: five taps, layers 1, 22, 43, 64 and 85, a window of 8,192, its own NVFP4 head) and the lookup, cut by StairCut (price files `ops/prices/nemotron-3.5-super-vl-120b-a12b/`, each with a `spec` prior: the 8-row chain plus the draft over 0.75 of LiLiCorr's offline accepted length).
+Nemotron 3.5 Super VL 120B-A12B with its RADIO image tower (`VISION=on`, [Super VL: images](#super-vl-images)), each profile with NVIDIA's LiLiCorr drafter for Super VL (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr: five taps, layers 1, 22, 43, 64 and 85, a window of 8,192, its own NVFP4 head) and the lookup, cut by StairCut (price files `ops/prices/nemotron-3.5-super-vl-120b-a12b/`, each with a `spec` prior: the 8-row chain plus the draft over 0.75 of LiLiCorr's offline accepted length).
 
 - `nemotron-super-vl-exl3-4.0`: an EXL3 pack of the BF16 checkpoint (nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16, revision 97e00975) by exllamav3 1.6.2 with the Puzzle/Bolt and Super VL patches: every projection at 4 bits, head 6, the MTP head at 4 (65.0 GB); 58.35 GiB at load (59.75 with the MTP head). Public repository 0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-4.0, pinned by commit.
 - `nemotron-super-vl-exl3-2.0`: the same converter at 2 bits with `-hq`: routed experts at 2, every other projection at 4, head 6, the MTP head at 4 to 6 (36.84 GB); 31.24 GiB at load. Public repository 0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-2.0, pinned by commit.
@@ -128,6 +128,32 @@ Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 w
 - Window (ENG-363): up to 1,048,576 tokens, the checkpoint's own (`llm_config.max_position_embeddings`, the tokenizer's `model_max_length`), for slot 0 and the side slots; the default stays 262,144. Attention has no positional encoding, and nothing in the engine is sized below that: K and V are [2, window, 128] a layer (8 GiB at 1,048,576), attention runs 4 to 2,048 programs of 512 keys, prompts run in 4,096-row chunks. Checked on EXL3 4.0 with slot 0 at 1,048,576, three side slots at 262,144, LiLiCorr and the lookup, the caches and conductor as served, the response cache off, a request raw (2026-10-16): five facts at 5 / 25 / 50 / 75 / 95 % of synthetic filler, greedy, thinking off, all five answered at 131,054 prompt tokens (first token after 228 s, 574 tok/s of prefill) and at 249,983 (475 s, 526 tok/s). A 1,000,000-token prompt was not measured.
 - The prefill's workspace does not grow with the prompt: 3.34 GiB above the engine at 131,054 tokens, 3.18 at 249,983 (the memory policy's `observed`). The adapter says so (`cost()`: a floor of 3.5 GiB, capped at 4.0); before, the 27B's line (30 kB a token) refused a 1,000,000-token prefill as 29 GiB of workspace. A slot 0 window above 262,144 adds its KV above it to the memory policy's ceiling and peak (+6 GiB at 1,048,576), as the side slots' bytes are added, so the caches are not refused for it during a long prefill.
 - Each side slot at 262,144 takes 2.82 GiB allocated and 3.10 GiB of MemAvailable at load (its KV 2.00 GiB), built in 9.2 s; measured with 3 and with 4 slots. With slot 0 at 1,048,576 and 4 slots the residency planner refused Laya (its 3 GiB claim under the 15 GiB floor against the engine's peak); with 3 slots it fits.
+
+### Super VL: images
+
+ENG-365. Every Super VL checkpoint carries the Omni model's image tower in BF16: the EXL3 packs copy it unquantised (shard 9 of the 4.0 pack, shard 5 of the 2.0), NVIDIA's ModelOpt checkpoint keeps it BF16 (shard 1; its 392 tensors are byte for byte the 4.0 pack's). `engine/models/nemotron_h/vision.py` loads it beside the trunk (`ctx.vision`, the server's image path of the Qwen towers) and runs the checkpoint's own arithmetic: transformers' `RadioModel` and `NemotronH_Omni_Reasoning_V3VisionProjector`, bf16, the reference's ops in its order.
+
+| part | Super VL |
+|-|-|
+| tower | C-RADIO ViT-H/16: 32 blocks, hidden 1,280, 16 heads of 80, MLP 5,120 (exact gelu), qkv with bias, no layer scale; 10 prefix tokens (3 class, 7 registers) dropped after the last block |
+| positions | a learned 128 x 128 table (2,048-pixel images), bilinear in fp32 to the grid's longer side squared, then cropped (RADIO's cropped position embedding); past a 247-patch side the same without the square, to fp32 rounding |
+| projector | `vision_final_layernorm` (the trunk has an MTP head), the v2 pixel shuffle of 2 x 2 patches into one 5,120-wide row, `mlp1`: RMSNorm (fp32, eps 1e-5), 5,120 -> 20,480, relu^2, 20,480 -> 4,096 |
+| processor | one tile an image: the 16-pixel grid of `image_processing_nemotron_h_omni.py` (`_compute_target_patches`: rounded up, scaled into 1,024..13,312 patches, each side even), torch's antialiased bicubic in fp32, CLIP mean and std; no remote code |
+| prompt | the template writes `<image>` (18) for an image part, in a user or a tool message; the engine writes `<img>` (19), one `<image>` a row, `</img>` (20): 256 to 3,328 rows, 1,000 for 1,280 x 800 |
+| rows | written over the placeholders' embeddings in the prompt chunk that holds them; no positional encoding, so no position moves and every text row is computed as without the image |
+| memory | 1.57 GB of tensors, 1.60 GiB allocated beside the EXL3 4.0 trunk; the image cache 512 MB (`--image-cache-mb`); the admission bound for the largest image 1.6 GiB of activations |
+
+The caches key an image's rows on its content (`key_ids` from the digest of the patches), as on the Qwen models: the same image resumes, another one under the same placeholder does not. A request with images runs on slot 0, as on the 27B. Video, the sound tower and RADIO's summary output are not served. Bolt's EXL3 packs hold the same kind of tower and stay text only (not checked).
+
+Checked against the checkpoint's own processor and modeling code (`tools/nh_vision_check.py`, DGX Spark, 2026-10-17, three synthetic pictures: shapes 640 x 480, a scene 1,024 x 768, a dark app screen with text 1,280 x 800):
+
+| picture | rows | pixels | ours vs reference bf16 | ours vs reference fp32: cosine (lowest row), relative | reference bf16 vs its fp32 |
+|-|-|-|-|-|-|
+| shapes | 300 | identical | max abs 0 | 0.99990 (0.99668), 0.0138 | 0.0138 |
+| scene | 768 | identical | max abs 0 | 0.99973 (0.98957), 0.0234 | 0.0234 |
+| app | 1,000 | identical | max abs 0 | 0.99985 (0.99628), 0.0171 | 0.0171 |
+
+The prompt ids equal the checkpoint processor's `input_ids` for each. On the engine (EXL3 4.0 trunk, "Describe this image.", thinking off, 96 greedy tokens), the answers with our rows and with the reference's rows are identical; they name the three shapes with their colours and places, the sky, sun, grass and red-roofed house, and the app's "Garden settings" header and orange START button. The trunk's own distance to BF16 is the pack's (KL 0.049 above); a BF16 reference of the whole model does not fit the board. `tests/test_nh_vision.py`: the processor's grids, the position table, the shuffle, the splice across prompt chunks, and the checkpoint's modeling code built small.
 
 ### Lightning: nemotron-lightning-bf16
 
