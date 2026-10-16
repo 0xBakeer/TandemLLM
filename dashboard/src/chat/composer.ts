@@ -8,7 +8,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { stripEdge, type Edge } from '../lib/phone';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
-import type { Attachment, Capabilities, ChatSettings, EffortChoice, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
+import type { Attachment, Capabilities, ChatSettings, EffortChoice, ModelInfo, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
 import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { chatProvider, providerWord } from './websearch';
@@ -258,7 +258,6 @@ export class QseChatComposer extends LightElement {
     const s = this.settings;
     const caps = this.caps;
     const model = caps?.models.find((m) => m.id === s?.model) ?? caps?.models[0];
-    const profile = model?.profiles.find((p) => p.id === s?.profile);
     const toolsOn = s ? s.tools.length : 0;
     const mcpOn = s ? s.mcp.length : 0;
     return html`<form class="ch-composer ${this.dragging ? 'is-drag' : ''} ${this.running ? 'is-running' : ''}" @submit=${(e: Event) => (e.preventDefault(), this.send())}
@@ -279,7 +278,7 @@ export class QseChatComposer extends LightElement {
         }} />${icon('plus')}</label>
         <span class="ch-pills" data-edge=${this.edge} @scroll=${() => this.measureStrip()}>
           <span class="ch-pillwrap">
-            <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'model'} @click=${() => (this.pop = this.pop === 'model' ? 'none' : 'model')} title="model and profile"><span class="ch-pill-main">${model?.name ?? '…'}</span>${profile ? html`<span class="ch-pill-sub">${profile.name}</span>` : nothing}</button>
+            <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'model'} @click=${() => (this.pop = this.pop === 'model' ? 'none' : 'model')} title="model"><span class="ch-pill-main">${model?.name ?? '…'}</span></button>
             ${this.pop === 'model' && caps ? this.renderModelPop(caps, s) : nothing}
           </span>
           <span class="ch-pillwrap">
@@ -312,11 +311,11 @@ export class QseChatComposer extends LightElement {
     </div>`;
   }
 
+  /** VIS-203: models only, one row each; the Chat tab runs under its own conductor profile */
   private renderModelPop(caps: Capabilities, s: ChatSettings | null): TemplateResult {
-    return html`<div class="ch-pop" role="menu">
-      ${caps.models.map((m) => html`<div class="ch-pop-group"><div class="ch-pop-title">${m.name} <span class="muted small">${m.weights}, ${(m.max_len / 1024).toFixed(0)}k window</span></div>
-        ${m.profiles.map((p) => html`<button type="button" role="menuitemradio" aria-checked=${s?.model === m.id && s?.profile === p.id} class="ch-pop-item ${s?.model === m.id && s?.profile === p.id ? 'is-on' : ''}" @click=${() => (this.patch({ model: m.id, profile: p.id }), (this.pop = 'none'))}><span class="ch-pop-name">${p.name}</span><span class="ch-pop-desc">${p.description}</span></button>`)}
-      </div>`)}
+    const cur = caps.models.find((m) => m.id === s?.model) ?? caps.models[0];
+    return html`<div class="ch-pop ch-pop-models" role="menu">
+      ${caps.models.map((m) => html`<button type="button" role="menuitemradio" aria-checked=${m === cur} class="ch-pop-item ${m === cur ? 'is-on' : ''}" data-model=${m.id} @click=${() => (this.patch(modelPatch(m)), (this.pop = 'none'))}><span class="ch-pop-name">${m.name}</span><span class="ch-pop-desc">${modelDesc(m)}</span></button>`)}
     </div>`;
   }
 
@@ -368,6 +367,16 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-foot"><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'tools' }), (this.pop = 'none'))}>All tools and policies</button><button type="button" class="linkish" @click=${() => (this.fire('ch-open-settings', { section: 'mcp' }), (this.pop = 'none'))}>MCP servers</button></div>
     </div>`;
   }
+}
+
+/** a pick sets the model and clears any profile: the engine maps the Chat tab to chat-app */
+export function modelPatch(m: ModelInfo): Partial<ChatSettings> {
+  return { model: m.id, profile: null };
+}
+
+/** "EXL3 4.0, 256k window": the parts a backend reports, none left empty */
+export function modelDesc(m: ModelInfo): string {
+  return [m.weights, m.max_len ? `${Math.round(m.max_len / 1024)}k window` : ''].filter(Boolean).join(', ');
 }
 
 /** "auto effort" as the value and its word, the word in the quieter ink (VIS-185) */

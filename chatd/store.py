@@ -140,9 +140,19 @@ DELETE FROM permission_rules WHERE rowid NOT IN (
   GROUP BY tool, IFNULL(match, ''), decision, IFNULL(conversation_id, ''))
 """
 
+# v7 (2026-10-16, VIS-203): no conductor profile in a chat or a preset. The composer's picker listed
+# every profile (opencode's, Open WebUI's, A/B tests, header-only ones) and a pick went to the engine
+# as X-Tandem-Profile; the Chat tab runs under chat-app, by its client kind
+SCHEMA_V7 = """
+UPDATE conversations SET settings = json_set(settings, '$.profile', NULL)
+  WHERE json_valid(settings) AND json_extract(settings, '$.profile') IS NOT NULL;
+UPDATE presets SET settings = json_set(settings, '$.profile', NULL)
+  WHERE json_valid(settings) AND json_extract(settings, '$.profile') IS NOT NULL
+"""
+
 # version n: the SQL that takes a file from n-1 to n
 MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5,
-                              6: SCHEMA_V6}
+                              6: SCHEMA_V6, 7: SCHEMA_V7}
 BACKUPS_KEPT = 7
 
 

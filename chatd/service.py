@@ -1293,7 +1293,6 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
     def _build_caps(self, facts: dict) -> dict:
         models = self.engine.models()
         eng = facts.get("engine") or {}
-        profiles = self.engine.profiles() if models else []
         out = []
         for m in models:
             card = m.get("tandem") if isinstance(m.get("tandem"), dict) else {}
@@ -1301,15 +1300,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             ours = m.get("owned_by") in ("local", "tandemllm") or card.get("backend") == "engine"
             w = eng.get("weights") if ours else None
             levels = c.get("effort_levels") or []
+            cloud = bool(card.get("cloud")) or card.get("kind") in ("openai", "anthropic", "deepseek",
+                                                                    "cloud")
             out.append({
-                "id": m["id"], "name": card.get("label") or m["id"],
+                "id": m["id"], "name": _model_name(m, card, ours, cloud),
                 "weights": card.get("pack") or (w.get("name") if isinstance(w, dict) else "") or "",
                 "max_len": int(card.get("context_length") or (eng.get("max_len") if ours else 0)
                                or 0),
-                "profiles": profiles if ours else [],
-                "backend": ("engine" if ours else
-                            "cloud" if card.get("kind") in ("openai", "anthropic", "cloud")
-                            else "proxy"),
+                # the conductor's profiles are each client's harness (opencode, Open WebUI,
+                # Hermes, tests); the Chat tab always runs under its own, chat-app
+                "profiles": [],
+                "backend": "engine" if ours else "cloud" if cloud else "proxy",
                 "capabilities": {
                     "thinking": bool(c.get("thinking", False)),
                     "effort_levels": [x for x in levels if x != "off"],
@@ -1638,10 +1639,21 @@ def _client_id(body: dict) -> str:
     return cmid
 
 
+def _model_name(m: dict, card: dict, ours: bool, cloud: bool) -> str:
+    """The picker's name of a model: the engine's own label; a backend's model by its provider
+    name, else its id (the card's label names the backend, which several models share)."""
+    if ours:
+        return card.get("label") or m["id"]
+    name = card.get("name") or m["id"]
+    return f"{name} (cloud)" if cloud else name
+
+
 def _clean_settings(patch: dict) -> dict:
     if not isinstance(patch, dict):
         raise ApiError(400, "bad_request", "settings must be an object")
     out = {k: v for k, v in patch.items() if k in _SETTINGS_KEYS}
+    if "profile" in out:
+        out["profile"] = None           # the Chat tab's runs take the chat-app profile
     if "effort" in out and out["effort"] not in EFFORTS:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
     if "max_steps" in out:
