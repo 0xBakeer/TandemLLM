@@ -143,8 +143,13 @@ def test_a_turn_of_a_side_conversation_names_its_home():
         huge = b2 + [5_000_000 + i for i in range(60_000)]
         need, why = _need(huge)
         assert need is None and why["wait"] == "too_long" and "home" not in why, why
-        # the slot cleared (another conversation ran there): no home
+        # SRV-528: no end anchor (the engine was ahead), the rows in place: still its home
         pool.slots[1].values["resident"].end = None
+        need, why = _need(b2)
+        assert why.get("home") == 1, why
+        # the slot cleared (another conversation ran there: `begin` cut the rows, the view went)
+        pool.slots[1].values["resident"].valid = 0
+        pool.slots[1].values["slot_view"] = None
         need, why = _need(b2)
         assert "home" not in why, why
     finally:

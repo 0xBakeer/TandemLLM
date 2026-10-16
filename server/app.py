@@ -792,7 +792,34 @@ def _par_view_keep(served: list | None, view: list | None) -> bool:
     except Exception:                                              # noqa: BLE001
         return False
     STATE["slot0_view"] = list(view)
+    # SRV-528: when, and whether its rows hold the whole prompt (a prefill cancelled part way does
+    # not), for `_slot0_stale`
+    STATE["slot0_seen"] = (time.monotonic(), valid >= len(served))
     return True
+
+
+#: SRV-528: how long slot 0's conversation keeps new conversations on the side slots
+#: (`_par_side_need`'s `prefer_side`) after the last request that continued it
+SLOT0_KEEP_S = float(_S.get("SLOT0_KEEP_S") or 1800.0)
+
+
+def _slot0_stale(now: float | None = None) -> str | None:
+    """SRV-528: why slot 0's resident conversation no longer counts for `prefer_side`: `partial`
+    when the last request that kept it stopped inside its prompt (a prefill cancelled part way),
+    `idle` when no request continued it for SLOT0_KEEP_S; None while it counts. A 1,000,000-token
+    test prompt cancelled after 937,984 rows (2026-10-16 22:01) kept slot 0, the 1,048,576-token
+    window, idle all evening: every new conversation was sent to a 262,144-token side slot beside
+    it. Nothing is dropped: its rows stay until a request needs slot 0, and its own retry still
+    resumes there (`_continues_resident`)."""
+    seen = dict.get(STATE, "slot0_seen")
+    if seen is None:
+        return None
+    t, whole = seen
+    if not whole:
+        return "partial"
+    if (time.monotonic() if now is None else now) - t >= SLOT0_KEEP_S:
+        return "idle"
+    return None
 
 
 #: how long a request waits for slot 0 while only TandemLLM's own work holds it (the shadow reader,
@@ -947,7 +974,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # another conversation: the shared part ends before its first user message, or,
             # without the template's marks, more than a chunk short of the resident rows
             other = head < conv if conv is not None else head < valid - chunk
-            if other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
+            stale = (_slot0_stale() if other and valid >= 2 * chunk
+                     and valid + margin + SIDE_MIN_ROOM > longest else None)
+            if stale is not None:
+                why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
+            elif other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
                 why["prefer_side"] = valid
                 if len(ids) <= SIDE_NEW_SHORT:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
@@ -973,6 +1004,9 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
         return _wait_reason(me)[0]
     if why.get("home") is not None and why.get("home_wait") is None:
         return f"waits up to {SIDE_HOME_WAIT_S:g} s for slot {why['home']}, which holds its conversation"
+    if why.get("hop_from") is not None:
+        return (f"moved from slot {why['hop_from']} (busy {why.get('home_wait')} s): re-reading its "
+                f"conversation on the next free slot")
     if why.get("slot0_first") and waited < SIDE_SLOT0_WAIT_S:
         where = ("slot 0 reads its conversation back from the NVMe" if why.get("wait") == "spill"
                  else "slot 0 holds its conversation")
@@ -993,29 +1027,53 @@ def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
 
 
 def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) -> int | None:
-    """FX16: the index of the side slot whose resident rows this prompt continues (judged on the
-    client's tokens against the last prompt served there, as `_continues_view` judges slot 0's),
-    when its window holds `need` rows; else None. The slot's rows and end anchor are its
-    resident prefix's (`_build_side_slots`); a request of another conversation served there
-    since cleared them (`ResidentPrefix.begin`), and so the view."""
+    """FX16: the index of the side slot that holds this conversation, when its window holds `need`
+    rows; else None. A slot holds it when the prompt continues the last prompt served there (judged
+    on the client's tokens, as `_continues_view` judges slot 0's) or shares at least a chunk of the
+    slot's own rows past the first user message (`res.common`). A request of another conversation
+    served there since cleared them (`ResidentPrefix.begin`), and so the view.
+
+    SRV-528: with or without an end anchor, and the slot with the longest share wins. FX16 named a
+    slot home only when it kept an end anchor and took the first such slot; a turn that kept none
+    (the engine ahead, SRV-530) was routed as a new conversation, to the lowest free side slot
+    `take_side` allowed, and once the carry guard of the slot below expired (CARRY_KEEP_S) a
+    45,778-token conversation moved from slot 2 to slot 1 and was read again in 80.9 s
+    (2026-10-17 00:05). Without an end anchor the turn resumes at the slot's anchors. Among the
+    slots within a chunk of the longest share a free one goes first."""
+    found = []
     for s in pool.side():
         vals = s.values or {}
         res, view = vals.get("resident"), vals.get("slot_view")
-        if res is None or not view or need > s.max_len:
+        if res is None or need > s.max_len:
             continue
         try:
-            if getattr(res, "end", None) is None or int(getattr(res, "valid", 0) or 0) < chunk:
+            if int(getattr(res, "valid", 0) or 0) < chunk:
                 continue
-            vc = _shared_head(ids, view)
-            if not _continues_view(len(view), vc, chunk, conv):
-                al_s = vals.get("end_align")
-                if al_s is not None:
-                    vc = max(vc, al_s.moved_common(view, ids))     # FX16: a moved block
-            if _continues_view(len(view), vc, chunk, conv):
-                return s.index
+            held = 0
+            if view:
+                vc = _shared_head(ids, view)
+                if not _continues_view(len(view), vc, chunk, conv):
+                    al_s = vals.get("end_align")
+                    if al_s is not None:
+                        vc = max(vc, al_s.moved_common(view, ids))     # FX16: a moved block
+                if _continues_view(len(view), vc, chunk, conv):
+                    held = vc
+            if not held:
+                # the slot's own rows (no view kept, or the client's copy parts from it): past the
+                # first user message, or without the template's marks nearly all of them
+                rc = res.common(ids)
+                valid = int(getattr(res, "valid", 0) or 0)
+                if rc >= chunk and (rc >= conv if conv is not None else rc >= valid - chunk):
+                    held = rc
+            if held:
+                found.append((held, s))
         except Exception:                                          # noqa: BLE001
             continue
-    return None
+    if not found:
+        return None
+    top = max(h for h, _ in found)
+    near = [s for h, s in found if h >= top - chunk]
+    return next((s for s in near if not s.busy), next(s for h, s in found if h == top)).index
 
 
 def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
@@ -7090,6 +7148,7 @@ class Handler(BaseHTTPRequestHandler):
                     # still there), or any side slot
                     home = None
                     par_why["home_wait"] = round(time.monotonic() - t_wait, 1)
+                    par_why["hop_from"] = int(par_why["home"])      # SRV-528
                 if self._client_gone():
                     left = True
                     rec.client_gone_at = time.perf_counter()
@@ -7157,13 +7216,20 @@ class Handler(BaseHTTPRequestHandler):
             INFLIGHT["lane" if micro else "running"] += 1
         if par is not None and not micro and side is None:
             par.took_slot0()
-        if par is not None and not micro and (side is not None or par_why.get("wait")):
+        if par is not None and not micro and par_why.get("hop_from") is not None and \
+                (side is None or side.index != par_why["hop_from"]):
+            # SRV-528: its conversation's slot stayed busy past SIDE_HOME_WAIT_S; the tokens the
+            # slot it took re-read are added at its end (`hop_tokens`)
+            with par._lk:
+                par.stats["hops"] = par.stats.get("hops", 0) + 1
+        if par is not None and not micro and (side is not None or par_why.get("wait")
+                                              or par_why.get("hop_from") is not None):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "home", "home_wait", "prefer_side",
-                                                          "new_wait", "spill", "spill_head",
+                                                          "home", "home_wait", "hop_from", "prefer_side",
+                                                          "slot0_stale", "new_wait", "spill", "spill_head",
                                                           "slot0_wait")
                             if k in par_why)
             if side is not None:
@@ -7175,6 +7241,9 @@ class Handler(BaseHTTPRequestHandler):
                             if conv is not None and head >= 1024 and head < conv else "")
                 if par_why.get("home") == side.index:
                     new_conv = " continues its conversation here (home)"
+                elif par_why.get("hop_from") is not None:
+                    new_conv = (f" moved from slot {par_why['hop_from']} (busy "
+                                f"{par_why.get('home_wait')} s): re-reads what this slot lacks")
                 elif par_why.get("slot0_wait") is not None:
                     new_conv = (f" slot 0 still busy after {par_why['slot0_wait']} s, its "
                                 f"conversation ({par_why.get('wait')}) read here")
@@ -7192,6 +7261,9 @@ class Handler(BaseHTTPRequestHandler):
             elif par_why.get("wait") in ("view", "resident", "spill"):
                 print(f"[parallel] {cid} slot 0, continues its conversation "
                       f"({par_why['wait']}): {nums}", flush=True)
+            elif par_why.get("hop_from") is not None:
+                print(f"[parallel] {cid} slot 0, moved from slot {par_why['hop_from']} (busy "
+                      f"{par_why.get('home_wait')} s): carried in or read again: {nums}", flush=True)
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns
@@ -8410,6 +8482,12 @@ class Handler(BaseHTTPRequestHandler):
                                 _side_view_keep(side, list(ctx_[:n_]), par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
+                    if par_why.get("hop_from") is not None and \
+                            (side is None or side.index != par_why["hop_from"]):
+                        # SRV-528: what the hop cost, in tokens this slot read again
+                        fw = int((STATE.get("last_prefill") or {}).get("forwarded") or 0)
+                        with par._lk:
+                            par.stats["hop_tokens"] = par.stats.get("hop_tokens", 0) + fw
                     _par_end(par, side, cid)
                 if side is None:
                     with QUEUE:
