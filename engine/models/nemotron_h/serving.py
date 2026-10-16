@@ -26,6 +26,7 @@ from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
 from engine.methods.staircut import PriceModel
 from engine.models.adapter import Capabilities, CostModel
+from engine.models.graph_lru import joint_graphs
 from engine.models.nemotron_h import kernels as K
 from engine.models.nemotron_h.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, NemotronHEngine
 from engine.models.state import SectionState
@@ -191,11 +192,18 @@ class NemotronHServing:
         return self._hidden[0, -1:] if self._hidden is not None else torch.zeros(1, self.cfg.hidden_size)
 
     def cost(self) -> CostModel:
-        """A snapshot: the SSM and conv states whole; K and V of the attention layers a token (bf16)."""
+        """A snapshot: the SSM and conv states whole; K and V of the attention layers a token (bf16).
+        The prefill workspace (ENG-363), measured on Super VL EXL3 4.0 (2026-10-16, the memory policy's
+        `observed`): 3.34 GiB above the engine at a 131,054-token prefill and 3.18 GiB at 249,983. The
+        prefill runs in 4,096-row chunks and attention reads the cache in place, so it does not grow with
+        the prompt: a floor of 3.5 GiB, the line through the 131k point, capped at 4.0 GiB (the policy
+        raises the cap if a prefill ever needs more). Without it the 27B's line (30 kB a token, no cap)
+        refused a 1,000,000-token prefill as 29 GiB of workspace."""
         conv = sum(t.numel() * t.element_size() for t in self.st.conv.values())
         rec = sum(t.numel() * t.element_size() for t in self.st.ssm.values())
         return CostModel(section_bytes=conv + rec, view_bytes_per_token=self.cfg.kv_bytes_per_token(2),
-                         parts={"recurrent": rec, "conv": conv})
+                         workspace_floor=int(3.5 * (1 << 30)), workspace_per_token=27370,
+                         workspace_cap=int(4.0 * (1 << 30)), parts={"recurrent": rec, "conv": conv})
 
     def manifest(self) -> Manifest:
         return manifest()
@@ -350,7 +358,7 @@ class NemotronHServing:
                 s._at(start)
                 s._ensure(start + 1 + CAPTURE_ROWS)
             rbs = fn.decode_multi([(int(block.view(-1)[0]), s.st, s.slot) for s, block, _, _ in items],
-                                  graphs=fn.__dict__.setdefault("joint_graphs", {}))
+                                  graphs=joint_graphs(fn))
             out = []
             for (s, block, _, _), rb in zip(items, rbs):
                 s.picks, s._hidden = rb["next"][:1], rb["hidden"][:1].unsqueeze(0)
