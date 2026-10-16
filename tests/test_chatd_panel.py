@@ -253,7 +253,10 @@ def test_the_turns_stats_weigh_every_call():
     run.usage = {"usage": {"prompt_tokens": 32289, "completion_tokens": 707},
                  "timings": {"predicted_per_second": 36.41, "tokens_per_block": 3.53},
                  "metrics": {"speculative_decoding": {"draft_acceptance_rate": 0.75}}}
+    run.step_usage = [{"step": 1, "ttft_ms": 900.0}, {"step": 2, "ttft_ms": 6082.7}]
+    run.started_ms -= 38_000
     s = run.stats("stop")
+    assert s["ttft_ms"] == 900.0 and 38_000 <= s["total_ms"] < 60_000, s   # the turn's, not a call's
     assert s["acceptance"] == round(630 / 1000, 4) and s["tokens_per_round"] == round(
         (922 + 706) / 530, 2), s
     assert s["decode_tps"] == round((922 + 706) * 1000 / 44_400, 2)

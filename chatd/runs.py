@@ -534,6 +534,12 @@ class Run:
         total = t.get("total_ms")
         if total is None and self.t_sent is not None:
             total = round((time.monotonic() - self.t_sent) * 1000, 1)
+        if len(self.step_usage) > 1:
+            # a turn of several calls: the first call's wait for its first token and the run's
+            # time, tools included; the last call's alone said 6 s for a 38 s turn (2026-10-16)
+            if self.step_usage[0].get("ttft_ms") is not None:
+                ttft = self.step_usage[0]["ttft_ms"]
+            total = float(now_ms() - self.started_ms)
         out = {
             "finish": finish,
             "ttft_ms": ttft,
