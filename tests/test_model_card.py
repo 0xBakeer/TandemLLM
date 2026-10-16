@@ -79,6 +79,17 @@ def test_the_flashnext_card_covers_its_packs():
     return "the Flash-Next packs get their card; images only with the tower loaded"
 
 
+def test_the_super_vl_card_reads_images_with_the_tower_loaded():
+    """ENG-365 / VIS-205: Super VL's packs say vision once the RADIO tower is loaded (`--vision off`, or a
+    checkpoint without it: no), so the Chat tab sends a chat's images and tool screenshots to it."""
+    for pack in ("nemotron-super-vl-exl3-4.0", "nemotron-super-vl-exl3-2.0", "nemotron-super-vl-nvfp4"):
+        c = model_card.card(_facts(pack=pack))
+        assert c["model"] == "nemotron-3.5-super-vl-120b-a12b" and c["capabilities"]["vision"] is True, c
+        assert model_card.card(_facts(pack=pack, vision=False))["capabilities"]["vision"] is False
+    assert model_card.card(_facts(pack="nemotron-bolt-exl3-2.0"))["capabilities"]["vision"] is False
+    return "the three Super VL packs: vision with the tower; Bolt: none"
+
+
 def test_annotate_leaves_proxy_models_their_own_card():
     entries = [{"id": "TandemLLM", "object": "model"},
                {"id": "openai/gpt", "tandem": {"backend": "openai", "context_length": 128000}}]

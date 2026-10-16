@@ -9,7 +9,7 @@
   "capabilities": {
     "thinking": true,
     "tools": true,
-    "vision": false,
+    "vision": true,
     "structured": true,
     "parallel_tool_calls": true
   }
