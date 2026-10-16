@@ -40,24 +40,42 @@ Two of those packages are there for images. Pillow decodes a request's images, a
 
 Run one engine per board\index{one engine per board}. Two engines loading side by side run the board out of memory, and a DGX Spark in that state stops answering until it is power cycled. Section~\ref{sec:one-engine} explains how the scripts enforce it.
 
-\section{A new box: setup mode, then one profile}\label{sec:new-box}\index{setup mode}\index{use-profile.sh@\texttt{use-profile.sh}}
+\section{A new box: setup mode, then the Setup Guide}\label{sec:new-box}\index{setup mode}\index{use-profile.sh@\texttt{use-profile.sh}}
 
-Since 0.8.1 a new DGX Spark needs four commands and no Hugging Face token. Every file a profile reads is public on Hugging Face: the 27B's weights and drafters (Section~\ref{sec:exl3-27b}) and turboderp's Flash-Next packs (Chapter~\ref{ch:flashnext}).
+Since 0.8.1 a new DGX Spark needs two commands and no Hugging Face token. Every file a profile reads is public on Hugging Face: our own packs, the vendors' releases, and turboderp's Flash-Next packs (Chapter~\ref{ch:flashnext}).
 
 \begin{shell}
 curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh
 bash install.sh --setup --yes
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 \end{shell}
 
-The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model of Qwen's.
+The first line fetches the installer from the release tag. With \code{--setup} the installer puts the code and the Python environment in place and downloads only Wren's model (Qwen3.5-2B, 4.3~GB), the setup guide's assistant. It writes the configuration with no weights and starts setup mode on \code{127.0.0.1:8000}: the dashboard and its \texttt{\#/setup} page, Wren, and no model loaded.
 
-Run \code{use-profile.sh} from \code{~/TandemLLM/run/ops/}, next to the \code{serve.env} the installer wrote. With \code{--dry-run} it prints every file's URL and size and changes nothing. Without it, the script downloads what the profile needs and checks every weight file against the sha256 the hub lists. It then leaves setup mode, starts the engine on port 8000 and sends one smoke request. \code{use-profile.sh --list} prints every profile; \code{exl3-4.5} is the default for the 27B and \code{flashnext-3.05} for Flash-Next. Since 0.8.2, \code{community/<id>} runs a pack someone else published (Chapter~\ref{ch:community}).
+Then open the Setup Guide in a browser and pick a model. The guide shows each model with its weight packs, checks that the choice fits in memory, downloads it and starts the engine; it walks through the model, the weights, the tools and the parallel slots in eight steps. \code{docs/setup.md} describes the page.
+
+\begin{itemize}
+\item On the box itself, open \texttt{http://127.0.0.1:8000/dashboard/\#/setup}.
+\item From another computer, open an SSH tunnel to the box first, \code{ssh -L 8000:127.0.0.1:8000 <user>@<box>}, and open the same address on that computer.
+\item On your network, install with \code{--host 0.0.0.0} and open \texttt{http://<box>:8000/dashboard/\#/setup} from any computer that reaches the box. Until an admin password is set, anyone who reaches the port can run the setup.
+\end{itemize}
+
+The installer prints the addresses when it finishes, and while the box is in setup mode the dashboard opens on the Setup Guide by itself.
+
+\subsection{Advanced: from the command line}\label{sec:new-box-cli}
+
+The Setup Guide runs \code{ops/use-profile.sh} for you. To pick the weights from a shell instead, run the copy in \code{~/TandemLLM/run/ops/}, next to the \code{serve.env} the installer wrote:
+
+\begin{shell}
+~/TandemLLM/run/ops/use-profile.sh --list
+~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run
+~/TandemLLM/run/ops/use-profile.sh <profile>
+\end{shell}
+
+\code{--list} prints every profile and marks the active one. With \code{--dry-run} the script prints every file's URL and size and changes nothing. Without it, the script downloads what the profile needs and checks every weight file against the sha256 the hub lists. It then leaves setup mode, starts the engine on port 8000 and sends one smoke request. Since 0.8.2, \code{community/<id>} runs a pack someone else published (Chapter~\ref{ch:community}).
 
 \begin{table}[htbp]
 \centering\small
-\caption{What the two default profiles download on a new box. Free disk: the download plus the 60~GB the script keeps free after it.}\label{tab:new-box}
+\caption{What two of the profiles download on a new box. Free disk: the download plus the 60~GB the script keeps free after it.}\label{tab:new-box}
 \begin{tabularx}{\linewidth}{@{}L{.17\linewidth}YL{.14\linewidth}L{.1\linewidth}@{}}
 \toprule
 \hd{profile} & \hd{downloads} & \hd{size} & \hd{free disk} \\
@@ -69,8 +87,6 @@ Run \code{use-profile.sh} from \code{~/TandemLLM/run/ops/}, next to the \code{se
 \end{table}
 
 A folder appears only when all its files are there. If a download stops, run the same command again: it keeps the files that finished and continues. The engine then needs about 80~GiB of free memory for a 27B profile and 70~GiB for \code{flashnext-3.05}. If the profile does not come up, the script brings setup mode back.
-
-The dashboard's setup page does the same from a browser. Open the ssh tunnel the installer prints and go to \texttt{http://localhost:8000/dashboard/\#/setup}; the page walks through the model, the profile, the tools and the parallel slots in eight steps and runs the same script. \code{docs/setup.md} describes the page.
 
 The installer checks out the tag \code{v0.11.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.11.0'}. \code{--ref} picks another release, and testers point \code{--repo} at the early-access repository.
 
@@ -93,7 +109,7 @@ bash TandemLLM-early-access/install.sh --setup --yes \
     --repo https://github.com/0xBakeer/TandemLLM-early-access.git
 \end{shell}
 
-Then pick a model with \code{use-profile.sh}, as in Section~\ref{sec:new-box}: \code{flashnext-3.05} (85.1~GB) or \code{exl3-4.5} (about 58~GB). Only the code comes from the private repository. The weights come from Hugging Face, where they are public, so you need no token. \code{EARLY-ACCESS.md} at the top of the repository has the same steps, and this book is \code{manual/tandemllm-manual.pdf} beside it.
+Then open the Setup Guide and pick a model, as in Section~\ref{sec:new-box}. Only the code comes from the private repository. The weights come from Hugging Face, where they are public, so you need no token. \code{EARLY-ACCESS.md} at the top of the repository has the same steps, and this book is \code{manual/tandemllm-manual.pdf} beside it.
 
 A box with a running profile counts as configured, and \code{--setup} alone refuses to touch it. To update, add \code{--force-setup}: the installer stops the engine, checks out the new tag and comes back in setup mode. Then switch to the profile again; its files are on disk already, so nothing downloads twice.
 

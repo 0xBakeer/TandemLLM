@@ -72,7 +72,7 @@ That includes StairCut's verify prices, `ops/stair-tables-nvfp4.json`, which wer
 - The FP8 profile also reads its own launch table (`QWEN38_FP8_TILES=ops/fp8-tiles.json`) and its router prices (`--price-table ops/prices.json:fp8-plain`).
 - `--fp8-head build` builds the FP8 head at load, without the file.
 
-## Two models: the 27B and Flash-Next
+## One model at a time: the 27B and Flash-Next
 
 The box serves one model at a time; `ops/active-profile` says which. The 27B's profiles are `nvfp4` and `exl3-<bpw>`; Qwen3.8-Flash-Next's are `flashnext-2.05` to `flashnext-6.05`, one per turboderp EXL3 pack (`ops/profiles/_flashnext.env` and one small file each). The same scripts serve both:
 

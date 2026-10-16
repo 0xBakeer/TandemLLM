@@ -34,6 +34,11 @@ ENG-359 (release 0.11.0): the same install takes Nemotron 3.5 Super VL's default
      LiLiCorr asset on disk passes; no Super VL profile note says "not public" or asks for a token
                                                                  test_a_setup_install_takes_the_super_vl_profile
 
+OPS-149: the setup message
+
+  8  install.sh --setup ends with the Setup Guide's address on the box, the ssh tunnel from another
+     computer and --host 0.0.0.0, and no profile to switch to          test_the_setup_message
+
 Run: python tests/test_fresh_install.py   (3 and 4 need Linux: install.sh stops anywhere else)
 """
 from __future__ import annotations
@@ -230,7 +235,7 @@ def test_a_setup_install_resolves_the_base():
     # a standalone community pack reads its own folder (server/setup/community.py)
     from server.setup import community, registry
     m, c = next((m, c) for m in registry.load_all()[0].values()
-                for c in m.get("community") or [] if c["load"] == "standalone")
+                for c in registry.community_packs(m) if c["load"] == "standalone")
     with tempfile.TemporaryDirectory() as cdir:
         _write(os.path.join(cdir, c["profile"] + ".env"), community.env(m, c).encode())
         got = _resolve(box, c["profile"], extra={"QSE_COMMUNITY_ENV_DIR": cdir})["QWEN38_MODEL"]
@@ -242,6 +247,22 @@ def test_a_setup_install_resolves_the_base():
         assert _resolve(box, "exl3-4.0")["QWEN38_MODEL"] == snaps
     finally:
         shutil.rmtree(os.path.join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.8-27B-FP8"))
+
+
+def test_the_setup_message():
+    """OPS-149: install.sh --setup ends by saying where the Setup Guide is: on the box, through an ssh
+    tunnel from another computer, or on the network with --host 0.0.0.0; no profile to switch to."""
+    box = _box()
+    if box is None:
+        print("    (skipped: install.sh runs on Linux only -- run it on the box)")
+        return
+    out = re.sub(r"\x1b\[[0-9;]*m", "", box["out"])
+    tail = out[out.index("Setup mode"):]
+    assert "no model is loaded yet. Open the Setup Guide in a browser and pick a model there." in tail, tail
+    assert "On this machine:        http://127.0.0.1:18996/dashboard/#/setup" in tail, tail
+    assert re.search(r"From another computer:  ssh -L 18996:127\.0\.0\.1:18996 \S+@\S+", tail), tail
+    assert "then open http://127.0.0.1:18996/dashboard/#/setup on that computer" in tail, tail
+    assert "--host 0.0.0.0" in tail and "use-profile.sh" not in tail, tail
 
 
 def test_a_setup_install_takes_an_exl3_profile():
