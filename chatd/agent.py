@@ -837,6 +837,11 @@ class AgentMixin:
             # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
+            if getattr(run, "shrink_to", 0):
+                # the engine counted this prompt past the estimate — one retry runs capped at
+                # the room the engine itself left (runs.py)
+                body["max_tokens"] = max(256, min(int(body["max_tokens"]), run.shrink_to))
+                run.shrink_to = 0
         if run.salvage:                             # a worker's report-only call (chatd/tasks.py)
             body["max_tokens"] = min(int(body.get("max_tokens") or SALVAGE_TOKENS), SALVAGE_TOKENS)
         run.tail = None                             # a tail goes with one call only

@@ -69,6 +69,24 @@ _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
 # the engine's memory refusal (engine/cache.py MemoryRefused, a 503 from server/app.py `_busy`)
 _MEMORY = re.compile(r"a (\d+)-token prefill needs ([\d.]+) GiB with every cache given back; "
                      r"the engine's peak is ([\d.]+) GiB")
+
+# a 400 saying the request is over the window, in the shapes vLLM and OpenAI answer with — the
+# engine's own counts are the prompt's exact sizes, which the guard can only estimate. One retry
+# recomputes the room from them (2026-10-16: a relay backend with no max_output on its card asked
+# a 262,144-token window for 260,976 output tokens against 1,169 of input — 1 token over, died).
+_OVERRUN_MAX = re.compile(r"maximum context(?: length)? is ([\d,]+) tokens", re.I)
+_OVERRUN_IN = re.compile(r"([\d,]+)\s+(?:prompt|input) tokens", re.I)
+
+
+def _overrun_room(message: str) -> int:
+    """The output room the engine's own numbers leave for a retried request, or 0 when this 400
+    is not a window overrun — or leaves no room to retry into."""
+    m = _OVERRUN_MAX.search(message or "")
+    n = _OVERRUN_IN.search(message or "")
+    if not m or not n:
+        return 0
+    room = int(m.group(1).replace(",", "")) - int(n.group(1).replace(",", "")) - 256
+    return room if room >= 256 else 0
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
 # anything else in it is replaced (the part's id is the one the next request sends back)
@@ -128,6 +146,8 @@ class Run:
         self.request_ids: set[str] = set()     # every call of the run
         self.stop_mode: str | None = None
         self.call = None
+        self.shrink_to = 0               # the room an oversized-output 400 left for a retry
+        self.overload_retried = False    # one retry per run: a loop of shrinks is a stall
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
         # the parts as they stream (the conversation's lock guards these and `pending`)
@@ -438,6 +458,15 @@ class Run:
             except EngineError as exc:
                 self.call = None
                 if not exc.retryable:
+                    room = _overrun_room(exc.args[0]) if exc.status == 400 else 0
+                    if room and not self.overload_retried:
+                        # the engine's counts beat the guard's estimate: one retry, capped at the
+                        # room the engine itself reported, instead of failing the run
+                        self.overload_retried = True
+                        self.shrink_to = room
+                        self.svc.log(f"[guard] {self.id} step {self.step}: {exc.args[0][:120]} — "
+                                     f"retrying with output capped at {room:,} tokens")
+                        continue
                     self.error = exc.args[0]
                     return "failed"
                 memory = memory_words(exc)
