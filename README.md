@@ -3,6 +3,7 @@
 </p>
 <h1 align="center">TandemLLM</h1>
 <p align="center">
+  <a href="https://tandemllm.0xbakeer.com"><img src="https://img.shields.io/badge/website-tandemllm.0xbakeer.com-3987e5" alt="website"></a>
   <a href="https://github.com/0xBakeer/TandemLLM/releases/latest"><img src="https://img.shields.io/github/v/release/0xBakeer/TandemLLM?color=3987e5" alt="release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="license"></a>
   <img src="https://img.shields.io/badge/hardware-DGX%20Spark%20(GB10)-76b900" alt="DGX Spark">
@@ -12,6 +13,27 @@
   <a href="https://doi.org/10.5281/zenodo.23045275"><img src="https://img.shields.io/badge/paper-StairCut-informational" alt="paper"></a>
   <a href="docs/community-weights.md"><img src="https://img.shields.io/badge/community-weights-3987e5" alt="community weights"></a>
   <img src="https://img.shields.io/github/stars/0xBakeer/TandemLLM?style=social" alt="stars">
+</p>
+
+<p align="center">
+  Website: <a href="https://tandemllm.0xbakeer.com"><b>tandemllm.0xbakeer.com</b></a>
+</p>
+
+<table>
+  <tr>
+    <td width="33%" valign="top"><img src="docs/gallery/setup-models.webp" width="100%" alt="The Setup Guide's models step: one tile per model with its measured speed"><br><sub>Setup Guide: one tile per model, each with its measured speed.</sub></td>
+    <td width="33%" valign="top"><img src="docs/gallery/setup-speed.webp" width="100%" alt="Nemotron 3.5 Bolt's speed table in the Setup Guide: tok/s and KL for each size"><br><sub>Each size's tok/s and KL, here Nemotron 3.5 Bolt.</sub></td>
+    <td width="33%" valign="top"><img src="docs/gallery/setup-community.webp" width="100%" alt="Community weights in the Setup Guide: turboderp's Qwen3.8-Flash-Next EXL3 packs"><br><sub>Community weights with their maker: turboderp's Flash-Next packs.</sub></td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top"><img src="docs/gallery/performance.webp" width="100%" alt="Performance: live decode speed and each running request"><br><sub>Performance: live decode speed and every running request.</sub></td>
+    <td width="33%" valign="top"><img src="docs/gallery/performance-history.webp" width="100%" alt="Performance history: decode speed, time to first token, tokens per block and draft acceptance"><br><sub>History: decode speed, first-token time, tokens per block, draft acceptance.</sub></td>
+    <td width="33%" valign="top"><img src="docs/gallery/usage.webp" width="100%" alt="Usage: tokens per day over a year"><br><sub>Usage: tokens per day for a year.</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  More pictures, the Chat tab among them: <a href="docs/gallery/README.md">docs/gallery</a>
 </p>
 
 TandemLLM is an inference engine for one NVIDIA DGX Spark, and it runs several models: Qwen3.8-27B, Qwen3.8-Flash-Next, LiquidAI's LFM2.5-24B-A2B (from 0.9.0), NVIDIA's Nemotron 3.5 Bolt 74B-A9B (from 0.10.0) and NVIDIA's Nemotron 3.5 Super VL 120B-A12B (from 0.11.0). The box serves one at a time, and they share one server and one setup guide. LFM2.5 is the fast one. Its default pack decodes 153.5 tok/s for one request.
