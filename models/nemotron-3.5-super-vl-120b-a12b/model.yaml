@@ -111,7 +111,7 @@ profiles:
   - nemotron-super-vl-lilicorr
   note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches: every projection at 4 bits, head 6, the MTP head at 4; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 58.35 GiB at load (59.75 with the MTP head), decode 31.3 tok/s (NVIDIA''s NVFP4 19.6). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
   hf_revision: 437a1fd1920248164b68e72f18f64484782f4b69
-  max_window: 262144
+  max_window: 1048576
 - id: nemotron-super-vl-exl3-2.0
   label: EXL3 2.0 bpw experts, 4-bit dense
   format: exl3
@@ -135,7 +135,7 @@ profiles:
   - nemotron-super-vl-lilicorr
   note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt''s 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 31.24 GiB at load, decode 36.8 tok/s (the 4.0 pack 31.4) at a much larger loss (KL 0.325 against 0.049). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
   hf_revision: c772513fab08034725c057aa6a02591332a4ffbb
-  max_window: 262144
+  max_window: 1048576
 - id: nemotron-super-vl-nvfp4
   label: NVFP4 (NVIDIA's checkpoint)
   format: nvfp4
@@ -160,7 +160,7 @@ profiles:
   - nemotron-super-vl-lilicorr
   note: 'NVIDIA''s ModelOpt checkpoint read as stored: routed and shared experts NVFP4, the Mamba2 and attention projections and the head FP8 with a tensor scale; activations and the KV cache bf16. A decode token reads 10.1 GB of it. Measured 2026-10-16: 66.63 GiB at load, decode 19.6 tok/s; 131,072 tokens. Drafts with NVIDIA''s LiLiCorr drafter and the lookup.'
   hf_revision: 8a115b9d966adce8c059a7bcf47f49a1e57957d8
-  max_window: 262144
+  max_window: 1048576
 measurements:
   build: 0.11.0
   date: '2026-10-16'
@@ -377,12 +377,12 @@ parallelism:
     default: 3
   window:
     min: 8192
-    max: 262144
+    max: 1048576
     default: 262144
     step: 4096
   side_window:
     min: 8192
-    max: 262144
+    max: 1048576
     default: 262144
     step: 4096
   kv_pool:

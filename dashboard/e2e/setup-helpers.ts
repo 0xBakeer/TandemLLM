@@ -11,3 +11,13 @@ export async function open(page: Page, hash: string): Promise<void> {
   await page.goto(`./${hash}`);
   await expect(page.locator('qse-setup, qse-system').first()).toBeVisible();
 }
+
+/** VIS-199: the parallel-chats stepper's field: type a count (the input event sets it at once). */
+export async function setSlots(page: Page, n: number | string): Promise<void> {
+  await page.locator('#pf-slots-in').fill(String(n));
+}
+
+/** VIS-199: a window stepper's field (window or side_window): type tokens, as a person would. */
+export async function setWindow(page: Page, key: 'window' | 'side_window', v: number | string): Promise<void> {
+  await page.locator(key === 'window' ? '#pf-win-in' : '#pf-side-in').fill(String(v));
+}

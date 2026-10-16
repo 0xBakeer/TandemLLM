@@ -14,7 +14,7 @@
 
 import type { SetupEstimate, SetupEstimatePart, SetupModel, SetupProfile, SetupSelection, SetupValue } from '../api/types';
 import { packNoImage } from './community';
-import { fieldError } from './fields';
+import { ENGINE_MAX_SLOTS, fieldError } from './fields';
 
 export const GIB = 2 ** 30;
 export const KV_TYPICAL_TOKENS = 32_768;
@@ -86,7 +86,10 @@ export function checkSelection(m: SetupModel, body: unknown): SetupSelection & {
   }
   if (bad.length) throw new SelectionError(422, 'invalid_combination', bad.join('; '));
   const p = m.parallelism;
-  const slots = intIn('slots', b.slots ?? p.slots.default, p.slots.min, p.slots.max);
+  // the card's slots.max is how far it was measured; the engine's own limit is the cap
+  const rawSlots = b.slots ?? p.slots.default;
+  if (typeof rawSlots === 'number' && Number.isInteger(rawSlots) && rawSlots > ENGINE_MAX_SLOTS) throw new SelectionError(422, 'out_of_range', `slots: ${rawSlots} is above ${ENGINE_MAX_SLOTS}, the most chats the engine verifies in one pass`);
+  const slots = intIn('slots', rawSlots, p.slots.min, ENGINE_MAX_SLOTS);
   const window = onStep('window', intIn('window', b.window ?? p.window.default, p.window.min, p.window.max), p.window.step);
   const mw = (m.profiles.find((x) => x.id === pid) as SetupProfile).max_window;
   if (mw && window > mw) throw new SelectionError(422, 'out_of_range', `window: ${thousands(window)} is above ${pid}'s largest window, ${thousands(mw)}`);

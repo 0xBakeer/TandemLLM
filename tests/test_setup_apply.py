@@ -7,7 +7,8 @@ The test matrix:
      value one plain line; it parses (bash -n) and serve.env reads it after the profile; a value
      with a command substitution in it is refused         test_the_overlay
   2  the plan: what changes against serve.env now, the commands it will run, the warnings (no
-     password, the 4 x 262,144 worst case); and each refusal with its code: over_budget,
+     password, the 4 x 262,144 worst case); slots past the card's measured 4 go through while they
+     fit (VIS-199); and each refusal with its code: over_budget,
      missing_assets (only an asset nothing downloads; OPS-95: a missing asset with a fetch list is
      part of the fetch step and its download_gb), missing_token (a private profile), disk_full,
      no_overlay_hook, secrets_exist, port_in_use, repo_mismatch
@@ -24,7 +25,8 @@ The test matrix:
                                                          test_rollback
   6  the routes: a body that names a step, a command, an env or a path is 422 unknown_field; a
      hostile profile or name is refused; dry_run is the plan and no job; busy and job_running are
-     409, a missing asset 412; a good apply is 202, unloads Wren and starts the runner
+     409, a missing asset 412; slots 17 (past the engine's 16) is 422 out_of_range; a good apply
+     is 202, unloads Wren and starts the runner
                                                          test_the_routes
   7  the job route: ?format=json the job; SSE sends the log on disk, the job as it is now and its
      done event, with their ids, and Last-Event-ID resumes after one; an unknown or malformed id is 404; the stream reads the log from a byte
@@ -237,6 +239,14 @@ def test_the_plan():
         assert any("full window" in w for w in p["warnings"])
         assert p["estimate"]["fits"] is True and p["restart"] is True
         p = _plan(_sel(kv_pool=False))
+        assert not p["ok"] and p["error_codes"][0] == "over_budget", p
+        # VIS-199: past the card's measured 4 the memory decides: 6 short chats fit and go into
+        # the overlay; 12 long ones do not and the plan says so (over_budget), never clamped
+        p = _plan(_sel(slots=6, window=32_768))
+        assert p["ok"], p["errors"]
+        assert {c["key"]: c for c in p["changes"]}["QSE_PARALLEL"]["next"] == "6"
+        assert "QSE_PARALLEL='6'" in apply.render_overlay(M, _sel(slots=6, window=32_768))
+        p = _plan(_sel(slots=12, kv_pool=False, window=65_536))
         assert not p["ok"] and p["error_codes"][0] == "over_budget", p
         # OPS-95: every published profile is public; a private one needs a token
         p = _plan(_sel(profile="exl3-3.0"))
@@ -773,6 +783,10 @@ def test_the_routes():
             app.INFLIGHT["running"] = 0
             code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, kv_pool=False)})
             assert code == 409 and b["error"]["code"] == "over_budget" and "plan" in b
+            # VIS-199: the engine's limit, 16 parallel chats, whatever the card measured
+            code, b = _api("POST", "/v1/setup/apply", {"selection": dict(sel, slots=17)})
+            assert code == 422 and b["error"]["code"] == "out_of_range", b
+            assert "above 16" in b["error"]["message"], b
             code, b = _api("POST", "/v1/setup/apply", {"selection": sel})
             assert code == 202 and b["job"]["state"] == "queued", b
             assert spawned == [b["job"]["id"]] and w.unloads == ["apply"]

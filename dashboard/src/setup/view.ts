@@ -33,14 +33,14 @@ import './memory-bar';
 import './reset';
 import './signin';
 import { clearSaved, emptyState, readSaved, safeStorage, setupReducer, windowMax, writeSaved, type LoadProblem, type ParallelKey, type SetupAction, type WizardState } from './state';
+import { parseSlots, slotsBlocker, slotsRange, slotsVerdict, stepSlots, type SlotsParse } from './slots';
+import { checkWindow, shortTokens, stepWindow, windowRange, type WindowKey, type WindowParse } from './window';
 import { S, STEP_INTRO, STEP_LABEL, STEP_SHORT, STEP_TITLE } from './strings';
 import { fieldKey, planToolCall } from './tools';
 import './wren';
 import '../styles/setup.css';
 import type { QseWren, ToolOutcome, WrenHost } from './wren';
 
-const WINDOW_PRESETS = [8_192, 32_768, 65_536, 131_072, 262_144];
-const kTok = (n: number) => (n >= 1024 ? `${Math.round(n / 1024)}k` : String(n));
 
 type SecChoice = 'keep' | 'generate';
 
@@ -66,6 +66,15 @@ export class QseSetup extends LightElement {
   @state() private resetOpen = false;
   @state() private unauthorized = false;
   @state() private winNarrow = false;
+  /** VIS-199: what is typed in the parallel-chats field while it is not a count the engine takes
+   *  (empty, 0, 2.5, 40): kept as typed with the reason, never clamped; null when the field shows
+   *  the selection's count */
+  @state() private slotsDraft: string | null = null;
+  /** VIS-199: what is typed in a window field, kept while the field has the focus (so a valid
+   *  value is not reformatted under the caret) and while it is not a window the model takes */
+  @state() private winDraft: Record<WindowKey, string | null> = { window: null, side_window: null };
+  /** Next was pressed while the count stops it: the reason shows beside Next until it is fixed */
+  @state() private nextRefused = false;
   /** the community list's sync with GitHub (CONTRACT.md addition 3: on the weights step's open and on Refresh) */
   @state() private communitySyncing = false;
 
@@ -233,6 +242,11 @@ export class QseSetup extends LightElement {
       if (push) location.hash = h;
       else history.replaceState(null, '', h);
     }
+    if (stepChanged || a.type === 'recommended' || (a.type === 'parallel' && a.key === 'slots')) {
+      this.slotsDraft = null;
+      this.nextRefused = false;
+    }
+    if (stepChanged || a.type === 'recommended' || a.type === 'profile') this.winDraft = { window: null, side_window: null };
     if (stepChanged) {
       if (push) window.scrollTo({ top: 0, behavior: reducedMotion() ? 'auto' : 'smooth' });
       if (next.step === 'review') this.queuePlan();
@@ -622,13 +636,50 @@ export class QseSetup extends LightElement {
     const step = this.wiz.step;
     if (step === 'install') return nothing;
     const i = stepIndex(step);
-    return html`<nav class="setup-nav" aria-label="Step navigation">
+    const why = this.nextRefused ? this.nextBlocker() : null;
+    return html`<nav class="setup-nav ${why ? 'has-why' : ''}" aria-label="Step navigation">
+      ${why ? html`<p class="setup-nav-why" id="setup-nav-why" role="alert" data-next-refused>${icon('info')} <span>${S.nextRefused(why)}</span></p>` : nothing}
       <button class="btn setup-prev" @click=${() => (i <= 1 ? this.dispatch({ type: 'tiles' }) : this.dispatch({ type: 'previous' }))}>${S.previous}</button>
       <span class="setup-nav-mid muted small num">${S.stepOf(i + 1, STEP_IDS.length)}</span>
       ${step === 'review'
         ? html`<button class="btn btn-primary setup-finish" ?disabled=${this.finishBlockers().length > 0 || this.plan?.state !== 'ready'} @click=${() => (this.confirmOpen = true)}>${S.finish}</button>`
-        : html`<button class="btn btn-primary setup-next" @click=${() => this.dispatch({ type: 'next' })}><span>${S.next}<span class="setup-next-to">: ${STEP_LABEL[STEP_IDS[i + 1]]}</span></span></button>`}
+        : html`<button class="btn btn-primary setup-next" aria-describedby=${why ? 'setup-nav-why' : nothing} @click=${() => this.next()}><span>${S.next}<span class="setup-next-to">: ${STEP_LABEL[STEP_IDS[i + 1]]}</span></span></button>`}
     </nav>`;
+  }
+
+  /** VIS-199: Next refuses a parallel-chats count the engine does not take or that does not fit,
+   *  says why beside it and puts the focus on the field */
+  private nextBlocker(): string | null {
+    const m = this.m;
+    const sel = this.wiz.selection;
+    if (this.wiz.step !== 'parallelism' || !m || !sel) return null;
+    const slots = slotsBlocker(slotsVerdict(m, sel), this.slotsParse(m));
+    if (slots) return slots;
+    for (const key of ['window', 'side_window'] as const) {
+      if (key === 'side_window' && sel.slots < 2) continue;
+      const w = this.winParse(m, sel, key);
+      if (w && !w.ok) return `${key === 'window' ? S.window : S.sideWindow}: ${w.why}`;
+    }
+    return null;
+  }
+
+  private winParse(m: SetupModel, sel: SetupSelection, key: WindowKey): WindowParse | null {
+    const raw = this.winDraft[key];
+    return raw == null ? null : checkWindow(raw, windowRange(m, sel, key));
+  }
+
+  private slotsParse(m: SetupModel): SlotsParse | null {
+    return this.slotsDraft == null ? null : parseSlots(this.slotsDraft, slotsRange(m));
+  }
+
+  private next(): void {
+    if (this.nextBlocker()) {
+      this.nextRefused = true;
+      this.querySelector<HTMLInputElement>('[data-field^="parallelism."].is-bad input')?.focus();
+      return;
+    }
+    this.nextRefused = false;
+    this.dispatch({ type: 'next' });
   }
 
   private renderStep(m: SetupModel, sel: SetupSelection, est: SetupEstimate | null): TemplateResult {
@@ -790,37 +841,11 @@ export class QseSetup extends LightElement {
     const fit = est?.context_tokens_fit ?? 0;
     const perSlot = Math.floor(fit / sel.slots);
     const set = (key: ParallelKey, value: number | boolean) => this.user('parallelism', key, { type: 'parallel', key, value });
-    // the main window's presets above the profile's largest stay, disabled with the reason (SRV-337);
-    // the side window's above the main window are left out
-    const prof = m.profiles.find((x) => x.id === sel.profile);
-    const winCtl = (key: 'window' | 'side_window', value: number, max: number) => html`<div class="win-ctl">
-      <div class="seg seg-wrap" role="radiogroup" aria-label=${key === 'window' ? S.window : S.sideWindow}>
-        ${WINDOW_PRESETS.filter((w) => w >= p[key].min && w <= (key === 'window' ? p.window.max : max)).map((w) => {
-          const over = w > max;
-          return html`<button class="seg-btn ${value === w ? 'is-on' : ''}" role="radio" aria-checked=${value === w} ?disabled=${over} title=${over && prof ? S.windowAboveProfile(prof.label, max) : nothing} @click=${() => set(key, w)}>${kTok(w)}</button>`;
-        })}
-      </div>
-      <input class="num-input num" type="number" inputmode="numeric" min=${p[key].min} max=${max} step=${p[key].step} .value=${String(value)} aria-label=${`${key === 'window' ? S.window : S.sideWindow} (${S.tokensUnit})`} @change=${(e: Event) => set(key, Number((e.target as HTMLInputElement).value))} />
-      <span class="muted small">${S.tokensUnit}</span>
-    </div>`;
     return html`<div class="spar">
       <div class="spar-fields">
-        <div class="pfield" data-field="parallelism.slots">
-          <div class="pfield-k"><span class="pfield-label" id="pf-slots">${S.slots}</span><span class="pfield-what">${S.slotsWhat}</span></div>
-          <div class="seg" role="radiogroup" aria-labelledby="pf-slots">
-            ${Array.from({ length: p.slots.max - p.slots.min + 1 }, (_, i) => p.slots.min + i).map((n) => html`<button class="seg-btn ${sel.slots === n ? 'is-on' : ''}" role="radio" aria-checked=${sel.slots === n} @click=${() => set('slots', n)}>${n}${n === p.slots.default ? html`<span class="seg-rec" title=${S.recommended}>•</span>` : nothing}</button>`)}
-          </div>
-        </div>
-        <div class="pfield" data-field="parallelism.window">
-          <div class="pfield-k"><span class="pfield-label">${S.window}</span><span class="pfield-what">${S.windowWhat}</span></div>
-          ${winCtl('window', sel.window, windowMax(m, sel.profile))}
-        </div>
-        ${sel.slots > 1
-          ? html`<div class="pfield" data-field="parallelism.side_window">
-              <div class="pfield-k"><span class="pfield-label">${S.sideWindow}</span><span class="pfield-what">${S.sideWindowWhat}</span></div>
-              ${winCtl('side_window', side, sel.window)}
-            </div>`
-          : nothing}
+        ${this.slotsField(m, sel)}
+        ${this.windowField(m, sel, 'window')}
+        ${sel.slots > 1 ? this.windowField(m, sel, 'side_window') : nothing}
         <div class="pfield" data-field="parallelism.kv_pool">
           <div class="pfield-k"><span class="pfield-label" id="pf-pool">${S.kvPool}</span><span class="pfield-what">${S.kvPoolWhat}</span></div>
           <label class="switch"><input type="checkbox" role="switch" .checked=${sel.kv_pool} aria-labelledby="pf-pool" @change=${(e: Event) => set('kv_pool', (e.target as HTMLInputElement).checked)} /><span>${sel.kv_pool ? 'on' : 'off'}</span></label>
@@ -839,18 +864,176 @@ export class QseSetup extends LightElement {
         <p class="spar-big num">${fit.toLocaleString('en-US')}</p>
         <p class="spar-big-u">${S.fitsUnit}</p>
         <div class="spar-slots" aria-hidden="true">
-          ${Array.from({ length: sel.slots }, (_, i) => {
-            const w = i === 0 ? sel.window : side;
-            return html`<div class="spar-slot">
-              <span class="spar-slot-n num">${i + 1}</span>
-              <span class="spar-slot-track"><span class="spar-slot-win" style="width:${(w / p.window.max) * 100}%"></span><span class="spar-slot-fit" style="width:${(Math.min(w, perSlot) / p.window.max) * 100}%"></span></span>
-              <span class="spar-slot-k num">${kTok(w)}</span>
-            </div>`;
-          })}
+          ${[
+            { n: '1', w: sel.window, on: true },
+            { n: sel.slots > 2 ? `2–${sel.slots}` : '2', w: side, on: sel.slots > 1 },
+          ].map(
+            (r) => html`<div class="spar-slot ${r.on ? '' : 'is-off'}">
+              <span class="spar-slot-n num">${r.n}</span>
+              <span class="spar-slot-track"><span class="spar-slot-win" style="width:${(r.w / p.window.max) * 100}%"></span><span class="spar-slot-fit" style="width:${(Math.min(r.w, perSlot) / p.window.max) * 100}%"></span></span>
+              <span class="spar-slot-k num">${shortTokens(r.w)}</span>
+            </div>`,
+          )}
         </div>
         <p class="small">${S.fitsPerSlot(perSlot, sel.slots)}</p>
         ${est ? html`<p class="small muted">${S.worstCase(est.kv_worst_gb, est.fits_worst ?? false)}</p>` : nothing}
       </aside>
+    </div>`;
+  }
+
+  /** VIS-199: parallel chats as a stepper, − / a number field / +. Typing, the buttons and the arrow
+   *  keys change the selection at once, so the memory bar and the readout follow on every change.
+   *  No card cap: above the card's measured range is a quiet note, a count that does not fit or that
+   *  the engine does not take says why here, in the bar, and beside Next, which refuses it. */
+  private slotsField(m: SetupModel, sel: SetupSelection): TemplateResult {
+    const r = slotsRange(m);
+    const v = slotsVerdict(m, sel);
+    const draft = this.slotsParse(m);
+    const typedBad = draft && !draft.ok ? draft.why : null;
+    const err = typedBad ?? (v.over ? S.slotsOver(v.n, v.overGb, v.fitMax) : null);
+    const set = (n: number) => this.user('parallelism', 'slots', { type: 'parallel', key: 'slots', value: n });
+    const step = (d: number) => {
+      const base = draft?.ok ? draft.n : sel.slots;
+      const n = stepSlots(base, d, r);
+      if (n !== sel.slots) set(n);
+      else this.slotsDraft = null;
+    };
+    const onInput = (e: Event) => {
+      const raw = (e.target as HTMLInputElement).value;
+      const p = parseSlots(raw, r);
+      if (p.ok) {
+        this.slotsDraft = null;
+        if (p.n !== sel.slots) set(p.n);
+      } else this.slotsDraft = raw;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        step(e.key === 'ArrowUp' ? 1 : -1);
+      }
+    };
+    const shown = this.slotsDraft ?? String(sel.slots);
+    const atMax = sel.slots >= r.max && !typedBad;
+    return html`<div class="pfield pfield-slots ${err ? 'is-bad' : ''}" data-field="parallelism.slots">
+      <div class="pfield-k"><label class="pfield-label" id="pf-slots" for="pf-slots-in">${S.slots}</label><span class="pfield-what">${S.slotsWhat}</span></div>
+      <div class="stepper ${err ? 'is-bad' : ''}" role="group" aria-labelledby="pf-slots">
+        <button class="stepper-btn" type="button" aria-label=${S.slotsFewer} aria-controls="pf-slots-in" ?disabled=${sel.slots <= r.min && !typedBad} @click=${() => step(-1)}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+        </button>
+        <input
+          id="pf-slots-in"
+          class="stepper-in num"
+          type="text"
+          inputmode="numeric"
+          enterkeyhint="done"
+          autocomplete="off"
+          spellcheck="false"
+          role="spinbutton"
+          aria-valuemin=${r.min}
+          aria-valuemax=${r.max}
+          aria-valuenow=${draft && !draft.ok ? nothing : sel.slots}
+          aria-valuetext=${draft && !draft.ok ? nothing : `${sel.slots} ${sel.slots === 1 ? 'chat' : 'chats'}`}
+          aria-invalid=${err ? 'true' : 'false'}
+          aria-describedby="pf-slots-say"
+          maxlength="3"
+          .value=${shown}
+          @input=${onInput}
+          @keydown=${onKey}
+          @focus=${(e: FocusEvent) => (e.target as HTMLInputElement).select()}
+        />
+        <button class="stepper-btn" type="button" aria-label=${S.slotsMore} aria-controls="pf-slots-in" ?disabled=${atMax} title=${atMax ? S.slotsAtMax(r.max) : nothing} @click=${() => step(1)}>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" /></svg>
+        </button>
+      </div>
+      <div class="slots-say" id="pf-slots-say">
+        ${err ? html`<p class="slots-err" role="alert" data-slots-error>${err}</p>` : nothing}
+        <p class="slots-cost" data-slots-cost>${S.slotsCost(v.cost.now, v.cost.full, v.cost.window)}</p>
+        ${v.untested && !typedBad ? html`<p class="slots-note" data-slots-untested>${S.slotsUntested(r.measured)}</p>` : nothing}
+      </div>
+    </div>`;
+  }
+
+  /** VIS-199: a window as a stepper, − / a number field / +. The buttons and ↑/↓ walk the ladder
+   *  8,192 to 1,048,576 (PageUp/PageDown two rungs, Home/End the ends), clipped to what the card,
+   *  the profile and (for the extra chats) the first chat hold. Any number can be typed, 131,072 or
+   *  128k or 1m; a valid one sets the window on the input event, so the bar follows at once. */
+  private windowField(m: SetupModel, sel: SetupSelection, key: WindowKey): TemplateResult {
+    const r = windowRange(m, sel, key);
+    const value = key === 'window' ? sel.window : Math.min(sel.side_window ?? sel.window, sel.window);
+    const label = key === 'window' ? S.window : S.sideWindow;
+    const id = key === 'window' ? 'pf-win' : 'pf-side';
+    const draft = this.winParse(m, sel, key);
+    const err = draft && !draft.ok ? draft.why : null;
+    const cur = draft?.ok ? draft.n : value;
+    const set = (n: number) => this.user('parallelism', key, { type: 'parallel', key, value: n });
+    const move = (to: number) => {
+      this.winDraft = { ...this.winDraft, [key]: null };
+      if (to !== value) set(to);
+    };
+    const onInput = (e: Event) => {
+      const raw = (e.target as HTMLInputElement).value;
+      this.winDraft = { ...this.winDraft, [key]: raw };
+      const p = checkWindow(raw, r);
+      if (p.ok && p.n !== value) set(p.n);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const k = e.key;
+      if (k === 'ArrowUp' || k === 'ArrowDown') move(stepWindow(cur, k === 'ArrowUp' ? 1 : -1, r));
+      else if (k === 'PageUp' || k === 'PageDown') {
+        const d = k === 'PageUp' ? 1 : -1;
+        move(stepWindow(stepWindow(cur, d, r), d, r));
+      } else if (k === 'Home') move(r.min);
+      else if (k === 'End') move(r.max);
+      else if (k === 'Enter') (e.target as HTMLInputElement).blur();
+      else return;
+      e.preventDefault();
+    };
+    // a valid value is shown with its separators once the field lets go of it
+    const onBlur = () => {
+      if (draft?.ok) this.winDraft = { ...this.winDraft, [key]: null };
+    };
+    const shown = this.winDraft[key] ?? value.toLocaleString('en-US');
+    const atMin = cur <= r.min && !err;
+    const atMax = cur >= r.max && !err;
+    return html`<div class="pfield pfield-win ${err ? 'is-bad' : ''}" data-field=${`parallelism.${key}`}>
+      <div class="pfield-k"><label class="pfield-label" id=${id} for=${`${id}-in`}>${label}</label><span class="pfield-what">${key === 'window' ? S.windowWhat : S.sideWindowWhat(sel.slots)}</span></div>
+      <div class="win-ctl">
+        <div class="stepper stepper-wide ${err ? 'is-bad' : ''}" role="group" aria-labelledby=${id}>
+          <button class="stepper-btn" type="button" aria-label=${S.windowShorter(label)} aria-controls=${`${id}-in`} ?disabled=${atMin} @click=${() => move(stepWindow(cur, -1, r))}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+          </button>
+          <input
+            id=${`${id}-in`}
+            class="stepper-in num"
+            type="text"
+            inputmode="numeric"
+            enterkeyhint="done"
+            autocomplete="off"
+            spellcheck="false"
+            role="spinbutton"
+            aria-valuemin=${r.min}
+            aria-valuemax=${r.max}
+            aria-valuenow=${err ? nothing : cur}
+            aria-valuetext=${err ? nothing : `${cur.toLocaleString('en-US')} ${S.tokensUnit}`}
+            aria-invalid=${err ? 'true' : 'false'}
+            aria-describedby=${`${id}-say`}
+            maxlength="12"
+            .value=${shown}
+            @input=${onInput}
+            @keydown=${onKey}
+            @blur=${onBlur}
+            @focus=${(e: FocusEvent) => (e.target as HTMLInputElement).select()}
+          />
+          <button class="stepper-btn" type="button" aria-label=${S.windowLonger(label)} aria-controls=${`${id}-in`} ?disabled=${atMax} title=${atMax ? r.maxWhy : nothing} @click=${() => move(stepWindow(cur, 1, r))}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" /></svg>
+          </button>
+        </div>
+        <span class="stepper-hint num" aria-hidden="true" data-win-short>${err ? '' : shortTokens(cur)}</span>
+      </div>
+      <div class="slots-say" id=${`${id}-say`}>
+        ${err ? html`<p class="slots-err" role="alert" data-win-error>${err}</p>` : nothing}
+        ${!err && atMax && r.max < m.parallelism[key].max ? html`<p class="slots-note" data-win-max>${r.maxWhy}</p>` : nothing}
+      </div>
     </div>`;
   }
 
