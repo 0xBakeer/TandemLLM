@@ -2,6 +2,24 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.11.0, 2026-10-16
+
+0.11.0 adds a fifth model, NVIDIA's Nemotron 3.5 Super VL 120B-A12B, from our EXL3 packs at 4.0 and 2.0 bpw or NVIDIA's NVFP4 release, with NVIDIA's LiLiCorr drafter for Super VL. The other models' text and speed do not change, and their saved conversations carry over.
+
+### Nemotron 3.5 Super VL 120B-A12B
+
+Super VL is a NemotronH hybrid (ENG-E13): 40 Mamba2, 40 mixture-of-experts (512 experts, 22 a token, one shared) and 8 attention layers, an MTP head, 1,048,576 tokens of context (TandemLLM serves up to 262,144). Text only: the vision tower is not served yet. Reference: [docs/nemotron-h.md](docs/nemotron-h.md).
+
+- ModelOpt checkpoints read as stored (ENG-351): NVFP4 projections (uint8 codes, e4m3 group scales, an fp32 tensor scale) and FP8 projections (e4m3 codes, an fp32 tensor scale), audited against the layer table. The routed experts of a layer run as one `NVFP4Bank` (`tools/nvfp4_relu2.py`: one program a row-expert pair, fp32 products, row-invariant), FP8 projections as `FP8Linear` (a 16-row tensor-core product, the scale on the fp32 sum). Static activation and KV scales are read past: activations and the KV cache stay in BF16.
+- LiLiCorr with its own head (ENG-353): Super VL's drafter carries an NVFP4 LM head over the target's vocabulary and reads five taps with a window of 8,192. Accepted length 4.82 on NVIDIA's NVFP4, 4.65 on the EXL3 4.0 pack (4 prompts of 192 tokens, thinking on).
+- Profiles `nemotron-super-vl-exl3-4.0` (default for Super VL), `nemotron-super-vl-exl3-2.0` and `nemotron-super-vl-nvfp4`, each with LiLiCorr and the lookup cut by StairCut, and the model's Setup Guide card (ENG-355). The price files carry a `spec` prior, so the cut drafts from the first request.
+- EXL3 packs converted from NVIDIA's BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with a patch for Super VL's layer layout (ENG-347, ENG-349): 4.0 has every projection at 4 bits, head 6, MTP head 4 (65.0 GB); 2.0 has routed experts at 2 bits and every other projection at 4 (36.84 GB). Each is in a public Hugging Face repository pinned by commit, with its model card, NVIDIA's OpenMDW-1.1 license text, a NOTICE and the converter patch (ENG-359).
+- Against the BF16 checkpoint's logits (`tools/nh_quality.py`, 8 wikitext-2 rows of 1,024 tokens): EXL3 4.0 KL 0.049, top-1 92.9 %; EXL3 2.0 KL 0.325, top-1 82.1 %; NVIDIA's NVFP4 KL 0.041, top-1 93.4 %.
+- Through the server, one request, 512 greedy tokens, thinking off, mean of 3 runs: plain 31.1 (4.0), 36.5 (2.0) and 19.6 tok/s (NVFP4); with LiLiCorr and the lookup on prose / chat / code / edit / copy 33.1 / 43.9 / 53.6 / 101.0 / 108.3 (4.0), 35.6 / 46.2 / 46.3 / 125.1 / 139.2 (2.0), 23.9 / 28.7 / 39.9 / 73.5 / 81.7 (NVFP4). Every drafted text is the plain run's. vLLM on NVIDIA's NVFP4: 19.4 plain, 29.9 / 34.8 / 52.7 / 72.4 / 72.7 with LiLiCorr. DGX Spark, 2026-10-16.
+- Not yet (ENG-357): prompts read at 476 to 589 tok/s, 4 to 5 times slower than vLLM; with a drafter, requests at once take turns instead of sharing a pass. The vision tower and the MTP head are not served.
+
+Upgrade: run the 0.11.0 installer again (`--setup --force-setup` on a box installed with `--setup`, the same `--dir` otherwise), then `ops/use-profile.sh nemotron-super-vl-exl3-4.0` for Super VL.
+
 ## 0.10.0, 2026-10-15
 
 0.10.0 adds a fourth model, NVIDIA's Nemotron 3.5 Bolt 74B-A9B, from our EXL3 packs at 2.0 to 6.0 bpw or NVIDIA's IQ2 GGUF, with NVIDIA's LiLiCorr drafter, and limits each Chat tab sandbox to 1 GiB. The other models' text and speed do not change, and their saved conversations carry over.
