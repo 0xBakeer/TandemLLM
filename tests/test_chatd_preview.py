@@ -115,6 +115,8 @@ def test_the_port_proxy_lets_the_opaque_preview_read_its_modules_and_adds_the_sh
                   "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "script"}
         st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/", headers=h_null)
         assert st == 200 and h["Access-Control-Allow-Origin"] == "null" and "X-Frame-Options" not in h
+        # WebKit matches no 'self' for a fetch or socket from the opaque origin (plain http port)
+        assert "connect-src 'self' https: wss: http: ws:;" in h["Content-Security-Policy"]
         page = body if isinstance(body, bytes) else body.encode()
         head = page.index(b"<head>") + len(b"<head>")
         assert page[head:head + 8] == b"<script>", "the shim comes first in the head"

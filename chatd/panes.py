@@ -36,9 +36,12 @@ import urllib.parse
 from chatd.ids import ulid
 from chatd.workspace import ChangedError, PathError
 
+# connect-src names http: and ws: too: in the preview's opaque origin WebKit does not match 'self'
+# for a fetch or a socket (scripts and images it does), so on the engine's plain http port a page's
+# fetch("data.json") and a dev server's hot-reload socket were refused (2026-10-16, SRV-511)
 PREVIEW_CSP = ("default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' "
                "'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; "
-               "connect-src 'self' https: wss:; frame-ancestors 'self'")
+               "connect-src 'self' https: wss: http: ws:; frame-ancestors 'self'")
 # VIS-159: video, audio, PDFs and other binaries play or download from the view route; their
 # answer never runs a script. A PDF keeps `object-src 'self'` for the browser's own viewer
 MEDIA_CSP = ("default-src 'none'; media-src 'self'; img-src 'self' data:; "

@@ -406,7 +406,7 @@ after the first turn", "not tracked for this model"), never a bare dash.
   answer text.
 - The preview always uses `<iframe sandbox="allow-scripts allow-forms allow-popups allow-modals">`, never
   with `allow-same-origin`. Artifact (`?raw=1`) and port answers carry
-  `Content-Security-Policy: default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:; frame-ancestors 'self'`.
+  `Content-Security-Policy: default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss: http: ws:; frame-ancestors 'self'` (http: and ws: because WebKit matches no 'self' for a fetch or a socket from the opaque origin: on a plain http port they were refused).
   The preview's origin is opaque, so it cannot read the dashboard cookie or call this API.
 - The preview's target (SRV-511, chatd/preview.py, dashboard/src/chat/preview.ts). The artifact of
   `port:N` shows port N when it listens; else the newest server that listens, with `note` saying so;
