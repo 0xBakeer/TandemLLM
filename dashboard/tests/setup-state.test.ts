@@ -136,9 +136,10 @@ describe('setupReducer', () => {
     const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'window', value: 65_536 }]);
     expect(s.selection!.side_window).toBe(65_536);
   });
-  it('clamps slots and floor to the registry range', () => {
-    const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 9 }, { type: 'parallel', key: 'floor_gb', value: 2 }]);
-    expect(s.selection!.slots).toBe(4);
+  it('clamps slots to the engine limit (not the card) and floor to the registry range', () => {
+    const s = run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 40 }, { type: 'parallel', key: 'floor_gb', value: 2 }]);
+    expect(s.selection!.slots).toBe(16);
+    expect(run([{ type: 'open', model: M }, { type: 'parallel', key: 'slots', value: 9 }]).selection!.slots).toBe(9);
     expect(s.selection!.floor_gb).toBe(10);
   });
   it('sets a method and resets to the recommended values', () => {
@@ -196,7 +197,7 @@ describe('restoreSelection', () => {
     expect(notices.join(' ')).toMatch(/flux/);
   });
   it('rejects out-of-range numbers and bad enum values', () => {
-    const { selection, notices } = restoreSelection(M, { ...defaults(M), slots: 12, methods: { reasoning_effort: 'max' } });
+    const { selection, notices } = restoreSelection(M, { ...defaults(M), slots: 17, methods: { reasoning_effort: 'max' } });
     expect(selection.slots).toBe(4);
     expect(selection.methods.reasoning_effort).toBe('medium');
     expect(notices).toHaveLength(2);

@@ -76,7 +76,7 @@ test('Wren ticks a box: the field pulses, the bar drops, Undo puts it back', asy
 test('Wren fills a form field: slots 2', async ({ page }) => {
   await open(page, `#/setup/${MODEL}/parallelism`);
   await ask(page, 'use 2 slots please');
-  await expect(page.locator('[data-field="parallelism.slots"] .seg-btn.is-on')).toHaveText(/^2/, { timeout: 10_000 });
+  await expect(page.locator('#pf-slots-in')).toHaveValue('2', { timeout: 10_000 });
 });
 
 test('an unknown component is refused: nothing changes, one notice says so', async ({ page }) => {
