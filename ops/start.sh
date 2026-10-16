@@ -88,7 +88,8 @@ status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || tru
 # token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
 # rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above). Setup mode
 # reads them too: its /v1/setup routes run apply and reset, and a password set must guard them.
-SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
+SECRETS="${QSE_SECRETS:-${QSE_STATE_DIR:+$QSE_STATE_DIR/secrets.env}}"
+SECRETS="${SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
 if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
 T_START=$(date +%s)
 if [ "$SETUP" = "1" ]; then
