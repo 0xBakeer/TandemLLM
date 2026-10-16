@@ -35,9 +35,11 @@ The test matrix:
      repository, the weights at load, the chat KL and top-1 (exllamav3's model_diff, the engine's own beside
      it), every measured cell, and its profile file's
      size and revision equal measurements/0.8.3-summary.json   test_the_lfm25_card_is_the_raw_data
- 14  Bolt's and Super VL's tables are their 0.11.0 runs: per measured profile one comparable row, each
-     greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same text in every run,
-     no request from a cache; the tile's speed is the recommended row's best cell
+ 14  Bolt's and Super VL's tables are their runs (Bolt 0.11.1, Super VL 0.11.0): per measured profile one
+     comparable row, each greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same
+     text in every run, no request from a cache; where plain servers ran beside them (Bolt, SPD-127), every
+     class's drafted mean is at least its plain mean less the plain runs' spread; the tile's speed is the
+     recommended row's best cell
                                                             test_the_nemotron_tables_are_the_raw_data
  15  every weight profile says who made it (VIS-175): ours (0xBakeer), the vendor (NVIDIA, LiquidAI) or a
      community author with a GitHub login (turboderp); Bolt's IQ2 names NVIDIA's GGUF repository; a
@@ -176,21 +178,24 @@ def test_the_lfm25_card_is_the_raw_data():
 
 
 NEMOTRON_TABLES = ("nemotron-3.5-bolt-74b-a9b", "nemotron-3.5-super-vl-120b-a12b")
+# the build each table was measured on
+NEMOTRON_BUILDS = {"nemotron-3.5-bolt-74b-a9b": "0.11.1", "nemotron-3.5-super-vl-120b-a12b": "0.11.0"}
 
 
 def test_the_nemotron_tables_are_the_raw_data():
     for mid in NEMOTRON_TABLES:
+        build = NEMOTRON_BUILDS[mid]
         m = registry.load(os.path.join(ROOT, "models", mid, "model.yaml"))
-        with open(os.path.join(ROOT, "models", mid, "measurements", "0.11.0-summary.json")) as fh:
+        with open(os.path.join(ROOT, "models", mid, "measurements", f"{build}-summary.json")) as fh:
             raw = json.load(fh)
         meas = m["measurements"]
-        assert meas["build"] == raw["build"] == "0.11.0", mid
-        assert meas["source"] == f"models/{mid}/measurements/0.11.0-summary.json", mid
+        assert meas["build"] == raw["build"] == build, mid
+        assert meas["source"] == f"models/{mid}/measurements/{build}-summary.json", mid
         rows = {r["profile"]: r for r in meas["rows"]}
         assert sorted(rows) == sorted(raw["profiles"]), (mid, sorted(rows))
         for pid, d in raw["profiles"].items():
             row = rows[pid]
-            assert row["build"] == "0.11.0" and row["comparable"] and row["date"] == d["date"], pid
+            assert row["build"] == build and row["comparable"] and row["date"] == d["date"], pid
             assert list(row["cells"]) == ["greedy_512"] and row["ttft_s"] == {} and row["lossless"] is None, pid
             assert len(d["runs"]) == 3, pid
             for task in ("prose", "chat", "code"):
@@ -203,6 +208,11 @@ def test_the_nemotron_tables_are_the_raw_data():
                 want = {"tok_s": round(mean("tok_s"), 2), "min": min(x["tok_s"] for x in xs),
                         "ms_round": round(mean("ms_round"), 1), "tok_round": round(mean("tok_round"), 2), "n": 3}
                 assert row["cells"]["greedy_512"][task] == want, (pid, task, row["cells"]["greedy_512"][task], want)
+                if "plain_runs" in d:
+                    # SPD-127: a drafted profile never writes a class slower than its plain step, beyond the
+                    # plain runs' own spread (IQ2's lookup on prose: 27.72 against 27.56 to 27.91 plain)
+                    ps = [r["classes"][task]["tok_s"] for r in d["plain_runs"]]
+                    assert len(ps) == 3 and want["tok_s"] >= sum(ps) / 3 - (max(ps) - min(ps)), (pid, task, want["tok_s"], ps)
         # the tile's speed is the recommended profile's fastest greedy-512 cell
         rec = registry.recommended_profile(m)["id"]
         best = max(((c["tok_s"], t) for t, c in rows[rec]["cells"]["greedy_512"].items()))
