@@ -58,6 +58,8 @@ import community from './setup/community-qwen3.8-27b.json';
 import flashNextCommunity from './setup/community-qwen3.8-flash-next.json';
 import flashNext from './setup/qwen3.8-flash-next.json';
 import lfm25 from './setup/lfm2.5-24b-a2b.json';
+import bolt from './setup/nemotron-3.5-bolt-74b-a9b.json';
+import superVl from './setup/nemotron-3.5-super-vl-120b-a12b.json';
 
 // the community packs (CONTRACT.md 2026-10-13, "API (as built)"): GET models/{id} lists the 27B's
 // entries in `community` with `community_sync` (the cached list, synced 12 min ago); POST
@@ -71,7 +73,10 @@ const MODEL = withCommunityProfiles({ ...(qwen as unknown as SetupModel), commun
 // VIS-175: turboderp's packs, each served by one of Flash-Next's own profiles
 const FLASH_NEXT = { ...(flashNext as unknown as SetupModel), community: (flashNextCommunity as unknown as { community: CommunityEntry[] }).community };
 const LFM25 = lfm25 as unknown as SetupModel;
-const MODELS = [MODEL, FLASH_NEXT, LFM25];
+// the two Nemotron 3.5 tiles of 0.10.0 and 0.11.0, so the models step lists what the server lists
+const BOLT = bolt as unknown as SetupModel;
+const SUPER_VL = superVl as unknown as SetupModel;
+const MODELS = [MODEL, FLASH_NEXT, LFM25, BOLT, SUPER_VL];
 const modelOf = (id: string | undefined): SetupModel => MODELS.find((m) => m.id === id) ?? MODEL;
 const GIB = 2 ** 30;
 

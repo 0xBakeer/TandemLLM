@@ -134,7 +134,8 @@ describe('the second model (OPS-97)', () => {
   it('the mock lists Flash-Next as a second tile and answers its entry, current and estimate', async () => {
     const ms = new MockSetup();
     const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; recommended: boolean; best_speed: unknown }[];
-    expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false], ['lfm2.5-24b-a2b', false]]);
+    expect(tiles.map((t) => [t.id, t.recommended])).toEqual([['qwen3.8-27b', true], ['qwen3.8-flash-next', false], ['lfm2.5-24b-a2b', false],
+      ['nemotron-3.5-bolt-74b-a9b', true], ['nemotron-3.5-super-vl-120b-a12b', false]]);
     // its measured row (3.05, the served speculation): the fastest greedy-512 cell, with its pack
     expect(tiles[1].best_speed).toEqual({ tok_s: 82.69, task: 'code', profile: 'flashnext-3.05' });
     const fn = (await call(ms, 'GET', '/v1/setup/models/qwen3.8-flash-next')).body as SetupModel;
@@ -164,6 +165,19 @@ describe('the third model (VIS-125)', () => {
       expect(est.fits).toBe(true);
       expect(est.context_tokens_fit).toBe(3 * 131_072);
       expect(est.kv_bytes_per_token).toBe(20_480);
+    }
+  });
+});
+describe('the Nemotron 3.5 tiles (VIS-177)', () => {
+  it('the mock lists Bolt and Super VL as the fourth and fifth tiles, each with its recommended profile\'s best measured cell', async () => {
+    const ms = new MockSetup();
+    const tiles = (await call(ms, 'GET', '/v1/setup/models')).body.models as { id: string; best_speed: unknown }[];
+    expect(tiles[3].best_speed).toEqual({ tok_s: 102.11, task: 'code', profile: 'nemotron-bolt-exl3-2.0' });
+    expect(tiles[4].best_speed).toEqual({ tok_s: 53.57, task: 'code', profile: 'nemotron-super-vl-exl3-4.0' });
+    for (const id of ['nemotron-3.5-bolt-74b-a9b', 'nemotron-3.5-super-vl-120b-a12b']) {
+      const m = (await call(ms, 'GET', `/v1/setup/models/${id}`)).body as SetupModel;
+      expect(m.id).toBe(id);
+      expect((await call(ms, 'GET', `/v1/setup/models/${id}/current`)).body.selection).toEqual({ model: id });
     }
   });
 });
