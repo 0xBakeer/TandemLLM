@@ -1,7 +1,7 @@
 // QA VIS-79 (VIS-78): the setup wizard at #/setup against the mock, desktop and 390 px. @mock
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, noHorizontalOverflow } from './helpers';
-import { open, setupMock, setSlots } from './setup-helpers';
+import { open, setupMock, setSlots, setWindow } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
 
@@ -91,7 +91,7 @@ test('over budget blocks Finish with How to fix, and a shorter window lets it go
   await expect(fix).toBeVisible();
   await fix.locator('a').click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'parallelism');
-  await page.locator('[data-field="parallelism.window"] .seg-btn', { hasText: '64k' }).click();
+  await setWindow(page, 'window', '64k');
   await expect(page.locator('.membar')).toHaveAttribute('data-fits', 'true');
   await page.goto(`./#/setup/${MODEL}/review`);
   await expect(page.locator('.setup-finish')).toBeEnabled();

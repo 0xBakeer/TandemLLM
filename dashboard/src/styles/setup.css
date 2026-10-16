@@ -1870,6 +1870,18 @@ a.ccard-license:hover {
 .stepper-in:focus-visible {
   box-shadow: none;
 }
+/* a window: room for 1,048,576, the short form ("256k") beside it */
+.stepper-wide {
+  grid-template-columns: 40px 112px 40px;
+}
+.stepper-wide .stepper-in {
+  font-size: var(--fs-md);
+}
+.stepper-hint {
+  min-width: 36px;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
 .stepper.is-bad .stepper-in {
   color: var(--err);
 }
@@ -3952,6 +3964,9 @@ qse-wren-figure::before {
     grid-template-columns: 48px 64px 48px;
     height: 50px;
     justify-self: start;
+  }
+  .stepper-wide {
+    grid-template-columns: 48px 124px 48px;
   }
   .rv-fixes li {
     grid-template-columns: minmax(0, 1fr) auto;

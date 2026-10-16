@@ -21,6 +21,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Setup Guide
 
 - Parallel chats is a stepper: minus, a number field and plus (VIS-199). A model card's range is how far the model was measured, not a cap. Above it the step says the count is untested, and the memory estimate decides, up to the engine's 16: a joint verify pass holds 32 rows and each chat keeps 2. The memory bar and a line with one extra chat's cost follow every change. The step names a count that does not fit, or one the engine does not take, next to the field; Next stays on the step and `POST /v1/setup/apply` refuses it (`over_budget`, `out_of_range`). The extra chats' window names chats 2 to N.
+- Both windows, the longest conversation and the one of the extra chats, are steppers too (VIS-199). Minus and plus walk 8,192, 16,384, 32,768 and on, doubling up to the model's own maximum (1,048,576 on Super VL, whose card now says so); the field takes any number, `131,072`, `128k` or `1m`, and shows the short form beside it. A value above the model, below its shortest window or off its step stays as typed with the limit named ("This model holds at most 1,048,576 tokens."), and Next stays on the step. The extra chats hold at most the first chat's window, as the engine cuts a side slot to slot 0's, and the step says so.
 
 Upgrade: run the installer again; chatd then starts with the engine, and `bin/tandem`, `run/ops/serve.env` and the scripts in `run/ops` are rewritten. A chatd started earlier keeps the old code until `tandem chat restart`.
 
