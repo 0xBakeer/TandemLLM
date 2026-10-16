@@ -24,7 +24,7 @@ chatd_check() {
     [ -f "$REPO/ops/chatd.sh" ] && [ ! -f "$REPO/run/setup-pending" ] || return 0
     if bash "$REPO/ops/chatd.sh" status >/dev/null 2>&1; then rm -f "$f"; return 0; fi
     hour="$(date +%Y%m%d%H)"
-    read -r h n < "$f" 2>/dev/null || true
+    h=""; n=0; [ -f "$f" ] && read -r h n < "$f"
     [ "${h:-}" = "$hour" ] || n=0
     n="${n:-0}"
     if [ "$n" -ge 3 ]; then
