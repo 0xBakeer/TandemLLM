@@ -110,6 +110,7 @@ def sse_data(event: bytes) -> bytes | None:
 class Adapter:
     kind = "generic"
     cloud = False
+    names: dict[str, str] = {}      # the provider's own name of a model, by upstream id
 
     def __init__(self, backend: dict):
         self.backend = backend

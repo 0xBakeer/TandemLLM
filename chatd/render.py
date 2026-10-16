@@ -254,10 +254,8 @@ def encode(obj: dict) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def headers(conversation_id: str, settings: dict) -> dict:
-    """The call's headers, also fixed: the session id, the client kind (`chat-app`: the conductor
-    maps it to its chat-app profile, SRV-351), and a profile only when the chat named one."""
-    h = {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app"}
-    if settings.get("profile"):
-        h["X-Tandem-Profile"] = str(settings["profile"])
-    return h
+def headers(conversation_id: str) -> dict:
+    """The call's headers, also fixed: the session id and the client kind (`chat-app`: the
+    conductor maps it to its chat-app profile, SRV-351). Never a profile header: the conductor's
+    other profiles belong to other clients (opencode, Open WebUI, Hermes) and to tests."""
+    return {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app"}

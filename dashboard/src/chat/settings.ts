@@ -434,7 +434,7 @@ export class QseChatSettings extends LightElement {
 
   private renderPrompts(): TemplateResult {
     return html`<h3 class="ch-settings-h">Prompts and presets</h3>
-      <p class="ch-settings-lead">A prompt is a saved system text with a slash command. A preset bundles a model, a profile, an effort, tools and a prompt, for one click in the composer.</p>
+      <p class="ch-settings-lead">A prompt is a saved system text with a slash command. A preset bundles a model, an effort, tools and a prompt, for one click in the composer.</p>
       <div class="ch-two">
         <section>
           <h4>Prompts</h4>
@@ -468,19 +468,19 @@ export class QseChatSettings extends LightElement {
               if (!confirm(`Delete the preset "${p.name}"?`)) return;
               await this.backend!.deletePreset(p.id);
               this.presets = this.presets.filter((x) => x.id !== p.id);
-            }}>${icon('trash')}</button></div><p class="ch-preset-sub">${p.profile ?? 'no profile'}, ${p.thinking ? effortWord(p.effort) : 'thinking off'}, ${p.tools.length} tool${p.tools.length === 1 ? '' : 's'}${p.prompt_id ? html`, /${this.prompts.find((x) => x.id === p.prompt_id)?.command ?? 'prompt'}` : ''}</p></li>`)}
+            }}>${icon('trash')}</button></div><p class="ch-preset-sub">${this.caps?.models.find((m) => m.id === p.model)?.name ?? p.model}, ${p.thinking ? effortWord(p.effort) : 'thinking off'}, ${p.tools.length} tool${p.tools.length === 1 ? '' : 's'}${p.prompt_id ? html`, /${this.prompts.find((x) => x.id === p.prompt_id)?.command ?? 'prompt'}` : ''}</p></li>`)}
           </ul>
           ${this.editPreset
             ? html`<form class="ch-edit-form" @submit=${async (e: Event) => {
                 e.preventDefault();
                 const p = this.editPreset!;
-                const saved = await this.backend!.savePreset({ id: p.id, name: p.name ?? '', model: p.model ?? this.caps?.models[0]?.id ?? 'TandemLLM', profile: p.profile ?? null, effort: p.effort ?? 'high', thinking: p.thinking ?? true, tools: p.tools ?? [], prompt_id: p.prompt_id ?? null });
+                const saved = await this.backend!.savePreset({ id: p.id, name: p.name ?? '', model: p.model ?? this.caps?.models[0]?.id ?? 'TandemLLM', profile: null, effort: p.effort ?? 'high', thinking: p.thinking ?? true, tools: p.tools ?? [], prompt_id: p.prompt_id ?? null });
                 this.presets = p.id ? this.presets.map((x) => (x.id === saved.id ? saved : x)) : [...this.presets, saved];
                 this.editPreset = null;
                 this.say(`Saved ${saved.name}.`);
               }}>
                 <label class="field"><span>name</span><input type="text" required .value=${this.editPreset.name ?? ''} @input=${(e: Event) => (this.editPreset = { ...this.editPreset, name: (e.target as HTMLInputElement).value })} /></label>
-                <label class="field"><span>profile</span><select .value=${this.editPreset.profile ?? ''} @change=${(e: Event) => (this.editPreset = { ...this.editPreset, profile: (e.target as HTMLSelectElement).value || null })}><option value="">none</option>${(this.caps?.models[0]?.profiles ?? []).map((pr) => html`<option value=${pr.id} ?selected=${this.editPreset?.profile === pr.id}>${pr.name}</option>`)}</select></label>
+                <label class="field"><span>model</span><select @change=${(e: Event) => (this.editPreset = { ...this.editPreset, model: (e.target as HTMLSelectElement).value })}>${(this.caps?.models ?? []).map((m) => html`<option value=${m.id} ?selected=${(this.editPreset?.model ?? this.caps?.models[0]?.id) === m.id}>${m.name}</option>`)}</select></label>
                 <label class="field"><span>effort</span><select .value=${this.editPreset.effort ?? 'high'} @change=${(e: Event) => (this.editPreset = { ...this.editPreset, effort: (e.target as HTMLSelectElement).value as Preset['effort'] })}>${EFFORTS.map((ef) => html`<option value=${ef} ?selected=${(this.editPreset?.effort ?? 'high') === ef}>${effortWord(ef)}</option>`)}</select></label>
                 <label class="switch"><input type="checkbox" .checked=${this.editPreset.thinking ?? true} @change=${(e: Event) => (this.editPreset = { ...this.editPreset, thinking: (e.target as HTMLInputElement).checked })} /><span>thinking</span></label>
                 <label class="field"><span>prompt</span><select @change=${(e: Event) => (this.editPreset = { ...this.editPreset, prompt_id: (e.target as HTMLSelectElement).value || null })}><option value="">none</option>${this.prompts.map((pr) => html`<option value=${pr.id} ?selected=${this.editPreset?.prompt_id === pr.id}>/${pr.command}</option>`)}</select></label>

@@ -26,6 +26,9 @@ from proxy.adapters.base import CHAT, COMPLETIONS, Adapter, _int
 class DeepSeek(Adapter):
     kind = "deepseek"
     cloud = True
+    # the V4 names; `deepseek-v4-flash` is the legacy id of `deepseek-flash`
+    names = {"deepseek-flash": "DeepSeek V4 Flash", "deepseek-v4-flash": "DeepSeek V4 Flash",
+             "deepseek-v4-pro": "DeepSeek V4 Pro"}
 
     def __init__(self, backend: dict, log=None):
         super().__init__(backend)

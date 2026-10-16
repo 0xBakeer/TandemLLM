@@ -140,3 +140,26 @@ def test_deepseek_miss_mismatch_is_a_log_line_not_a_correction():
 
 if __name__ == "__main__":
     run(globals())
+
+
+def test_the_model_list_names_each_model_by_its_provider_name():
+    """VIS-203: the card's label names the backend (both DeepSeek models said `DeepSeek (cloud)`);
+    `name` is the provider's own name of the model (null when the adapter has none), `cloud` the
+    backend's kind."""
+    from types import SimpleNamespace
+
+    from proxy.route import Table
+    backends = [{"id": "deepseek", "kind": "deepseek", "label": "DeepSeek (cloud)", "enabled": True},
+                {"id": "v1", "kind": "vllm", "label": "vLLM box", "enabled": True}]
+    row = dict(enabled=True, present=True, public_id=None, context_length=1048576, features={},
+               price=None, fallback=None)
+    models = [dict(row, backend="deepseek", model="deepseek-flash"),
+              dict(row, backend="deepseek", model="deepseek-v4-pro"),
+              dict(row, backend="v1", model="Qwen/Qwen3.5-4B")]
+    cfg = SimpleNamespace(generation=1, backends=lambda: backends, models=lambda: models,
+                          rules=lambda: [])
+    cards = {m["id"]: m["tandem"] for m in Table(cfg).listing(0)}
+    assert cards["deepseek-flash"]["name"] == "DeepSeek V4 Flash" and cards["deepseek-flash"]["cloud"]
+    assert cards["deepseek-v4-pro"]["name"] == "DeepSeek V4 Pro"
+    assert cards["deepseek-flash"]["label"] == "DeepSeek (cloud)"
+    assert cards["Qwen/Qwen3.5-4B"]["name"] is None and cards["Qwen/Qwen3.5-4B"]["cloud"] is False

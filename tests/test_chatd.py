@@ -23,7 +23,7 @@ from chatd_util import Chat, apply, is_done, run_all, text_of
 
 from chatd import render
 from chatd.events import RESET_BEHIND
-from chatd.store import SCHEMA_V1, Store, StoreError
+from chatd.store import MIGRATIONS, SCHEMA_V1, Store, StoreError
 
 ANSWER24 = "".join(f"w{i} " for i in range(24))
 
@@ -63,7 +63,82 @@ def test_the_daily_backup_keeps_seven():
     kept = sorted(os.listdir(out))
     assert len(kept) == 7 and kept[0] == "chat-20261003.sqlite3", kept
     assert sqlite3.connect(os.path.join(out, kept[-1])).execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "6"
+        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "7"
+
+
+def test_v7_drops_every_stored_conductor_profile():
+    """VIS-203: a chat or a preset that held `coding`, `chat` or a test profile from the old picker
+    runs under chat-app (the client kind) after the upgrade; the rest of its settings stay."""
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "chat.sqlite3")
+    old = {v: sql for v, sql in MIGRATIONS.items() if v < 7}
+    s = Store(path, old)
+    for cid, st in (("c1", {"model": "TandemLLM", "profile": "coding", "effort": "high"}),
+                    ("c2", {"model": "TandemLLM", "profile": None}), ("c3", {"model": "x"})):
+        s.run("INSERT INTO conversations (id, title, created, updated, settings, ui) VALUES "
+              "(?, 't', 1, 1, ?, '{}')", (cid, json.dumps(st)))
+    s.run("INSERT INTO presets VALUES ('p1', 'n', 'TandemLLM', NULL, ?)",
+          (json.dumps({"profile": "ui-check", "effort": "low"}),))
+    s.db.close()
+    s = Store(path)
+    assert s.migrated == [7]
+    got = {r[0]: json.loads(r[1]) for r in s.all("SELECT id, settings FROM conversations")}
+    assert got["c1"] == {"model": "TandemLLM", "profile": None, "effort": "high"}
+    assert got["c2"] == {"model": "TandemLLM", "profile": None} and got["c3"] == {"model": "x"}
+    assert json.loads(s.one("SELECT settings FROM presets")[0]) == {"profile": None,
+                                                                    "effort": "low"}
+    s.db.close()
+
+
+def test_capabilities_list_models_only_each_by_its_own_name():
+    """VIS-203: the picker's rows. The engine's model by its label; a backend's model by the
+    provider's name (the card's label names the backend: two DeepSeek models were both `DeepSeek
+    (cloud)`), `(cloud)` for a cloud backend, the id when the provider name is unknown; no
+    conductor profile in any model."""
+    from types import SimpleNamespace
+
+    from chatd.service import Service
+    cards = [
+        {"id": "TandemLLM", "owned_by": "tandemllm", "tandem": {
+            "backend": "engine", "label": "Nemotron 3.5 Super VL 120B-A12B",
+            "pack": "nemotron-super-vl-exl3-4.0", "context_length": 262144}},
+        {"id": "deepseek-flash", "owned_by": "deepseek", "tandem": {
+            "backend": "deepseek", "kind": "deepseek", "label": "DeepSeek (cloud)",
+            "upstream_id": "deepseek-flash", "name": "DeepSeek V4 Flash", "cloud": True,
+            "context_length": 1048576}},
+        {"id": "deepseek-v4-pro", "owned_by": "deepseek", "tandem": {
+            "backend": "deepseek", "kind": "deepseek", "label": "DeepSeek (cloud)",
+            "upstream_id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "cloud": True,
+            "context_length": 1048576}},
+        {"id": "Qwen/Qwen3.5-4B", "owned_by": "vllm1", "tandem": {
+            "backend": "vllm1", "kind": "vllm", "label": "vLLM box", "name": None,
+            "cloud": False, "upstream_id": "Qwen/Qwen3.5-4B", "context_length": 32768}},
+    ]
+    stub = SimpleNamespace(engine=SimpleNamespace(models=lambda: cards),
+                           permission_default=lambda: "auto")
+    caps = Service._build_caps(stub, {"engine": {"max_len": 262144}})
+    rows = {m["id"]: m for m in caps["models"]}
+    assert [m["name"] for m in caps["models"]] == [
+        "Nemotron 3.5 Super VL 120B-A12B", "DeepSeek V4 Flash (cloud)", "DeepSeek V4 Pro (cloud)",
+        "Qwen/Qwen3.5-4B"]
+    assert all(m["profiles"] == [] for m in caps["models"])
+    assert rows["TandemLLM"]["backend"] == "engine"
+    assert rows["deepseek-flash"]["backend"] == "cloud" and rows["deepseek-flash"]["weights"] == ""
+    assert rows["Qwen/Qwen3.5-4B"]["backend"] == "proxy"
+    assert caps["defaults"]["model"] == "TandemLLM" and caps["defaults"]["profile"] is None
+
+
+def test_a_settings_patch_never_stores_a_profile():
+    c = Chat()
+    try:
+        cid = c.new()
+        st, obj, _ = c.call("PATCH", f"/conversations/{cid}/settings",
+                            {"profile": "ui-check", "effort": "low"})
+        assert st == 200, obj
+        st, conv, _ = c.call("GET", f"/conversations/{cid}")
+        assert conv["settings"]["profile"] is None and conv["settings"]["effort"] == "low"
+    finally:
+        c.close()
 
 
 # ------------------------------------------------------------------ the forward key
@@ -616,9 +691,7 @@ def test_render_effort_and_thinking_switches():
     off = render.body("m", {"effort": "high", "thinking": False}, branch)
     assert off["chat_template_kwargs"] == {"enable_thinking": False}
     assert "reasoning_effort" not in off
-    h = render.headers("C1", {"profile": None})
-    assert h == {"x-session-id": "chat-C1", "X-QSE-Client": "chat-app"}
-    assert render.headers("C1", {"profile": "coding"})["X-Tandem-Profile"] == "coding"
+    assert render.headers("C1") == {"x-session-id": "chat-C1", "X-QSE-Client": "chat-app"}
 
 
 def test_think_tags_and_reasoning_content_become_thinking_parts():

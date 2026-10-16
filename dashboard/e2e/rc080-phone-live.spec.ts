@@ -28,7 +28,7 @@ test('a phone sends a message, reads the answer, and opens the context and More 
   await expect(page.locator('.rail-tab .beta-pill')).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/phone-1-chat.png` });
   // the phone's empty Chat page is the composer: the first message makes the chat
-  for (const t of ['model and profile', 'thinking effort', 'tools, skills and MCP servers']) {
+  for (const t of ['model', 'thinking effort', 'tools, skills and MCP servers']) {
     await expect(page.locator(`.ch-pill[title="${t}"]`)).toBeVisible();
   }
   await page.locator('#ch-input').fill('In one sentence: what is a lighthouse for?');

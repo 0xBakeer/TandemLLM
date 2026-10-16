@@ -753,7 +753,7 @@ class AgentMixin:
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
                                "continue": run.continue_final, "estimate": est}),
                         run.step, run.id))
-        return render.encode(body), render.headers(conv.id, settings)
+        return render.encode(body), render.headers(conv.id)
 
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False) -> bool:
@@ -807,7 +807,7 @@ class AgentMixin:
             run.set_phase("prefill", "Compacting the conversation")
         t0 = time.monotonic()
         st, obj = self.engine.post_json("/v1/chat/completions", body,
-                                        render.headers(conv.id, settings), timeout=900.0)
+                                        render.headers(conv.id), timeout=900.0)
         if st != 200 or not isinstance(obj, dict):
             self.log(f"[compact] {conv.id} failed ({st})")
             return False
