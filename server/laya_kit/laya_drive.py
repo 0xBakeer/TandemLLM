@@ -18,7 +18,9 @@ a stuck spot or a step budget ends what it says; `report` turns the log into a s
            the steps with real input (click:SELECTOR or click:text=Start, key:Space or key:ArrowRight*400,
            type:#name=Ada, wait:MS, read:JS, expect:JS, shot:NAME), screenshots it at 1280 and
            390 px, closes Chrome and prints one JSON report: console errors, uncaught exceptions,
-           failed loads, the step results, horizontal overflow, the visible text; exit 0 on PASS
+           failed loads, the step results, horizontal overflow, the visible text, each
+           screenshot's look in numbers (brightness, the share of its most common colour,
+           saturation); exit 0 on PASS
   report   python3 laya_drive.py report [drive-log.jsonl beside the kit]
   serve-log  python3 laya_drive.py serve-log [--port 8765]: the in-page kit's log sink
 
@@ -57,6 +59,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 
 # SRV-171: the log beside the kit (the session's scratch directory, which the packages name
 # `{tandem_scratch}`), never inside the user's project; `--log` names another file
@@ -766,6 +769,17 @@ class PageCheck:
             f.write(base64.b64decode(data))
         return os.path.relpath(path)
 
+    def look(self, width: int) -> dict | None:
+        """The screenshot in numbers, for a reader that sees no images (an eighth of its size,
+        decoded here): a day scene that renders dark or a page that is one flat colour shows."""
+        try:
+            h = int(self.cdp.evaluate("innerHeight") or 900)
+            data = self.cdp.call("Page.captureScreenshot", format="png", clip={
+                "x": 0, "y": 0, "width": width, "height": h, "scale": 0.125}).get("data") or ""
+            return look_of(base64.b64decode(data))
+        except (RuntimeError, ValueError, OSError, zlib.error, struct.error):
+            return None
+
     def step(self, spec: str) -> dict:
         kind, _, arg = spec.partition(":")
         kind = kind.strip().lower()
@@ -841,6 +855,7 @@ class PageCheck:
             lay = self.cdp.evaluate(_LAYOUT % w)
             lay["overflow_x"] = lay["scroll_width"] > w + 1
             lay["shot"] = self.shot(f"page-{w}")
+            lay["look"] = self.look(w)
             rep["widths"].append(lay)
         self.settle(100)
         rep["errors"], rep["warnings"] = _problems(self.cdp.events)
@@ -857,6 +872,61 @@ class PageCheck:
 
     def close(self) -> None:
         self.b.close()
+
+
+def png_pixels(png: bytes) -> tuple[int, int, list] | None:
+    """(width, height, rows of (r, g, b)) of an 8-bit RGB or RGBA PNG without interlace (what
+    Chrome writes); None for any other kind."""
+    pos, idat, head = 8, [], None
+    while pos + 8 <= len(png):
+        n, kind = struct.unpack(">I4s", png[pos:pos + 8])
+        if kind == b"IHDR":
+            head = struct.unpack(">IIBBBBB", png[pos + 8:pos + 21])
+        elif kind == b"IDAT":
+            idat.append(png[pos + 8:pos + 8 + n])
+        pos += 12 + n
+    if head is None or head[2] != 8 or head[3] not in (2, 6) or head[6]:
+        return None
+    w, h, bpp = head[0], head[1], 3 if head[3] == 2 else 4
+    raw, stride = zlib.decompress(b"".join(idat)), w * bpp
+    prev, rows = bytearray(stride), []
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b, c = prev[i], prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append([tuple(line[x:x + 3]) for x in range(0, stride, bpp)])
+        prev = line
+    return w, h, rows
+
+
+def look_of(png: bytes) -> dict | None:
+    """A screenshot in numbers: `brightness` (mean luma, 0 to 100), `top_colour` and `top_share`
+    (the most common colour, 16 levels a channel, and its share in %), `colours` (the colours
+    over 1 % of it) and `saturation` (the mean, 0 to 100)."""
+    got = png_pixels(png)
+    if got is None or not got[0] or not got[1]:
+        return None
+    px = [p for row in got[2] for p in row]
+    counts = collections.Counter((r >> 4, g >> 4, b >> 4) for r, g, b in px)
+    (top, n_top), = counts.most_common(1)
+    n = len(px)
+    return {"brightness": round(sum(0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in px)
+                                / n / 2.55),
+            "top_colour": "#" + "".join(f"{v * 17:02x}" for v in top),
+            "top_share": round(100 * n_top / n),
+            "colours": sum(1 for v in counts.values() if v * 100 >= n),
+            "saturation": round(sum(max(p) - min(p) for p in px) / n / 2.55)}
 
 
 PAGE_QUESTION = "Does this page check show a failure?"
