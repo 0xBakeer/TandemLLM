@@ -100,6 +100,7 @@ class Table:
                                        "label": b["label"], "upstream_id": m["model"],
                                        "name": cls.names.get(m["model"]), "cloud": cls.cloud,
                                        "context_length": m["context_length"],
+                                       "max_output": cls.max_output.get(m["model"]),
                                        "features": m["features"]}})
         return out
 

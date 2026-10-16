@@ -29,6 +29,8 @@ class DeepSeek(Adapter):
     # the V4 names; `deepseek-v4-flash` is the legacy id of `deepseek-flash`
     names = {"deepseek-flash": "DeepSeek V4 Flash", "deepseek-v4-flash": "DeepSeek V4 Flash",
              "deepseek-v4-pro": "DeepSeek V4 Pro"}
+    # a larger max_tokens is refused: "the valid range of max_tokens is [1, 393216]" (2026-10-16)
+    max_output = dict.fromkeys(names, 393216)
 
     def __init__(self, backend: dict, log=None):
         super().__init__(backend)

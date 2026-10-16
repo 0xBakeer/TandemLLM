@@ -163,3 +163,5 @@ def test_the_model_list_names_each_model_by_its_provider_name():
     assert cards["deepseek-v4-pro"]["name"] == "DeepSeek V4 Pro"
     assert cards["deepseek-flash"]["label"] == "DeepSeek (cloud)"
     assert cards["Qwen/Qwen3.5-4B"]["name"] is None and cards["Qwen/Qwen3.5-4B"]["cloud"] is False
+    assert cards["deepseek-flash"]["max_output"] == cards["deepseek-v4-pro"]["max_output"] == 393216
+    assert cards["Qwen/Qwen3.5-4B"]["max_output"] is None

@@ -207,7 +207,7 @@ Not tested yet on real engines: the night pass (`tools/proxy_engines_check.sh --
 
 ## Models, names and routing
 
-`GET /v1/models` lists each backend's real models under their own ids (`deepseek-flash`, `Qwen/Qwen3.5-4B`), with `owned_by` set to the backend's id and a `tandem` block (backend, kind, label, upstream id, the provider's name of the model or null, whether the backend is a cloud API, context length, switches). In the engine's server, `TandemLLM` stays the engine's own. When two backends serve one id, both are listed as `<backend>/<model>` and the bare id is not; the prefixed form is always accepted. A model can get a public id of its own in the GUI.
+`GET /v1/models` lists each backend's real models under their own ids (`deepseek-flash`, `Qwen/Qwen3.5-4B`), with `owned_by` set to the backend's id and a `tandem` block (backend, kind, label, upstream id, the provider's name of the model and its largest `max_tokens`, each null when the adapter has none, whether the backend is a cloud API, context length, switches). In the engine's server, `TandemLLM` stays the engine's own. When two backends serve one id, both are listed as `<backend>/<model>` and the bare id is not; the prefixed form is always accepted. A model can get a public id of its own in the GUI.
 
 A request goes to, in this order: an explicit `<backend>/` prefix, the first enabled routing rule whose glob matches the id, the one backend that serves it, else OpenAI's 404 `model_not_found` (which names the prefixed forms when two backends serve the id).
 

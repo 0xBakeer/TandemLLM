@@ -742,9 +742,11 @@ class AgentMixin:
             est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:
             raise GuardError(too_long_words(est, window, path, body, conv.tok_ratio))
-        if window:
+        cap = int(info.get("max_output") or 0)
+        if window and (ours or cap):
+            # a backend's model without a known output limit gets none: its window is no limit
+            # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
-            cap = int(info.get("max_output") or 0)
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)

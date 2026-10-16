@@ -128,6 +128,26 @@ def test_capabilities_list_models_only_each_by_its_own_name():
     assert caps["defaults"]["model"] == "TandemLLM" and caps["defaults"]["profile"] is None
 
 
+def test_a_backend_model_gets_max_tokens_only_from_its_output_limit():
+    """VIS-203: DeepSeek through the proxy has a 1,048,576 window and refuses a max_tokens above
+    393,216; the window minus the prompt was sent, and the first DeepSeek chat failed at once."""
+    c = Chat()
+    try:
+        info = {"id": "fake-a", "max_len": 1048576, "weights": "", "backend": "cloud",
+                "max_output": None, "vision": False, "tools": True, "effort_budgets": {}}
+        c.svc.model_info = lambda model_id: dict(info)
+        cid = c.new()
+        c.send(cid, "hello")
+        c.wait_idle(cid)
+        assert "max_tokens" not in c.last_body()
+        info["max_output"] = 393216
+        c.send(cid, "again")
+        c.wait_idle(cid)
+        assert c.last_body()["max_tokens"] == 393216
+    finally:
+        c.close()
+
+
 def test_a_settings_patch_never_stores_a_profile():
     c = Chat()
     try:
