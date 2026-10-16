@@ -62,22 +62,34 @@ DGX Spark, 2026-10-15: decode step 44.2 tok/s from its graph on the rows path (4
 
 ### Bolt: nemotron-bolt-exl3-2.5 to 6.0
 
-`nemotron-bolt-exl3-<bpw>` (`ops/profiles/nemotron-bolt-exl3-<bpw>.env`): EXL3 packs of the same BF16 checkpoint at one rate for every projection, head 6, each in its public repository 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>, pinned by commit; 262,144 tokens; 3 slots; LiLiCorr and the lookup cut by StairCut. They have no StairCut price file yet: the cut learns its prices online.
+`nemotron-bolt-exl3-<bpw>` (`ops/profiles/nemotron-bolt-exl3-<bpw>.env`): EXL3 packs of the same BF16 checkpoint: below 4.0 the routed experts at the level and every other projection at 4 bits, from 4.0 up every projection at the level; head 6 (8 at 6.0); each in its public repository 0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>, pinned by commit; 262,144 tokens; 3 slots; LiLiCorr and the lookup cut by StairCut. They have no StairCut price file yet: the cut learns its prices online.
 
 Quality as above (`tools/nh_quality.py`, 8 wikitext-2 rows of 1,024 tokens against the BF16 logits); decode step from its graph with one CTA a row (`dense`, measured before the rows path; the 2.0 pack: 41.3 there, 44.2 on the rows path); DGX Spark, 2026-10-15:
 
-| profile | download | at load | KL | top-1 | perplexity | decode step |
-|-|-|-|-|-|-|-|
-| `nemotron-bolt-exl3-2.0` | 23.48 GB | 20.22 GiB | 0.170 | 84.1 % | 6.81 | 41.3 tok/s |
-| `nemotron-bolt-exl3-2.5` | 27.61 GB | 24.07 GiB | 0.094 | 87.3 % | 6.34 | 39.9 tok/s |
-| `nemotron-bolt-exl3-3.0` | 31.75 GB | 27.92 GiB | 0.061 | 89.7 % | 6.21 | 39.6 tok/s |
-| `nemotron-bolt-exl3-3.5` | 35.88 GB | 32.01 GiB | 0.044 | 91.1 % | 6.12 | 38.7 tok/s |
-| `nemotron-bolt-exl3-4.0` | 40.01 GB | 36.18 GiB | 0.034 | 92.7 % | 6.10 | 38.4 tok/s |
-| `nemotron-bolt-exl3-5.0` | 49.13 GB | 44.42 GiB | 0.016 | 94.8 % | 6.00 | 32.0 tok/s |
-| `nemotron-bolt-exl3-6.0` | 58.37 GB | 53.00 GiB | 0.0087 | 96.2 % | 5.98 | 27.8 tok/s |
-| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 22.19 GiB | 0.259 | 79.6 % | 7.48 | 27.9 tok/s |
+| profile | download | at load | KL | top-1 | perplexity | decode step | plain, server |
+|-|-|-|-|-|-|-|-|
+| `nemotron-bolt-exl3-2.0` | 23.48 GB | 20.22 GiB | 0.170 | 84.1 % | 6.81 | 41.3 tok/s | 43.3 tok/s |
+| `nemotron-bolt-exl3-2.5` | 27.61 GB | 24.07 GiB | 0.094 | 87.3 % | 6.34 | 39.9 tok/s | 42.1 tok/s |
+| `nemotron-bolt-exl3-3.0` | 31.75 GB | 27.92 GiB | 0.061 | 89.7 % | 6.21 | 39.6 tok/s | 41.7 tok/s |
+| `nemotron-bolt-exl3-3.5` | 35.88 GB | 32.01 GiB | 0.044 | 91.1 % | 6.12 | 38.7 tok/s | 40.6 tok/s |
+| `nemotron-bolt-exl3-4.0` | 40.01 GB | 36.18 GiB | 0.034 | 92.7 % | 6.10 | 38.4 tok/s | 40.5 tok/s |
+| `nemotron-bolt-exl3-5.0` | 49.13 GB | 44.42 GiB | 0.016 | 94.8 % | 6.00 | 32.0 tok/s | 34.1 tok/s |
+| `nemotron-bolt-exl3-6.0` | 58.37 GB | 53.00 GiB | 0.0087 | 96.2 % | 5.98 | 27.8 tok/s | 29.2 tok/s |
+| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 22.19 GiB | 0.259 | 79.6 % | 7.48 | 27.9 tok/s | 27.8 tok/s |
 
 Each pack passed the load-time self-check and a chat on the Spark. The LiLiCorr rows of [LiLiCorr](#lilicorr) are measured on the 2.0 pack only.
+
+Plain, server (ENG-345, this release, 2026-10-16): one fresh server a run on the Spark with the GPU to itself, `tools/fn_lookup_ab.py` (prose, chat, code, edit and copy asks, 512 greedy tokens, thinking off, max_len 32,768, conductor raw, the suffix store off), `--drafter none`, one slot; the mean over the five asks, then the mean of 3 runs (spread 0.1 to 0.5 tok/s). The same windows ran LiLiCorr and the lookup (`--drafter mtp --draft-head lilicorr --parallel 3`) three times, alternating with the plain runs, on 2.0, 4.0 and the IQ2 GGUF:
+
+| ask | 2.0 plain | 2.0 LiLiCorr + lookup | 4.0 LiLiCorr + lookup | IQ2 LiLiCorr + lookup | llama.cpp + LiLiCorr (IQ2 GGUF) |
+|-|-|-|-|-|-|
+| prose | 43.4 | 65.7 | 40.4 | 27.2 | 49.3 |
+| chat | 43.3 | 69.4 | 40.5 | 27.6 | 62.0 |
+| code | 43.4 | 102.8 | 40.5 | 27.4 | 92.2 |
+| edit | 43.2 | 180.5 | 40.3 | 27.6 | 92.5 |
+| copy | 43.0 | 244.7 | 40.3 | 27.5 | 132.0 |
+
+Every TandemLLM text is the plain run's. On 4.0 and on the IQ2 GGUF, StairCut keeps plain steps from the first round with LiLiCorr beside the lookup (a fresh 4.0 price file from `nh_check.py prices` changed nothing); the cause is not isolated. llama.cpp (620d2225c, `--spec-type draft-dflash`, 7 draft tokens, one slot) decodes the GGUF plain at 38.2 tok/s; its LiLiCorr texts differ from its plain texts on prose and chat.
 
 ### Lightning: nemotron-lightning-bf16
 

@@ -1,6 +1,6 @@
 \chapter{Nemotron 3.5 Bolt 74B-A9B}\label{ch:nemotron}
 
-NVIDIA's Nemotron 3.5 Bolt 74B-A9B is a NemotronH hybrid: 88 layers, 40 of them Mamba2, 40 mixture-of-experts and 8 attention layers without positional encoding. A token runs 9 of up to 496 experts a layer. It is the fourth model TandemLLM serves; its support ships in release 0.10.0. On one DGX Spark the engine decodes it at 44.2~tok/s from our 2.0 EXL3 pack and at 27.9~tok/s from NVIDIA's IQ2 GGUF, and with NVIDIA's LiLiCorr drafter and the lookup at 65.8~tok/s on prose and 99.0 on code (\measured, 2026-10-15). TandemLLM serves Bolt's text; its RADIO image tower is not served yet. \code{docs/nemotron-h.md} is the same material for the repository, with every check and run.
+NVIDIA's Nemotron 3.5 Bolt 74B-A9B is a NemotronH hybrid: 88 layers, 40 of them Mamba2, 40 mixture-of-experts and 8 attention layers without positional encoding. A token runs 9 of up to 496 experts a layer. It is the fourth model TandemLLM serves; its support ships in release 0.10.0. On one DGX Spark the engine decodes it at 43.3~tok/s from our 2.0 EXL3 pack and at 27.8~tok/s from NVIDIA's IQ2 GGUF, and with NVIDIA's LiLiCorr drafter and the lookup at 65.7~tok/s on prose and 102.8 on code (\measured, 2026-10-16, the mean of 3 runs). TandemLLM serves Bolt's text; its RADIO image tower is not served yet. \code{docs/nemotron-h.md} is the same material for the repository, with every check and run.
 
 \section{The model}\index{Nemotron 3.5 Bolt}
 
@@ -28,19 +28,19 @@ context & 262,144 tokens & 262,144 tokens \\
 
 \begin{table}[htbp]
 \centering\small
-\caption[The Bolt profiles]{The Bolt profiles, \measured{} 2026-10-15: the download, the weights on the device at load, against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens the KL divergence and the top-1 agreement, and the decode step from its graph (tok/s; the 2.0 pack on the multi-row kernel, the others measured before it).}\label{tab:nh-profiles}
+\caption[The Bolt profiles]{The Bolt profiles, \measured{} 2026-10-15: the download, the weights on the device at load, against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens the KL divergence and the top-1 agreement, and plain decode through the server for one request, 512 greedy tokens, thinking off (tok/s, the mean of 3 runs on this release, 2026-10-16).}\label{tab:nh-profiles}
 \begin{tabular}{@{}lrrrrr@{}}
 \toprule
-\hd{profile} & \hd{disk} & \hd{weights} & \hd{KL} & \hd{top-1} & \hd{step} \\
+\hd{profile} & \hd{disk} & \hd{weights} & \hd{KL} & \hd{top-1} & \hd{plain} \\
 \midrule
-\code{nemotron-bolt-exl3-2.0} & 23.48~GB & 20.22~GiB & 0.170 & 84.1~\% & 44.2 \\
-\code{nemotron-bolt-exl3-2.5} & 27.61~GB & 24.07~GiB & 0.094 & 87.3~\% & 39.9 \\
-\code{nemotron-bolt-exl3-3.0} & 31.75~GB & 27.92~GiB & 0.061 & 89.7~\% & 39.6 \\
-\code{nemotron-bolt-exl3-3.5} & 35.88~GB & 32.01~GiB & 0.044 & 91.1~\% & 38.7 \\
-\code{nemotron-bolt-exl3-4.0} & 40.01~GB & 36.18~GiB & 0.034 & 92.7~\% & 38.4 \\
-\code{nemotron-bolt-exl3-5.0} & 49.13~GB & 44.42~GiB & 0.016 & 94.8~\% & 32.0 \\
-\code{nemotron-bolt-exl3-6.0} & 58.37~GB & 53.00~GiB & 0.0087 & 96.2~\% & 27.8 \\
-\code{nemotron-bolt-iq2} & 22.04~GB & 22.19~GiB & 0.259 & 79.6~\% & 27.9 \\
+\code{nemotron-bolt-exl3-2.0} & 23.48~GB & 20.22~GiB & 0.170 & 84.1~\% & 43.3 \\
+\code{nemotron-bolt-exl3-2.5} & 27.61~GB & 24.07~GiB & 0.094 & 87.3~\% & 42.1 \\
+\code{nemotron-bolt-exl3-3.0} & 31.75~GB & 27.92~GiB & 0.061 & 89.7~\% & 41.7 \\
+\code{nemotron-bolt-exl3-3.5} & 35.88~GB & 32.01~GiB & 0.044 & 91.1~\% & 40.6 \\
+\code{nemotron-bolt-exl3-4.0} & 40.01~GB & 36.18~GiB & 0.034 & 92.7~\% & 40.5 \\
+\code{nemotron-bolt-exl3-5.0} & 49.13~GB & 44.42~GiB & 0.016 & 94.8~\% & 34.1 \\
+\code{nemotron-bolt-exl3-6.0} & 58.37~GB & 53.00~GiB & 0.0087 & 96.2~\% & 29.2 \\
+\code{nemotron-bolt-iq2} & 22.04~GB & 22.19~GiB & 0.259 & 79.6~\% & 27.8 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -59,16 +59,16 @@ Bolt has no MTP head. NVIDIA's drafter for it is LiLiCorr (0.96~GB, NVFP4), port
 
 \begin{table}[htbp]
 \centering\small
-\caption[LiLiCorr on the 2.0 pack]{One request, 512 greedy tokens, thinking off, tok/s and in brackets tokens a block, \measured{} 2026-10-15 on \code{nemotron-bolt-exl3-2.0}; llama.cpp with LiLiCorr on NVIDIA's GGUF for comparison.}\label{tab:nh-lilicorr}
+\caption[LiLiCorr on the 2.0 pack]{One request, 512 greedy tokens, thinking off, tok/s and in brackets tokens a block, \measured{} 2026-10-16 on \code{nemotron-bolt-exl3-2.0}, the mean of 3 runs; llama.cpp with LiLiCorr on NVIDIA's GGUF for comparison (its prose and chat texts differ from its plain run's).}\label{tab:nh-lilicorr}
 \begin{tabular}{@{}lrrr@{}}
 \toprule
 \hd{ask} & \hd{plain} & \hd{LiLiCorr + lookup} & \hd{llama.cpp + LiLiCorr} \\
 \midrule
-prose & 43.0 & 65.8 (3.01) & 47.9 \\
-code & 43.0 & 99.0 (4.87) & 89.0 \\
-chat & 43.2 & 69.3 (3.10) & 60.3 \\
-edit & 43.1 & 152.8 (12.46) & 94.5 \\
-copy & 43.2 & 256.0 (15.97) & 135.1 \\
+prose & 43.4 & 65.7 (3.0) & 49.3 \\
+code & 43.4 & 102.8 (4.9) & 92.2 \\
+chat & 43.3 & 69.4 (3.1) & 62.0 \\
+edit & 43.2 & 180.5 (13.6) & 92.5 \\
+copy & 43.0 & 244.7 (15.8) & 132.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -80,6 +80,6 @@ Three requests at once with LiLiCorr and the lookup run at 72.1~tok/s in total, 
 \begin{itemize}
 \item Bolt's image tower: the GGUF's \code{mmproj} file and the packs' BF16 tower are not loaded.
 \item A CUDA GEMV for the IQ2\_XXS shared experts: measured at 32.7~tok/s against 27.9, not in this release, so the IQ2 profile decodes and drafts slower than it could.
-\item StairCut price files for the 2.5 to 6.0 packs, and their LiLiCorr rows.
+\item StairCut price files for the 2.5 to 6.0 packs. On the 4.0 pack StairCut keeps plain steps with LiLiCorr in this release (40.3 to 40.5~tok/s on every ask against 40.5 plain); the cause is not isolated, and the other packs have no LiLiCorr rows.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}
