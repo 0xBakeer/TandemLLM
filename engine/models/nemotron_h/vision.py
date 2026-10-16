@@ -192,7 +192,7 @@ def pixels(pil, cfg: RadioConfig, budget: int) -> torch.Tensor:
     import numpy as np
     wp, hp = target_patches(pil.width, pil.height, cfg, budget)
     tw, th = wp * cfg.patch_size, hp * cfg.patch_size
-    t = torch.from_numpy(np.asarray(pil, dtype=np.uint8)).permute(2, 0, 1).unsqueeze(0).to(dtype=torch.float32)
+    t = torch.from_numpy(np.array(pil, dtype=np.uint8)).permute(2, 0, 1).unsqueeze(0).to(dtype=torch.float32)
     if t.shape[-2] != th or t.shape[-1] != tw:
         t = F.interpolate(t, size=(th, tw), mode="bicubic", align_corners=False, antialias=True)
     mean = torch.tensor(cfg.norm_mean).view(1, 3, 1, 1)
