@@ -205,6 +205,47 @@ def test_the_rcs_own_fp3_files_adopt_on_the_same_tree():
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ 3. NemotronH's GGUF
+
+def test_nemotron_hs_gguf_and_its_loader_are_in_the_fingerprint():
+    """A Bolt profile serves the GGUF QSE_NH_GGUF names (or one in the model folder), loaded by
+    gguf_load.py and tools/iq2_linear.py: a changed byte in any of them is another fingerprint."""
+    from engine.models.nemotron_h import serving
+    names = {os.path.relpath(p, ROOT) for p in mf.files(ROOT, serving.manifest())}
+    for f in ("engine/models/nemotron_h/gguf.py", "engine/models/nemotron_h/gguf_load.py", "tools/iq2_linear.py"):
+        assert f in names, f"{f} is not in NemotronH's manifest"
+    d = tempfile.mkdtemp(prefix="qse-tid-")
+    saved = os.environ.pop("QSE_NH_GGUF", None)
+    try:
+        cfg, here, there = (os.path.join(d, x) for x in ("config", "here", "there"))
+        for x in (cfg, here, there):
+            os.makedirs(x)
+        with open(os.path.join(cfg, "config.json"), "w") as f:
+            f.write('{"model_type": "nemotron_h"}')
+        for x in (here, there):
+            with open(os.path.join(x, "bolt.gguf"), "wb") as f:
+                f.write(b"GGUF" + bytes(4096))
+        a = types.SimpleNamespace(model=cfg, prefix_chunk=1024)
+        os.environ["QSE_NH_GGUF"] = os.path.join(here, "bolt.gguf")
+        x = diskcache.fingerprint_extra(a)
+        os.environ["QSE_NH_GGUF"] = os.path.join(there, "bolt.gguf")
+        assert diskcache.fingerprint_extra(a) == x, "the same GGUF in another folder"
+        with open(os.path.join(there, "bolt.gguf"), "r+b") as f:
+            f.write(b"GGUF\x01")
+        assert diskcache.fingerprint_extra(a) != x, "another GGUF beside the config folder"
+        del os.environ["QSE_NH_GGUF"]
+        shutil.copy(os.path.join(here, "bolt.gguf"), cfg)
+        y = diskcache.fingerprint_extra(a)
+        shutil.copy(os.path.join(there, "bolt.gguf"), cfg)
+        assert diskcache.fingerprint_extra(a) != y, "another GGUF in the model folder"
+        return "the loader, the IQ2 kernel and the GGUF's bytes count"
+    finally:
+        os.environ.pop("QSE_NH_GGUF", None)
+        if saved is not None:
+            os.environ["QSE_NH_GGUF"] = saved
+        shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
