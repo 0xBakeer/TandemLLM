@@ -18,7 +18,7 @@ Each page covers one part of TandemLLM and names the files that implement it. St
 | [measurement.md](measurement.md) | the benchmark row, the teacher-forced bench, noise, the release gate |
 | [adding-a-model.md](adding-a-model.md) | the adapter path a new model takes, the seams, and the tests it must pass |
 | [lfm2.5-24b-a2b.md](lfm2.5-24b-a2b.md) | LiquidAI's LFM2.5-24B-A2B: the model, its profiles, its tool-call format, how the engine runs it |
-| [nemotron-h.md](nemotron-h.md) | NVIDIA's NemotronH (Nemotron 3.5 Bolt, Lightning): the model, the EXL3 and GGUF profiles, LiLiCorr, how the engine runs it |
+| [nemotron-h.md](nemotron-h.md) | NVIDIA's NemotronH (Nemotron 3.5 Bolt, Super VL, Lightning): the models, the EXL3, GGUF and NVFP4 profiles, LiLiCorr, how the engine runs them |
 | [setup.md](setup.md) | a new box from the command line, the dashboard's setup guide, the model registry behind it, and Wren |
 | [chat.md](chat.md) | the Chat tab (in beta) and chatd, the service behind it: the sandbox, the permission modes, the known limitations |
 | [community-weights.md](community-weights.md) | packs other people published: running one, adding yours with one JSON file, how a maintainer verifies it |

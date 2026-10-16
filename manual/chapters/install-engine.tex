@@ -45,7 +45,7 @@ Run one engine per board\index{one engine per board}. Two engines loading side b
 Since 0.8.1 a new DGX Spark needs four commands and no Hugging Face token. Every file a profile reads is public on Hugging Face: the 27B's weights and drafters (Section~\ref{sec:exl3-27b}) and turboderp's Flash-Next packs (Chapter~\ref{ch:flashnext}).
 
 \begin{shell}
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.10.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh
 bash install.sh --setup --yes
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run
 ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
@@ -72,7 +72,7 @@ A folder appears only when all its files are there. If a download stops, run the
 
 The dashboard's setup page does the same from a browser. Open the ssh tunnel the installer prints and go to \texttt{http://localhost:8000/dashboard/\#/setup}; the page walks through the model, the profile, the tools and the parallel slots in eight steps and runs the same script. \code{docs/setup.md} describes the page.
 
-The installer checks out the tag \code{v0.10.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.10.0'}. \code{--ref} picks another release, and \code{--repo} another repository.
+The installer checks out the tag \code{v0.11.0} from the repository \code{--repo} names, the public one by default. Where the tag is missing, \code{curl} fails with a 404, and the installer stops at its clone step with \enquote{no tag, branch or commit 'v0.11.0'}. \code{--ref} picks another release, and \code{--repo} another repository.
 
 \section{Updating a box in setup mode}\label{sec:update-setup}\index{upgrade}
 
@@ -88,14 +88,14 @@ bash ~/TandemLLM/src/install.sh --setup --force-setup --yes --ref <new tag>
 Without \code{--setup}, one command sets up the NVFP4 profile, StairCut included:
 
 \begin{shell}
-curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.10.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh | bash
 \end{shell}
 
 The installer works in seven steps, and each step is skipped when it is already done, so running it again updates an install and resumes a download that stopped.
 
 \begin{enumerate}
 \item Checks. The GPU needs its driver and the CUDA compiler, the disk and the memory need room, and Hugging Face must answer.
-\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.10.0}.
+\item The engine: a clone of the repository \code{--repo} names into \code{~/TandemLLM/src} at the pinned release, \code{v0.11.0}.
 \item A Python venv in \code{~/TandemLLM/venv} with the pinned packages; torch and torchvision come from the CUDA 13.0 index. If neither \code{uv} nor Python 3.11 is on the machine, the installer fetches \code{uv} first.
 \item The weights, into the normal Hugging Face cache: the vendor's FP8 checkpoint (it supplies the tensors the NVFP4 overlays do not replace, and the tokenizer), the four NVFP4 files and both fine-tuned drafters. With \code{--setup}, only Wren's model; \code{use-profile.sh} fetches the rest later.
 \item A lookup corpus built from public text (one English and one German Wikipedia shard, plus Python sources from the venv's own packages, about 31 million tokens). \code{--no-corpus} skips it.

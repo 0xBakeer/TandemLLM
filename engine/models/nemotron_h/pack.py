@@ -24,6 +24,12 @@ it copies unquantised is skipped like the BF16 checkpoint's. A projection is BF1
 per tensor (`formats`); `audit()` checks each EXL3 block's shapes against the config, its rate against the
 ones the kernels decode, and the mul1 codebook.
 
+NVIDIA's ModelOpt checkpoints (Super VL's NVFP4, `hf_quant_config.json` MIXED_PRECISION) store a projection as
+NVFP4 (`X.weight` uint8 [N, K / 2], `X.weight_scale` e4m3 [N, K / 16], `X.weight_scale_2` fp32) or FP8
+(`X.weight` e4m3 [N, K], `X.weight_scale` fp32); `formats` says "nvfp4" / "fp8", `audit()` checks the codes and
+scales against the config's shape. The static activation scales (`input_scale`) and the KV scales (`k_scale`,
+`v_scale`) are read past: the engine keeps bf16 activations and a bf16 KV cache.
+
 A GGUF reader (Bolt's IQ2_XXS release) plugs in beside this one with the same canonical names.
 """
 
@@ -40,6 +46,11 @@ import torch
 
 from engine.models.lfm2_moe.pack import DSIZE, DT, EXL3_SUFFIX, MUL1, RATES, TensorInfo, safetensors_header
 from engine.models.nemotron_h.config import NemotronHConfig, config_from_dict
+
+DT = {**DT, "F8_E4M3": torch.float8_e4m3fn}
+DSIZE = {**DSIZE, "F8_E4M3": 1}
+#: a ModelOpt projection's scales beside its `weight`
+MODELOPT_SUFFIX = ("weight_scale", "weight_scale_2", "input_scale", "k_scale", "v_scale")
 
 PREFIXES = ("language_model.backbone.", "language_model.", "backbone.")
 #: an Omni checkpoint's towers: not the language model's, skipped by name
@@ -170,12 +181,20 @@ class PackIndex:
                 if info.nbytes != int(np.prod(info.shape)) * DSIZE[info.dtype]:
                     raise ValueError(f"{fn}: {k} has {info.nbytes} bytes for {info.shape} {info.dtype}")
                 info.kind = "expert" if ".experts." in name else (
-                    "exl3" if name.rsplit(".", 1)[-1] in EXL3_SUFFIX else "plain")
+                    "exl3" if name.rsplit(".", 1)[-1] in EXL3_SUFFIX else
+                    "scale" if name.rsplit(".", 1)[-1] in MODELOPT_SUFFIX else "plain")
                 tensors[name] = info
             if files[fn] != start + end:
                 raise ValueError(f"{fp}: {files[fn]} bytes on disk, the header describes {start + end}"
                                  " (truncated or corrupt)")
-        idx = cls(path, cfg, tensors, files, skipped, quant=raw.get("quantization_config") or {})
+        quant = raw.get("quantization_config") or (raw.get("llm_config") or {}).get("quantization_config") or {}
+        hq = os.path.join(path, "hf_quant_config.json")
+        if os.path.isfile(hq):
+            with open(hq) as f:
+                q = json.load(f).get("quantization") or {}
+            quant = {"quant_method": "modelopt", "quant_algo": q.get("quant_algo"),
+                     "kv_cache_quant_algo": q.get("kv_cache_quant_algo")}
+        idx = cls(path, cfg, tensors, files, skipped, quant=quant)
         idx.has_mtp = "mtp.layers.0.eh_proj.weight" in tensors or "mtp.layers.0.eh_proj.trellis" in tensors
         return idx
 
@@ -196,6 +215,10 @@ class PackIndex:
                 continue
             if t is None:
                 raise ValueError(f"{name} is missing from the checkpoint")
+            if base is not None and len(shape) == 2 and t.dtype in ("U8", "F8_E4M3"):
+                read |= self._audit_modelopt(base, *shape)
+                formats[base] = "nvfp4" if t.dtype == "U8" else "fp8"
+                continue
             if tuple(t.shape) != tuple(shape):
                 raise ValueError(f"{name} {t.shape}: the config wants {shape}")
             if t.dtype not in ("BF16", "F32", "F16"):
@@ -203,6 +226,8 @@ class PackIndex:
             if base is not None and len(shape) == 2:
                 formats[base] = t.dtype.lower()
             read.add(name)
+        # a KV scale (k_proj.k_scale, v_proj.v_scale): the KV cache stays bf16
+        read |= {n for n in self.tensors if n.endswith((".k_scale", ".v_scale"))}
         extra = sorted(set(self.tensors) - read)
         if extra and not (not self.has_mtp and all(e.startswith("mtp.") for e in extra)):
             raise ValueError(f"{len(extra)} tensor(s) the layer table does not read, first {extra[0]}")
@@ -210,6 +235,9 @@ class PackIndex:
         dt = Counter(t.dtype for t in self.tensors.values() if t.kind != "exl3" and not t.name.endswith(".trellis"))
         self.notes = [f"tensors {len(self.tensors)} ({dict(dt)}), mtp {'yes' if self.has_mtp else 'no'}"
                       + (f", {self.skipped} tower tensors skipped" if self.skipped else "")]
+        if self.quant.get("quant_method") == "modelopt":
+            self.notes.append(f"ModelOpt {self.quant.get('quant_algo')}: projections {dict(Counter(formats.values()))}"
+                              f" (activations bf16, KV bf16; checkpoint KV {self.quant.get('kv_cache_quant_algo')})")
         if self.is_exl3:
             self.notes.append(f"projections {dict(Counter(formats.values()))}, EXL3 bits "
                               f"{dict(sorted(Counter(self.tensors[b + '.trellis'].k for b, f in formats.items() if f == 'exl3').items()))}")
@@ -236,6 +264,34 @@ class PackIndex:
             else:
                 raise ValueError(f"{base}: no {s} and no {alt}")
         return read
+
+    def _audit_modelopt(self, base: str, N: int, K: int) -> set:
+        """One ModelOpt projection: NVFP4 codes [N, K / 2] with e4m3 scales [N, K / 16] and a tensor scale, or FP8
+        codes [N, K] with a tensor scale. Returns the tensors it reads."""
+        w = self.tensors[base + ".weight"]
+        s = self.tensors.get(base + ".weight_scale")
+        if s is None:
+            raise ValueError(f"{base}: {w.dtype} codes without weight_scale")
+        read = {base + ".weight", base + ".weight_scale"}
+        if w.dtype == "U8":
+            s2 = self.tensors.get(base + ".weight_scale_2")
+            if K % 128:
+                raise ValueError(f"{base}: NVFP4 needs K a multiple of 128, not {K}")
+            if tuple(w.shape) != (N, K // 2) or tuple(s.shape) != (N, K // 16) or s.dtype != "F8_E4M3":
+                raise ValueError(f"{base}: NVFP4 {w.shape} / scale {s.shape} {s.dtype} does not fit {(N, K)}")
+            if s2 is None or int(np.prod(s2.shape)) != 1:
+                raise ValueError(f"{base}: NVFP4 without one weight_scale_2")
+            read.add(base + ".weight_scale_2")
+        else:
+            if tuple(w.shape) != (N, K) or int(np.prod(s.shape)) != 1:
+                raise ValueError(f"{base}: FP8 {w.shape} / scale {s.shape} does not fit {(N, K)} with one tensor scale")
+        if base + ".input_scale" in self.tensors:
+            read.add(base + ".input_scale")
+        return read
+
+    def scale(self, name: str) -> float:
+        """A ModelOpt tensor scale as a float."""
+        return float(self.read(name).float().reshape(-1)[0])
 
     def check_mul1(self) -> None:
         """Every `.mul1` holds 0x83DCD12D (the codebook the kernels decode)."""
@@ -269,7 +325,8 @@ class PackIndex:
         trellis and channel factors."""
         t = self.tensors.get(name)
         if t is not None:
-            return t.nbytes
+            sc = self.tensors.get(name[:-len("weight")] + "weight_scale") if name.endswith(".weight") else None
+            return t.nbytes + (sc.nbytes if sc is not None else 0)
         base = name[:-len(".weight")]
         return sum(self.tensors[base + "." + s].nbytes for s in ("trellis", "suh", "svh", "su", "sv")
                    if base + "." + s in self.tensors)

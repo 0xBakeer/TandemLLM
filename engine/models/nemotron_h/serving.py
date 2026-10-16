@@ -37,7 +37,8 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/ref.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py")
 #: the model's name in ops/prices/ and models/, by the served weight profile's name
-MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b"}
+MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b",
+             "nemotron-super-vl-": "nemotron-3.5-super-vl-120b-a12b"}
 
 
 def model_id(path: str) -> str:
@@ -55,11 +56,19 @@ def manifest() -> Manifest:
 
 
 def _tensors(o) -> list:
-    """The tensors a weight entry holds: a tensor, a layer's stacked experts."""
+    """The tensors a weight entry holds: a tensor, a layer's stacked experts (bf16 or NVFP4), a ModelOpt
+    projection's codes and scales."""
     if torch.is_tensor(o):
         return [o]
     if hasattr(o, "up") and hasattr(o, "down"):
         return [o.up, o.down]
+    if hasattr(o, "uw"):
+        return [o.uw, o.us, o.dw, o.ds]
+    blk = getattr(o, "blk", None)
+    if blk is not None and hasattr(blk, "w"):
+        return [blk.w, blk.s]
+    if hasattr(o, "w") and torch.is_tensor(o.w):
+        return [o.w]
     return []
 
 

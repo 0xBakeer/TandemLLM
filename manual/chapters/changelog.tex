@@ -34,9 +34,16 @@
 0.9.1 & 10-14 & web search and media playback in the Chat tab; the loop guard, the loop escape and memory notes on in the shipped conductor profiles; Setup Guide fixes; the 27B's EXL3 profiles fetch only the base tensors they read \\
 0.9.2 & 10-15 & install fixes: the checksum step reads a download's globs; after \code{install.sh --setup} the 27B's EXL3 profiles take \code{base-plain} \\
 0.10.0 & 10-15 & a fourth model, Nemotron 3.5 Bolt 74B-A9B: seven EXL3 sizes, NVIDIA's IQ2 GGUF and its LiLiCorr drafter; a 1~GiB limit for each Chat tab sandbox; attachments never inlined past the window \\
+0.11.0 & 10-16 & a fifth model, Nemotron 3.5 Super VL 120B-A12B: EXL3 packs at 4.0 and 2.0, NVIDIA's NVFP4 release read as stored, its LiLiCorr drafter \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.11.0, Nemotron 3.5 Super VL}\label{sec:changelog-0110}
+
+0.11.0 adds a fifth model, NVIDIA's Nemotron 3.5 Super VL 120B-A12B (Section~\ref{sec:nh-supervl}). The other models' text and speed do not change, and their saved conversations carry over.
+
+\paragraph{Super VL.} Our EXL3 packs at 4.0 and 2.0 bits a weight and NVIDIA's NVFP4 release, read as stored (NVFP4 experts, FP8 Mamba2 and attention projections and head), each with NVIDIA's LiLiCorr drafter for Super VL beside the lookup. The 4.0 pack is the default: KL 0.049 against BF16 (NVIDIA's NVFP4 0.041), 31.1~tok/s for one request (NVFP4 19.6), and with LiLiCorr and the lookup 53.6~tok/s on code and 101.0 on edit asks (the mean of 3 runs). Text only: the vision tower is not served yet.
 
 \section{0.10.0, Nemotron 3.5 Bolt}\label{sec:changelog-0100}
 

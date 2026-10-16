@@ -1,6 +1,6 @@
-\chapter{Nemotron 3.5 Bolt 74B-A9B}\label{ch:nemotron}
+\chapter{Nemotron 3.5 Bolt and Super VL}\label{ch:nemotron}
 
-NVIDIA's Nemotron 3.5 Bolt 74B-A9B is a NemotronH hybrid: 88 layers, 40 of them Mamba2, 40 mixture-of-experts and 8 attention layers without positional encoding. A token runs 9 of up to 496 experts a layer. It is the fourth model TandemLLM serves; its support ships in release 0.10.0. On one DGX Spark the engine decodes it at 43.3~tok/s from our 2.0 EXL3 pack and at 27.8~tok/s from NVIDIA's IQ2 GGUF, and with NVIDIA's LiLiCorr drafter and the lookup at 65.7~tok/s on prose and 102.8 on code (\measured, 2026-10-16, the mean of 3 runs). TandemLLM serves Bolt's text; its RADIO image tower is not served yet. \code{docs/nemotron-h.md} is the same material for the repository, with every check and run.
+NVIDIA's Nemotron 3.5 Bolt 74B-A9B is a NemotronH hybrid: 88 layers, 40 of them Mamba2, 40 mixture-of-experts and 8 attention layers without positional encoding. A token runs 9 of up to 496 experts a layer. It is the fourth model TandemLLM serves; its support ships in release 0.10.0. On one DGX Spark the engine decodes it at 43.3~tok/s from our 2.0 EXL3 pack and at 27.8~tok/s from NVIDIA's IQ2 GGUF, and with NVIDIA's LiLiCorr drafter and the lookup at 65.7~tok/s on prose and 102.8 on code (\measured, 2026-10-16, the mean of 3 runs). TandemLLM serves Bolt's text; its RADIO image tower is not served yet. Release 0.11.0 adds the larger Nemotron 3.5 Super VL 120B-A12B (Section~\ref{sec:nh-supervl}). \code{docs/nemotron-h.md} is the same material for the repository, with every check and run.
 
 \section{The model}\index{Nemotron 3.5 Bolt}
 
@@ -75,11 +75,38 @@ copy & 43.0 & 244.7 (15.8) & 132.0 \\
 
 Three requests at once with LiLiCorr and the lookup run at 72.1~tok/s in total, every text its request's alone. Of 20 server requests, 16 equal the plain answers and 4 equal them up to the reasoning budget's forced close, which lands at the end of a verified block (Chapter~\ref{ch:exactness}).
 
+\section{Super VL 120B-A12B}\label{sec:nh-supervl}\index{Nemotron 3.5 Super VL}
+
+Nemotron 3.5 Super VL 120B-A12B has Bolt's layout at a larger size: 88 layers (40 Mamba2, 40 mixture-of-experts, 8 attention), 512 experts a layer with 22 a token and one shared expert, and one MTP block. The checkpoint reads 1,048,576 tokens of context; the profiles serve 262,144. It is the fifth model TandemLLM serves, from release 0.11.0, text only.
+
+Three profiles run it. Two are our EXL3 packs, converted from NVIDIA's BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with a patch for Super VL's layout; each is a public repository \code{0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-<bpw>}, pinned by commit. The third reads NVIDIA's NVFP4 release as stored: ModelOpt NVFP4 for the routed and shared experts, FP8 with a tensor scale for the Mamba2 and attention projections and the head (\code{tools/nvfp4_relu2.py}). A decode token reads 10.1~GB of that release.
+
+\begin{table}[htbp]
+\centering\small
+\caption[The Super VL profiles]{The Super VL profiles, \measured{} 2026-10-16: the download, the weights at load, the KL divergence and top-1 agreement against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens, and decode through the server for one request, 512 greedy tokens, thinking off (tok/s, the mean of 3 runs): plain, and with LiLiCorr and the lookup on prose / code / edit asks.}\label{tab:nh-supervl}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+\hd{profile} & \hd{disk} & \hd{weights} & \hd{KL} & \hd{top-1} & \hd{plain} & \hd{LiLiCorr} \\
+\midrule
+\code{nemotron-super-vl-exl3-4.0} & 65.0~GB & 58.35~GiB & 0.049 & 92.9~\% & 31.1 & 33.1 / 53.6 / 101.0 \\
+\code{nemotron-super-vl-exl3-2.0} & 36.84~GB & 31.24~GiB & 0.325 & 82.1~\% & 36.5 & 35.6 / 46.3 / 125.1 \\
+\code{nemotron-super-vl-nvfp4} & 75.06~GB & 66.63~GiB & 0.041 & 93.4~\% & 19.6 & 23.9 / 39.9 / 73.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 4.0 pack has every projection at 4 bits, head 6; it is the default, within 0.008 KL of NVIDIA's NVFP4 and 1.6 times as fast plain. The 2.0 pack keeps the routed experts at 2 bits and every other projection at 4. It is 17~\% faster plain, but its KL is more than six times the 4.0 pack's, nearly twice what the same recipe gave on Bolt; it is for a box where 4.0 does not fit.
+
+Super VL's LiLiCorr drafter carries its own NVFP4 head over the target's vocabulary and reads five taps with a window of 8,192. Its accepted length is 4.65 tokens a block on the 4.0 pack (4 prompts of 192 tokens, thinking on). The price files carry a \code{spec} prior, the 8-row chain plus the draft over 0.75 of that length, so StairCut drafts from the first request. Every drafted text equals the plain run's.
+
+vLLM (nightly-3f1bcfd8, NVIDIA's flags for the Spark) on NVIDIA's NVFP4 release decodes at 19.4~tok/s plain and at 29.9 / 52.7 / 72.4 on prose / code / edit with LiLiCorr; its greedy text changes from run to run, plain included, since those flags round the Mamba cache at random. It reads prompts 4 to 5 times as fast (2,158 to 2,521~tok/s against 476 to 589), and it batches requests at once, where TandemLLM's drafted slots take turns.
+
 \section{What is not done}
 
 \begin{itemize}
 \item Bolt's image tower: the GGUF's \code{mmproj} file and the packs' BF16 tower are not loaded.
 \item A CUDA GEMV for the IQ2\_XXS shared experts: measured at 32.7~tok/s against 27.9, not in this release, so the IQ2 profile decodes and drafts slower than it could.
 \item StairCut price files for the 2.5 to 6.0 packs. On the 4.0 pack StairCut keeps plain steps with LiLiCorr in this release (40.3 to 40.5~tok/s on every ask against 40.5 plain); the cause is not isolated, and the other packs have no LiLiCorr rows.
+\item Super VL: grouped expert prefill (prompts read 4 to 5 times slower than vLLM), a joint verify for requests at once, the vision tower and the MTP head as a draft head.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}
