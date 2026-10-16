@@ -826,6 +826,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if status == "stopped":
             finish = "stopped"
         stats = run.stats(finish)
+        if status == "interrupted":
+            # the Continue card's words (VIS-197): it said "the engine restarted" for every one
+            stats["interrupted"] = run.interrupt or "engine"
         with conv.lock:
             if run.carry:
                 self.append(run, "thinking" if run.in_tag else "text", run.carry)
@@ -1509,13 +1512,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 self.store.run("UPDATE runs SET state = 'interrupted' WHERE id = ?", (r["id"],))
                 continue
             with conv.lock:
-                self.store.run("UPDATE messages SET status = 'interrupted' WHERE id = ? AND "
-                               "status = 'streaming'", (r["assistant_message_id"],))
+                stats = {**_empty_stats("error"), "interrupted": "restart"}
+                # a Continued message keeps its earlier run's figures, with this reason
+                self.store.run("UPDATE messages SET status = 'interrupted', stats = CASE WHEN "
+                               "stats IS NULL THEN ? ELSE json_set(stats, '$.interrupted', "
+                               "'restart') END WHERE id = ? AND status = 'streaming'",
+                               (dumps(stats), r["assistant_message_id"]))
                 self.store.run("UPDATE runs SET state = 'interrupted', ended = ? WHERE id = ?",
                                (now_ms(), r["id"]))
                 self.emit(conv, {"type": "run.done", "run_id": r["id"],
                                  "message_id": r["assistant_message_id"],
-                                 "stats": _empty_stats("error"), "status": "interrupted"},
+                                 "stats": stats, "status": "interrupted"},
                           run_id=r["id"])
         if n:
             self.log(f"[start] {n} run(s) left running by the last chatd are interrupted")

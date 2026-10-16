@@ -207,6 +207,8 @@ export interface TurnStats {
   prefill_tps?: number | null;
   /** cloud backends only */
   cost_usd?: number | null;
+  /** an `interrupted` answer: why (VIS-197); absent on answers from before 0.11.2 */
+  interrupted?: 'limit' | 'sandbox' | 'engine' | 'restart' | string;
 }
 
 // ---- the run ----------------------------------------------------------------------------------

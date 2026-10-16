@@ -18,7 +18,10 @@ THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
 4. a step without calls ends the run: `stop` completes it, `length` gets one continuation, an
    empty turn one retry with a hidden nudge (a second empty turn is an error the user sees).
 Limits: `max_steps` model calls (50; the run ends `interrupted` with a notice and Continue goes
-on), the same call with the same arguments three times in a row ends the run with a notice.
+on), the same call with the same arguments three times in a row ends the run with a notice, and
+so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
+whatever the calls were (live 2026-10-16: 28 calls with other arguments each answered
+`exec failed (404)`).
 
 WHAT STREAMS. `reasoning_content` (or `reasoning`) deltas go to a thinking part; `content` goes to a
 text part, and a `<think>...</think>` block inside it goes to a thinking part too. Parts are
@@ -123,6 +126,10 @@ class Run:
         self.empty_retries = 0
         self.nudge = False
         self.recent_calls: collections.deque = collections.deque(maxlen=3)
+        # the sandbox's own failures in a row (not the command's): three alike end the run
+        self.sandbox_errors: collections.deque = collections.deque(maxlen=3)
+        self.sandbox_stuck = False
+        self.interrupt: str | None = None      # why it ends `interrupted`: limit, sandbox (else engine)
         self.request_chars = 0
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
@@ -234,6 +241,7 @@ class Run:
             if self.step >= self.max_steps:
                 self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
                                f"Continue goes on from here.")
+                self.interrupt = "limit"
                 return "interrupted"
             if not self._slot():
                 return self._stopped()
@@ -243,6 +251,9 @@ class Run:
             if self.step_parts:
                 if self.svc.run_tools(self, list(self.step_parts)) == "cancelled":
                     return self._stopped()
+                if self.sandbox_stuck:              # Continue goes on once the sandbox is back
+                    self.interrupt = "sandbox"
+                    return "interrupted"
                 if self.notice:                     # the same call three times in a row
                     return "completed"
                 if self.svc.queued(self.conv):      # a steer: the next run carries it
