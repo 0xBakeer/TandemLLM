@@ -5460,7 +5460,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
                                                          f"SameSite=Strict; Path=/; Max-Age=0"
                                                          f"{secure}"),))
-        who = self.headers.get("X-Real-IP") or self._peer()
+        who = self._peer()               # the TCP peer, never a header: X-Real-IP is the
+        # client's to write, and a rotating value filed every failure in its own bucket so the
+        # throttle never fired. There is no trusted-proxy opt-in that would make it believable
+        # (--trust-loopback reads only the header's absence), so it is not read here at all.
         if a.login_blocked(who):
             return self._json(429, {"error": {"type": "too_many",
                                               "message": "too many failed logins; wait a minute"}},

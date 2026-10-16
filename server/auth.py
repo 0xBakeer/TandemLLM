@@ -67,8 +67,9 @@ compared with `hmac.compare_digest`, and are never printed, logged or returned.
 THE SESSION: `POST /v1/dashboard/session {"token"}` sets `qse_dash=<expiry>.<nonce>.<HMAC-SHA256>` (a
 key derived from the admin token, so rotating the token ends every session; the nonce makes each
 login its own session, so signing out ends that one only), HttpOnly, SameSite=Strict,
-Path=/, 12 hours, Secure behind https. Five failed logins a minute from one address (X-Real-IP, or
-the peer) and the sixth gets a 429. The dashboard API only reads, and `/v1/cache/clear` does not
+Path=/, 12 hours, Secure behind https. Five failed logins a minute from one address (the TCP
+peer; `X-Real-IP` is client-controlled and deliberately not believed) and the sixth gets a 429.
+The dashboard API only reads, and `/v1/cache/clear` does not
 take the cookie. SameSite=Strict is NOT the whole CSRF story for `/v1/setup/*`, which writes
 (apply, reset) and takes the cookie: an open box, or loopback through a tunnel, needs no cookie at
 all, and a text/plain POST from any page needs no preflight. So every /v1/setup POST must also be
