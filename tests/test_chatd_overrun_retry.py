@@ -20,17 +20,17 @@ OPENAI = ("This model's maximum context length is 8192 tokens. However, you requ
 
 
 def test_the_engine_numbers_become_the_room():
-    assert _overrun_room(VLLM) == 262144 - 1169 - 256
+    assert _overrun_room(VLLM) == 262144 - 1169 - 4096
 
 
 def test_openai_wording_parses_too():
-    assert _overrun_room(OPENAI) == 0          # 8192 - 9500 - 256 < 256: no room to retry into
+    assert _overrun_room(OPENAI) == 0          # 8192 - 9500 - 4096 < 256: no room to retry into
 
 
 def test_openai_with_room():
     assert _overrun_room(
-        "This model's maximum context length is 8192 tokens. However, you requested 7000 "
-        "prompt tokens and 400 completion tokens") == 8192 - 7000 - 256
+        "This model's maximum context length is 8192 tokens. However, you requested 3000 "
+        "prompt tokens and 400 completion tokens") == 8192 - 3000 - 4096
 
 
 def test_other_400s_stay_fatal():
@@ -42,7 +42,7 @@ def test_other_400s_stay_fatal():
 
 def test_commas_tolerated():
     assert _overrun_room("maximum context length is 262,144 tokens. you requested 1,169 "
-                         "input tokens") == 262144 - 1169 - 256
+                         "input tokens") == 262144 - 1169 - 4096
 
 
 if __name__ == "__main__":

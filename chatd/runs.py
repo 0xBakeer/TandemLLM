@@ -85,7 +85,9 @@ def _overrun_room(message: str) -> int:
     n = _OVERRUN_IN.search(message or "")
     if not m or not n:
         return 0
-    room = int(m.group(1).replace(",", "")) - int(n.group(1).replace(",", "")) - 256
+    # the margin is not 256: the engine refused a retried request by 1 token when its own
+    # count of the same prompt had drifted +257 between two prefills (2026-10-17, 00:13)
+    room = int(m.group(1).replace(",", "")) - int(n.group(1).replace(",", "")) - 4096
     return room if room >= 256 else 0
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
