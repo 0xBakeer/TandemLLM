@@ -10,7 +10,8 @@ fixed set of generations on the random 4-layer model, recorded ONCE from the rel
   * the chain and the tree with a drafter that is always right (every block accepted in full),
     and with one that is right but for its last token (every block rolled back by one);
   * the chain and the single-token step stopping at an end token;
-  * the KV length and the published context at the end of each.
+  * the KV length and the published context at the end of each (since SRV-530 the KV length stops
+    at the committed tokens where the release's ran past the end token).
 
 The outputs depend on the torch build and the CPU's kernels, so the fixture is keyed by platform
 and torch version, as tests/test_refactor_gate.py does. A host without a recorded key prints what
@@ -137,7 +138,14 @@ def test_the_raw_loop_writes_what_the_release_wrote():
     if want is None:
         print(f"  no recorded key for {key}; this host's outputs: {json.dumps(got)[:300]}...")
         return
-    bad = {k: (got.get(k), v) for k, v in want.items() if got.get(k) != v}
+    bad = {}
+    for k, v in want.items():
+        if isinstance(v, dict) and v.get("kv", 0) > v.get("ctx", 0):
+            # SRV-530: the rows a block verified past the end token are not committed any more;
+            # the engine stops at the committed tokens, the text is the release's
+            v = dict(v, kv=v["ctx"])
+        if got.get(k) != v:
+            bad[k] = (got.get(k), v)
     assert not bad, f"the raw loop no longer writes what the release wrote: {bad}"
 
 

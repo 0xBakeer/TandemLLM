@@ -174,6 +174,9 @@ KNOBS: dict[str, tuple] = {
     # 0.8.2: a request whose conversation slot 0 holds (or reads back from the NVMe) waits this
     # long for slot 0, then takes a free side slot it fits in
     'SIDE_SLOT0_WAIT_S': ('3', 'server/app.py'),
+    # SRV-528: how long slot 0's conversation keeps new conversations on the side slots after the
+    # last request that continued it (a cancelled prefill's rows: not at all)
+    'SLOT0_KEEP_S': ('1800', 'server/app.py'),
     # FX17: the warm-up prefill at start (tokens; 0 skips)
     'WARM_PREFILL_TOKENS': ('2600', 'server/app.py'),
     'REREAD_SAY_TOKENS': ('8192', 'server/app.py'),
