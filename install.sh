@@ -31,7 +31,8 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.11.1 fixes symlinks in the Chat tab sandbox's folders and prices Bolt's EXL3 packs;
+# The engine release. v0.11.2 starts chatd with the engine, scopes the sandbox containers to their chatd and fixes the install's scripts and secrets;
+# v0.11.1 fixes symlinks in the Chat tab sandbox's folders and prices Bolt's EXL3 packs;
 # v0.11.0 adds Nemotron 3.5 Super VL 120B-A12B (the nemotron-super-vl-* profiles);
 # v0.10.0 adds Nemotron 3.5 Bolt 74B-A9B (the nemotron-bolt-* profiles);
 # v0.9.2 fixes the glob checksum check and the EXL3 base after install.sh --setup;
@@ -44,7 +45,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.11.1}"
+TANDEM_REF="${TANDEM_REF:-v0.11.2}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
