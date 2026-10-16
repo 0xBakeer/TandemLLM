@@ -37,6 +37,7 @@ profile that serves the pack.
 
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import os
@@ -553,6 +554,49 @@ def profile(m: dict, pid: str) -> dict | None:
         c = community(m, pid)
         return community_profile(m, c) if c is not None else None
     return next((p for p in m["profiles"] if p["id"] == pid), None)
+
+
+def config_max_len(folder: str | None) -> int | None:
+    """The longest context a checkpoint's own config names: `max_position_embeddings` at the top of its
+    config.json or in `text_config` / `llm_config` (a multimodal wrapper: Super VL's Omni), the tokenizer's
+    `model_max_length` where that is shorter; None without a readable config."""
+    if not folder:
+        return None
+    try:
+        with open(os.path.join(folder, "config.json")) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    n = next((c.get("max_position_embeddings") for c in (cfg, cfg.get("text_config") or {},
+                                                          cfg.get("llm_config") or {})
+              if isinstance(c, dict) and isinstance(c.get("max_position_embeddings"), int)), None)
+    if not n or n <= 0:
+        return None
+    try:
+        with open(os.path.join(folder, "tokenizer_config.json")) as fh:
+            t = json.load(fh).get("model_max_length")
+        if isinstance(t, int) and 0 < t < n:          # LFM2.5's reads 1e30: no limit
+            n = t
+    except (OSError, ValueError):
+        pass
+    return int(n)
+
+
+def with_config_window(m: dict, folders: list) -> dict:
+    """ENG-363: the model with its window range up to what its checkpoint holds. The first folder of
+    `folders` (the weight folders of its profiles present on this box) with a config sets the largest
+    window and side window (`config_max_len`); a box without the weights keeps the card's, which name
+    the same numbers. The defaults stay the card's (lowered only to the new largest)."""
+    n = next((x for x in map(config_max_len, folders) if x), None)
+    par = m["parallelism"]
+    if not n or all(par[k]["max"] == n for k in ("window", "side_window")):
+        return m
+    m = copy.deepcopy(m)
+    for k in ("window", "side_window"):
+        r = m["parallelism"][k]
+        r["max"] = n - n % r["step"]
+        r["default"] = min(r["default"], r["max"])
+    return m
 
 
 def window_refusal(profile_id: str, max_len: int, models: dict[str, dict] | None = None) -> str | None:

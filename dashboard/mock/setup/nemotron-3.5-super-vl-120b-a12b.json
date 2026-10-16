@@ -135,7 +135,7 @@
    ],
    "note": "Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches: every projection at 4 bits, head 6, the MTP head at 4; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 58.35 GiB at load (59.75 with the MTP head), decode 31.3 tok/s (NVIDIA's NVFP4 19.6). Drafts with NVIDIA's LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.",
    "hf_revision": "437a1fd1920248164b68e72f18f64484782f4b69",
-   "max_window": 262144
+   "max_window": 1048576
   },
   {
    "id": "nemotron-super-vl-exl3-2.0",
@@ -166,7 +166,7 @@
    ],
    "note": "Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt's 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 31.24 GiB at load, decode 36.8 tok/s (the 4.0 pack 31.4) at a much larger loss (KL 0.325 against 0.049). Drafts with NVIDIA's LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.",
    "hf_revision": "c772513fab08034725c057aa6a02591332a4ffbb",
-   "max_window": 262144
+   "max_window": 1048576
   },
   {
    "id": "nemotron-super-vl-nvfp4",
@@ -198,7 +198,7 @@
    ],
    "note": "NVIDIA's ModelOpt checkpoint read as stored: routed and shared experts NVFP4, the Mamba2 and attention projections and the head FP8 with a tensor scale; activations and the KV cache bf16. A decode token reads 10.1 GB of it. Measured 2026-10-16: 66.63 GiB at load, decode 19.6 tok/s; 131,072 tokens. Drafts with NVIDIA's LiLiCorr drafter and the lookup.",
    "hf_revision": "8a115b9d966adce8c059a7bcf47f49a1e57957d8",
-   "max_window": 262144
+   "max_window": 1048576
   }
  ],
  "measurements": {
@@ -316,9 +316,16 @@
    {
     "id": "engine",
     "label": "Engine state, the decode graphs and warm-up",
-    "gib": 1.4,
+    "gib": 1.1,
     "kind": "fixed",
-    "source": "an estimate until measured on Super VL (Lightning BF16: 1.4)"
+    "source": "measured 2026-10-16 at load (ENG-363): the engine 0.67 GiB of MemAvailable beyond slot 0's KV, the warm-up 0.43"
+   },
+   {
+    "id": "lilicorr",
+    "label": "LiLiCorr drafter (its head, taps and rings)",
+    "gib": 3.9,
+    "kind": "fixed",
+    "source": "measured 2026-10-16 at load: 2.26 GiB allocated, 3.90 of MemAvailable"
    },
    {
     "id": "allocator",
@@ -326,20 +333,17 @@
     "gib": 1.5,
     "kind": "reserve",
     "source": "an estimate until measured on the Spark"
+   },
+   {
+    "id": "prefill_workspace",
+    "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
+    "gib": 3.4,
+    "kind": "reserve",
+    "source": "measured 2026-10-16 (the memory policy's observed workspace, ENG-363): 3.34 GiB above the engine at a 131,054-token prefill, 3.18 at 249,983; it does not grow with the window (4,096-row chunks, attention reads the cache in place)"
    }
   ],
   "sources": [
    "engine/models/nemotron_h/pack.py PackIndex.decode_bytes (the checkpoints' headers, 2026-10-16)"
-  ],
-  "per_window_parts": [
-   {
-    "id": "prefill_workspace",
-    "label": "Prefill workspace (a 4,096-token chunk's activations, the SSD chunks and the batched experts)",
-    "bytes_per_token": 8192,
-    "max_gib": 3.0,
-    "kind": "reserve",
-    "source": "an estimate until measured"
-   }
   ]
  },
  "components": [
@@ -529,13 +533,13 @@
   },
   "window": {
    "min": 8192,
-   "max": 262144,
+   "max": 1048576,
    "default": 262144,
    "step": 4096
   },
   "side_window": {
    "min": 8192,
-   "max": 262144,
+   "max": 1048576,
    "default": 262144,
    "step": 4096
   },
@@ -550,7 +554,7 @@
   "kv_hard_floor_gb": 10,
   "kv_bytes_per_token": 8192,
   "typical_fill_tokens": 32768,
-  "side_slot_const_gib": 0.0,
+  "side_slot_const_gib": 1.1,
   "knobs": {
    "slots": "QSE_PARALLEL",
    "window": "MAX_LEN",
@@ -809,14 +813,14 @@
      "label": "Context window, first slot",
      "type": "int",
      "min": 8192,
-     "max": 262144
+     "max": 1048576
     },
     {
      "field": "side_window",
      "label": "Context window, other slots",
      "type": "int",
      "min": 8192,
-     "max": 262144
+     "max": 1048576
     },
     {
      "field": "kv_pool",

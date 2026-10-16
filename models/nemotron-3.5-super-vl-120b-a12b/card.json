@@ -4,7 +4,7 @@
   "packs": [
     "nemotron-super-vl-*"
   ],
-  "context_limit": 262144,
+  "context_limit": 1048576,
   "max_output": 32768,
   "capabilities": {
     "thinking": true,
