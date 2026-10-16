@@ -1063,10 +1063,65 @@ def test_the_relay_reads_the_listening_ports_from_proc():
             fh.write(cmd)
         for i, ino in enumerate(inos):
             os.symlink(f"socket:[{ino}]", os.path.join(proc, pid, "fd", str(i + 3)))
+    # the vite process: its working directory and its start (field 22 of stat, after the name)
+    os.symlink("/workspace/pagoda-garden", os.path.join(proc, "40", "cwd"))
+    with open(os.path.join(proc, "40", "stat"), "w") as fh:
+        fh.write("40 (node (vite)) S 1 40 40 0 -1 4194560 " + "0 " * 12 + "98765 1 2\n")
     assert relay.listening(proc) == [
-        {"port": 5173, "addresses": ["::1"], "command": "node /w/node_modules/.bin/vite"},
-        {"port": 8000, "addresses": ["0.0.0.0", "::"], "command": "python3 -m http.server"}]
+        {"port": 5173, "addresses": ["::1"], "command": "node /w/node_modules/.bin/vite",
+         "cwd": "/workspace/pagoda-garden", "started": 98765},
+        {"port": 8000, "addresses": ["0.0.0.0", "::"], "command": "python3 -m http.server",
+         "cwd": "", "started": 0}]
     assert relay.ports_words([]) == "nothing listens on any port in the sandbox"
+
+
+def test_the_relay_probes_a_page_and_its_scripts_and_style_sheets():
+    """`relay.py probe PORT PATH`: the page's status, type and title, and each script and style
+    sheet on the same server with its own status (a 404 module is named); another host is left
+    out."""
+    import importlib.util
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    spec = importlib.util.spec_from_file_location("relay", sb_mod.RELAY)
+    relay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(relay)
+    page = (b'<!doctype html><html><head><title> Pagoda\n Garden </title>'
+            b'<link rel="stylesheet" crossorigin href="/assets/a.css">'
+            b'<link rel=icon href=/favicon.ico><script src="https://cdn.example/x.js"></script>'
+            b'<script type="module" src="/src/main.js"></script>'
+            b"<script type='module' src='missing.js'></script></head></html>")
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            known = {"/app/": (page, "text/html"), "/assets/a.css": (b"b{}", "text/css"),
+                     "/src/main.js": (b"1", "text/javascript")}
+            body, ctype = known.get(self.path, (b"no", "text/plain"))
+            self.send_response(200 if self.path in known else 404)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        got = relay.probe(port, "/app/")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert got["status"] == 200 and got["type"] == "text/html" and got["title"] == "Pagoda Garden"
+    assert got["assets"] == [
+        {"url": "/assets/a.css", "status": 200, "type": "text/css"},
+        {"url": "/src/main.js", "status": 200, "type": "text/javascript"},
+        {"url": "missing.js", "status": 404, "type": "text/plain"}]
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    closed = free.getsockname()[1]
+    free.close()
+    down = relay.probe(closed)
+    assert down["status"] == 0 and "nothing listens" in down["type"] and down["assets"] == []
 
 
 def test_a_sandbox_that_never_starts_fails_the_call_with_the_reason_and_the_run_goes_on():

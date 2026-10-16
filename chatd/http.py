@@ -95,7 +95,10 @@ ROUTES = [
     ("GET", rf"/conversations/{_ID}/sandbox/diff", "diff"),
     ("POST", rf"/conversations/{_ID}/sandbox/undo", "undo"),
     ("GET", rf"/conversations/{_ID}/sandbox/view/(.+)", "view"),
+    ("GET", rf"/conversations/{_ID}/sandbox/ports", "sandbox_ports"),
     ("*", rf"/conversations/{_ID}/sandbox/ports/(\d+)(/.*)?", "port"),
+    ("POST", rf"/conversations/{_ID}/sandbox/serve", "serve"),
+    ("POST", rf"/conversations/{_ID}/preview/report", "preview_report"),
     ("GET", rf"/conversations/{_ID}/terminals", "terminals"),
     ("POST", rf"/conversations/{_ID}/terminals", "new_terminal"),
     ("GET", rf"/conversations/{_ID}/terminals/([^/]+)/ws", "terminal_ws"),
@@ -571,17 +574,35 @@ class Handler(BaseHTTPRequestHandler):
         self._json(202, self.svc.undo(cid, str(self._body().get("run_id") or "")))
 
     def r_view(self, cid, path):
-        from chatd.panes import view_csp
+        from chatd.panes import TEXT_LIMIT, view_csp
+        from chatd.preview import cors
         fh, meta = self.svc.open_file(cid, path)
+        headers = (("Content-Security-Policy", view_csp(meta["mime"], path)),
+                   ("X-Content-Type-Options", "nosniff")) + cors(self.headers.get("Origin"))
         with fh:
-            self._send_file(fh, meta, (("Content-Security-Policy", view_csp(meta["mime"], path)),
-                                       ("X-Content-Type-Options", "nosniff")))
+            if meta["mime"] == "text/html" and meta["bytes"] <= TEXT_LIMIT:
+                # a page: its absolute URLs to its own directory, and the preview's shim
+                body = self.svc.view_page(cid, path, fh.read(TEXT_LIMIT))
+                return self._send(200, body, meta["mime"], headers)
+            self._send_file(fh, meta, headers)
 
     def r_artifact(self, cid, ref):
         self._json(200, self.svc.artifact(cid, ref))
 
     def r_port(self, cid, port, rest):
         self.svc.proxy_port(self, cid, int(port), rest or "/")
+
+    def r_sandbox_ports(self, cid):
+        self._json(200, self.svc.sandbox_ports(cid))
+
+    def r_serve(self, cid):
+        self._json(202, self.svc.serve(cid, self._body()))
+
+    def r_preview_report(self, cid):
+        body = self._body()
+        body["viewer"] = self.viewer
+        self.svc.preview_report(cid, body)
+        self._empty(204)
 
     def r_terminals(self, cid):
         self._json(200, self.svc.terminals_list(cid))

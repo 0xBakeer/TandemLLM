@@ -151,7 +151,8 @@ def test_the_view_route_keeps_its_path_checks_and_page_csp():
         ws = c.svc.workspace(cid)
         ws.write("site/index.html", b"<h1>hi</h1>")
         st, body, h = _get(c, f"/conversations/{cid}/sandbox/view/site/index.html")
-        assert st == 200 and body == b"<h1>hi</h1>"
+        # a page comes whole, with the preview's shim first (chatd/preview.py)
+        assert st == 200 and body.startswith(b"<script>") and body.endswith(b"</script><h1>hi</h1>")
         assert h["content-security-policy"] == P.PREVIEW_CSP
         os.symlink("/etc/passwd", os.path.join(ws.root, "pw.mp4"))
         st, _, _ = _get(c, f"/conversations/{cid}/sandbox/view/pw.mp4")

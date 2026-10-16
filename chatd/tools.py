@@ -307,8 +307,50 @@ def _present(ctx, a):
         full = ctx.ws.resolve(str(a.get("path") or ""), must_exist=True)
         ref = "file:" + ctx.ws.show(full) if kind != "editor" else ctx.ws.show(full)
     pane = {"kind": kind, "ref": ref, "title": str(a.get("title") or "")[:80] or None}
+    if kind == "preview":
+        return _present_preview(ctx, pane)
     ctx.present(pane)
     return Result(f"opened a {kind} pane for the user", pane=pane)
+
+
+def _present_preview(ctx, pane):
+    """A preview's real outcome for the model: what the pane targets (the port that listens, a
+    page's dev server, or nothing yet), what the server answered, and what the user's pane loaded
+    (its own report: errors, failed files), so the model cannot claim a blank pane works. Live
+    (2026-10-16) `present` said done for port 4173 while the user's pane was white."""
+    from chatd.preview import REPORT_WAIT_S, probe_words, report_words, server_words
+    from chatd.service import ApiError
+    t0 = time.time()
+    try:
+        art = ctx.svc.artifact(ctx.cid, pane["ref"])
+    except ApiError as exc:
+        raise ToolError(str(exc)) from None
+    ctx.present(pane)
+    w = art.get("waiting")
+    if w:
+        return Result(f"opened a preview pane, but it shows nothing yet: {w['message']} "
+                      f"{_ports_words(ctx.svc.listening(ctx.cid))}. Start the server (bash with "
+                      f"background true), then present it again. The preview does not work yet: "
+                      f"do not tell the user it does.", is_error=True, pane=pane)
+    lines, bad = [], False
+    if art.get("port"):
+        lines.append("opened the preview pane on " + server_words(
+            {"port": art["port"], "command": art.get("server")}) + ".")
+        if art.get("note"):
+            lines.append(art["note"])
+        words, b = probe_words(ctx.svc.probe(ctx.cid, art["port"]))
+        lines.append(words)
+        bad = bad or b
+    else:
+        lines.append(f"opened the preview pane on {pane['ref'][5:]}.")
+    viewers = len(ctx.svc.conv(ctx.cid).fan)
+    rep = ctx.svc.wait_report(ctx.cid, pane["ref"], t0, REPORT_WAIT_S if viewers else 0)
+    words, b = report_words(rep, viewers)
+    lines.append(words)
+    bad = bad or b
+    if bad:
+        lines.append("The preview does not work yet: fix this before telling the user it does.")
+    return Result("\n".join(lines), is_error=bad, pane=pane)
 
 
 def _library_search(ctx, a):

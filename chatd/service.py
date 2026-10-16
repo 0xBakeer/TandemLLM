@@ -38,6 +38,7 @@ from chatd import tools as tools_mod
 from chatd.agent import AgentMixin
 from chatd.panes import PanesMixin
 from chatd.plans import PlansMixin
+from chatd.preview import PreviewMixin
 from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
 from chatd import websearch
@@ -145,7 +146,8 @@ def device_label(ua: str | None) -> str | None:
     return browser or system or "another device"
 
 
-class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, WebSearchMixin):
+class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
+              WebSearchMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,

@@ -12,10 +12,12 @@ the user's shell and the agent never type into the same PTY.
 
 THE PORT PREVIEW. The container has no network, so a dev server inside it is reached through an
 exec of `relay.py connect <port>` (localhost: ::1, then 127.0.0.1): chatd writes the HTTP request to its stdin and reads the answer
-from its stdout. Each answer carries the preview CSP (CONTRACT section 5); an HTML answer's
-absolute `/` URLs, a script's absolute imports and a style sheet's `url(/...)` are rewritten to the
-port's prefix (a dev server started without `--base`).
-WebSocket upgrades (hot reload) are not passed through yet.
+from its stdout. Each answer carries the preview CSP (CONTRACT section 5) and, for the preview's
+opaque origin, `Access-Control-Allow-Origin: null`; an HTML answer's absolute `/` URLs, a script's
+absolute imports and a style sheet's `url(/...)` are rewritten to the port's prefix (a dev server
+started without `--base`), and a page gets the preview's shim (chatd/preview.py). The server sees
+a local client: no Origin, Referer or Sec-Fetch-Site/Mode. A WebSocket (hot reload) goes through
+the same relay.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import re
 import socket
 import struct
 import threading
@@ -311,6 +312,7 @@ class TerminalsMixin:
     # ------------------------------------------------------------------ the port preview
     def proxy_port(self, handler, cid: str, port: int, rest: str) -> None:
         from chatd.panes import PREVIEW_CSP
+        from chatd.preview import cors, rewrite_css, rewrite_page, rewrite_script
         self.conv(cid)
         box = self.sandboxes.box(cid)
         if box.state != "running":
@@ -327,7 +329,8 @@ class TerminalsMixin:
         for k, v in handler.headers.items():
             # no accept-encoding: the rewrites below read the answer's bytes
             if k.lower() in ("host", "connection", "cookie", "authorization", "upgrade",
-                             "keep-alive", "x-tandem-forward", "accept-encoding") or \
+                             "keep-alive", "x-tandem-forward", "accept-encoding", "origin",
+                             "referer", "sec-fetch-site", "sec-fetch-mode") or \
                     k.lower().startswith("x-tandem"):
                 continue
             lines.append(f"{k}: {v}")
@@ -355,7 +358,8 @@ class TerminalsMixin:
             k, _, v = h.decode("latin-1").partition(":")
             kl = k.strip().lower()
             if not kl or kl in ("content-length", "connection", "transfer-encoding",
-                                "content-security-policy", "set-cookie", "keep-alive"):
+                                "content-security-policy", "set-cookie", "keep-alive", "vary",
+                                "x-frame-options") or kl.startswith("access-control-"):
                 continue
             if kl == "content-type":
                 ctype = v.strip()
@@ -363,15 +367,14 @@ class TerminalsMixin:
             keep.append((k.strip(), v.strip()))
         if b"transfer-encoding: chunked" in hdrs.lower():
             payload = _dechunk(payload)
-        prefix = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}/".encode()
+        prefix = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}"
         if ctype.startswith("text/html"):
-            payload = re.sub(rb'(src|href|action)=(["\'])/(?!/)',
-                             lambda m: m.group(1) + b"=" + m.group(2) + prefix, payload)
+            payload = rewrite_page(payload, prefix, port)
         elif "javascript" in ctype:
-            payload = _JS_ABS.sub(lambda m: m.group(1) + m.group(2) + prefix, payload)
+            payload = rewrite_script(payload, prefix, path)
         elif ctype.startswith("text/css"):
-            payload = _CSS_ABS.sub(lambda m: m.group(1) + prefix, payload)
-        handler._send(status, payload, ctype, tuple(keep) + (
+            payload = rewrite_css(payload, prefix)
+        handler._send(status, payload, ctype, tuple(keep) + cors(handler.headers.get("Origin")) + (
             ("Content-Security-Policy", PREVIEW_CSP), ("X-Content-Type-Options", "nosniff")))
 
     def _proxy_ws(self, handler, cid: str, port: int, path: str) -> None:
@@ -384,7 +387,7 @@ class TerminalsMixin:
                  "Connection: Upgrade"]
         for k, v in handler.headers.items():
             kl = k.lower()
-            if kl.startswith("sec-websocket-") or kl in ("origin", "user-agent", "accept-language"):
+            if kl.startswith("sec-websocket-") or kl in ("user-agent", "accept-language"):
                 lines.append(f"{k}: {v}")
         box = self.sandboxes.box(cid)
         exec_id, sock, first = self.sandboxes.open_exec(
@@ -426,13 +429,6 @@ class TerminalsMixin:
                 sock.close()
             except OSError:
                 pass
-
-
-#: a module's absolute imports (`from "/src/a.js"`, `import "/@vite/client"`, `import("/x")`): a
-#: dev server that serves ES modules (Vite) writes them so, and the browser asked the dashboard's
-#: origin for them; live (2026-10-16) a Vite app's index came through and its 18 modules were 404
-_JS_ABS = re.compile(rb'((?:\bfrom|\bimport)\s*\(?\s*)(["\'])/(?![/*])')
-_CSS_ABS = re.compile(rb'(url\(\s*["\']?)/(?![/*])')
 
 
 def _dechunk(data: bytes) -> bytes:

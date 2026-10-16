@@ -13,10 +13,13 @@ diff and its undo, artifacts and the preview. Mixed into `chatd.service.Service`
                                                           deletions, patch}]}
     POST   /conversations/{id}/sandbox/undo {run_id}      the run's files back as they were
     GET    /conversations/{id}/artifacts/{ref}            what a pane shows: `file:<path>`,
-                                                          `diff:<run>`, `port:<n>`
+                                                          `diff:<run>`, `port:<n>` (a preview's
+                                                          target: chatd/preview.py)
     GET    /conversations/{id}/sandbox/view/<path>        a workspace file for the preview iframe
                                                           (the preview CSP, CONTRACT 5) or a media
-                                                          player: streamed, with byte ranges
+                                                          player: streamed, with byte ranges; a
+                                                          page whole, its absolute URLs to its own
+                                                          directory, with the preview's shim
 
 Paths are resolved by chatd/workspace.py (no `..`, nothing outside /workspace, no symlink on the
 way). Files are read on the host; nothing here needs the container running.
@@ -205,6 +208,13 @@ class PanesMixin:
         return (f"/v1/chat-app/conversations/{cid}/sandbox/view/"
                 f"{urllib.parse.quote(rel, safe='/')}")
 
+    def view_page(self, cid: str, path: str, data: bytes) -> bytes:
+        """A page on the view route: absolute `/` URLs to the page's own directory (a built site's
+        `/assets/...`), and the preview's shim (chatd/preview.py)."""
+        from chatd.preview import rewrite_page
+        url = self.view_url(cid, path)
+        return rewrite_page(data, url.rsplit("/", 1)[0])
+
     def open_file(self, cid: str, path: str):
         """(file object, {mime, bytes, etag, mtime}) for the view and download routes, which
         stream it; the caller closes the file."""
@@ -284,7 +294,6 @@ class PanesMixin:
     # ------------------------------------------------------------------ artifacts
     def artifact(self, cid: str, ref: str) -> dict:
         """What a pane shows for `ref`; the preview loads `url` in a sandboxed iframe."""
-        base = f"/v1/chat-app/conversations/{cid}"
         if ref.startswith("diff:"):
             run = ref[5:]
             d = self.diff(cid, run)
@@ -292,9 +301,7 @@ class PanesMixin:
             return {"kind": "diff", "content": text or "No file changed in this run.\n",
                     "mime": "text/x-diff", "title": "changes", "files": d["files"]}
         if ref.startswith("port:"):
-            port = int(ref[5:])
-            return {"kind": "preview", "content": "", "mime": "text/html",
-                    "title": f"port {port}", "url": f"{base}/sandbox/ports/{port}/"}
+            return self.preview_of_port(cid, int(ref[5:]))
         path = ref[5:] if ref.startswith("file:") else ref
         meta, data = self.file(cid, path)
         mime = meta["mime"]
@@ -307,6 +314,10 @@ class PanesMixin:
         if mime.startswith("image/"):
             return {"kind": "image", "content": url, "mime": mime, "title": title, "url": url}
         if mime == "text/html":
+            from chatd.preview import needs_server
+            need = needs_server(self.workspace(cid), path)
+            if need:
+                return self.preview_of_page(cid, path, need)
             return {"kind": "preview", "content": meta.get("content") or "", "mime": mime,
                     "title": title, "url": url}
         if mime in ("text/markdown",) or rel.endswith(".md"):
