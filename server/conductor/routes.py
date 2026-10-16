@@ -240,6 +240,20 @@ def _base(body: dict) -> int | None:
         raise ApiError(400, "bad_request", "base_version is a version number")
 
 
+def _q_int(q: dict, name: str, default: int) -> int:
+    """A query parameter as a number; one that is not a number is a 400 naming it. An
+    uncaught int() here raises out of the route: the connection dies with no answer and
+    every retry of the bad URL spams a traceback (the versions/diff, transcripts, memory
+    search and packages/usage routes have answered 400 like this from the first)."""
+    v = q.get(name)
+    if v is None or v == "":
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        raise ApiError(400, "bad_request", f"{name} is a number")
+
+
 def _route(handler, cond, method, parts, q, body, auth):
     st = cond.store
     if not parts:
@@ -279,10 +293,10 @@ def _route(handler, cond, method, parts, q, body, auth):
             raise ApiError(404, "not_found", f"no monitor event {parts[1]}")
         return 200, {"event": e}, None
     if head == "events" and len(parts) == 1 and method == "GET":
-        evs = cond.journal.rows(since_ms=int(q.get("since") or 0), kind="monitor",
-                                limit=min(2000, int(q.get("limit") or 100)),
+        evs = cond.journal.rows(since_ms=_q_int(q, "since", 0), kind="monitor",
+                                limit=min(2000, _q_int(q, "limit", 100)),
                                 session=q.get("session") or None,
-                                before_ms=int(q["before"]) if q.get("before") else None,
+                                before_ms=_q_int(q, "before", 0) if q.get("before") else None,
                                 # VIS-44: one request's events, the row drawer's list
                                 request_ids=[q["request"]] if q.get("request") else None)
         if q.get("task"):
@@ -300,10 +314,10 @@ def _route(handler, cond, method, parts, q, body, auth):
                      "sessions": mon.watching() if mon is not None else []}, None
     if head == "decisions":
         if len(parts) == 1 and method == "GET":
-            rows = cond.journal.rows(since_ms=int(q.get("since") or 0),
-                                     limit=min(500, int(q.get("limit") or 100)),
+            rows = cond.journal.rows(since_ms=_q_int(q, "since", 0),
+                                     limit=min(500, _q_int(q, "limit", 100)),
                                      session=q.get("session") or None,
-                                     before_ms=int(q["before"]) if q.get("before") else None,
+                                     before_ms=_q_int(q, "before", 0) if q.get("before") else None,
                                      kind="router")
             return 200, {"decisions": cond.journal.with_events(rows)}, None
         if len(parts) == 2 and method == "GET":
@@ -323,7 +337,7 @@ def _route(handler, cond, method, parts, q, body, auth):
                                 labelled_at=int(time.time() * 1000) if label != "clear" else None)
             return 200, {"id": parts[1], "label": None if label == "clear" else label}, None
     if head == "stats" and method == "GET":
-        hours = max(1, min(168, int(q.get("hours") or 24)))
+        hours = max(1, min(168, _q_int(q, "hours", 24)))
         since = int((time.time() - hours * 3600) * 1000)
         rows = cond.journal.rows(since_ms=since, limit=100000)
         evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
