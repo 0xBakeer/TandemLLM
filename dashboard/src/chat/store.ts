@@ -21,7 +21,7 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
     case 'run.metrics': {
       if (!c.run || c.run.id !== ev.run_id) return c;
       const hist = [...c.run.tps_history, ev.decode_tps].slice(-TPS_SLOTS);
-      return { ...c, run: { ...c.run, decode_tps: ev.decode_tps, tokens_per_round: ev.tokens_per_round, acceptance: ev.acceptance, tokens: ev.tokens, thinking: { used: ev.thinking_used, budget: ev.thinking_budget === undefined ? c.run.thinking.budget : ev.thinking_budget }, prefill: ev.prefill ?? c.run.prefill, tps_history: hist } };
+      return { ...c, run: { ...c.run, decode_tps: ev.decode_tps, tokens_per_round: ev.tokens_per_round, acceptance: ev.acceptance, tokens: ev.tokens, thinking: { used: ev.thinking_used, call: ev.thinking_call, budget: ev.thinking_budget === undefined ? c.run.thinking.budget : ev.thinking_budget }, prefill: ev.prefill ?? c.run.prefill, tps_history: hist } };
     }
     case 'run.done': {
       const messages = mapMessage(c.messages, ev.message_id, (m) => ({ ...m, status: ev.status, stats: ev.stats, parts: m.parts.map((p) => (p.type === 'thinking' ? { ...p, done: true } : p)) }));
@@ -155,6 +155,25 @@ export function pendingPermission(c: Conversation): { message: Message; call: To
 export function interruptedMessage(c: Conversation): Message | null {
   const m = c.messages[c.messages.length - 1];
   return m && m.role === 'assistant' && m.status === 'interrupted' ? m : null;
+}
+
+/** The Continue card of an interrupted answer (VIS-197): its words, from the reason chatd
+ *  recorded (`stats.interrupted`), and whether its last part is the run's own notice (the limit
+ *  of model calls, the sandbox failing), which the card then carries in its place. It said "The
+ *  engine restarted" for every one, a run at its limit included. An answer from before the
+ *  reason: its notice when it ends with one, else neutral words. */
+export function interruptWords(m: Message): { text: string; notice: boolean } | null {
+  if (m.status !== 'interrupted') return null;
+  const last = m.parts[m.parts.length - 1];
+  if (last && last.type === 'error' && !last.retryable) return { text: last.message, notice: true };
+  const why = m.stats?.interrupted;
+  const text =
+    why === 'restart'
+      ? 'The chat service restarted while this answer was being written. The text so far stays.'
+      : why === 'engine'
+        ? 'The engine stopped answering while this answer was being written. The text so far stays.'
+        : 'This answer stopped before it was finished. The text so far stays.';
+  return { text, notice: false };
 }
 
 /** The last assistant message with figures, for the Context panel when nothing runs. */

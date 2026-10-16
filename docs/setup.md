@@ -7,7 +7,7 @@ The dashboard's `#/setup` page walks through an install in eight steps, from pic
 A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.1/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.2/install.sh
 bash install.sh --setup --yes
 ```
 
@@ -21,7 +21,7 @@ The installer prints the addresses when it finishes, and the dashboard opens on 
 
 On a checkout, the same mode starts with `ops/start.sh --setup` (127.0.0.1 unless `--host` names another address). Setup mode runs `server/app.py --setup`: no model of Qwen's, no caches, no state store, no drafters, no conductor and no ledger. It answers the dashboard, `/v1/setup/*`, `/health` (`"mode": "setup"`) and an empty `/v1/models`, loads Wren at the start, and gives every other route a 503 with the code `setup_mode`. The watchdog sees its `/health` answer 200 and leaves it alone.
 
-The installer writes the marker `run/setup-pending` (with the host to bind). While it exists, a plain `ops/start.sh` (the reboot's, the watchdog's) starts setup mode again. The install job removes it before it starts the configured engine, and puts it back if that engine does not come up.
+The installer writes the marker `run/setup-pending` (with the host to bind). While it exists, a plain `ops/start.sh` (the reboot's, the watchdog's) starts setup mode again. The install job removes it before it starts the configured engine, and puts it back if that engine does not come up. Setup mode does not start chatd; the configured engine's start does, so the Chat tab works once the guide is done.
 
 Until an admin password is set, anyone who reaches the port can run the setup, apply it and reset the box. The review step says so. `ops/make-secrets.sh --admin` sets one; the setup page's "generate" option does the same on a box that has no `secrets.env` yet.
 
@@ -46,7 +46,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.11.1`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.11.1'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.11.2`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.11.2'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 
@@ -152,7 +152,7 @@ A model the browser has no progress for starts from what the box runs now (`GET 
 | 4 | the weights of every profile but the active one, and their HF cache copies; never what an engine on any port reads (its `--nvfp4`, `--fp8-head`, `QWEN38_EXL3`, `QWEN38_DRAFT_*`), nor `~/nvfp4-bf16` while `~/tandem-staircut` is there; nothing at all while the active profile is unknown (409 `active_unknown`) | `delete weights` | no |
 | 5 | the usage ledger file and its `-wal`, `-shm` and `-journal` files (not its folder), the conductor's settings and journal, the memory notes | `delete history` | yes |
 
-Levels 2 to 4 never touch the active profile's weights, the K3 drafters, the K4 draft head, the base checkpoint, the small models, the HF token, `secrets.env`, the history or the conductor's data. A cache the running engine holds is cleared by the engine's own function; the shadow reader's disk is kept while it runs. A symbolic link goes as a link and its target stays. Every reset is refused while requests run or a job runs, and every call writes one line to `run/setup-audit.log`.
+Levels 2 to 4 never touch the active profile's weights, the K3 drafters, the K4 draft head, the base checkpoint, the small models, the HF token, the secrets file the engine reads (`QSE_SECRETS`, else `$QSE_STATE_DIR/secrets.env`, else `~/.qwen38-spark-engine/secrets.env`; an install's `DIR/state/secrets.env`) and its folder, the history (`QSE_USAGE_LEDGER`) or the conductor's data. Level 5 never touches the secrets file either. A cache the running engine holds is cleared by the engine's own function; the shadow reader's disk is kept while it runs. A symbolic link goes as a link and its target stays. Every reset is refused while requests run or a job runs, and every call writes one line to `run/setup-audit.log`.
 
 ## The routes
 

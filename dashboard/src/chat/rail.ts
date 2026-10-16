@@ -38,7 +38,8 @@ export class QseChatRail extends LightElement {
   @property({ attribute: false }) list: ConversationSummary[] = [];
   @property({ attribute: false }) folders: Folder[] = [];
   @property({ type: String }) active: string | null = null;
-  @property({ type: Boolean }) mock = false;
+  /** the mock's badge, with why it runs (empty: the server's chat) */
+  @property({ attribute: false }) mock = '';
   /** chats whose answer finished since this device last looked */
   @property({ attribute: false }) unread = new Set<string>();
   @state() private filter = '';
@@ -86,7 +87,7 @@ export class QseChatRail extends LightElement {
       </nav>
       <div class="ch-rail-foot">
         <button type="button" class="btn btn-ghost ch-rail-settings" @click=${() => this.fire('ch-open-settings', { section: 'tools' })}>${icon('sliders')} Settings</button>
-        ${this.mock ? html`<span class="ch-mock-badge" title="the server has no chat routes yet; this is the in-browser mock">mock data</span>` : nothing}
+        ${this.mock ? html`<span class="ch-mock-badge" title=${this.mock}>mock data</span>` : nothing}
       </div>
     </div>`;
   }

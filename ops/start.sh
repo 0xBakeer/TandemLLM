@@ -37,6 +37,27 @@ LOGS="$REPO/logs"; mkdir -p "$LOGS"
 PIDFILE="$LOGS/engine.pid"
 LOG="$LOGS/engine-$(date +%Y%m%d-%H%M%S).log"
 
+# OPS-155: chatd, the Chat tab's service, once the engine answers /health: started if it is not
+# running, by the checkout's ops/chatd.sh (its own session, nothing inherited above stdio, serve.env,
+# local.env and secrets.env exported, the admin token held back). Not in setup mode, not for a
+# hold's restart (HOLD_RESTART=1), not with QSE_CHATD=off. A chatd that does not start is a warning:
+# the engine is up either way. ops/stop.sh never stops it, so an engine restart, the watchdog's
+# included, never ends a chat run; `tandem stop` does.
+load_secrets() {
+    SECRETS="${QSE_SECRETS:-${QSE_STATE_DIR:+$QSE_STATE_DIR/secrets.env}}"
+    SECRETS="${SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
+    if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
+}
+start_chatd() {
+    [ "${QSE_CHATD:-on}" = "off" ] && { echo "[start] chatd: off (QSE_CHATD=off)"; return 0; }
+    [ "${HOLD_RESTART:-0}" = "1" ] && return 0
+    [ -f "$REPO/ops/chatd.sh" ] || return 0
+    bash "$REPO/ops/chatd.sh" status >/dev/null 2>&1 && return 0
+    bash "$REPO/ops/chatd.sh" start \
+        || echo "[start] WARNING: chatd did not start (above, log $REPO/logs/chatd.log); the engine" \
+                "serves without the Chat tab. tandem chat start tries again"
+}
+
 # A hold owns the board: the pause file is how it says so, and this script must respect it too.
 # The @reboot cron line calls this directly (not through the watchdog, which already respects the
 # pause), and on 2026-09-18 21:38 it started :8000 under a running hold -- a second engine beside
@@ -57,7 +78,9 @@ if [ -f "$REPO/.watchdog.off" ] && [ "${HOLD_RESTART:-0}" != "1" ]; then
     fi
 fi
 if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    echo "[start] already healthy on :$PORT"; exit 0
+    echo "[start] already healthy on :$PORT"
+    [ "$SETUP" = "1" ] || { load_secrets; start_chatd; }
+    exit 0
 fi
 # One engine at a time, and a LOADING one counts: the server binds its port only once the
 # weights are in, so for the minutes of a load neither /health nor `ss` sees it, and this script
@@ -88,8 +111,7 @@ status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || tru
 # token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
 # rule"). QSE_DASHBOARD_LOGIN reaches the server exported from serve.env (set -a above). Setup mode
 # reads them too: its /v1/setup routes run apply and reset, and a password set must guard them.
-SECRETS="${QSE_SECRETS:-$HOME/.qwen38-spark-engine/secrets.env}"
-if [ -f "$SECRETS" ]; then set -a; . "$SECRETS"; set +a; fi
+load_secrets
 T_START=$(date +%s)
 if [ "$SETUP" = "1" ]; then
     # Setup mode: the server with no model of Qwen's, the dashboard and Wren alone (no caches, no
@@ -251,6 +273,7 @@ for i in $(seq 1 60); do
                 && echo "[start] narrator: load asked" \
                 || echo "[start] narrator: the load did not answer (conductor off?)"
         fi
+        start_chatd
         exit 0
     fi
     sleep 10

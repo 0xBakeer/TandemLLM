@@ -78,8 +78,7 @@ def test_delete_forever_removes_the_container_and_the_folders():
         _use_the_sandbox(c, cid)
         _use_the_sandbox(c, other)
         c.ok("DELETE", f"/conversations/{cid}?forever=1")
-        name = c.svc.sandboxes.name(cid)
-        assert ("DELETE", f"/containers/{name}?force=1") in c.svc.sandboxes.engine.calls
+        assert ("DELETE", f"/containers/fake-{cid}?force=1") in c.svc.sandboxes.engine.calls
         assert not any(os.path.exists(d) for d in _folders(c, cid)), _folders(c, cid)
         assert c.svc.store.one("SELECT 1 FROM conversations WHERE id = ?", (cid,)) is None
         assert cid not in c.svc.sandboxes.boxes
@@ -102,7 +101,7 @@ def test_the_trash_after_seven_days_is_the_same_purge():
         assert all(os.path.isdir(d) for d in _folders(c, cid))
         c.svc.sweep_once(now=deleted + TRASH_KEEP_MS + 1000)
         assert not any(os.path.exists(d) for d in _folders(c, cid))
-        assert ("DELETE", f"/containers/{c.svc.sandboxes.name(cid)}?force=1") in c.svc.sandboxes.engine.calls
+        assert ("DELETE", f"/containers/fake-{cid}?force=1") in c.svc.sandboxes.engine.calls
         assert c.svc.store.one("SELECT 1 FROM conversations WHERE id = ?", (cid,)) is None
     finally:
         c.close()
@@ -125,8 +124,8 @@ def test_the_start_removes_the_containers_of_gone_and_trashed_chats():
         removed = c.svc.reap_sandboxes()
         assert sorted(removed) == sorted([gone, trashed]), removed
         names = [p for m, p in c.svc.sandboxes.engine.calls if m == "DELETE"]
-        assert f"/containers/{c.svc.sandboxes.name(gone)}?force=1" in names
-        assert f"/containers/{c.svc.sandboxes.name(trashed)}?force=1" in names
+        assert "/containers/fake-gone?force=1" in names            # by its id: its own only
+        assert "/containers/fake-trashed?force=1" in names
         assert not any(os.path.exists(d) for d in _folders(c, gone))          # gone: the folders go
         assert all(os.path.isdir(d) for d in _folders(c, trashed))            # trashed: they wait
         assert c.svc.sandboxes.box(live).state == "running" and live not in removed

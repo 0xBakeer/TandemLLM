@@ -3,7 +3,11 @@
    cache; violet is thinking; aqua a tool that finished well; red a failure. The user's bubble is a
    neutral grey. One instrument carries the design: the context-window ribbon in the Context panel.
    One breakpoint, 768 px (the shell's): the rail becomes a drawer, the Context panel and the
-   panes become sheets. Between 768 and 1180 px the Context panel is an overlay. */
+   panes become sheets. Between 768 and 1180 px the Context panel is an overlay.
+   The design pass (VIS-185): three radii by rank (6 px controls, 10 px cards and code, 16 px the
+   bubble and the composer), hairline rules for cards and strong rules for inputs only, state on a
+   dot and a word rather than a coloured bar, the figures line one quiet row of numbers, and nothing
+   in the thread wider than its column: words wrap, code and tables scroll in their own box. */
 
 qse-chat,
 qse-chat-rail,
@@ -38,9 +42,13 @@ qse-chat-thread {
   --ch-ctx-w: 320px;
   --ch-pane-size: 40%;
   --ch-measure: 76ch;
-  --ch-user: var(--bg-3);
+  --ch-user: color-mix(in srgb, var(--ink) 7%, var(--bg));
   --ch-think: var(--series-violet);
   --ch-tool: var(--series-aqua);
+  --ch-r-sm: 6px;
+  --ch-r: 10px;
+  --ch-r-lg: 16px;
+  --ch-gap: 12px;
   position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -202,6 +210,19 @@ qse-chat-thread {
 .ch-row-time {
   flex: none;
   color: var(--ink-3);
+}
+/* a running chat's phase in the row: one line, cut with an ellipsis */
+.ch-row-sub .ch-mark {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ch-row-sub .ch-mark-dot {
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: 1px;
 }
 .ch-row-more {
   position: absolute;
@@ -426,9 +447,17 @@ qse-chat-thread {
 .ch-more {
   position: relative;
 }
-.ch-more-pop {
+/* the header's menu opens down from its button, right-aligned: `.ch-pop` rises (the composer's
+   pills), and up here it went under the top bar; on a phone `.ch-pop` spans its anchor, which here
+   is the button */
+.ch-more > .ch-more-pop {
+  top: calc(100% + 6px);
+  bottom: auto;
   right: 0;
   left: auto;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100dvh - var(--topbar-h) - 120px);
 }
 .ch-body {
   flex: 1;
@@ -496,22 +525,26 @@ qse-chat-thread {
 }
 
 /* ---- the thread -------------------------------------------------------------------------------- */
+/* the thread scrolls up and down only: a long word, a URL or inline code wraps in its line, code
+   blocks and tables scroll in their own box, so the column never pans sideways (VIS-185) */
 .ch-scroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   scroll-padding-bottom: 24px;
 }
 .ch-col {
   max-width: var(--ch-measure);
   margin: 0 auto;
-  padding: 16px 20px 12px;
+  padding: 20px 24px 16px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 26px;
   font-size: 15px;
-  line-height: 1.55;
+  line-height: 1.6;
+  overflow-wrap: break-word;
 }
 
 /* the Now line: a row of its own above the scrolling thread, so it reserves its height and never
@@ -528,15 +561,16 @@ qse-chat-thread {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 8px 12px 8px 8px;
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
+  padding: 8px 12px 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r);
   background: var(--bg-2);
-  box-shadow: inset 3px 0 0 var(--orange);
+  box-shadow: inset 2px 0 0 var(--orange);
   font-size: var(--fs-sm);
+  min-width: 0;
 }
 .ch-now.is-permission {
-  box-shadow: inset 3px 0 0 var(--warn-ink);
+  box-shadow: inset 2px 0 0 var(--warn-ink);
 }
 .ch-now-fig {
   flex: none;
@@ -558,6 +592,12 @@ qse-chat-thread {
 .ch-now-words {
   font-weight: 600;
   color: var(--ink);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 .ch-now-nums {
   display: inline-flex;
@@ -584,7 +624,8 @@ qse-chat-thread {
 }
 .ch-now-sub {
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 2px 12px;
   color: var(--ink-3);
   font-size: var(--fs-xs);
 }
@@ -622,29 +663,41 @@ qse-chat-thread {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 4px;
+  gap: 2px;
+  min-width: 0;
 }
 .ch-bubble {
-  max-width: 72%;
+  max-width: min(80%, 62ch);
+  min-width: 0;
   background: var(--ch-user);
-  border-radius: 14px 14px 4px 14px;
-  padding: 10px 14px;
+  border-radius: var(--ch-r-lg) var(--ch-r-lg) var(--ch-r-sm) var(--ch-r-lg);
+  padding: 9px 15px;
 }
 .ch-text {
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .ch-user-foot {
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-height: 24px;
+  gap: 4px;
+  min-height: 28px;
 }
+/* a message's own actions: small, quiet glyphs (on a phone always there, on a desktop on hover) */
 .ch-tools {
   display: inline-flex;
-  gap: 2px;
+  align-items: center;
+  gap: 0;
   opacity: 0;
   transition: opacity 0.12s;
+}
+.ch-tools .btn {
+  padding: 5px;
+  color: var(--ink-3);
+}
+.ch-tools .icon {
+  width: 15px;
+  height: 15px;
 }
 .ch-msg:hover .ch-tools,
 .ch-msg:focus-within .ch-tools {
@@ -667,6 +720,7 @@ qse-chat-thread {
 .ch-edit {
   width: 100%;
   max-width: 100%;
+  border-radius: var(--ch-r-lg);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -748,7 +802,7 @@ qse-chat-thread {
 .ch-assistant {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--ch-gap);
   min-width: 0;
 }
 .ch-waiting {
@@ -758,25 +812,50 @@ qse-chat-thread {
   color: var(--ink-2);
   font-size: var(--fs-sm);
 }
+/* the figures line: one quiet row of readings under the answer, the numbers a step brighter than
+   their words. A phone keeps the speed, the tokens and the first token; the rest are in its title
+   and in the Context panel's Last turn. If it still runs out of room it ends in an ellipsis. */
 .ch-foot {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 24px;
+  min-height: 28px;
   margin-top: -4px;
+  min-width: 0;
 }
 .ch-figs {
-  font-size: var(--fs-xs);
+  flex: 1;
+  min-width: 0;
+  display: block;
+  font-size: 11px;
+  line-height: 28px;
   color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ch-tf + .ch-tf {
+  margin-left: 1.1em;
+}
+.ch-tf b {
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.ch-tf-finish {
+  color: var(--warn-ink);
+}
+.ch-foot .ch-tools {
+  flex: none;
+  margin-left: auto;
 }
 .ch-interrupted {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  padding: 8px 10px;
-  border: 1px solid var(--warn);
-  border-radius: var(--radius);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: var(--ch-r);
   background: var(--orange-wash);
   font-size: var(--fs-sm);
 }
@@ -788,23 +867,31 @@ qse-chat-thread {
   min-width: 12ch;
 }
 
-/* thinking */
+/* thinking: a quiet disclosure line; violet marks it (the caret, the rule beside the open text) */
 .ch-think {
-  border-left: 2px solid var(--ch-think);
-  padding-left: 12px;
   color: var(--ink-2);
-  font-size: var(--fs-sm);
+  font-size: 13.5px;
+  min-width: 0;
 }
 .ch-think summary {
   cursor: pointer;
-  color: var(--ch-think);
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
   font-weight: 500;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   list-style: none;
   user-select: none;
-  min-height: 24px;
+  min-height: 26px;
+  max-width: 100%;
+}
+.ch-think summary:hover {
+  color: var(--ink);
+}
+.ch-think summary .num {
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
 }
 .ch-think summary::-webkit-details-marker {
   display: none;
@@ -813,7 +900,7 @@ qse-chat-thread {
   content: '';
   width: 0;
   height: 0;
-  border-left: 5px solid currentColor;
+  border-left: 5px solid var(--ch-think);
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
   transition: transform 0.12s;
@@ -823,9 +910,11 @@ qse-chat-thread {
 }
 .ch-think-body {
   white-space: pre-wrap;
-  word-break: break-word;
-  margin-top: 6px;
-  line-height: 1.5;
+  overflow-wrap: anywhere;
+  margin: 4px 0 2px 2px;
+  padding: 2px 4px 2px 15px;
+  border-left: 1px solid color-mix(in srgb, var(--ch-think) 55%, transparent);
+  line-height: 1.55;
   max-height: 320px;
   overflow: auto;
 }
@@ -836,7 +925,10 @@ qse-chat-thread {
   line-height: 1.6;
 }
 .ch-md > * + * {
-  margin-top: 0.75em;
+  margin-top: 0.8em;
+}
+.ch-md > * + :is(h3, h4, h5, h6) {
+  margin-top: 1.4em;
 }
 .ch-md h3,
 .ch-md h4,
@@ -847,59 +939,86 @@ qse-chat-thread {
   line-height: 1.3;
 }
 .ch-md h3 {
-  font-size: 17px;
+  font-size: 18px;
 }
 .ch-md h4 {
+  font-size: 16px;
+}
+.ch-md h5 {
   font-size: 15px;
+}
+.ch-md h6 {
+  font-size: 14px;
+  color: var(--ink-2);
 }
 .ch-md ul,
 .ch-md ol {
-  padding-left: 1.4em;
+  padding-left: 1.35em;
   margin: 0;
 }
 .ch-md li + li {
-  margin-top: 0.3em;
+  margin-top: 0.35em;
+}
+.ch-md li::marker {
+  color: var(--ink-3);
 }
 .ch-md blockquote {
   border-left: 2px solid var(--rule-strong);
-  padding-left: 12px;
+  padding-left: 14px;
   color: var(--ink-2);
   margin: 0;
 }
 .ch-md hr {
   border: 0;
   border-top: 1px solid var(--rule);
+  margin: 1.4em 0;
 }
 .ch-md a {
   text-decoration: underline;
-  text-decoration-color: var(--rule-strong);
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
 }
-.ch-md code {
-  font-size: 0.9em;
+/* inline code wraps anywhere (a call, a URL, a path is one long word) and keeps its tint on
+   every line it breaks over */
+.ch-md :not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.12em 0.4em;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
+/* a code block: a header row with the language and the tools, the code scrolling in its box */
 .ch-md .md-code {
   position: relative;
   background: var(--bg-inset);
   border: 1px solid var(--rule);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
   overflow: hidden;
+  min-width: 0;
 }
-.ch-md .md-code[data-lang]::before {
+.ch-md .md-code::before {
   content: attr(data-lang);
   display: block;
-  padding: 4px 10px 3px;
+  height: 32px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
+  line-height: 32px;
   color: var(--ink-3);
+  text-align: left;
 }
 .ch-md .md-code pre {
   margin: 0;
-  padding: 10px 12px;
+  padding: 12px 14px;
   overflow: auto;
   font-size: 12.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   tab-size: 4;
+  overscroll-behavior-x: contain;
 }
 .ch-md .md-code code {
   background: none;
@@ -912,16 +1031,18 @@ qse-chat-thread {
   left: 0;
   right: 0;
   bottom: 0;
-  height: 2px;
-  background: linear-gradient(90deg, var(--orange), transparent);
+  height: 1px;
+  background: linear-gradient(90deg, var(--orange-hi), transparent);
 }
 .md-code-tools {
   position: absolute;
-  top: 2px;
+  top: 0;
   right: 4px;
+  height: 32px;
   display: inline-flex;
+  align-items: center;
   gap: 2px;
-  opacity: 0;
+  opacity: 0.75;
   transition: opacity 0.12s;
 }
 .md-code:hover .md-code-tools,
@@ -929,26 +1050,38 @@ qse-chat-thread {
   opacity: 1;
 }
 .md-code-tools .btn {
-  padding: 2px 6px;
+  padding: 3px 6px;
   font-size: var(--fs-xs);
-  background: var(--bg-2);
+  color: var(--ink-3);
+}
+.md-code-tools .icon {
+  width: 15px;
+  height: 15px;
 }
 .ch-md .md-table {
-  overflow: auto;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r);
 }
 .ch-md table {
   border-collapse: collapse;
   font-size: var(--fs-sm);
+  min-width: 100%;
 }
 .ch-md th,
 .ch-md td {
-  border: 1px solid var(--rule);
-  padding: 5px 9px;
+  padding: 7px 12px;
   text-align: left;
+  vertical-align: top;
+}
+.ch-md td {
+  border-top: 1px solid var(--rule);
 }
 .ch-md th {
-  background: var(--bg-3);
   font-weight: 600;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  white-space: nowrap;
 }
 .ch-md.is-streaming > :last-child::after,
 .ch-md.is-streaming:empty::after {
@@ -964,9 +1097,10 @@ qse-chat-thread {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  padding: 8px 10px;
-  border: 1px solid var(--err);
-  border-radius: var(--radius);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--err) 60%, transparent);
+  border-radius: var(--ch-r);
+  overflow-wrap: anywhere;
   color: var(--err);
   font-size: var(--fs-sm);
   background: var(--orange-wash);
@@ -979,9 +1113,10 @@ qse-chat-thread {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  max-width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r);
   background: var(--bg-2);
   color: var(--ink);
   cursor: pointer;
@@ -994,49 +1129,54 @@ qse-chat-thread {
   font-weight: 500;
 }
 
-/* tool cards */
+/* tool cards: a row with a state dot, the tool, its one argument (cut with an ellipsis inside the
+   card), the time and the word. Calls that follow each other join into one list. */
 .ch-call {
+  position: relative;
   border: 1px solid var(--rule);
-  border-left: 3px solid var(--ch-tool);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
   background: var(--bg-2);
   font-size: var(--fs-sm);
   min-width: 0;
 }
-.ch-call.is-running {
-  border-left-color: var(--orange-hi);
+.ch-call + .ch-call {
+  margin-top: calc(-1 * var(--ch-gap) - 1px);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.ch-call:has(+ .ch-call) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
 }
 .ch-call.is-asking {
-  border-left-color: var(--warn-ink);
+  z-index: 1;
   border-color: var(--warn);
-}
-.ch-call.is-failed {
-  border-left-color: var(--err);
 }
 .ch-call.is-denied,
 .ch-call.is-cancelled {
-  border-left-color: var(--ink-3);
-  opacity: 0.85;
+  opacity: 0.8;
 }
 .ch-call-head {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 7px 12px;
   background: none;
   border: 0;
+  border-radius: inherit;
   color: var(--ink);
   cursor: pointer;
   text-align: left;
-  min-height: 34px;
+  min-height: 38px;
+  min-width: 0;
 }
 .ch-call-head:hover {
-  background: var(--bg-3);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
 }
 .ch-call-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--ch-tool);
   flex: none;
@@ -1060,29 +1200,41 @@ qse-chat-thread {
   padding: 0;
   font-weight: 600;
   color: var(--ink);
-  font-size: var(--fs-sm);
-  flex: none;
+  font-size: 12.5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.ch-risk {
+.ch-risk,
+.ch-approved {
   font-family: var(--font-mono);
   font-size: 10px;
+  line-height: 15px;
   padding: 0 5px;
   border-radius: 999px;
-  border: 1px solid var(--rule-strong);
+  border: 1px solid var(--rule);
   color: var(--ink-3);
+  flex: none;
 }
 .ch-risk-exec,
 .ch-risk-write {
-  border-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
   color: var(--warn-ink);
 }
 .ch-call-args {
+  flex: 1;
   color: var(--ink-2);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+.ch-call-head .grow {
+  display: none;
 }
 .ch-call-dur {
   color: var(--ink-3);
@@ -1091,7 +1243,7 @@ qse-chat-thread {
 }
 .ch-call-word {
   font-size: var(--fs-xs);
-  color: var(--ink-2);
+  color: var(--ink-3);
   flex: none;
 }
 .is-asking .ch-call-word {
@@ -1104,25 +1256,27 @@ qse-chat-thread {
 .ch-call-chev {
   width: 0;
   height: 0;
-  border-left: 5px solid var(--ink-3);
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
+  border-left: 4px solid var(--ink-3);
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
   transition: transform 0.12s;
   flex: none;
+  margin-left: 2px;
 }
 .ch-call-head[aria-expanded='true'] .ch-call-chev {
   transform: rotate(90deg);
 }
 .ch-call-body {
-  padding: 0 10px 10px;
+  padding: 2px 12px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .ch-perm {
   padding: 10px 12px;
-  border: 1px solid var(--warn);
-  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent);
+  border-radius: var(--ch-r-sm);
+  overflow-wrap: anywhere;
   background: var(--orange-wash);
 }
 .ch-perm-text {
@@ -1175,11 +1329,11 @@ qse-chat-thread {
   padding: 8px 10px;
   background: var(--bg-inset);
   border: 1px solid var(--rule);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r-sm);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   max-height: 260px;
   overflow: auto;
   min-height: 2.2em;
@@ -1198,14 +1352,14 @@ qse-chat-thread {
 }
 /* a folded card's way to the page it wrote */
 .ch-call-open {
-  padding: 0 10px 8px;
+  padding: 0 12px 10px;
 }
 /* web_search: the results under the head, open or folded (VIS-157) */
 .ch-search {
   flex-direction: column;
   gap: 8px;
   margin: 0;
-  padding: 2px 10px 10px 26px;
+  padding: 2px 12px 12px 30px;
   list-style: decimal;
   color: var(--ink-3);
 }
@@ -1237,7 +1391,8 @@ qse-chat-thread {
   overflow-wrap: anywhere;
 }
 .ch-search-err {
-  padding: 0 10px 8px;
+  padding: 0 12px 10px;
+  overflow-wrap: anywhere;
   margin: 0;
 }
 
@@ -1251,9 +1406,10 @@ qse-chat-thread {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 6px 8px 6px 12px;
   border: 1px dashed var(--rule-strong);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
   color: var(--ink-2);
   font-size: var(--fs-sm);
 }
@@ -1279,7 +1435,7 @@ qse-chat-thread {
 /* ---- the composer ----------------------------------------------------------------------------- */
 qse-chat-composer {
   flex: none;
-  padding: 8px 20px 14px;
+  padding: 6px 24px 16px;
 }
 .ch-composer {
   position: relative;
@@ -1291,11 +1447,13 @@ qse-chat-composer {
   padding: 10px 12px 8px;
   background: var(--bg-2);
   border: 1px solid var(--rule-strong);
-  border-radius: 12px;
-  transition: border-color 0.12s;
+  border-radius: var(--ch-r-lg);
+  box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.55);
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 .ch-composer:focus-within {
-  border-color: var(--cobalt);
+  border-color: color-mix(in srgb, var(--cobalt) 70%, transparent);
+  box-shadow: 0 0 0 3px var(--cobalt-wash), 0 10px 30px -18px rgba(0, 0, 0, 0.55);
 }
 .ch-composer.is-drag {
   border-color: var(--orange);
@@ -1333,7 +1491,7 @@ qse-chat-composer {
 .ch-pills {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -1343,24 +1501,29 @@ qse-chat-composer {
 .ch-pill {
   display: inline-flex;
   align-items: baseline;
-  gap: 5px;
+  gap: 4px;
+  max-width: 100%;
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid var(--rule-strong);
+  border: 1px solid var(--rule);
   background: transparent;
   color: var(--ink-2);
   font-size: var(--fs-xs);
+  line-height: 16px;
   cursor: pointer;
   white-space: nowrap;
 }
 .ch-pill:hover,
 .ch-pill[aria-expanded='true'] {
   color: var(--ink);
-  border-color: var(--ink-3);
+  border-color: var(--rule-strong);
   background: var(--bg-3);
 }
 .ch-pill-main {
-  font-weight: 600;
+  font-weight: 550;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ch-pill-sub {
   color: var(--ink-3);
@@ -1377,7 +1540,7 @@ qse-chat-composer {
   padding: 6px;
   background: var(--bg-2);
   border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
   box-shadow: var(--shadow-pop);
   display: flex;
   flex-direction: column;
@@ -1494,7 +1657,7 @@ qse-chat-composer {
   padding: 4px;
   background: var(--bg-2);
   border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
   box-shadow: var(--shadow-pop);
 }
 .ch-slash-item {
@@ -1564,8 +1727,8 @@ qse-chat-composer {
 .ch-starter {
   text-align: left;
   padding: 10px 14px;
-  border: 1px solid var(--rule-strong);
-  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r);
   background: var(--bg-2);
   color: var(--ink);
   cursor: pointer;
@@ -1573,9 +1736,6 @@ qse-chat-composer {
 }
 .ch-starter:hover {
   border-color: var(--cobalt);
-}
-.ch-empty-note {
-  margin-top: 6px;
 }
 
 /* ---- the Context panel -------------------------------------------------------------------------- */
@@ -1595,7 +1755,7 @@ qse-chat-composer {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 8px 8px 14px;
+  padding: 8px 8px 8px 16px;
   border-bottom: 1px solid var(--rule);
   min-height: 48px;
 }
@@ -1618,16 +1778,20 @@ qse-chat-context {
   padding: 14px;
 }
 .ch-ctx-sec {
-  padding: 12px 14px 14px;
+  padding: 14px 16px 16px;
   border-bottom: 1px solid var(--rule);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  min-width: 0;
+}
+.ch-ctx-sec:last-child {
+  border-bottom: 0;
 }
 .ch-ctx-h {
   font-size: var(--fs-sm);
   font-weight: 600;
-  color: var(--ink-2);
+  color: var(--ink);
 }
 .ch-ctx-sec.is-live .ch-ctx-h {
   color: var(--orange-hi);
@@ -1638,7 +1802,16 @@ qse-chat-context {
   align-items: center;
 }
 .ch-kv {
-  gap: 4px;
+  gap: 5px;
+}
+.ch-kv dt {
+  color: var(--ink-3);
+}
+/* a long value wraps at its words and stays right-aligned, never a letter to a line */
+.ch-kv dd {
+  display: block;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 .ch-kv dd code {
   font-size: var(--fs-xs);
@@ -1811,10 +1984,11 @@ qse-chat-context {
 }
 .ch-cp-summary {
   margin-top: 4px;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: var(--bg-inset);
   border: 1px solid var(--rule);
-  border-radius: var(--radius);
+  border-radius: var(--ch-r);
+  overflow-wrap: anywhere;
   line-height: 1.5;
   color: var(--ink);
 }
@@ -1858,9 +2032,9 @@ qse-chat-context {
   align-items: center;
   gap: 8px;
   margin-top: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--cobalt-dim);
-  border-radius: var(--radius);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--cobalt) 45%, transparent);
+  border-radius: var(--ch-r);
   background: var(--cobalt-wash);
 }
 .ch-planbar textarea {
@@ -1886,15 +2060,6 @@ qse-chat-context {
 }
 .ch-pop-item.is-yolo.is-on {
   background: var(--orange-wash);
-}
-.ch-approved {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 999px;
-  border: 1px solid var(--rule-strong);
-  color: var(--ink-3);
-  flex: none;
 }
 .ch-approved.is-yolo {
   border-color: var(--orange);
@@ -2015,32 +2180,64 @@ qse-chat-panes {
   height: 100%;
   min-height: 0;
 }
+/* the panes' strip: the tabs scroll sideways in their own box (the open one kept in view, the
+   edge with more behind it fading), the plus right after them, dock and close fixed at the end */
+.ch-pane-strip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 40px;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid var(--rule);
+  flex: none;
+  min-width: 0;
+}
 .ch-pane-tabs {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px 6px;
-  border-bottom: 1px solid var(--rule);
+  flex: 0 1 auto;
+  min-width: 0;
   overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+.ch-pane-tabs::-webkit-scrollbar {
+  display: none;
+}
+.ch-pane-tabs[data-edge='start'] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
+.ch-pane-tabs[data-edge='end'] {
+  mask-image: linear-gradient(to right, transparent, #000 24px);
+}
+.ch-pane-tabs[data-edge='mid'] {
+  mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
+.ch-pane-strip > .btn,
+.ch-pane-plus {
   flex: none;
 }
 .ch-pane-tab {
   display: inline-flex;
   align-items: center;
-  border-radius: var(--radius-sm);
+  height: 30px;
+  border-radius: var(--ch-r-sm);
   color: var(--ink-2);
   flex: none;
+  max-width: 200px;
 }
 .ch-pane-tab.is-on {
-  background: var(--cobalt-wash);
+  background: var(--bg-3);
   color: var(--ink);
-  box-shadow: inset 0 -2px 0 var(--cobalt);
 }
 .ch-pane-tab-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 9px;
   border: 0;
   background: none;
   color: inherit;
@@ -2048,14 +2245,23 @@ qse-chat-panes {
   font-size: var(--fs-sm);
   white-space: nowrap;
 }
+.ch-pane-tab-btn > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ch-pane-tab-btn .icon {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-3);
+}
+.ch-pane-tab.is-on .ch-pane-tab-btn .icon {
+  color: var(--cobalt-hi);
 }
 .ch-pane-tab-x {
   display: inline-flex;
+  flex: none;
   padding: 3px;
-  margin-right: 3px;
+  margin-right: 4px;
   border: 0;
   background: none;
   color: var(--ink-3);
@@ -2101,14 +2307,49 @@ qse-chat-panes {
 .ch-pane-empty {
   padding: 14px;
 }
+/* a pane's own bar: its name (cut with an ellipsis), then its controls, all at one quiet height */
 .ch-pane-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
+  gap: 6px;
+  padding: 3px 6px 3px 12px;
   border-bottom: 1px solid var(--rule);
   flex: none;
-  min-height: 34px;
+  min-height: 36px;
+  min-width: 0;
+}
+.ch-pane-bar > :first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ch-pane-bar > :not(:first-child) {
+  flex: none;
+}
+.ch-pane-bar .grow {
+  flex: 1;
+}
+.ch-pane-bar code {
+  background: none;
+  padding: 0;
+  color: var(--ink-2);
+}
+.ch-pane-bar .seg {
+  border-color: var(--rule);
+  border-radius: var(--ch-r-sm);
+}
+.ch-pane-bar .seg-btn {
+  min-height: 26px;
+  padding: 2px 9px;
+  font-size: var(--fs-xs);
+}
+.ch-pane-bar .btn-sm {
+  padding: 5px;
+}
+.ch-pane-bar .btn-sm .icon {
+  width: 16px;
+  height: 16px;
 }
 
 /* terminal */
@@ -2141,19 +2382,29 @@ qse-chat-panes {
   padding: 4px 10px;
   border-top: 1px solid var(--rule);
 }
-/* the phone's key row (Chat 8): the keys an on-screen keyboard lacks */
+/* the phone's key row (Chat 8): the keys an on-screen keyboard lacks, shared out over the width
+   at one slim height */
 .ch-term-keys {
   display: flex;
-  gap: 4px;
-  padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+  gap: 2px;
+  padding: 3px 4px calc(3px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--rule);
+  background: var(--bg-2);
   overflow-x: auto;
+  scrollbar-width: none;
   flex: none;
 }
+.ch-term-keys::-webkit-scrollbar {
+  display: none;
+}
 .ch-term-keys .btn {
-  min-width: 44px;
-  min-height: 44px;
+  flex: 1 0 auto;
+  justify-content: center;
+  min-width: 36px;
+  min-height: 34px;
+  padding: 0 6px;
   font-family: var(--font-mono);
+  font-size: var(--fs-sm);
 }
 .ch-term-keys .btn.is-on {
   background: var(--cobalt-wash);
@@ -2432,7 +2683,7 @@ qse-chat-panes {
   border-radius: var(--r-sm, 6px);
 }
 .ch-call-media {
-  padding: 0 10px 8px;
+  padding: 0 12px 10px;
 }
 .ch-call-media qse-media-view {
   display: block;
@@ -2926,21 +3177,54 @@ qse-chat-panes {
   .ch-head-model {
     display: none;
   }
+  /* the mock's badge stays on a phone: a slim bar under the header (VIS-179) */
+  .ch-head {
+    position: relative;
+  }
   .ch-mock-head {
-    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    margin: 0;
+    padding: 0 8px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+    background: var(--bg-2);
+    text-align: center;
+    line-height: 18px;
   }
   .ch-col {
-    padding: 12px 12px 8px;
-    gap: 14px;
+    padding: 16px 16px 12px;
+    gap: 22px;
   }
   .ch-now-dock {
-    padding: 6px 12px 0;
+    padding: 8px 12px 0;
   }
   .ch-now-nums {
     gap: 8px;
   }
   .ch-bubble {
-    max-width: 88%;
+    max-width: 86%;
+  }
+  .ch-md .md-code pre {
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  /* the figures line keeps what fits one row; the rest is in its title */
+  .ch-tf-round,
+  .ch-tf-acc,
+  .ch-tf-sub {
+    display: none;
+  }
+  /* "read" is the plain case: the phone shows only the risks that change something */
+  .ch-risk-read {
+    display: none;
+  }
+  .ch-call-head {
+    padding: 7px 10px;
+    gap: 7px;
   }
   .ch-tools {
     opacity: 1;
@@ -2952,12 +3236,12 @@ qse-chat-panes {
     grid-template-columns: minmax(0, 1fr);
   }
   qse-chat-composer {
-    padding: 6px 10px 10px;
+    padding: 4px 10px 10px;
   }
   /* the composer on a phone (2026-10-13): the same elements, laid out as two rows. Row one is
-     the message: attach, the text, Send (or Queue and Stop). Row two is the readout strip: the
-     model, the effort, the tools, plan mode, every value in view at 390 px; at 320 px it scrolls
-     and the edge with more behind it fades. */
+     the message: attach, the text, Send (or Queue and Stop). Row two is the readout row: the
+     model, the effort, the tools, the permission mode and plan mode, every value in view at 390 px;
+     on a narrower screen the row wraps rather than cutting a pill at the edge (VIS-185). */
   .ch-composer {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
@@ -3002,54 +3286,57 @@ qse-chat-panes {
   .ch-composer .ch-send,
   .ch-composer .ch-stop,
   .ch-composer .ch-queue-btn {
-    min-height: 36px;
+    min-height: 38px;
     padding-top: 6px;
     padding-bottom: 6px;
   }
   .ch-pills {
     grid-area: pills;
     flex-wrap: nowrap;
-    gap: 6px;
-    overflow-x: auto;
-    margin: 0 -2px;
-    padding: 2px 2px 3px;
-    scrollbar-width: none;
-    overscroll-behavior-x: contain;
-    -webkit-overflow-scrolling: touch;
-  }
-  .ch-pills::-webkit-scrollbar {
-    display: none;
-  }
-  .ch-pills[data-edge='start'] {
-    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
-  }
-  .ch-pills[data-edge='end'] {
-    mask-image: linear-gradient(to right, transparent, #000 28px);
-  }
-  .ch-pills[data-edge='mid'] {
-    mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent);
-  }
-  /* the fade masks the strip's descendants too, and a pill's popover is one: no mask while one is open */
-  .ch-pills:has(.ch-pop) {
-    mask-image: none;
+    gap: 4px;
+    padding: 2px 0 1px;
   }
   .ch-pillwrap {
     position: static;
     flex: none;
+    max-width: 100%;
+  }
+  /* the model's pill gives way: its name ends in an ellipsis so the other values stay whole */
+  .ch-pillwrap:first-child {
+    flex: 0 1 auto;
+    min-width: 64px;
   }
   .ch-pill {
     flex: none;
-    padding: 5px 10px;
+    padding: 4px 7px;
   }
   /* the value alone on a phone (the profile, the MCP count and "reads only" wait in the popover),
-     so the four pills stand in one row at 390 px; a long model name ends in an ellipsis */
+     so the pills stand in one row at 390 px; "effort" stays, "auto" alone would read as the
+     permission mode */
   .ch-pill-sub {
     display: none;
   }
-  .ch-pill-main {
-    max-width: 38vw;
+  .ch-pill-effort .ch-pill-sub {
+    display: inline;
+  }
+
+  /* Send, Queue and Stop as glyphs that keep their names for a screen reader */
+  .ch-composer .ch-btn-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
     overflow: hidden;
-    text-overflow: ellipsis;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ch-composer .ch-send,
+  .ch-composer .ch-stop,
+  .ch-composer .ch-queue-btn {
+    min-width: 38px;
+    justify-content: center;
+    padding-left: 9px;
+    padding-right: 9px;
+    border-radius: var(--ch-r);
   }
   /* a pill's popover spans the composer and rises above it, keyboard or not: it is anchored to
      the composer's box, not to the screen's bottom (iOS keeps fixed boxes under the keyboard) */
@@ -3067,7 +3354,14 @@ qse-chat-panes {
     width: 100vw;
     bottom: var(--tabbar-space);
   }
-  /* the panes: a full-screen sheet from the bottom */
+  /* the panes: a full-screen sheet from the bottom. The shell's bar steps down while it is open
+     (the sheet is modal: its close button leads back), so the pane has the screen's height */
+  .shell:has(.ch.is-sheet-panes) {
+    --tabbar-space: 0px;
+  }
+  .shell:has(.ch.is-sheet-panes) .rail {
+    transform: translateY(110%);
+  }
   qse-chat-panes.is-sheet,
   .is-panes qse-chat-panes {
     position: fixed;
@@ -3086,6 +3380,9 @@ qse-chat-panes {
   }
   .ch.is-sheet-panes qse-chat-panes {
     transform: translateY(0);
+  }
+  .ch-pane-body:not([data-kind='terminal']) {
+    padding-bottom: env(safe-area-inset-bottom);
   }
   .ch.is-panes:not(.is-sheet-panes) qse-chat-panes {
     display: none;
@@ -3157,21 +3454,16 @@ qse-chat-panes {
   }
 }
 
-/* ---- the narrowest phones: Send and Stop keep their glyph and their name, lose the word --------- */
+/* ---- the narrowest phones: the readout row wraps rather than cut a value -------------------------- */
 @media (max-width: 360px) {
-  .ch-composer .ch-send .ch-btn-word,
-  .ch-composer .ch-stop .ch-btn-word {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+  .ch-pills {
+    flex-wrap: wrap;
   }
-  .ch-composer .ch-send,
-  .ch-composer .ch-stop {
-    padding-left: 9px;
-    padding-right: 9px;
+  .ch-pillwrap:first-child .ch-pill-main {
+    max-width: 44vw;
+  }
+  .ch-tf-ttft {
+    display: none;
   }
 }
 

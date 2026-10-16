@@ -166,3 +166,165 @@ def test_the_harness_and_the_split_outlive_a_chatd_restart():
     finally:
         c.fake_srv.shutdown()
         shutil.rmtree(c.data, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------- SRV-509, live 2026-10-16
+# An agent turn on Nemotron 3.5 Super VL (13,270 tokens, 2,193 thinking, a tool call a step): Now
+# said "not tracked for this model" for the speed and the acceptance while it decoded, showed an
+# earlier call's 923 tokens and 797 thinking; after the turn "thinking, this turn" was 0 and the
+# conversation counted every earlier call's answer twice.
+
+def _run_after_one_call():
+    """A run whose first call (r1) finished with its usage frame; its second call is in flight."""
+    import types
+
+    from chatd.runs import Run
+    run = Run(types.SimpleNamespace(), types.SimpleNamespace(id="c1"), user_message_id="u",
+              message_id="m", max_steps=10, started_by=None)
+    run.request_ids, run.tokens, run.thinking_tokens = {"r1"}, 923, 797
+    run.add_spec({"predicted_n": 923, "predicted_ms": 25_000.0, "blocks": 330, "draft_n": 600,
+                  "draft_n_accepted": 330})
+    run.call_base, run.request_id, run.usage = (923, 797), None, None
+    return run
+
+
+def _rows(*rows):
+    from chatd.engine import LiveTail
+    tail = LiveTail(None, lambda: False)
+    tail._take({"requests": list(rows)})
+    return tail
+
+
+LIVE_R2 = {"request_id": "r2", "conversation_id": "chat-c1", "phase": "decode",
+           "tokens_per_block": None, "ended_ms_ago": None,
+           "activity": {"state": "thinking", "decode": {
+               "tokens": 120, "thinking_tokens": 100, "tps_now": 36.0,
+               "tokens_per_round_now": None}}}
+DONE_R1 = {"request_id": "r1", "conversation_id": "chat-c1", "phase": "done",
+           "tokens_per_block": 2.8, "ended_ms_ago": 5000.0,
+           "activity": {"state": "done", "decode": {"tokens": 923, "thinking_tokens": 797,
+                                                    "tps_now": None}}}
+
+
+def test_the_live_tail_takes_the_call_in_flight_over_the_finished_ones():
+    """The snapshot lists the live rows first, then the finished ones of the last 30 s: the last
+    row of a conversation won, an earlier call's finished one."""
+    older = dict(DONE_R1, request_id="r0", ended_ms_ago=20_000.0)
+    assert _rows(LIVE_R2, DONE_R1, older).row("chat-c1", None)["request_id"] == "r2"
+    assert _rows(older, DONE_R1).row("chat-c1", None)["request_id"] == "r1"   # the newest end
+
+
+def _metrics(run, tail):
+    import time
+    import types
+
+    from chatd.service import Service
+    events = []
+    svc = types.SimpleNamespace(live=tail, emit=lambda conv, ev, **kw: events.append(ev))
+    conv = types.SimpleNamespace(id="c1", context_sent_at=time.monotonic())
+    Service._metrics(svc, conv, run)
+    return events[-1]
+
+
+def test_the_now_figures_are_the_call_in_flights_and_the_turns():
+    run = _run_after_one_call()
+    ev = _metrics(run, _rows(LIVE_R2, DONE_R1))
+    assert ev["decode_tps"] == 36.0
+    assert ev["tokens"] == 923 + 120 and ev["thinking_used"] == 797 + 100, ev
+    assert ev["thinking_call"] == 100                       # what the call's budget caps
+    assert ev["acceptance"] == 0.55 and ev["tokens_per_round"] == 2.79, ev   # the first call's
+    d = run.as_dict()
+    assert d["thinking"] == {"used": 897, "budget": None, "call": 100}
+    # between two calls only the finished one is there: no speed, the counts stay the run's
+    run.tokens, run.thinking_tokens = 1043, 897
+    ev = _metrics(run, _rows(DONE_R1))
+    assert ev["decode_tps"] is None and ev["tokens"] == 1043 and ev["acceptance"] == 0.55
+    # another run's finished call is not this run's
+    run2 = _run_after_one_call()
+    run2.request_ids = {"r9"}
+    ev = _metrics(run2, _rows(DONE_R1))
+    assert ev["tokens"] == 923 and ev["tokens_per_round"] == 2.79
+
+
+def test_the_turns_stats_weigh_every_call():
+    run = _run_after_one_call()
+    run.add_spec({"predicted_n": 707, "predicted_ms": 19_400.0, "blocks": 200, "draft_n": 400,
+                  "draft_n_accepted": 300})
+    run.usage = {"usage": {"prompt_tokens": 32289, "completion_tokens": 707},
+                 "timings": {"predicted_per_second": 36.41, "tokens_per_block": 3.53},
+                 "metrics": {"speculative_decoding": {"draft_acceptance_rate": 0.75}}}
+    run.step_usage = [{"step": 1, "ttft_ms": 900.0}, {"step": 2, "ttft_ms": 6082.7}]
+    run.started_ms -= 38_000
+    s = run.stats("stop")
+    assert s["ttft_ms"] == 900.0 and 38_000 <= s["total_ms"] < 60_000, s   # the turn's, not a call's
+    assert s["acceptance"] == round(630 / 1000, 4) and s["tokens_per_round"] == round(
+        (922 + 706) / 530, 2), s
+    assert s["decode_tps"] == round((922 + 706) * 1000 / 44_400, 2)
+
+
+def test_thinking_this_turn_live_and_after_the_turn():
+    model = {"id": "m", "max_len": 262144, "max_output": 32768}
+    common = dict(model=model, settings={}, files_tokens=0, facts={}, peek=None, harness=None)
+    run = {"thinking": {"used": 897, "call": 100, "budget": None}}
+    row = {"prompt_tokens": 30318, "cached_tokens": 30286}
+    r = ctx_mod.report(**common, branch_tokens=20_000, stats=None, run=run, row=row)
+    parts = {p["kind"]: p for p in r["parts"]}
+    # the first call's 797 are in the second call's prompt: counted once, as thinking
+    assert parts["thinking"]["tokens"] == 897 and parts["messages"]["tokens"] == 30318 - 797
+    assert parts["thinking"]["label"] == "thinking, this turn"
+    stats = {"prompt_tokens": 32289, "completion_tokens": 13270, "reasoning_tokens": 2193}
+    r = ctx_mod.report(**common, branch_tokens=30_803, stats=stats, run=None, row=None)
+    parts = {p["kind"]: p for p in r["parts"]}
+    assert parts["thinking"]["tokens"] == 2193 and parts["thinking"]["label"] == \
+        "thinking, last turn"
+    assert r["used"] == 30_803 + 2193
+    r = ctx_mod.report(**common, branch_tokens=10, stats=None, run=None, row=None)
+    assert {p["kind"]: p for p in r["parts"]}["thinking"]["label"] == "thinking, this turn"
+
+
+def test_the_next_request_counts_the_last_calls_prompt_and_answer_once():
+    from chatd.service import _branch_tokens
+    stats = {"prompt_tokens": 32289, "completion_tokens": 13270, "reasoning_tokens": 2193,
+             "steps": 9, "step_usage": [{"step": 8, "prompt_tokens": 31445,
+                                         "completion_tokens": 816},
+                                        {"step": 9, "prompt_tokens": 32289,
+                                         "completion_tokens": 707}]}
+    branch = [{"role": "user", "parts": [{"type": "text", "text": "x" * 40}]},
+              {"role": "assistant", "parts": [], "stats": stats}]
+    assert _branch_tokens(branch) == 32289 + 707 - 2193
+    # a one-call turn saved before the calls' own counts: as before
+    one = {"prompt_tokens": 100, "completion_tokens": 50, "reasoning_tokens": 20, "steps": 1}
+    assert _branch_tokens([{"role": "assistant", "parts": [], "stats": one}]) == 130
+    # a turn of several calls saved before them: the prompt and the last step's text
+    old = {"prompt_tokens": 100, "completion_tokens": 900, "reasoning_tokens": 20, "steps": 2}
+    parts = [{"type": "text", "text": "a" * 400, "step": 1},
+             {"type": "text", "text": "b" * 40, "step": 2}]
+    assert _branch_tokens([{"role": "assistant", "parts": parts, "stats": old}]) == 110
+
+
+def test_a_running_sandboxs_figures_go_out_with_the_context():
+    """The sandbox's memory and disk went out only when its state changed (live: 20 MB and 24 KB
+    of disk through an npm install of 51 MB); now with the context, at most every SANDBOX_S."""
+    import types
+
+    from chatd import service as svc_mod
+    events, disk = [], [24_000]
+    state = types.SimpleNamespace(state="running")
+    boxes = types.SimpleNamespace(box=lambda cid: state,
+                                  status=lambda cid: {"state": state.state, "disk_bytes": disk[0]})
+    svc = types.SimpleNamespace(sandboxes=boxes, emit=lambda conv, ev, **kw: events.append(ev))
+    conv = types.SimpleNamespace(id="c1", context={"used": 1}, fan=[1], context_sent_at=0.0,
+                                 sandbox_sent=(0.0, None))
+    svc_mod.Service._send_context(svc, conv)
+    assert [e["type"] for e in events] == ["context.changed", "sandbox.changed"]
+    disk[0] = 51_098_428
+    svc_mod.Service._send_context(svc, conv)                 # within SANDBOX_S: the context only
+    assert [e["type"] for e in events][2:] == ["context.changed"]
+    conv.sandbox_sent = (conv.sandbox_sent[0] - svc_mod.SANDBOX_S, conv.sandbox_sent[1])
+    svc_mod.Service._send_context(svc, conv)
+    assert events[-1] == {"type": "sandbox.changed",
+                          "sandbox": {"state": "running", "disk_bytes": 51_098_428}}
+    state.state = "stopped"
+    conv.sandbox_sent = (0.0, None)
+    svc_mod.Service._send_context(svc, conv)
+    assert events[-1]["type"] == "context.changed"

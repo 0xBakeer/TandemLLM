@@ -45,6 +45,21 @@ free blocks at the time. So:
 - 30 minutes with no tool call and no terminal: stop (`idle`).
 
 chatd restarts adopt running containers by their label and do not recreate them.
+
+ONE CHATD'S CONTAINERS. Several chatds may share one container engine (a second install, a test
+instance with its own --data). Each labels its containers `tandem.chat.instance=<id>`, the id kept
+in its data dir (`sandbox-instance.json`, made anew when the dir is a copy), and adopts, reaps,
+stops, kills and removes only those. A container from before the label (no instance label) is this
+chatd's only when the chat's workspace folder is in this data dir; one that stopped is created
+again with the label at its next start (the files are mounts, nothing is lost). Live 2026-10-16: a
+test chatd adopted the live chatd's containers, found their chats missing from its store and
+removed them.
+
+A CONTAINER THAT IS GONE. Before each use a running box is looked at (the engine's inspect): a
+container removed or stopped outside chatd is marked stopped, a new one starts for the call, and
+the call's result says once that the sandbox restarted (files kept, processes gone). An exec the
+engine answers 404 or 409 (no such container, not running) does the same. Live 2026-10-16: every
+call answered `exec failed (404)` and the model retried until the step limit.
 """
 
 from __future__ import annotations
@@ -54,6 +69,7 @@ import json
 import os
 import shutil
 import socket
+import secrets
 import struct
 import threading
 import time
@@ -76,6 +92,11 @@ IDLE_S = 30 * 60
 CGROUP = "/sys/fs/cgroup"
 MEM_TTL_S = 5.0
 LABEL = "tandem.chat"
+INSTANCE_LABEL = "tandem.chat.instance"
+INSTANCE_FILE = "sandbox-instance.json"
+RESTARTED = ("[the sandbox was restarted: its container was gone (removed or stopped outside "
+             "chatd). The files in /workspace are kept; processes that ran in it (dev servers, "
+             "background jobs) are gone and must be started again]")
 
 
 class Unavailable(Exception):
@@ -86,6 +107,47 @@ class Unavailable(Exception):
     def __init__(self, message: str, data: dict | None = None):
         super().__init__(message)
         self.data = data
+
+
+class Gone(Unavailable):
+    """The container is gone (the engine answered 404, or 409: not running); the box is marked
+    stopped and the next ensure() starts a new one."""
+
+
+def instance_id(data_dir: str) -> str:
+    """This chatd's id on the container engine, kept in its data dir; a dir copied elsewhere
+    (another path) gets its own."""
+    path = os.path.join(data_dir, INSTANCE_FILE)
+    here = os.path.realpath(data_dir)
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+        if doc.get("dir") == here and doc.get("id"):
+            return str(doc["id"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    doc = {"id": secrets.token_hex(8), "dir": here}
+    os.makedirs(data_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, path)
+    return doc["id"]
+
+
+RELAY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ops", "sandbox",
+                     "relay.py")
+
+
+def relay_cmd(*args: str) -> list[str]:
+    """`relay.py <args>` in the sandbox, with this release's relay sent in the exec (python3 -c):
+    a container keeps the image it was made from, and its /opt/tandem/relay.py with it. Without
+    the source tree (an installed package), the image's own."""
+    try:
+        with open(RELAY) as fh:
+            return ["python3", "-c", fh.read(), *args]
+    except OSError:
+        return ["python3", "/opt/tandem/relay.py", *args]
 
 
 def limit_words() -> str:
@@ -194,6 +256,7 @@ class Box:
         self.proxy: Proxy | None = None
         self.lock = threading.RLock()
         self.mem: tuple[float, int | None] = (0.0, None)   # (when read, bytes in use)
+        self.restarted = False               # its container was gone: the next result says so
 
 
 class Sandboxes:
@@ -221,6 +284,22 @@ class Sandboxes:
         self.wait_s, self.poll_s, self.release_every_s = WAIT_S, 2.0, RELEASE_EVERY_S
         self._avail: tuple[float, bool] | None = None
         self.stopping = threading.Event()
+        self._instance: str | None = None
+
+    @property
+    def instance(self) -> str:
+        if self._instance is None:
+            self._instance = instance_id(self.data)
+        return self._instance
+
+    def owns(self, labels: dict | None, cid: str) -> bool:
+        """A container is this chatd's: its instance label is ours, or it has none (made before
+        the label) and the chat's workspace folder is in this data dir."""
+        labels = labels or {}
+        inst = labels.get(INSTANCE_LABEL)
+        if inst:
+            return inst == self.instance
+        return os.path.isdir(self.paths(cid)[0])
 
     # ------------------------------------------------------------------ availability
     def available(self) -> bool:
@@ -252,7 +331,8 @@ class Sandboxes:
 
     # ------------------------------------------------------------------ adopt, status
     def adopt(self) -> int:
-        """At start: the containers a previous chatd left running keep running, and come back."""
+        """At start: the containers a previous chatd (of this data dir) left running keep
+        running, and come back. Another chatd's are not looked at."""
         try:
             st, rows = self.engine.call("GET", "/containers/json?all=1&filters=" +
                                         urllib.parse.quote(json.dumps({"label": [LABEL]})))
@@ -261,7 +341,7 @@ class Sandboxes:
         n = 0
         for r in rows if st == 200 and isinstance(rows, list) else []:
             cid = (r.get("Labels") or {}).get(LABEL)
-            if not cid:
+            if not cid or not self.owns(r.get("Labels"), cid):
                 continue
             b = self.box(cid)
             b.container = r.get("Id")
@@ -392,7 +472,9 @@ class Sandboxes:
         with b.lock:
             b.last_used = self.clock()
             if b.state == "running" and b.container:
-                return b.container
+                if self._alive(b):
+                    return b.container
+                self.gone(cid)
             waited, t0 = False, time.monotonic()
             while True:
                 why = self.admit()
@@ -430,6 +512,41 @@ class Sandboxes:
             self.log(f"[sandbox] {cid} running")
             return b.container
 
+    def _alive(self, b: Box) -> bool:
+        """The engine still has the box's container, running. True when it cannot say."""
+        try:
+            st, info = self.engine.call("GET", f"/containers/{b.container}/json", timeout=5)
+        except OSError:
+            return True
+        if st == 404:
+            return False
+        if st == 200 and isinstance(info, dict):
+            return bool((info.get("State") or {}).get("Running", True))
+        return True
+
+    def gone(self, cid: str) -> None:
+        """Its container was removed or stopped outside chatd: stopped, and a new one starts at
+        the next use, whose result says so (`take_restarted`)."""
+        b = self.box(cid)
+        with b.lock:
+            if b.state != "running":
+                return
+            b.state, b.stopped_reason, b.restarted = "stopped", "gone", True
+            if b.proxy is not None:
+                b.proxy.close()
+                b.proxy = None
+        self.log(f"[sandbox] {cid}: the container is gone; a new one starts at the next call")
+        self._changed(b)
+
+    def take_restarted(self, cid: str) -> str | None:
+        """Once, after a box whose container was gone runs again: the words for the call's
+        result."""
+        b = self.box(cid)
+        if b.restarted and b.state == "running":
+            b.restarted = False
+            return RESTARTED
+        return None
+
     def _gave_up(self, b: Box, why: str, spent: float) -> Unavailable:
         """The wait's end: the reason and the numbers, for the model (the tool's result), the
         chat (the call's `output.data`) and the Sandbox panel (`error`)."""
@@ -465,6 +582,15 @@ class Sandboxes:
             os.makedirs(d, exist_ok=True)
         name = self.name(cid)
         st, info = self.engine.call("GET", f"/containers/{name}/json")
+        if st == 200:
+            labels = ((info or {}).get("Config") or {}).get("Labels") or {}
+            if labels.get(INSTANCE_LABEL) not in (None, self.instance):
+                raise Unavailable("a sandbox container of another chatd has this chat's name "
+                                  f"({name})")
+            if INSTANCE_LABEL not in labels and not (info.get("State") or {}).get("Running"):
+                # made before the instance label: a new one with it (the files are mounts)
+                st, _ = self.engine.call("DELETE", f"/containers/{info['Id']}?force=1", timeout=30)
+                st = 404 if st in (204, 404) else st
         if st == 404:
             proxy = "http://127.0.0.1:3128"
             body = {
@@ -477,7 +603,7 @@ class Sandboxes:
                         f"https_proxy={proxy}", "NO_PROXY=localhost,127.0.0.1",
                         "no_proxy=localhost,127.0.0.1", "npm_config_prefix=/home/agent/.npm-global",
                         "PIP_DISABLE_PIP_VERSION_CHECK=1", "PYTHONUNBUFFERED=1"],
-                "Labels": {LABEL: cid},
+                "Labels": {LABEL: cid, INSTANCE_LABEL: self.instance},
                 "HostConfig": {
                     "Binds": [f"{ws}:/workspace:rw", f"{home}:/home/agent:rw",
                               f"{eg}:/run/tandem:ro"],
@@ -533,7 +659,16 @@ class Sandboxes:
         self.stop(cid, "user")
         b = self.box(cid)
         try:
-            self.engine.call("DELETE", f"/containers/{self.name(cid)}?force=1", timeout=30)
+            ctr = b.container
+            if ctr is None:
+                # not started by this chatd since it began: by name, when it is ours
+                st, info = self.engine.call("GET", f"/containers/{self.name(cid)}/json",
+                                            timeout=10)
+                if st == 200 and isinstance(info, dict) and \
+                        self.owns((info.get("Config") or {}).get("Labels"), cid):
+                    ctr = info.get("Id")
+            if ctr:
+                self.engine.call("DELETE", f"/containers/{ctr}?force=1", timeout=30)
         except OSError:
             pass
         b.container = None
@@ -549,6 +684,10 @@ class Sandboxes:
         st, info = self.engine.call("POST", f"/containers/{container}/exec", {
             "AttachStdin": stdin, "AttachStdout": True, "AttachStderr": True, "Tty": tty,
             "Cmd": cmd, "WorkingDir": workdir, "User": "1000:1000", "Env": env or []})
+        if st in (404, 409):
+            self.gone(cid)
+            raise Gone("the sandbox's container was gone (removed or stopped outside chatd); "
+                       "the next call starts a new one, with the files kept")
         if st != 201:
             raise Unavailable(f"exec failed ({st})")
         exec_id = info["Id"]

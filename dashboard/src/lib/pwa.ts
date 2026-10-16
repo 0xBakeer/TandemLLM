@@ -22,8 +22,11 @@ export function registerWorker(onUpdate: (apply: () => void) => void): void {
     if (reg.waiting && sw.controller) offer(reg.waiting);
     reg.addEventListener('updatefound', () => {
       const w = reg.installing;
+      // an update replaces the worker that controls the page now; the first install has none (its
+      // `installed` event can arrive after it claimed the page, which offered a reload for nothing)
+      const replaces = !!sw.controller;
       w?.addEventListener('statechange', () => {
-        if (w.state === 'installed' && sw.controller) offer(w);
+        if (w.state === 'installed' && replaces) offer(w);
       });
     });
     // a tab left open checks for a new build now and then

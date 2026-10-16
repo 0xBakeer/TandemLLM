@@ -14,7 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
-import { HARNESS_PENDING, kvWords, memoryWords, partWords, residentWords, sandboxWords, skillTokens, turnFigure } from './context-words';
+import { HARNESS_PENDING, kvWords, liveFigure, memoryWords, partWords, residentWords, sandboxWords, skillTokens, slotWords, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -110,24 +110,29 @@ export class QseChatContext extends LightElement {
     // the contract's null is "no cap" (auto effort, or a model without levels), never a made-up figure
     const budget = !c.settings.thinking ? 0 : r ? r.thinking.budget : null;
     const used = r?.thinking.used ?? last?.reasoning_tokens ?? 0;
+    // the budget caps each model call: its meter is the call's thinking
+    const capped = r ? r.thinking.call ?? r.thinking.used : used;
+    const be = c.context.model.backend;
+    const drafter = c.context.model.drafter;
+    const fig = (v: number | null | undefined, fmt: (v: number) => string, kind: 'tps' | 'round' | 'accepted') => (r ? liveFigure(v, fmt, r, kind, be, drafter) : turnFigure(v, fmt, !!last));
     const elapsed = r ? Math.max(0, Math.round((this.now - Date.parse(r.started_at)) / 1000)) : null;
     return html`<section class="ch-ctx-sec ${r ? 'is-live' : 'is-idle'}" data-sec="now">
       <h3 class="ch-ctx-h">${r ? 'Now' : 'Last turn'}</h3>
       <div class="ch-fig">
-        <div class="ch-fig-value num">${tps != null ? html`${fixed(tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${turnFigure(null, String, !!r || !!last)}</span>`}</div>
+        <div class="ch-fig-value num">${tps != null ? html`${fixed(tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${fig(null, String, 'tps')}</span>`}</div>
         ${hist.length > 1 ? html`<qse-spark .values=${hist} mode="ribbon" .height=${36} .format=${(v: number) => v.toFixed(1)} unit=" tok/s" aria-label="decode tok/s, last minute"></qse-spark>` : html`<div class="ch-fig-flat"></div>`}
       </div>
       <dl class="kv ch-kv">
         <div><dt>phase</dt><dd>${r ? r.phase : last ? last.finish : 'idle'}</dd></div>
         ${r && elapsed != null ? html`<div><dt>running for</dt><dd class="num">${elapsedWords(elapsed)}</dd></div>` : nothing}
-        <div><dt>tokens per round</dt><dd class="num">${turnFigure(r ? r.tokens_per_round : last?.tokens_per_round, (v) => fixed(v, 2), !!r || !!last)}</dd></div>
-        <div><dt>accepted</dt><dd class="num">${turnFigure(r ? r.acceptance : last?.acceptance, (v) => pct(v, 0), !!r || !!last)}</dd></div>
+        <div><dt>tokens per round</dt><dd class="num">${fig(r ? r.tokens_per_round : last?.tokens_per_round, (v) => fixed(v, 2), 'round')}</dd></div>
+        <div><dt>accepted</dt><dd class="num">${fig(r ? r.acceptance : last?.acceptance, (v) => pct(v, 0), 'accepted')}</dd></div>
         ${r?.prefill ? html`<div><dt>prefill</dt><dd class="num">${exact(r.prefill.done)} / ${exact(r.prefill.total)}</dd></div>` : nothing}
         ${r?.tool ? html`<div><dt>tool</dt><dd><code>${r.tool.name}</code></dd></div>` : nothing}
       </dl>
       <div class="ch-meter-block">
-        <div class="meter-head"><span>thinking budget</span><span class="num">${budget ? `${exact(used)} of ${exact(budget)}` : budget === 0 ? 'off' : `${exact(used)}, no cap`}</span></div>
-        <div class="meter ch-meter"><span class="meter-fill ${budget && used / budget > 0.85 ? 'is-warn' : ''}" style="width:${budget ? Math.min(100, (used / budget) * 100).toFixed(1) : 0}%"></span></div>
+        <div class="meter-head"><span>thinking budget</span><span class="num">${budget ? `${exact(capped)} of ${exact(budget)}, this call` : budget === 0 ? 'off' : `${exact(used)}, no cap`}</span></div>
+        <div class="meter ch-meter"><span class="meter-fill ${budget && capped / budget > 0.85 ? 'is-warn' : ''}" style="width:${budget ? Math.min(100, (capped / budget) * 100).toFixed(1) : 0}%"></span></div>
       </div>
     </section>`;
   }
@@ -173,7 +178,7 @@ export class QseChatContext extends LightElement {
       <dl class="kv ch-kv">
         <div data-mem="kv"><dt>KV for this chat</dt><dd>${kvWords(mem, c.context.model.backend)}</dd></div>
         <div data-mem="resident"><dt>resident prefix</dt><dd class=${mem.resident_owner === 'this' ? 'num' : ''}>${residentWords(mem, c.context.model.backend)}</dd></div>
-        <div><dt>slot</dt><dd>${c.context.cache.slot ?? 'none held'}</dd></div>
+        <div data-mem="slot"><dt>slot</dt><dd>${slotWords(c.context.cache.slot, mem)}</dd></div>
         <div data-mem="sandbox"><dt>sandbox</dt><dd class=${sb.memory_bytes != null ? 'num' : ''}>${sandboxWords(sb)}</dd></div>
         <div><dt>sandbox disk</dt><dd class="num">${bytes(sb.disk_bytes, 0)} of ${bytes(sb.disk_limit_bytes, 0)}</dd></div>
       </dl>

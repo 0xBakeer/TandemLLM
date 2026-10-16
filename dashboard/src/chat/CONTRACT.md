@@ -332,7 +332,10 @@ answer 503 `sandbox_unavailable` when the sandbox is not installed.
 | POST | `/conversations/{id}/sandbox/upload` | `?dir=`, multipart | `SandboxFile[]` | (v0.2) | v2 |
 | GET | `/conversations/{id}/sandbox/diff` | `?run_id=` | `{files: {path, status, additions, deletions, patch}[]}` | (v0.2, diff pane) | v2 |
 | POST | `/conversations/{id}/sandbox/undo` | `{run_id}` | 202 | (v0.2) | v2 |
-| GET | `/conversations/{id}/sandbox/ports/{port}/...` | | reverse proxy into the sandbox (preview pane) | (v0.2) | v2 |
+| GET | `/conversations/{id}/sandbox/ports/{port}/...` | | reverse proxy into the sandbox (preview pane); `Access-Control-Allow-Origin: null` for the preview's opaque origin, a page with the preview's shim (SRV-511) | (v0.2) | v2 |
+| GET | `/conversations/{id}/sandbox/ports` | | `{ports: {port, addresses, command, cwd, started, http}[]}`: what listens in the sandbox, `[]` when it is stopped (SRV-511) | `sandboxPorts()` | v2 |
+| POST | `/conversations/{id}/sandbox/serve` | `{dir}` | 202 `{dir, command, log}`: the project's dev server started in the background (the command from its package.json; `npm install` first without node_modules); 400 `no_dev_server` | `serve()` | v2 |
+| POST | `/conversations/{id}/preview/report` | `{ref, url, title, errors, failed, elements, text, canvas}` | 204: what the preview pane's page loaded; `present` waits up to 15 s for it | `previewReport()` | v2 |
 | GET | `/conversations/{id}/artifacts/{ref}` | `?version=` | `{kind, content, mime, title, url?, bytes?}`; a video, audio, PDF or binary file: `content` "", `url` the view route; `?raw=1` serves it with the preview CSP | `artifact()` | v2 |
 | POST / GET | `/conversations/{id}/terminals` | | `{session, title, owner: 'user' \| 'agent', alive}` | (v0.2) | v2 |
 | WS | `/conversations/{id}/terminals/{session}/ws` | | binary frames = PTY bytes; text frames = JSON `{type:'resize', cols, rows}`; on attach the server sends the scrollback (max 1 MiB) first | `terminal()` | v2 |
@@ -379,7 +382,7 @@ type ChatEvent =
 
 Rules:
 - A permission prompt closes on any later `tool.*` event for its `call_id` (another device answered).
-- `run.done` with status `interrupted` means chatd or the engine restarted; the UI offers Continue.
+- `run.done` with status `interrupted`: the run stopped before its end and the UI offers Continue. `stats.interrupted` says why: `limit` (its limit of model calls) or `sandbox` (the same sandbox failure three calls in a row), both with the notice as the message's last part; `engine` (the engine did not answer for the retry window); `restart` (chatd restarted during the run). Absent on answers from before 0.11.2 (VIS-197).
 - The global stream (`/events`) sends `conversation.updated` (with `id` in the patch), `conversation.created`
   `{conversation: ConversationSummary}`, `conversation.deleted` `{id}`, `run.started`, `run.done`,
   `tool.asking` (with `conversation_id`), each persisted with its own sequence.
@@ -403,8 +406,25 @@ after the first turn", "not tracked for this model"), never a bare dash.
   answer text.
 - The preview always uses `<iframe sandbox="allow-scripts allow-forms allow-popups allow-modals">`, never
   with `allow-same-origin`. Artifact (`?raw=1`) and port answers carry
-  `Content-Security-Policy: default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss:; frame-ancestors 'self'`.
+  `Content-Security-Policy: default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; style-src 'self' 'unsafe-inline' https:; connect-src 'self' https: wss: http: ws:; frame-ancestors 'self'` (http: and ws: because WebKit matches no 'self' for a fetch or a socket from the opaque origin: on a plain http port they were refused).
   The preview's origin is opaque, so it cannot read the dashboard cookie or call this API.
+- The preview's target (SRV-511, chatd/preview.py, dashboard/src/chat/preview.ts). The artifact of
+  `port:N` shows port N when it listens; else the newest server that listens, with `note` saying so;
+  else `waiting` (no `url`). A page that cannot run as a file (a module script that imports a package
+  by name without an import map, or a .ts/.jsx/.vue entry: a bundler project's source index.html)
+  shows its project's running dev server (`note`), else `waiting` with the project's `dir` and the
+  `command` that starts it; the pane offers a Start button (`POST sandbox/serve`) and asks again every
+  2.5 s until a server listens. While the panes are open they ask what listens every 4 s: a port that
+  starts listening opens in a Preview tab, once (not one that listened at the first look, not a port
+  that does not answer HTTP, not one a preview already shows). The plus menu's Preview opens the newest
+  running server, else the last page. A page on the view route resolves its absolute `/` URLs against
+  its own directory (a built `dist/index.html`).
+- A previewed page (port or view route) gets a script first in its head: run-time URLs that start with
+  `/` or name localhost:PORT (fetch, XHR, WebSocket, EventSource, an image's src) go to the port's
+  prefix, so a dev server's hot-reload socket connects; and it posts `{tandemPreview: 1, ...}` to the
+  dashboard after load and on later errors. The pane shows "2 errors" and the like and passes the
+  report to chatd. With an admin password set, a module request from the opaque origin carries no
+  session: the preview's modules need the dashboard without a password (AU1's default).
 - A video, audio file, PDF or binary from the view route carries `default-src 'none'; media-src 'self'`
   (a PDF: `script-src 'none'; object-src 'self'`): it plays or downloads, it never runs a script.
 - Tool output in events and parts is capped (30,000 characters per call); the full output is a file at
@@ -452,7 +472,11 @@ Either side appends here with a date; the architect answers by changing the sect
 Designer requests (2026-10-12, after building the UI against v0.2; the mock does all of these):
 
 1. The probe. `GET /capabilities` must answer `Content-Type: application/json`; the client treats a
-   200 without it as a static fallback (vite's `index.html`) and uses the mock.
+   200 without it as a static fallback (vite's `index.html`): the mock on the dev server only,
+   elsewhere the "does not serve the chat API" state. Since VIS-179 every answer but the chat API's
+   is a named state chosen by the status and `error.type` (502 `chat_unavailable`, 403 `forbidden`,
+   404, 503 `setup_mode`, other, no answer; `backend.ts` `classifyProbe`); the mock loads only for
+   `?chat=mock` and the dev server.
 2. Pane ids. `PATCH /conversations/{id}` `{ui}` with panes that carry no `id`: the server assigns one
    and answers with `ui.changed` so every device sees the same ids. The client sends `kind:ref` as a
    provisional id when it has none; the server may keep it.

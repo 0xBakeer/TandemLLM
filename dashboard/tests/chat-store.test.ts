@@ -1,7 +1,7 @@
 // the chat reducer: a run's events in order, a tool call's life, a catch-up replay equals the
 // live path, and the attachment state machine's words.
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { adopt, applyEvent, applyEvents, firstLine, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
+import { adopt, applyEvent, applyEvents, firstLine, interruptWords, interruptedMessage, lastStats, messageText, pendingPermission } from '../src/chat/store';
 import { attachLabel, initialAttachment, onEvent, onStreamState, onTick, LOST_AFTER_MS } from '../src/chat/connection';
 import type { ChatEvent, Conversation, Run, StampedEvent, TurnStats } from '../src/chat/types';
 
@@ -159,6 +159,25 @@ describe('the chat reducer', () => {
     // the output in tool.done wins over the streamed one
     const d = applyEvents(conv(), [...TURN.slice(0, 15), { type: 'tool.done', message_id: 'a1', call_id: 'k1', status: 'done', is_error: false, output: { content: 'final', is_error: false, bytes: 5, exit_code: 0 } }]);
     expect((d.messages[1].parts[1] as { output: { content: string } }).output.content).toBe('final');
+  });
+
+  it('the Continue card words an interrupted answer by its reason (VIS-197)', () => {
+    const limit = 'The run reached its limit of 50 model calls. Continue goes on from here.';
+    const at = (status: string, parts: unknown[], interrupted?: string) => ({ id: 'a1', role: 'assistant', status, parts, stats: interrupted ? { finish: 'tool_calls', interrupted } : null }) as unknown as Parameters<typeof interruptWords>[0];
+    // live 2026-10-16: interrupted at the limit showed the limit and "The engine restarted" both
+    expect(interruptWords(at('interrupted', [{ type: 'text', text: 'x' }, { type: 'error', message: limit, retryable: false, step: 50 }], 'limit'))).toEqual({ text: limit, notice: true });
+    // the same answer stored before the reason existed
+    expect(interruptWords(at('interrupted', [{ type: 'text', text: 'x' }, { type: 'error', message: limit, retryable: false }]))).toEqual({ text: limit, notice: true });
+    expect(interruptWords(at('interrupted', [{ type: 'text', text: 'x' }], 'restart'))?.text).toMatch(/^The chat service restarted/);
+    expect(interruptWords(at('interrupted', [{ type: 'text', text: 'x' }], 'engine'))?.text).toMatch(/^The engine stopped answering/);
+    // an earlier run's notice in the middle (Continue went on), then chatd restarted
+    const cont = interruptWords(at('interrupted', [{ type: 'error', message: limit, retryable: false }, { type: 'text', text: 'more' }], 'restart'));
+    expect(cont).toEqual({ text: expect.stringMatching(/^The chat service restarted/), notice: false });
+    // no reason, no notice: neutral words, never "the engine restarted"
+    const old = interruptWords(at('interrupted', [{ type: 'text', text: 'x' }]));
+    expect(old?.notice).toBe(false);
+    expect(old?.text).not.toMatch(/engine/);
+    expect(interruptWords(at('done', [{ type: 'error', message: limit, retryable: false }]))).toBeNull();
   });
 
   it('a snapshot that arrives after some of the stream: the events past its seq go on top, the rest are not applied twice', () => {

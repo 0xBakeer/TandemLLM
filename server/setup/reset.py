@@ -20,8 +20,9 @@ exactly (WORDS). Every reset is refused while requests are in flight or a setup 
 
 WHAT IS NEVER REMOVED by levels 2 to 4: the active profile's weights, the protected assets (the K3
 drafters, the K4 draft head, the FP8 base checkpoint: nothing downloads them again), Wren's and the
-small roles' models, the Hugging Face token, secrets.env, the ledger, the conductor's data and this
-checkout. Only paths from the table here, resolved from serve.env and the registry, can go, each
+small roles' models, the Hugging Face token, the secrets file the engine reads and its folder
+(QSE_SECRETS, else $QSE_STATE_DIR/secrets.env, else ~/.qwen38-spark-engine/secrets.env: an install's
+is DIR/state/secrets.env), the ledger (QSE_USAGE_LEDGER), the conductor's data and this checkout. Only paths from the table here, resolved from serve.env and the registry, can go, each
 checked to be under the home folder and none of the above; a symbolic link is removed as a link and
 never followed. A cache the engine runs is cleared through its own clear function under the engine's
 lock (wiping a disk tier behind a running engine's back broke it, SRV-289); the shadow reader's disk,
@@ -63,7 +64,28 @@ SIZE_S = 2.0
 
 
 def state_dir() -> str:
+    """The caches, the conductor, the memory notes, the models and the deciders: an install keeps
+    them here too (install.sh moves only the secrets and the ledger, to DIR/state)."""
     return os.path.expanduser("~/.qwen38-spark-engine")
+
+
+def secrets_files() -> list[str]:
+    """The secrets file the engine reads (apply.secrets_file()) and the one serve.env names, when
+    that is another (OPS-163)."""
+    out = [apply.secrets_file()]
+    got = _env(["QSE_SECRETS", "QSE_STATE_DIR"])
+    if got.get("QSE_SECRETS"):
+        out.append(os.path.expanduser(got["QSE_SECRETS"]))
+    elif got.get("QSE_STATE_DIR"):
+        out.append(os.path.join(os.path.expanduser(got["QSE_STATE_DIR"]), "secrets.env"))
+    return list(dict.fromkeys(out))
+
+
+def state_dirs() -> list[str]:
+    """Real paths of the state folders: ~/.qwen38-spark-engine and each secrets file's folder
+    (an install's DIR/state). A guard, and an item inside one may go."""
+    return list(dict.fromkeys(os.path.realpath(p) for p in
+                              [state_dir(), *(os.path.dirname(f) for f in secrets_files())]))
 
 
 def _label(path: str) -> str:
@@ -167,15 +189,24 @@ def protected(m: dict | None, repo: str | None = None, level: int = 2) -> list[s
     """Real paths a level never removes (a path under one of them, or one of them under it): the
     checkout, the home and state folders, secrets.env, the roles' models, the HF token and the
     assets; below level 5 also the ledger, the conductor's data and the memory notes."""
-    keep = [apply.ROOT, os.path.expanduser("~"), state_dir(),
+    keep = [apply.ROOT, os.path.expanduser("~"), *state_dirs(), *secrets_files(),
             os.path.join(state_dir(), "secrets.env"), os.path.join(state_dir(), "models"),
             os.path.join(state_dir(), "deciders"),
             os.path.expanduser(os.environ.get("HF_TOKEN_PATH") or "~/.cache/huggingface/token")]
     if level != 5:
         keep += [os.path.join(state_dir(), x) for x in ("usage", "conductor", "memory")]
+        # where serve.env puts them: an install's ledger is DIR/state/usage/ledger.sqlite3
+        got = _env(["QSE_USAGE_LEDGER", "QSE_CONDUCTOR_CONFIG"])
+        if got.get("QSE_USAGE_LEDGER") not in (None, "", "off"):
+            keep.append(os.path.dirname(os.path.expanduser(got["QSE_USAGE_LEDGER"])))
+        if got.get("QSE_CONDUCTOR_CONFIG") not in (None, "", "off"):
+            keep.append(os.path.expanduser(got["QSE_CONDUCTOR_CONFIG"]))
     if level == 4:
         keep += in_use()
     out = [os.path.realpath(p) for p in keep]
+    # a secrets file that is a symbolic link: the link itself, as _allowed names an item that is one
+    out += [os.path.join(os.path.realpath(os.path.dirname(f)), os.path.basename(f))
+            for f in secrets_files()]
     for a in (m or {}).get("assets") or []:
         for p in [a["path"], *a.get("also", [])]:
             for hit in glob.glob(registry.expand(p, repo)) or [registry.expand(p, repo)]:
@@ -190,10 +221,11 @@ def _allowed(path: str, guard: list[str], level: int) -> str | None:
         os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
     if not real.startswith(home + os.sep):
         return "outside the home folder"
+    roots = [home, *state_dirs()]
     for g in guard:
         if real == g or g.startswith(real + os.sep):
             return "it holds something that is never removed"
-        if real.startswith(g + os.sep) and g not in (home, os.path.realpath(state_dir())):
+        if real.startswith(g + os.sep) and g not in roots:
             return "it is inside something that is never removed"
     return None
 

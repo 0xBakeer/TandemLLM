@@ -2,7 +2,7 @@
 // nothing (2026-10-14: "KV for this chat —", "resident prefix —", "running, 0 B", "— tokens").
 
 import { bytes, compact, exact } from '../lib/format';
-import type { Attachment, ContextReport, HarnessMemory, SandboxCallData, SandboxStatus } from './types';
+import type { Attachment, ContextReport, HarnessMemory, Run, SandboxCallData, SandboxStatus } from './types';
 
 export const NOT_TRACKED = 'not tracked for this model';
 export const AFTER_TURN = 'measured after the first turn';
@@ -17,6 +17,28 @@ type Backend = ContextReport['model']['backend'];
 export function turnFigure(v: number | null | undefined, fmt: (v: number) => string, hadTurn: boolean): string {
   if (v != null && Number.isFinite(v)) return fmt(v);
   return hadTurn ? NOT_TRACKED : AFTER_TURN;
+}
+
+/** a Now figure while a run is live: the value, else why there is none at this moment. Live
+ *  (2026-10-16, an agent turn on Nemotron 3.5 Super VL) every gap read "not tracked for this
+ *  model": between two model calls, in a call's first 50 tokens, before a call had ended. */
+export function liveFigure(v: number | null | undefined, fmt: (v: number) => string, r: Run, kind: 'tps' | 'round' | 'accepted', backend: Backend, drafter: string | null): string {
+  if (v != null && Number.isFinite(v)) return fmt(v);
+  if (backend && backend !== 'engine') return NOT_TRACKED;
+  if (kind !== 'tps' && !drafter) return 'no drafter';
+  if (r.phase === 'queued') return 'queued';
+  if (r.phase === 'prefill') return 'prefilling';
+  if (r.phase === 'tool' || r.phase === 'permission') return kind === 'tps' ? 'between model calls' : 'measured when a model call ends';
+  return kind === 'tps' ? 'warming up, the first 50 tokens' : 'measured when a model call ends';
+}
+
+/** the slot row: the engine's lane tag while a request runs, else who holds the slot. It said
+ *  "none held" under "KV for this chat: 32,890 tokens, in the engine's slot" (2026-10-16). */
+export function slotWords(slot: string | null, mem: Mem): string {
+  if (slot) return slot;
+  if (mem.kv_where === 'slot') return 'held by this chat';
+  if (mem.kv_where === 'park' || mem.kv_where === 'other') return 'held by another chat';
+  return 'none held';
 }
 
 /** where the engine keeps this chat's rows */

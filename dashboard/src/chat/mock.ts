@@ -256,7 +256,7 @@ export class MockChatBackend implements ChatBackend {
         ['Which one for the weekly code check?', [{ type: 'text', text: '6.0, once a week, on the same 40 prompts. Keep the 4.5 answers beside them and count the lines that differ. If the count stays under 5 % for a month, drop the check.' }]],
       ],
     });
-    mk('c_regex', 'A regex for ISO dates with an optional time', 9 * 86_400_000, { turns: [['Regex for ISO dates with an optional time part.', [{ type: 'text', text: '```\n^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$\n```\n\nThe date is required, the time optional, seconds optional inside the time. It accepts a space or a `T` between them.' }]]] });
+    mk('c_regex', 'A regex for ISO dates with an optional time', 9 * 86_400_000, { turns: [['Regex for ISO dates with an optional time part.', [{ type: 'text', text: '```\n^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$\n```\n\nThe date is required, the time optional, seconds optional inside the time. It accepts a space or a `T` between them.\n\nIn a form: `document.querySelector(\'input[name=date]\').value.match(isoDate)?.groups` holds the parts. The format is RFC 3339, section 5.6: https://datatracker.ietf.org/doc/html/rfc3339#section-5.6\n\n| input | matches | why |\n| --- | --- | --- |\n| `2026-10-16` | yes | the date alone |\n| `2026-10-16T08:30` | yes | seconds are optional |\n| `2026-10-16T8:30` | no | the hour needs two digits |' }]]] });
     const sql = mk(this.interruptedId, 'Slow query on the orders table', 12 * 86_400_000, { folder_id: 'f_engine', turns: [['Why is this query slow? 14 s on 2 million rows.', [{ type: 'text', text: 'The filter on `created_at` has no index and the `ORDER BY` sorts the whole table. One index on `(customer_id, created_at)` turns the plan into a range scan; expect under 50 ms.' }]]] });
     // the interrupted answer: the engine restarted mid-sentence; Continue resumes it
     {
@@ -862,6 +862,14 @@ export class MockChatBackend implements ChatBackend {
     if (!a) throw new Error(`no artifact ${ref}`);
     return a;
   }
+  // the mock's sandbox runs no server: the preview shows its seeded pages
+  async sandboxPorts(_id: string) {
+    return [];
+  }
+  async serve(_id: string, dir: string) {
+    return { dir, command: 'npm run dev', log: '/workspace/.tandem/outputs/dev-server.log' };
+  }
+  async previewReport(): Promise<void> {}
 
   terminal(id: string, session: string, onData: (data: string) => void): TerminalSession {
     const st = this.get(id);

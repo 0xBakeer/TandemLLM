@@ -215,11 +215,40 @@ def _search(ctx, a):
                                       "results": res["results"]})
 
 
+def _ports(ctx) -> list[dict] | None:
+    """What listens in the sandbox now (relay.py ports); None when that could not be read."""
+    mark = len(ctx.output_text())
+    ctx.exec(sandbox_mod.relay_cmd("ports"), timeout=20, quiet=True)
+    lines = ctx.output_text()[mark:].strip().splitlines()
+    try:
+        got = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return got if isinstance(got, list) else None
+
+
+def _ports_words(ports: list[dict] | None) -> str:
+    if ports is None:
+        return "what listens in the sandbox could not be read"
+    if not ports:
+        return "nothing listens on any port in the sandbox"
+    return "listening now: " + ", ".join(
+        f"{p['port']} on {' and '.join(p.get('addresses') or [])}" +
+        (f" ({p['command']})" if p.get("command") else "") for p in ports)
+
+
 def _render(ctx, a):
     w = min(2400, max(320, int(a.get("width") or 1280)))
     h = min(2400, max(240, int(a.get("height") or 800)))
     if a.get("port"):
-        url = f"http://127.0.0.1:{int(a['port'])}/{str(a.get('path') or '').lstrip('/')}"
+        # localhost, as curl in the sandbox dials it (::1, then 127.0.0.1): live (2026-10-16)
+        # Vite 5 listened on [::1]:5173 only and Chromium sent to 127.0.0.1 was refused
+        port = int(a["port"])
+        ports = _ports(ctx)
+        if ports is not None and port not in {p.get("port") for p in ports}:
+            raise ToolError(f"nothing listens on port {port} in the sandbox, on any address; "
+                            f"{_ports_words(ports)}")
+        url = f"http://localhost:{port}/{str(a.get('path') or '').lstrip('/')}"
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
@@ -229,8 +258,9 @@ def _render(ctx, a):
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
            f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught|ERROR' | grep -v -E "
            f"'dbus|Fontconfig|gpu|GPU|sandbox' | head -40")
+    mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
-    log = ctx.output_text()
+    log = ctx.output_text()[mark:]
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):
@@ -238,7 +268,9 @@ def _render(ctx, a):
             raise ToolError(f"the page did not render: {oom_words()}, the kernel killed Chromium. "
                             f"A lighter page or a smaller width and height may fit",
                             oom_data()) from None
-        raise ToolError("the page did not render: " + (log.strip() or "no screenshot")) from None
+        raise ToolError("the page did not render: " + (log.strip() or "no screenshot") +
+                        (f" ({url}; {_ports_words(_ports(ctx))})" if a.get("port") else "")
+                        ) from None
     errors = [ln for ln in log.splitlines() if ln.strip()]
     # a new render of the page as it is now, each call (its own file): live (2026-10-13) the
     # model read a correct clock as "still tilted" four times and took the screenshots for stale
@@ -275,8 +307,50 @@ def _present(ctx, a):
         full = ctx.ws.resolve(str(a.get("path") or ""), must_exist=True)
         ref = "file:" + ctx.ws.show(full) if kind != "editor" else ctx.ws.show(full)
     pane = {"kind": kind, "ref": ref, "title": str(a.get("title") or "")[:80] or None}
+    if kind == "preview":
+        return _present_preview(ctx, pane)
     ctx.present(pane)
     return Result(f"opened a {kind} pane for the user", pane=pane)
+
+
+def _present_preview(ctx, pane):
+    """A preview's real outcome for the model: what the pane targets (the port that listens, a
+    page's dev server, or nothing yet), what the server answered, and what the user's pane loaded
+    (its own report: errors, failed files), so the model cannot claim a blank pane works. Live
+    (2026-10-16) `present` said done for port 4173 while the user's pane was white."""
+    from chatd.preview import REPORT_WAIT_S, probe_words, report_words, server_words
+    from chatd.service import ApiError
+    t0 = time.time()
+    try:
+        art = ctx.svc.artifact(ctx.cid, pane["ref"])
+    except ApiError as exc:
+        raise ToolError(str(exc)) from None
+    ctx.present(pane)
+    w = art.get("waiting")
+    if w:
+        return Result(f"opened a preview pane, but it shows nothing yet: {w['message']} "
+                      f"{_ports_words(ctx.svc.listening(ctx.cid))}. Start the server (bash with "
+                      f"background true), then present it again. The preview does not work yet: "
+                      f"do not tell the user it does.", is_error=True, pane=pane)
+    lines, bad = [], False
+    if art.get("port"):
+        lines.append("opened the preview pane on " + server_words(
+            {"port": art["port"], "command": art.get("server")}) + ".")
+        if art.get("note"):
+            lines.append(art["note"])
+        words, b = probe_words(ctx.svc.probe(ctx.cid, art["port"]))
+        lines.append(words)
+        bad = bad or b
+    else:
+        lines.append(f"opened the preview pane on {pane['ref'][5:]}.")
+    viewers = len(ctx.svc.conv(ctx.cid).fan)
+    rep = ctx.svc.wait_report(ctx.cid, pane["ref"], t0, REPORT_WAIT_S if viewers else 0)
+    words, b = report_words(rep, viewers)
+    lines.append(words)
+    bad = bad or b
+    if bad:
+        lines.append("The preview does not work yet: fix this before telling the user it does.")
+    return Result("\n".join(lines), is_error=bad, pane=pane)
 
 
 def _library_search(ctx, a):

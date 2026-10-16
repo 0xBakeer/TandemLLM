@@ -4,7 +4,7 @@
 
 import { apiBase } from '../api/client';
 import { ResumableStream } from '../lib/sse';
-import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
+import { VersionConflict, type Artifact, type ChatBackend, type ListeningPort, type PreviewReport, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 
 const PREFIX = '/v1/chat-app';
@@ -267,7 +267,16 @@ export class RemoteChatBackend implements ChatBackend {
     await call<void>(`/conversations/${enc(id)}/sandbox/file?path=${encodeURIComponent(path)}`, { method: 'PUT', body: content, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...(etag ? { 'If-Match': etag } : {}) } });
   }
   artifact(id: string, ref: string) {
-    return call<{ kind: string; content: string; mime: string; title: string; url?: string; bytes?: number }>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
+    return call<Artifact>(`/conversations/${enc(id)}/artifacts/${enc(ref)}`);
+  }
+  async sandboxPorts(id: string) {
+    return (await call<{ ports: ListeningPort[] }>(`/conversations/${enc(id)}/sandbox/ports`)).ports;
+  }
+  serve(id: string, dir: string) {
+    return post<{ dir: string; command: string; log: string }>(`/conversations/${enc(id)}/sandbox/serve`, { dir });
+  }
+  async previewReport(id: string, report: PreviewReport) {
+    await post<void>(`/conversations/${enc(id)}/preview/report`, report);
   }
 
   terminal(id: string, session: string, onData: (data: string | Uint8Array) => void): TerminalSession {

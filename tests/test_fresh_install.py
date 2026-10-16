@@ -37,7 +37,8 @@ ENG-359 (release 0.11.0): the same install takes Nemotron 3.5 Super VL's default
 OPS-149: the setup message
 
   8  install.sh --setup ends with the Setup Guide's address on the box, the ssh tunnel from another
-     computer and --host 0.0.0.0, and no profile to switch to          test_the_setup_message
+     computer and --host 0.0.0.0, and no profile to switch to; the Chat tab starts once the setup
+     is done (OPS-155)                                                 test_the_setup_message
 
 Run: python tests/test_fresh_install.py   (3 and 4 need Linux: install.sh stops anywhere else)
 """
@@ -263,6 +264,9 @@ def test_the_setup_message():
     assert re.search(r"From another computer:  ssh -L 18996:127\.0\.0\.1:18996 \S+@\S+", tail), tail
     assert "then open http://127.0.0.1:18996/dashboard/#/setup on that computer" in tail, tail
     assert "--host 0.0.0.0" in tail and "use-profile.sh" not in tail, tail
+    # OPS-155: the Chat tab waits for the setup, and says how to see chatd
+    assert "The Chat tab starts with the engine once the setup is done (" in tail and \
+        "/bin/tandem chat status)." in tail, tail
 
 
 def test_a_setup_install_takes_an_exl3_profile():

@@ -15,6 +15,11 @@
 // (VIS-151, VIS-155) on top: 423.7 KB; a lazy install view measured 424.0 KB, so no split.
 // 425 KB with the sandbox's reason on a call and the attachment chip's tokens (VIS-167, VIS-169):
 // 424.2 KB.
+// 428 KB with a live run's reasons on the Now figures and the slot row's owner (VIS-181) and the
+// Chat tab's panel for a box whose chatd is down, its re-probe and banner (VIS-179): 427.3 KB.
+// 430 KB with the preview's target, its waiting state and Start button, the page's report and the
+// new-server watch (SRV-511): 429.7 KB. 431 KB with the Chat tab's design pass on top (VIS-185: the
+// figures line as readings, the panes' tab strip that scrolls on its own, the thread's wrap rules): 430.3 KB.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -33,8 +38,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 425 KB)`);
-if (total > 425 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 431 KB)`);
+if (total > 431 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

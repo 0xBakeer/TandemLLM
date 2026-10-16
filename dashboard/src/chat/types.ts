@@ -207,6 +207,8 @@ export interface TurnStats {
   prefill_tps?: number | null;
   /** cloud backends only */
   cost_usd?: number | null;
+  /** an `interrupted` answer: why (VIS-197); absent on answers from before 0.11.2 */
+  interrupted?: 'limit' | 'sandbox' | 'engine' | 'restart' | string;
 }
 
 // ---- the run ----------------------------------------------------------------------------------
@@ -233,8 +235,9 @@ export interface Run {
   decode_tps: number | null;
   tokens_per_round: number | null;
   acceptance: number | null;
-  thinking: { used: number; budget: number | null };
-  /** the completion tokens so far */
+  /** used: the run's, every model call; call: this call's, which the budget caps */
+  thinking: { used: number; budget: number | null; call?: number };
+  /** the completion tokens so far, every model call of the run */
   tokens: number;
   /** one-second decode samples for the sparkline, oldest first, at most 120 */
   tps_history: (number | null)[];
@@ -637,7 +640,7 @@ export interface PaneRef {
 export type ChatEvent =
   | { type: 'run.started'; run: Run }
   | { type: 'run.phase'; run_id: string; phase: RunPhase; now: string; tool?: Run['tool']; prefill?: Run['prefill']; step?: number; queue_position?: number | null }
-  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_budget?: number | null; prefill?: Run['prefill'] }
+  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; prefill?: Run['prefill'] }
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
   | { type: 'message.created'; message: Message }
