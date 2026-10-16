@@ -12,7 +12,7 @@
 // text (lit renders interpolations escaped) and makes a link only from an https URL; the avatar
 // only from github.com.
 
-import type { CommunityEntry, SetupCommunityDrafters, SetupDevice, SetupModality, SetupModel, SetupProfile, SetupSelection, SetupSocialNetwork } from '../api/types';
+import type { CommunityEntry, SetupCommunityDrafters, SetupDevice, SetupMaker, SetupModality, SetupModel, SetupProfile, SetupSelection, SetupSocialNetwork } from '../api/types';
 
 export const COMMUNITY_PREFIX = 'community/';
 export const DOCS_URL = 'https://github.com/0xBakeer/TandemLLM/blob/main/docs/community-weights.md';
@@ -52,6 +52,7 @@ export function profileOfEntry(m: Pick<SetupModel, 'profiles'>, e: CommunityEntr
     note: null,
     // the drafters' files beside the pack; none when the pack runs without drafters
     assets_required: e.drafters === 'none' ? [] : (like?.assets_required ?? []),
+    made_by: { kind: 'community', name: e.author.github, github: e.author.github, repo: null },
     community: e,
   };
 }
@@ -157,6 +158,7 @@ export function modalityStates(e: Pick<CommunityEntry, 'modalities' | 'modalitie
 export function draftersText(d: SetupCommunityDrafters): string {
   if (d === 'tandem-exl3') return 'Uses TandemLLM drafters (K3 + K4)';
   if (d === 'dflash2') return 'Uses DFlash2 drafters';
+  if (d === 'in-pack') return "Drafts with the pack's own draft layer";
   return 'No drafters: one token a pass';
 }
 
@@ -166,7 +168,7 @@ export interface SpeedCell {
 }
 
 export interface CommunityCard {
-  /** the profile id, community/<id> */
+  /** the profile id: community/<id>, or the model's own profile that serves the pack (VIS-175) */
   id: string;
   slug: string;
   name: string;
@@ -198,8 +200,10 @@ export interface CommunityCard {
 
 const HF_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/;
 
-export function cardOf(p: SetupProfile): CommunityCard | null {
-  const e = p.community;
+/** the card of profile `p`; `entry` for a pack one of the model's own profiles serves (VIS-175),
+ *  whose profile carries no `community` of its own */
+export function cardOf(p: SetupProfile, entry: CommunityEntry | undefined = p.community): CommunityCard | null {
+  const e = entry;
   if (!e) return null;
   const social = socialLinks(e);
   const speeds: SpeedCell[] = [];
@@ -233,10 +237,48 @@ export function cardOf(p: SetupProfile): CommunityCard | null {
   };
 }
 
-export function cardsOf(m: Pick<SetupModel, 'profiles'>): CommunityCard[] {
-  return communityProfiles(m)
-    .map(cardOf)
-    .filter((c): c is CommunityCard => !!c);
+/** the community cards: the packs that are profiles of their own, then the ones the model's own
+ *  profiles serve (VIS-175: turboderp's Flash-Next packs; Use selects that profile) */
+export function cardsOf(m: Pick<SetupModel, 'profiles'> & Partial<Pick<SetupModel, 'community'>>): CommunityCard[] {
+  const served = (m.community ?? []).flatMap((e) => {
+    if (e.profile.startsWith(COMMUNITY_PREFIX)) return [];
+    const own = ownProfiles(m).find((p) => p.id === e.profile);
+    return own ? [cardOf(own, e)] : [];
+  });
+  return [...communityProfiles(m).map((p) => cardOf(p)), ...served].filter((c): c is CommunityCard => !!c);
+}
+
+// ---- who made the weights (VIS-175) --------------------------------------------------------------
+
+export interface SourceLine {
+  kind: SetupMaker['kind'];
+  /** "Community quant", "Vendor release", "TandemLLM quant" */
+  label: string;
+  /** "@turboderp", "NVIDIA", "@0xBakeer" */
+  by: string;
+  /** the maker's GitHub profile, when the maker has a login */
+  byUrl: string | null;
+  /** owner/name on Hugging Face */
+  repo: string;
+  repoUrl: string | null;
+}
+
+export const MAKER_LABEL: Record<SetupMaker['kind'], string> = { ours: 'TandemLLM quant', vendor: 'Vendor release', community: 'Community quant' };
+const GH_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
+
+/** the weight card's source line: the Hugging Face repository and who made the pack */
+export function sourceLine(p: Pick<SetupProfile, 'hf_repo' | 'made_by'>): SourceLine {
+  const mk: SetupMaker = p.made_by ?? { kind: 'ours', name: '' };
+  const repo = mk.repo || p.hf_repo;
+  const login = mk.github && GH_LOGIN.test(mk.github) ? mk.github : null;
+  return {
+    kind: mk.kind,
+    label: MAKER_LABEL[mk.kind] ?? MAKER_LABEL.community,
+    by: login ? `@${login}` : mk.name,
+    byUrl: login ? `https://github.com/${login}` : null,
+    repo,
+    repoUrl: HF_ID.test(repo) ? `https://huggingface.co/${repo}` : null,
+  };
 }
 
 // ---- search and sort ----------------------------------------------------------------------------

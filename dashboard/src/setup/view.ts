@@ -14,13 +14,13 @@
 import { html, nothing, render as litRender, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../api/client';
-import type { CommunitySync, SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
+import type { CommunitySync, SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupProfile, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
 import { poll, type Poller } from '../lib/poll';
 import { LightElement, type Loadable } from '../ui/base';
 import { emptyState as emptyPanel, errorState, icon, skeleton } from '../ui/bits';
 import { setupApi } from './api';
 import { buildPageState, howToFix, overSentence, planFixStep, stepIssues, tokenBlocked, type StepIssues } from './checks';
-import { communityProfiles, ownProfiles, packNoImage, withCommunityProfiles } from './community';
+import { communityProfiles, ownProfiles, packNoImage, sourceLine, withCommunityProfiles } from './community';
 import './community-view';
 import { availability, isOn } from './deps';
 import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
@@ -717,6 +717,7 @@ export class QseSetup extends LightElement {
               <span><span class="wcard-k">${S.weightsMemory}</span> ${p.weights_gib.toFixed(1)} GiB</span>
               <span><span class="wcard-k">${S.weightsDisk}</span> ${here ? S.onDisk : S.toDownload(p.disk_gb)}</span>
             </span>
+            ${this.renderSource(p)}
             ${p.note ? html`<span class="wcard-note">${p.note}</span>` : nothing}
             ${p.hf_private && !here && dev?.hf_token_present === false ? html`<span class="wcard-private is-blocked" data-private>${icon('warn')} ${S.privateNoTokenShort}</span>` : nothing}
           </label>`;
@@ -725,6 +726,16 @@ export class QseSetup extends LightElement {
       ${communityProfiles(m).length || m.community
         ? html`<qse-community .model=${m} .sync=${m.community_sync ?? null} .selected=${sel.profile} .device=${dev} .syncing=${this.communitySyncing} .onUse=${(id: string) => this.user('weights', 'profile', { type: 'profile', id })} .onRefresh=${() => void this.syncCommunity()}></qse-community>`
         : nothing}`;
+  }
+
+  /** VIS-175: the weights' Hugging Face repository as owner/name, linked, and who made them */
+  private renderSource(p: SetupProfile): TemplateResult {
+    const src = sourceLine(p);
+    return html`<span class="wcard-src" data-weights-src=${src.kind}>
+      <span class="sbadge wsrc-kind wsrc-${src.kind}">${src.label}</span>
+      <span class="wsrc-by">${S.madeBy} ${src.byUrl ? html`<a href=${src.byUrl} target="_blank" rel="noopener noreferrer" title=${S.community.github(src.by.slice(1))}>${src.by}</a>` : src.by}</span>
+      ${src.repoUrl ? html`<a class="wsrc-repo" href=${src.repoUrl} target="_blank" rel="noopener noreferrer" title=${S.community.onHf(src.repo)}>${src.repo} ${icon('external')}</a>` : html`<span class="wsrc-repo">${src.repo}</span>`}
+    </span>`;
   }
 
   // ---- step 3: components -------------------------------------------------------------------

@@ -976,6 +976,42 @@ qse-wren-figure {
   font-size: var(--fs-sm);
   color: var(--ink-2);
 }
+/* VIS-175: the weights' repository and who made them */
+.wcard-src {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  min-width: 0;
+}
+.wsrc-kind.wsrc-community {
+  color: var(--cobalt);
+  border-color: currentColor;
+}
+.wsrc-by a,
+.wsrc-repo {
+  color: var(--ink-2);
+}
+.wsrc-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+a.wsrc-repo:hover,
+.wsrc-by a:hover {
+  color: var(--ink);
+}
+.wsrc-repo .icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
 .wcard-private {
   display: flex;
   gap: 5px;
@@ -1496,10 +1532,18 @@ a.ccard-license:hover {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   font-size: var(--fs-sm);
   color: var(--ink-2);
   text-decoration: none;
-  white-space: nowrap;
+}
+.ccard-repo {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.ccard-hf .icon {
+  flex: none;
 }
 .ccard-hf:hover {
   color: var(--ink);

@@ -139,6 +139,7 @@ export const S = {
   weightsMemory: 'Memory',
   weightsDisk: 'Download',
   onDisk: 'On this box',
+  madeBy: 'by',
   toDownload: (gb: number) => `${gb.toFixed(1)} GB`,
   privateRepo: 'Some of these weights are in private repositories that are not public yet. This box has a Hugging Face token, and a download works when that token has access to them.',
   privateNoToken: 'This box has no Hugging Face token, so it cannot download these weights. Add one with huggingface-cli login on the box, or pick weights that are already here.',
@@ -149,7 +150,7 @@ export const S = {
   // community weights (CONTRACT.md 2026-10-13); the entries' own text is the authors', shown as is
   community: {
     heading: 'Community weights',
-    intro: 'Packs made by people who run TandemLLM on their own boxes. Each one installs through the same steps as ours and runs with our drafters. Verified means we ran it on our DGX Spark.',
+    intro: 'Weights that other people published on Hugging Face and TandemLLM loads. Each pack installs through the same steps as ours. Verified means we ran it on our DGX Spark.',
     addYours: 'Add yours',
     addYoursHow: 'How to add yours',
     search: 'Search by name, author or tag',
@@ -174,6 +175,7 @@ export const S = {
     notMeasured: 'Not measured on our box yet',
     license: 'License',
     hf: 'Hugging Face',
+    onHf: (repo: string) => `${repo} on Hugging Face`,
     github: (login: string) => `@${login} on GitHub`,
     bpw: 'bits a weight',
     download: 'download',
