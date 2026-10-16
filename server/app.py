@@ -1949,10 +1949,7 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
             at += len(full) - len(ids)
             ids = full
     if images:
-        from engine.vision import MMContext, expand
-        tower = STATE["vision"]
-        full, spans = expand(ids, images, tower.cfg.image_token_id, tower.cfg.spatial_merge_size)
-        mm = MMContext(full, spans, images, tower, eng.cfg, cache=STATE.get("image_cache"))
+        full, mm = _vision_context(ids, images, eng)
         at += len(full) - len(ids)
         ids, key_ids = full, mm.key_ids
         eng.mm, eng.pos_delta = mm, mm.delta
@@ -4621,20 +4618,29 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     return ids, "text", False
 
 
+def _vision_context(ids: list[int], images: list, eng, on_encode=None) -> tuple:
+    """`(ids, mm)`: the prompt with each image's placeholder expanded to its rows and the request's
+    image context, as the served tower writes them: its own `context` (Super VL's RADIO tower:
+    `<img>` rows `</img>`, no rotary, engine/models/nemotron_h/vision.py), else engine/vision.py's
+    (the Qwen towers: the placeholder's rows and their three-axis rotary)."""
+    tower = STATE["vision"]
+    own = getattr(tower, "context", None)
+    if own is not None:
+        return own(ids, images, cache=STATE.get("image_cache"), on_encode=on_encode)
+    from engine.vision import MMContext, expand
+    full, spans = expand(ids, images, tower.cfg.image_token_id, tower.cfg.spatial_merge_size)
+    return full, MMContext(full, spans, images, tower, eng.cfg, cache=STATE.get("image_cache"),
+                           on_encode=on_encode)
+
+
 def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
     """The prompt with each image's one placeholder expanded to its rows, and the
     request's `MMContext`. `rec.encoding` is the live view's "encoding image i of n"."""
-    from engine.vision import MMContext, expand
-    tower = STATE["vision"]
-    ids, spans = expand(prompt.tolist(), images, tower.cfg.image_token_id,
-                        tower.cfg.spatial_merge_size)
-
     def on_encode(i, n):
         if rec is not None:
             rec.encoding = (i, n) if i is not None else None
 
-    mm = MMContext(ids, spans, images, tower, STATE["engine"].cfg,
-                   cache=STATE.get("image_cache"), on_encode=on_encode)
+    ids, mm = _vision_context(prompt.tolist(), images, STATE["engine"], on_encode)
     if STATE.get("verbose"):
         grids = ",".join("x".join(str(g) for g in im.grid) for im in images)
         print(f"[vision] {len(images)} image(s) grids={grids} rows={mm.image_tokens} "
@@ -9520,7 +9526,8 @@ def _load(a) -> None:
     # vision tower with its processor and caches (`_load_vision`, a builder's own tower)
     ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
                                 kv_pool=lambda: _kv_pool_open(a),
-                                vision=lambda path, tower_of=None: _load_vision(a, path, tower_of))
+                                vision=lambda path, tower_of=None, config_of=None:
+                                _load_vision(a, path, tower_of, config_of))
     m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
@@ -10078,12 +10085,14 @@ def _gib(b) -> str:
     return "-" if b is None else f"{b / (1 << 30):.2f}"
 
 
-def _load_vision(a, path: str, tower_of=None) -> None:
+def _load_vision(a, path: str, tower_of=None, config_of=None) -> None:
     """The checkpoint's vision tower (bf16, as stored; or `tower_of(vision config)`, the tower a
     model's builder makes in its own weight format, VIS-97), its image processor and the embedding
-    cache -- when the checkpoint has a tower and `--vision on`."""
+    cache -- when the checkpoint has a tower and `--vision on`. `config_of(path)`: a builder's own
+    vision config reader (Super VL's RADIO tower, ENG-365), whose tower brings its own processor
+    (`preprocessor`), warm-up (`warm`) and prompt rows (`context`)."""
     from engine.vision import EmbedCache, VisionTower, load_vision_config
-    vcfg = load_vision_config(path) if getattr(a, "vision", "on") == "on" else None
+    vcfg = (config_of or load_vision_config)(path) if getattr(a, "vision", "on") == "on" else None
     if vcfg is None:
         print("[vision] off" + (" (the checkpoint has no vision tower)"
                                 if getattr(a, "vision", "on") == "on" else ""), flush=True)
@@ -10094,9 +10103,11 @@ def _load_vision(a, path: str, tower_of=None) -> None:
     if tower is None:
         print("[vision] off (the checkpoint has no vision tower)", flush=True)
         return
-    pre = images_mod.Preprocessor(path, vcfg.spatial_merge_size,
-                                  max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
-                                  backend=getattr(a, "image_backend", "torchvision"))
+    own = getattr(tower, "preprocessor", None)
+    pre = (own(int(a.image_max_pixels)) if own is not None else
+           images_mod.Preprocessor(path, vcfg.spatial_merge_size,
+                                   max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
+                                   backend=getattr(a, "image_backend", "torchvision")))
     STATE.update(vision=tower, image_pre=pre,
                  image_cache=EmbedCache(int(a.image_cache_mb * (1 << 20))),
                  image_limits=images_mod.Limits(
@@ -10109,8 +10120,11 @@ def _load_vision(a, path: str, tower_of=None) -> None:
                  image_act_budget=int(a.image_act_gb * (1 << 30)))
     # the kernels' first launch here, not in the first image request: a 4x4-patch image
     with torch.no_grad():
-        m = vcfg.spatial_merge_size * 2
-        tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
+        if hasattr(tower, "warm"):
+            tower.warm()
+        else:
+            m = vcfg.spatial_merge_size * 2
+            tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
     tower.stats.update(images=0, patches=0, ms=0.0)
     print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB, {vcfg.depth} blocks, "
           f"{len(tower.t)} tensors; processor {type(pre.proc).__name__} "
