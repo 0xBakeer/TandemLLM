@@ -1292,6 +1292,33 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
 
 
+def _end_cut(new: list[int], eos, room: int) -> int:
+    """SRV-530: how many of a verified block's `new` tokens the generation keeps: through its first
+    end token, and at most `room` (the output budget left). The block's rows past that point are
+    not committed.
+
+    The walk accepts rows past the end token whenever the draft has them: the lookup copies what
+    followed the same tool call earlier in the prompt (`</tool_call>`, `<|im_end|>`, `\\n`,
+    `<|im_start|>`), and the target accepts the newline after its end token. Committed, they left
+    the engine one or two rows past the committed tokens. Qwen's pending commit is cut back to the
+    committed tokens (`trim_pending`); a NemotronH state has walked those rows and cannot be, so the
+    end anchor was refused (`ahead`) on 31 of the 54 turns of 2026-10-16, every one a tool call. The
+    commit now stops at the last kept token's row, where Qwen's cut back stopped."""
+    j = next((i for i, t in enumerate(new) if t in eos), None)
+    keep = len(new) if j is None else j + 1
+    return max(1, min(keep, int(room)))
+
+
+def _end_cut_said(rows: int) -> None:
+    """SRV-530: a block's rows past the end were left uncommitted: counted (`end_cut` in the
+    resident prefix's stats) and said in the log."""
+    res = STATE.get("resident")
+    if res is not None:
+        res.stats["end_cut"] = res.stats.get("end_cut", 0) + 1
+    if STATE.get("verbose"):
+        print(f"[spec] the accepted path ran {rows} row(s) past the end: not committed", flush=True)
+
+
 def generate_stream(*args, **kw):
     """`_generate_stream`; with side slots (`--parallel N`), its slot leaves the round's barrier
     the moment the generation ends, however it ends (the handler may abandon it half way)."""
@@ -1601,6 +1628,12 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if fin is not None:
                         # the end token is not taken: the path is kept up to the node before it
                         path, new = path[:fin[0] + 1], new[:fin[0]]
+                    cut = _end_cut(new, eos, max_new - n_out)
+                    if cut < len(new):
+                        # SRV-530: rows past the end token (or the budget) are not committed
+                        if len(path) > cut + 1:
+                            _end_cut_said(len(path) - cut - 1)
+                        path, new = path[:cut + 1], new[:cut]
                     if lpr is not None:
                         lpr.rows(lg[h2d(path, torch.long, prompt.device)], new)
                     eng.commit_tree(path)
@@ -1834,6 +1867,12 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             if fin is not None:
                 # the end token is not taken: the rows are kept up to the one before it
                 keep, new = fin[0] + 1, new[:fin[0]]
+            cut = _end_cut(new, eos, max_new - n_out)
+            if cut < len(new):
+                # SRV-530: rows past the end token (or the budget) are not committed
+                if keep > cut + 1:
+                    _end_cut_said(keep - cut - 1)
+                keep, new = cut + 1, new[:cut]
             if lpr is not None:
                 lpr.rows(lg, new)
             if pen is not None:
@@ -2389,7 +2428,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     offset for a continuation's own generation, which wrote its rows after the images.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
-    token has been decided and not forwarded -- so what is snapshotted is the prefix that really
+    token has been decided and not forwarded -- or `len(ctx)` when the end token was a drafted row
+    the block verified (the commit stops there, `_end_cut`) -- so what is snapshotted is the prefix that really
     was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
