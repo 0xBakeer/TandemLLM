@@ -2108,7 +2108,7 @@
      "label": "Parallel requests",
      "type": "int",
      "min": 1,
-     "max": 4
+     "max": 16
     },
     {
      "field": "window",

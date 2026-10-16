@@ -1,8 +1,8 @@
 """The engine's memory limits (OPS-47): one table, its overrides, and what each limit holds now.
 
 Every limit is a key in `ops/serve.env`, passed to the server as a flag by `ops/start.sh`. The
-dashboard's Memory plan panel may override any of them except `MAX_LEN` (262,144, a fixed
-project limit): the override is the `engine` section of the conductor's `residency` document, versioned
+dashboard's Memory plan panel may override any of them except `MAX_LEN` (the window the engine
+loaded with): the override is the `engine` section of the conductor's `residency` document, versioned
 like every conductor document. A key that is `live` applies from the next request on, under the
 engine lock; the others are read once, when the engine loads, so a change to them says "needs a
 restart" until the engine has restarted with it.
@@ -49,7 +49,10 @@ LIMITS: tuple = (
     ("MAX_LEN", "max_len", "tokens", False, "the context window"),
 )
 KEYS = tuple(k for k, *_ in LIMITS)
-LOCKED = {"MAX_LEN": "the context window is 262,144 tokens (a fixed project limit)"}
+LOCKED = {"MAX_LEN": "the context window is set when the engine loads (MAX_LEN, the setup guide)"}
+#: the window MEM_CEILING_GIB and MEM_PEAK_GIB are set at (ops/serve.env, every profile): a longer slot 0
+#: window adds its KV above it to both (server/app.py `_window_above_limits`, ENG-363)
+LIMITS_WINDOW = 262_144
 _BY_KEY = {k: (dest, unit, live, what) for k, dest, unit, live, what in LIMITS}
 
 

@@ -127,6 +127,69 @@ def test_a_capped_workspace_stops_growing_and_a_larger_prefill_raises_the_cap():
     return "the floor, the line, the cap; a larger prefill raises it; no cap for the 27B"
 
 
+def test_nemotron_h_workspace_is_flat_so_a_million_token_prefill_runs():
+    """ENG-363: NemotronH's prefill workspace does not grow with the prompt (3.34 GiB above the engine at
+    131,054 tokens, 3.18 at 249,983 on Super VL): its adapter says so, and a 1,000,000-token prefill with
+    the engine at the live numbers (80.6 GiB allocated, 82.4 reserved, peak 94.8 with slot 0's window
+    and three side slots) is admitted. The 27B's line refused it on 2026-10-16 ("needs 107.3 GiB")."""
+    from types import SimpleNamespace
+
+    from engine.models.nemotron_h.serving import NemotronHServing
+    srv = NemotronHServing.__new__(NemotronHServing)
+    srv.st = SimpleNamespace(conv={}, ssm={})
+    srv.cfg = SimpleNamespace(kv_bytes_per_token=lambda dtype_bytes: 8192)
+    c = srv.cost()
+    assert c.view_bytes_per_token == 8192
+    fa = FakeAlloc(80.6, reserve_gib=1.8)
+    m = budget(fa, ceiling=90.8, peak=94.8, ws_floor=c.workspace_floor, ws_per_token=c.workspace_per_token,
+               ws_cap=c.workspace_cap)
+    assert m.workspace(8192) == int(3.5 * GIB) and m.workspace(1_000_000) == int(4.0 * GIB)
+    g = m.gate(1_000_000)
+    assert g["workspace"] == int(4.0 * GIB)
+    m.done()
+    old = budget(FakeAlloc(80.6, reserve_gib=1.8), ceiling=90.8, peak=94.8)
+    try:
+        old.gate(1_000_000)
+        raise AssertionError("the 27B's line admitted a 1,000,000-token prefill")
+    except MemoryRefused:
+        pass
+    # what a long prefill teaches stays under the cap (3.34 GiB at 131,054 tokens)
+    m.mark()
+    fa.take(int(3.34 * GIB))
+    fa.give(int(3.34 * GIB))
+    m.prefilled(131_054)
+    assert m.workspace(1_000_000) == int(4.0 * GIB)
+    return "4.0 GiB at 1,000,000 tokens: admitted; the 27B's 28 GiB: refused"
+
+
+def test_slot_0s_window_above_the_limits_window_raises_ceiling_and_peak():
+    """ENG-363: MEM_CEILING_GIB and MEM_PEAK_GIB are set at a 262,144-token window; slot 0 at 1,048,576
+    holds 786,432 more rows of KV from the load on (pool off), so both limits go up by them (6 GiB on
+    Super VL), kept in `fixed` like the side slots'. At 262,144, with limits off or with no engine
+    cost, nothing moves."""
+    from types import SimpleNamespace
+
+    from server import app as A
+    from server import memlimits
+    eng = SimpleNamespace(cost=lambda: SimpleNamespace(view_bytes_per_token=8192))
+    old = A.STATE.get("mem")
+    try:
+        m = A.STATE["mem"] = budget(FakeAlloc(80), ceiling=76, peak=80)
+        A._window_above_limits(SimpleNamespace(max_len=1_048_576), eng)
+        extra = 8192 * (1_048_576 - memlimits.LIMITS_WINDOW)
+        assert extra == 6 * GIB
+        assert (m.ceiling, m.peak, m.fixed) == (int(76 * GIB) + extra, int(80 * GIB) + extra, extra)
+        m = A.STATE["mem"] = budget(FakeAlloc(80), ceiling=76, peak=80)
+        A._window_above_limits(SimpleNamespace(max_len=262_144), eng)
+        assert (m.ceiling, m.fixed) == (int(76 * GIB), 0)
+        m = A.STATE["mem"] = budget(FakeAlloc(80), ceiling=0, peak=0)      # limits off
+        A._window_above_limits(SimpleNamespace(max_len=1_048_576), eng)
+        assert m.fixed == 0
+    finally:
+        A.STATE["mem"] = old
+    return "+6 GiB at 1,048,576; nothing at 262,144 or with the limits off"
+
+
 def test_a_long_prefill_sheds_store_anchors_stash_park_pin_in_that_order_until_it_fits():
     fa = FakeAlloc(70)
     m = budget(fa)

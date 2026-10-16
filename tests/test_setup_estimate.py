@@ -16,7 +16,7 @@ The test matrix:
   5  the context that fits is floor(room / bytes a token) over all slots, and a note gives a slot's
      share capped by the window                          test_the_context_that_fits
   6  the selection check: unknown ids are 400s, a tool whose dependency is off, a required tool off,
-     slots or windows out of range, an unknown key, a field value that is not the field's are 422s
+     slots (past the engine's 16) or windows out of range, an unknown key, a field value that is not the field's are 422s
      with a code and the field; what the body leaves out is the registry's default, the side window
      the window                                          test_the_selection_check
   7  the fixture: at least 30 cases over every profile, every tool, slots 1 to 4, five windows, the
@@ -153,7 +153,8 @@ def test_the_selection_check():
     _refused(dict(base, components={"drafters": False}), 422, "invalid_combination", "drafters")
     _refused(dict(base, components={"disk_tier": False}), 422, "invalid_combination", "nvme_spill")
     _refused(dict(base, components={"vision": "yes"}), 422, "invalid_selection")
-    _refused(dict(base, slots=5), 422, "out_of_range", "slots")
+    _refused(dict(base, slots=17), 422, "out_of_range", "slots")
+    assert E.check(m, dict(base, slots=16))["slots"] == 16     # past the card's measured 4: memory decides
     _refused(dict(base, slots=0), 422, "out_of_range", "slots")
     _refused(dict(base, slots=2.5), 422, "out_of_range", "slots")
     _refused(dict(base, window=512), 422, "out_of_range", "window")
@@ -219,7 +220,9 @@ def _cases() -> list[dict]:
     case("a cent over the budget", floor_gb=round(floor + 0.01, 2), **sel)
     case("methods and advanced fields do not move the memory", methods={"reasoning_effort": "low"},
          advanced={"port": 8080})
-    case("refused: slots 5", slots=5)
+    case("5 slots, past the card's measured 4: memory decides", slots=5, window=32_768)
+    case("16 slots, the engine's limit, pool off: over the budget", slots=16, kv_pool=False)
+    case("refused: slots 17, above the engine's limit", slots=17)
     case("refused: window 512", window=512)
     case("refused: a window off the 8,192 step", window=100_000)
     case("refused: a side window off the step", side_window=20_000)
@@ -233,7 +236,7 @@ def _cases() -> list[dict]:
         for w in (131_072, 262_144):
             out.append({"name": f"Flash-Next {p['id']}, window {w:,}",
                         "selection": {"model": f["id"], "profile": p["id"], "window": w}})
-    out.append({"name": "Flash-Next refused: two slots", "selection": {"model": f["id"], "slots": 2}})
+    out.append({"name": "Flash-Next, two slots (measured up to one)", "selection": {"model": f["id"], "slots": 2}})
     models = {m["id"]: m, f["id"]: f}
     for c in out:
         mm = models[c["selection"].get("model", m["id"])] if c["selection"].get("model") in models else m

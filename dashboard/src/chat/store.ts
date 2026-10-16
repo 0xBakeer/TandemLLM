@@ -162,6 +162,12 @@ export function interruptedMessage(c: Conversation): Message | null {
  *  of model calls, the sandbox failing), which the card then carries in its place. It said "The
  *  engine restarted" for every one, a run at its limit included. An answer from before the
  *  reason: its notice when it ends with one, else neutral words. */
+/** The card under an interrupted answer, or none while a Continue run writes into that same message
+ * (the card stayed under the new text until the run ended). */
+export function interruptCard(m: Message, runMessageId?: string | null): { text: string; notice: boolean } | null {
+  return runMessageId && runMessageId === m.id ? null : interruptWords(m);
+}
+
 export function interruptWords(m: Message): { text: string; notice: boolean } | null {
   if (m.status !== 'interrupted') return null;
   const last = m.parts[m.parts.length - 1];

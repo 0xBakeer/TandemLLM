@@ -107,6 +107,7 @@ class NemotronHEngine(NemotronHRef):
         self.max_len = max_len
         self.classes = K.classes(max_len)
         self._rb: dict = {}
+        self._attn: dict = {}
         self.host_ms: dict = {}
         m = {li: self.pre(li) + "mixer." for li in range(c.num_hidden_layers)}
         self._wc = {li: W[m[li] + "conv1d.weight"].reshape(c.conv_dim, -1).to(torch.bfloat16).contiguous()
@@ -284,7 +285,7 @@ class NemotronHEngine(NemotronHRef):
               "hidden": torch.zeros(M, c.hidden_size, dtype=self.dtype, device=dev),
               "proj": {li: torch.zeros(M, c.in_proj_dim, dtype=self.dtype, device=dev) for li in c.mamba_layers},
               "xbc": {li: torch.zeros(M, c.conv_dim, dtype=self.dtype, device=dev) for li in c.mamba_layers},
-              "attn": {}}
+              "tag": key[:-1] if isinstance(key, tuple) else None}
         if self.taps:
             rb["taps"] = torch.zeros(M, len(self.taps), c.hidden_size, dtype=self.dtype, device=dev)
         if M == 1:
@@ -294,6 +295,14 @@ class NemotronHEngine(NemotronHRef):
             h["mn"].numpy()[0] = 1
         self._rb[key] = rb
         return rb
+
+    def _attn_bufs(self, tag, M: int, ns: int) -> dict:
+        """ENG-363: attention's partials of an M-row call at class `ns`, one set for the row counts of a
+        power-of-two bucket of a slot (`tag`) instead of one a row count: a set is M x 32 MiB at class
+        2,048 (a 1,048,576-token window), and the 33 verify widths held up to 17 GiB. Each call writes
+        the partials it reads, so calls of one slot share them one after another."""
+        rows = min(1 << (M - 1).bit_length(), ROWS_MAX + 1)
+        return self._attn.setdefault((tag, ns, rows), {"rows": rows})
 
     @staticmethod
     def _key(slot, M: int):
@@ -405,7 +414,7 @@ class NemotronHEngine(NemotronHRef):
                     kv = qkv[r]
                     st.k[li].index_copy_(1, d["slot"], kv[:, Hq * D:(Hq + Hk) * D].reshape(M, Hk, D).transpose(0, 1))
                     st.v[li].index_copy_(1, d["slot"], kv[:, (Hq + Hk) * D:].reshape(M, Hk, D).transpose(0, 1))
-                    K.attn_rows(q[r], st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=rb["attn"].setdefault(ns, {}),
+                    K.attn_rows(q[r], st.k[li], st.v[li], d["ctl"], d["anc"], ns, bufs=self._attn_bufs(rb["tag"], M, ns),
                                 out=o[r])
                 out = self.lin(o.view(R, -1), self.W[m + "o_proj.weight"])
             else:
@@ -477,17 +486,16 @@ class NemotronHEngine(NemotronHRef):
     def decode_multi(self, items: list, graphs: dict | None = None) -> list:
         """One decode token of each of several states [(token, state, slot)] in one pass, every state
         advanced in place as by its own decode step, each row the bits of that state's lone decode step.
-        From `graphs` ((slot, class) of every state -> JointDecodeGraph), else eager."""
+        From `graphs` (engine/models/graph_lru.py: (slot, class) of every state -> JointDecodeGraph, the
+        most recent kept), else eager."""
         parts = []
         for token, st, slot in items:
             self.stage(token, st, slot)
             parts.append((st, self._rows_buffers(1, self._key(slot, 1)), 1, K.class_of(st.length + 1, st.cap)))
         if graphs is not None:
             key = tuple((slot, ns) for (_, _, slot), (_, _, _, ns) in zip(items, parts))
-            g = graphs.get(key)
-            if g is None:
-                g = graphs[key] = JointDecodeGraph(self, parts)
-                g.capture()
+            # a capture's warm-ups read the rows staged above
+            g = graphs.take(key, lambda: JointDecodeGraph(self, parts).captured())
             g.graph.replay()
         else:
             self._rows(parts, write=True)
@@ -888,6 +896,10 @@ class JointDecodeGraph:
             eng._rows(parts, write=True)
         torch.cuda.synchronize()
         _state_restore(saved)
+
+    def captured(self) -> "JointDecodeGraph":
+        self.capture()
+        return self
 
 
 class VerifyGraph:

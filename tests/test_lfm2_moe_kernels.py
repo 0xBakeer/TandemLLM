@@ -94,6 +94,19 @@ def test_qk_prep_and_attention_rows():
     assert torch.equal(q1[0], q[3])
     assert torch.equal(K.attn_rows(q[3:4], kc, vc, ctl[3:4], anc[3:4], ns)[0], o[3])
     assert torch.equal(K.attn_rows(q, kc, vc, ctl, anc, ns * 2), o)
+    # ENG-363: partials sized for 8 rows serve 4 rows and then 1 (a call reads only what it wrote);
+    # more rows than they hold is refused, never a buffer swapped under a captured graph
+    bufs = {"rows": 8}
+    assert torch.equal(K.attn_rows(q, kc, vc, ctl, anc, ns, bufs=bufs), o)
+    assert bufs["pacc"].shape[0] == 8 * HK * ns * 16
+    assert torch.equal(K.attn_rows(q[3:4], kc, vc, ctl[3:4], anc[3:4], ns, bufs=bufs)[0], o[3])
+    small = {"rows": 2}
+    K.attn_rows(q[:2], kc, vc, ctl[:2], anc[:2], ns, bufs=small)
+    try:
+        K.attn_rows(q, kc, vc, ctl, anc, ns, bufs=small)
+        raise AssertionError("4 rows in partials sized for 2")
+    except ValueError:
+        pass
 
 
 def test_router():

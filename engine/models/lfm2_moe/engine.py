@@ -418,18 +418,17 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         """One decode token of each of several states [(token, state, slot)] in one pass (`_rows`, the
         weights read once), every state advanced in place as by its own decode step (its conv states
         shift, its KV row lands at its length; `st.length` is the caller's), each row the bits of that
-        state's lone decode step. From `graphs` ((slot, class) of every state -> JointDecodeGraph), else
-        eager. Returns each state's row buffers (logits, next, hidden)."""
+        state's lone decode step. From `graphs` (engine/models/graph_lru.py: (slot, class) of every state ->
+        JointDecodeGraph, the most recent kept), else eager. Returns each state's row buffers (logits, next,
+        hidden)."""
         parts = []
         for token, st, slot in items:
             self.stage(token, st, slot)
             parts.append((st, self._rows_buffers(1, self._key(slot, 1)), 1, K.class_of(st.length + 1, st.cap)))
         if graphs is not None:
             key = tuple((slot, ns) for (_, _, slot), (_, _, _, ns) in zip(items, parts))
-            g = graphs.get(key)
-            if g is None:
-                g = graphs[key] = JointDecodeGraph(self, parts)
-                g.capture()                            # its warm-ups read the rows staged above
+            # a capture's warm-ups read the rows staged above
+            g = graphs.take(key, lambda: JointDecodeGraph(self, parts).captured())
             g.graph.replay()
         else:
             self._rows(parts, write=True)
@@ -727,6 +726,10 @@ class JointDecodeGraph:
             eng._rows(parts, write=True)
         torch.cuda.synchronize()
         _state_restore(saved)
+
+    def captured(self) -> "JointDecodeGraph":
+        self.capture()
+        return self
 
 
 class VerifyGraph:

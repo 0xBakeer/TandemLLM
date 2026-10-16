@@ -423,14 +423,20 @@ def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Te
     b = bufs if bufs is not None else {}
     n = M * HK * ns * BM
     pm = b.get("pm")
-    if pm is None or pm.shape[0] != n:
-        pm = torch.empty(n, dtype=torch.float32, device=q.device)
+    if pm is None or pm.shape[0] < n:
+        # `bufs["rows"]`: the row count the partials are sized for, shared by calls of fewer rows (written
+        # whole before they are read); a buffer is never replaced under a graph that captured it
+        if pm is not None and b.get("rows"):
+            raise ValueError(f"{M} rows in partials sized for {b['rows']}")
+        cap = max(M, int(b.get("rows") or M)) * HK * ns * BM
+        pm = torch.empty(cap, dtype=torch.float32, device=q.device)
         pl = torch.empty_like(pm)
-        pacc = torch.empty(n, D, dtype=torch.float32, device=q.device)
+        pacc = torch.empty(cap, D, dtype=torch.float32, device=q.device)
         if bufs is not None:
             bufs.update(pm=pm, pl=pl, pacc=pacc)
     else:
         pl, pacc = b["pl"], b["pacc"]
+    pm, pl, pacc = pm[:n], pl[:n], pacc[:n]
     if out is None:
         out = torch.empty(M, HQ, D, dtype=torch.bfloat16, device=q.device)
     _attn_split[(M, HK, ns)](q, kc, vc, ctl, anc, pm, pl, pacc, kc.stride(0), kc.stride(1), vc.stride(0), vc.stride(1),

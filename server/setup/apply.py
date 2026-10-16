@@ -874,7 +874,7 @@ class Runner:
     def _steps(self) -> bool:
         spec = self.spec
         self.step("check", "running")
-        m = registry.get(spec["model"])
+        m = device_mod.windowed(registry.get(spec["model"]))
         if m is None:
             return self._fail("check", f"no model {spec['model']!r} in models/")
         if spec.get("kind") == "reset":

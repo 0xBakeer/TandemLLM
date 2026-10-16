@@ -534,10 +534,13 @@ def _lane_room(job, where: str) -> bool:
 
 def _par_health() -> dict:
     """`/health`'s `parallel`: the pool's report and what the side slots read from the disk tier
-    (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader)."""
+    (`side_disk`: lookups, hits, tokens restored, failed restores; None without the reader), and the
+    joint decode graphs the engine keeps (`joint_graphs`, engine/models/graph_lru.py; None without)."""
     out = dict.get(STATE, "pool").report()
     r = dict.get(STATE, "disk_side")
     out["side_disk"] = r.report() if r is not None else None
+    jg = getattr(getattr(dict.get(STATE, "engine"), "fn", None), "__dict__", {}).get("joint_graphs")
+    out["joint_graphs"] = jg.report() if hasattr(jg, "report") else None
     if kvpool.POOL is not None:
         out["kv_pool"] = kv_pool_report()
     return out
@@ -4295,6 +4298,7 @@ def _kv_after_load(a) -> None:
     eng = dict.get(STATE, "engine")
     pages = getattr(getattr(eng, "kv", None), "pages", None)
     if pool is None or pages is None:
+        _window_above_limits(a, eng)
         return
     static = sum(b.nbytes for b in pages.bufs)
     mem = dict.get(STATE, "mem")
@@ -4311,6 +4315,24 @@ def _kv_after_load(a) -> None:
     print(f"[kv-pool] on: slot 0 window {eng.kv.max_len:,} rows reserved as "
           f"{_gib(static)} GiB of addresses, page {pages.bufs[0].page >> 20} MiB, hard floor "
           f"{_gib(pool.hard_floor)} GiB, margin {pool.margin_rows} rows", flush=True)
+
+
+def _window_above_limits(a, eng) -> None:
+    """ENG-363: slot 0's window above the one the limits are set at (memlimits.LIMITS_WINDOW) holds
+    its KV from the load on when the pool is off: the policy's ceiling and peak go up by the KV of
+    the rows above it, as they do for the side slots, so the caches are not shed and a long prefill
+    not refused for slot 0's own window (Super VL at 1,048,576 tokens: +6 GiB)."""
+    mem = dict.get(STATE, "mem")
+    if mem is None or not mem.on or eng is None or not hasattr(eng, "cost"):
+        return
+    extra = int(eng.cost().view_bytes_per_token) * max(0, int(a.max_len) - memlimits.LIMITS_WINDOW)
+    if extra <= 0:
+        return
+    mem.fixed += extra             # kept when a residency document sets the limits again
+    mem.ceiling += extra
+    mem.peak += extra
+    print(f"[memory] ceiling and peak +{_gib(extra)} GiB for slot 0's window above "
+          f"{memlimits.LIMITS_WINDOW:,} tokens: {_gib(mem.ceiling)} / {_gib(mem.peak)} GiB", flush=True)
 
 
 def kv_pool_report() -> dict | None:

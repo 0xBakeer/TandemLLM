@@ -77,7 +77,7 @@ Three requests at once with LiLiCorr and the lookup run at 72.1~tok/s in total, 
 
 \section{Super VL 120B-A12B}\label{sec:nh-supervl}\index{Nemotron 3.5 Super VL}
 
-Nemotron 3.5 Super VL 120B-A12B has Bolt's layout at a larger size: 88 layers (40 Mamba2, 40 mixture-of-experts, 8 attention), 512 experts a layer with 22 a token and one shared expert, and one MTP block. The checkpoint reads 1,048,576 tokens of context; the profiles serve 262,144. It is the fifth model TandemLLM serves, from release 0.11.0, text only.
+Nemotron 3.5 Super VL 120B-A12B has Bolt's layout at a larger size: 88 layers (40 Mamba2, 40 mixture-of-experts, 8 attention), 512 experts a layer with 22 a token and one shared expert, and one MTP block. The checkpoint reads 1,048,576 tokens of context; the setup guide takes a window up to that, 262,144 by default. Needles were checked to 249,983 prompt tokens; a 1,000,000-token prompt is not measured yet. It is the fifth model TandemLLM serves, from release 0.11.0, text only.
 
 Three profiles run it. Two are our EXL3 packs, converted from NVIDIA's BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with a patch for Super VL's layout; each is a public repository \code{0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-<bpw>}, pinned by commit. The third reads NVIDIA's NVFP4 release as stored: ModelOpt NVFP4 for the routed and shared experts, FP8 with a tensor scale for the Mamba2 and attention projections and the head (\code{tools/nvfp4_relu2.py}). A decode token reads 10.1~GB of that release.
 

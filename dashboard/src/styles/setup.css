@@ -1800,6 +1800,135 @@ a.ccard-license:hover {
   width: 220px;
   font-family: var(--font-mono);
 }
+/* VIS-199: parallel chats, − / the count / +. One joined control on an inset well: the count in
+   the middle in the readout's mono figures, the two buttons raised inside it (outer radius 10, the
+   Chat tab's control radius; inner 7 = 10 - the 3 px well). The lines under it span the field. */
+.stepper {
+  display: inline-grid;
+  grid-template-columns: 40px 60px 40px;
+  gap: 3px;
+  height: 42px;
+  padding: 3px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+.stepper:focus-within:has(.stepper-in:focus-visible) {
+  box-shadow: var(--focus);
+}
+.stepper.is-bad {
+  border-color: var(--err);
+}
+.stepper-btn {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: var(--bg-3);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color 0.12s, transform 0.08s;
+}
+.stepper-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+}
+.stepper-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--cobalt) 18%, var(--bg-3));
+}
+.stepper-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.stepper-btn:disabled {
+  background: transparent;
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+.stepper-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--cobalt-hi);
+}
+.stepper-in {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+}
+.stepper-in:focus,
+.stepper-in:focus-visible {
+  box-shadow: none;
+}
+/* a window: room for 1,048,576, the short form ("256k") beside it */
+.stepper-wide {
+  grid-template-columns: 40px 112px 40px;
+}
+.stepper-wide .stepper-in {
+  font-size: var(--fs-md);
+}
+.stepper-hint {
+  min-width: 36px;
+  color: var(--ink-2);
+  font-size: var(--fs-sm);
+}
+.stepper.is-bad .stepper-in {
+  color: var(--err);
+}
+.pfield-slots.is-bad {
+  border-color: var(--err);
+}
+.slots-say {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+}
+.slots-say p {
+  margin: 0;
+}
+.slots-err {
+  color: var(--err);
+  font-weight: 600;
+}
+.slots-note::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 7px 1px 1px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--warn);
+}
+.spar-slot.is-off {
+  visibility: hidden;
+}
+.setup-nav.has-why {
+  flex-wrap: wrap;
+  background: var(--bg);
+  border-top: 1px solid var(--rule);
+}
+.setup-nav-why {
+  order: -1;
+  flex-basis: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--err);
+  font-size: var(--fs-sm);
+}
 .floor-ctl {
   display: flex;
   align-items: center;
@@ -1836,7 +1965,7 @@ a.ccard-license:hover {
 }
 .spar-slot {
   display: grid;
-  grid-template-columns: 14px 1fr 36px;
+  grid-template-columns: 34px 1fr 36px;
   align-items: center;
   gap: 8px;
   font-size: var(--fs-xs);
@@ -3831,6 +3960,14 @@ qse-wren-figure::before {
     min-height: 44px;
     min-width: 44px;
   }
+  .stepper {
+    grid-template-columns: 48px 64px 48px;
+    height: 50px;
+    justify-self: start;
+  }
+  .stepper-wide {
+    grid-template-columns: 48px 124px 48px;
+  }
   .rv-fixes li {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -3904,8 +4041,12 @@ qse-wren-figure::before {
   .mt-bar,
   .wmeter-bar span,
   .spar-slot-win,
-  .spar-slot-fit {
+  .spar-slot-fit,
+  .stepper-btn {
     transition: none !important;
+  }
+  .stepper-btn:active:not(:disabled) {
+    transform: none;
   }
   /* still poses: the open mouth half open, the mini box on its field */
   .goldbox[data-mouth='open'] .gb-m-open {

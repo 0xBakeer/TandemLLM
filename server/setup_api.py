@@ -91,7 +91,7 @@ def device(app) -> dict:
 
 
 def _model(h, mid: str) -> dict | None:
-    m = registry.get(mid)
+    m = device_mod.windowed(registry.get(mid))
     if m is None:
         _err(h, 404, "unknown_model", f"no model {mid!r} in models/")
     return m
@@ -198,7 +198,7 @@ def community_body() -> dict:
 def selection_model(body) -> dict:
     """The model a selection names, or SelectionError (400 unknown_model)."""
     mid = body.get("model") if isinstance(body, dict) else None
-    m = registry.get(mid) if isinstance(mid, str) else None
+    m = device_mod.windowed(registry.get(mid)) if isinstance(mid, str) else None
     if m is None:
         raise estimate_mod.SelectionError(400, "unknown_model", f"no model {mid!r} in models/")
     return m

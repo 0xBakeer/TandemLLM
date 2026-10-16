@@ -281,7 +281,7 @@ def test_invalid_calls_are_repaired_once():
     assert len(model.prompts) == 2
     assert "there is no tool 'finish'" in model.prompts[1], model.prompts[1][-400:]
     assert w.stats["tool_invalid"] == 1
-    bad = call_xml("set_field", step="parallelism", field="slots", value=9)
+    bad = call_xml("set_field", step="parallelism", field="slots", value=17)
     w, model = _wren(Scripted(replies=[bad, bad, bad, bad]))
     _loaded(w)
     ev = _events(w)
@@ -330,8 +330,8 @@ def test_one_repair_then_words_with_the_tools_off():
     """VIS-91: an invalid call gets one repair; when that is invalid too the model answers in
     words with no tools in the prompt, and the turn says nothing changed."""
     _on_disk()
-    bad = call_xml("set_field", step="parallelism", field="slots", value=9)
-    w, model = _wren(Scripted(replies=[bad, bad, "Four is the most this model allows."]))
+    bad = call_xml("set_field", step="parallelism", field="slots", value=17)
+    w, model = _wren(Scripted(replies=[bad, bad, "Sixteen is the most the engine runs."]))
     _loaded(w)
     ev = _events(w)
     assert not [e for e in ev if e["type"] == "tool_call"], ev
@@ -339,7 +339,7 @@ def test_one_repair_then_words_with_the_tools_off():
     assert model.prompts[1].endswith(json.dumps(tools.definitions(M))), "the repair has the tools"
     assert model.prompts[2].endswith("[]"), model.prompts[2][-200:]   # the words: no tools at all
     text = "".join(e.get("delta", "") for e in ev)
-    assert text == "Four is the most this model allows.", repr(text)
+    assert text == "Sixteen is the most the engine runs.", repr(text)
     assert ev[-1] == {"type": "done", "finish": "stop", "sources": ev[-1]["sources"],
                       "unchanged": True}, ev[-1]
     assert w.stats["tool_invalid"] == 2 and w.stats["forced_words"] == 1
@@ -454,7 +454,9 @@ def test_the_tool_checks():
         assert why is None, (name, args, why)
     assert tools.check(M, "set_field", {"step": "parallelism", "field": "window",
                                         "value": "65536"})[0]["value"] == 65536
-    bad = [("set_field", {"step": "parallelism", "field": "slots", "value": 9}),
+    # VIS-199: the engine's 16 is the cap, not the card's measured 4
+    assert tools.check(M, "set_field", {"step": "parallelism", "field": "slots", "value": 9})[1] is None
+    bad = [("set_field", {"step": "parallelism", "field": "slots", "value": 17}),
            ("set_field", {"step": "parallelism", "field": "nope", "value": 1}),
            ("set_field", {"step": "review", "field": "slots", "value": 1}),
            ("set_field", {"step": "methods", "field": "served_model", "value": "a; reboot"}),

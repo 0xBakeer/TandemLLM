@@ -128,7 +128,7 @@ test('@read the tiles and every step with the box data, from what the box runs n
 
   await page.locator('.setup-next').click();
   await expect(page.locator('.setup-step')).toHaveAttribute('data-step', 'parallelism');
-  await expect(page.locator('[data-field="parallelism.slots"] .seg-btn.is-on')).toHaveText(new RegExp(`^${current.selection.slots}`));
+  await expect(page.locator('#pf-slots-in')).toHaveValue(String(current.selection.slots));
   await shot(page, '4-parallelism');
 
   await page.locator('.setup-next').click();
