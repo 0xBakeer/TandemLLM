@@ -2,6 +2,18 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.11.2 (unreleased)
+
+0.11.2 starts chatd, the Chat tab's service, with the engine, and the Chat tab says when chatd is down instead of switching to the in-browser mock. Every model writes the same text as in 0.11.1.
+
+### Chat tab and install
+
+- chatd starts with the engine (`tandem start`, `ops/start.sh`, the systemd unit, the Setup Guide) and stops with `tandem stop`; an engine restart leaves it running. The watchdog starts a chatd that died. `tandem chat start|stop|restart|status|logs`, a chatd line in `tandem status`, `QSE_CHATD=off` to opt out; the install's last message names the Chat tab (OPS-155).
+- `ops/chatd.sh` runs under the install's venv and reads the same secrets file as the engine; a start that fails exits 1 with the log. `ops/make-secrets.sh` writes the file the engine reads, so the Setup Guide's generated admin password takes effect on an installed box. `ops/chatd.service` runs from `~/TandemLLM` (OPS-153).
+- The Chat tab says when chatd is not running, with the command, instead of switching to the in-browser mock, which now loads only for `?chat=mock`; a key chatd refuses, an engine without chat routes and no answer are named too, and the tab checks again by itself (VIS-179). Reported by Aron (issue #3).
+
+Upgrade: run the installer again; chatd then starts with the engine. A chatd started earlier keeps the old code until `tandem chat restart`.
+
 ## 0.11.1, 2026-10-16
 
 0.11.1 fixes how chatd, the Chat tab's server, reaches the folders a chat's sandbox can write; update every box that runs the Chat tab. It gives Bolt's EXL3 packs 2.5 to 6.0 their StairCut price files, so drafting no longer runs slower than plain decoding on them, takes two contributions, names each weight pack's maker in the setup guide, and describes the install through the setup guide. Every model writes the same text as in 0.11.0.

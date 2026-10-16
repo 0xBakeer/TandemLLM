@@ -1,8 +1,8 @@
 #!/bin/bash
 # Make the access tokens for the :8000 service, once:
 #
-#   bash ops/make-secrets.sh                    creates ~/.qwen38-spark-engine/secrets.env (mode 600)
-#                                               with the metrics token only
+#   bash ops/make-secrets.sh                    creates secrets.env (mode 600) with the metrics token
+#                                               and the chat's forward key
 #   bash ops/make-secrets.sh --admin            the same, plus the admin password
 #   bash ops/make-secrets.sh --rotate [--admin] replaces the file (every dashboard session ends);
 #                                               an admin password already there stays one
@@ -16,9 +16,19 @@
 # it every admin route is open, so the server belongs on a trusted network (docs/server.md "The
 # admin rule"). 32 random bytes each, hex. The values are never printed: read them with `cat` on the
 # box when a client needs one. ops/start.sh sources the file.
+#
+# The file is the one the engine reads (OPS-153): QSE_SECRETS, else serve.env's QSE_SECRETS beside
+# this script (an install's DIR/state/secrets.env; the setup guide's apply job runs this script
+# without the engine's environment), else $QSE_STATE_DIR/secrets.env, else
+# ~/.qwen38-spark-engine/secrets.env.
 set -eu
-DIR="${QSE_STATE_DIR:-$HOME/.qwen38-spark-engine}"
-FILE="$DIR/secrets.env"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${QSE_SECRETS:-}" ] && [ -f "$HERE/serve.env" ]; then
+    QSE_SECRETS="$(set +eu; . "$HERE/serve.env" >/dev/null 2>&1; printf '%s' "${QSE_SECRETS:-}")"
+fi
+FILE="${QSE_SECRETS:-${QSE_STATE_DIR:+$QSE_STATE_DIR/secrets.env}}"
+FILE="${FILE:-$HOME/.qwen38-spark-engine/secrets.env}"
+DIR="$(dirname "$FILE")"
 ROTATE=0; ADMIN=0
 for a in "$@"; do
     case "$a" in

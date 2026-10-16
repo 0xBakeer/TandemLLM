@@ -14,8 +14,9 @@
 // panel's memory notes (SRV-471): 422.2 KB. 424 KB with the Setup Guide's job log and change list
 // (VIS-151, VIS-155) on top: 423.7 KB; a lazy install view measured 424.0 KB, so no split.
 // 425 KB with the sandbox's reason on a call and the attachment chip's tokens (VIS-167, VIS-169):
-// 424.2 KB. 426 KB with a live run's reasons on the Now figures and the slot row's owner
-// (VIS-181): 425.1 KB.
+// 424.2 KB.
+// 428 KB with a live run's reasons on the Now figures and the slot row's owner (VIS-181) and the
+// Chat tab's panel for a box whose chatd is down, its re-probe and banner (VIS-179): 427.3 KB.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -34,8 +35,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 426 KB)`);
-if (total > 426 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 428 KB)`);
+if (total > 428 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

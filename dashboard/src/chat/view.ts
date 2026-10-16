@@ -1,5 +1,5 @@
-// <qse-chat>: the Chat tab. Picks the backend (the server's /v1/chat-app, or the in-browser mock
-// with a badge), loads the capabilities and the conversation list, opens the chat in the route and
+// <qse-chat>: the Chat tab. Picks the backend (the server's /v1/chat-app; the in-browser mock with
+// a badge for ?chat=mock and the dev server; without the chat API the panel that names why, VIS-179), loads the capabilities and the conversation list, opens the chat in the route and
 // tails its event stream (a catch-up from the last seen event id, then live), and lays out the
 // rail, the thread with its composer, the panes workspace and the Context panel. One breakpoint at
 // 768 px (the shell's) turns the rail, the Context panel and the panes into a drawer and sheets;
@@ -22,7 +22,8 @@ import './composer';
 import './context-panel';
 import './panes';
 import './settings';
-import { pickBackend, VersionConflict, type ChatBackend, type Subscription } from './backend';
+import { isChatDown, pickBackend, probeChat, VersionConflict, type ChatBackend, type ChatDown, type Subscription } from './backend';
+import { downBanner, Reprobe } from './chat-down';
 import { attachLabel, initialAttachment, onEvent as attachEvent, onStreamState, onTick, type Attachment as Attach } from './connection';
 import { adopt, applyEvent, messageText } from './store';
 import { badge, notify, notifyKind } from './notify';
@@ -65,7 +66,11 @@ export class QseChat extends LightElement {
   @property({ attribute: false }) path: string[] = [];
 
   @state() private backend: ChatBackend | null = null;
-  @state() private backendReason: 'forced' | 'probed' | 'fallback' | null = null;
+  @state() private backendReason: 'forced' | 'probed' | 'dev' | null = null;
+  /** no chat API at boot (the panel), or a live tab that lost chatd (the banner) */
+  @state() private down: ChatDown | null = null;
+  @state() private lost = false;
+  @state() private probeTick = 0;
   @state() private caps: Capabilities | null = null;
   @state() private needSignIn = false;
   @state() private list: ConversationSummary[] = [];
@@ -107,6 +112,8 @@ export class QseChat extends LightElement {
   private floor = 0;
   /** the events applied lately, for a snapshot that arrives after some of them (store.adopt) */
   private recent: StampedEvent[] = [];
+  private reprobe: Reprobe | null = null;
+  private downClock: ReturnType<typeof setInterval> | null = null;
 
   // ---- lifecycle ------------------------------------------------------------------------------
 
@@ -131,6 +138,7 @@ export class QseChat extends LightElement {
     this.globalSub?.close();
     this.listPoll?.stop();
     if (this.tick) clearInterval(this.tick);
+    this.stopReprobe();
     super.disconnectedCallback();
   }
 
@@ -184,6 +192,23 @@ export class QseChat extends LightElement {
       mock: async () => new (await import('./mock')).MockChatBackend({ scenario }),
       remote: async () => new (await import('./remote')).RemoteChatBackend(),
     });
+    if (!choice.backend) {
+      this.down = choice.down;
+      this.startReprobe(async () => {
+        const d = await probeChat();
+        if (d) {
+          this.down = d;
+          return false;
+        }
+        this.down = null;
+        this.backend = new (await import('./remote')).RemoteChatBackend();
+        this.backendReason = 'probed';
+        await this.loadCaps();
+        if (!this.needSignIn) await this.afterSignIn();
+        return true;
+      }, true);
+      return;
+    }
     this.backend = choice.backend;
     this.backendReason = choice.reason;
     await this.loadCaps();
@@ -196,7 +221,8 @@ export class QseChat extends LightElement {
       this.caps = await this.backend!.capabilities();
       this.needSignIn = !!this.caps.session && this.caps.session.password_set && !this.caps.session.signed_in;
     } catch (e) {
-      this.say('warn', `The chat server did not answer: ${(e as Error).message}`);
+      if (isChatDown(e)) this.onLost();
+      else this.say('warn', `The chat server did not answer: ${(e as Error).message}`);
     }
   }
 
@@ -220,8 +246,39 @@ export class QseChat extends LightElement {
       this.list = r.conversations;
       this.folders = r.folders;
     } catch (e) {
-      this.say('warn', `Could not load the chats: ${(e as Error).message}`);
+      if (isChatDown(e)) this.onLost();
+      else if (!this.lost) this.say('warn', `Could not load the chats: ${(e as Error).message}`);
     }
+  }
+
+  // ---- no chat API (VIS-179) --------------------------------------------------------------------
+
+  private startReprobe(check: () => Promise<boolean>, clock = false): void {
+    this.stopReprobe();
+    this.reprobe = new Reprobe(check, () => (this.probeTick += 1));
+    this.reprobe.start();
+    // the panel's "next in N s"
+    if (clock) this.downClock = setInterval(() => (this.now = Date.now()), 1000);
+  }
+
+  private stopReprobe(): void {
+    this.reprobe?.stop();
+    this.reprobe = null;
+    if (this.downClock) clearInterval(this.downClock);
+    this.downClock = null;
+  }
+
+  /** a live tab's call answered 502 chat_unavailable: one banner, probes until chatd is back */
+  private onLost(): void {
+    if (this.lost) return;
+    this.lost = true;
+    this.startReprobe(async () => {
+      if (await probeChat()) return false;
+      this.lost = false;
+      this.stopReprobe();
+      await this.loadList();
+      return true;
+    });
   }
 
   // ---- route ------------------------------------------------------------------------------------
@@ -631,6 +688,7 @@ export class QseChat extends LightElement {
   // ---- render ---------------------------------------------------------------------------------
 
   render() {
+    if (this.down) return html`<div class="view ch ch-down-view"><qse-chat-down .down=${this.down} .probe=${this.reprobe} .now=${this.now} data-tick=${this.probeTick}></qse-chat-down></div>`;
     if (this.needSignIn) return this.renderSignIn();
     const c = this.conv;
     const section = this.section;
@@ -643,7 +701,7 @@ export class QseChat extends LightElement {
       if (e.dataTransfer?.files.length) this.composer?.acceptFiles(e.dataTransfer.files);
     }}>
       <aside class="ch-rail" aria-label="chats" ?hidden=${!this.phone && !this.railOpen && this.sheet !== 'rail'}>
-        <qse-chat-rail .list=${this.list} .folders=${this.folders} .active=${c?.id ?? null} .mock=${this.backend?.kind === 'mock'} .unread=${this.unread}
+        <qse-chat-rail .list=${this.list} .folders=${this.folders} .active=${c?.id ?? null} .mock=${this.backend?.kind === 'mock' ? this.mockNote : ''} .unread=${this.unread}
           @ch-open=${(e: CustomEvent<{ id: string }>) => this.goto(e.detail.id)}
           @ch-new=${() => void this.newChat()}
           @ch-rename=${(e: CustomEvent<{ id: string; title: string }>) => void this.rename(e.detail.id, e.detail.title)}
@@ -681,7 +739,7 @@ export class QseChat extends LightElement {
             : html`<h1 class="ch-title">Chat</h1><span class="ch-head-sub"><span class="beta-pill" title="The Chat tab is in beta">Beta</span></span>`}
         </div>
         <div class="ch-head-tools">
-          ${this.backend?.kind === 'mock' ? html`<span class="ch-mock-badge ch-mock-head" title=${this.backendReason === 'forced' ? 'opened with ?chat=mock' : 'the server has no chat routes yet; this is the in-browser mock'}>mock data</span>` : nothing}
+          ${this.backend?.kind === 'mock' ? html`<span class="ch-mock-badge ch-mock-head" title=${this.mockNote}>mock data</span>` : nothing}
           <button type="button" class="btn btn-ghost btn-icon ${panesOpen ? 'is-on' : ''}" aria-label="Panes" title="Panes: terminal, preview, files" ?disabled=${!c} aria-pressed=${panesOpen} @click=${() => this.togglePanes()}>${icon('terminal')}${panes.length ? html`<span class="ch-count">${panes.length}</span>` : nothing}</button>
           <button type="button" class="btn btn-ghost btn-icon ${(this.ctxOpen && !this.narrow) || this.sheet === 'ctx' ? 'is-on' : ''}" aria-label="Context panel" title="Context" aria-pressed=${(this.ctxOpen && !this.narrow) || this.sheet === 'ctx'} @click=${() => this.toggleCtx()}>${icon('panel')}</button>
           <span class="ch-more">
@@ -707,6 +765,7 @@ export class QseChat extends LightElement {
       </header>
       <div class="ch-body">
         <div class="ch-threadwrap">
+          ${this.lost ? downBanner() : nothing}
           ${c ? this.renderThread(c) : this.renderEmpty()}
           ${this.renderComposer(c)}
         </div>
@@ -753,8 +812,12 @@ export class QseChat extends LightElement {
       <p class="ch-empty-title">Talk to the box.</p>
       <p class="ch-empty-lead muted">One model on this machine, with a sandbox, tools and the engine's own numbers beside every answer. A chat keeps running when you close the tab; open it on the phone and watch.</p>
       <div class="ch-starters">${STARTERS.map((s) => html`<button type="button" class="ch-starter" @click=${() => void this.send(s, [])}>${s}</button>`)}</div>
-      ${this.backend?.kind === 'mock' ? html`<p class="ch-empty-note small muted">Mock data: the server has no chat routes yet. Every answer here is scripted in the browser.</p>` : nothing}
     </div>`;
+  }
+
+  /** the mock's badge: why this tab runs on it */
+  private get mockNote(): string {
+    return this.backendReason === 'dev' ? 'dev server: no chat routes' : 'opened with ?chat=mock';
   }
 
   private renderComposer(c: Conversation | null): TemplateResult {

@@ -936,7 +936,7 @@ def test_a_failing_block_ab_stops_the_gate():
 
 def test_the_scripts_parse():
     for name in ("watchdog.sh", "start.sh", "stop.sh", "hold.sh", "engines.sh", "gate.sh",
-                 "roles.sh"):
+                 "roles.sh", "chatd.sh", "make-secrets.sh"):
         r = subprocess.run(["bash", "-n", os.path.join(OPS, name)], capture_output=True, text=True)
         assert r.returncode == 0, f"{name}: {r.stderr}"
 

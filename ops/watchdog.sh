@@ -14,6 +14,30 @@ LOGS="$REPO/logs"; mkdir -p "$LOGS"
 STATE="$LOGS/watchdog.fails"; WD="$LOGS/watchdog.log"
 NEED="${WATCHDOG_FAILS:-3}"
 say() { echo "$(date -Is) $*" >> "$WD"; }
+# OPS-155: the engine answers and chatd does not: start chatd, never the engine's restart for it. At
+# most 3 starts in an hour (logs/watchdog.chatd: the hour and the count), then one "giving up"
+# line until the next hour; a chatd found running clears the count. QSE_CHATD=off or setup mode
+# (run/setup-pending): nothing.
+chatd_check() {
+    local f="$LOGS/watchdog.chatd" hour h n
+    [ "${QSE_CHATD:-on}" = "off" ] && return 0
+    [ -f "$REPO/ops/chatd.sh" ] && [ ! -f "$REPO/run/setup-pending" ] || return 0
+    if bash "$REPO/ops/chatd.sh" status >/dev/null 2>&1; then rm -f "$f"; return 0; fi
+    hour="$(date +%Y%m%d%H)"
+    h=""; n=0; [ -f "$f" ] && read -r h n < "$f"
+    [ "${h:-}" = "$hour" ] || n=0
+    n="${n:-0}"
+    if [ "$n" -ge 3 ]; then
+        [ "$n" = 3 ] && { say "chatd: 3 starts this hour did not keep it running; giving up until the next hour"; echo "$hour 4" > "$f"; }
+        return 0
+    fi
+    echo "$hour $((n + 1))" > "$f"
+    if bash "$REPO/ops/chatd.sh" start >> "$WD" 2>&1; then
+        say "chatd was not running; started it ($((n + 1))/3 this hour)"
+    else
+        say "chatd was not running and did not start ($((n + 1))/3 this hour); log: $REPO/logs/chatd.log"
+    fi
+}
 
 # A fourth state, added 2026-09-18: PAUSED. A measurement takes the board lock and drains :8000 on
 # purpose, and a supervisor that cannot tell a deliberate stop from a crash restarts the service
@@ -32,7 +56,7 @@ fi
 # code "000000" in every log line of 2026-09-19.
 CODE="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://127.0.0.1:$PORT/health")"
 CODE="${CODE:-000}"
-if [ "$CODE" = "200" ]; then echo 0 > "$STATE"; rm -f "$LOGS/loading.since"; exit 0; fi
+if [ "$CODE" = "200" ]; then echo 0 > "$STATE"; rm -f "$LOGS/loading.since"; chatd_check; exit 0; fi
 if [ "$CODE" = "503" ]; then say "draining (503), leaving it alone"; echo 0 > "$STATE"; exit 0; fi
 # The box lock. Every hold runs as `flock ~/.qwen38-box.flock ops/hold.sh...`, and a held
 # lock means somebody owns the board: the silence is theirs, as with the pause file, which a hold
