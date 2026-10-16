@@ -136,7 +136,7 @@ export function planToolCall(call: RawToolCall | Pick<SetupToolCall, 'name' | 'a
     if (f) return { ok: true, kind: 'explain', target: { step: 'methods', field: f.field.id }, result: `${f.field.label}: ${f.field.what}` };
     const p = m.profiles.find((x) => x.id === id);
     if (p) return { ok: true, kind: 'explain', target: { step: 'weights', field: 'profile' }, result: `${p.label}: KL ${p.quality.kl_vs_bf16 ?? '?'}, ${p.weights_gib} GiB in memory${p.note ? '. ' + p.note : ''}` };
-    const par: Record<string, string> = { slots: S.slotsWhat, window: S.windowWhat, side_window: S.sideWindowWhat, kv_pool: S.kvPoolWhat, floor_gb: S.floorWhat };
+    const par: Record<string, string> = { slots: S.slotsWhat, window: S.windowWhat, side_window: S.sideWindowWhat(sel.slots), kv_pool: S.kvPoolWhat, floor_gb: S.floorWhat };
     if (par[id]) return { ok: true, kind: 'explain', target: { step: 'parallelism', field: id }, result: par[id] };
     return fail(S.tool.noField('any', id));
   }

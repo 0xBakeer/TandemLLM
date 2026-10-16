@@ -24,6 +24,7 @@ from engine.methods.device import device_id
 from engine.methods.manifest import Manifest
 from engine.methods.staircut import PriceModel
 from engine.models.adapter import Capabilities, CostModel
+from engine.models.graph_lru import joint_graphs
 from engine.models.lfm2_moe import kernels as K
 from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
 from engine.models.state import SectionState
@@ -322,7 +323,7 @@ class Lfm2MoeServing:
                 s._at(start)
                 s._ensure(start + 1 + CAPTURE_ROWS)
             rbs = fn.decode_multi([(int(block.view(-1)[0]), s.st, s.slot) for s, block, _, _ in items],
-                                  graphs=fn.__dict__.setdefault("joint_graphs", {}))
+                                  graphs=joint_graphs(fn))
             out = []
             for (s, block, _, _), rb in zip(items, rbs):
                 s.picks, s._hidden = rb["next"][:1], rb["hidden"][:1].unsqueeze(0)

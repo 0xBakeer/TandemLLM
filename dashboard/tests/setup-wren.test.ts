@@ -38,7 +38,9 @@ describe('planToolCall', () => {
     expect(planToolCall({ name: 'set_field', args: '{"step": 4, "field": "slots", "value": "3"}' }, ctx())).toMatchObject({ ok: true, actions: [{ type: 'parallel', key: 'slots', value: 3 }] });
   });
   it('a value outside the range or the enum is rejected with the reason', () => {
-    expect(planToolCall({ name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 9 } }, ctx())).toEqual({ ok: false, error: 'The arguments are wrong: slots: at most 4.' });
+    // VIS-199: the card's measured 4 is no cap; the engine's 16 is
+    expect(planToolCall({ name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 17 } }, ctx())).toEqual({ ok: false, error: 'The arguments are wrong: slots: at most 16.' });
+    expect(planToolCall({ name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 9 } }, ctx())).toMatchObject({ ok: true, actions: [{ type: 'parallel', key: 'slots', value: 9 }] });
     expect(planToolCall({ name: 'set_field', args: { step: 'methods', field: 'reasoning_effort', value: 'max' } }, ctx())).toMatchObject({ ok: false, error: expect.stringMatching(/expected one of low, medium, xhigh/) });
   });
   it('an unknown component is rejected', () => {

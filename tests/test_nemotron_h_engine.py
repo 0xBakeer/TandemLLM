@@ -147,6 +147,35 @@ def test_verify_rows_are_the_decode_steps():
         assert torch.equal(_decode(eng, s2, [7, 19, 44])[2], tree[3]), name
 
 
+def test_verify_widths_share_attention_partials():
+    """ENG-363: the verify widths of a power-of-two bucket share one set of attention partials per slot
+    and class (5 to 8 rows: one set sized for 8), and each width's rows are still the decode steps'
+    bits, a smaller block right after a larger one in the same set included."""
+    if SKIP:
+        return SKIP
+    cfg, eng, ref = tiny()
+    st = eng.new_state(256)
+    eng.prefill(PROMPT, st)
+    L, s0 = st.length, _snap(st)
+    toks = [7, 19, 23, 44, 31, 60, 5, 9]
+    want = _decode(eng, st, toks)
+    for M in (8, 5, 3, 4, 6):
+        st.length = L
+        _put(st, s0)
+        eng.stage_rows(toks[:M], chain(M), st)
+        got = eng.rows_step(st, M)
+        assert torch.equal(got[:M], want[:M]), M
+    ns = K.class_of(L + 8, st.cap)
+    assert eng._attn_bufs(None, 5, ns) is eng._attn_bufs(None, 8, ns)
+    assert eng._attn_bufs(None, 3, ns) is eng._attn_bufs(None, 4, ns)
+    assert eng._attn_bufs(None, 4, ns) is not eng._attn_bufs(None, 5, ns)
+    assert eng._attn_bufs("s1", 8, ns) is not eng._attn_bufs(None, 8, ns)   # a side slot keeps its own
+    b8 = eng._attn_bufs(None, 8, ns)
+    assert b8["pacc"].shape[0] == 8 * cfg.num_key_value_heads * ns * 16
+    assert eng._attn_bufs(None, 33, ns)["rows"] == 33 and eng._attn_bufs(None, 20, ns)["rows"] == 32
+    return f"widths 8, 5, 3, 4, 6 from {len([k for k in eng._attn if k[0] is None and k[1] == ns])} sets"
+
+
 def test_commit_a_moved_path_and_a_rollback():
     if SKIP:
         return SKIP
@@ -241,6 +270,31 @@ def test_graphs_replay_the_eager_bits():
         eng.commit(b, [0, 1, 3])
         assert a.length == b.length and _same_state(a, b)
     return f"{len(vg)} verify, {len(cg)} commit graphs"
+
+
+def test_joint_decode_graphs_are_kept_by_recency_and_recaptured_with_the_same_bits():
+    """ENG-363: the joint decode graphs live in a bounded cache (engine/models/graph_lru.py); with room
+    for one, three sets of slots in turn drop and capture again, every row its state's lone decode
+    step's bits (GPU only)."""
+    if SKIP or DEV != "cuda":
+        return SKIP or "skipped: CUDA graphs need the GPU"
+    from engine.models.graph_lru import GraphLRU
+    cfg, eng, ref = tiny()
+    states, alone = [eng.new_state(256) for _ in range(3)], [eng.new_state(256) for _ in range(3)]
+    for st, al, n in zip(states, alone, (14, 9, 5)):
+        eng.prefill(PROMPT[:n], st)
+        eng.prefill(PROMPT[:n], al)
+    lru = GraphLRU(cap=1)
+    sets = [(0, 1), (1, 2), (0, 1, 2), (0, 1)]
+    for tok, pick in zip((7, 19, 23, 44), sets):
+        rbs = eng.decode_multi([(tok, states[j], f"g{j}") for j in pick], graphs=lru)
+        for j, rb in zip(pick, rbs):
+            assert torch.equal(rb["logits"][:1], _decode(eng, alone[j], [tok])), (pick, j)
+            states[j].length += 1
+    for st, al in zip(states, alone):
+        assert st.length == al.length and _same_state(st, al)
+    assert len(lru) == 1 and lru.captures == 4 and lru.evicted == 3
+    return f"4 rounds, {lru.captures} captures, {lru.evicted} dropped: the lone bits"
 
 
 def test_mtp_head_drafts_and_resumes():

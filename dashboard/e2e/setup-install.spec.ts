@@ -2,7 +2,7 @@
 // downloads and the install page of a finished job against the mock, desktop and 390 px. @mock
 import { expect, test, type Page } from '@playwright/test';
 import { IS_MOCK, noHorizontalOverflow } from './helpers';
-import { open, setupMock } from './setup-helpers';
+import { open, setupMock, setSlots } from './setup-helpers';
 
 test.skip(!IS_MOCK, 'the setup guide specs drive the mock (POST /__mock/setup)');
 
@@ -16,7 +16,7 @@ async function install(page: Page) {
   await open(page, `#/setup/${MODEL}/weights`);
   await page.locator('[data-profile-card="exl3-6.0"]').click();
   await open(page, `#/setup/${MODEL}/parallelism`);
-  await page.locator('[data-field="parallelism.slots"] .seg-btn', { hasText: '2' }).click();
+  await setSlots(page, 2);
   await open(page, `#/setup/${MODEL}/review`);
   await expect(page.locator('.rv-table tbody tr').first()).toBeVisible();
   await page.locator('.setup-finish').click();

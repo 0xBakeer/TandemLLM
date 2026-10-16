@@ -167,6 +167,19 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
     return out
 
 
+def windowed(m: dict | None) -> dict | None:
+    """ENG-363: the model with its window range up to what the checkpoint on this box holds
+    (registry.with_config_window over the folders of its profiles with weights present); the card's
+    range when none is here or the disk cannot be read."""
+    if m is None:
+        return None
+    try:
+        disk = on_disk(m)
+    except Exception:                                              # noqa: BLE001
+        return m
+    return registry.with_config_window(m, [v["dir"] for v in disk.values() if v.get("weights") and v.get("dir")])
+
+
 def active_profile() -> str | None:
     """The profile the running engine serves (QSE_WEIGHTS), else active-profile under serve.env's
     REPO (repo_ops: an install.sh box keeps it there, not beside its run/ops/serve.env)."""

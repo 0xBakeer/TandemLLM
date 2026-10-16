@@ -22,7 +22,8 @@ The test matrix:
                                                             test_more_models
   7  models/schema/model.schema.json is the schema the code checks   test_the_schema_file
   8  the CLI: exit 0 on the seed, 1 and the YAML path on a bad file  test_the_cli
-  9  the step schema: the eight steps in order, a field per tool, the profile and enum options
+  9  the step schema: the eight steps in order, a field per tool, the profile and enum options, slots
+     up to the engine's 16 (a joint pass of 32 rows, 2 a chat at least)   test_wizard_fields, test_engine_max_slots
                                                             test_wizard_fields
  10  a string a client sends is a plain value or nothing: newlines, $(...), quotes and spaces are
      refused, and numbers keep their range                  test_field_values
@@ -435,10 +436,20 @@ def test_wizard_fields():
     assert steps[2]["fields"][0]["options"] == [p["id"] for p in m["profiles"]]
     assert {f["field"] for f in steps[3]["fields"]} == {c["id"] for c in m["components"]}
     assert registry.step_field(m, "parallelism", "slots") == \
-        {"field": "slots", "label": "Parallel requests", "type": "int", "min": 1, "max": 4}
+        {"field": "slots", "label": "Parallel requests", "type": "int", "min": 1, "max": 16}
     assert registry.step_field(m, 5, "reasoning_effort")["options"] == ["low", "medium", "xhigh"]
     assert registry.step_field(m, "methods", "nope") is None
     assert registry.step_field(m, "review", "slots") is None
+
+
+def test_engine_max_slots():
+    """The guide's cap on parallel chats is the engine's: a joint pass of 32 rows, 2 a chat at least."""
+    from server import slots
+    meet = slots.Meeting()
+    assert registry.ENGINE_MAX_SLOTS == meet.max_rows // 2 == 16
+    n = registry.ENGINE_MAX_SLOTS
+    assert slots.share(n, meet.max_rows) * n <= meet.max_rows
+    assert slots.share(n + 1, meet.max_rows) * (n + 1) > meet.max_rows
 
 
 def test_field_values():

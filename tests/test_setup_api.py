@@ -11,7 +11,7 @@ The test matrix:
   3  GET /v1/setup/device with a fake memory source (119.7 GiB, 61 GiB available) and a fake GPU:
      every block filled, the password a boolean; without a GPU and without /proc/meminfo the
      blocks are null and the answer still 200            test_device
-  4  POST /v1/setup/estimate: the default fits; an unknown profile is 400; slots 5 and window 512
+  4  POST /v1/setup/estimate: the default fits; an unknown profile is 400; slots 17 and window 512
      are 422 out_of_range; the narrator without the conductor is 422 invalid_combination naming
      both; a body with a command in it is 422 unknown_field   test_estimate_route
   5  the admin guard: with an admin token set, every /v1/setup route through the proxy is 401
@@ -149,7 +149,7 @@ def test_estimate_route():
     for body, status, kind in (
             ({"model": "qwen3.8-27b", "profile": "exl3-9.9"}, 400, "unknown_profile"),
             ({"model": "nope"}, 400, "unknown_model"),
-            ({"model": "qwen3.8-27b", "slots": 5}, 422, "out_of_range"),
+            ({"model": "qwen3.8-27b", "slots": 17}, 422, "out_of_range"),
             ({"model": "qwen3.8-27b", "window": 512}, 422, "out_of_range"),
             ({"model": "qwen3.8-27b", "cmd": "reboot"}, 422, "unknown_field")):
         code, err = call("POST", "/v1/setup/estimate", body)

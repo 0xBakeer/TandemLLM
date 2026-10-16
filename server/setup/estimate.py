@@ -126,8 +126,13 @@ def check(m: dict, body) -> dict:
     if bad:
         raise SelectionError(422, "invalid_combination", "; ".join(b["reason"] for b in bad), bad)
     p = m["parallelism"]
-    slots = _int_in("slots", body.get("slots", p["slots"]["default"]), p["slots"]["min"],
-                    p["slots"]["max"])
+    # the card's slots.max is how far it was measured; the engine's own limit is the cap
+    slots = body.get("slots", p["slots"]["default"])
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots > registry.ENGINE_MAX_SLOTS:
+        raise SelectionError(422, "out_of_range", f"slots: {slots} is above {registry.ENGINE_MAX_SLOTS}, "
+                             "the most chats the engine verifies in one pass",
+                             [{"field": "slots", "reason": f"at most {registry.ENGINE_MAX_SLOTS}"}])
+    slots = _int_in("slots", slots, p["slots"]["min"], registry.ENGINE_MAX_SLOTS)
     window = _on_step("window", _int_in("window", body.get("window", p["window"]["default"]),
                                         p["window"]["min"], p["window"]["max"]), p["window"]["step"])
     mw = registry.profile(m, pid).get("max_window")
