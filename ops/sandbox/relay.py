@@ -8,7 +8,7 @@ The container runs with no network but its loopback. Two jobs:
                             each one goes: the internet yes, the LAN and the host no)
     relay.py connect PORT   (an exec per request) connect to localhost:PORT and pipe stdin to it
                             and its answer to stdout: chatd's way to a dev server in the sandbox
-                            for the preview pane. localhost as curl dials it: ::1, then 127.0.0.1.
+                            for the preview pane. ::1, then 127.0.0.1, by address (not /etc/hosts).
                             Live (2026-10-16) Vite 5 on `localhost` listened on [::1]:5173 only
                             (Node 17+ takes the resolver's order) and a dial to 127.0.0.1 alone
                             was refused while curl in the sandbox answered 200
@@ -139,9 +139,19 @@ def ports_words(ports):
                                                               else "") for r in ports)
 
 
+def dial(port):
+    """::1, then 127.0.0.1, by address: /etc/hosts may map localhost to 127.0.0.1 only."""
+    for host in ("::1", "127.0.0.1"):
+        try:
+            return socket.create_connection((host, port), timeout=10)
+        except OSError:
+            pass
+    raise OSError(f"nothing listens on port {port}")
+
+
 def connect(port):
     try:
-        s = socket.create_connection(("localhost", port), timeout=10)
+        s = dial(port)
     except OSError:
         msg = (f"Nothing listens on port {port} in the sandbox (dialed localhost: ::1 and "
                f"127.0.0.1); {ports_words(listening())}.\n").encode()
