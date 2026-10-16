@@ -9,7 +9,8 @@ devices); the LAN, this box and the engine unreachable while the public internet
 chatd's proxy; a 2 GiB allocation dies at the 1 GiB limit and the cgroup counts the kill; the pids limit stops a fork storm;
 render_page's Chromium writes a screenshot and reports a console error; a PTY; the port relay;
 a second runtime adopts the running container; stop. Then every built-in tool through chatd's loop
-(the fake model asks, the real sandbox and workspace answer; SRV-353).
+(the fake model asks, the real sandbox and workspace answer; SRV-353), and an attachment sent
+after the sandbox linked uploads/ out of the workspace (SEC-1).
 """
 
 from __future__ import annotations
@@ -267,8 +268,66 @@ def test_an_open_webui_tool_runs_in_a_real_sandbox():
         c.close()
 
 
+def test_an_upload_does_not_follow_a_symlink_the_sandbox_made():
+    """SEC-1: in a real sandbox, bash links /workspace/uploads to a host folder (by the path the
+    host sees), then a message with an attachment is sent: the host folder stays empty, the message
+    is sent and the attachment says why it is not in the workspace. Then a dangling link at the
+    file's name: the file takes the next free name, the link's target is not created."""
+    if not ON:
+        print("skipped: set QSE_SANDBOX_BOX=1 on the box")
+        return
+    avail = sb_mod.meminfo()["MemAvailable"] / sb_mod.GiB
+    need = sb_mod.FLOOR_GB + sb_mod.LIMIT_BYTES / sb_mod.GiB
+    assert avail >= need, f"MemAvailable {avail:.1f} GiB: wait for {need:g}"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from chatd_util import Chat
+    from test_chatd_attach import upload
+
+    def bash(command):
+        return "FAKE_CALLS " + json.dumps([{"name": "bash", "arguments": {"command": command}}])
+
+    def send_file(cid, n):
+        att = upload(c, "notes.txt", "text/plain", b"the user's notes\n")
+        c.ok("POST", f"/conversations/{cid}/messages",
+             {"client_msg_id": f"sec1-{n}", "text": "read it", "attachments": [att["id"]]})
+        s = c.wait_idle(cid, 180)
+        return [m for m in s["messages"] if m["role"] == "user"][-1]["attachments"][0]
+
+    c = Chat()
+    sb = c.svc.sandboxes
+    sb.max_running = 1
+    outside = tempfile.mkdtemp(prefix="sec1-outside-")
+    cid = None
+    try:
+        assert sb.available(), "no sandbox runtime on this box"
+        c.svc.add_rule("bash", None, "allow", None)
+        cid = c.new()
+        c.send(cid, bash(f"ln -s {outside} /workspace/uploads && ls -l /workspace"))
+        c.wait_idle(cid, 180)
+        a = send_file(cid, 1)
+        print(f"  uploads/ a symlink: {a.get('unplaced')!r}; host folder {os.listdir(outside)}")
+        assert os.listdir(outside) == [] and "path" not in a and "symlink" in a["unplaced"], a
+        c.send(cid, bash(f"rm /workspace/uploads && mkdir /workspace/uploads && "
+                         f"ln -s {outside}/planted.txt /workspace/uploads/notes.txt"))
+        c.wait_idle(cid, 180)
+        a = send_file(cid, 2)
+        c.send(cid, bash("cat /workspace/uploads/notes-2.txt"))
+        out = [p for p in c.wait_idle(cid, 180)["messages"][-1]["parts"]
+               if p["type"] == "tool_call"][0]["output"]["content"]
+        print(f"  a dangling link at the name: {a.get('path')}; host folder {os.listdir(outside)}")
+        assert os.listdir(outside) == [] and a["path"] == "/workspace/uploads/notes-2.txt", a
+        assert "the user's notes" in out, out
+    finally:
+        if cid:
+            c.call("POST", f"/conversations/{cid}/sandbox/stop")
+            sb.remove(cid, files=True)
+        c.close()
+        shutil.rmtree(outside, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_the_sandbox_on_this_box()
     test_every_builtin_through_chatd_in_a_real_sandbox()
     test_an_open_webui_tool_runs_in_a_real_sandbox()
+    test_an_upload_does_not_follow_a_symlink_the_sandbox_made()
     print("ok")
