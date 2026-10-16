@@ -245,7 +245,7 @@ export interface Run {
 
 // ---- the Context panel ------------------------------------------------------------------------
 
-export type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'messages' | 'thinking' | 'reserved';
+export type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'images' | 'messages' | 'thinking' | 'reserved';
 
 export interface ContextPart {
   kind: ContextPartKind;

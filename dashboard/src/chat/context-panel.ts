@@ -21,6 +21,7 @@ const PART_COLOR: Record<ContextPartKind, string> = {
   tools: 'var(--series-aqua)',
   skills: 'var(--series-violet)',
   files: 'var(--series-yellow)',
+  images: 'var(--series-red)',
   messages: 'var(--cobalt)',
   thinking: 'var(--think)',
   reserved: 'transparent',
