@@ -40,6 +40,10 @@ from chatd import sandbox as sandbox_mod
 from chatd.workspace import ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
+MAX_RESULT_BYTES = 40_000           # one read_file result: 2000 long lines of a 27-page manual
+                                    # were 178,580 tokens in a single step, 68 % of a 262,144
+                                    # window — the guard saw ~257k pass and the run died past it
+                                    # (issue #18); a capped step stays far under any window
 MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
 UI_LIMIT_CHARS = 30_000
 BASH_TIMEOUT_S = 600
@@ -151,9 +155,17 @@ def _read(ctx, a):
     off = max(1, int(a.get("offset") or 1))
     lim = int(a.get("limit") or 2000)
     chunk = lines[off - 1:off - 1 + lim]
-    body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(chunk, off))
-    more = f"\n[{len(lines) - (off - 1 + len(chunk))} more lines]" if off - 1 + len(chunk) < \
-        len(lines) else ""
+    shown, used = [], 0
+    for ln in chunk:                                        # 2000 lines of long paragraphs were
+        n = len(ln.encode("utf-8", "replace")) + 1          # a whole manual in one step (issue
+        if shown and used + n > MAX_RESULT_BYTES:
+            break
+        shown.append(ln)
+        used += n
+    body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(shown, off))
+    rest = len(lines) - (off - 1 + len(shown))
+    more = (f"\n[{rest} more lines left; this call showed {len(shown)} of them, up to "
+            f"{MAX_RESULT_BYTES:,} bytes — read on with offset {off + len(shown)}]" if rest else "")
     return Result(body + more)
 
 
