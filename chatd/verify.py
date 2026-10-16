@@ -110,16 +110,13 @@ def _pages_first(paths: list[str]) -> list[str]:
 
 
 def look_words(lk: dict | None) -> str:
+    """The kit's numbers as they are, no verdict: a red cube on a dark page is dark and right."""
     if not lk:
         return ""
-    b, share = lk.get("brightness"), lk.get("top_share")
-    words = f"brightness {b} %" + (" (dark)" if b is not None and b < 25 else
-                                   " (very light)" if b is not None and b > 90 else "")
-    words += f", {share} % of it one colour ({lk.get('top_colour')})"
-    words += f", {lk.get('colours')} colours over 1 %, saturation {lk.get('saturation')} %"
-    if (lk.get("saturation") or 0) < 10:
-        words += " (greyish)"
-    return words
+    top = lk.get("top") or [[lk.get("top_colour"), lk.get("top_share")]]
+    return (f"brightness {lk.get('brightness')} %, colours " +
+            ", ".join(f"{c} {share} %" for c, share in top) +
+            f", saturation {lk.get('saturation')} %")
 
 
 def check_words(rep: dict, target: dict, n: int, vision: bool, playtest: bool) -> str:
@@ -157,10 +154,10 @@ def check_words(rep: dict, target: dict, n: int, vision: bool, playtest: bool) -
         lines.append(f"The {PLAYTEST} package is in this task: a game or a flow of several steps "
                      f"needs its playtest too; this check only loaded the page.")
     lines.append("Compare this with what the user asked for. If anything is wrong or missing (an "
-                 "error, an empty, dark or washed-out page, a layout that breaks at 390 px, a "
-                 "scene or page that does not look like the request), fix it now. If it is right, "
-                 "answer the user, and say what this check showed and what it did not test "
-                 "(input, sound, motion over time).")
+                 "error, an empty page, a layout that breaks at 390 px, light or colours that do "
+                 "not match the request), fix it now. If it is right, answer the user, and say "
+                 "what this check showed and what it did not test (input, sound, motion over "
+                 "time).")
     return "\n".join(lines)
 
 
@@ -193,10 +190,9 @@ def own_checks(parts: list[dict]) -> list[str]:
     for p in parts:
         if p.get("type") != "tool_call" or p.get("harness"):
             continue
-        content = (p.get("output") or {}).get("content") or ""
         if p.get("name") == "render_page":
             shots += 1
-            last = p.get("status") == "done" and "no console errors" in content
+            last = p.get("status") == "done"
         elif p.get("name") == "present" and (p.get("pane") or {}).get("kind") == "preview":
             out.append("the preview pane " + ("loaded without a problem" if p.get("status") ==
                                               "done" else "reported a problem"))
@@ -206,7 +202,7 @@ def own_checks(parts: list[dict]) -> list[str]:
             out.append(f"{mode} of its own (exit {code if code is not None else '?'})")
     if shots:
         out.insert(0, f"render_page {shots} time{'s' if shots != 1 else ''} by the model (the last "
-                      f"one {'without' if last else 'with'} console errors or a failure)")
+                      f"one {'rendered' if last else 'failed'})")
     return out
 
 

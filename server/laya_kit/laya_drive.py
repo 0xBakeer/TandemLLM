@@ -912,8 +912,9 @@ def png_pixels(png: bytes) -> tuple[int, int, list] | None:
 
 def look_of(png: bytes) -> dict | None:
     """A screenshot in numbers: `brightness` (mean luma, 0 to 100), `top_colour` and `top_share`
-    (the most common colour, 16 levels a channel, and its share in %), `colours` (the colours
-    over 1 % of it) and `saturation` (the mean, 0 to 100)."""
+    (the most common colour, 16 levels a channel, and its share in %), `top` (the three most
+    common colours over 1 % with their shares: a red cube on a dark page is a second colour of a
+    few %), `colours` (the colours over 1 % of it) and `saturation` (the mean, 0 to 100)."""
     got = png_pixels(png)
     if got is None or not got[0] or not got[1]:
         return None
@@ -921,10 +922,14 @@ def look_of(png: bytes) -> dict | None:
     counts = collections.Counter((r >> 4, g >> 4, b >> 4) for r, g, b in px)
     (top, n_top), = counts.most_common(1)
     n = len(px)
+
+    def hexof(c):
+        return "#" + "".join(f"{v * 17:02x}" for v in c)
     return {"brightness": round(sum(0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in px)
                                 / n / 2.55),
-            "top_colour": "#" + "".join(f"{v * 17:02x}" for v in top),
+            "top_colour": hexof(top),
             "top_share": round(100 * n_top / n),
+            "top": [[hexof(c), round(100 * k / n)] for c, k in counts.most_common(3) if k * 100 >= n],
             "colours": sum(1 for v in counts.values() if v * 100 >= n),
             "saturation": round(sum(max(p) - min(p) for p in px) / n / 2.55)}
 

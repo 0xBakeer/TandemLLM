@@ -331,10 +331,14 @@ def test_changed_web_files_and_pages_first():
 
 
 def test_the_look_in_words():
+    """Numbers, no verdict: live (2026-10-17) "95 % one colour (dark)" made the model take a red
+    cube (the second colour, 4 %) for an empty page and rework a page that was right."""
+    assert V.look_words({"brightness": 7, "top_colour": "#111111", "top_share": 95,
+                         "top": [["#111111", 95], ["#cc2222", 4]], "colours": 2,
+                         "saturation": 3}) == \
+        "brightness 7 %, colours #111111 95 %, #cc2222 4 %, saturation 3 %"
     assert V.look_words({"brightness": 18, "top_colour": "#445577", "top_share": 72,
-                         "colours": 4, "saturation": 6}) == \
-        "brightness 18 % (dark), 72 % of it one colour (#445577), 4 colours over 1 %, " \
-        "saturation 6 % (greyish)"
+                         "saturation": 6}) == "brightness 18 %, colours #445577 72 %, saturation 6 %"
     assert V.look_words(None) == ""
 
 
@@ -354,8 +358,7 @@ def test_own_checks_come_from_the_call_outcomes():
               "output": {"content": "", "exit_code": 0}},
              {"type": "tool_call", "name": "render_page", "harness": "verify", "status": "failed",
               "output": {"content": "x"}}]
-    assert V.own_checks(parts) == ["render_page 2 times by the model (the last one without "
-                                   "console errors or a failure)",
+    assert V.own_checks(parts) == ["render_page 2 times by the model (the last one rendered)",
                                    "a Laya playtest of its own (exit 0)"]
     st = {**V.new_state(), "target": {"label": "/workspace/index.html"},
           "checks": [{"n": 1, "label": "/workspace/index.html", "state": "passed",
@@ -413,7 +416,8 @@ def test_the_kit_reads_a_screenshot_in_numbers():
     assert L.png_pixels(png)[2][4][0] == (200, 30, 30) and L.png_pixels(png)[2][4][7] == \
         (60, 70, 90)
     assert L.look_of(png) == {"brightness": 27, "top_colour": "#cc1111", "top_share": 50,
-                              "colours": 2, "saturation": 39}
+                              "top": [["#cc1111", 50], ["#334455", 50]], "colours": 2,
+                              "saturation": 39}
     assert L.look_of(b"\x89PNG\r\n\x1a\n") is None
 
 
