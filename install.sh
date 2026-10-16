@@ -811,9 +811,14 @@ else
         bash -n "$RUN/ops/serve.env.tmp" || die "the generated serve.env does not parse"
         mv "$RUN/ops/serve.env.tmp" "$RUN/ops/serve.env"
         # the release's own service scripts, next to this env file (they source ./serve.env)
-        # and what the setup guide's apply job runs beside them (server/setup/apply.py)
+        # and what the setup guide's apply job runs beside them (server/setup/apply.py); roles.sh is
+        # what start.sh runs after /health, watchdog.sh the cron line of docs/operations.md, hold.sh
+        # a box-alone command (OPS-161). Not copied: chatd.sh runs from the checkout (it finds the
+        # chatd package there and this file through DIR), gate.sh is the release gate of a
+        # development checkout. tests/test_install_ops_copy.py keeps this list and their "$HERE/"
+        # calls in step.
         for s in start.sh stop.sh engines.sh use-profile.sh make-secrets.sh engine_status.py \
-                 fetch_weights.py; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
+                 fetch_weights.py roles.sh watchdog.sh hold.sh; do install -m 755 "$SRC/ops/$s" "$RUN/ops/$s"; done
         if [ "$SETUP" = 1 ]; then
             # setup mode until the setup guide's apply job removes it (a reboot comes back to it)
             mkdir -p "$SRC/run"
@@ -1068,6 +1073,7 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
   Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
+  Watchdog:  $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read

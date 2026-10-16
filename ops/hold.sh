@@ -13,6 +13,11 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
+# an install's DIR/run/ops (OPS-161): the tree is serve.env's REPO, DIR/src, where start.sh and the
+# watchdog look for the pause file; the service scripts are the ones beside this file
+if [ -f "$REPO/../.tandemllm-install" ]; then
+    REPO="$(set -a; . "$HERE/serve.env" >/dev/null 2>&1; printf '%s' "$REPO")"
+fi
 MIN="${1:?usage: hold.sh <minutes> -- <command...>}"; shift
 [ "${1:-}" = "--" ] && shift
 [ $# -gt 0 ] || { echo "[hold] no command given"; exit 2; }
@@ -60,7 +65,7 @@ restore() {
     # box lock on an open descriptor, and the engine used to inherit it: on 2026-09-23 at 09:24 the
     # restarted :8000 engine held the lock and every later `flock` waited on the operator's service.
     ( for fd in $(seq 3 254); do eval "exec $fd>&-"; done 2>/dev/null
-      HOLD_RESTART=1 bash ops/start.sh ) 2>&1 | tail -2
+      HOLD_RESTART=1 bash "$HERE/start.sh" ) 2>&1 | tail -2
     rm -f .watchdog.off
 }
 trap 'restore' EXIT
@@ -81,7 +86,7 @@ HOLD_WHY="${HOLD_REASON:-$( [ -n "${HOLD_NOTE:-}" ] && head -1 "$HOLD_NOTE" 2>/d
 echo "[hold] stopping the service (up to ${MIN}m budget for the command)"
 # the roles beside the engine first, then the engine (OPS-41)
 [ -f "$HERE/roles.sh" ] && bash "$HERE/roles.sh" down
-QSE_STATUS_KEEP=1 bash ops/stop.sh 120
+QSE_STATUS_KEEP=1 bash "$HERE/stop.sh" 120
 if [ -n "$(engine_pids)" ]; then
     echo "[hold] REFUSING: an engine process is still alive after stop.sh: $(echo $(engine_pids))"
     exit 1
