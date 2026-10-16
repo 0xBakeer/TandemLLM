@@ -17,7 +17,7 @@
                                                                    greedy text: a draft at every position,
                                                                    agreement a depth, the accepted length
                                                                    of a greedy speculative run, draft ms
-    $PY tools/nh_check.py prices --stair s.json --bench b.json --out <price file>
+    $PY tools/nh_check.py prices --stair s.json --bench b.json --out <price file> [--lilicorr l.json]
     $PY tools/nh_check.py llamacpp --model <dir> --url <llama-server> --out ref.pt
                                                                    llama.cpp's greedy text on the same
                                                                    token ids, its top 10 log-probs a step
@@ -584,6 +584,15 @@ def cmd_audit(a) -> None:
     print(json.dumps(s, indent=1))
 
 
+def spec_prior(stair: dict, lilicorr: dict) -> float:
+    """StairCut's `spec` prior, a drafted round's ms a token: the 8-row chain at the staircase's lowest
+    context plus the draft, over 0.75 of the accepted length `lilicorr` measured offline. It anchors the
+    EMA the first rounds set (their captures and first kernel calls ran 2-3 times the steady cost and,
+    with no prior, priced every drafted round above the plain step for good)."""
+    rows = stair["rows"][min(stair["rows"], key=int)]
+    return round((rows["8"]["ms"] + lilicorr["draft_ms_median"]) / (0.75 * lilicorr["accepted_length_mean"]), 1)
+
+
 def cmd_prices(a) -> None:
     """StairCut's price file from a staircase run and a bench run: per attention class (the adapter's
     price_class of the staircase's contexts) the chain verify ms for 1..16 rows, the plain step's ms."""
@@ -599,11 +608,19 @@ def cmd_prices(a) -> None:
     out = {("0" if k == lo else k): v for k, v in out.items()}
     out["step_ms"] = round(max(0.1, (stair["rows"][max(stair["rows"], key=int)]["16"]["ms"]
                                      - stair["rows"][max(stair["rows"], key=int)]["15"]["ms"])), 2)
-    out["measured"] = (f"tools/nh_check.py staircase and bench on {os.path.basename(a.stair)}, "
-                       f"{os.path.basename(a.bench)}: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the "
-                       "median), at the staircase's contexts (the lowest as class 0); plain = the captured decode "
-                       "step's ms a token, host wall clock with a sync a token. No spec or prime prior: the cut "
-                       "drafts and learns them online.")
+    measured = (f"tools/nh_check.py staircase and bench on {os.path.basename(a.stair)}, "
+                f"{os.path.basename(a.bench)}: chain = a VerifyGraph replay of 1..16 rows (CUDA events, the "
+                "median), at the staircase's contexts (the lowest as class 0); plain = the captured decode "
+                "step's ms a token, host wall clock with a sync a token.")
+    if a.lilicorr:
+        spec = spec_prior(stair, json.load(open(a.lilicorr)))
+        for k in out:
+            if k.isdigit():
+                out[k]["spec"] = {"1": spec}
+        out["measured"] = (f"{measured} No prime prior (learned online). Spec prior {spec} ms a token: (8-row "
+                           f"chain + draft) / (0.75 x LiLiCorr's offline accepted length), {os.path.basename(a.lilicorr)}.")
+    else:
+        out["measured"] = f"{measured} No spec or prime prior: the cut drafts and learns them online."
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
     json.dump(out, open(a.out, "w"), indent=1)
     print(json.dumps(out, indent=1))
@@ -670,6 +687,7 @@ def main() -> None:
     pr.add_argument("--bench", required=True)
     pr.add_argument("--out", required=True)
     pr.add_argument("--max-len", type=int, default=131072)
+    pr.add_argument("--lilicorr", help="a `lilicorr --json` run: the file gets its spec prior")
     lc = sub.add_parser("llamacpp")
     lc.add_argument("--model", required=True, help="the checkpoint directory (its tokenizer and chat template)")
     lc.add_argument("--url", required=True, help="llama-server on the same GGUF")
