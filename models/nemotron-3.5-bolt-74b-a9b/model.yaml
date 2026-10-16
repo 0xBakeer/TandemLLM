@@ -160,7 +160,7 @@ profiles:
     the pack in BF16 and not loaded. A decode token reads about 4.7 GB. Measured 2026-10-15: 20.22 GiB at load, the decode
     step 44.2 tok/s (the IQ2 GGUF 27.9). Drafts with NVIDIA''s LiLiCorr drafter and the lookup, a verify block''s rows
     on one trellis decode (SPD-125). The Hugging Face repository is public: a download needs no token.'
-  hf_revision: 0c59e1c05ce5d0161028d2a8f7392730ba5d79a2
+  hf_revision: 6d05454da1e630f28035a2f433472b7f2df84454
   max_window: 262144
 - id: nemotron-bolt-exl3-2.5
   label: EXL3 2.5 bpw
@@ -186,7 +186,7 @@ profiles:
     39.92 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: 619793f8f60adce3c70fe06c2ea14b67eb591b26
+  hf_revision: ea3aeebec6b5f43856999d4e008a97c5d7a5ef9e
   max_window: 262144
 - id: nemotron-bolt-exl3-3.0
   label: EXL3 3.0 bpw
@@ -212,7 +212,7 @@ profiles:
     39.57 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: 5791e33ea784ebc11a257754a783da8cc5139e29
+  hf_revision: 924c71e065ecbfeead376c655668cc7232f2633d
   max_window: 262144
 - id: nemotron-bolt-exl3-3.5
   label: EXL3 3.5 bpw
@@ -238,7 +238,7 @@ profiles:
     38.66 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: ba0be2cff48138a5e2f42adf110cce22b1ad56f0
+  hf_revision: b72058169b75881fabb1397cd10d6d90885bcd31
   max_window: 262144
 - id: nemotron-bolt-exl3-4.0
   label: EXL3 4.0 bpw
@@ -264,7 +264,7 @@ profiles:
     38.4 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: 41ec6bfe3898dbe7ea903574612402c1dd4aba6b
+  hf_revision: 9fbf616ea3bd808f09e3470bb960a12f63b66034
   max_window: 262144
 - id: nemotron-bolt-exl3-5.0
   label: EXL3 5.0 bpw
@@ -290,7 +290,7 @@ profiles:
     32.0 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: 577893d50d2eb9edd27c0e204996c6f57b202650
+  hf_revision: 2352d1f8c882d4c5b3211aef4f006f99b50a3959
   max_window: 262144
 - id: nemotron-bolt-exl3-6.0
   label: EXL3 6.0 bpw
@@ -316,7 +316,7 @@ profiles:
     27.77 tok/s (one CTA a row, measured before the rows path). Drafts with NVIDIA''s LiLiCorr drafter and the lookup; no
     StairCut price file yet (the cut learns its prices online). The Hugging Face repository is public: a download needs
     no token.'
-  hf_revision: ecde863982d267294f9e08a7c68c64ca3ef3706c
+  hf_revision: 9cfd11612f08fca7588eb0e7a2e5199796ad943b
   max_window: 262144
 measurements:
   build: 0.9.1

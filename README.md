@@ -70,20 +70,20 @@ LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 pa
 
 The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
 
-Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, converted from NVIDIA's BF16 checkpoint, or from NVIDIA's own 2-bit GGUF. It is a hybrid of 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 9 of up to 496 experts a token. The EXL3 profiles draft with NVIDIA's LiLiCorr drafter and the lookup, the GGUF profile with the lookup alone, and every drafted text is the plain decode's. The packs are public, one repository a size (`0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>`, for example [the 2.0 pack](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0)); the GGUF and the drafter come from NVIDIA's repositories. TandemLLM serves Bolt's text; its image tower is not served yet. Measured on one DGX Spark on 2026-10-15; quality against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; decode step for one request:
+Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, converted from NVIDIA's BF16 checkpoint, or from NVIDIA's own 2-bit GGUF. It is a hybrid of 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 9 of up to 496 experts a token. The EXL3 profiles draft with NVIDIA's LiLiCorr drafter and the lookup, the GGUF profile with the lookup alone, and every drafted text is the plain decode's. The packs are public, one repository a size (`0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>`, for example [the 2.0 pack](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0), all seven in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-bolt-74b-a9b-exl3-for-tandemllm-6ad16f70eaa4c1d9c56c6831)); the GGUF and the drafter come from NVIDIA's repositories. TandemLLM serves Bolt's text; its image tower is not served yet. Measured on one DGX Spark on 2026-10-15 and 16; quality against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; plain decode through the server for one request, 512 greedy tokens, thinking off, the mean of 3 runs on this release:
 
-| profile | download | KL vs BF16 | top-1 vs BF16 | decode step, tok/s |
+| profile | download | KL vs BF16 | top-1 vs BF16 | plain decode, tok/s |
 |-|-|-|-|-|
-| `nemotron-bolt-exl3-2.0` (default for Bolt; experts 2 bits, dense 4) | 23.48 GB | 0.170 | 84.1 % | 44.2 |
-| `nemotron-bolt-exl3-2.5` | 27.61 GB | 0.094 | 87.3 % | 39.9 |
-| `nemotron-bolt-exl3-3.0` | 31.75 GB | 0.061 | 89.7 % | 39.6 |
-| `nemotron-bolt-exl3-3.5` | 35.88 GB | 0.044 | 91.1 % | 38.7 |
-| `nemotron-bolt-exl3-4.0` | 40.01 GB | 0.034 | 92.7 % | 38.4 |
-| `nemotron-bolt-exl3-5.0` | 49.13 GB | 0.016 | 94.8 % | 32.0 |
-| `nemotron-bolt-exl3-6.0` | 58.37 GB | 0.0087 | 96.2 % | 27.8 |
-| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 0.259 | 79.6 % | 27.9 |
+| `nemotron-bolt-exl3-2.0` (default for Bolt; experts 2 bits, dense 4) | 23.48 GB | 0.170 | 84.1 % | 43.3 |
+| `nemotron-bolt-exl3-2.5` | 27.61 GB | 0.094 | 87.3 % | 42.1 |
+| `nemotron-bolt-exl3-3.0` | 31.75 GB | 0.061 | 89.7 % | 41.7 |
+| `nemotron-bolt-exl3-3.5` | 35.88 GB | 0.044 | 91.1 % | 40.6 |
+| `nemotron-bolt-exl3-4.0` | 40.01 GB | 0.034 | 92.7 % | 40.5 |
+| `nemotron-bolt-exl3-5.0` | 49.13 GB | 0.016 | 94.8 % | 34.1 |
+| `nemotron-bolt-exl3-6.0` | 58.37 GB | 0.0087 | 96.2 % | 29.2 |
+| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 0.259 | 79.6 % | 27.8 |
 
-With LiLiCorr and the lookup the 2.0 pack writes 65.8 tok/s on prose, 99.0 on code, 69.3 on chat, and 152.8 and 256.0 on edit and copy asks (512 greedy tokens, thinking off). The 2.5 to 6.0 rows were measured before the multi-row EXL3 kernel the 2.0 row uses. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, llama.cpp and BF16, and the run behind each number.
+With LiLiCorr and the lookup the 2.0 pack writes 65.7 tok/s on prose, 102.8 on code, 69.4 on chat, and 180.5 and 244.7 on edit and copy asks (same shape, mean of 3 runs). On the 4.0 pack StairCut keeps plain steps with LiLiCorr on this release, so it runs at its plain rate; the cause is not isolated. llama.cpp on NVIDIA's GGUF decodes at 38.2 tok/s on the same asks. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, llama.cpp and BF16, and the run behind each number.
 
 ### Community weights
 
