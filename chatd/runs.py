@@ -84,7 +84,8 @@ class Run:
         self.queue_position: int | None = None
         self.prefill: dict | None = None
         self.tool: dict | None = None
-        self.request_id: str | None = None
+        self.request_id: str | None = None     # this model call's (each step is its own request)
+        self.request_ids: set[str] = set()     # every call of the run
         self.stop_mode: str | None = None
         self.call = None
         self.wake = threading.Event()
@@ -99,9 +100,10 @@ class Run:
         self.in_tag = False
         self.carry = ""
         self.trim = False             # the newlines right after a tag are the template's, not text
-        # counts for the figures when the live row is not there
+        # counts for the figures when the live row is not there; the run's, every call in them
         self.tokens = 0
         self.thinking_tokens = 0
+        self.call_base = (0, 0)                # tokens, thinking_tokens before this call
         self.t_sent: float | None = None
         self.t_first: float | None = None
         self.marks: list[tuple[float, int]] = []
@@ -127,6 +129,10 @@ class Run:
         self.compacted = 0                      # the step a compaction last ran before
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
+        # the speculation of the run's finished calls (their usage frames' timings), for the
+        # turn's tok/s, tokens per round and acceptance: a call's own figure is one step's
+        self.spec = {"predicted_n": 0, "predicted_ms": 0.0, "rounds_n": 0, "blocks": 0,
+                     "draft_n": 0, "draft_accepted": 0}
         self.step_usage: list[dict] = []       # per model call: prompt, cached, cache source
         self.snapshotted = False
         self.waiting: dict[str, dict] = {}     # call id -> {"event", "answer"} while a prompt waits
@@ -144,7 +150,9 @@ class Run:
             "decode_tps": self.metrics["decode_tps"],
             "tokens_per_round": self.metrics["tokens_per_round"],
             "acceptance": self.metrics["acceptance"],
-            "thinking": {"used": self.thinking_tokens, "budget": self.metrics["thinking_budget"]},
+            # used: the run's; call: this model call's (the budget caps each call)
+            "thinking": {"used": self.thinking_tokens, "budget": self.metrics["thinking_budget"],
+                         "call": self.thinking_tokens - self.call_base[1]},
             "tokens": self.tokens,
             "tps_history": list(self.tps_history[-120:]),
         }
@@ -260,7 +268,8 @@ class Run:
         else:
             self.step += 1
         self.step_parts, self.tc_parts = [], {}
-        self.finish_reason, self.usage = None, None
+        self.finish_reason, self.usage, self.request_id = None, None, None
+        self.call_base = (self.tokens, self.thinking_tokens)
         while True:
             if self.stop_mode:
                 return self._stopped()
@@ -334,21 +343,28 @@ class Run:
                 return "failed"
             if self.request_id is None and obj.get("id"):
                 self.request_id = str(obj["id"])
+                self.request_ids.add(self.request_id)
             if isinstance(obj.get("usage"), dict):
                 u = obj["usage"]
                 self.usage = {"usage": u, "timings": obj.get("timings") or {},
                               "metrics": obj.get("metrics") or {},
                               "tandem": (u.get("tandem") or obj.get("tandem"))}
                 t = obj.get("timings") or {}
+                comp = int(u.get("completion_tokens") or 0)
+                reas = int((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
                 self.step_usage.append({"step": self.step,
                                         "prompt_tokens": int(u.get("prompt_tokens") or 0),
                                         "cached_tokens": int((u.get("prompt_tokens_details") or {})
                                                              .get("cached_tokens") or 0),
                                         "cache_source": t.get("cache_source"),
-                                        "ttft_ms": t.get("ttft_ms")})
-                self.acc["completion"] += int(u.get("completion_tokens") or 0)
-                self.acc["reasoning"] += int((u.get("completion_tokens_details") or {})
-                                             .get("reasoning_tokens") or 0)
+                                        "ttft_ms": t.get("ttft_ms"),
+                                        "completion_tokens": comp, "reasoning_tokens": reas})
+                self.acc["completion"] += comp
+                self.acc["reasoning"] += reas
+                self.add_spec(t)
+                if comp:                             # the call's exact counts
+                    self.tokens = self.call_base[0] + comp
+                    self.thinking_tokens = self.call_base[1] + reas
                 self.svc.learn_ratio(self.conv, int(u.get("prompt_tokens") or 0),
                                      self.request_chars, self.request_images)
             for ch in obj.get("choices") or []:
@@ -478,6 +494,30 @@ class Run:
         (t0, n0) = older[0]
         return round((n1 - n0) / (t1 - t0), 1) if t1 > t0 else None
 
+    def add_spec(self, t: dict) -> None:
+        """One finished call's timings into the run's sums."""
+        n, ms, blocks = int(t.get("predicted_n") or 0), float(t.get("predicted_ms") or 0), \
+            int(t.get("blocks") or 0)
+        if n > 1 and ms:
+            self.spec["predicted_n"] += n - 1          # as the engine's predicted_per_second
+            self.spec["predicted_ms"] += ms
+        if blocks and n > 1:
+            self.spec["rounds_n"] += n - 1             # the prefill's token is not a round's
+            self.spec["blocks"] += blocks
+        if t.get("draft_n"):
+            self.spec["draft_n"] += int(t["draft_n"])
+            self.spec["draft_accepted"] += int(t.get("draft_n_accepted") or 0)
+
+    def turn_figures(self) -> dict:
+        """The run's finished calls together: tok/s, tokens per round and the share of drafted
+        tokens accepted; None where no call measured it."""
+        s = self.spec
+        return {"decode_tps": round(s["predicted_n"] * 1000 / s["predicted_ms"], 2)
+                if s["predicted_ms"] else None,
+                "tokens_per_round": round(s["rounds_n"] / s["blocks"], 2) if s["blocks"] else None,
+                "acceptance": round(s["draft_accepted"] / s["draft_n"], 4) if s["draft_n"]
+                else None}
+
     def stats(self, finish: str) -> dict:
         """The message's TurnStats: the usage frame's figures when it came, else chatd's own."""
         u = (self.usage or {}).get("usage") or {}
@@ -486,6 +526,7 @@ class Run:
         spec = mt.get("speculative_decoding") or {}
         ptd = u.get("prompt_tokens_details") or {}
         ctd = u.get("completion_tokens_details") or {}
+        turn = self.turn_figures()
         ttft = t.get("ttft_ms") if t.get("ttft_ms") is not None else mt.get(
             "time_to_first_token_ms")
         if ttft is None and self.t_first is not None and self.t_sent is not None:
@@ -496,7 +537,7 @@ class Run:
         out = {
             "finish": finish,
             "ttft_ms": ttft,
-            "decode_tps": t.get("predicted_per_second") or None,
+            "decode_tps": turn["decode_tps"] or t.get("predicted_per_second") or None,
             "total_ms": total,
             "prompt_tokens": int(u.get("prompt_tokens") or 0),
             "completion_tokens": int(self.acc["completion"] or u.get("completion_tokens") or
@@ -506,8 +547,10 @@ class Run:
             "steps": self.step,
             "step_usage": self.step_usage[-50:],
             "cached_tokens": int(ptd.get("cached_tokens") or 0),
-            "tokens_per_round": t.get("tokens_per_block") or spec.get("mean_acceptance_length"),
-            "acceptance": spec.get("draft_acceptance_rate"),
+            "tokens_per_round": turn["tokens_per_round"] or t.get("tokens_per_block") or
+            spec.get("mean_acceptance_length"),
+            "acceptance": turn["acceptance"] if turn["acceptance"] is not None else
+            spec.get("draft_acceptance_rate"),
             "cache_source": t.get("cache_source"),
             "prefill_tps": t.get("prompt_per_second") or None,
             "cost_usd": None,

@@ -74,6 +74,7 @@ PERSIST_S = 1.0
 METRICS_S = 1.0
 CONTEXT_RUN_S = 1.0
 CONTEXT_IDLE_S = 10.0
+SANDBOX_S = 10.0          # a running sandbox's memory and disk go out with the context this often
 PEEK_TTL_S = 30.0
 class ApiError(Exception):
     def __init__(self, status: int, kind: str, message: str, extra: dict | None = None):
@@ -97,6 +98,7 @@ class Conv:
         self.persisted_at = 0.0
         self.context: dict | None = None
         self.context_sent_at = 0.0
+        self.sandbox_sent: tuple[float, dict | None] = (0.0, None)
         self.peek: tuple[float, dict | None] | None = None
         self.tok_ratio: float | None = None       # tokens per request character, learned
 
@@ -1094,26 +1096,37 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
 
     def _metrics(self, conv: Conv, run: Run) -> None:
         """Once a second: `run.metrics` (ephemeral) from the run's live row, else chatd's counts;
-        prefill progress and the queue place move the Now line too."""
+        prefill progress and the queue place move the Now line too. The live row is this model
+        call's: a run of several calls (a tool call each) has a finished row of each earlier call
+        in the snapshot for 30 s, and one of those read live (2026-10-16) said "not tracked" for
+        the speed and the old call's tokens. Tokens and thinking are the run's: the earlier
+        calls' plus this one's. Tokens per round and acceptance between the rows' figures come
+        from the run's finished calls (their usage frames)."""
         row = self.live.row(render.session_id(conv.id), run.request_id)
+        if row is not None and row.get("phase") == "done" and \
+                row.get("request_id") not in run.request_ids:
+            row = None                              # another run's call, or a previous turn's
         act = (row or {}).get("activity") or {}
         dec = act.get("decode") or {}
         pre = act.get("prefill") or {}
+        turn = run.turn_figures()
         if row is not None:
-            tps = dec.get("tps_now") if (dec.get("tokens") or 0) > 50 else None
-            if tps is None and row.get("decode_live_now_tps") is not None:
+            live = row.get("phase") != "done"
+            tps = dec.get("tps_now") if live and (dec.get("tokens") or 0) > 50 else None
+            if tps is None and live and row.get("decode_live_now_tps") is not None:
                 tps = row["decode_live_now_tps"]
             run.metrics["decode_tps"] = tps
-            run.metrics["tokens_per_round"] = dec.get("tokens_per_round_now") or \
-                row.get("tokens_per_block")
-            # the live row has no acceptance rate (`accept_mean` is a mean length, not a share);
-            # the answer's own figure comes with its usage frame
-            run.metrics["acceptance"] = None
+            run.metrics["tokens_per_round"] = (dec.get("tokens_per_round_now") or
+                                               row.get("tokens_per_block") if live else None) \
+                or turn["tokens_per_round"]
+            # the live row has no acceptance rate (`accept_mean` is a mean length, not a share):
+            # the run's finished calls' share, from their usage frames
+            run.metrics["acceptance"] = turn["acceptance"]
             if row.get("thinking_budget") is not None:
                 run.metrics["thinking_budget"] = row["thinking_budget"]
-            if dec.get("tokens") is not None:
-                run.tokens = int(dec["tokens"])
-                run.thinking_tokens = int(dec.get("thinking_tokens") or run.thinking_tokens)
+            if live and dec.get("tokens") is not None and run.usage is None:
+                run.tokens = run.call_base[0] + int(dec["tokens"])
+                run.thinking_tokens = run.call_base[1] + int(dec.get("thinking_tokens") or 0)
             state = act.get("state")
             if state == "prefilling" and pre.get("total"):
                 run.prefill = {"done": int(pre.get("done") or 0), "total": int(pre["total"]),
@@ -1126,6 +1139,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
                               queue_position=int(place) if place else None)
         else:
             run.metrics["decode_tps"] = run.local_decode_tps()
+            run.metrics["tokens_per_round"] = turn["tokens_per_round"]
+            run.metrics["acceptance"] = turn["acceptance"]
         run.tps_history.append(run.metrics["decode_tps"])
         del run.tps_history[:-120]
         self.emit(conv, {"type": "run.metrics", "run_id": run.id,
@@ -1133,6 +1148,7 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
                          "tokens_per_round": run.metrics["tokens_per_round"],
                          "acceptance": run.metrics["acceptance"], "tokens": run.tokens,
                          "thinking_used": run.thinking_tokens,
+                         "thinking_call": run.thinking_tokens - run.call_base[1],
                          "thinking_budget": run.metrics["thinking_budget"],
                          "prefill": run.prefill}, persist=False)
         if time.monotonic() - conv.context_sent_at >= CONTEXT_RUN_S:
@@ -1150,6 +1166,14 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
             return
         conv.context_sent_at = time.monotonic()
         self.emit(conv, {"type": "context.changed", "context": conv.context}, persist=False)
+        # the sandbox's figures went out only when its state changed: live (2026-10-16) the panel
+        # said 20 MB and 24 KB of disk through an npm install of 51 MB
+        at, sent = conv.sandbox_sent
+        if time.monotonic() - at >= SANDBOX_S and self.sandboxes.box(conv.id).state == "running":
+            st = self.sandboxes.status(conv.id)
+            conv.sandbox_sent = (time.monotonic(), st)
+            if st != sent:
+                self.emit(conv, {"type": "sandbox.changed", "sandbox": st}, persist=False)
 
     # ================================================================== the context report
     def _context(self, conv: Conv, settings: dict, branch: list[dict], *, live_row=None,
@@ -1693,8 +1717,20 @@ def _branch_tokens(branch: list[dict]) -> int:
     for m in branch:
         s = m.get("stats")
         if m["role"] == "assistant" and s and s.get("prompt_tokens"):
-            base = int(s["prompt_tokens"]) + int(s.get("completion_tokens") or 0) - int(
-                s.get("reasoning_tokens") or 0)
+            # the last call's prompt (the earlier calls' answers are in it) and answer, less the
+            # turn's thinking; a turn's completion_tokens are every call's (live 2026-10-16: an
+            # agent turn of 13,270 counted ~11,000 tokens twice)
+            last = (s.get("step_usage") or [{}])[-1]
+            reasoning = int(s.get("reasoning_tokens") or 0)
+            if last.get("completion_tokens") is not None:
+                base = int(last.get("prompt_tokens") or s["prompt_tokens"]) + int(
+                    last["completion_tokens"]) - reasoning
+            elif int(s.get("steps") or 1) > 1:     # a turn saved before the calls' own counts
+                base = int(s["prompt_tokens"]) + ctx_mod.estimate_tokens(
+                    render.text_of(render.steps(m.get("parts") or [])[-1]))
+            else:
+                base = int(s["prompt_tokens"]) + int(s.get("completion_tokens") or 0) - reasoning
+            base = max(0, base)
             since = 0
         else:
             since += ctx_mod.estimate_tokens(render.text_of(m.get("parts") or []))

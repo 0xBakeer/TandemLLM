@@ -220,6 +220,13 @@ class Engine:
         return out
 
 
+def _newer(a: dict, b: dict) -> bool:
+    """Is row `a` the one to show over `b`: in flight over finished, then the later end."""
+    if (a.get("phase") == "done") != (b.get("phase") == "done"):
+        return a.get("phase") != "done"
+    return float(a.get("ended_ms_ago") or 0) < float(b.get("ended_ms_ago") or 0)
+
+
 class LiveTail:
     """One reader of `/v1/dashboard/live` for every run in chatd (SRV-349: a phone watching a chat
     costs the engine nothing extra). It runs while `wanted()` says a run is on and stops 15 s after.
@@ -266,7 +273,12 @@ class LiveTail:
             if not isinstance(r, dict):
                 continue
             if r.get("conversation_id"):
-                conv[str(r["conversation_id"])] = r
+                # a conversation's request in flight, else its newest finished one: the snapshot
+                # keeps finished rows for 30 s after the live ones, so an agent's next call came
+                # after its previous calls' rows and the last of those was taken (2026-10-16)
+                k = str(r["conversation_id"])
+                if k not in conv or _newer(r, conv[k]):
+                    conv[k] = r
             if r.get("request_id"):
                 req[str(r["request_id"])] = r
         with self.lock:

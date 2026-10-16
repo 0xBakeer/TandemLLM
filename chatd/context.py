@@ -66,10 +66,15 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
         skills = int(row["hidden_tokens"])
     elif stats and stats.get("hidden_tokens"):
         skills = int(stats["hidden_tokens"])
-    thinking = int((run or {}).get("thinking", {}).get("used") or 0) if run else 0
+    # the turn's thinking: the run's so far, its earlier calls' inside this call's prompt; after
+    # the turn the last answer's, which the engine holds until the next message drops it (it
+    # read 0 there, live 2026-10-16, beside "2,193 thinking" on the answer)
+    th = (run or {}).get("thinking") or {}
+    thinking = int(th.get("used") or 0) if run else int((stats or {}).get("reasoning_tokens") or 0)
+    earlier = max(0, thinking - int(th.get("call") or 0)) if run else 0
     messages = max(0, branch_tokens - files_tokens)
     if row and row.get("prompt_tokens"):
-        messages = max(0, int(row["prompt_tokens"]) - files_tokens)
+        messages = max(0, int(row["prompt_tokens"]) - files_tokens - earlier)
     reserved = int(model.get("max_output") or 0)
     system = int((split or {}).get("system") or 0)
     tools = int((split or {}).get("tools") or 0)
@@ -80,7 +85,8 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
         {"kind": "skills", "label": "skills and packages", "tokens": skills},
         {"kind": "files", "label": "files", "tokens": files_tokens},
         {"kind": "messages", "label": "conversation", "tokens": messages},
-        {"kind": "thinking", "label": "thinking, this turn", "tokens": thinking},
+        {"kind": "thinking", "label": "thinking, this turn" if run or not thinking else
+         "thinking, last turn", "tokens": thinking},
         {"kind": "reserved", "label": "kept for the answer", "tokens": reserved},
     ]
     used = sum(p["tokens"] for p in parts if p["kind"] != "reserved")
