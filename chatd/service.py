@@ -1300,7 +1300,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             ours = m.get("owned_by") in ("local", "tandemllm") or card.get("backend") == "engine"
             w = eng.get("weights") if ours else None
             levels = c.get("effort_levels") or []
-            cloud = bool(card.get("cloud")) or card.get("kind") in ("openai", "anthropic", "cloud")
+            cloud = bool(card.get("cloud")) or card.get("kind") in ("openai", "anthropic", "deepseek",
+                                                                    "cloud")
             out.append({
                 "id": m["id"], "name": _model_name(m, card, ours, cloud),
                 "weights": card.get("pack") or (w.get("name") if isinstance(w, dict) else "") or "",
