@@ -16,7 +16,9 @@ THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
    steer) ends the run here, and the next run carries it: the model reads it right after the
    results;
 4. a step without calls ends the run: `stop` completes it, `length` gets one continuation, an
-   empty turn one retry with a hidden nudge (a second empty turn is an error the user sees).
+   empty turn one retry with a hidden nudge (a second empty turn is an error the user sees). A
+   run that built or changed a web page or app checks it first (chatd/verify.py): the check is a
+   call of the harness's own in that step, and the model reads its result in the next one.
 Limits: `max_steps` model calls (50; the run ends `interrupted` with a notice and Continue goes
 on), the same call with the same arguments three times in a row ends the run with a notice, and
 so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
@@ -44,6 +46,7 @@ import re
 import threading
 import time
 
+from chatd import verify
 from chatd.engine import EngineError
 from chatd.ids import iso, now_ms, ulid
 
@@ -142,6 +145,7 @@ class Run:
                      "draft_n": 0, "draft_accepted": 0}
         self.step_usage: list[dict] = []       # per model call: prompt, cached, cache source
         self.snapshotted = False
+        self.verify = verify.new_state()       # the verify phase's checks (chatd/verify.py)
         self.waiting: dict[str, dict] = {}     # call id -> {"event", "answer"} while a prompt waits
 
     # ------------------------------------------------------------------ the contract's Run
@@ -268,6 +272,8 @@ class Run:
                     continue
                 self.error = "The model answered with nothing, twice."
                 return "failed"
+            if self.svc.verify_step(self):          # the app it built, checked; the model reads it
+                continue
             return "completed"
 
     def _call(self) -> str:

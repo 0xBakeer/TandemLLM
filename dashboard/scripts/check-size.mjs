@@ -22,7 +22,8 @@
 // figures line as readings, the panes' tab strip that scrolls on its own, the thread's wrap rules): 430.3 KB.
 // 433 KB with the Setup Guide's parallel-chats stepper (VIS-199: the field, its reasons, the cost line,
 // Next's refusal and the fit search): 432.4 KB. 434 KB with its two window steppers on top (the ladder,
-// typed 128k and 1m, the limits named): 433.6 KB.
+// typed 128k and 1m, the limits named): 433.6 KB. 435 KB with the verify phase on top (SRV-532: the
+// harness's check card, the Checked / Not checked block, the composer's switch): 434.2 KB.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -41,8 +42,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 434 KB)`);
-if (total > 434 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 435 KB)`);
+if (total > 435 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

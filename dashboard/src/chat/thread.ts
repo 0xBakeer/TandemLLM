@@ -22,6 +22,7 @@ import { callMedia, callPane, loadMediaView } from './file-panes';
 import { hostOf, resultsWord, searchResults } from './websearch';
 import { attachmentWords, sandboxCallWords } from './context-words';
 import { figsParts } from './turn-figures';
+import { actingPhase, isHarnessCall, verifyBlock, verifyTone } from './verify';
 
 const PANE_LANGS: Record<string, PaneRef['kind']> = { html: 'preview', svg: 'preview', markdown: 'markdown', md: 'markdown', diff: 'diff', patch: 'diff' };
 
@@ -103,7 +104,7 @@ export class QseChatThread extends LightElement {
     const started = Date.parse(r.started_at);
     const elapsed = Math.max(0, Math.round((this.now - started) / 1000));
     const label = this.attach ? attachLabel(this.attach, this.now) : null;
-    const fig: FigureState = r.phase === 'tool' ? 'acting' : r.phase === 'permission' ? 'listening' : r.phase === 'thinking' || r.phase === 'prefill' || r.phase === 'queued' ? 'thinking' : 'talking';
+    const fig: FigureState = actingPhase(r.phase) ? 'acting' : r.phase === 'permission' ? 'listening' : r.phase === 'thinking' || r.phase === 'prefill' || r.phase === 'queued' ? 'thinking' : 'talking';
     const pf = r.prefill;
     return html`<div class="ch-now ${r.phase === 'permission' ? 'is-permission' : ''}" data-phase=${r.phase} role="status">
       <qse-wren-figure class="ch-now-fig" .state=${fig} .size=${30}></qse-wren-figure>
@@ -234,6 +235,14 @@ export class QseChatThread extends LightElement {
         return html`<div class="ch-error" role="alert" data-part="error">${icon('warn')}<span>${p.message}</span>${p.retryable ? html`<button type="button" class="btn btn-sm" ?disabled=${!!c.run} @click=${() => this.fire('ch-regenerate', { messageId: m.id })}>${icon('refresh')} Retry</button>` : nothing}</div>`;
       case 'todos':
         return html``;
+      case 'verify': {
+        const b = verifyBlock(p);
+        return html`<div class="ch-verify is-${verifyTone(p.state)}" role="note" data-part="verify" data-state=${p.state}>
+          <p class="ch-verify-lead">${icon(p.state === 'passed' ? 'check' : 'warn')}<span>${b.lead}</span></p>
+          ${b.checked.length ? html`<p class="ch-verify-k">Checked</p><ul class="ch-verify-list">${b.checked.map((x) => html`<li>${x}</li>`)}</ul>` : nothing}
+          ${b.unchecked.length ? html`<p class="ch-verify-k">Not checked</p><ul class="ch-verify-list is-not">${b.unchecked.map((x) => html`<li>${x}</li>`)}</ul>` : nothing}
+        </div>`;
+      }
       case 'artifact':
         return html`<button type="button" class="ch-artifact" data-part="artifact" @click=${() => this.fire('ch-open-pane', { pane: { kind: p.mime.startsWith('image/') ? 'image' : p.mime === 'text/html' ? 'preview' : 'markdown', ref: p.id, title: p.title } as PaneRef })}>${icon('preview')}<span class="ch-artifact-title">${p.title}</span><span class="muted small">v${p.version}, open in a pane</span></button>`;
     }
@@ -272,7 +281,7 @@ export class QseChatThread extends LightElement {
     return html`<section class="ch-call is-${t.status}" data-call=${t.id} data-tool=${t.name}>
       <button type="button" class="ch-call-head" aria-expanded=${open} @click=${() => this.toggleCall(t.id)}>
         <span class="ch-call-dot" aria-hidden="true"></span>
-        <code class="ch-call-name">${toolLabel(t.name)}</code>${t.risk ? html`<span class="ch-risk ch-risk-${t.risk}" title=${`${t.risk} tool`}>${t.risk}</span>` : nothing}${t.approved && t.approved !== 'user' ? html`<span class="ch-approved is-${t.approved}" title=${approvedTitle(t.approved)}>${approvedWord(t.approved)}</span>` : nothing}
+        ${isHarnessCall(t) ? html`<code class="ch-call-name">verify</code><span class="ch-approved is-harness" title="the harness checked the app in a browser before the run ends; the model reads the result">harness</span>` : html`<code class="ch-call-name">${toolLabel(t.name)}</code>${t.risk ? html`<span class="ch-risk ch-risk-${t.risk}" title=${`${t.risk} tool`}>${t.risk}</span>` : nothing}`}${t.approved && t.approved !== 'user' ? html`<span class="ch-approved is-${t.approved}" title=${approvedTitle(t.approved)}>${approvedWord(t.approved)}</span>` : nothing}
         <span class="ch-call-args num">${args}</span>
         <span class="grow"></span>
         ${dur ? html`<span class="ch-call-dur num">${dur}</span>` : nothing}

@@ -41,6 +41,8 @@ from chatd.plans import PlansMixin
 from chatd.preview import PreviewMixin
 from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
+from chatd.verify import VerifyMixin
+from chatd.verify import summary as verify_summary
 from chatd import websearch
 from chatd.websearch import WebSearchMixin
 from chatd.engine import Engine, LiveTail
@@ -63,6 +65,9 @@ DEFAULT_SETTINGS = {
     # SRV-469: null = the global web search settings; else some of provider, max_results,
     # safe_search, language, time_range (chatd/websearch.py)
     "web_search": None,
+    # SRV-532: a run that built or changed a web page or app checks it in a browser before it
+    # ends (chatd/verify.py)
+    "verify": True,
 }
 EFFORTS = ("auto", "low", "medium", "high", "xhigh")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
@@ -147,7 +152,7 @@ def device_label(ua: str | None) -> str | None:
 
 
 class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
-              WebSearchMixin):
+              WebSearchMixin, VerifyMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -863,6 +868,13 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                     conv.live["parts"].append(note)
                     self.emit(conv, {"type": "part.added", "message_id": run.message_id,
                                      "part": note}, run_id=run.id)
+                said = verify_summary(run.verify, conv.live["parts"]) if status == "done" \
+                    else None
+                if said is not None:                # what the verify phase checked, and what not
+                    said["step"] = run.step
+                    conv.live["parts"].append(said)
+                    self.emit(conv, {"type": "part.added", "message_id": run.message_id,
+                                     "part": said}, run_id=run.id)
                 conv.live["status"] = status
                 if status == "error":
                     conv.live["parts"].append({"type": "error", "message": run.error or "failed",
@@ -1658,6 +1670,8 @@ def _clean_settings(patch: dict) -> dict:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
     if "max_steps" in out:
         out["max_steps"] = max(1, min(200, int(out["max_steps"] or 50)))
+    if "verify" in out:
+        out["verify"] = bool(out["verify"])
     if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):
         raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
     if "web_search" in out:

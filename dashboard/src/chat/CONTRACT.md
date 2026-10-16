@@ -104,8 +104,11 @@ interface ToolCallPart {
   started_at: string | null; ended_at: string | null;
   permission?: { summary: string; suggested_rule?: { tool: string; match?: string } } | null;   // suggested_rule: v0.2
   pane?: PaneRef | null;
+  harness?: 'verify';                            // SRV-532: a call the harness made itself (source {kind: 'harness'})
 }
 interface ErrorPart { type: 'error'; message: string; retryable: boolean }
+interface VerifyPart { type: 'verify'; state: 'passed' | 'problems' | 'not_run' | 'stale'; text: string;
+                       checked?: string[]; not_checked?: string[] }   // SRV-532: the end of an answer that built an app
 interface ArtifactPart { type: 'artifact'; id: string; title: string; mime: string; version: number }   // v2
 
 interface Attachment {
@@ -129,7 +132,7 @@ interface TurnStats {
 }
 
 // ---- the run
-type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'finishing';
+type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing';   // verifying: SRV-532
 interface Run {
   id: string; conversation_id: string; message_id: string; started_at: string;
   started_by: string | null;                     // a device label when it was not this browser
@@ -198,6 +201,7 @@ interface ChatSettings {
   auto_accept_edits: boolean;                    // v0.2: write tools run without asking
   max_steps: number;                             // v0.2: default 50
   sandbox_network: 'off' | 'on';                 // v0.2: 'on' = internet without the LAN; see SandboxStatus.network
+  verify?: boolean;                              // SRV-532: check a page or app the run built before it ends (default true)
 }
 type ToolPolicy = 'ask' | 'always' | 'never';
 type ToolSource = { kind: 'builtin' } | { kind: 'package'; id: string } | { kind: 'mcp'; id: string } | { kind: 'user'; id: string };
@@ -540,3 +544,13 @@ The ask: fewer allow prompts for `cd` and `ls`, and a mode that asks for nothing
 - `tool.started` carries `approved: 'user' | 'rule' | 'auto' | 'yolo' | null`; `ToolCallPart.approved` keeps it and the card shows a small badge for everything but `user` (YOLO in orange).
 - Server (chatd, 2026-10-13): serves exactly this shape: `ChatSettings.permission_mode` (null on chats from before 0.8.2), `approved` on `tool.started` and the tool part (`rule` = a rule, an always policy or auto-accept edits on a tool that would ask; null = the tool's own default allow), `PATCH /defaults {permission_mode}` answering `Capabilities.defaults`. It also sends `tool.auto_approved` (the event log's record of each call a mode allowed), `Run.permission_mode`, `run.mode` and the assistant message's `permission_mode`; the reducer ignores them today. Full server section: chat-ui-brief/community/CONTRACT.md "Permission modes (API)".
 - Bash prompts (chatd, 2026-10-13, the 11-times "always allow cd" bug): `suggested_rule` for bash carries `matches: string[]`, one prefix per part of a chained command that no allow rule covers yet (`cd /w && node a.js > run.log 2>&1; echo $?; cat run.log` -> `["cd","node","echo","cat"]`), and `match` the same joined with ", ". "Always allow" saves all of them (once each). `matches: []` (a command with `$(...)` or backticks) means no rule can allow it: the thread hides the Always button. The button reads "Always allow `cd, node, echo, cat`".
+
+
+## The verify phase (SRV-532, 2026-10-17)
+
+A run that built or changed a web page or app checks it in a browser before it ends (chatd/verify.py is the authority).
+
+- When the model's step would end the run and web files changed since the run's start or its last check, chatd adds a call of its own to that step: `ToolCallPart` with `name: 'render_page'`, `harness: 'verify'`, `source: {kind: 'harness'}`, `input` the target (`{path}` or `{port}`). It goes through `part.added`, `tool.started` and `tool.done` like any call; its output is what the model reads, with the 1280 px screenshot in `output.images` and an image pane. The thread shows it as a `verify` card with a `harness` badge.
+- Meanwhile `run.phase` is `verifying`, `now` "Verifying the app: loading <target> in a browser (check N of 2)", `tool` the call. The model then fixes what the check found or answers; at most two checks a run.
+- A completed run that built or changed an app ends with a `VerifyPart` (`part.added`): `state` passed, problems (the last check's, not fixed), not_run (no check could run: no sandbox, the step limit, the sandbox failed) or stale (files changed after the last check); `text` a lead line, then "Checked: ..." and "Not checked: ..." lines with the items of `checked` and `not_checked`. The model never reads it.
+- `ChatSettings.verify` (default true; absent on an older server = on) turns it off; the composer's tools menu has the switch.
