@@ -260,6 +260,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [
     "fastest"
@@ -289,6 +294,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -316,6 +326,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -343,6 +358,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [
     "best speed for quality"
@@ -372,6 +392,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": true,
    "badges": [
     "recommended"
@@ -401,6 +426,11 @@
    "drafters_gib": 5.41,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [
     "closest to BF16"
@@ -430,6 +460,11 @@
    "drafters_gib": 5.87,
    "hf_repo": "0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [
     "public weights"

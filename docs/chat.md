@@ -125,15 +125,26 @@ MCP servers: stdio servers run inside the chat's sandbox, HTTP servers are calle
 through the same egress rules; their secrets are sealed in the store and never come back in an
 answer.
 
+chatd reads and writes the chat's workspace and the sandbox's home on the host (the file tools, the
+files pane, uploads, snapshots and undo, the Open WebUI runner's files), and the sandbox can change
+both at any moment. So no such access follows a symlink (`chatd/workspace.py`, SEC-1): it walks
+from the folder's root one directory at a time, each opened with O_NOFOLLOW from the one before,
+so a folder swapped for a symlink after a check cannot redirect it; a write goes to a new file
+(O_EXCL) in the verified folder and is renamed over the name; a read takes a regular file only (a
+FIFO would block chatd). A path with a symlink on the way is refused, and the file tools say so.
+
 ## Attachments
 
 An image goes to a model that reads images; a text file goes into the prompt, and its tokens show on
 its chip as soon as it is added (the composer uploads it then). When a message is sent, each of its
 attachments is saved in the chat's workspace under `uploads/` (`/workspace/uploads/<name>`, a free
-name). The message's text files share a budget of a quarter of the window's free room, at most
-32,000 tokens; a file past it is not inlined: the prompt gets one line with its name, size, tokens
-and path, and the chip marks it "as a file" before the send. A request that still does not fit
-names its cause: the attachment, its message and its tokens, or the largest part.
+name, cut to 255 bytes with its extension kept). When it cannot be saved there (`uploads/` is a
+symlink, the disk is full), the message is sent all the same: the attachment keeps its stored copy
+and the prompt gets one line saying it is not in the workspace and why. The message's text files
+share a budget of a quarter of the window's free room, at most 32,000 tokens; a file past it is not
+inlined: the prompt gets one line with its name, size, tokens and path, and the chip marks it "as a
+file" before the send. A request that still does not fit names its cause: the attachment, its
+message and its tokens, or the largest part.
 
 ## Web search
 

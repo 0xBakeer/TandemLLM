@@ -115,7 +115,7 @@ flowchart TB
     A --> H
 ```
 
-Half of it is built. Since 2026-10-12 the adapters, the state, the shared methods and the server's one loader serve both models. Four parts are still design, each with its ticket: format plugins, a kernel registry, device profiles and the mesh.
+Half of it is built. Since 2026-10-12 the adapters, the state, the shared methods and the server's one loader serve every model. Four parts are still design, each with its ticket: format plugins, a kernel registry, device profiles and the mesh.
 
 | layer | what | where | today |
 |-|-|-|-|

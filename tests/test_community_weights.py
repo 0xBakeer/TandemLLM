@@ -29,6 +29,14 @@ The test matrix:
      the pack and our drafters, and leaves run/ alone (on the box: GNU df)
                                                             test_use_profile_dry_run
 
+VIS-175: a pack one of the model's own profiles serves (turboderp's Flash-Next branches)
+
+ 12  each of turboderp's five entries checks, names its own profile, its repository at a commit and
+     turboderp; it is not a community/<id> profile, switch, served card or download folder; a
+     mismatch with its profile (repository, bits a weight, an unknown profile) and a draft layer in
+     a pack without a profile are refused; the fetched index cannot replace it, and the index a
+     box before 0.11.1 fetches holds none of them          test_a_pack_an_own_profile_serves
+
 Run: python tests/test_community_weights.py
 """
 
@@ -59,6 +67,8 @@ SLUG = "thinkingcap-27b-kearuga-exl3-4.00"
 PID = "community/" + SLUG
 ENTRY = os.path.join(ROOT, "models", "qwen3.8-27b", "community", SLUG + ".json")
 REV = "11447639033dd80a4c04536b5b37ed7d642802ee"
+FN_BPW = ("2.05", "3.05", "4.05", "5.05", "6.05")
+FN_ENTRY = os.path.join(ROOT, "models", "qwen3.8-flash-next", "community", "turboderp-flashnext-3.05.json")
 
 
 def _entry() -> dict:
@@ -133,8 +143,10 @@ def test_the_first_entry():
         from server.setup import tools
         sel = next(t for t in tools.definitions(m) if t["function"]["name"] == "select_profile")
         assert PID in sel["function"]["parameters"]["properties"]["id"]["enum"]
-        # Flash-Next has none, and the payload holds nothing of this machine
-        assert _models()["qwen3.8-flash-next"]["community"] == []
+        # Flash-Next's are turboderp's packs its own profiles serve (VIS-175), and the payload holds
+        # nothing of this machine
+        assert [c["profile"] for c in _models()["qwen3.8-flash-next"]["community"]] == \
+            [f"flashnext-{b}" for b in FN_BPW]
         assert os.path.expanduser("~") not in json.dumps(m["community"])
 
 
@@ -149,6 +161,12 @@ def test_the_schema_and_index_files():
     assert [(e["model"], e["id"]) for e in idx["entries"]] == [("qwen3.8-27b", SLUG)]
     import hashlib
     assert idx["entries"][0]["sha256"] == hashlib.sha256(open(ENTRY, "rb").read()).hexdigest()
+    # the entries one of the model's own profiles serves are in community-builtin.json alone (VIS-175)
+    with open(community.builtin_path(), encoding="utf-8") as fh:
+        assert fh.read() == community.render_index(community.build_index(builtin=True)), \
+            "regenerate: python -m server.setup.community --index"
+    assert [(e["model"], e["id"]) for e in community.build_index(builtin=True)["entries"]] == \
+        [("qwen3.8-flash-next", f"turboderp-flashnext-{b}") for b in FN_BPW]
 
 
 BAD = [  # (change, the field the message names, a part of the message)
@@ -242,7 +260,7 @@ def test_the_cli_names_the_file_and_field():
                 out = io.StringIO()
                 with redirect_stdout(out):
                     rc = registry.main(["--check"])
-                assert rc == 0 and "1 packs, models/community-index.json matches" in out.getvalue(), out.getvalue()
+                assert rc == 0 and "6 packs, models/community-index.json matches" in out.getvalue(), out.getvalue()
         finally:
             registry.MODELS_DIR = saved
     finally:
@@ -523,6 +541,69 @@ class _H:
         self.out = (status, json.loads(json.dumps(body)))
 
 
+def test_a_pack_an_own_profile_serves():
+    from server import model_card
+    from server.setup import apply, device
+    models = _models()
+    m = models["qwen3.8-flash-next"]
+    for b in FN_BPW:
+        c = next(x for x in m["community"] if x["id"] == f"turboderp-flashnext-{b}")
+        own = registry.profile(m, f"flashnext-{b}")
+        assert c["profile"] == own["id"] and c["hf"]["repo"] == own["hf_repo"] == "turboderp/Qwen3.8-Flash-Next-exl3"
+        assert re.fullmatch(r"[0-9a-f]{40}", c["hf"]["revision"]) and c["author"]["github"] == "turboderp"
+        assert own["made_by"] == {"kind": "community", "name": "turboderp", "github": "turboderp"}
+        assert c["memory"]["like"] == own["id"] and c["drafters"] == "in-pack"
+        assert apply.profile_ok("community/" + c["id"]) is False
+        assert model_card.find("community/" + c["id"]) is None
+    assert [p["id"] for p in registry.profiles(m)] == [p["id"] for p in m["profiles"]]
+    assert registry.community(m, "community/turboderp-flashnext-3.05") is None
+    assert registry.step_field(m, "weights", "profile")["options"] == [p["id"] for p in m["profiles"]]
+    statuses = {c["id"].rsplit("-", 1)[1]: c["status"] for c in m["community"]}
+    assert statuses == {"2.05": "verified", "3.05": "verified", "4.05": "verified", "5.05": "broken",
+                        "6.05": "submitted"}
+    # the on-disk map keeps the profiles' own folders and adds none
+    disk = device.on_disk(m, fresh=True)
+    assert sorted(disk) == sorted(p["id"] for p in m["profiles"])
+    # use-profile.sh community/<id> points at the profile
+    r = subprocess.run([sys.executable, "-m", "server.setup.community", "env", "community/turboderp-flashnext-3.05"],
+                       cwd=ROOT, capture_output=True, text=True)
+    assert r.returncode == 2 and "ops/use-profile.sh flashnext-3.05" in r.stderr, r.stderr
+    # what the check refuses
+    base = json.load(open(FN_ENTRY))
+    assert registry.community_errors(base, base["id"], "qwen3.8-flash-next", models) == []
+    for change, field, part in [
+            (lambda e: e["hf"].update(repo="someone/Qwen3.8-Flash-Next-exl3"), "$.hf.repo", "is not profile"),
+            (lambda e: e.update(bpw=4.05), "$.format", "is not profile flashnext-3.05's"),
+            (lambda e: e.update(profile="flashnext-9.05"), "$.profile", "has no profile"),
+            (lambda e: e["modalities"].update(audio=True) or e.update(modalities_in_pack=["text", "image", "audio"]),
+             "$.modalities.audio", "does not serve audio"),
+            (lambda e: e["hf"].update(revision="3.05bpw_h5_ng5"), "$.hf.revision", "does not match")]:
+        e = copy.deepcopy(base)
+        change(e)
+        errs = registry.community_errors(e, e["id"], "qwen3.8-flash-next", models)
+        assert any(x.startswith(field) and part in x for x in errs), (field, errs)
+    e = dict(_entry(), drafters="in-pack")
+    assert any(x.startswith("$.drafters:") and "own profiles only" in x
+               for x in registry.community_errors(e, SLUG, "qwen3.8-27b", models))
+    # a fetched index with an entry of the same id does not replace the release's
+    tmp = tempfile.mkdtemp(prefix="cw-own-")
+    try:
+        fake = dict(base, profile="flashnext-2.05", bpw=2.05, description="replaced")
+        doc = {"schema": 1, "generator": "t", "entries": [
+            {"model": "qwen3.8-flash-next", "id": base["id"], "path": "models/qwen3.8-flash-next/community/"
+             + base["id"] + ".json", "sha256": "0" * 64, "entry": fake}]}
+        with _Env(QSE_COMMUNITY_DIR=tmp, QSE_COMMUNITY_URL="off"):
+            with open(community.cache_path(), "w") as fh:
+                json.dump(doc, fh)
+            got = [c for c in registry.load_all()[0]["qwen3.8-flash-next"]["community"] if c["id"] == base["id"]]
+            assert len(got) == 1 and got[0]["profile"] == "flashnext-3.05", got
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    # the index every box fetches holds no such entry: a box before 0.11.1 would drop it
+    with open(community.bundled_path()) as fh:
+        assert all("profile" not in r["entry"] for r in json.load(fh)["entries"])
+
+
 def test_the_api():
     from server import setup_api
     hub = _Hub()
@@ -533,7 +614,7 @@ def test_the_api():
             h = _H()
             setup_api._get(h, None, ["models"])
             tiles = {t["id"]: t for t in h.out[1]["models"]}
-            assert tiles["qwen3.8-27b"]["community_count"] == 1 and tiles["qwen3.8-flash-next"]["community_count"] == 0
+            assert tiles["qwen3.8-27b"]["community_count"] == 1 and tiles["qwen3.8-flash-next"]["community_count"] == len(FN_BPW)
             setup_api._get(h, None, ["models", "qwen3.8-27b"])
             body = h.out[1]
             assert [c["profile"] for c in body["community"]] == [PID], body["community"]

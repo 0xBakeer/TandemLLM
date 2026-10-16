@@ -9,7 +9,8 @@ queue) only ever appends. `tests/test_chatd_render.py` pins it: the same convers
 same bytes across calls and across a restart (a fresh store read).
 
     messages        the branch, root to head: user text (text attachments as a fenced block after
-                    it, one line with its workspace path for one over the budget, chatd/attach.py;
+                    it, one line with its workspace path for one over the budget, chatd/attach.py,
+                    one line saying why for one not saved under uploads/;
                     images as `image_url` parts when the model reads images), assistant text with
                     its reasoning as `reasoning_content` (the engine's template decides what to keep);
                     notices (role `system` in the tree) are the UI's and are left out
@@ -73,6 +74,8 @@ def _user(m: dict, vision: bool, blob=None) -> dict:
                 text += attach.line(a)
                 continue
             text += f"\n\n```{a.get('name') or 'file'}\n{body}\n```"
+        if a.get("unplaced"):
+            text += attach.unplaced_line(a)
     if images:
         return {"role": "user", "content": [{"type": "text", "text": text}, *images]}
     return {"role": "user", "content": text}

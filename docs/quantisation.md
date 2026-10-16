@@ -204,7 +204,7 @@ The windows come from the Setup Guide's estimate ([setup.md](setup.md)), calibra
 
 5.05 does not load on this engine yet. Its routed experts use 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8 (`tools/fn_kernels.py` `MoEBank` refuses the 7). By the estimate its window would be 53,248 with the vision tower and 65,536 without. 6.05 needs about 92 GiB for its weights, which leaves too little under the 15 GiB floor at any window.
 
-The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha256), so `ops/fetch_weights.py` hard-links it between packs instead of downloading 39 GB again ([operations.md](operations.md#two-models-the-27b-and-flash-next)).
+The 4.05, 5.05 and 6.05 branches carry the same n-gram table file (the same sha256), so `ops/fetch_weights.py` hard-links it between packs instead of downloading 39 GB again ([operations.md](operations.md#one-model-at-a-time-the-27b-and-flash-next)).
 
 ### What a pack holds, and how the engine reads it
 

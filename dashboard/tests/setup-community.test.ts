@@ -4,9 +4,14 @@
 import { describe, expect, it } from 'vitest';
 import community from '../mock/setup/community-qwen3.8-27b.json';
 import model from '../mock/setup/qwen3.8-27b.json';
+import fnCommunity from '../mock/setup/community-qwen3.8-flash-next.json';
+import flashNext from '../mock/setup/qwen3.8-flash-next.json';
+import bolt from '../mock/setup/nemotron-3.5-bolt-74b-a9b.json';
+import superVl from '../mock/setup/nemotron-3.5-super-vl-120b-a12b.json';
+import lfm from '../mock/setup/lfm2.5-24b-a2b.json';
 import type { CommunityEntry, CommunitySync, SetupDevice, SetupModel } from '../src/api/types';
 import { howToFix } from '../src/setup/checks';
-import { avatarUrl, boxState, cardOf, cardsOf, communityProfiles, countText, httpsUrl, initials, isCommunity, modalityStates, ownProfiles, packVisionOff, profileOfEntry, searchCards, socialLinks, SORT_KEYS, sortCards, speedOf, withCommunityProfiles } from '../src/setup/community';
+import { avatarUrl, boxState, cardOf, cardsOf, communityProfiles, countText, httpsUrl, initials, isCommunity, modalityStates, ownProfiles, packVisionOff, profileOfEntry, searchCards, socialLinks, SORT_KEYS, sortCards, sourceLine, speedOf, withCommunityProfiles } from '../src/setup/community';
 import { checkSelection, estimate } from '../src/setup/estimate';
 import { defaults, emptyState, restoreSelection, setupReducer } from '../src/setup/state';
 
@@ -216,5 +221,66 @@ describe('sort', () => {
     expect(countText(1, 1)).toBe('1 pack');
     expect(countText(3, 3)).toBe('3 packs');
     expect(countText(1, 3)).toBe('1 of 3 packs');
+  });
+});
+
+// VIS-175: every weight card names its Hugging Face repository and who made the pack; turboderp's
+// Flash-Next packs are community cards whose Use selects Flash-Next's own profile
+describe('who made the weights', () => {
+  const FN_BPW = ['2.05', '3.05', '4.05', '5.05', '6.05'];
+  const FN = withCommunityProfiles({ ...(flashNext as unknown as SetupModel), community: (fnCommunity as unknown as { community: CommunityEntry[] }).community });
+  const of = (m: SetupModel, id: string) => sourceLine(m.profiles.find((p) => p.id === id)!);
+  it('a turboderp pack: a community quant by @turboderp, its repository linked as owner/name', () => {
+    expect(of(FN, 'flashnext-3.05')).toEqual({ kind: 'community', label: 'Community quant', by: '@turboderp', byUrl: 'https://github.com/turboderp', repo: 'turboderp/Qwen3.8-Flash-Next-exl3', repoUrl: 'https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3' });
+    for (const p of FN.profiles) expect(sourceLine(p).by, p.id).toBe('@turboderp');
+  });
+  it("a vendor release names the vendor; Bolt's IQ2 names NVIDIA's GGUF repository, not the text files'", () => {
+    const vl = superVl as unknown as SetupModel;
+    expect(of(vl, 'nemotron-super-vl-nvfp4')).toMatchObject({ kind: 'vendor', label: 'Vendor release', by: 'NVIDIA', byUrl: null, repo: 'nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4' });
+    const iq2 = of(bolt as unknown as SetupModel, 'nemotron-bolt-iq2');
+    expect(iq2).toMatchObject({ kind: 'vendor', by: 'NVIDIA', repo: 'nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF', repoUrl: 'https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF' });
+    expect(of(lfm as unknown as SetupModel, 'lfm25-bf16')).toMatchObject({ kind: 'vendor', by: 'LiquidAI', repo: 'LiquidAI/LFM2.5-24B-A2B' });
+  });
+  it('our own packs say TandemLLM and @0xBakeer', () => {
+    expect(of(lfm as unknown as SetupModel, 'lfm25-exl3-3.5')).toMatchObject({ kind: 'ours', label: 'TandemLLM quant', by: '@0xBakeer', byUrl: 'https://github.com/0xBakeer', repo: '0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.5' });
+    expect(of(OWN, 'exl3-4.5')).toMatchObject({ kind: 'ours', repo: '0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5' });
+  });
+  it("every profile of every mocked model has a maker and an owner/name repository", () => {
+    for (const m of [OWN, FN, superVl, bolt, lfm] as unknown as SetupModel[]) {
+      for (const p of ownProfiles(m)) {
+        const s = sourceLine(p);
+        expect(s.repo, p.id).toMatch(/^[^/]+\/[^/]+$/);
+        expect(s.repoUrl, p.id).toBe(`https://huggingface.co/${s.repo}`);
+        expect(['ours', 'vendor', 'community'], p.id).toContain(s.kind);
+      }
+    }
+  });
+  it("a community pack's profile is the author's; an untrusted login or repository is never a link", () => {
+    expect(sourceLine(profileOfEntry(OWN, thinking))).toMatchObject({ kind: 'community', by: '@0xWhiteMage', byUrl: 'https://github.com/0xWhiteMage', repo: thinking.hf.repo });
+    const bad = sourceLine({ hf_repo: 'javascript:alert(1)', made_by: { kind: 'community', name: 'x', github: 'bad login!' } });
+    expect(bad.byUrl).toBeNull();
+    expect(bad.repoUrl).toBeNull();
+    expect(bad.by).toBe('x');
+  });
+  it("turboderp's five packs are community cards on Flash-Next; Use selects its own profile, which stays one of ours", () => {
+    const fc = cardsOf(FN);
+    expect(fc.map((c) => c.id)).toEqual(FN_BPW.map((b) => `flashnext-${b}`));
+    expect(ownProfiles(FN).map((p) => p.id)).toEqual(FN_BPW.map((b) => `flashnext-${b}`));
+    expect(communityProfiles(FN)).toEqual([]);
+    const c = fc[1];
+    expect(c.author).toMatchObject({ login: 'turboderp', url: 'https://github.com/turboderp' });
+    expect(c.hfRepo).toBe('turboderp/Qwen3.8-Flash-Next-exl3');
+    expect(c.hfUrl).toMatch(/^https:\/\/huggingface\.co\/turboderp\/Qwen3\.8-Flash-Next-exl3\/tree\/[0-9a-f]{40}$/);
+    expect(c.drafters).toBe("Drafts with the pack's own draft layer");
+    expect(c.modalities.map((m) => [m.id, m.runs])).toEqual([
+      ['text', true],
+      ['image', true],
+    ]);
+    expect(c.verified!.speeds.map((s) => s.task)).toEqual(['prose', 'code', 'chat']);
+    expect(fc.map((x) => x.status)).toEqual(['verified', 'verified', 'verified', 'broken', 'submitted']);
+    const st = setupReducer(setupReducer(emptyState(), { type: 'open', model: FN }, FN), { type: 'profile', id: c.id }, FN);
+    expect(st.selection!.profile).toBe('flashnext-3.05');
+    // the 27B's list still holds its packs first, and no profile-backed card
+    expect(cardsOf(M).map((x) => x.id)).toEqual(communityProfiles(M).map((p) => p.id));
   });
 });

@@ -46,7 +46,7 @@ TandemLLM is several programs that share one repository and one release number.
 \item[The dashboard] \code{dashboard/}: a web page the server serves at \code{/dashboard/}. It shows what each request is doing now, a year of usage, the log, a playground, the conductor's settings, the backends and the machine.
 \item[The proxy] \code{proxy/}: the same dashboard in front of other OpenAI-compatible engines and cloud APIs, routed by model id. It installs with \code{pip} and needs no GPU.
 \item[The plugins] \code{plugins/}: two small packages that run inside vLLM and SGLang and report each request's queue, prefill and decode times to the proxy.
-\item[The installer] \code{install.sh}: one command that sets up the served profile on the test board, and best effort on another CUDA GPU. With \code{--setup} it starts setup mode instead, and \code{ops/use-profile.sh} then downloads and starts any weight profile (Section~\ref{sec:new-box}).
+\item[The installer] \code{install.sh}: one command that sets up the served profile on the test board, and best effort on another CUDA GPU. With \code{--setup} it starts setup mode instead: the Setup Guide in the browser, or \code{ops/use-profile.sh} from a shell, then downloads and starts any weight profile (Section~\ref{sec:new-box}).
 \end{description}
 
 \section{What runs today}

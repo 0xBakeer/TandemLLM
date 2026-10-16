@@ -137,6 +137,11 @@
    "drafters_gib": 0.0,
    "hf_repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16",
    "hf_private": false,
+   "made_by": {
+    "kind": "vendor",
+    "name": "NVIDIA",
+    "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF"
+   },
    "recommended": false,
    "badges": [
     "NVIDIA's own quantization"
@@ -165,6 +170,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": true,
    "badges": [
     "recommended"
@@ -193,6 +203,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.5",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -219,6 +234,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-3.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -245,6 +265,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-3.5",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -271,6 +296,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-4.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -297,6 +327,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-5.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -323,6 +358,11 @@
    "drafters_gib": 1.32,
    "hf_repo": "0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-6.0",
    "hf_private": false,
+   "made_by": {
+    "kind": "ours",
+    "name": "0xBakeer",
+    "github": "0xBakeer"
+   },
    "recommended": false,
    "badges": [],
    "quality": {
@@ -341,36 +381,36 @@
   }
  ],
  "measurements": {
-  "build": "0.11.0",
+  "build": "0.11.1",
   "date": "2026-10-16",
-  "method": "the prose, chat and code asks of tools/fn_lookup_ab.py, one request at a time through one fresh server a run on the DGX Spark, the GPU to itself: greedy, thinking off, 512 new tokens; tok/s and tokens a round are the server's own timings. The profile's drafting (EXL3: NVIDIA's LiLiCorr drafter and the lookup; IQ2: the lookup alone; the cut by StairCut with the price files the release ships, none for 2.5 to 4.0), 3 slots, conductor raw, caches and the suffix store off, max_len 32,768. Three runs a cell on the 0.11.0 release, the same text in every run. Not measured yet: EXL3 5.0 and 6.0, sampled, 128 tokens, long context, first-token times. Raw data: models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.0-summary.json.",
-  "source": "models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.0-summary.json",
+  "method": "the prose, chat and code asks of tools/fn_lookup_ab.py, one request at a time through one fresh server a run on the DGX Spark, the GPU to itself: greedy, thinking off, 512 new tokens; tok/s and tokens a round are the server's own timings. The profile's drafting (EXL3: NVIDIA's LiLiCorr drafter and the lookup; IQ2: the lookup alone; the cut by StairCut with the release's price files), 3 slots, conductor raw, caches and the suffix store off, max_len 32,768. Three runs a cell, alternating with plain servers (--drafter none, the same shape); every drafted text is the plain run's. Measured on the 0.11.1 tree before its version bump. Not measured yet: sampled, 128 tokens, long context, first-token times. Raw data: models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.1-summary.json.",
+  "source": "models/nemotron-3.5-bolt-74b-a9b/measurements/0.11.1-summary.json",
   "rows": [
    {
     "profile": "nemotron-bolt-iq2",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 27.96,
-       "min": 27.87,
-       "ms_round": 36.5,
+       "tok_s": 27.72,
+       "min": 27.71,
+       "ms_round": 36.8,
        "tok_round": 1.02,
        "n": 3
       },
       "chat": {
-       "tok_s": 28.08,
-       "min": 28.0,
-       "ms_round": 36.7,
+       "tok_s": 27.84,
+       "min": 27.81,
+       "ms_round": 37.0,
        "tok_round": 1.03,
        "n": 3
       },
       "code": {
-       "tok_s": 32.22,
-       "min": 32.13,
-       "ms_round": 37.9,
+       "tok_s": 31.94,
+       "min": 31.91,
+       "ms_round": 38.2,
        "tok_round": 1.22,
        "n": 3
       }
@@ -378,33 +418,33 @@
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 27.73 / 27.72 / 27.75 tok/s; edit and copy asks 97.81 and 131.6 drafted (27.61 and 27.62 plain); every text the plain run's."
    },
    {
     "profile": "nemotron-bolt-exl3-2.0",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 65.84,
-       "min": 65.52,
-       "ms_round": 45.7,
-       "tok_round": 3.01,
+       "tok_s": 65.63,
+       "min": 65.12,
+       "ms_round": 45.8,
+       "tok_round": 3.0,
        "n": 3
       },
       "chat": {
-       "tok_s": 70.88,
-       "min": 70.45,
-       "ms_round": 43.9,
-       "tok_round": 3.11,
+       "tok_s": 71.08,
+       "min": 70.63,
+       "ms_round": 43.4,
+       "tok_round": 3.09,
        "n": 3
       },
       "code": {
-       "tok_s": 102.72,
-       "min": 102.0,
-       "ms_round": 47.5,
+       "tok_s": 102.11,
+       "min": 101.48,
+       "ms_round": 47.8,
        "tok_round": 4.88,
        "n": 3
       }
@@ -412,143 +452,211 @@
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 43.34 / 43.27 / 43.3 tok/s; edit and copy asks 163.49 and 247.16 drafted (43.09 and 42.99 plain); every text the plain run's."
    },
    {
     "profile": "nemotron-bolt-exl3-2.5",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 42.39,
-       "min": 42.24,
-       "ms_round": 41.8,
-       "tok_round": 1.77,
+       "tok_s": 65.82,
+       "min": 65.67,
+       "ms_round": 49.1,
+       "tok_round": 3.23,
        "n": 3
       },
       "chat": {
-       "tok_s": 41.67,
-       "min": 40.93,
-       "ms_round": 36.0,
-       "tok_round": 1.5,
+       "tok_s": 68.88,
+       "min": 68.43,
+       "ms_round": 48.9,
+       "tok_round": 3.37,
        "n": 3
       },
       "code": {
-       "tok_s": 89.33,
-       "min": 87.23,
-       "ms_round": 49.8,
-       "tok_round": 4.45,
+       "tok_s": 114.66,
+       "min": 114.51,
+       "ms_round": 49.5,
+       "tok_round": 5.68,
        "n": 3
       }
      }
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 42.12 / 42.02 / 42.02 tok/s; edit and copy asks 161.93 and 208.68 drafted (41.81 and 41.79 plain); every text the plain run's."
    },
    {
     "profile": "nemotron-bolt-exl3-3.0",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 31.49,
-       "min": 31.27,
-       "ms_round": 38.5,
-       "tok_round": 1.21,
+       "tok_s": 58.12,
+       "min": 57.99,
+       "ms_round": 48.7,
+       "tok_round": 2.83,
        "n": 3
       },
       "chat": {
-       "tok_s": 39.65,
-       "min": 39.62,
-       "ms_round": 36.3,
-       "tok_round": 1.44,
+       "tok_s": 69.33,
+       "min": 69.11,
+       "ms_round": 47.1,
+       "tok_round": 3.27,
        "n": 3
       },
       "code": {
-       "tok_s": 73.66,
-       "min": 72.14,
-       "ms_round": 50.9,
-       "tok_round": 3.75,
+       "tok_s": 100.8,
+       "min": 100.15,
+       "ms_round": 50.2,
+       "tok_round": 5.06,
        "n": 3
       }
      }
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 41.76 / 41.66 / 41.66 tok/s; edit and copy asks 149.63 and 203.69 drafted (41.49 and 41.44 plain); every text the plain run's."
    },
    {
     "profile": "nemotron-bolt-exl3-3.5",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 32.88,
-       "min": 32.85,
-       "ms_round": 39.5,
-       "tok_round": 1.3,
+       "tok_s": 59.53,
+       "min": 59.06,
+       "ms_round": 49.9,
+       "tok_round": 2.97,
        "n": 3
       },
       "chat": {
-       "tok_s": 40.33,
-       "min": 39.73,
-       "ms_round": 37.0,
-       "tok_round": 1.49,
+       "tok_s": 65.87,
+       "min": 64.67,
+       "ms_round": 49.3,
+       "tok_round": 3.25,
        "n": 3
       },
       "code": {
-       "tok_s": 75.58,
-       "min": 73.54,
-       "ms_round": 47.3,
-       "tok_round": 3.57,
+       "tok_s": 100.98,
+       "min": 99.68,
+       "ms_round": 53.5,
+       "tok_round": 5.4,
        "n": 3
       }
      }
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 40.76 / 40.69 / 40.69 tok/s; edit and copy asks 129.68 and 217.37 drafted (40.5 and 40.45 plain); every text the plain run's."
    },
    {
     "profile": "nemotron-bolt-exl3-4.0",
-    "build": "0.11.0",
+    "build": "0.11.1",
     "date": "2026-10-16",
     "comparable": true,
     "cells": {
      "greedy_512": {
       "prose": {
-       "tok_s": 30.96,
-       "min": 30.55,
-       "ms_round": 39.7,
-       "tok_round": 1.23,
+       "tok_s": 51.97,
+       "min": 51.86,
+       "ms_round": 47.9,
+       "tok_round": 2.49,
        "n": 3
       },
       "chat": {
-       "tok_s": 39.04,
-       "min": 38.61,
-       "ms_round": 37.1,
-       "tok_round": 1.45,
+       "tok_s": 61.97,
+       "min": 61.26,
+       "ms_round": 48.6,
+       "tok_round": 3.01,
        "n": 3
       },
       "code": {
-       "tok_s": 84.58,
-       "min": 84.24,
-       "ms_round": 49.1,
-       "tok_round": 4.15,
+       "tok_s": 97.87,
+       "min": 97.77,
+       "ms_round": 55.5,
+       "tok_round": 5.43,
        "n": 3
       }
      }
     },
     "ttft_s": {},
     "lossless": null,
-    "note": null
+    "note": "Plain (--drafter none) prose / chat / code 40.48 / 40.43 / 40.42 tok/s; edit and copy asks 137.36 and 210.25 drafted (40.26 and 40.21 plain); every text the plain run's."
+   },
+   {
+    "profile": "nemotron-bolt-exl3-5.0",
+    "build": "0.11.1",
+    "date": "2026-10-16",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 51.71,
+       "min": 51.39,
+       "ms_round": 57.6,
+       "tok_round": 2.98,
+       "n": 3
+      },
+      "chat": {
+       "tok_s": 55.51,
+       "min": 55.26,
+       "ms_round": 56.6,
+       "tok_round": 3.14,
+       "n": 3
+      },
+      "code": {
+       "tok_s": 81.73,
+       "min": 81.33,
+       "ms_round": 60.1,
+       "tok_round": 4.91,
+       "n": 3
+      }
+     }
+    },
+    "ttft_s": {},
+    "lossless": null,
+    "note": "Plain (--drafter none) prose / chat / code 33.98 / 33.95 / 33.96 tok/s; edit and copy asks 121.33 and 184.39 drafted (33.79 and 33.75 plain); every text the plain run's."
+   },
+   {
+    "profile": "nemotron-bolt-exl3-6.0",
+    "build": "0.11.1",
+    "date": "2026-10-16",
+    "comparable": true,
+    "cells": {
+     "greedy_512": {
+      "prose": {
+       "tok_s": 40.11,
+       "min": 40.01,
+       "ms_round": 64.0,
+       "tok_round": 2.57,
+       "n": 3
+      },
+      "chat": {
+       "tok_s": 50.14,
+       "min": 49.79,
+       "ms_round": 60.8,
+       "tok_round": 3.05,
+       "n": 3
+      },
+      "code": {
+       "tok_s": 76.34,
+       "min": 75.47,
+       "ms_round": 69.7,
+       "tok_round": 5.32,
+       "n": 3
+      }
+     }
+    },
+    "ttft_s": {},
+    "lossless": null,
+    "note": "Plain (--drafter none) prose / chat / code 29.16 / 29.12 / 29.07 tok/s; edit and copy asks 110.83 and 157.27 drafted (29.0 and 28.92 plain); every text the plain run's."
    }
   ]
  },

@@ -660,11 +660,16 @@ class Sandboxes:
 
 
 def _du(path: str) -> int:
+    """The bytes of the files under `path`, a tree the sandbox writes into: os.fwalk walks by
+    fds, so a folder swapped for a symlink mid-walk is not entered (os.walk would list what it
+    points to, the host's / included)."""
     total = 0
-    for dirpath, _, files in os.walk(path, followlinks=False):
+    if not os.path.isdir(path):
+        return 0
+    for _, _, files, dirfd in os.fwalk(path, follow_symlinks=False):
         for f in files:
             try:
-                total += os.lstat(os.path.join(dirpath, f)).st_size
+                total += os.stat(f, dir_fd=dirfd, follow_symlinks=False).st_size
             except OSError:
                 pass
     return total

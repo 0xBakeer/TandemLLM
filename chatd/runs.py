@@ -49,6 +49,10 @@ BACKOFF_MAX_S = 60.0
 FLUSH_S = 0.05
 WARMUP_TOKENS = 50            # decode rates skip the first 50 tokens (the dashboard's NOW rule)
 _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
+# a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
+# goes into the screenshot's command line; one the backend passed through from the model with
+# anything else in it is replaced (the part's id is the one the next request sends back)
+_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
 NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
 
@@ -391,8 +395,10 @@ class Run:
                 self.carry = ""
             if self.phase not in ("writing", "finishing"):
                 self.set_phase("writing", f"Calling {fn.get('name') or 'a tool'}")
-            k = self.svc.add_call(self, str(tc.get("id") or f"call_{ulid()[-12:]}"),
-                                  str(fn.get("name") or ""))
+            call_id = str(tc.get("id") or "")
+            if not _CALL_ID.fullmatch(call_id) or set(call_id) == {"."}:
+                call_id = f"call_{ulid()[-12:]}"
+            k = self.svc.add_call(self, call_id, str(fn.get("name") or ""))
             self.tc_parts[idx] = k
             self.step_parts.append(k)
         k = self.tc_parts[idx]

@@ -35,10 +35,18 @@ The test matrix:
      repository, the weights at load, the chat KL and top-1 (exllamav3's model_diff, the engine's own beside
      it), every measured cell, and its profile file's
      size and revision equal measurements/0.8.3-summary.json   test_the_lfm25_card_is_the_raw_data
- 14  Bolt's and Super VL's tables are their 0.11.0 runs: per measured profile one comparable row, each
-     greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same text in every run,
-     no request from a cache; the tile's speed is the recommended row's best cell
+ 14  Bolt's and Super VL's tables are their runs (Bolt 0.11.1, Super VL 0.11.0): per measured profile one
+     comparable row, each greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same
+     text in every run, no request from a cache; where plain servers ran beside them (Bolt, SPD-127), every
+     class's drafted mean is at least its plain mean less the plain runs' spread; the tile's speed is the
+     recommended row's best cell
                                                             test_the_nemotron_tables_are_the_raw_data
+ 15  every weight profile says who made it (VIS-175): ours (0xBakeer), the vendor (NVIDIA, LiquidAI) or a
+     community author with a GitHub login (turboderp); Bolt's IQ2 names NVIDIA's GGUF repository; a
+     profile without `made_by`, a community maker without a login, an unknown kind and a repo that is
+     not owner/name are refused                             test_every_pack_names_its_maker
+ 16  dashboard/mock/setup/community-qwen3.8-flash-next.json is the API's list of turboderp's packs
+                                                            test_the_builtin_community_mock
 
 Run: python tests/test_setup_registry.py
 """
@@ -170,21 +178,24 @@ def test_the_lfm25_card_is_the_raw_data():
 
 
 NEMOTRON_TABLES = ("nemotron-3.5-bolt-74b-a9b", "nemotron-3.5-super-vl-120b-a12b")
+# the build each table was measured on
+NEMOTRON_BUILDS = {"nemotron-3.5-bolt-74b-a9b": "0.11.1", "nemotron-3.5-super-vl-120b-a12b": "0.11.0"}
 
 
 def test_the_nemotron_tables_are_the_raw_data():
     for mid in NEMOTRON_TABLES:
+        build = NEMOTRON_BUILDS[mid]
         m = registry.load(os.path.join(ROOT, "models", mid, "model.yaml"))
-        with open(os.path.join(ROOT, "models", mid, "measurements", "0.11.0-summary.json")) as fh:
+        with open(os.path.join(ROOT, "models", mid, "measurements", f"{build}-summary.json")) as fh:
             raw = json.load(fh)
         meas = m["measurements"]
-        assert meas["build"] == raw["build"] == "0.11.0", mid
-        assert meas["source"] == f"models/{mid}/measurements/0.11.0-summary.json", mid
+        assert meas["build"] == raw["build"] == build, mid
+        assert meas["source"] == f"models/{mid}/measurements/{build}-summary.json", mid
         rows = {r["profile"]: r for r in meas["rows"]}
         assert sorted(rows) == sorted(raw["profiles"]), (mid, sorted(rows))
         for pid, d in raw["profiles"].items():
             row = rows[pid]
-            assert row["build"] == "0.11.0" and row["comparable"] and row["date"] == d["date"], pid
+            assert row["build"] == build and row["comparable"] and row["date"] == d["date"], pid
             assert list(row["cells"]) == ["greedy_512"] and row["ttft_s"] == {} and row["lossless"] is None, pid
             assert len(d["runs"]) == 3, pid
             for task in ("prose", "chat", "code"):
@@ -197,6 +208,11 @@ def test_the_nemotron_tables_are_the_raw_data():
                 want = {"tok_s": round(mean("tok_s"), 2), "min": min(x["tok_s"] for x in xs),
                         "ms_round": round(mean("ms_round"), 1), "tok_round": round(mean("tok_round"), 2), "n": 3}
                 assert row["cells"]["greedy_512"][task] == want, (pid, task, row["cells"]["greedy_512"][task], want)
+                if "plain_runs" in d:
+                    # SPD-127: a drafted profile never writes a class slower than its plain step, beyond the
+                    # plain runs' own spread (IQ2's lookup on prose: 27.72 against 27.56 to 27.91 plain)
+                    ps = [r["classes"][task]["tok_s"] for r in d["plain_runs"]]
+                    assert len(ps) == 3 and want["tok_s"] >= sum(ps) / 3 - (max(ps) - min(ps)), (pid, task, want["tok_s"], ps)
         # the tile's speed is the recommended profile's fastest greedy-512 cell
         rec = registry.recommended_profile(m)["id"]
         best = max(((c["tok_s"], t) for t, c in rows[rec]["cells"]["greedy_512"].items()))
@@ -260,6 +276,26 @@ def _refused(data: dict, want: str) -> None:
     raise AssertionError(f"accepted a file that should fail with {want!r}")
 
 
+def test_every_pack_names_its_maker():
+    """VIS-175: our packs are 0xBakeer's, NVIDIA's and LiquidAI's releases are the vendor's, and
+    turboderp's Flash-Next packs are a community author's; the weights' repository is hf_repo except
+    Bolt's IQ2, whose weights are NVIDIA's GGUF repository"""
+    kinds = {"0xBakeer": ("ours", "0xBakeer"), "nvidia": ("vendor", "NVIDIA"), "LiquidAI": ("vendor", "LiquidAI"),
+             "turboderp": ("community", "turboderp")}
+    seen = set()
+    for m in registry.load_all()[0].values():
+        for p in m["profiles"]:
+            mb = p["made_by"]
+            assert (mb["kind"], mb["name"]) == kinds[p["hf_repo"].split("/")[0]], (p["id"], mb)
+            assert mb.get("github") == ({"ours": "0xBakeer", "community": mb["name"]}.get(mb["kind"])), (p["id"], mb)
+            seen.add(mb["kind"])
+            if p["id"] == "nemotron-bolt-iq2":
+                assert mb["repo"] == "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF"
+            else:
+                assert mb.get("repo") is None, p["id"]
+    assert seen == {"ours", "vendor", "community"}
+
+
 def test_the_validator_rules():
     d = _seed()
     registry.parse(copy.deepcopy(d), "seed")                       # the seed itself passes
@@ -311,6 +347,19 @@ def test_the_validator_rules():
     x = copy.deepcopy(d)
     x["profiles"][0]["speed"] = 1
     _refused(x, "unknown key 'speed'")
+    # VIS-175: every profile says who made it; a community pack names its author's GitHub login
+    x = copy.deepcopy(d)
+    del x["profiles"][0]["made_by"]
+    _refused(x, "made_by")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"] = {"kind": "community", "name": "someone"}
+    _refused(x, "$.profiles[0].made_by.github: a community pack names its author's GitHub login")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"]["kind"] = "friend"
+    _refused(x, "made_by.kind")
+    x = copy.deepcopy(d)
+    x["profiles"][0]["made_by"]["repo"] = "not a repo"
+    _refused(x, "made_by.repo")
     x = copy.deepcopy(d)
     x["parallelism"]["slots"]["default"] = 9
     _refused(x, "$.parallelism.slots: the default is outside min..max")
@@ -439,6 +488,28 @@ def _mock_copy(mid: str) -> str:
     return os.path.join(ROOT, "dashboard", "mock", "setup", mid + ".json")
 
 
+# VIS-175: Flash-Next's community list is the release's own (models/community-builtin.json), so the mock
+# keeps the API's list as it is
+BUILTIN_MOCKED = ("qwen3.8-flash-next",)
+
+
+def _builtin_copy(mid: str) -> str:
+    return os.path.join(ROOT, "dashboard", "mock", "setup", f"community-{mid}.json")
+
+
+def _builtin_served(mid: str) -> dict:
+    return json.loads(json.dumps({"community": registry.get(mid)["community"]}))
+
+
+def test_the_builtin_community_mock():
+    """dashboard/mock/setup/community-qwen3.8-flash-next.json is the API's community list of Flash-Next
+    (turboderp's packs). Write it again with: python tests/test_setup_registry.py --write-mock"""
+    for mid in BUILTIN_MOCKED:
+        with open(_builtin_copy(mid)) as fh:
+            assert json.load(fh) == _builtin_served(mid), (
+                f"{_builtin_copy(mid)} is not the registry's list; run python tests/test_setup_registry.py --write-mock")
+
+
 def _served(m: dict) -> dict:
     """GET /v1/setup/models/{id} (server/setup_api.py), as JSON, without the community packs: the
     dashboard's mock keeps those in mock/setup/community-<id>.json (tests/test_community_weights.py
@@ -455,6 +526,11 @@ if __name__ == "__main__":
                 json.dump(_served(registry.get(mid)), fh, indent=1, ensure_ascii=False)
                 fh.write("\n")
             print(f"wrote {_mock_copy(mid)}")
+        for mid in BUILTIN_MOCKED:
+            with open(_builtin_copy(mid), "w") as fh:
+                json.dump(_builtin_served(mid), fh, indent=1, ensure_ascii=False)
+                fh.write("\n")
+            print(f"wrote {_builtin_copy(mid)}")
         sys.exit(0)
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -1,6 +1,6 @@
 \chapter{Adding a model}\label{ch:adding-model}
 
-The engine serves two big models: Qwen3.8-27B, a hybrid of Gated DeltaNet and attention layers, and Qwen3.8-Flash-Next, a mixture of experts on the same hybrid (Chapter~\ref{ch:flashnext}). The small models beside them (the Qwen3.5 narrator and shadow reader) run on the 27B's forward code. Flash-Next was the first model added through the adapter path below. This chapter lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
+The engine serves big models such as Qwen3.8-27B, a hybrid of Gated DeltaNet and attention layers, and Qwen3.8-Flash-Next, a mixture of experts on the same hybrid (Chapter~\ref{ch:flashnext}). The small models beside them (the Qwen3.5 narrator and shadow reader) run on the 27B's forward code. Flash-Next was the first model added through the adapter path below. This chapter lists the seams where a new model plugs in, what each one expects, and the tests a new model must pass before its numbers mean anything. Some of the engine is still specific to this family, and the last section says which parts.
 
 \section{The adapter path}\label{sec:adapter-path}\index{model adapter}\index{ModelState}
 

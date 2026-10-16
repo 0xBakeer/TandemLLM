@@ -31,7 +31,8 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.11.0 adds Nemotron 3.5 Super VL 120B-A12B (the nemotron-super-vl-* profiles);
+# The engine release. v0.11.1 fixes symlinks in the Chat tab sandbox's folders and prices Bolt's EXL3 packs;
+# v0.11.0 adds Nemotron 3.5 Super VL 120B-A12B (the nemotron-super-vl-* profiles);
 # v0.10.0 adds Nemotron 3.5 Bolt 74B-A9B (the nemotron-bolt-* profiles);
 # v0.9.2 fixes the glob checksum check and the EXL3 base after install.sh --setup;
 # v0.9.1 adds web search and media playback to the Chat tab and the loop guard;
@@ -43,7 +44,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.11.0}"
+TANDEM_REF="${TANDEM_REF:-v0.11.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -981,13 +982,18 @@ if [ "$SETUP" = 1 ]; then
     else
         bash "$RUN/ops/start.sh" --setup --host "$HOST" || die "setup mode did not come up; log: $SRC/logs/engine.log"
     fi
+    # no model is loaded yet: the user picks one in the Setup Guide (OPS-149)
+    printf '\n%sSetup mode%s: no model is loaded yet. Open the Setup Guide in a browser and pick a model there.\n\n' "$B" "$N"
+    case "$HOST" in 127.0.0.1|0.0.0.0) printf '  On this machine:        http://127.0.0.1:%s/dashboard/#/setup\n' "$PORT" ;; esac
     if [ "$HOST" = 127.0.0.1 ]; then
-        printf '\n%sSetup mode%s on this machine only. From your computer:\n\n    ssh -L %s:localhost:%s %s\n\n  then open http://localhost:%s/dashboard/#/setup\n' \
-            "$B" "$N" "$PORT" "$PORT" "$(hostname 2>/dev/null || echo '<this box>')" "$PORT"
+        printf '  From another computer:  ssh -L %s:127.0.0.1:%s %s@%s\n' "$PORT" "$PORT" \
+            "$(id -un 2>/dev/null || echo '<user>')" "$(hostname 2>/dev/null || echo '<this box>')"
+        printf '                          then open http://127.0.0.1:%s/dashboard/#/setup on that computer\n' "$PORT"
+        printf '  (To open it to your network instead, install with --host 0.0.0.0.)\n'
     else
-        printf '\n%sSetup mode%s: open http://%s:%s/dashboard/#/setup\n' "$B" "$N" \
-            "$(hostname -I 2>/dev/null | awk '{print $1}')" "$PORT"
-        printf '%sWARNING:%s no admin password is set, so anyone who reaches port %s can run the setup.\n' "$Y" "$N" "$PORT"
+        SETUP_ADDR="$HOST"; [ "$HOST" = 0.0.0.0 ] && SETUP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        printf '  From your network:      http://%s:%s/dashboard/#/setup\n' "${SETUP_ADDR:-<this box>}" "$PORT"
+        printf '\n%sWARNING:%s no admin password is set, so anyone who reaches port %s can run the setup.\n' "$Y" "$N" "$PORT"
         printf '  Set one with: bash %s/ops/make-secrets.sh --admin   (then restart setup mode)\n' "$RUN"
     fi
     exit 0

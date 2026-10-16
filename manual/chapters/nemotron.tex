@@ -28,24 +28,24 @@ context & 262,144 tokens & 262,144 tokens \\
 
 \begin{table}[htbp]
 \centering\small
-\caption[The Bolt profiles]{The Bolt profiles, \measured{} 2026-10-15: the download, the weights on the device at load, against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens the KL divergence and the top-1 agreement, and plain decode through the server for one request, 512 greedy tokens, thinking off (tok/s, the mean of 3 runs on this release, 2026-10-16).}\label{tab:nh-profiles}
-\begin{tabular}{@{}lrrrrr@{}}
+\caption[The Bolt profiles]{The Bolt profiles, \measured{} 2026-10-15: the download, the weights on the device at load, against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens the KL divergence and the top-1 agreement, and through the server for one request, 512 greedy tokens, thinking off, tok/s, the mean of 3 runs on 0.11.1 (2026-10-16): plain, and prose / chat / code with the profile's drafting (LiLiCorr and the lookup; the GGUF: the lookup).}\label{tab:nh-profiles}
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-\hd{profile} & \hd{disk} & \hd{weights} & \hd{KL} & \hd{top-1} & \hd{plain} \\
+\hd{profile} & \hd{disk} & \hd{weights} & \hd{KL} & \hd{top-1} & \hd{plain} & \hd{drafted} \\
 \midrule
-\code{nemotron-bolt-exl3-2.0} & 23.48~GB & 20.22~GiB & 0.170 & 84.1~\% & 43.3 \\
-\code{nemotron-bolt-exl3-2.5} & 27.61~GB & 24.07~GiB & 0.094 & 87.3~\% & 42.1 \\
-\code{nemotron-bolt-exl3-3.0} & 31.75~GB & 27.92~GiB & 0.061 & 89.7~\% & 41.7 \\
-\code{nemotron-bolt-exl3-3.5} & 35.88~GB & 32.01~GiB & 0.044 & 91.1~\% & 40.6 \\
-\code{nemotron-bolt-exl3-4.0} & 40.01~GB & 36.18~GiB & 0.034 & 92.7~\% & 40.5 \\
-\code{nemotron-bolt-exl3-5.0} & 49.13~GB & 44.42~GiB & 0.016 & 94.8~\% & 34.1 \\
-\code{nemotron-bolt-exl3-6.0} & 58.37~GB & 53.00~GiB & 0.0087 & 96.2~\% & 29.2 \\
-\code{nemotron-bolt-iq2} & 22.04~GB & 22.19~GiB & 0.259 & 79.6~\% & 27.8 \\
+\code{nemotron-bolt-exl3-2.0} & 23.48~GB & 20.22~GiB & 0.170 & 84.1~\% & 43.2 & 65.6 / 71.1 / 102.1 \\
+\code{nemotron-bolt-exl3-2.5} & 27.61~GB & 24.07~GiB & 0.094 & 87.3~\% & 41.9 & 65.8 / 68.9 / 114.7 \\
+\code{nemotron-bolt-exl3-3.0} & 31.75~GB & 27.92~GiB & 0.061 & 89.7~\% & 41.6 & 58.1 / 69.3 / 100.8 \\
+\code{nemotron-bolt-exl3-3.5} & 35.88~GB & 32.01~GiB & 0.044 & 91.1~\% & 40.6 & 59.5 / 65.9 / 101.0 \\
+\code{nemotron-bolt-exl3-4.0} & 40.01~GB & 36.18~GiB & 0.034 & 92.7~\% & 40.4 & 52.0 / 62.0 / 97.9 \\
+\code{nemotron-bolt-exl3-5.0} & 49.13~GB & 44.42~GiB & 0.016 & 94.8~\% & 33.9 & 51.7 / 55.5 / 81.7 \\
+\code{nemotron-bolt-exl3-6.0} & 58.37~GB & 53.00~GiB & 0.0087 & 96.2~\% & 29.1 & 40.1 / 50.1 / 76.3 \\
+\code{nemotron-bolt-iq2} & 22.04~GB & 22.19~GiB & 0.259 & 79.6~\% & 27.7 & 27.7 / 27.8 / 31.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The EXL3 packs are converted from NVIDIA's BF16 checkpoint by exllamav3 1.6.2 with a patch for Bolt's layer table, head at 6 bits; each is a public repository \code{0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>}, pinned by commit. The 2.0 pack keeps its Mamba2, attention, latent and shared-expert projections at 4 bits and its routed experts at 2; it is the default, better and faster than NVIDIA's 2-bit GGUF. \code{nemotron-bolt-iq2} reads NVIDIA's GGUF as stored: IQ2\_XXS experts, NVFP4 Mamba2 projections with their per-tensor scales, Q8\_0 head and attention; against llama.cpp on the same file its top token agrees at 97.75~\% of 1,024 chat positions, every difference a near tie. The 2.5 to 6.0 profiles have no StairCut price file yet, so the cut learns its prices online.
+The EXL3 packs are converted from NVIDIA's BF16 checkpoint by exllamav3 1.6.2 with a patch for Bolt's layer table, head at 6 bits; each is a public repository \code{0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>}, pinned by commit. The 2.0 pack keeps its Mamba2, attention, latent and shared-expert projections at 4 bits and its routed experts at 2; it is the default, better and faster than NVIDIA's 2-bit GGUF. \code{nemotron-bolt-iq2} reads NVIDIA's GGUF as stored: IQ2\_XXS experts, NVFP4 Mamba2 projections with their per-tensor scales, Q8\_0 head and attention; against llama.cpp on the same file its top token agrees at 97.75~\% of 1,024 chat positions, every difference a near tie. Each EXL3 profile drafts with its own StairCut price file, measured on the Spark (\code{nh_check.py prices --lilicorr}): the verify chain of 1 to 16 rows, the plain step and a \code{spec} prior for a drafted round, so every pack drafts at least as fast as it decodes plain, on every ask.
 
 \section{One row path and exact rollback}
 
@@ -55,7 +55,7 @@ The EXL3 projections run on \code{tools/fn_kernels.dense_rows}: each row's input
 
 \section{LiLiCorr}\index{LiLiCorr}
 
-Bolt has no MTP head. NVIDIA's drafter for it is LiLiCorr (0.96~GB, NVFP4), ported from vLLM's and llama.cpp's implementations to \code{engine/drafters/lilicorr.py}. The engine keeps the residual rows entering six of Bolt's layers in a ring a sequence; the drafter reads them, runs a block of 8 positions through five layers of sliding-window attention with sink logits and a dynamic convolution, and walks a candidate lattice to 7 tokens, all as one CUDA graph. It drafts beside the lookup in the EXL3 profiles, and StairCut cuts every block; the IQ2 profile drafts with the lookup alone, since with LiLiCorr beside it StairCut kept plain steps on this build (cause not isolated). Every drafted token is verified, so the text is the plain decode's. On 8 chat prompts its accepted length is 4.55 tokens a block, against 4.57 for llama.cpp with the same drafter (\measured).
+Bolt has no MTP head. NVIDIA's drafter for it is LiLiCorr (0.96~GB, NVFP4), ported from vLLM's and llama.cpp's implementations to \code{engine/drafters/lilicorr.py}. The engine keeps the residual rows entering six of Bolt's layers in a ring a sequence; the drafter reads them, runs a block of 8 positions through five layers of sliding-window attention with sink logits and a dynamic convolution, and walks a candidate lattice to 7 tokens, all as one CUDA graph. It drafts beside the lookup in the EXL3 profiles, and StairCut cuts every block; the IQ2 profile drafts with the lookup alone, since with LiLiCorr beside it and a price file without a \code{spec} prior StairCut kept plain steps on 0.10.0. Every drafted token is verified, so the text is the plain decode's. On 8 chat prompts its accepted length is 4.55 tokens a block, against 4.57 for llama.cpp with the same drafter (\measured).
 
 \begin{table}[htbp]
 \centering\small
@@ -106,7 +106,7 @@ vLLM (nightly-3f1bcfd8, NVIDIA's flags for the Spark) on NVIDIA's NVFP4 release 
 \begin{itemize}
 \item Bolt's image tower: the GGUF's \code{mmproj} file and the packs' BF16 tower are not loaded.
 \item A CUDA GEMV for the IQ2\_XXS shared experts: measured at 32.7~tok/s against 27.9, not in this release, so the IQ2 profile decodes and drafts slower than it could.
-\item StairCut price files for the 2.5 to 6.0 packs. On the 4.0 pack StairCut keeps plain steps with LiLiCorr in this release (40.3 to 40.5~tok/s on every ask against 40.5 plain); the cause is not isolated, and the other packs have no LiLiCorr rows.
+\item LiLiCorr on the IQ2 profile with a \code{spec} prior, and a one-row price for a profile without a price file (without one the cut takes the anchor alone after a paid draft).
 \item Super VL: grouped expert prefill (prompts read 4 to 5 times slower than vLLM), a joint verify for requests at once, the vision tower and the MTP head as a draft head.
 \item Any task benchmark, and the benchmark row of Chapter~\ref{ch:measurement}.
 \end{itemize}

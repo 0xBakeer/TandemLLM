@@ -1,6 +1,6 @@
 # Roadmap
 
-TandemLLM runs three models (Qwen3.8-27B, Qwen3.8-Flash-Next and, from 0.9.0, LFM2.5-24B-A2B, one at a time) on one board (DGX Spark). The 27B serves one request at a time by default; Flash-Next's and LFM2.5's profiles run three slots. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
+TandemLLM runs several models (Qwen3.8-27B, Qwen3.8-Flash-Next and, from 0.9.0, LFM2.5-24B-A2B, one at a time) on one board (DGX Spark). The 27B serves one request at a time by default; Flash-Next's and LFM2.5's profiles run three slots. Each step below widens one of those limits, and each keeps the two rules that hold today: the output stays the model's greedy text, up to the documented near-tie exception ([exactness.md](exactness.md)), and no measured number gets worse. We plan to take the steps in this order. Nothing here is a promise of dates.
 
 ## A mixture-of-experts model: served, with four parts open
 

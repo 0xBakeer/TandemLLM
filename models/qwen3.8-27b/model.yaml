@@ -179,6 +179,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-2.5
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: [fastest]
     quality: {kl_vs_bf16: 0.2121, top1_pct: 86.27, ppl: 3.1187, date: "2026-10-09", source: *qsrc}
@@ -193,6 +194,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.0
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: []
     quality: {kl_vs_bf16: 0.1246, top1_pct: 89.80, ppl: 2.9180, date: "2026-10-09", source: *qsrc}
@@ -207,6 +209,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-3.5
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: []
     quality: {kl_vs_bf16: 0.0749, top1_pct: 92.31, ppl: 2.8001, date: "2026-10-09", source: *qsrc}
@@ -221,6 +224,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.0
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: [best speed for quality]
     quality: {kl_vs_bf16: 0.0392, top1_pct: 94.71, ppl: 2.7458, date: "2026-10-09", source: *qsrc}
@@ -235,6 +239,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-4.5
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: true
     badges: [recommended]
     quality: {kl_vs_bf16: 0.0217, top1_pct: 95.78, ppl: 2.7271, date: "2026-10-09", source: *qsrc}
@@ -249,6 +254,7 @@ profiles:
     drafters_gib: 5.41
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-6.0
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: [closest to BF16]
     quality: {kl_vs_bf16: 0.0042, top1_pct: 98.06, ppl: 2.7064, date: "2026-10-09", source: *qsrc}
@@ -266,6 +272,7 @@ profiles:
     drafters_gib: 5.87
     hf_repo: 0xBakeer/TandemLLM-Qwen3.8-27B-NVFP4
     hf_private: false
+    made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
     recommended: false
     badges: [public weights]
     quality: {kl_vs_bf16: 0.0582, top1_pct: 93.35, ppl: 2.7685, date: "2026-10-09", source: *qsrc}

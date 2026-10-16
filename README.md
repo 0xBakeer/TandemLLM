@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/github/stars/0xBakeer/TandemLLM?style=social" alt="stars">
 </p>
 
-TandemLLM is an inference engine for one NVIDIA DGX Spark, and it runs five models: Qwen3.8-27B, Qwen3.8-Flash-Next, LiquidAI's LFM2.5-24B-A2B (from 0.9.0), NVIDIA's Nemotron 3.5 Bolt 74B-A9B (from 0.10.0) and NVIDIA's Nemotron 3.5 Super VL 120B-A12B (from 0.11.0). The box serves one at a time, and all five share one server and one setup guide. LFM2.5 is the fast one. Its default pack decodes 153.5 tok/s for one request.
+TandemLLM is an inference engine for one NVIDIA DGX Spark, and it runs several models: Qwen3.8-27B, Qwen3.8-Flash-Next, LiquidAI's LFM2.5-24B-A2B (from 0.9.0), NVIDIA's Nemotron 3.5 Bolt 74B-A9B (from 0.10.0) and NVIDIA's Nemotron 3.5 Super VL 120B-A12B (from 0.11.0). The box serves one at a time, and they share one server and one setup guide. LFM2.5 is the fast one. Its default pack decodes 153.5 tok/s for one request.
 
 On Qwen3.8-27B with the published NVFP4 weights and StairCut on, it writes about 50 tokens a second for one request. Plain greedy decoding on the same box runs at 13.69 tok/s. The text is the model's own greedy text, with one documented exception: where the two best tokens are within one unit in the last place (ulp), the batched verify can round the other way ([docs/exactness.md](docs/exactness.md)).
 
@@ -28,7 +28,7 @@ The manual is in [manual/tandemllm-manual.pdf](manual/tandemllm-manual.pdf), a P
 
 ## Models
 
-Every file below is public on Hugging Face. `ops/use-profile.sh <profile>` downloads what a profile needs, checks each weight file against the hub's sha256, and starts the engine on port 8000.
+Every file below is public on Hugging Face. The Setup Guide, or `ops/use-profile.sh <profile>` from a shell, downloads what a profile needs, checks each weight file against the hub's sha256, and starts the engine on port 8000.
 
 Qwen3.8-27B comes as NVFP4 or as one of six EXL3 sizes. The six EXL3 sizes and their drafters are one collection: [TandemLLM Qwen3.8-27B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4). Each EXL3 card has its KL against BF16 and a speed table; the KL column below comes from those cards.
 
@@ -44,7 +44,7 @@ Qwen3.8-27B comes as NVFP4 or as one of six EXL3 sizes. The six EXL3 sizes and t
 
 The 27B profiles share the rest: the base checkpoint `Qwen/Qwen3.8-27B-FP8` (30.4 GB, without `mtp.safetensors`) and the BF16 drafters [0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b8) and [-b16](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-DFlash2-b16) (7.7 GB together). An EXL3 profile also needs the K3 drafters and the K4 draft head, [0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters](https://huggingface.co/0xBakeer/TandemLLM-Qwen3.8-27B-EXL3-drafters) (1.9 GB). The script fetches all of them; you never copy a drafter by hand.
 
-Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Qwen3.8-Flash-Next-exl3`](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3). A Flash-Next profile needs nothing else: the pack carries its own draft layer.
+Qwen3.8-Flash-Next runs from turboderp's EXL3 packs, one branch each of [`turboderp/Qwen3.8-Flash-Next-exl3`](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3). They are community quants: turboderp made them, not TandemLLM, and the Setup Guide lists them under Community weights with their author. A Flash-Next profile needs nothing else: the pack carries its own draft layer.
 
 | profile | branch | download | largest window on one DGX Spark |
 |-|-|-|-|
@@ -54,7 +54,7 @@ Qwen3.8-Flash-Next runs from turboderp's packs, one branch each of [`turboderp/Q
 | `flashnext-5.05` | `5.05bpw_h6_ng6` | 121.9 GB | does not load yet |
 | `flashnext-6.05` | `6.05bpw_h6_ng6` | 137.7 GB | does not fit |
 
-The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has both models' formats.
+The 5.05 pack codes its experts at 5 and 7 bits a weight, and the MoE kernels take 2 to 6 and 8. [docs/quantisation.md](docs/quantisation.md) has each model's formats.
 
 LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 packs, one collection: [TandemLLM LFM2.5-24B-A2B EXL3](https://huggingface.co/collections/0xBakeer/tandemllm-lfm25-24b-a2b-exl3-6acf468024dd5288750dd683). The model has 24B parameters, but only 4 of its 64 experts run for each token, so a token reads 1.17 GB of the 3.5 pack. The packs and the BF16 checkpoint [LiquidAI/LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) are public; a download needs no token. Measured on one DGX Spark on 2026-10-14, one request, 512 greedy tokens of chat through the server:
 
@@ -70,20 +70,20 @@ LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 pa
 
 The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
 
-Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, converted from NVIDIA's BF16 checkpoint, or from NVIDIA's own 2-bit GGUF. It is a hybrid of 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 9 of up to 496 experts a token. The EXL3 profiles draft with NVIDIA's LiLiCorr drafter and the lookup, the GGUF profile with the lookup alone, and every drafted text is the plain decode's. The packs are public, one repository a size (`0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>`, for example [the 2.0 pack](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0), all seven in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-bolt-74b-a9b-exl3-for-tandemllm-6ad16f70eaa4c1d9c56c6831)); the GGUF and the drafter come from NVIDIA's repositories. TandemLLM serves Bolt's text; its image tower is not served yet. Measured on one DGX Spark on 2026-10-15 and 16; quality against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; plain decode through the server for one request, 512 greedy tokens, thinking off, the mean of 3 runs on this release:
+Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, converted from NVIDIA's BF16 checkpoint, or from NVIDIA's own 2-bit GGUF. It is a hybrid of 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 9 of up to 496 experts a token. The EXL3 profiles draft with NVIDIA's LiLiCorr drafter and the lookup, the GGUF profile with the lookup alone, and every drafted text is the plain decode's. The packs are public, one repository a size (`0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>`, for example [the 2.0 pack](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0), all seven in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-bolt-74b-a9b-exl3-for-tandemllm-6ad16f70eaa4c1d9c56c6831)); the GGUF and the drafter come from NVIDIA's repositories. TandemLLM serves Bolt's text; its image tower is not served yet. Measured on one DGX Spark on 2026-10-15 and 16; quality against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; one request through the server, 512 greedy tokens, thinking off, the mean of 3 runs on this release, plain and with the profile's drafting (LiLiCorr and the lookup; the GGUF: the lookup):
 
-| profile | download | KL vs BF16 | top-1 vs BF16 | plain decode, tok/s |
-|-|-|-|-|-|
-| `nemotron-bolt-exl3-2.0` (default for Bolt; experts 2 bits, dense 4) | 23.48 GB | 0.170 | 84.1 % | 43.3 |
-| `nemotron-bolt-exl3-2.5` | 27.61 GB | 0.094 | 87.3 % | 42.1 |
-| `nemotron-bolt-exl3-3.0` | 31.75 GB | 0.061 | 89.7 % | 41.7 |
-| `nemotron-bolt-exl3-3.5` | 35.88 GB | 0.044 | 91.1 % | 40.6 |
-| `nemotron-bolt-exl3-4.0` | 40.01 GB | 0.034 | 92.7 % | 40.5 |
-| `nemotron-bolt-exl3-5.0` | 49.13 GB | 0.016 | 94.8 % | 34.1 |
-| `nemotron-bolt-exl3-6.0` | 58.37 GB | 0.0087 | 96.2 % | 29.2 |
-| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 0.259 | 79.6 % | 27.8 |
+| profile | download | KL vs BF16 | top-1 vs BF16 | plain decode, tok/s | drafted, prose / chat / code / edit / copy |
+|-|-|-|-|-|-|
+| `nemotron-bolt-exl3-2.0` (default for Bolt; experts 2 bits, dense 4) | 23.48 GB | 0.170 | 84.1 % | 43.2 | 65.6 / 71.1 / 102.1 / 163.5 / 247.2 |
+| `nemotron-bolt-exl3-2.5` | 27.61 GB | 0.094 | 87.3 % | 41.9 | 65.8 / 68.9 / 114.7 / 161.9 / 208.7 |
+| `nemotron-bolt-exl3-3.0` | 31.75 GB | 0.061 | 89.7 % | 41.6 | 58.1 / 69.3 / 100.8 / 149.6 / 203.7 |
+| `nemotron-bolt-exl3-3.5` | 35.88 GB | 0.044 | 91.1 % | 40.6 | 59.5 / 65.9 / 101.0 / 129.7 / 217.4 |
+| `nemotron-bolt-exl3-4.0` | 40.01 GB | 0.034 | 92.7 % | 40.4 | 52.0 / 62.0 / 97.9 / 137.4 / 210.2 |
+| `nemotron-bolt-exl3-5.0` | 49.13 GB | 0.016 | 94.8 % | 33.9 | 51.7 / 55.5 / 81.7 / 121.3 / 184.4 |
+| `nemotron-bolt-exl3-6.0` | 58.37 GB | 0.0087 | 96.2 % | 29.1 | 40.1 / 50.1 / 76.3 / 110.8 / 157.3 |
+| `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 0.259 | 79.6 % | 27.7 | 27.7 / 27.8 / 31.9 / 97.8 / 131.6 |
 
-With LiLiCorr and the lookup the 2.0 pack writes 65.7 tok/s on prose, 102.8 on code, 69.4 on chat, and 180.5 and 244.7 on edit and copy asks (same shape, mean of 3 runs). On the 4.0 pack StairCut keeps plain steps with LiLiCorr on this release, so it runs at its plain rate; the cause is not isolated. llama.cpp on NVIDIA's GGUF decodes at 38.2 tok/s on the same asks. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, llama.cpp and BF16, and the run behind each number.
+Every pack drafts at least as fast as it decodes plain, on every ask: since 0.11.1 each EXL3 pack has its StairCut price file, and before that 3.0 to 4.0 wrote prose and chat slower than plain. The GGUF profile's lookup finds little in prose and chat, which run at its plain rate. llama.cpp on NVIDIA's GGUF decodes at 38.2 tok/s on the same asks. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, llama.cpp and BF16, and the run behind each number.
 
 Nemotron 3.5 Super VL 120B-A12B runs from two EXL3 packs of NVIDIA's BF16 checkpoint or from NVIDIA's own NVFP4 release, read as stored. It has the same hybrid layout as Bolt at a larger size: 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 22 of 512 experts a token. Every profile drafts with NVIDIA's LiLiCorr drafter for Super VL and the lookup, and every drafted text is the plain decode's. The packs are public ([4.0](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-4.0), [2.0](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-2.0), both in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-super-vl-120b-a12b-exl3-for-tandemllm-6ad1bc063ad2f3f5df638016)). TandemLLM serves Super VL's text; its vision tower is not served yet. Same measurement as for Bolt, on 2026-10-16:
 
@@ -171,18 +171,33 @@ Start with [docs/architecture.md](docs/architecture.md), a one-page tour. [docs/
 
 ## Install
 
-On a new DGX Spark, install in setup mode and then switch to a profile ([docs/setup.md](docs/setup.md)):
+On a new DGX Spark, two commands install TandemLLM and start it in setup mode, with no model loaded yet ([docs/setup.md](docs/setup.md)):
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.0/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.1/install.sh
 bash install.sh --setup --yes
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run   # each file's URL and size
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05             # or exl3-4.5, lfm25-exl3-3.5; --list prints every profile
 ```
 
-[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.11.0` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. `use-profile.sh` then downloads the profile, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+Then open the Setup Guide in a browser and pick a model there. The guide shows each model with its weight packs, checks that your choice fits in memory, downloads it and starts the engine.
 
-Where the tag `v0.11.0` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.11.0'". Pass `--repo` and `--ref` to install from another repository or release.
+- On the box itself, open `http://127.0.0.1:8000/dashboard/#/setup`.
+- From another computer, open an SSH tunnel to the box with `ssh -L 8000:127.0.0.1:8000 <user>@<box>` and open the same address on that computer. You can also install with `--host 0.0.0.0` and open `http://<box>:8000/dashboard/#/setup` from any computer on your network. Until you set an admin password, anyone who reaches the port can run the setup.
+
+The installer prints these addresses when it finishes.
+
+[install.sh](install.sh) first checks the board: GPU, driver, CUDA compiler, the free disk its downloads need, and 64 GiB of free memory to start (8 GiB with `--setup`). It clones the engine at the tag `v0.11.1` into `~/TandemLLM/src`, from the repository `--repo` names, and builds a venv with pinned packages. With `--setup` it downloads only Wren's model (Qwen3.5-2B, 4.3 GB), the setup guide's assistant, and starts setup mode on `127.0.0.1:8000`. The Setup Guide then downloads the weights you pick, checks every weight file, leaves setup mode and starts the engine. The config is `~/TandemLLM/run/ops/serve.env`, the release's `ops/serve.env` with this machine's paths. Run the installer again to update: it skips finished steps, and a download that stopped continues where it stopped.
+
+Where the tag `v0.11.1` is missing, `curl` fails with a 404 and the installer stops at its clone step with "no tag, branch or commit 'v0.11.1'". Pass `--repo` and `--ref` to install from another repository or release.
+
+### Advanced: from the command line
+
+The Setup Guide runs `ops/use-profile.sh` for you. To pick the weights from a shell instead, after the two commands above:
+
+```bash
+~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
+~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # each file's URL and size, nothing downloaded
+~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
+```
 
 Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.
 
@@ -191,7 +206,7 @@ Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one 
 | `--setup` | install the code and Wren's model only, then start setup mode (the dashboard's `#/setup` page) |
 | `--dir DIR` | install directory, default `~/TandemLLM` |
 | `--port PORT`, `--host ADDR` | where the API listens, default `127.0.0.1:8000` |
-| `--ref REF` | the engine version to check out (any git ref), default `v0.11.0`; `v0.2.0-staircut` is the paper's |
+| `--ref REF` | the engine version to check out (any git ref), default `v0.11.1`; `v0.2.0-staircut` is the paper's |
 | `--repo URL` | the git repository to clone, default `https://github.com/0xBakeer/TandemLLM.git` |
 | `--hf-token TOKEN` | a Hugging Face token (`HF_TOKEN` works too); only a private or gated repository needs one |
 | `--no-corpus` | skip the lookup corpus |
@@ -296,7 +311,7 @@ tandem-dash                    # http://127.0.0.1:8080/dashboard/ opens on Setup
 
 ## Status
 
-The current release is `v0.11.0`. It adds a fifth model, NVIDIA's Nemotron 3.5 Super VL 120B-A12B, from two EXL3 packs or NVIDIA's NVFP4 release, with NVIDIA's LiLiCorr drafter for it; the engine reads NVIDIA's ModelOpt NVFP4 and FP8 checkpoints as stored. `v0.10.0` adds a fourth model, NVIDIA's Nemotron 3.5 Bolt 74B-A9B, with seven EXL3 sizes, NVIDIA's IQ2 GGUF and NVIDIA's LiLiCorr drafter ([docs/nemotron-h.md](docs/nemotron-h.md)); each chat's sandbox in the Chat tab gets a 1 GiB limit, and an attachment is never inlined past the window. `v0.9.2` fixes two install bugs on a new box: a download whose file list is globs (the shadow reader's and the narrator's models) failed its checksum step, and after `install.sh --setup` the 27B's EXL3 profiles refused to start without the full FP8 base. `v0.9.1` adds web search and media playback to the Chat tab, turns on the loop guard and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page; an EXL3 profile of the 27B downloads 3.54 GB of base tensors instead of 30.41. `v0.9.0` adds a third model, LiquidAI's LFM2.5-24B-A2B, with six EXL3 sizes and the BF16 checkpoint ([docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md)). `v0.8.3` is the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one of five models at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
+The current release is `v0.11.1`. It fixes how the Chat tab's server reaches the folders a chat's sandbox can write: no read or write there follows a symlink any more, so update a box that runs the Chat tab. It also gives Bolt's EXL3 packs from 2.5 to 6.0 their StairCut price files, so drafting no longer runs slower than plain decoding on them; it names each weight pack's maker in the setup guide; and it describes the install through the setup guide. `v0.11.0` adds NVIDIA's Nemotron 3.5 Super VL 120B-A12B, from two EXL3 packs or NVIDIA's NVFP4 release, with NVIDIA's LiLiCorr drafter for it; the engine reads NVIDIA's ModelOpt NVFP4 and FP8 checkpoints as stored. `v0.10.0` adds NVIDIA's Nemotron 3.5 Bolt 74B-A9B, with seven EXL3 sizes, NVIDIA's IQ2 GGUF and NVIDIA's LiLiCorr drafter ([docs/nemotron-h.md](docs/nemotron-h.md)); each chat's sandbox in the Chat tab gets a 1 GiB limit, and an attachment is never inlined past the window. `v0.9.2` fixes two install bugs on a new box: a download whose file list is globs (the shadow reader's and the narrator's models) failed its checksum step, and after `install.sh --setup` the 27B's EXL3 profiles refused to start without the full FP8 base. `v0.9.1` adds web search and media playback to the Chat tab, turns on the loop guard and memory notes in the shipped conductor profiles, and fixes the Setup Guide's install page; an EXL3 profile of the 27B downloads 3.54 GB of base tensors instead of 30.41. `v0.9.0` adds LiquidAI's LFM2.5-24B-A2B, with six EXL3 sizes and the BF16 checkpoint ([docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md)). `v0.8.3` is the code of `v0.8.2` with the repository cleaned for the public release. `v0.8.2` adds community weight packs, permission modes in the Chat tab (Ask, Auto as the default, and YOLO; [docs/chat.md](docs/chat.md)) and standalone EXL3 packs of the 27B (pull request #1 by 0xWhiteMage). It also stops a chat from waiting minutes for slot 0 while a side slot is free, and makes the model say it is TandemLLM when asked. `v0.8.1` lets a new DGX Spark download every file a profile needs, with no Hugging Face token (OPS-95). `v0.8.0` added Qwen3.8-Flash-Next with vision and three parallel slots, the Chat tab (in beta; [docs/chat.md](docs/chat.md) lists its known limitations), and the cache peek and prewarm. Saved chats of 0.7.2 carry over, because the disk tier now knows its files by their content. `v0.2.0-staircut` (merge commit `c111fa7`) is the paper's release: it brought StairCut and turned it on in the served profile. The engine runs on one board (DGX Spark) with one model at a time. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Credits
 

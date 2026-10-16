@@ -10,8 +10,9 @@ before, and is itself recorded, so an undo can be undone.
 The plan put these in git refs inside the workspace. They live beside it instead: running git on the
 host inside a tree the agent controls would run its `.git/config` (core.fsmonitor, hooks) as
 chatd's user, and running it in the container would start a sandbox for every write. Pure Python
-on the host reads the files as data only. Skipped: .git, node_modules, .tandem and files over 5 MB
-(listed with their size, not restorable).
+on the host reads the files as data only, through the workspace's symlink-safe fds
+(chatd/workspace.py), and writes them back the same way. Skipped: .git, node_modules, .tandem
+and files over 5 MB (listed with their size, not restorable).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import difflib
 import json
 import os
 
-from chatd.workspace import Workspace, etag
+from chatd.workspace import PathError, Workspace, etag
 
 MAX_FILE = 5 * 1024 * 1024
 MAX_FILES = 20_000
@@ -49,14 +50,19 @@ class Snapshots:
             if n >= MAX_FILES:
                 break
             rel = os.path.relpath(full, ws.root)
+            # opened through the workspace's fds (O_NOFOLLOW, a regular file by its fstat): a
+            # file the sandbox swaps for a symlink after the walk is skipped, not followed
             try:
-                st = os.lstat(full)
-                if st.st_size > MAX_FILE:
-                    man[rel] = f"big:{st.st_size}"
-                    continue
-                with open(full, "rb") as fh:
-                    data = fh.read()
-            except OSError:
+                fh, st = ws.dir.open(rel)
+                with fh:
+                    if st.st_size > MAX_FILE:
+                        man[rel] = f"big:{st.st_size}"
+                        continue
+                    data = fh.read(MAX_FILE + 1)
+            except (PathError, OSError):
+                continue
+            if len(data) > MAX_FILE:
+                man[rel] = f"big:{len(data)}"
                 continue
             h = etag(data)
             p = self._obj(cid, h)

@@ -81,6 +81,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: LiquidAI/LFM2.5-24B-A2B
   hf_private: false
+  made_by: {kind: vendor, name: LiquidAI}
   recommended: false
   badges:
   - reference quality
@@ -104,6 +105,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-2.5
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: false
   badges:
   - smallest
@@ -126,6 +128,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.0
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: false
   badges: []
   quality:
@@ -147,6 +150,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-3.5
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: true
   badges:
   - recommended
@@ -169,6 +173,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.0
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: false
   badges: []
   quality:
@@ -190,6 +195,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-4.5
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: false
   badges: []
   quality:
@@ -211,6 +217,7 @@ profiles:
   drafters_gib: 0.0
   hf_repo: 0xBakeer/TandemLLM-LFM2.5-24B-A2B-EXL3-6.0
   hf_private: false
+  made_by: {kind: ours, name: 0xBakeer, github: 0xBakeer}
   recommended: false
   badges: []
   quality:

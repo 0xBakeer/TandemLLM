@@ -155,7 +155,7 @@ def on_disk(m: dict, *, fresh: bool = False) -> dict:
     # profile will name (community.pack_dir), not serve.env's; ${REPO} is the box's
     from server.setup import community as community_mod
     repo = next((v["repo"] for v in out.values() if v["repo"]), None)
-    for c in m.get("community") or []:
+    for c in registry.community_packs(m):
         d = {"dir": community_mod.pack_dir(c["id"]), "files": []}
         missing = [a for a in registry.community_assets(c)
                    if not registry.asset_present(registry.asset(m, a), repo, m)]

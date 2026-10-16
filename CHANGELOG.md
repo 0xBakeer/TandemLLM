@@ -2,6 +2,34 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## 0.11.1, 2026-10-16
+
+0.11.1 fixes how chatd, the Chat tab's server, reaches the folders a chat's sandbox can write; update every box that runs the Chat tab. It gives Bolt's EXL3 packs 2.5 to 6.0 their StairCut price files, so drafting no longer runs slower than plain decoding on them, takes two contributions, names each weight pack's maker in the setup guide, and describes the install through the setup guide. Every model writes the same text as in 0.11.0.
+
+### Security
+
+- Chat tab: chatd saves an attachment under `/workspace/uploads/` without following a symlink. The sandbox can write that folder, so it could make `uploads/` a symlink, or leave one at the file's name, and chatd then wrote the user's file wherever the link pointed on the host. Now `uploads/` must be a real folder and the file a new one; when chatd cannot save it there, it sends the message all the same and the prompt says why. chatd cuts a name over 255 bytes, keeping its extension; on Linux such a name failed the send (SEC-1). Reported by Joey.
+- Chat tab: chatd's other reads and writes in the folders the sandbox writes into do not follow a symlink either: the file tools and files pane, snapshots with their undo, and the Open WebUI runner's files in the sandbox's home. Before, a symlink at the runner's `run.py`, the toolkit file or the request file made chatd overwrite the link's target, and a snapshot copied a file the sandbox swapped for a symlink into the chat. Each access walks from the folder's root by directory fds opened with O_NOFOLLOW, a write goes to a new file renamed into place, and a read takes a regular file only (a FIFO blocked chatd). chatd replaces a tool call id from the backend that is not a plain name before the id names a file (SEC-1).
+
+### Contributions
+
+- Asset fetches download a pinned asset at its revision (SPD-121). `ops/fetch_weights.py` planned an asset at its `revision` but fetched the repository's default branch and checked it against that branch's manifest. Contributed by joeynyc (pull request #1).
+- NemotronH's tier fingerprint counts its GGUF reader and loader (`gguf.py`, `gguf_load.py`) and the GGUF file itself (`QSE_NH_GGUF`, a `.gguf` in the model folder): another GGUF restored the first one's saved states (ENG-327). The NemotronH profiles' fingerprint changes, so Bolt's and Super VL's saved conversations from 0.10.0 and 0.11.0 are not reused: their first request reads the prompt again. Contributed by joeynyc (pull request #2).
+
+### Nemotron 3.5 Bolt: StairCut price files
+
+- Bolt's EXL3 profiles 2.5, 3.0, 3.5, 4.0, 5.0 and 6.0 ship StairCut price files (`ops/prices/nemotron-3.5-bolt-74b-a9b/`, SPD-127), measured on the Spark: the verify chain of 1 to 16 rows at 1,024 and 8,192 tokens, the plain step, and a `spec` prior for a drafted round, (8-row chain + draft) / (0.75 x LiLiCorr's accepted length), 13.9 to 20.2 ms a token. `tools/nh_check.py prices --lilicorr` writes it.
+- Without a file the cut priced a one-row block at 1 ms and took the anchor alone after the draft had run, wherever the draft was unsure; on 0.11.0, 3.0 to 4.0 wrote prose at 31 to 33 tok/s and chat at 39 to 40, below their plain 40.5 to 41.7.
+- Setup Guide rows on 0.11.1, one request, 512 greedy tokens, thinking off, 3 runs of the profile's drafting beside 3 plain runs; plain / drafted prose / chat / code, tok/s: 2.0 43.2 / 65.6 / 71.1 / 102.1; 2.5 41.9 / 65.8 / 68.9 / 114.7; 3.0 41.6 / 58.1 / 69.3 / 100.8; 3.5 40.6 / 59.5 / 65.9 / 101.0; 4.0 40.4 / 52.0 / 62.0 / 97.9; 5.0 33.9 / 51.7 / 55.5 / 81.7; 6.0 29.1 / 40.1 / 50.1 / 76.3; the IQ2 GGUF with the lookup 27.7 / 27.7 / 27.8 / 31.9. Every drafted text is the plain run's. DGX Spark, 2026-10-16.
+- Super VL keeps its 0.11.0 price files. On 0.11.1 NVIDIA's NVFP4 drafts above plain on every ask (prose 23.7, chat 28.5, code 39.5 against 19.6). The EXL3 2.0 pack's prose varies from run to run: two runs at 37.3 tok/s, one at 33.5 with the cut on plain steps, against 36.5 plain; chat and code drafted 45.4 to 63.7, one code run 44.6 (cause not isolated).
+
+### Setup guide and install
+
+- Each weight card names its source: a TandemLLM quant, a vendor release or a community quant, the maker and the Hugging Face repository as owner/name (VIS-175). Every profile in `models/*/model.yaml` carries `made_by`. Flash-Next's community section lists turboderp's five packs from `models/community-builtin.json`, which ships with the release and is never fetched; Use selects the matching `flashnext-<bpw>` profile.
+- The install is two commands, then the setup guide in the browser: `bash install.sh --setup --yes` and `http://127.0.0.1:8000/dashboard/#/setup` (OPS-149). README, docs/setup.md, the manual and install.sh's last message say so; `use-profile.sh` moved to "Advanced: from the command line".
+
+Upgrade: run the 0.11.1 installer again (`--setup --force-setup` on a box installed with `--setup`, the same `--dir` otherwise). chatd is its own process and keeps the old code until it restarts: `bash ~/TandemLLM/src/ops/chatd.sh stop`, then `bash ~/TandemLLM/src/ops/chatd.sh start`.
+
 ## 0.11.0, 2026-10-16
 
 0.11.0 adds a fifth model, NVIDIA's Nemotron 3.5 Super VL 120B-A12B, from our EXL3 packs at 4.0 and 2.0 bpw or NVIDIA's NVFP4 release, with NVIDIA's LiLiCorr drafter for Super VL. The other models' text and speed do not change, and their saved conversations carry over.

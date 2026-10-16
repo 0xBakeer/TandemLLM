@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import time
 import urllib.parse
 
@@ -138,7 +139,7 @@ def _bash(ctx, a):
 def _read(ctx, a):
     path = str(a.get("path") or "")
     st = ctx.ws.stat(path)
-    if os.path.isdir(ctx.ws.resolve(path)):
+    if stat.S_ISDIR(st.st_mode):
         raise ToolError(f"{path} is a directory; use glob to list it")
     data = ctx.ws.read(path, limit=4 * 1024 * 1024)
     if path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
