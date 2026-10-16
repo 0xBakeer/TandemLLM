@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   prompt_id: null,
   policies: {},
   auto_accept_edits: false,
+  verify: true,
   max_steps: 50,
   sandbox_network: 'off',
   permission_mode: 'auto',

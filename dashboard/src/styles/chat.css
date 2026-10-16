@@ -1109,6 +1109,58 @@ qse-chat-thread {
   flex: 1;
   min-width: 12ch;
 }
+/* SRV-532: the answer's "Checked / Not checked" block from the verify phase */
+.ch-verify {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--ok);
+  border-radius: var(--ch-r);
+  overflow-wrap: anywhere;
+  font-size: var(--fs-sm);
+  background: var(--bg-2);
+}
+.ch-verify.is-warn {
+  border-left-color: var(--warn);
+}
+.ch-verify.is-err {
+  border-left-color: var(--err);
+}
+.ch-verify-lead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-weight: 600;
+}
+.ch-verify.is-ok .ch-verify-lead .icon {
+  color: var(--ok);
+}
+.ch-verify.is-warn .ch-verify-lead .icon {
+  color: var(--warn-ink);
+}
+.ch-verify.is-err .ch-verify-lead .icon {
+  color: var(--err);
+}
+.ch-verify-k {
+  margin: 4px 0 0;
+  color: var(--ink-2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.ch-verify-list {
+  margin: 0;
+  padding-left: 18px;
+}
+.ch-verify-list.is-not {
+  color: var(--ink-2);
+}
+.ch-approved.is-harness {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+}
 .ch-artifact {
   display: inline-flex;
   align-items: center;
