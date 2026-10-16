@@ -326,7 +326,10 @@ def _route(handler, cond, method, parts, q, body, auth):
         hours = max(1, min(168, int(q.get("hours") or 24)))
         since = int((time.time() - hours * 3600) * 1000)
         rows = cond.journal.rows(since_ms=since, limit=100000)
-        evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
+        # the monitor block is counts: no tile of it ever shows a hidden text, so a
+        # week of monitor rows is not read with every one of them attached
+        evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor",
+                                 texts=False)
                if cond.state.get("monitor") is not None else None)
         out = dec_mod.stats(rows, hours=hours, events=evs)
         out["roles"] = cond.roles_health()
@@ -334,8 +337,17 @@ def _route(handler, cond, method, parts, q, body, auth):
     if head == "sessions" and method == "GET":
         if len(parts) == 1:
             since = int((time.time() - 7 * 86400) * 1000)
-            rows = cond.journal.rows(since_ms=since, limit=100000)
-            evs = cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
+            # Two reads, one page of 200 lines. The fetch used to be two global
+            # reads of the whole week — up to 100k of the router's rows with
+            # their JSON and 200k of the monitor's with every hidden text,
+            # 300k dicts per request (the 2026-10-16 audit) — for a page whose
+            # lines each count one session. First group the keys by newest,
+            # then read only those, and never a text a line never says.
+            keys = cond.journal.recent_sessions(since_ms=since, limit=200)
+            rows = (cond.journal.rows(since_ms=since, limit=100000, sessions=keys)
+                    if keys else [])
+            evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor",
+                                     sessions=keys, texts=False) if keys else [])
             return 200, {"sessions": dec_mod.sessions(rows, evs)[:200],
                          "live": cond.router.sessions_live()}, None
         key = parts[1]
