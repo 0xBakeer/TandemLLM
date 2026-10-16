@@ -16,6 +16,13 @@ import { attachmentWords } from './context-words';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
+/** What a tap inside a model group selects: one entry per profile, or the bare model itself
+ * when it has none — a relayed backend model reports no profiles, and without this it would
+ * render a title and no clickable row, so the chat could never pick it (issue #16). */
+export function modelPickTargets(m: { id: string; profiles: { id: string }[] }): { model: string; profile: string | null }[] {
+  return m.profiles.length ? m.profiles.map((p) => ({ model: m.id, profile: p.id })) : [{ model: m.id, profile: null }];
+}
+
 @customElement('qse-chat-composer')
 export class QseChatComposer extends LightElement {
   @property({ attribute: false }) settings: ChatSettings | null = null;
@@ -313,6 +320,7 @@ export class QseChatComposer extends LightElement {
 
   /** VIS-203: models only, one row each; the Chat tab runs under its own conductor profile */
   private renderModelPop(caps: Capabilities, s: ChatSettings | null): TemplateResult {
+    // upstream VIS-203 flat picker subsumes our no-profile fix: modelPatch always clears profile
     const cur = caps.models.find((m) => m.id === s?.model) ?? caps.models[0];
     return html`<div class="ch-pop ch-pop-models" role="menu">
       ${caps.models.map((m) => html`<button type="button" role="menuitemradio" aria-checked=${m === cur} class="ch-pop-item ${m === cur ? 'is-on' : ''}" data-model=${m.id} @click=${() => (this.patch(modelPatch(m)), (this.pop = 'none'))}><span class="ch-pop-name">${m.name}</span><span class="ch-pop-desc">${modelDesc(m)}</span></button>`)}
