@@ -28,13 +28,17 @@ The test matrix:
      refused, and numbers keep their range                  test_field_values
  11  the KV bytes a token are the server's (server/slots.py) and the units add up: 104.25 KiB,
      26.06 GiB = 27.98 GB at 262,144 tokens                 test_kv_units
- 12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next, LFM2.5) are what
-     GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
+ 12  the dashboard mock's copies (dashboard/mock/setup/<id>.json: the 27B, Flash-Next, LFM2.5, Bolt,
+     Super VL) are what GET /v1/setup/models/<id> answers, key for key        test_the_mock_copy
 
  13  LFM2.5's card is its runs' own numbers: per profile the disk size and commit of its Hugging Face
      repository, the weights at load, the chat KL and top-1 (exllamav3's model_diff, the engine's own beside
      it), every measured cell, and its profile file's
      size and revision equal measurements/0.8.3-summary.json   test_the_lfm25_card_is_the_raw_data
+ 14  Bolt's and Super VL's tables are their 0.11.0 runs: per measured profile one comparable row, each
+     greedy-512 cell the mean, minimum, ms and tokens a round of its 3 runs, the same text in every run,
+     no request from a cache; the tile's speed is the recommended row's best cell
+                                                            test_the_nemotron_tables_are_the_raw_data
 
 Run: python tests/test_setup_registry.py
 """
@@ -163,6 +167,40 @@ def test_the_lfm25_card_is_the_raw_data():
         assert f"QSE_WEIGHTS_REVISION={d['hub']['revision']}\n" in env, pid
         assert f"QSE_WEIGHTS_GB={round(d['hub']['bytes'] / 1e9, 2)}\n" in env, pid
     assert n == 7 * 3, n
+
+
+NEMOTRON_TABLES = ("nemotron-3.5-bolt-74b-a9b", "nemotron-3.5-super-vl-120b-a12b")
+
+
+def test_the_nemotron_tables_are_the_raw_data():
+    for mid in NEMOTRON_TABLES:
+        m = registry.load(os.path.join(ROOT, "models", mid, "model.yaml"))
+        with open(os.path.join(ROOT, "models", mid, "measurements", "0.11.0-summary.json")) as fh:
+            raw = json.load(fh)
+        meas = m["measurements"]
+        assert meas["build"] == raw["build"] == "0.11.0", mid
+        assert meas["source"] == f"models/{mid}/measurements/0.11.0-summary.json", mid
+        rows = {r["profile"]: r for r in meas["rows"]}
+        assert sorted(rows) == sorted(raw["profiles"]), (mid, sorted(rows))
+        for pid, d in raw["profiles"].items():
+            row = rows[pid]
+            assert row["build"] == "0.11.0" and row["comparable"] and row["date"] == d["date"], pid
+            assert list(row["cells"]) == ["greedy_512"] and row["ttft_s"] == {} and row["lossless"] is None, pid
+            assert len(d["runs"]) == 3, pid
+            for task in ("prose", "chat", "code"):
+                xs = [r["classes"][task] for r in d["runs"]]
+                # a greedy text is the same in every run (and, where a plain server ran beside it, the plain one's)
+                assert d.get("same_text", {}).get(task, True), (pid, task)
+                assert all(x.get("same_text_as_plain", True) and x.get("cache_source", "none") == "none"
+                           for x in xs), (pid, task)
+                mean = lambda k: sum(x[k] for x in xs) / len(xs)
+                want = {"tok_s": round(mean("tok_s"), 2), "min": min(x["tok_s"] for x in xs),
+                        "ms_round": round(mean("ms_round"), 1), "tok_round": round(mean("tok_round"), 2), "n": 3}
+                assert row["cells"]["greedy_512"][task] == want, (pid, task, row["cells"]["greedy_512"][task], want)
+        # the tile's speed is the recommended profile's fastest greedy-512 cell
+        rec = registry.recommended_profile(m)["id"]
+        best = max(((c["tok_s"], t) for t, c in rows[rec]["cells"]["greedy_512"].items()))
+        assert registry.tile(m)["best_speed"] == {"tok_s": best[0], "task": best[1], "profile": rec}, mid
 
 
 def test_every_knob_is_registered():
@@ -392,8 +430,9 @@ def test_the_mock_copy():
                 f"{_mock_copy(mid)} is not the registry's payload; run python tests/test_setup_registry.py --write-mock")
 
 
-# the 27B and, for the models step's second tile and a pack's largest window, Flash-Next (OPS-97)
-MOCKED = ("qwen3.8-27b", "qwen3.8-flash-next", "lfm2.5-24b-a2b")
+# the 27B and, for the models step's second tile and a pack's largest window, Flash-Next (OPS-97); the
+# NemotronH tables for the measured table's unit tests (not served by the mock)
+MOCKED = ("qwen3.8-27b", "qwen3.8-flash-next", "lfm2.5-24b-a2b") + NEMOTRON_TABLES
 
 
 def _mock_copy(mid: str) -> str:

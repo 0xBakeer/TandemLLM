@@ -159,14 +159,43 @@ profiles:
   hf_revision: 8a115b9d966adce8c059a7bcf47f49a1e57957d8
   max_window: 262144
 measurements:
-  build: 0.10.0
+  build: 0.11.0
   date: '2026-10-16'
   method: >-
-    the five asks of tools/fn_lookup_ab.py (prose / chat / code / edit / copy) through one fresh server a run on the
-    Spark, the GPU to itself, one greedy request each, thinking off, 512 new tokens, conductor raw; three alternating
-    rounds of plain and LiLiCorr + lookup servers. The numbers are in docs/nemotron-h.md and the profiles' notes.
-  source: docs/nemotron-h.md
-  rows: []
+    the prose, chat and code asks of tools/fn_lookup_ab.py, one request at a time through one fresh server a run on
+    the DGX Spark, the GPU to itself: greedy, thinking off, 512 new tokens, streamed; decode tok/s = (tokens - 1) /
+    (last token - first token) on the client clock. The profile's drafting (LiLiCorr and the lookup cut by StairCut,
+    the shipped price file with its spec prior), 3 slots, conductor raw, the suffix store off, max_len 140,000. Three
+    runs a cell, alternating with plain servers; every drafted text is the plain run's, and no request was answered
+    from a cache. Measured on the branch merged as 0.11.0 before its version bump (its /health reads 0.10.0): the
+    engine, server and tools are the release's byte for byte. Not measured yet: sampled, 128 tokens, long context,
+    first-token times. Raw data: models/nemotron-3.5-super-vl-120b-a12b/measurements/0.11.0-summary.json.
+  source: models/nemotron-3.5-super-vl-120b-a12b/measurements/0.11.0-summary.json
+  rows:
+  - profile: nemotron-super-vl-exl3-4.0
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [33.11, 32.33, 62.0, 2.05, 3], chat: [43.88, 43.33, 88.9, 3.9, 3], code: [53.57, 49.68, 80.2, 4.34, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-super-vl-exl3-2.0
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [35.59, 33.87, 52.8, 1.89, 3], chat: [46.22, 45.41, 68.9, 3.18, 3], code: [46.27, 36.41, 43.7, 2.3, 3]}
+    ttft_s: {}
+    lossless: null
+  - profile: nemotron-super-vl-nvfp4
+    build: 0.11.0
+    date: '2026-10-16'
+    comparable: true
+    cells:
+      greedy_512: {prose: [23.85, 23.81, 106.3, 2.54, 3], chat: [28.65, 28.39, 108.8, 3.12, 3], code: [39.87, 39.84, 119.8, 4.78, 3]}
+    ttft_s: {}
+    lossless: null
 
 memory:
   parts:
