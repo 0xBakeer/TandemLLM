@@ -38,6 +38,8 @@ ADDED_AFTER_072 = {"QWEN38_SHADOW_DIR": "", "QWEN38_SHADOW_DISK_GB": "20", "QWEN
                    "QWEN38_SHADOW_GRID": "512"}
 # the arguments that name weight and drafter files
 _ARG_FILES = ("model", "nvfp4", "fp8_head", "head", "dflash2_ckpt", "dflash2_ckpt16")
+# the variables outside QWEN38_* that name weight files (NemotronH's GGUF beside its config folder)
+_ROW_FILES = ("QSE_NH_GGUF",)
 # a file past this size is identified by a sample of its bytes (`content_id`)
 SAMPLE_OVER = 64 << 20
 _IDS: dict = {}
@@ -90,12 +92,12 @@ def _file_id(path: str) -> list:
 def content_id(path: str):
     """What is at `path`, not where it is: a file's size and sha256 (over the whole file up to
     SAMPLE_OVER; past that over its first and last MiB and 16 reads of 64 KiB spread between them),
-    a folder's .safetensors and .json files by name, "missing" for neither. Remembered by the file's
-    real path, size, mtime and inode for the process."""
+    a folder's .safetensors, .json and .gguf files by name, "missing" for neither. Remembered by the
+    file's real path, size, mtime and inode for the process."""
     p = os.path.expanduser(path)
     if os.path.isdir(p):
         return {"dir": [[f, content_id(os.path.join(p, f))] for f in sorted(os.listdir(p))
-                        if f.endswith((".safetensors", ".json"))]}
+                        if f.endswith((".safetensors", ".json", ".gguf"))]}
     try:
         st = os.stat(p)
     except OSError:
@@ -149,7 +151,7 @@ def fingerprint_extra(a) -> dict:
         v = getattr(a, name, None)
         files += [content_id(p) for p in (str(v).split(",") if v else [])]
     env = {k: _located(v) for k, v in sorted(os.environ.items())
-           if k.startswith("QWEN38_") and not k.startswith(_NOT_ROWS)}
+           if (k.startswith("QWEN38_") and not k.startswith(_NOT_ROWS)) or k in _ROW_FILES}
     return _libraries({"files": files, "env": env, "chunk": getattr(a, "prefix_chunk", None),
                        "drafter": getattr(a, "drafter", None),
                        "narrow_arm": getattr(a, "narrow_arm", None)})
