@@ -2,6 +2,11 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
+## Unreleased
+
+- Chat tab: chatd saves an attachment under `/workspace/uploads/` without following a symlink. The sandbox can write that folder, so it could make `uploads/` a symlink, or leave one at the file's name, and chatd then wrote the user's file wherever the link pointed on the host. Now `uploads/` must be a real folder and the file a new one; when chatd cannot save it there, it sends the message all the same and the prompt says why. chatd cuts a name over 255 bytes, keeping its extension; on Linux such a name failed the send (SEC-1). Reported by Joey.
+- Chat tab: chatd's other reads and writes in the folders the sandbox writes into do not follow a symlink either: the file tools and files pane, snapshots with their undo, and the Open WebUI runner's files in the sandbox's home. Before, a symlink at the runner's `run.py`, the toolkit file or the request file made chatd overwrite the link's target, and a snapshot copied a file the sandbox swapped for a symlink into the chat. Each access walks from the folder's root by directory fds opened with O_NOFOLLOW, a write goes to a new file renamed into place, and a read takes a regular file only (a FIFO blocked chatd). chatd replaces a tool call id from the backend that is not a plain name before the id names a file (SEC-1).
+
 ## 0.11.0, 2026-10-16
 
 0.11.0 adds a fifth model, NVIDIA's Nemotron 3.5 Super VL 120B-A12B, from our EXL3 packs at 4.0 and 2.0 bpw or NVIDIA's NVFP4 release, with NVIDIA's LiLiCorr drafter for Super VL. The other models' text and speed do not change, and their saved conversations carry over.

@@ -45,7 +45,7 @@ from chatd.websearch import WebSearchMixin
 from chatd.engine import Engine, LiveTail
 from chatd.sandbox import Sandboxes
 from chatd.snapshots import Snapshots
-from chatd.workspace import Workspace
+from chatd.workspace import PathError, Workspace
 from chatd.events import RESET_BEHIND, Fanout, Subscriber, as_json
 from chatd.ids import iso, now_ms, ulid
 from chatd.runs import FLUSH_S, Run
@@ -1395,7 +1395,8 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
 
     def _place(self, conv: Conv, row, atts: list[dict]) -> None:
         """SRV-487, when a message is sent: each attachment is saved in the chat's workspace under
-        uploads/ (`path`), and a text file goes into the prompt whole only while the message's
+        uploads/ (`path`; `unplaced`, why not, when it cannot be: the message is sent all the
+        same), and a text file goes into the prompt whole only while the message's
         text files stay within a quarter of the window's free room, at most INLINE_MAX_TOKENS
         (`inline`); past it the prompt gets one line with its name, size and path
         (chatd/attach.py, chatd/render.py)."""
@@ -1411,7 +1412,13 @@ class Service(AgentMixin, PanesMixin, TerminalsMixin, SkillsMixin, PlansMixin, W
                 _, data = self.attachment(a["id"])
             except (ApiError, OSError):
                 continue
-            a["path"] = attach_mod.save_upload(ws_dir, a.get("name") or "file", data)
+            try:
+                a["path"] = attach_mod.save_upload(ws_dir, a.get("name") or "file", data)
+            except (PathError, OSError) as exc:
+                # the sandbox owns uploads/ (a symlink there is refused): the message goes
+                # without the file in the workspace, and the prompt says why (chatd/attach.py)
+                a["unplaced"] = attach_mod.unplaced_words(exc)
+                self.log(f"[attach] {a['id']} not saved under uploads/: {a['unplaced']}")
             if a.get("kind") != "text":
                 continue
             tokens = int(a.get("tokens") or 0)

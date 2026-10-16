@@ -18,8 +18,8 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_THINK_TAGS      the reasoning as <think>...</think> inside `content`
     FAKE_MEMORY          a memory block (a user rule) after the answer, in 7-character pieces
     FAKE_TOOL            two tool calls, their arguments streamed in pieces
-    FAKE_CALLS [...]     these calls (JSON list of {name, arguments}, the rest of the line), when
-                         the request offers tools and its last message is not a tool result
+    FAKE_CALLS [...]     these calls (JSON list of {name, arguments, id?}, the rest of the line),
+                         when the request offers tools and its last message is not a tool result
                          (FAKE_CALLS_ALWAYS: after tool results too, for loop guards)
     FAKE_SLOW_TTFT <s>   wait <s> seconds before the first token
     FAKE_SLOW            ten tokens a second
@@ -533,7 +533,8 @@ def make_handler(fake: Fake):
             elif tools and getattr(self, "_calls", None) is not None:
                 for i, call in enumerate(self._calls):
                     args = json.dumps(call.get("arguments") or {})
-                    self._event(chunk({"tool_calls": [{"index": i, "id": f"call_{i}_{self._n_msgs}",
+                    self._event(chunk({"tool_calls": [{"index": i, "id": call.get("id") or
+                                                       f"call_{i}_{self._n_msgs}",
                                                        "type": "function", "function": {
                                                            "name": call["name"], "arguments": ""}}]}))
                     for k in range(0, len(args), 7):
