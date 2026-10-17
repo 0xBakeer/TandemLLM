@@ -7790,6 +7790,11 @@ class Handler(BaseHTTPRequestHandler):
                     # and alignment, on the expanded key ids (`_mm_end_replay`); SP4's note
                     # (text positions) moves to the rows' coordinates with it
                     try:
+                        # ENG-371: a conversation that ran on a side slot and now has an image
+                        # (a worker's first screenshot) is carried into slot 0 as a text turn is,
+                        # when its images all come after the side slot's end
+                        with torch.no_grad():
+                            _carry_from_side(list(mm.key_ids), conv_id)
                         _spill_before_replay(list(mm.key_ids), mm_ok=True)
                         mm_old, keys_n = mm, int(prompt.numel())
                         e_before = int(res_.end["at"]) if res_.end is not None else 0

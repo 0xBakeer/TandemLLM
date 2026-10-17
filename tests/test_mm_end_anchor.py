@@ -332,6 +332,76 @@ def test_an_image_key_is_content_for_the_alignment():
     return "an image key's bytes: no whitespace, its own"
 
 
+# ------------------------------------------------------------------ 8. a side slot's conversation
+
+def _side_turn(p1, n):
+    """`serve` with a side slot beside slot 0 (its own engine on the same weights) and a text
+    turn on it; the carry record its end leaves."""
+    from server import slots as S
+    res = serve()
+    _, d = TV.reference()
+    seng, _ = TV.engine_for(d, max_len=256)
+    vals = {k: None for k in S.OVERLAY}
+    vals.update(engine=seng, drafter=None, max_len=256)
+    side = S.Slot(1, 256, values=vals)
+    pool = S.Pool([S.Slot(0, 256), side])
+    app.STATE["pool"] = pool
+    s = pool.take_side(len(p1) + n, owner="ses")
+    S.bind(s)
+    try:
+        out1, _ = text_turn(p1, n)
+    finally:
+        S.bind(None)
+        pool.release_side(s)
+    return res, side, out1
+
+
+def _carried_image_turn(ids, images, n, carry=True):
+    """The handler's order for a request with images on slot 0 (ENG-371): expanded, the side
+    slot's conversation carried in on the key ids, the replay in key space, the prefill."""
+    res = app.STATE["resident"]
+    t = torch.tensor(ids)
+    prompt, mm = app._mm_prompt(t, images)
+    if carry:
+        with torch.no_grad():
+            app._carry_from_side(list(mm.key_ids), "ses")
+    if res.end is not None:
+        prompt, mm, _, _, _ = app._mm_end_replay(res, t, prompt, mm, images)
+    served = list(mm.key_ids)
+    out = list(app.generate_stream(prompt, n, set(), None, "ses", mm=mm, end_mm=True))
+    return out, dict(app.STATE["last_prefill"]), served, mm
+
+
+def test_a_side_slots_conversation_with_its_first_screenshot_is_carried_into_slot_0():
+    """ENG-371: a conversation that ran on a side slot (text only) gets its first screenshot and
+    must run on slot 0: the side slot's rows are carried in on the request's key ids, as a text
+    turn's are, and it resumes at the side slot's end. Before, a request with images skipped the
+    carry and read its prompt again (live 2026-10-17 23:41: a parent's turn with a screenshot
+    re-read 14,606 of 19,726 tokens)."""
+    if need():
+        return need()
+    x = TV.image(53, (1, 4, 6))
+    for k in range(50):
+        p1 = text(40, 7 + 1000 * k)
+        res, side, out1 = _side_turn(p1, 20)
+        if not {IMG, VS, VE} & set(out1):
+            break
+    rec = side.carry
+    assert rec is not None and rec["at"] == len(p1) + len(out1) - 1, rec
+    copy = p1 + out1 + with_image(text(6, 4)) + text(4, 5)
+    out2, pre2, served, mm = _carried_image_turn(copy, [x], 12)
+    assert pre2["reused"] == rec["at"] and pre2["forwarded"] == len(served) - rec["at"], pre2
+    assert res.stats["side_carries"] == 1 and side.carry is None, res.stats
+    ref = cold(app._mm_collapse(list(mm.key_ids), mm), [x], 12)
+    assert out2 == ref, (out2, ref)
+    # without the carry (0.11.4): slot 0 holds nothing of it, the prompt is read again
+    _side_turn(p1, 20)
+    _, pre0, _, _ = _carried_image_turn(copy, [x], 12, carry=False)
+    assert pre0["reused"] == 0, pre0
+    return (f"resumed at the side slot's end ({rec['at']} of {len(served)}), 12 greedy tokens "
+            f"equal; without the carry {pre0['forwarded']} forwarded")
+
+
 def test_a_long_re_read_says_why():
     res = cache.ResidentPrefix(BIG, 1024, end=True)
     res.valid, res.tokens = 100_000, [1] * 100_000
