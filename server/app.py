@@ -1532,6 +1532,10 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
         if probe is not None:
             probe.prefilled(eng, drafter, len(ctx), where.get("start", 0))
+        if where.get("why"):
+            # SRV-546: a long re-read is never silent (positions only, never text)
+            print(f"[cache] re-read {forwarded:,} of {len(ctx):,} tokens (resumed at {reused:,}, "
+                  f"{where.get('kind') or 'cold'}): {where['why']}", flush=True)
         if mm is not None:
             mm.release()
         # a conversation read back from the NVMe for this request (engine/spill.py) is `spill`
@@ -2085,7 +2089,7 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
         mem.gate(len(ids))
     if drafter is not None:
         drafter.reset()           # as a request's start: its caches resume from the rows
-    logits, reused, forwarded = cache.prefill(
+    logits, reused, forwarded = _stage_prefill(
         eng, drafter, ids, STATE.get("device", "cuda"), store=STATE.get("state_store"),
         chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
         checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
@@ -4802,6 +4806,17 @@ def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
 #: and the whitespace alignment run on its expanded key ids (`_mm_end_replay`), an end anchor or
 #: an NVMe entry kept after images is offered to it (`end_mm`). Off: the anchors in place only
 MM_END = (_S.get("MM_END") or "on").strip().lower()
+
+
+def _stage_prefill(eng, drafter, ids, device, **kw):
+    """`cache.prefill` for the router's in-context stage, which says a long re-read as the turn
+    does (SRV-546: positions only)."""
+    seen: dict = {}
+    logits, reused, forwarded = cache.prefill(eng, drafter, ids, device, info=seen, **kw)
+    if seen.get("why"):
+        print(f"[cache] the router's stage re-read {forwarded:,} of {len(ids):,} tokens (resumed "
+              f"at {reused:,}, {seen.get('kind') or 'cold'}): {seen['why']}", flush=True)
+    return logits, reused, forwarded
 
 
 def _mm_collapse(keys: list[int], ref) -> list[int] | None:

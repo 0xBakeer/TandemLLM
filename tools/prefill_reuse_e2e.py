@@ -126,7 +126,9 @@ def main() -> int:
     ap.add_argument("--ledger", default=os.path.expanduser(
         "~/.qwen38-spark-engine/usage/ledger.sqlite3"))
     ap.add_argument("--history-tokens", type=int, default=100_000)
-    ap.add_argument("--max-tokens", type=int, default=1200)
+    # chatd sends the window's room; a small limit cuts tool calls, which then go back as other
+    # text than the model wrote (server/toolcall.py) and the copy parts from the rows there
+    ap.add_argument("--max-tokens", type=int, default=16384)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
