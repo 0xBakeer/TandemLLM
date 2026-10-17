@@ -969,6 +969,10 @@ class Hosts:
         self.fetch = fetch
         self.locality = locality or _Locality(clock=clock)
         self.remotes: dict = {}
+        # view() runs per dashboard request (ThreadingHTTPServer); the get-or-create of a
+        # _Remote is two steps, and two requests missing the same key used to each build
+        # one — the replaced object's fetch thread then ran against a discarded entry
+        self._remotes_guard = threading.Lock()
 
     def view(self, backends: list[dict] | None, engine: dict | None = None,
              wait: float = 0.0) -> list[dict]:
@@ -992,13 +996,20 @@ class Hosts:
         out = [dict(loc, id="local", label=self.collector.label, source="local", url=None,
                     backends=[w["backend"] for w in local_watch], state="ok", error=None)]
         token = self.env.get(TOKEN_ENV) or None
-        for key in list(self.remotes):
-            if key not in groups:
-                del self.remotes[key]
+        with self._remotes_guard:
+            for key in list(self.remotes):
+                if key not in groups:
+                    del self.remotes[key]
+            for key, _watch in groups.items():
+                if key not in self.remotes:
+                    kind, url, dcgm = key
+                    self.remotes[key] = _Remote(kind, url, dcgm or None,
+                                                token if kind == "collector" else None,
+                                                clock=self.clock, fetch=self.fetch)
         for i, (key, watch) in enumerate(sorted(groups.items())):
             kind, url, dcgm = key
             r = self.remotes.get(key)
-            if r is None:
+            if r is None:                              # pruned by a concurrent view — rebuild
                 r = self.remotes[key] = _Remote(kind, url, dcgm or None,
                                                 token if kind == "collector" else None,
                                                 clock=self.clock, fetch=self.fetch)
