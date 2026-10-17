@@ -3549,3 +3549,10 @@ qse-chat-panes {
   margin: 0 0 6px;
   overflow-wrap: anywhere;
 }
+
+/* a send/upload in flight says so: a scanned PDF is read on the server before the message
+   itself is posted, which can hold the request for a minute */
+.ch-send-note {
+  margin: 0 12px 2px;
+  text-align: right;
+}
