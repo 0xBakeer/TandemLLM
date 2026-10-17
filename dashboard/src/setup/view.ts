@@ -1223,7 +1223,11 @@ export class QseSetup extends LightElement {
   private stepInstall(): TemplateResult {
     const id = this.wiz.job;
     if (!id) return html`<p class="muted">${S.installStarting}</p>`;
-    return html`<qse-install-progress .jobId=${id} .initial=${this.jobInitial} .previousProfile=${this.previousProfile} .onBack=${() => this.dispatch({ type: 'job', id: null })}></qse-install-progress>`;
+    return html`<qse-install-progress .jobId=${id} .initial=${this.jobInitial} .previousProfile=${this.previousProfile} .onBack=${() => this.dispatch({ type: 'job', id: null })} @job-retry=${(e: CustomEvent<SetupJob>) => {
+      // VIS-213: the retry is a job of its own; the page follows it
+      this.jobInitial = e.detail;
+      this.dispatch({ type: 'job', id: e.detail.id });
+    }}></qse-install-progress>`;
   }
 }
 

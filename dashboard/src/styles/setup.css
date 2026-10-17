@@ -4174,3 +4174,45 @@ qse-wren-figure::before {
     padding: 14px;
   }
 }
+
+/* VIS-213: a failed install's way on */
+.inst-fail {
+  display: grid;
+  gap: 10px;
+}
+.inst-fail-step {
+  margin: 0;
+  font-weight: 600;
+}
+.inst-fixed ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.inst-fixed li {
+  display: flex;
+  gap: 6px;
+  color: var(--ink-2);
+}
+.inst-fixed li svg {
+  color: var(--ok);
+  flex: none;
+}
+.inst-diag-text {
+  width: 100%;
+  font: var(--fs-sm, 0.85rem) / 1.4 var(--mono, ui-monospace, monospace);
+  background: var(--bg-inset);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  padding: 8px;
+}
+@media (max-width: 768px) {
+  .inst-fail-actions .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}

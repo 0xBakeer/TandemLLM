@@ -17,6 +17,10 @@ dashboard/src/api/types.ts `Setup*`).
     POST /v1/setup/apply {selection, dry_run?}   202 and a job (dry_run: the plan); 409 while
                                           requests are in flight or a job runs, 409/412 when the
                                           plan has errors (over_budget, missing_token, ...)
+    POST /v1/setup/jobs/{id}/retry {}     a failed or rolled back job again, from its selection: 202
+                                          and the new job (`retry_of`), the finished download kept
+    GET  /v1/setup/jobs/{id}/diagnostics  the job as text for a bug report (versions, steps, tandem
+                                          doctor, the log's tail), nothing secret (VIS-213)
     GET  /v1/setup/jobs/{id}              SSE: the log lines on disk, the job as it is now, then its
                                           events as they come (`id:` the sequence, Last-Event-ID
                                           resumes); ?format=json the job
@@ -180,6 +184,8 @@ def _get(h, app, parts: list[str]) -> None:
         return h._json(200, device(app), extra_headers=NO_STORE)
     if len(parts) == 2 and parts[0] == "jobs":
         return job_route(h, parts[1])
+    if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "diagnostics":
+        return diagnostics_route(h, parts[1])
     if parts == ["status"]:
         return h._json(200, setup_status(app), extra_headers=NO_STORE)
     if parts == ["reset"]:
@@ -255,6 +261,8 @@ def _post(h, app, parts: list[str], body) -> None:
         return apply_route(h, app, parts[0], body)
     if parts == ["reset"]:
         return reset_route(h, app, body)
+    if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
+        return retry_route(h, app, parts[1])
     if parts == ["assistant", "load"]:
         return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
     if parts == ["assistant", "unload"]:
@@ -316,6 +324,60 @@ def apply_route(h, app, which: str, body) -> None:
                    mem_total_gb=mem.get("MemTotal"))
     if which == "plan" or body.get("dry_run"):
         return h._json(200, dict(p, dry_run=which == "apply"), extra_headers=NO_STORE)
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode)
+
+
+def retry_route(h, app, jid: str) -> None:
+    """POST /v1/setup/jobs/{id}/retry (VIS-213): a new job with the failed one's selection (or its
+    reset), `retry_of` the old id. The check and tandem doctor run again; a download that finished
+    is not repeated (the plan finds the weights), one cut short goes on."""
+    from server.setup import apply
+    old = apply.read_job(jid) if apply.JOB_ID.match(jid or "") else None
+    spec = apply.job_spec(jid) if old is not None else None
+    if old is None or spec is None:
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    if old["state"] not in ("failed", "rolled_back"):
+        return _err(h, 409, "not_retryable", f"job {jid} is {old['state']}: only a failed or rolled "
+                                             f"back job is tried again")
+    m = device_mod.windowed(registry.get(spec.get("model")))
+    if m is None:
+        return _err(h, 404, "unknown_model", f"no model {spec.get('model')!r} in models/")
+    setup_mode = bool(app.STATE.get("setup_mode"))
+    if spec.get("kind") == "reset":
+        p = apply.reset_plan(m, setup_mode=setup_mode)
+        sel, kind = p["selection"], "reset"
+    else:
+        sel, kind = estimate_mod.check(m, spec["selection"]), "apply"
+        mem = device_mod.meminfo()
+        p = apply.plan(m, sel, setup_mode=setup_mode,
+                       password_set=bool(getattr(app.STATE.get("auth"), "password_set", False)),
+                       available_gb=round(mem["MemAvailable"], 2) if "MemAvailable" in mem else None,
+                       mem_total_gb=mem.get("MemTotal"))
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=jid)
+
+
+def diagnostics_route(h, jid: str) -> None:
+    """GET /v1/setup/jobs/{id}/diagnostics (VIS-213): the job as text for a bug report, no secret."""
+    from server.setup import apply
+    text = apply.diagnostics(jid) if apply.JOB_ID.match(jid or "") else None
+    if text is None:
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    raw = text.encode()
+    h.send_response(200)
+    h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(raw)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    h.wfile.write(raw)
+    return None
+
+
+def _launch(h, app, m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
+            retry_of: str | None = None) -> None:
+    """A job from a checked plan: refused while requests run (409 busy), when the plan has an
+    error, or while another job runs (409 job_running); else Wren unloaded, the runner spawned,
+    202 and the job."""
+    from server.setup import apply
     if busy(app) and not setup_mode:
         inf = app.INFLIGHT
         return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
@@ -332,10 +394,10 @@ def apply_route(h, app, which: str, body) -> None:
             return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
                         job=run["id"])
         wren_of(app).unload("apply")
-        job = apply.new_job(m, sel, p, setup_mode=setup_mode)
+        job = apply.new_job(m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=retry_of)
         apply.spawn(job["id"])
-    print(f"[setup] apply job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
-          f"started", flush=True)
+    print(f"[setup] {kind} job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
+          f"started" + (f" (a retry of {retry_of})" if retry_of else ""), flush=True)
     return h._json(202, {"contract_version": CONTRACT, "job": job}, extra_headers=NO_STORE)
 
 

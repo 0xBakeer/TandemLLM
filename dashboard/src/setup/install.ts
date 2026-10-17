@@ -16,7 +16,7 @@ import { apiBase } from '../api/client';
 import { rememberJob, rememberStatusPort, restarting } from '../lib/restart';
 import './restart-card';
 import { setupApi, setupUnauthorized } from './api';
-import { appendLog, applyJobEvent, changeText, dedupes, finishedLines, isFinal, type JobLog, needsJob, STALE_MS, streamAction, streamFinished } from './job-view';
+import { appendLog, applyJobEvent, changeText, copyText, dedupes, finishedLines, isFinal, type JobLog, needsJob, STALE_MS, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
 import { shortTokens } from './window';
 
@@ -39,6 +39,11 @@ export class QseInstallProgress extends LightElement {
   @state() private tick = 0;
   /** VIS-211: no job in hand for STALE_MS: the page says it cannot read the install */
   @state() private stale = false;
+  /** VIS-213: Retry and Copy diagnostics on a failed job */
+  @state() private retrying = false;
+  @state() private retryError: string | null = null;
+  @state() private copy: 'idle' | 'busy' | 'copied' | 'shown' | 'error' = 'idle';
+  @state() private diag: string | null = null;
   private stream: ResumableStream | null = null;
   private connectedAt = 0;
   private reading = false;
@@ -202,6 +207,53 @@ export class QseInstallProgress extends LightElement {
     return html`<span class="inst-dot" aria-hidden="true"></span>`;
   }
 
+  /** VIS-213: a failed or rolled back job's way on: what tandem doctor repaired, Retry from the
+   *  failed step (a new job; the download is not repeated), Copy diagnostics, Back to Review */
+  private failedEnd(j: SetupJob) {
+    const failed = j.steps.find((s) => s.state === 'failed');
+    const fixed = j.doctor?.repaired ?? [];
+    return html`<div class="inst-fail" data-job-failed-end>
+      ${failed ? html`<p class="inst-fail-step" data-failed-step=${failed.id}>${S.failedAt(failed.label)}</p>` : nothing}
+      ${fixed.length
+        ? html`<div class="inst-fixed" data-doctor-repaired><p class="small">${S.doctorRepaired}</p><ul>${fixed.map((t) => html`<li>${icon('check')} <span>${t}</span></li>`)}</ul></div>`
+        : nothing}
+      <div class="inst-actions inst-fail-actions">
+        <button class="btn btn-primary" data-job-retry ?disabled=${this.retrying} @click=${() => void this.retry(j)}>${this.retrying ? S.retrying : failed && failed.id !== 'check' ? S.retryFrom(failed.label) : S.retryJob}</button>
+        <button class="btn" data-copy-diagnostics ?disabled=${this.copy === 'busy'} @click=${() => void this.copyDiagnostics(j)}>${this.copy === 'copied' ? S.diagCopied : S.copyDiagnostics}</button>
+        ${this.onBack ? html`<button class="btn btn-ghost" @click=${() => this.onBack?.()}>${S.backToReview}</button>` : nothing}
+      </div>
+      ${this.retryError ? html`<p class="rv-warn" role="alert" data-retry-error>${this.retryError}</p>` : nothing}
+      ${this.copy === 'error' ? html`<p class="rv-warn" role="alert">${S.diagError}</p>` : nothing}
+      ${this.copy === 'shown' && this.diag
+        ? html`<div class="inst-diag"><p class="small muted">${S.diagSelect}</p><textarea class="inst-diag-text" readonly rows="10" data-diagnostics-text @focus=${(e: Event) => (e.target as HTMLTextAreaElement).select()}>${this.diag}</textarea></div>`
+        : nothing}
+    </div>`;
+  }
+
+  private async retry(j: SetupJob): Promise<void> {
+    this.retrying = true;
+    this.retryError = null;
+    try {
+      const res = await setupApi.retry(j.id);
+      this.dispatchEvent(new CustomEvent('job-retry', { detail: res.job, bubbles: true }));
+    } catch (e) {
+      this.retryError = S.retryFailed((e as Error).message);
+    } finally {
+      this.retrying = false;
+    }
+  }
+
+  private async copyDiagnostics(j: SetupJob): Promise<void> {
+    this.copy = 'busy';
+    try {
+      this.diag = await setupApi.diagnostics(j.id);
+    } catch {
+      this.copy = 'error';
+      return;
+    }
+    this.copy = (await copyText(this.diag)) ? 'copied' : 'shown';
+  }
+
   /** VIS-209: when the restart began: the restart step's start, else when the page saw it go */
   private restartSince(j: SetupJob): number {
     const st = j.steps.find((s) => (s.id === 'switch' || s.id === 'rollback') && (s.state === 'running' || s.state === 'waiting'));
@@ -295,7 +347,7 @@ export class QseInstallProgress extends LightElement {
             <span class="inst-icon">${this.stepIcon(s)}</span>
             <span class="inst-label">${s.label}</span>
             <span class="inst-state muted small">${S.stepState[s.state]}${s.started_at && s.ended_at ? html` <span class="num">${Math.max(0, s.ended_at - s.started_at).toFixed(1)} s</span>` : nothing}</span>
-            ${s.detail ? html`<span class="inst-detail muted small">${s.detail}</span>` : nothing}
+            ${s.detail && !(s.id === 'check' && j?.changes?.length) ? html`<span class="inst-detail muted small">${s.detail}</span>` : nothing}
             ${s.id === 'check' && j?.changes?.length ? this.changeList(j) : nothing}
           </li>`,
         )}
@@ -305,7 +357,7 @@ export class QseInstallProgress extends LightElement {
         ${this.log.dropped ? html`<p class="muted small" data-log-dropped>${S.logDropped(this.log.dropped)}</p>` : nothing}
         <pre class="inst-log" tabindex="0">${this.log.lines.map((l) => l.line).join('\n')}</pre>
       </details>
-      ${final && this.onBack ? html`<div class="inst-actions"><button class="btn btn-primary" @click=${() => this.onBack?.()}>${S.backToReview}</button></div>` : nothing}
+      ${final ? this.failedEnd(j!) : nothing}
     </div>`;
   }
 }

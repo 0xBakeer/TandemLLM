@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SetupEnvChange, SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
-import { appendLog, applyJobEvent, changeText, dedupes, doneMessage, durationText, finishedLines, isFinal, type JobLog, LOG_KEEP, needsJob, streamAction, streamFinished } from '../src/setup/job-view';
+import { appendLog, applyJobEvent, changeText, copyText, dedupes, doneMessage, durationText, finishedLines, isFinal, type JobLog, LOG_KEEP, needsJob, streamAction, streamFinished } from '../src/setup/job-view';
 
 const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
 
@@ -359,5 +359,23 @@ describe('VIS-211: the install page shows the job\'s true end', () => {
     expect(finishedLines({ ...DONE, kind: 'reset' }, String).title).toBe('The shipped configuration is ready');
     expect(durationText(42)).toBe('42 s');
     expect(durationText(240)).toBe('4 min');
+  });
+});
+
+describe('VIS-213: Copy diagnostics', () => {
+  it('the Clipboard API where the page may use it', async () => {
+    let got = '';
+    expect(await copyText('report', { clipboard: { writeText: async (t: string) => void (got = t) } as unknown as Clipboard }, null)).toBe(true);
+    expect(got).toBe('report');
+  });
+  it('plain http on a phone: no Clipboard API and no copy command: false, the page shows the text', async () => {
+    const doc = {
+      createElement: () => ({ value: '', setAttribute() {}, style: {}, select() {}, remove() {} }),
+      body: { appendChild() {} },
+      execCommand: () => false,
+    } as unknown as Document;
+    expect(await copyText('report', { clipboard: undefined as unknown as Clipboard }, doc)).toBe(false);
+    const ok = { ...doc, execCommand: () => true } as unknown as Document;
+    expect(await copyText('report', { clipboard: undefined as unknown as Clipboard }, ok)).toBe(true);
   });
 });

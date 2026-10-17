@@ -119,3 +119,33 @@ export function durationText(s: number): string {
   const r = Math.round(s - m * 60);
   return r ? `${m} min ${r} s` : `${m} min`;
 }
+
+/** VIS-213: copy `text` to the clipboard: the Clipboard API where the page may use it (https, or a
+ *  secure context), else a hidden text box and execCommand (plain http on a phone); false when
+ *  neither worked (the page then shows the text to select by hand). */
+export async function copyText(text: string, nav: Pick<Navigator, 'clipboard'> | null = typeof navigator === 'undefined' ? null : navigator, doc: Document | null = typeof document === 'undefined' ? null : document): Promise<boolean> {
+  try {
+    if (nav?.clipboard?.writeText) {
+      await nav.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* not allowed here: the fallback */
+  }
+  if (!doc) return false;
+  const ta = doc.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  doc.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = doc.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}

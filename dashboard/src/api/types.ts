@@ -1563,6 +1563,10 @@ export interface SetupJob {
    *  have neither) */
   model?: string;
   summary?: SetupJobSummary;
+  /** VIS-213: the job this one tries again */
+  retry_of?: string | null;
+  /** OPS-171: tandem doctor's report from the check step (and what it repaired after a failure) */
+  doctor?: { repaired?: string[]; problems?: string[] };
 }
 export interface SetupJobSummary {
   model: string;

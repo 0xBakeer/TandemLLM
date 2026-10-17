@@ -50,6 +50,14 @@ export const setupApi = {
   apply: (body: SetupApplyRequest) => post<SetupApplyResponse>('/v1/setup/apply', body),
   job: (id: string) => get<SetupJob>(`/v1/setup/jobs/${encodeURIComponent(id)}?format=json`),
   jobUrl: (id: string) => `${apiBase()}/v1/setup/jobs/${encodeURIComponent(id)}`,
+  /** VIS-213: a failed or rolled back job again, from the failed step's side (the download is kept) */
+  retry: (id: string) => post<SetupApplyResponse>(`/v1/setup/jobs/${encodeURIComponent(id)}/retry`, {}),
+  /** VIS-213: the job as text for a bug report (no secret) */
+  diagnostics: (id: string) =>
+    request<string>(`/v1/setup/jobs/${encodeURIComponent(id)}/diagnostics`, {}, 'text').catch((e) => {
+      if (e instanceof ApiError && e.status === 401) setupUnauthorized();
+      throw e;
+    }),
   /** the community list, fetched from GitHub now (CONTRACT.md addition 3: on the weights section's
    *  open and on Refresh only; one conditional GET, 10 s); the cache or the bundled copy when GitHub
    *  does not answer, with `sync.error` */

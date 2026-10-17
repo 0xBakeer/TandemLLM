@@ -722,7 +722,8 @@ def job_summary(m: dict, sel: dict) -> dict:
             "side_window": sel.get("side_window")}
 
 
-def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply") -> dict:
+def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
+            retry_of: str | None = None) -> dict:
     """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
     reset (reset level 2: the overlay goes and the recommended profile starts)."""
     jid = secrets.token_hex(8)
@@ -735,13 +736,84 @@ def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply
            "profile": sel["profile"], "steps": steps, "message": None, "changes": p["changes"],
            "rolled_back": False, "failed_step": None, "pid": None,
            "url": f"http://<this box>:{p['ports']['next']}/dashboard/",
-           "model": m["id"], "summary": job_summary(m, sel)}
+           "model": m["id"], "summary": job_summary(m, sel), "retry_of": retry_of}
     _write_json(os.path.join(d, "job.json"),
                 {"kind": kind, "model": m["id"], "selection": sel, "setup_mode": setup_mode,
                  "previous": p["profile"]["current"], "ports": p["ports"],
                  "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model")})
     _write_json(os.path.join(d, "state.json"), job)
     return job
+
+
+def job_spec(jid: str) -> dict | None:
+    """The job.json the server wrote (the selection, the kind): a retry starts from it."""
+    try:
+        with open(os.path.join(job_dir(jid), "job.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def diagnostics(jid: str, n_lines: int = 200) -> str | None:
+    """VIS-213: a failed job as text for a bug report: versions, the job, its steps, tandem doctor
+    (the job's report and a fresh check), the selection and the last log lines. Nothing secret:
+    the log was filtered when it was written, and the whole text passes the filter again."""
+    import platform
+    from server.conductor.redact import redact
+    from server.setup import doctor
+    job = read_job(jid)
+    if job is None:
+        return None
+    spec = job_spec(jid) or {}
+    ver = ""
+    try:
+        with open(os.path.join(ROOT, "VERSION")) as fh:
+            ver = fh.read().strip()
+    except OSError:
+        pass
+    commit = ""
+    try:
+        commit = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], capture_output=True,
+                                text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    gpu = ""
+    try:
+        gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=5).stdout.strip().splitlines()[0]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    out = ["TandemLLM Setup Guide diagnostics",
+           f"TandemLLM {ver or '?'}{' (' + commit + ')' if commit else ''}; Python {platform.python_version()}; "
+           f"{platform.platform()}{'; GPU ' + gpu if gpu else ''}",
+           f"job {job['id']} ({job.get('kind')}), {job.get('state')}"
+           + (f", a retry of {job['retry_of']}" if job.get("retry_of") else "")
+           + f"; profile {job.get('profile')}; model {job.get('model') or spec.get('model')}",
+           f"message: {job.get('message') or '-'}", "", "steps:"]
+    for st in job.get("steps") or []:
+        took = f" {st['ended_at'] - st['started_at']:.1f} s" if st.get("started_at") and st.get("ended_at") else ""
+        out.append(f"  {st['id']:<16} {st['state']:<8}{took}  {st.get('detail') or ''}".rstrip())
+    d = job.get("doctor") or {}
+    out += ["", "tandem doctor before the job: "
+            + (f"repaired {len(d.get('repaired') or [])}, to look at {len(d.get('problems') or [])}" if d else "not run")]
+    out += [f"  repaired: {t}" for t in d.get("repaired") or []] + [f"  to look at: {t}" for t in d.get("problems") or []]
+    try:
+        now = doctor.run(ROOT, repair=False, log=False)
+        out += ["tandem doctor now: " + ("nothing to look at" if now["ok"] else f"{len(now['problems'])} to look at")]
+        out += [f"  to look at: {t}" for t in now["problems"]]
+    except Exception as exc:                                      # noqa: BLE001
+        out.append(f"tandem doctor now: did not run ({type(exc).__name__})")
+    sel = spec.get("selection") or {}
+    out += ["", "selection: " + json.dumps({k: sel.get(k) for k in ("profile", "slots", "window", "side_window",
+                                                                    "kv_pool", "components")}, sort_keys=True)]
+    logs = [e["event"].get("line", "") for e in events(jid) if e["event"].get("type") == "log"]
+    out += ["", f"log (the last {min(n_lines, len(logs))} of {len(logs)} lines):"] + logs[-n_lines:]
+    text, _ = redact("\n".join(out) + "\n")
+    for k in ("HF_TOKEN", "QSE_ADMIN_TOKEN"):
+        v = os.environ.get(k)
+        if v:
+            text = text.replace(v, "[redacted]")
+    return text
 
 
 def spawn(jid: str) -> int:
@@ -855,7 +927,53 @@ class Runner:
 
     def run(self, argv: list[str], timeout: float, **env) -> int:
         self.log(f"$ {' '.join(os.path.relpath(a, ROOT) if a.startswith(ROOT) else a for a in argv)}")
-        return self.cmd(argv, timeout=timeout, env=self.env(**env), cwd=ROOT, line=self.log)
+        self.last_lines = []
+
+        def line(text: str) -> None:
+            self.last_lines = (self.last_lines + [text])[-40:]
+            self.log(text)
+        return self.cmd(argv, timeout=timeout, env=self.env(**env), cwd=ROOT, line=line)
+
+    def explain(self, what: str, rc: int, timeout: float) -> str:
+        """VIS-213: a failed command in plain words, from its exit status and its last lines; when
+        the cause is a file mode, tandem doctor repairs it now and the sentence says so."""
+        lines = [ln for ln in getattr(self, "last_lines", []) if ln.strip()]
+        text = "\n".join(lines)
+        last = next((ln for ln in reversed(lines) if not ln.startswith("$ ")), "")
+        if rc == 124:
+            return f"{what}: it did not finish within {timeout / 60:.0f} minutes and was stopped. Press Retry."
+        m = re.search(r"([\w./-]+\.sh): Permission denied", text)
+        if m:
+            from server.setup import doctor
+            try:
+                fixed = doctor.run(ROOT, repair=True, log=False)["repaired"]
+            except Exception:                                     # noqa: BLE001
+                fixed = []
+            self.job.setdefault("doctor", {}).setdefault("repaired", [])
+            self.job["doctor"]["repaired"] += fixed
+            return (f"{what}: the script {os.path.basename(m.group(1))} could not be run (Permission "
+                    f"denied: it lost its execute bit). " + ("tandem doctor has repaired its file mode; "
+                                                             "press Retry." if fixed else
+                                                             "Run tandem doctor on the box, then Retry."))
+        rules = ((r"a hold owns the board", "a hold owns the board (a measurement or maintenance runs); "
+                                            "try again when it ends."),
+                 (r"an engine is already alive|REFUSING: an engine", "another engine is running on this "
+                                                                     "box; stop it, then press Retry."),
+                 (r"MemAvailable [\d.]+ GB < ", "there was not enough free memory to start it; stop other "
+                                                 "programs that use memory, then press Retry."),
+                 (r"FAILED to become healthy|did not answer /health",
+                  "the new engine did not answer in time" + (f" (its log: {last})" if last else "") +
+                  "."),
+                 (r"smoke: /health does not name", "the engine that answered is not the new one."),
+                 (r"smoke: the turn through", "the new engine started but did not answer a short chat."),
+                 (r"download/verify FAILED|did not fetch|REFUSING the download",
+                  f"the download stopped ({last or 'no reason given'}); press Retry to go on, the "
+                  f"finished files are kept."),
+                 (r"Traceback|Error:", f"it failed: {last}."))
+        for pat, words in rules:
+            if re.search(pat, text):
+                return f"{what}: {words} (exit {rc})"
+        return f"{what} (exit {rc})" + (f": {last}" if last else "") + "."
 
     # -- the job
     def main(self) -> int:
@@ -944,8 +1062,8 @@ class Runner:
                           TIMEOUTS["fetch"], **({"QSE_FETCH_ASSETS": " ".join(extra)}
                                                 if extra else {}))
             if rc != 0:
-                return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
-                                           f"else changed")
+                return self._fail("fetch", self.explain("The download did not finish", rc,
+                                                        TIMEOUTS["fetch"]) + " Nothing else changed.")
             self.step("fetch", "done")
         old_port, new_port = spec["ports"]["current"], spec["ports"]["next"]
         if not self._preflight_step(m, sel["profile"], render_overlay(m, sel), old_port, new_port,
@@ -987,7 +1105,7 @@ class Runner:
                       SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=smoke_model,
                       QSE_NO_ROLLBACK="1")
         if rc != 0:
-            self._fail("switch", f"the new setup did not start (ops/use-profile.sh exit {rc})")
+            self._fail("switch", self.explain("The new setup did not start", rc, TIMEOUTS["switch"]))
             return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         # smoke
@@ -1121,7 +1239,7 @@ class Runner:
                       SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=p["smoke_model"],
                       QSE_NO_ROLLBACK="1")
         if rc != 0:
-            self._fail("switch", f"the engine did not start (ops/use-profile.sh exit {rc})")
+            self._fail("switch", self.explain("The engine did not start", rc, TIMEOUTS["switch"]))
             return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         self.step("smoke", "running")
