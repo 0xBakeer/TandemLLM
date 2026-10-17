@@ -106,30 +106,44 @@ export class QseUsage extends LightElement {
     return this.params.get('to');
   }
 
+  private loadSeq = 0;
+
   private async load(quiet = false): Promise<void> {
+    // load() is called directly (updated() on param change, the 60 s interval): a later call
+    // supersedes this one, so every read of the params happens before the first await and a
+    // response that lands after a param change is discarded instead of showing the old selection.
+    const my = ++this.loadSeq;
+    const mine = () => my === this.loadSeq;
+    const { model, client, backend, user, internal, range, from: customFrom, to: customTo } =
+      { model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal, range: this.range, from: this.from, to: this.to };
     if (!quiet) this.usage = { state: 'loading' };
     const today = todayKey(this.tz);
     const { from, to } = yearWindow(today);
     try {
-      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
+      const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model, client, backend, user, internal });
+      if (!mine()) return; // a newer load owns the view now
       this.usage = { state: 'ready', data: u };
       // the engine against each relayed backend (a cloud model), over the same year and filters
-      const rel = this.backend ? [] : relayedBackends(u);
+      const rel = backend ? [] : relayedBackends(u);
       if (rel.length) {
-        const q = { from, to, bucket: 'day' as const, tz: this.tz, model: this.model, client: this.client, user: this.user, internal: this.internal };
+        const q = { from, to, bucket: 'day' as const, tz: this.tz, model, client, user, internal };
         const [engine, ...others] = await Promise.all([api.usage({ ...q, backend: ENGINE }), ...rel.map((ref) => api.usage({ ...q, backend: ref.id }))]);
+        if (!mine()) return;
         this.byBackend = { engine, relayed: rel.map((ref, i) => ({ ref, usage: others[i] })) };
       } else this.byBackend = null;
     } catch (e) {
+      if (!mine()) return;
       const d = describeError(e);
       this.usage = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
-    if (this.range === 'custom' && this.from && this.to) {
+    if (!mine()) return;
+    if (range === 'custom' && customFrom && customTo) {
       this.custom = { state: 'loading' };
       try {
-        const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
-        this.custom = { state: 'ready', data: u };
+        const u = await api.usage({ from: customFrom, to: customTo, bucket: 'day', tz: this.tz, model, client, backend, user, internal });
+        if (mine()) this.custom = { state: 'ready', data: u };
       } catch (e) {
+        if (!mine()) return;
         const d = describeError(e);
         this.custom = { state: 'error', endpoint: d.endpoint, message: d.message };
       }
