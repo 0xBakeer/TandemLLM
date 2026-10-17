@@ -36,6 +36,8 @@ import urllib.parse
 
 CHUNK = 65536
 CONNECT_TIMEOUT_S = 15.0
+SPLICE_IDLE_TIMEOUT_S = 300.0        # a tunnel with nothing either way this long is half-open:
+                                     # the pump ends on it and both sockets close
 MAX_FETCH = 4 * 1024 * 1024
 
 
@@ -223,7 +225,7 @@ class Proxy:
                 up.sendall(f"{method} {path} HTTP/1.1\r\n".encode() + b"\r\n".join(keep) +
                            b"\r\nConnection: close\r\n\r\n" + body)
             c.settimeout(None)
-            _splice(c, up)
+            _splice(c, up)                       # the pumps carry the idle timeout
         except (Refused, ValueError) as exc:
             self.stats["refused"] += 1
             msg = str(exc).encode()
@@ -244,9 +246,13 @@ class Proxy:
                         pass
 
 
-def _splice(a: socket.socket, b: socket.socket) -> None:
+def _splice(a: socket.socket, b: socket.socket,
+            idle: float = SPLICE_IDLE_TIMEOUT_S) -> None:
+    """Pump both ways until either side ends; a side that has heard nothing for `idle`
+    is treated as ended, so a half-open tunnel dies instead of standing forever."""
     def pump(src, dst):
         try:
+            src.settimeout(idle)                 # a TimeoutError out of recv ends it here
             while True:
                 d = src.recv(CHUNK)
                 if not d:
