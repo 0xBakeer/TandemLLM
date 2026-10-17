@@ -63,7 +63,7 @@ def test_the_daily_backup_keeps_seven():
     kept = sorted(os.listdir(out))
     assert len(kept) == 7 and kept[0] == "chat-20261003.sqlite3", kept
     assert sqlite3.connect(os.path.join(out, kept[-1])).execute(
-        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "7"
+        "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "8"
 
 
 def test_v7_drops_every_stored_conductor_profile():
@@ -80,7 +80,7 @@ def test_v7_drops_every_stored_conductor_profile():
     s.run("INSERT INTO presets VALUES ('p1', 'n', 'TandemLLM', NULL, ?)",
           (json.dumps({"profile": "ui-check", "effort": "low"}),))
     s.db.close()
-    s = Store(path)
+    s = Store(path, {v: sql for v, sql in MIGRATIONS.items() if v <= 7})
     assert s.migrated == [7]
     got = {r[0]: json.loads(r[1]) for r in s.all("SELECT id, settings FROM conversations")}
     assert got["c1"] == {"model": "TandemLLM", "profile": None, "effort": "high"}
@@ -115,7 +115,7 @@ def test_capabilities_list_models_only_each_by_its_own_name():
             "cloud": False, "upstream_id": "Qwen/Qwen3.5-4B", "context_length": 32768}},
     ]
     stub = SimpleNamespace(engine=SimpleNamespace(models=lambda: cards),
-                           permission_default=lambda: "auto")
+                           permission_default=lambda: "auto", agents_default=lambda: False)
     caps = Service._build_caps(stub, {"engine": {"max_len": 262144}})
     rows = {m["id"]: m for m in caps["models"]}
     assert [m["name"] for m in caps["models"]] == [

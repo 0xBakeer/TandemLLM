@@ -8,6 +8,8 @@
     events          the event log, `(conversation_id, seq)`; ephemeral events are never stored
     global_events   the list-level stream (`gseq`)
     queue           messages typed while a run works (the steer queue)
+    tasks           the tasks a main agent gave its workers (v8; a worker's transcript is the
+                    messages of its hidden `task` conversation)
     folders, attachments, and the phase-2 tables (artifacts, permission_rules, mcp_servers,
     user_tools, presets, prompts, terminals), created now so their migrations stay additive
 
@@ -150,9 +152,28 @@ UPDATE presets SET settings = json_set(settings, '$.profile', NULL)
   WHERE json_valid(settings) AND json_extract(settings, '$.profile') IS NOT NULL
 """
 
+# v8 (VIS-E15, SRV-579): workers. A task the main agent gives runs on a conversation of its own
+# (`kind` task, `parent_id` the chat), hidden from the list; `tasks` is one row a task: its brief,
+# its state, its figures, the report chatd parsed and chatd's check (chatd/tasks.py)
+SCHEMA_V8 = """
+ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+ALTER TABLE conversations ADD COLUMN parent_id TEXT;
+CREATE INDEX conversations_parent ON conversations(parent_id);
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, run_id TEXT, call_id TEXT,
+  n INTEGER NOT NULL, attempt INTEGER NOT NULL DEFAULT 1, title TEXT NOT NULL, brief TEXT NOT NULL,
+  expect TEXT NOT NULL, task_conversation_id TEXT NOT NULL, status TEXT NOT NULL,
+  steps INTEGER NOT NULL DEFAULT 0, max_steps INTEGER, prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0, cached_tokens INTEGER NOT NULL DEFAULT 0,
+  started INTEGER, ended INTEGER, report TEXT, report_source TEXT, check_text TEXT, error TEXT
+);
+CREATE UNIQUE INDEX tasks_n ON tasks(conversation_id, n);
+CREATE INDEX tasks_call ON tasks(conversation_id, call_id)
+"""
+
 # version n: the SQL that takes a file from n-1 to n
 MIGRATIONS: dict[int, str] = {1: SCHEMA_V1, 2: SCHEMA_V2, 3: SCHEMA_V3, 4: SCHEMA_V4, 5: SCHEMA_V5,
-                              6: SCHEMA_V6, 7: SCHEMA_V7}
+                              6: SCHEMA_V6, 7: SCHEMA_V7, 8: SCHEMA_V8}
 BACKUPS_KEPT = 7
 
 

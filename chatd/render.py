@@ -46,6 +46,12 @@ def session_id(conversation_id: str) -> str:
     return SESSION_PREFIX + conversation_id
 
 
+def task_session_id(parent_id: str, n: int) -> str:
+    """A worker's `x-session-id` (VIS-E15): its own key beside the chat's, so the router, the
+    prefix cache, the park and the live row keep the chat and its task n apart."""
+    return f"{SESSION_PREFIX}{parent_id}-task-{n}"
+
+
 def text_of(parts: list[dict], kind: str = "text") -> str:
     return "".join(p.get("text") or "" for p in parts if p.get("type") == kind)
 
@@ -312,11 +318,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          vision: bool = False, blob=None, continue_final: bool = False,
          max_tokens: int | None = None, tools: list[dict] | None = None,
          levels: list[str] | None = None, effort_off: str | None = None,
-         keep_reasoning_from: int = 0, nudge: str | None = None,
+         keep_reasoning_from: int = 0, tail: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
          step_from: tuple[int, int] | None = None, fold_before: str | None = None) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
-    context guard drops it before that); `nudge`: a hidden last user line (the empty-turn retry);
+    context guard drops it before that); `tail`: a hidden last user line for one call, never
+    stored (the empty-turn nudge; a worker's report sent back, or its report at the step cap);
     `inline_images`: tool images in the tool message (our engine) or in a user message after it;
     `step_from`: (a branch index, a step): that assistant message's steps before the step were
     compacted (a long run: the summary is in the system block); `fold_before`: the newest
@@ -330,8 +337,8 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
                             inline=inline_images,
                             from_step=step_from[1] if step_from and i == step_from[0] else 0,
                             fold_before=fold_before))
-    if nudge:
-        msgs.append({"role": "user", "content": nudge})
+    if tail:
+        msgs.append({"role": "user", "content": tail})
     out: dict = {"model": model, "messages": msgs, "stream": True,
                  "stream_options": {"include_usage": True}}
     if tools:
@@ -358,11 +365,16 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
 
 def system_block(*, today: str | None, tools: bool, summary: str | None = None,
                  skills: str | None = None, prompt: str | None = None,
-                 plan: str | None = None) -> str | None:
+                 plan: str | None = None, worker: str | None = None,
+                 agents: str | None = None) -> str | None:
     """The system message: the chat's own prompt, then the tool rules, the skill index and the
-    summary of compacted turns. None for a plain chat with nothing to say."""
+    summary of compacted turns. None for a plain chat with nothing to say. `worker`: a task run's
+    block (packages/system/workers/PACKAGE.md), in place of the chat's own prompt; `agents`: the
+    main agent's paragraph in Agents mode (references/main.md), right after the tool rules."""
     parts = []
-    if prompt:
+    if worker:
+        parts.append(worker.strip())
+    elif prompt:
         parts.append(prompt.strip())
     if tools:
         parts.append(
@@ -372,6 +384,8 @@ def system_block(*, today: str | None, tools: bool, summary: str | None = None,
             "you edit it, and prefer edit_file for small changes. Use present to show the user a "
             "page, a file or this run's changes. When the task is done, answer in plain words; do "
             "not call tools you do not need.")
+    if agents and tools:
+        parts.append(agents.strip())
     if plan:
         parts.append(plan)
     if skills:
@@ -402,11 +416,21 @@ def encode(obj: dict) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def headers(conversation_id: str) -> dict:
+def headers(conversation_id: str, *, session: str | None = None,
+            parent_session: str | None = None, worker: bool = False) -> dict:
     """The call's headers, also fixed: the session id and the client kind (`chat-app`: the
     conductor maps it to its chat-app profile, SRV-351). Never a profile header: the conductor's
     other profiles belong to other clients (opencode, Open WebUI, Hermes) and to tests.
     `X-Tandem-Cost: 1`: a call the proxy relays to a priced model ends with its cost, an SSE
-    comment before [DONE] (proxy/relay.py); our engine's own calls cost nothing and get none."""
-    return {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app",
-            "X-Tandem-Cost": "1"}
+    comment before [DONE] (proxy/relay.py); our engine's own calls cost nothing and get none.
+    A worker's (VIS-E15): its own session, the chat's as `X-Tandem-Parent-Session` (the session
+    that comes back when the worker ends), `X-Tandem-Worker: 1`, and `X-Tandem-Memory: off`: the
+    memory notes are the main agent's (server/conductor/memory.py reads nothing, writes nothing)."""
+    h = {"x-session-id": session or session_id(conversation_id), "X-QSE-Client": "chat-app",
+         "X-Tandem-Cost": "1"}
+    if parent_session:
+        h["X-Tandem-Parent-Session"] = parent_session
+    if worker:
+        h["X-Tandem-Worker"] = "1"
+        h["X-Tandem-Memory"] = "off"
+    return h

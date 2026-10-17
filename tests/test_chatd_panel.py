@@ -225,8 +225,9 @@ def _metrics(run, tail):
 
     from chatd.service import Service
     events = []
-    svc = types.SimpleNamespace(live=tail, emit=lambda conv, ev, **kw: events.append(ev))
-    conv = types.SimpleNamespace(id="c1", context_sent_at=time.monotonic())
+    svc = types.SimpleNamespace(live=tail, emit=lambda conv, ev, **kw: events.append(ev),
+                                session_of=lambda conv: "chat-" + conv.id)
+    conv = types.SimpleNamespace(id="c1", context_sent_at=time.monotonic(), parent_id=None)
     Service._metrics(svc, conv, run)
     return events[-1]
 
@@ -336,7 +337,7 @@ def test_a_running_sandboxs_figures_go_out_with_the_context():
                                   status=lambda cid: {"state": state.state, "disk_bytes": disk[0]})
     svc = types.SimpleNamespace(sandboxes=boxes, emit=lambda conv, ev, **kw: events.append(ev))
     conv = types.SimpleNamespace(id="c1", context={"used": 1}, fan=[1], context_sent_at=0.0,
-                                 sandbox_sent=(0.0, None))
+                                 sandbox_sent=(0.0, None), parent_id=None)
     svc_mod.Service._send_context(svc, conv)
     assert [e["type"] for e in events] == ["context.changed", "sandbox.changed"]
     disk[0] = 51_098_428

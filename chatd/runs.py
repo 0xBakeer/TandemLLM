@@ -43,6 +43,10 @@ retried once after its Retry-After (the chat on the other slot may finish), then
 is compacted and the smaller request sent; the guard compacts this chat under 80 % of the refused
 request from then on (`Conv.memory_limit`). Refused right after that, the retries go on as above,
 and the Now line says the engine has no memory for the chat's context.
+
+WORKERS (VIS-E15). A worker is a run like any other on a task conversation (chatd/tasks.py): its
+`parent` is the run whose task call started it, it runs in that run's slot (`slot_owner`), its
+phases move the parent's Now line, and its end becomes the task's result.
 """
 
 from __future__ import annotations
@@ -100,7 +104,7 @@ class GuardError(Exception):
 
 class Run:
     def __init__(self, svc, conv, *, user_message_id: str, message_id: str, max_steps: int,
-                 started_by: str | None, continue_final: bool = False):
+                 started_by: str | None, continue_final: bool = False, parent=None, task=None):
         self.svc = svc
         self.conv = conv
         self.id = ulid()
@@ -165,7 +169,7 @@ class Run:
         self.length_continued = False
         self.empty_retries = 0
         self.engine_errors = 0                 # calls the engine ended with finish reason error
-        self.nudge = False
+        self.tail: str | None = None            # a hidden last user line for the next call (render.body)
         self.recent_calls: collections.deque = collections.deque(maxlen=3)
         # the sandbox's own failures in a row (not the command's): three alike end the run
         self.sandbox_errors: collections.deque = collections.deque(maxlen=3)
@@ -186,6 +190,25 @@ class Run:
         self.snapshotted = False
         self.verify = verify.new_state()       # the verify phase's checks (chatd/verify.py)
         self.waiting: dict[str, dict] = {}     # call id -> {"event", "answer"} while a prompt waits
+        # VIS-E15: a worker's parent run and its tasks row; a parent's running worker, and the
+        # figures of the tasks it gave (its TurnStats' `workers`)
+        self.parent = parent
+        self.task = task
+        self.child: Run | None = None
+        self.workers: list[dict] = []
+        self.tasks_given = 0
+        self.agents = False                    # the chat's Agents mode at the run's start
+        # a worker's report (chatd/tasks.py): what it reported, sent back once, the report-only
+        # call at its cap whose tool calls are stored and never run
+        self.report: dict | None = None
+        self.report_source: str | None = None
+        self.report_misses = 0                 # the step of the report sent back, once
+        self.salvage = False
+        self.ignore_calls = False
+        # SRV-585: the steers typed while this worker runs ((time, text), appended to its next
+        # stored tool result), and a parent's task call that Continue resumes before any call
+        self.notes: list[tuple[str, str]] = []
+        self.resume_part: int | None = None
 
     # ------------------------------------------------------------------ the contract's Run
     def as_dict(self, viewer: str | None = None) -> dict:
@@ -225,10 +248,19 @@ class Run:
         call = self.call
         if call is not None:
             call.close()
+        child = self.child
+        if child is not None and child.active:      # Stop stops both (VIS-E15)
+            child.stop(mode)
 
     @property
     def active(self) -> bool:
         return self.state in ("queued", "running")
+
+    @property
+    def slot_owner(self) -> "Run":
+        """The run whose slot this one uses: a worker runs in its parent's (it takes none of its
+        own, so another chat's chance to run is what it was without workers)."""
+        return self.parent.slot_owner if self.parent is not None else self
 
     # ------------------------------------------------------------------ phases
     def set_phase(self, phase: str, now: str, **extra) -> None:
@@ -252,6 +284,8 @@ class Run:
                 self.prefill = None
             self.svc.emit(self.conv, ev, run_id=self.id)
             self.svc.summary_changed(self.conv, now=now)
+        if self.parent is not None:              # a worker: `task.phase`, the parent's Now line
+            self.svc.task_phase(self)
 
     # ------------------------------------------------------------------ the thread
     def _main(self) -> None:
@@ -263,7 +297,8 @@ class Run:
             self.svc.log(f"[run] {self.id} crashed: {type(exc).__name__}")
             outcome = "failed"
         finally:
-            self.svc.slots.release_if(self)
+            if self.parent is None:              # a worker's slot is its parent's
+                self.svc.slots.release_if(self)
             # 2026-10-17: finish_run itself. It runs a dozen store transactions, title work,
             # event emits, a context re-send and the queue drain; any of them raising used to
             # escape the thread (threading.excepthook printed it, no state marker) and leave
@@ -294,17 +329,35 @@ class Run:
         if not self._slot():
             return self._stopped()
         self.state = "running"
+        if self.resume_part is not None:
+            # Continue of a parent whose worker was interrupted: the worker's loop goes on first,
+            # inside the task call (chatd/tasks.py), then this run's
+            self.step_parts, self.resume_part = [self.resume_part], None
+            end = self._after_tools()
+            if end is not None:
+                return end
         while True:
             if self.stop_mode:
                 return self._stopped()
-            if self.step >= self.max_steps:
-                self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
-                               f"Continue goes on from here.")
-                self.interrupt = "limit"
-                return "interrupted"
+            if self.step >= self.max_steps and not self.salvage:
+                if self.parent is not None:
+                    # a worker at its cap still reports: one more call whose only job is the
+                    # report, the tool schemas kept (the prompt's head and its cache stay)
+                    self.salvage = self.ignore_calls = True
+                    self.tail = self.svc.salvage_text(self)
+                else:
+                    self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
+                                   f"Continue goes on from here.")
+                    self.interrupt = "limit"
+                    return "interrupted"
             if not self._slot():
                 return self._stopped()
             outcome = self._call()
+            if self.salvage and outcome in ("completed", "failed"):
+                if outcome == "completed" and self.step_parts:
+                    self.svc.run_tools(self, list(self.step_parts))     # stored, never run
+                self.svc.task_report(self, answered=outcome == "completed")
+                return "completed"
             if outcome != "completed":
                 return outcome
             if self.finish_reason == "error":
@@ -320,28 +373,42 @@ class Run:
                               "the engine's log says why.")
                 return "failed"
             if self.step_parts:
-                if self.svc.run_tools(self, list(self.step_parts)) == "cancelled":
-                    return self._stopped()
-                if self.sandbox_stuck:              # Continue goes on once the sandbox is back
-                    self.interrupt = "sandbox"
-                    return "interrupted"
-                if self.notice:                     # the same call three times in a row
-                    return "completed"
-                if self.svc.queued(self.conv):      # a steer: the next run carries it
-                    return "completed"
+                end = self._after_tools()
+                if end is not None:
+                    return end
                 continue
             if self.finish_reason == "length" and not self.length_continued:
                 self.length_continued, self.continue_final = True, True
                 continue
-            if self.svc.step_empty(self):
+            if self.parent is None and self.svc.step_empty(self):
                 if self.empty_retries == 0:
-                    self.empty_retries, self.nudge = 1, True
+                    self.empty_retries, self.tail = 1, NUDGE
                     continue
                 self.error = "The model answered with nothing, twice."
                 return "failed"
             if self.svc.verify_step(self):          # the app it built, checked; the model reads it
                 continue
+            if self.parent is not None and self.svc.task_report(self):
+                continue                            # a worker's report, sent back once
             return "completed"
+
+    def _after_tools(self) -> str | None:
+        """The step's calls run; how the run ends after them, or None: the next step."""
+        done = self.svc.run_tools(self, list(self.step_parts))
+        if any(self.svc.call_part(self, k).get("name") == "task" and
+               self.svc.call_part(self, k).get("status") == "interrupted" for k in self.step_parts):
+            self.interrupt = "task"                 # Continue resumes the worker, then this run
+            return "interrupted"
+        if done == "cancelled":
+            return self._stopped()
+        if self.sandbox_stuck:                      # Continue goes on once the sandbox is back
+            self.interrupt = "sandbox"
+            return "interrupted"
+        if self.notice:                             # the same call three times in a row
+            return "completed"
+        if self.svc.queued(self.conv):              # a steer: the next run carries it
+            return "completed"
+        return None
 
     def _call(self) -> str:
         """One model call with its retries: completed, failed, interrupted or cancelled."""
@@ -363,7 +430,6 @@ class Run:
             except GuardError as exc:
                 self.error = str(exc)
                 return "failed"
-            self.nudge = False
             self.set_phase("queued", "Sending to the engine")
             try:
                 self.t_sent = time.monotonic()
@@ -707,4 +773,12 @@ class Run:
         }
         if ptd.get("hidden_tokens"):
             out["hidden_tokens"] = int(ptd["hidden_tokens"])
+        if self.workers:
+            # the workers' calls beside the main agent's own (VIS-E15); the chat's usage totals
+            # count both (service.py `_usage`)
+            out["workers"] = {"count": len(self.workers), **{k: sum(int(w.get(k) or 0)
+                                                                     for w in self.workers)
+                                                            for k in ("prompt_tokens",
+                                                                      "completion_tokens",
+                                                                      "cached_tokens", "ms")}}
         return out

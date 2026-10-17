@@ -259,6 +259,25 @@ A bash rule names a command's first word, or its first two for programs with sub
 
 `PATCH /conversations/{id}/settings` takes `permission_mode` too. A chat from before 0.8.2 has none and runs in the default mode.
 
+## Agents mode: a main agent with workers
+
+A chat setting, `agents`, off by default (VIS-E15). With it on, the main agent talks with the user and plans, and gives every file write and every multi-step build or fix to a worker with the `task` tool. A long agent loop kept every file it wrote and read in its context: one chat on 2026-10-17 grew from 25k to 162k tokens in about 50 minutes, and its compactions read 131,505 tokens again each time. In Agents mode the file text lives in a worker's context and goes with it.
+
+- The main agent has read_file (at most 200 lines or 12,000 characters a call), glob, grep, web_search, web_fetch, render_page, present, the library, todo_write, task and the chat's MCP tools; no bash, write_file or edit_file. Each of its results is cut at 12,000 characters, and a repeated read of an unchanged workspace answers with the earlier call's id.
+- A task is `{title, brief, expect}`. The brief has four lines, Goal, Files, Constraints and Check; a brief without them is refused before any worker starts.
+- A worker is a full run on a hidden task conversation: a fresh context (the worker's instructions from `packages/system/workers/`, its tools, the brief and the todo list), the chat's sandbox, `/workspace`, permission mode and rules, the parent's run slot, at most 40 model calls (`task_max_steps`), its own compaction and the verify phase. Its engine session is `chat-<chat>-task-<n>`; its memory notes are off. One worker at a time, at most 8 a run (`task_max_per_run`).
+- The worker ends with a report in a fixed shape. chatd parses it, sends it back once when a field is missing, builds one from the record when it is missing twice, and at the step cap makes one report-only call whose tool calls never run. Below the report chatd adds its own check: the files the snapshot diff says changed, the calls that ran, and the checks the report claims with no call behind them. The main agent reads at most 8,000 characters of it; the whole is in `/workspace/.tandem/tasks/<n>/report.md`.
+- Stop stops both. A message sent while a worker runs reaches the main agent after the report, and the worker as a note on its next tool result. An interrupted worker leaves its parent interrupted; Continue resumes the worker, then the parent, and never runs a cut-off write or command again.
+
+```text
+GET   /v1/chat-app/conversations/{id}/tasks              {tasks: Task[]}
+GET   /v1/chat-app/conversations/{id}/tasks/{task_id}    {task, messages, seq}
+PATCH /v1/chat-app/conversations/{id}/settings           {agents} -> the settings + reread_tokens
+PATCH /v1/chat-app/defaults                              {agents} -> the capabilities' defaults
+```
+
+The events and types are in `dashboard/src/chat/CONTRACT.md`, section "Tasks (VIS-E15)". With Agents off, every request is the one the single loop sends (`tests/chatd_replay.py`).
+
 ## Chat tab (beta): known limitations
 
 The Chat tab is in beta in this release, and a Beta pill beside it says so. We know of these limits and have not fixed them yet:

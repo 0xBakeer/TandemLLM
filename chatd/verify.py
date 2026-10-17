@@ -261,18 +261,19 @@ class VerifyMixin:
     def verify_step(self, run) -> bool:
         """At a step that would end the run: check the app the run built or changed, as a tool
         call in this step whose result the model reads next; True when it did (the loop goes on)."""
-        from chatd.service import DEFAULT_SETTINGS
         conv, st = run.conv, run.verify
+        root = self.root_cid(conv.id)                   # a worker's files are its chat's
         with conv.lock:
-            settings = {**DEFAULT_SETTINGS, **json.loads(self._row(conv.id)["settings"])}
-        if not settings.get("verify", True) or settings.get("plan_mode") or not run.snapshotted:
+            settings = self.settings_of(conv.id)
+        if not settings.get("verify", True) or settings.get("plan_mode") or not run.snapshotted \
+                or run.agents:                  # Agents mode: its workers check what they built
             return False
-        base = st["base"] or self.snaps.load(conv.id, run.id, "before")
+        base = st["base"] or self.snaps.load(root, run.id, "before")
         if base is None:
             return False
         ws = self.workspace(conv.id)
         try:
-            now = self.snaps.take(conv.id, ws, run.id, f"check-{len(st['checks']) + 1}")
+            now = self.snaps.take(root, ws, run.id, f"check-{len(st['checks']) + 1}")
         except OSError:
             return False
         changed = changed_web(base, now)
@@ -299,7 +300,7 @@ class VerifyMixin:
     def verify_target(self, run, ws, changed: list[str]) -> dict | None:
         """What the check loads: {label, url, path | port, note?}, or {label, why} for a page
         that needs a dev server that does not run; None when no page or app comes of `changed`."""
-        cid = run.conv.id
+        cid = self.root_cid(run.conv.id)                # the sandbox is the chat's
         shown = next((p["pane"] for p in reversed(run.conv.live["parts"] if run.conv.live else [])
                       if p.get("type") == "tool_call" and p.get("name") == "present" and
                       (p.get("pane") or {}).get("kind") == "preview"), None)

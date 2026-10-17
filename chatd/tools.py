@@ -41,6 +41,11 @@ from chatd.workspace import ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
 MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
+# SRV-583: a main agent in Agents mode reads less a call: no tool brings a whole file into its
+# context; read_file at most AGENTS_READ_LINES lines or AGENTS_LIMIT_CHARS characters
+AGENTS_LIMIT_CHARS = 12_000
+AGENTS_EDGE_CHARS = 4_000
+AGENTS_READ_LINES = 200
 UI_LIMIT_CHARS = 30_000
 BASH_TIMEOUT_S = 600
 OUTPUTS_DIR = ".tandem/outputs"
@@ -71,13 +76,14 @@ class Tool:
 
 class Result:
     def __init__(self, content: str = "", *, is_error=False, exit_code=None, images=None,
-                 pane=None, data=None):
+                 pane=None, data=None, status=None):
         self.content = content
         self.is_error = is_error
         self.exit_code = exit_code
         self.images = images or []      # [(mime, bytes)]
         self.pane = pane
         self.data = data                # structured output for the UI (`output.data`)
+        self.status = status            # the part's status when not done/failed (a task: interrupted)
 
 
 class ToolError(Exception):
@@ -150,11 +156,31 @@ def _read(ctx, a):
     lines = data.decode("utf-8", "replace").splitlines()
     off = max(1, int(a.get("offset") or 1))
     lim = int(a.get("limit") or 2000)
+    if getattr(ctx, "agents", False):
+        return _read_capped(lines, off, min(lim, AGENTS_READ_LINES))
     chunk = lines[off - 1:off - 1 + lim]
     body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(chunk, off))
     more = f"\n[{len(lines) - (off - 1 + len(chunk))} more lines]" if off - 1 + len(chunk) < \
         len(lines) else ""
     return Result(body + more)
+
+
+def _read_capped(lines: list[str], off: int, lim: int) -> Result:
+    """A main agent's read in Agents mode: at most `lim` lines and AGENTS_LIMIT_CHARS characters,
+    whole lines, and where it stopped when the file goes on."""
+    out, n = [], 0
+    for i, ln in enumerate(lines[off - 1:off - 1 + lim], off):
+        row = f"{i:6d}\t{ln}"
+        if out and n + len(row) + 1 > AGENTS_LIMIT_CHARS:
+            break
+        out.append(row[:AGENTS_LIMIT_CHARS])
+        n += len(row) + 1
+    end = off - 1 + len(out)
+    body = "\n".join(out)
+    if end < len(lines):
+        body += (f"\nShowing lines {off}-{end} of {len(lines):,}. Read a range with offset and "
+                 f"limit, or give the reading to a worker.")
+    return Result(body)
 
 
 def _write(ctx, a):
@@ -542,6 +568,27 @@ def _todo_write(ctx, a):
     return Result(f"todo list saved: {len(got)} items, {done} done")
 
 
+def _task(ctx, a):
+    return ctx.svc.start_task(ctx.run, ctx.part, a)
+
+
+#: VIS-E15: the task tool's description and schema, as the plan note gives them
+TASK_DESCRIPTION = (
+    "Give a job to a worker: a fresh assistant that works in this chat's sandbox and /workspace "
+    "with every file and command tool, and that sees nothing of this chat except your brief and "
+    "the todo list. Use it for every file write and for any build or fix that takes more than one "
+    "step. Returns the worker's report and chatd's check of it. One task at a time.")
+TASK_SCHEMA = {"type": "object", "required": ["title", "brief", "expect"], "properties": {
+    "title": {"type": "string", "description": "A short name for the card the user sees, at most "
+                                               "80 characters."},
+    "brief": {"type": "string", "description": "Four lines, each with its label. Goal: what must "
+              "be true when the worker is done. Files: the paths to read or change and what each "
+              "holds. Constraints: what must not change, versions, limits. Check: how the worker "
+              "proves it is done (a command, render_page on a path or port, what the console must "
+              "show)."},
+    "expect": {"type": "string", "description": "What the report must contain beyond its standard "
+               "fields, for example the port of the dev server or the FPS line."}}}
+
 BUILTINS = [
     Tool("bash", "Run a shell command in this chat's own Linux sandbox. The working directory is "
          "/workspace (the chat's files, kept across sessions). Python 3, Node, git, ripgrep, jq, "
@@ -595,8 +642,27 @@ BUILTINS = [
              "id": _S, "text": _S, "state": {"type": "string",
                                             "enum": ["pending", "in_progress", "done"]}},
              ["text", "state"])}}, ["items"]), executor=_todo_write),
+    # last, so the tools before it keep their order: only Agents mode lists it (chatd/agent.py
+    # tools_for), never the chat's tool picker
+    Tool("task", TASK_DESCRIPTION, TASK_SCHEMA, risk="task", default="allow", executor=_task),
 ]
 BY_NAME = {t.name: t for t in BUILTINS}
+#: the tools a mode adds, not the chat's picker (capabilities, GET /tools)
+MODE_TOOLS = ("task",)
+#: a worker's tools (VIS-E15), in BUILTINS order: every file and command tool; no task (depth 1),
+#: no todo_write (the main agent keeps the list), no MCP in phase 1
+WORKER_TOOLS = ("bash", "read_file", "write_file", "edit_file", "glob", "grep", "web_search",
+                "web_fetch", "render_page", "present", "library_search", "library_read")
+ONE_TASK = "one task at a time: call it again after you read this report"
+#: SRV-583: a main agent's tools in Agents mode (BUILTINS order, then the chat's MCP tools): no
+#: bash, write_file or edit_file, so no tool brings a whole file in and the work goes to workers
+AGENTS_TOOLS = ("read_file", "glob", "grep", "web_search", "web_fetch", "render_page", "present",
+                "library_search", "library_read", "todo_write", "task")
+AGENTS_REFUSAL = "not available in Agents mode: give this to a worker with task"
+#: a call a stop cut short, after Continue (SRV-585): never run again; the model checks and decides
+INTERRUPTED_CALL = ("this call was interrupted and its effect is unknown; check the file before "
+                    "you repeat it")
+INTERRUPTED_READ = "this call was interrupted before it returned; call it again if you need it"
 
 
 # ---------------------------------------------------------------------- permissions
@@ -810,9 +876,11 @@ def summary(tool: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------------- results
-def for_model(ctx, call_id: str, text: str) -> str:
-    """The result the model reads: whole up to ~16,000 tokens; else the ends and the file."""
-    if len(text) <= MODEL_LIMIT_CHARS:
+def for_model(ctx, call_id: str, text: str, limit: int = MODEL_LIMIT_CHARS,
+              edge: int = MODEL_EDGE_CHARS) -> str:
+    """The result the model reads: whole up to `limit` (~16,000 tokens; a main agent in Agents
+    mode 12,000 characters); else the ends and the file."""
+    if len(text) <= limit:
         return text
     path = f"{OUTPUTS_DIR}/{call_id}.txt"
     try:
@@ -820,9 +888,9 @@ def for_model(ctx, call_id: str, text: str) -> str:
         where = f"/workspace/{path}"
     except (PathError, OSError):
         where = "(could not be saved)"
-    cut = len(text) - 2 * MODEL_EDGE_CHARS
-    return (text[:MODEL_EDGE_CHARS] + f"\n\n[... {cut:,} characters left out; the whole output is "
-            f"in {where} ...]\n\n" + text[-MODEL_EDGE_CHARS:])
+    cut = len(text) - 2 * edge
+    return (text[:edge] + f"\n\n[... {cut:,} characters left out; the whole output is "
+            f"in {where} ...]\n\n" + text[-edge:])
 
 
 def for_ui(text: str) -> tuple[str, bool]:

@@ -41,6 +41,7 @@ from chatd.panes import PanesMixin
 from chatd.plans import PlansMixin
 from chatd.preview import PreviewMixin
 from chatd.skills import SkillsMixin
+from chatd.tasks import TasksMixin
 from chatd.terminals import TerminalsMixin
 from chatd.verify import VerifyMixin
 from chatd.verify import summary as verify_summary
@@ -72,6 +73,9 @@ DEFAULT_SETTINGS = {
     # SRV-532: a run that built or changed a web page or app checks it in a browser before it
     # ends (chatd/verify.py)
     "verify": True,
+    # VIS-E15: Agents mode (the main agent plans and gives the file work to workers, chatd/tasks.py),
+    # off: today's single loop, byte for byte; a worker's model calls; the tasks one run may give
+    "agents": False, "task_max_steps": 40, "task_max_per_run": 8,
 }
 # `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
 EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
@@ -90,6 +94,10 @@ PEEK_TTL_S = 30.0
 
 #: SRV-546: a prefill that reads this many tokens again names it a re-read, with the engine's reason
 REREAD_WORDS_TOKENS = 8192
+#: VIS-E15: the events of a task conversation that go to its chat's log, with `task_id`: the
+#: worker's transcript as it streams, its prompts and the panes it opens
+TASK_FORWARD = ("message.created", "part.added", "part.delta", "part.done", "tool.asking",
+                "tool.started", "tool.output", "tool.done", "tool.auto_approved", "pane.open")
 
 
 def prefill_words(pre: dict) -> str:
@@ -134,6 +142,9 @@ class Conv:
         # chatd's estimate of the smallest request the engine refused for memory (runs.py): the
         # context guard compacts under it from then on (compaction.compact_at)
         self.memory_limit: int | None = None
+        # VIS-E15: a task conversation's chat and its tasks row; its events go to the chat's log
+        self.parent_id: str | None = None
+        self.task_id: str | None = None
 
 
 class Slots:
@@ -145,6 +156,7 @@ class Slots:
         self.cv = threading.Condition()
 
     def acquire(self, run, timeout: float) -> bool:
+        run = getattr(run, "slot_owner", run)          # a worker runs in its parent's slot
         with self.cv:
             if run in self.holders:
                 return True
@@ -156,6 +168,7 @@ class Slots:
             return True
 
     def release_if(self, run) -> None:
+        run = getattr(run, "slot_owner", run)
         with self.cv:
             if run in self.holders:
                 self.holders.discard(run)
@@ -179,7 +192,7 @@ def device_label(ua: str | None) -> str | None:
 
 
 class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
-              WebSearchMixin, VerifyMixin):
+              WebSearchMixin, VerifyMixin, TasksMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -257,12 +270,30 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return out
 
     def workspace(self, cid: str) -> Workspace:
-        ws = Workspace(self.sandboxes.paths(cid)[0])
+        """The chat's /workspace; a task conversation's is its chat's (one sandbox, one tree)."""
+        ws = Workspace(self.sandboxes.paths(self.root_cid(cid))[0])
         ws.ensure()
         return ws
 
+    def root_cid(self, cid: str) -> str:
+        """The chat a task conversation belongs to; any other conversation is its own (VIS-E15).
+        A row's parent never changes, so the answer is kept."""
+        roots = self.__dict__.setdefault("_roots", {})
+        if cid not in roots:
+            r = self.store.one("SELECT parent_id FROM conversations WHERE id = ?", (cid,))
+            if r is None:
+                return cid
+            roots[cid] = r["parent_id"] or cid
+        return roots[cid]
+
+    def settings_of(self, cid: str) -> dict:
+        """A conversation's settings with the defaults; a task conversation has none of its own:
+        its chat's (the model, the permission mode, the tools, the sandbox network)."""
+        row = self._row(self.root_cid(cid))
+        return {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+
     def _network_mode(self, cid: str) -> str:
-        r = self.store.one("SELECT settings FROM conversations WHERE id = ?", (cid,))
+        r = self.store.one("SELECT settings FROM conversations WHERE id = ?", (self.root_cid(cid),))
         s = json.loads(r["settings"]) if r else {}
         return "off" if s.get("sandbox_network") == "off" else "on"
 
@@ -310,6 +341,10 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             if row is None:
                 raise ApiError(404, "not_found", "no such conversation")
             c = self.convs[cid] = Conv(cid, int(row[0]))
+            if self.root_cid(cid) != cid:
+                c.parent_id = self.root_cid(cid)
+                t = self.store.one("SELECT id FROM tasks WHERE task_conversation_id = ?", (cid,))
+                c.task_id = t["id"] if t else None
             return c
 
     def _row(self, cid: str):
@@ -320,7 +355,14 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
 
     def emit(self, conv: Conv, ev: dict, *, run_id: str | None = None,
              persist: bool = True) -> int | None:
-        """One event: stored with the next seq (unless ephemeral), then to every subscriber."""
+        """One event: stored with the next seq (unless ephemeral), then to every subscriber. A task
+        conversation keeps no log: its transcript's events go to its chat's with `task_id`, the
+        rest (its run's own run.*, context, usage) stay inside chatd (`task.*` says them)."""
+        if conv.parent_id is not None:
+            if ev["type"] not in TASK_FORWARD:
+                return None
+            return self.emit(self.conv(conv.parent_id), {**ev, "task_id": conv.task_id},
+                             run_id=run_id, persist=persist)
         data = as_json(ev)
         with conv.lock:
             seq = None
@@ -398,7 +440,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
 
     def _status(self, conv: Conv, branch: list[dict]) -> str:
         if conv.run is not None and conv.run.active:
-            return "waiting" if conv.run.phase == "permission" else "running"
+            child = conv.run.child
+            return "waiting" if conv.run.phase == "permission" or (
+                child is not None and child.phase == "permission") else "running"
         if branch and branch[-1]["role"] == "assistant" and branch[-1]["status"] in (
                 "error", "interrupted"):
             return "error"
@@ -471,12 +515,14 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
 
     def summary_changed(self, conv: Conv, **patch) -> None:
         """`conversation.updated` on the global stream (the rail); the conversation's own stream
-        learns the same from its run events."""
+        learns the same from its run events. A task conversation is not on the rail."""
+        if conv.parent_id is not None:
+            return
         self.emit_global({"type": "conversation.updated", "patch": {"id": conv.id, **patch}})
 
     # ================================================================== conversations: routes
     def list(self, q: str = "", archived: bool = False, folder: str | None = None) -> dict:
-        sql = "SELECT id FROM conversations WHERE deleted IS NULL AND archived = ?"
+        sql = "SELECT id FROM conversations WHERE deleted IS NULL AND kind = 'chat' AND archived = ?"
         args: list = [1 if archived else 0]
         if folder:
             sql += " AND folder_id = ?"
@@ -563,10 +609,15 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.stop("cancel")
             if run.thread is not None:
                 run.thread.join(10)
-        self.store.run("UPDATE conversations SET deleted = ? WHERE id = ?", (now_ms(), cid))
+        kids = [r["id"] for r in self.store.all("SELECT id FROM conversations WHERE parent_id = ?",
+                                                (cid,))]
+        t = now_ms()
+        self.store.run("UPDATE conversations SET deleted = ? WHERE id = ? OR parent_id = ?",
+                       (t, cid, cid))
         self.store.run("DELETE FROM queue WHERE conversation_id = ?", (cid,))
         with self.convs_lock:
-            self.convs.pop(cid, None)
+            for k in [cid, *kids]:
+                self.convs.pop(k, None)
         with conv.lock:
             for s in list(conv.fan.subs):
                 s.close()
@@ -579,9 +630,10 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         """POST /conversations/{id}/restore: back from the trash. Its sandbox starts again on its
         next tool call, as any stopped one does."""
         n = self.store.run("UPDATE conversations SET deleted = NULL WHERE id = ? AND deleted IS NOT "
-                           "NULL", (cid,))
+                           "NULL AND kind = 'chat'", (cid,))
         if not n:
             raise ApiError(404, "not_found", "no such conversation in the trash")
+        self.store.run("UPDATE conversations SET deleted = NULL WHERE parent_id = ?", (cid,))
         self.log(f"[conv] {cid} restored from the trash")
         snap = self.snapshot(cid)
         self.emit_global({"type": "conversation.created",
@@ -595,12 +647,15 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             raise ApiError(404, "not_found", "no such conversation")
         if self.store.one("SELECT 1 FROM conversations WHERE id = ? AND deleted IS NULL", (cid,)):
             self.delete(cid)
+        kids = [r["id"] for r in self.store.all("SELECT id FROM conversations WHERE parent_id = ?",
+                                                (cid,))]
         with self.store.tx() as db:
-            for table in ("events", "messages", "runs", "queue", "todos", "compactions", "sandboxes",
-                          "terminals"):
-                db.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (cid,))
-            db.execute("DELETE FROM permission_rules WHERE conversation_id = ?", (cid,))
-            db.execute("DELETE FROM conversations WHERE id = ?", (cid,))
+            for c in [cid, *kids]:                  # its task conversations go with it (VIS-E15)
+                for table in ("events", "messages", "runs", "queue", "todos", "compactions",
+                              "sandboxes", "terminals", "tasks"):
+                    db.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (c,))
+                db.execute("DELETE FROM permission_rules WHERE conversation_id = ?", (c,))
+                db.execute("DELETE FROM conversations WHERE id = ?", (c,))
         self.sandboxes.remove(cid, files=True)
         with self.sandboxes.lock:
             self.sandboxes.boxes.pop(cid, None)
@@ -629,16 +684,26 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return self.permission_modes()
 
     def patch_defaults(self, body: dict) -> dict:
-        """PATCH /defaults {permission_mode}: the settings a new chat starts with that the user
-        sets (the permission mode, today); answers the capabilities' defaults."""
+        """PATCH /defaults {permission_mode, agents}: the settings a new chat starts with that the
+        user sets; answers the capabilities' defaults."""
         clean = _clean_settings(body)
-        other = sorted(k for k in clean if k != "permission_mode")
+        other = sorted(k for k in clean if k not in ("permission_mode", "agents"))
         if other or not clean:
-            raise ApiError(400, "bad_request", "only permission_mode can be set as a default")
-        if clean["permission_mode"] is None:
-            raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
-        self.set_permission_default({"default": clean["permission_mode"]})
+            raise ApiError(400, "bad_request", "only permission_mode and agents can be set as "
+                                               "defaults")
+        if "permission_mode" in clean:
+            if clean["permission_mode"] is None:
+                raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
+            self.set_permission_default({"default": clean["permission_mode"]})
+        if "agents" in clean:                   # SRV-583: off until the eval rows exist
+            self.store.run("INSERT OR REPLACE INTO meta VALUES ('agents_default', ?)",
+                           ("1" if clean["agents"] else "0",))
+            self._caps = None
         return self.capabilities()["defaults"]
+
+    def agents_default(self) -> bool:
+        r = self.store.one("SELECT value FROM meta WHERE key = 'agents_default'")
+        return bool(r and r["value"] == "1")
 
     def permission_modes(self) -> dict:
         """GET /permissions/mode: the default and the modes there are."""
@@ -755,11 +820,12 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return m
 
     def _start_run(self, conv: Conv, user_mid: str, viewer: str | None, *,
-                   continue_mid: str | None = None) -> Run:
+                   continue_mid: str | None = None, parent: Run | None = None,
+                   task: dict | None = None) -> Run:
         """Under the conversation's lock: the assistant message, the run row, `run.started`,
-        `message.created`, then the thread."""
-        row = self._row(conv.id)
-        settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+        `message.created`, then the thread. `parent` and `task`: a worker's run on its task
+        conversation (chatd/tasks.py), at most the task's model calls, Continue included."""
+        settings = self.settings_of(conv.id)
         if continue_mid:
             mid = continue_mid
             m = self._messages(conv.id)[mid]
@@ -771,17 +837,23 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}
-        steps = int(settings.get("max_steps") or DEFAULT_SETTINGS["max_steps"])
+        steps = int(task["max_steps"]) if task is not None else \
+            int(settings.get("max_steps") or DEFAULT_SETTINGS["max_steps"])
         run = Run(self, conv, user_message_id=user_mid, message_id=mid, max_steps=steps,
-                  started_by=viewer, continue_final=bool(continue_mid))
+                  started_by=viewer, continue_final=bool(continue_mid), parent=parent, task=task)
         run.permission_mode = self.permission_mode(settings)
+        if parent is None:
+            # read once: a switch during the run applies to the next one (the prompt's head)
+            run.agents = bool(settings.get("agents"))
+        if continue_mid and conv.live["parts"] and (parent is not None or run.agents):
+            self._cut_calls(conv, run)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
             run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])
             # a cut text goes on in its own step; after tool results the next call is a new step
             run.continue_final = last.get("type") in ("text", "thinking")
             run.resume_same_step = run.continue_final
-            run.max_steps = run.step + steps
+            run.max_steps = steps if task is not None else run.step + steps
         self.store.run("UPDATE messages SET run_id = ? WHERE id = ?", (run.id, mid))
         self.store.run("INSERT INTO runs (id, conversation_id, user_message_id, "
                        "assistant_message_id, state, max_steps, model, started, started_by, "
@@ -796,12 +868,44 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             self.emit(conv, {"type": "message.created",
                              "message": self._wire_message(msgs[mid], self._children(msgs))},
                       run_id=run.id)
-        self.emit_global({"type": "run.started", "conversation_id": conv.id, "run_id": run.id})
+        if conv.parent_id is None:
+            self.emit_global({"type": "run.started", "conversation_id": conv.id,
+                              "run_id": run.id})
         self.summary_changed(conv, status="running", now=run.now)
         self.log(f"[run] {run.id} started conv={conv.id}")
         self.live.ensure()
         run.start()
         return run
+
+    def _cut_calls(self, conv: Conv, run: Run) -> None:
+        """Continue of a worker, or of a main agent in Agents mode (SRV-585): a call the stop cut
+        short is never run again. A write, a command or an MCP call reads that its effect is
+        unknown; a task call whose worker was cut is the one call that goes on (its worker
+        resumes inside it, chatd/tasks.py)."""
+        parts = conv.live["parts"]
+        for k, p in enumerate(parts):
+            if p.get("type") != "tool_call" or p.get("status") not in (
+                    "running", "asking", "cancelled", "interrupted"):
+                continue
+            if p.get("name") == "task":
+                r = self.store.one("SELECT 1 FROM tasks WHERE conversation_id = ? AND call_id = ?",
+                                   (conv.id, p["id"]))
+                if r is not None and k == max(i for i, q in enumerate(parts)
+                                              if q.get("type") == "tool_call"):
+                    run.resume_part = k
+                continue
+            if p.get("status") == "interrupted":
+                continue
+            risky = p.get("name") in ("bash", "write_file", "edit_file") or \
+                str(p.get("name") or "").startswith("mcp__")
+            words = tools_mod.INTERRUPTED_CALL if risky else tools_mod.INTERRUPTED_READ
+            before = p.get("model_content") or ""
+            p["model_content"] = (before + "\n" if before else "") + words
+            p["status"], p["permission"] = "interrupted", None
+            p["ended_at"] = p.get("ended_at") or iso(now_ms())
+            self.emit(conv, {"type": "tool.done", "message_id": conv.live["id"],
+                             "call_id": p["id"], "status": "interrupted", "is_error": True})
+        self._persist_live(conv)
 
     def _budget(self, settings: dict) -> int | None:
         """The thinking budget in force, from the model's card (effort levels with their caps)."""
@@ -881,7 +985,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         conv = run.conv
         if run.snapshotted:
             try:
-                self.snaps.take(conv.id, self.workspace(conv.id), run.id, "after")
+                self.snaps.take(self.root_cid(conv.id), self.workspace(conv.id), run.id, "after")
             except OSError:
                 pass
         status = {"completed": "done", "cancelled": "stopped", "interrupted": "interrupted",
@@ -963,6 +1067,13 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             conv.live = None
             if conv.run is run:
                 conv.run = None
+            if run.parent is not None:
+                # a worker: its tasks row, its report and `task.done` on the chat (chatd/tasks.py);
+                # no title, no queue (the chat's steers are its parent's), not on the rail
+                self.log(f"[run] {run.id} {outcome} task={run.task['id']} conv={conv.parent_id} "
+                         f"tokens={stats['completion_tokens']} finish={finish}")
+                self.task_ended(run, outcome, stats)
+                return
             row = self._row(conv.id)
             branch, _ = self._branch(conv, row["head_id"])
             self.emit(conv, {"type": "usage.changed", "usage": _usage(branch)})
@@ -991,6 +1102,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
 
     def _enqueue(self, conv: Conv, cmid: str, text: str) -> dict:
         q = {"id": ulid(), "text": text, "created": now_ms(), "client_msg_id": cmid}
+        child = conv.run.child if conv.run is not None else None
+        if child is not None and child.active:
+            # a steer while a worker runs: the main agent reads it after the report, as any
+            # steer; the worker sees it as a note on its next tool result (SRV-585)
+            child.notes.append((time.strftime("%H:%M"), text))
         self.store.run("INSERT INTO queue VALUES (?, ?, ?, ?, ?)",
                        (q["id"], conv.id, text, cmid, q["created"]))
         self.emit(conv, {"type": "queue.changed", "queue": self._queue(conv.id)})
@@ -1181,7 +1297,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         the speed and the old call's tokens. Tokens and thinking are the run's: the earlier
         calls' plus this one's. Tokens per round and acceptance between the rows' figures come
         from the run's finished calls (their usage frames)."""
-        row = self.live.row(render.session_id(conv.id), run.request_id)
+        row = self.live.row(self.session_of(conv), run.request_id)
         if row is not None and row.get("phase") == "done" and \
                 row.get("request_id") not in run.request_ids:
             row = None                              # another run's call, or a previous turn's
@@ -1231,6 +1347,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                                   else run.live_ttft_ms())
         run.tps_history.append(run.metrics["decode_tps"])
         del run.tps_history[:-120]
+        if conv.parent_id is not None:              # a worker: `task.metrics` on its chat
+            self.task_metrics(run)
+            return
         self.emit(conv, {"type": "run.metrics", "run_id": run.id,
                          "decode_tps": run.metrics["decode_tps"],
                          "tokens_per_round": run.metrics["tokens_per_round"],
@@ -1249,7 +1368,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             self._send_context(conv)
 
     def _send_context(self, conv: Conv, force: bool = False) -> None:
-        if conv.context is None:
+        if conv.context is None or conv.parent_id is not None:
             return
         if not force and not len(conv.fan):
             return
@@ -1333,13 +1452,15 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if conv.memory_limit:                       # where the guard compacts this chat now
             out["compact_at"] = comp.compact_at(out["window"], conv.memory_limit)
         out["skills"] = self.skills_report(settings)
+        out["worker"] = self.worker_context(on)     # the running worker's own context (VIS-E15)
+        out["last_worker"] = self.last_worker(conv.id) if out["worker"] is None else None
         return out
 
     def _maybe_peek(self, conv: Conv, settings: dict, branch: list[dict]) -> None:
         """On attach: where the chat's cache lives (`POST /v1/cache/peek`, SRV-349), and a prewarm
         when it would come back from the NVMe spill or the disk tier and the engine is idle. A
         server without the routes answers 404 and the panel keeps the last request's figures."""
-        if not branch or time.monotonic() < self._no_peek_until or (
+        if not branch or conv.parent_id is not None or time.monotonic() < self._no_peek_until or (
                 conv.peek is not None and time.monotonic() - conv.peek[0] < PEEK_TTL_S):
             return
         conv.peek = (time.monotonic(), None)
@@ -1454,6 +1575,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         defaults = dict(DEFAULT_SETTINGS)
         defaults["model"] = first["id"] if first else ""
         defaults["permission_mode"] = self.permission_default()
+        defaults["agents"] = self.agents_default()
         return {
             "models": [{k: v for k, v in m.items() if not k.startswith("_")} for m in out],
             "_models": out,
@@ -1482,7 +1604,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         runs at the provider, not on the box (live 2026-10-17: a DeepSeek chat waited behind two
         engine runs). Read per call: the chat's model can change between two calls of a run."""
         try:
-            settings = {**DEFAULT_SETTINGS, **json.loads(self._row(run.conv.id)["settings"])}
+            settings = self.settings_of(run.conv.id)
             return self.model_info(settings.get("model")).get("backend") != "cloud"
         except Exception:                                           # noqa: BLE001
             return True
@@ -1640,6 +1762,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         """A chatd that stopped with runs on: every such run is `interrupted` now, its message keeps
         the text it had written, and Continue resumes it."""
         n = 0
+        # a run whose worker was running: `task` (Continue resumes the worker first, chatd/tasks.py)
+        tasked = {r["run_id"] for r in self.store.all("SELECT run_id FROM tasks WHERE status = "
+                                                      "'running'")}
         for r in self.store.all("SELECT * FROM runs WHERE state IN ('queued', 'running')"):
             n += 1
             try:
@@ -1647,19 +1772,21 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             except ApiError:
                 self.store.run("UPDATE runs SET state = 'interrupted' WHERE id = ?", (r["id"],))
                 continue
+            why = "task" if r["id"] in tasked else "restart"
             with conv.lock:
-                stats = {**_empty_stats("error"), "interrupted": "restart"}
+                stats = {**_empty_stats("error"), "interrupted": why}
                 # a Continued message keeps its earlier run's figures, with this reason
                 self.store.run("UPDATE messages SET status = 'interrupted', stats = CASE WHEN "
                                "stats IS NULL THEN ? ELSE json_set(stats, '$.interrupted', "
-                               "'restart') END WHERE id = ? AND status = 'streaming'",
-                               (dumps(stats), r["assistant_message_id"]))
+                               "?) END WHERE id = ? AND status = 'streaming'",
+                               (dumps(stats), why, r["assistant_message_id"]))
                 self.store.run("UPDATE runs SET state = 'interrupted', ended = ? WHERE id = ?",
                                (now_ms(), r["id"]))
                 self.emit(conv, {"type": "run.done", "run_id": r["id"],
                                  "message_id": r["assistant_message_id"],
                                  "stats": stats, "status": "interrupted"},
                           run_id=r["id"])
+        self.store.run("UPDATE tasks SET status = 'interrupted' WHERE status = 'running'")
         if n:
             self.log(f"[start] {n} run(s) left running by the last chatd are interrupted")
         return n
@@ -1668,7 +1795,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         """After the first answer: one short call names the chat (thinking off). The first line of
         the first message stays the title when the call fails or a person renamed the chat."""
         row = self.store.one("SELECT * FROM conversations WHERE id = ? AND deleted IS NULL", (cid,))
-        if row is None or not row["title_auto"]:
+        if row is None or not row["title_auto"] or row["kind"] != "chat":
             return
         msgs = self._messages(cid)
         branch = [msgs[m] for m in self._path(msgs, row["head_id"])]
@@ -1727,7 +1854,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
     def sweep_once(self, now: int | None = None) -> None:
         now = now or now_ms()
         for r in self.store.all("SELECT id FROM conversations WHERE deleted IS NOT NULL AND "
-                                "deleted < ?", (now - TRASH_KEEP_MS,)):
+                                "deleted < ? AND kind = 'chat'", (now - TRASH_KEEP_MS,)):
             self.purge(r["id"])
         self.store.run("DELETE FROM events WHERE type IN ('part.delta', 'tool.output') AND ts < ?",
                        (now - DELTA_KEEP_MS,))
@@ -1795,6 +1922,11 @@ def _clean_settings(patch: dict) -> dict:
         out["max_steps"] = max(1, min(200, int(out["max_steps"] or DEFAULT_SETTINGS["max_steps"])))
     if "verify" in out:
         out["verify"] = bool(out["verify"])
+    if "agents" in out:
+        out["agents"] = bool(out["agents"])
+    for k, hi in (("task_max_steps", 200), ("task_max_per_run", 32)):
+        if k in out:
+            out[k] = max(1, min(hi, int(out[k] or DEFAULT_SETTINGS[k])))
     if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):
         raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
     if "web_search" in out:
@@ -1850,7 +1982,8 @@ def _empty_stats(finish: str) -> dict:
 
 def _usage(branch: list[dict]) -> dict:
     out = {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0,
-           "cached_tokens": 0, "tool_calls": 0, "wall_s": 0, "cost_usd": None}
+           "cached_tokens": 0, "tool_calls": 0, "wall_s": 0, "cost_usd": None,
+           "workers": {"count": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}}
     wall = 0.0
     for m in branch:
         s = m.get("stats")
@@ -1863,6 +1996,11 @@ def _usage(branch: list[dict]) -> dict:
         out["turns"] += 1
         for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens"):
             out[k] += int(s.get(k) or 0)
+        w = s.get("workers") or {}
+        out["workers"]["count"] += int(w.get("count") or 0)
+        for k in ("prompt_tokens", "completion_tokens", "cached_tokens"):   # its workers' calls
+            out[k] += int(w.get(k) or 0)
+            out["workers"][k] += int(w.get(k) or 0)
         if s.get("cost_usd") is not None:         # a cloud model's turns, at the proxy's prices
             out["cost_usd"] = round((out["cost_usd"] or 0) + float(s["cost_usd"]), 6)
         wall += float(s.get("total_ms") or 0) / 1000
