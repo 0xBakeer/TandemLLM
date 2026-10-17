@@ -246,7 +246,17 @@ class Run:
             outcome = "failed"
         finally:
             self.svc.slots.release_if(self)
-            self.svc.finish_run(self, outcome)
+            # 2026-10-17: finish_run itself. It runs a dozen store transactions, title work,
+            # event emits, a context re-send and the queue drain; any of them raising used to
+            # escape the thread (threading.excepthook printed it, no state marker) and leave
+            # the conversation behind a ghost: the runs row never terminal, run.active still
+            # true, conv.run never cleared -- every later message queued behind a run that
+            # no longer existed. service.finish_guard forces the state and drains, guarded
+            # all the way down: it must never raise.
+            try:
+                self.svc.finish_run(self, outcome)
+            except Exception as exc:                                    # noqa: BLE001
+                self.svc.finish_guard(self, outcome, exc)
 
     def _slot(self) -> bool:
         """One of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one),
