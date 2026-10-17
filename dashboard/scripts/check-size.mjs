@@ -24,6 +24,7 @@
 // Next's refusal and the fit search): 432.4 KB. 434 KB with its two window steppers on top (the ladder,
 // typed 128k and 1m, the limits named): 433.6 KB. 435 KB with the verify phase on top (SRV-532: the
 // harness's check card, the Checked / Not checked block, the composer's switch): 434.2 KB.
+// 448 KB with the shell hardware rail on top (PR #45: 446.3 KB measured on the 0.11.3 base)
 // 445 KB with the Setup Guide's restart card, finished screen, Retry and diagnostics and its weights list
 // on top (VIS-209, VIS-211, VIS-213, VIS-215, 2026-10-17: 442.5 KB).
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -44,8 +45,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 445 KB)`);
-if (total > 445 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 448 KB)`);
+if (total > 448 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
