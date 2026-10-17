@@ -1063,6 +1063,50 @@ def test_render_page_reports_the_page_console_without_chromium_noise():
     assert res.content.endswith("\nno console errors")
 
 
+def test_render_page_on_a_port_takes_a_file_path_below_the_server_and_says_an_error_page():
+    """Live (2026-10-17, pagoda replay 2): render_page {"port": 8080, "path":
+    "/workspace/_test.html"} on `python3 -m http.server` run from /workspace loaded
+    http://localhost:8080/workspace/_test.html, the server's 404 page, and said "no console
+    errors"."""
+    ws = Workspace(tempfile.mkdtemp())
+    listening = [{"port": 8080, "addresses": ["0.0.0.0"], "command": "python3 -m http.server 8080",
+                  "cwd": "/workspace"}]
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, status):
+            self.ws, self.cmds, self.out, self.status = ws, [], "", status
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                self.out += f"HTTP_STATUS {self.status}\n"
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx("200")
+    res = T._render(ctx, {"port": 8080, "path": "/workspace/_test.html"})
+    assert "http://localhost:8080/_test.html" in ctx.cmds[-1][-1]
+    assert "curl -s -o /dev/null -m 10 -w '%{http_code}' http://localhost:8080/_test.html" in \
+        ctx.cmds[-1][-1]
+    assert res.content.endswith("\nno console errors") and "HTTP" not in res.content
+    ctx = Ctx("404")
+    res = T._render(ctx, {"port": 8080, "path": "/elsewhere/x.html"})
+    assert "http://localhost:8080/elsewhere/x.html" in ctx.cmds[-1][-1]
+    assert "the server answered HTTP 404 for http://localhost:8080/elsewhere/x.html: the " \
+           "screenshot is its error page, not the app" in res.content
+    # a file render asks no server
+    ws.write("index.html", b"<p>hi</p>")
+    ctx = Ctx("200")
+    T._render(ctx, {"path": "index.html"})
+    assert "curl" not in ctx.cmds[-1][-1]
+
+
 def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():
     """ops/sandbox/relay.py as chatd sends it (python3 -c): a server on ::1 only and one on
     127.0.0.1 only both answer through `connect`; a closed port says what listens instead."""

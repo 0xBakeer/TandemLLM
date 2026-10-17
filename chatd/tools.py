@@ -238,6 +238,7 @@ def _ports_words(ports: list[dict] | None) -> str:
 
 
 # what Chromium writes beside the page's console: its own pages, the WebGL fallback, its GL driver
+STATUS_MARK = "HTTP_STATUS "
 CONSOLE_NOISE = "source: chrome://|Automatic fallback to software WebGL|GL Driver Message"
 _CONSOLE_HEAD = re.compile(r"^\[[\d:./]+:[A-Z]+:CONSOLE(?:\((\d+)\)|:(\d+))?\]\s*")
 
@@ -259,7 +260,14 @@ def _render(ctx, a):
         if ports is not None and port not in {p.get("port") for p in ports}:
             raise ToolError(f"nothing listens on port {port} in the sandbox, on any address; "
                             f"{_ports_words(ports)}")
-        url = f"http://localhost:{port}/{str(a.get('path') or '').lstrip('/')}"
+        path = str(a.get("path") or "")
+        row = next((p for p in ports or [] if p.get("port") == port), None)
+        cwd = ((row or {}).get("cwd") or "").rstrip("/")
+        if cwd and path.startswith(cwd + "/"):
+            # a file's path where the URL's goes: the server serves its working directory (live
+            # 2026-10-17, /workspace/_test.html on a server from /workspace was its 404 page)
+            path = path[len(cwd) + 1:]
+        url = f"http://localhost:{port}/{path.lstrip('/')}"
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
@@ -267,15 +275,20 @@ def _render(ctx, a):
     # WebGL through SwiftShader by name (the automatic fallback is deprecated and says so on
     # every page); the page's console only: Chromium's own pages (chrome://) and its services
     # (GCM registration, `ERROR:...cc` lines) are not the page's
-    cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && timeout 60 chromium --headless=new --no-sandbox "
-           f"--disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run "
+    # a server's answer is said when it is no page (404, 500): the screenshot is its error page
+    status = (f"echo \"{STATUS_MARK}$(curl -s -o /dev/null -m 10 -w '%{{http_code}}' "
+              f"{shlex.quote(url)})\"; " if a.get("port") else "")
+    cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && {status}timeout 60 chromium --headless=new "
+           f"--no-sandbox --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run "
            f"--disable-background-networking --hide-scrollbars --enable-logging=stderr --v=0 "
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
            f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught' | grep -v -E "
            f"'{CONSOLE_NOISE}' | head -40")
     mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
-    log = "\n".join(console_line(ln) for ln in ctx.output_text()[mark:].splitlines())
+    out = ctx.output_text()[mark:].splitlines()
+    code = next((ln[len(STATUS_MARK):].strip() for ln in out if ln.startswith(STATUS_MARK)), "")
+    log = "\n".join(console_line(ln) for ln in out if not ln.startswith(STATUS_MARK))
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):
@@ -292,6 +305,9 @@ def _render(ctx, a):
     msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
            f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
            f"screenshot {shot}\n")
+    if code.isdigit() and not 200 <= int(code) < 400:
+        msg += (f"the server answered HTTP {code} for {url}: the screenshot is its error page, not "
+                f"the app\n")
     msg += ("console:\n" + "\n".join(errors[:40])) if errors else "no console errors"
     return Result(msg, images=[("image/png", png)],
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
