@@ -99,9 +99,21 @@ class Snapshots:
             return None
         return data.decode("utf-8", "replace").splitlines(keepends=True)
 
+    def _size(self, cid: str, h: str | None) -> int:
+        """A recorded file's size: 0 for none (deleted), else the object's or a big one's."""
+        if not h:
+            return 0
+        if h.startswith("big:"):
+            return int(h[4:])
+        try:
+            return os.path.getsize(self._obj(cid, h))
+        except OSError:
+            return 0
+
     def diff(self, cid: str, run: str) -> dict:
         """{files: [{path, status, additions, deletions, patch}]} between the run's before and
-        after (after = the tree now while the run has not ended)."""
+        after (after = the tree now while the run has not ended); a binary or big file's entry
+        has its size after (`bytes`)."""
         before = self.load(cid, run, "before")
         after = self.load(cid, run, "after")
         if before is None:
@@ -117,7 +129,8 @@ class Snapshots:
             la, lb = self._text(cid, a), self._text(cid, b)
             if la is None or lb is None:
                 out.append({"path": "/workspace/" + path, "status": status, "additions": 0,
-                            "deletions": 0, "patch": "Binary or large file changed\n"})
+                            "deletions": 0, "patch": "Binary or large file changed\n",
+                            "bytes": self._size(cid, b)})
                 continue
             patch = "".join(difflib.unified_diff(la, lb, f"a/{path}", f"b/{path}", n=3))
             adds = sum(1 for ln in patch.splitlines() if ln.startswith("+") and

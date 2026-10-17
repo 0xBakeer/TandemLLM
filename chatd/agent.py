@@ -16,8 +16,9 @@ from chatd import egress, render
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
 from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
-from chatd.runs import NUDGE, GuardError
+from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
+from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS
 from chatd.store import dumps
 from chatd.tools import PathError, Result, ToolError
 
@@ -501,6 +502,11 @@ class AgentMixin:
     def run_tools(self, run, idxs: list[int]) -> str:
         conv = run.conv
         self.new_step(run)
+        if run.ignore_calls:                        # a worker's report-only call: nothing runs
+            for k in idxs:
+                self._finish_call(run, conv.live["parts"][k], Result(IGNORED_CALL),
+                                  status="ignored")
+            return "ok"
         with conv.lock:
             settings = self.settings_of(conv.id)
             parts = [conv.live["parts"][k] for k in idxs]
@@ -634,6 +640,10 @@ class AgentMixin:
             images.append(self.store_blob(conv.id, f"{part['id']}.png", mime, data))
         with conv.lock:
             self.flush(run)
+            if run.parent is not None and images:
+                # a worker's screenshots by id, for its report's Checks (chatd/tasks.py)
+                part["shot"] = f"shot-{1 + sum(1 for p in conv.live['parts'] if p.get('shot'))}"
+                res.content += f"\nscreenshot id: {part['shot']}"
             ui, cut = tools_mod.for_ui(res.content)
             st = status or ("failed" if res.is_error else "done")
             out = {"content": ui, "is_error": bool(res.is_error) or st == "failed",
@@ -770,7 +780,7 @@ class AgentMixin:
             return self._request(settings, info, tools, path,
                                  self._compaction_for(conv.id, path), head,
                                  continue_final=run.continue_final, keep_reasoning_from=keep_from,
-                                 nudge=NUDGE if run.nudge else None)
+                                 tail=run.tail)
         if ours and run.step <= 1 and not run.remark:
             gone = self.missing_pins(settings)
             if gone:
@@ -798,6 +808,9 @@ class AgentMixin:
             # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
+        if run.salvage:                             # a worker's report-only call (chatd/tasks.py)
+            body["max_tokens"] = min(int(body.get("max_tokens") or SALVAGE_TOKENS), SALVAGE_TOKENS)
+        run.tail = None                             # a tail goes with one call only
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)
         run.request_est = est

@@ -318,11 +318,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          vision: bool = False, blob=None, continue_final: bool = False,
          max_tokens: int | None = None, tools: list[dict] | None = None,
          levels: list[str] | None = None, effort_off: str | None = None,
-         keep_reasoning_from: int = 0, nudge: str | None = None,
+         keep_reasoning_from: int = 0, tail: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
          step_from: tuple[int, int] | None = None, fold_before: str | None = None) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
-    context guard drops it before that); `nudge`: a hidden last user line (the empty-turn retry);
+    context guard drops it before that); `tail`: a hidden last user line for one call, never
+    stored (the empty-turn nudge; a worker's report sent back, or its report at the step cap);
     `inline_images`: tool images in the tool message (our engine) or in a user message after it;
     `step_from`: (a branch index, a step): that assistant message's steps before the step were
     compacted (a long run: the summary is in the system block); `fold_before`: the newest
@@ -336,8 +337,8 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
                             inline=inline_images,
                             from_step=step_from[1] if step_from and i == step_from[0] else 0,
                             fold_before=fold_before))
-    if nudge:
-        msgs.append({"role": "user", "content": nudge})
+    if tail:
+        msgs.append({"role": "user", "content": tail})
     out: dict = {"model": model, "messages": msgs, "stream": True,
                  "stream_options": {"include_usage": True}}
     if tools:

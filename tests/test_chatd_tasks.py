@@ -81,7 +81,7 @@ def task_call(title="Hello file", brief=BRIEF, expect="nothing"):
 
 class Script:
     """The fake's script: `main(body, k)` for the chat's requests and `worker(body, k, n)` for a
-    worker's, `k` the step (the tool results so far in the run, from 0), `n` the task's number."""
+    worker's, `k` the tool results so far in the run (from 0), `n` the task's number."""
 
     def __init__(self, main=None, worker=None):
         self.main = main or (lambda b, k: {"calls": [task_call()]} if k == 0 else
@@ -93,10 +93,10 @@ class Script:
         if body.get("stream") is not True:
             return None                       # a compaction's or a title's call: the fake's words
         s = hdr(h, "x-session-id") or ""
-        k = sum(1 for m in since_user(body) if m.get("role") == "tool")
-        if "-task-" in s:
+        if "-task-" in s:                 # a worker has one user message (a tail is one more)
+            k = sum(1 for m in body.get("messages") or [] if m.get("role") == "tool")
             return self.worker(body, k, int(s.rsplit("-", 1)[1]))
-        return self.main(body, k)
+        return self.main(body, sum(1 for m in since_user(body) if m.get("role") == "tool"))
 
 
 def agents_chat(c, **settings) -> str:
@@ -476,10 +476,11 @@ def test_the_events_and_the_endpoints():
         assert phases and all(e["task_id"] == tid and e["max_steps"] == 40 for e in phases)
         nows = [e["now"] for e in evs if e["type"] == "run.phase" and e["phase"] == "task"]
         assert any(n.startswith("Task 1: Hello file, call 1 of 40: ") for n in nows), nows
-        worker_parts = [e for e in evs if e["type"].startswith(("part.", "tool.")) and
+        worker_parts = [e for e in evs if e["type"].startswith(("part.", "tool.", "message.")) and
                         e.get("task_id")]
         assert worker_parts and all(e["task_id"] == tid for e in worker_parts)
-        assert {"part.added", "tool.started", "tool.done"} <= {e["type"] for e in worker_parts}
+        assert {"message.created", "part.added", "tool.started", "tool.done"} <= \
+            {e["type"] for e in worker_parts}
         done = next(e for e in evs if e["type"] == "task.done")
         assert done["task_id"] == tid and done["status"] == "done"
         assert done["stats"]["steps"] == 2 and done["stats"]["completion_tokens"] > 0

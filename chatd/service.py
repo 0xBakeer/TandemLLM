@@ -96,8 +96,8 @@ PEEK_TTL_S = 30.0
 REREAD_WORDS_TOKENS = 8192
 #: VIS-E15: the events of a task conversation that go to its chat's log, with `task_id`: the
 #: worker's transcript as it streams, its prompts and the panes it opens
-TASK_FORWARD = ("part.added", "part.delta", "part.done", "tool.asking", "tool.started",
-                "tool.output", "tool.done", "tool.auto_approved", "pane.open")
+TASK_FORWARD = ("message.created", "part.added", "part.delta", "part.done", "tool.asking",
+                "tool.started", "tool.output", "tool.done", "tool.auto_approved", "pane.open")
 
 
 def prefill_words(pre: dict) -> str:

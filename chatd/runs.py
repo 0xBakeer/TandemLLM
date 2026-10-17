@@ -169,7 +169,7 @@ class Run:
         self.length_continued = False
         self.empty_retries = 0
         self.engine_errors = 0                 # calls the engine ended with finish reason error
-        self.nudge = False
+        self.tail: str | None = None            # a hidden last user line for the next call (render.body)
         self.recent_calls: collections.deque = collections.deque(maxlen=3)
         # the sandbox's own failures in a row (not the command's): three alike end the run
         self.sandbox_errors: collections.deque = collections.deque(maxlen=3)
@@ -198,6 +198,13 @@ class Run:
         self.workers: list[dict] = []
         self.tasks_given = 0
         self.agents = False                    # the chat's Agents mode at the run's start
+        # a worker's report (chatd/tasks.py): what it reported, sent back once, the report-only
+        # call at its cap whose tool calls are stored and never run
+        self.report: dict | None = None
+        self.report_source: str | None = None
+        self.report_misses = 0                 # the step of the report sent back, once
+        self.salvage = False
+        self.ignore_calls = False
 
     # ------------------------------------------------------------------ the contract's Run
     def as_dict(self, viewer: str | None = None) -> dict:
@@ -318,14 +325,25 @@ class Run:
         while True:
             if self.stop_mode:
                 return self._stopped()
-            if self.step >= self.max_steps:
-                self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
-                               f"Continue goes on from here.")
-                self.interrupt = "limit"
-                return "interrupted"
+            if self.step >= self.max_steps and not self.salvage:
+                if self.parent is not None:
+                    # a worker at its cap still reports: one more call whose only job is the
+                    # report, the tool schemas kept (the prompt's head and its cache stay)
+                    self.salvage = self.ignore_calls = True
+                    self.tail = self.svc.salvage_text(self)
+                else:
+                    self.notice = (f"The run reached its limit of {self.max_steps} model calls. "
+                                   f"Continue goes on from here.")
+                    self.interrupt = "limit"
+                    return "interrupted"
             if not self._slot():
                 return self._stopped()
             outcome = self._call()
+            if self.salvage and outcome in ("completed", "failed"):
+                if outcome == "completed" and self.step_parts:
+                    self.svc.run_tools(self, list(self.step_parts))     # stored, never run
+                self.svc.task_report(self, answered=outcome == "completed")
+                return "completed"
             if outcome != "completed":
                 return outcome
             if self.finish_reason == "error":
@@ -354,14 +372,16 @@ class Run:
             if self.finish_reason == "length" and not self.length_continued:
                 self.length_continued, self.continue_final = True, True
                 continue
-            if self.svc.step_empty(self):
+            if self.parent is None and self.svc.step_empty(self):
                 if self.empty_retries == 0:
-                    self.empty_retries, self.nudge = 1, True
+                    self.empty_retries, self.tail = 1, NUDGE
                     continue
                 self.error = "The model answered with nothing, twice."
                 return "failed"
             if self.svc.verify_step(self):          # the app it built, checked; the model reads it
                 continue
+            if self.parent is not None and self.svc.task_report(self):
+                continue                            # a worker's report, sent back once
             return "completed"
 
     def _call(self) -> str:
@@ -384,7 +404,6 @@ class Run:
             except GuardError as exc:
                 self.error = str(exc)
                 return "failed"
-            self.nudge = False
             self.set_phase("queued", "Sending to the engine")
             try:
                 self.t_sent = time.monotonic()

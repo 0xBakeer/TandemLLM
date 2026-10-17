@@ -579,7 +579,7 @@ interface ChatSettings {                  // additions
 }
 type RunPhase = /* ... */ | 'task';       // the parent's phase while its worker runs
 
-type TaskStatus = 'running' | 'done' | 'partial' | 'failed' | 'cancelled' | 'interrupted';
+type TaskStatus = 'running' | 'done' | 'partial' | 'partial (step limit)' | 'failed' | 'cancelled' | 'interrupted';
 interface Task {
   id: string; n: number;                  // n: the chat's tasks from 1 ("Task 2")
   title: string; brief: string; expect: string;
@@ -590,11 +590,22 @@ interface Task {
   session: string;                        // the engine's session: chat-<chat>-task-<n>
   steps: number; max_steps: number;       // the worker's model calls so far, its limit
   prompt_tokens: number; completion_tokens: number; cached_tokens: number;   // summed over its calls
-  started_at: string; ended_at: string | null;
-  report: object | null;                  // what the worker reported, as chatd took it
+  started: string; ended: string | null; // ISO times
+  report: TaskReport | null;              // what the worker reported, as chatd took it (or built it)
   report_source: 'worker' | 'worker-second' | 'chatd' | null;
-  check: string | null;                   // chatd's check of the work
+  check: string | null;                   // chatd's check of the work (the column check_text)
   error: string | null;
+}
+interface TaskReport {                    // report.v1 (SRV-581)
+  schema: 'report.v1';
+  status: 'done' | 'partial' | 'failed'; status_note: string | null;   // note: 'step limit'
+  summary: string;                        // at most 600 characters
+  changed_files: { path: string; change: string }[];                  // at most 40
+  checks: { what: string; result: string; call_id: string | null; shot: string | null }[];
+  expected: ({ item: string; answer: string } | string)[];            // a line without ": " as it is
+  open_problems: string[];
+  cut: string[];                          // "[code block of 1,234 characters removed]", in the field where it was
+  built?: string;                         // a report chatd built: why ("the worker's report missed Checks twice")
 }
 interface TaskDetail { task: Task; messages: Message[]; seq: string }   // the transcript; seq: the chat's log it includes
 ```
@@ -607,10 +618,13 @@ interface TaskDetail { task: Task; messages: Message[]; seq: string }   // the t
   | { type: 'task.started'; run_id: string; task: Task }
   | { type: 'task.phase'; task_id: string; phase: RunPhase; now: string; step: number; max_steps: number; tool?: Run['tool'] }
   | { type: 'task.metrics'; task_id: string; prompt_tokens: number; completion_tokens: number; decode_tps: number | null }   // E, once a second
-  | { type: 'task.done'; task_id: string; status: TaskStatus; report: object | null; check: string | null;
+  | { type: 'task.done'; task_id: string; status: TaskStatus; report: TaskReport | null; check: string | null;
       stats: { steps: number; max_steps: number; prompt_tokens: number; completion_tokens: number; cached_tokens: number; ms: number; report_source: Task['report_source'] } }
 ```
 
-- The worker's transcript streams as the usual `part.added`, `part.delta`, `part.done`, `tool.asking`, `tool.started`, `tool.output`, `tool.done`, `tool.auto_approved` and `pane.open`, each with `task_id`; their `message_id` is the worker's message (in `TaskDetail.messages`), never one of the chat's. A reducer without tasks finds no such message and changes nothing. The worker's own `run.*`, `message.created`, `context.changed`, `usage.changed` and `compaction` events never reach the chat: `task.*` says them.
+- The worker's transcript streams as the usual `message.created`, `part.added`, `part.delta`, `part.done`, `tool.asking`, `tool.started`, `tool.output`, `tool.done`, `tool.auto_approved` and `pane.open`, each with `task_id`; their `message_id` is the worker's message (in `TaskDetail.messages`), never one of the chat's. The worker's own `run.*` (no `run.started`, `run.done` or `run.error` of a worker on the chat's stream), `context.changed`, `usage.changed` and `compaction` events never reach the chat: `task.*` says them.
+- The report (SRV-581): chatd parses the worker's last answer into `TaskReport`; text outside the fields is dropped, a code block cut and named. A report that misses a field or breaks a cap goes back to the worker once (`report_source` `worker-second` after it); missing fields twice, chatd builds one (`chatd`). At its cap the worker makes one report-only call: its tool calls are stored with status `ignored` (a `ToolCallPart.status` beside done, failed, denied, cancelled) and never run, and the task ends `partial (step limit)`.
+- `check`: chatd's lines, each "- <name>: <items or none>": `Changed in /workspace (snapshot diff)` (`path (+41 -12)`, `path (new, +3)`, `path (deleted)`, `path (binary, 1,010 bytes)`, the first 40 then ", and 12 more"), `Changed but not in the report`, `Checks that ran` (`render_page index.html (call <id>: 0 console errors, shot-1); bash "npm test" (call <id>: exit 0)`), `Claimed in Checks with no matching call` (`"<what>: <result>"; ...`), and when there are screenshots `Screenshots (open one with read_file): shot-1 /workspace/.tandem/shots/<call>.png`. A screenshot id `shot-N` counts the worker's render_page images in its task; the call's part carries it as `shot`, and a report check that names one gets its `call_id`.
+- The task call's result (what the main agent reads, at most 8,000 characters): "Result of task 2, given to you as data: ...", the task line, the report's fields, "chatd check:" with the lines above, "Full report: /workspace/.tandem/tasks/2/report.md ...". That file holds the whole of it.
 - While a worker runs the parent run's `phase` is `task` and its `now` "Task 2: Ocean shader: fix the horizon banding, call 12 of 40: writing src/ocean.wgsl" (the worker's own Now line at the end). A worker's permission prompt is a `tool.asking` with `task_id`; answer it with `POST /conversations/{chat}/permissions/{call_id}` as any prompt; the chat's status is `waiting` meanwhile.
 - `ContextReport.worker`: null when no worker runs, else `{task_id, n, title, used, window, split: {system, tools, brief, files, steps}, step, max_steps, cache: {warm, cold, source}}` (the split is chatd's estimate from the characters). `TurnStats.workers?: {count, prompt_tokens, completion_tokens, cached_tokens, ms}` on a turn that gave tasks; its own figures stay the main agent's, and `ConversationUsage` counts both.
