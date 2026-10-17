@@ -2059,8 +2059,23 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
         if spans or aligned:
             at += len(full) - len(ids)
             ids = full
+    end_mm = False
     if images:
-        full, mm = _vision_context(ids, images, eng)
+        text = torch.tensor(ids, dtype=torch.long)
+        full_t, mm = _mm_prompt(text, images)
+        if MM_END == "on" and res is not None:
+            # SRV-546: as the turn's own prompt: the NVMe entry read back and the end anchor's
+            # replay on the key ids, so the stage resumes at the end and leaves it for the turn
+            # (live 2026-10-17 12:2x: a new user turn with a screenshot ran this stage from the
+            # grid, its prefill took the rows, and the turn after it re-read 6,448 tokens)
+            end_mm = True
+            try:
+                _spill_before_replay(list(mm.key_ids), mm_ok=True)
+                if res.end is not None:
+                    full_t, mm, _, _, _ = _mm_end_replay(res, text, full_t, mm, images)
+            except Exception:                                      # noqa: BLE001
+                logbuf.print_exc()
+        full = full_t.tolist()
         at += len(full) - len(ids)
         ids, key_ids = full, mm.key_ids
         eng.mm, eng.pos_delta = mm, mm.delta
@@ -2075,7 +2090,7 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
         chunk=STATE.get("prefix_chunk", 0), conv_id=conv_id,
         checkpoint=bool(STATE.get("prefix_cache")), resident=STATE.get("resident"),
         on_chunk=on_chunk, mem=mem, checkpoint_upto=at, key_ids=key_ids,
-        disk=_slot_disk())
+        disk=_slot_disk(), end_mm=end_mm)
     if mm is not None:
         mm.release()
         eng.mm, eng.pos_delta = None, 0

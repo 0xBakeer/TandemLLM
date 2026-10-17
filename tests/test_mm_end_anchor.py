@@ -27,7 +27,8 @@ regions.
   3  an end kept after images, then the next request with the same image and more text: resumed
      at the end, the same greedy tokens; the hidden spans and regions carry over
   4  another image in that place: never the end (the keys part at the image)
-  5  MM_END off: the second request with an image goes back to the grid, as in 0.11.3
+  5  MM_END off: the second request with an image goes back to the grid, as in 0.11.3; the
+     router's in-context stage of a new user turn with images resumes at the end too
   6  the expansion's inverse and positions for both towers' shapes (no marks; `<img>` `</img>`)
   7  an image key id's bytes for the alignment; the words of a re-read
 
@@ -240,6 +241,29 @@ def test_an_end_kept_after_images_serves_the_next_request_with_them():
     app.MM_END = "on"
     return (f"resumed at the end ({e2} of {len(served3)}); 0.11.3: {pre3o['kind']} at "
             f"{pre3o['reused']}; 10 greedy tokens equal")
+
+
+def test_the_router_stage_of_a_new_user_turn_resumes_at_the_end_after_images():
+    """Live (the after-fix run, turn D): a new user turn with a screenshot ran the router's
+    in-context stage first; its prefill (`_context_prefill`) still served images as rendered, read
+    from a grid line and took the rows, and the turn after it re-read 6,448 tokens."""
+    if need():
+        return need()
+    x = TV.image(57, (1, 4, 6))
+    for k in range(20):
+        res, p1, out1 = first_turn(30, 16, 20 + 7 * k)
+        c2 = p1 + out1 + with_image(text(6, 7)) + text(3, 8)
+        out2, pre2, served2, mm2, _ = image_turn(c2, [x], 16)
+        if clean(out2):
+            break
+    e2 = res.end["at"]
+    stage = c2 + out2 + text(7, 21)                # the new user message, up to its insertion
+    _, reused, fwd = app._context_prefill(list(stage), len(stage), "ses", None, [x])
+    assert reused == e2 and res.end is not None and res.end["at"] == e2, (reused, e2)
+    out3, pre3, served3, mm3, _ = image_turn(stage + text(4, 22), [x], 8)
+    assert pre3["reused"] >= e2, (pre3, e2)
+    assert out3 == cold(app._mm_collapse(served3, mm3), [x], 8)
+    return f"the stage resumed at the end ({e2}), the turn after it at {pre3['reused']}"
 
 
 # ------------------------------------------------------------------ 4. another image
