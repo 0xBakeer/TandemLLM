@@ -341,13 +341,15 @@ def test_a_password_brings_the_rule_back():
 
 def test_brute_force():
     _setup()
-    other = {"X-Forwarded-For": "203.0.113.45", "X-Real-IP": "203.0.113.45"}
     for i in range(5):
         code, _, _ = _login(token=f"wrong-{i}")
         assert code == 401
     code, head, _ = _login()
     assert code == 429 and "Retry-After" in head, "the sixth, even with the right token"
-    code, _, _ = call("POST", "/v1/dashboard/session", other, {"token": ADMIN})
+    # 2026-10-17: the key is the TCP peer, so "another address" is another peer, not another
+    # X-Real-IP header -- the header is the client's to write (test_login_throttle_key.py).
+    code, _, _ = call("POST", "/v1/dashboard/session", {}, {"token": ADMIN},
+                      peer="203.0.113.45")
     assert code == 204, "another address is not blocked"
 
 
