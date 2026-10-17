@@ -199,6 +199,30 @@ def test_a_new_chat_runs_up_to_100_model_calls():
         c.close()
 
 
+def test_a_call_the_engine_ends_with_an_error_is_retried_once_then_fails_saying_so():
+    """Live (2026-10-17, pagoda replay 4): the engine failed a call after 8,192 tokens of thinking
+    (finish reason `error`); chatd took it for an empty answer, nudged, got the same, and the run
+    failed with "The model answered with nothing, twice." """
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "hello FAKE_REASONING FAKE_FINISH_ERROR_ONCE")
+        s = c.wait_idle(cid, 30)
+        a = s["messages"][-1]
+        assert a["status"] == "done" and a["stats"]["steps"] == 2, a["stats"]
+        assert "w0" in text_of(a)
+        assert not any("(Your last turn was empty" in json.dumps(b) for b in requests(c)), \
+            "no empty-turn nudge for an engine error"
+        c.send(cid, "again FAKE_REASONING FAKE_FINISH_ERROR")
+        s = c.wait_idle(cid, 30)
+        a = s["messages"][-1]
+        assert a["status"] == "error" and a["stats"]["steps"] == 2
+        assert "The engine failed this model call twice (finish reason error)" in json.dumps(a)
+        assert "answered with nothing" not in json.dumps(a)
+    finally:
+        c.close()
+
+
 def test_the_same_call_three_times_stops_the_run():
     c = Chat()
     try:
