@@ -1448,6 +1448,16 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "effort_levels": (m.get("capabilities") or {}).get("effort_levels") or [],
                 "effort_off": m.get("_effort_off")}
 
+    def takes_slot(self, run) -> bool:
+        """Whether the run's next call needs one of the run slots: a cloud model's does not, it
+        runs at the provider, not on the box (live 2026-10-17: a DeepSeek chat waited behind two
+        engine runs). Read per call: the chat's model can change between two calls of a run."""
+        try:
+            settings = {**DEFAULT_SETTINGS, **json.loads(self._row(run.conv.id)["settings"])}
+            return self.model_info(settings.get("model")).get("backend") != "cloud"
+        except Exception:                                           # noqa: BLE001
+            return True
+
     # ================================================================== attachments
     def upload(self, content_type: str, body: bytes) -> dict:
         if len(body) > MAX_ATTACHMENT_BYTES + 65536:
