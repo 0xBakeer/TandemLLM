@@ -279,10 +279,12 @@ def _route(handler, cond, method, parts, q, body, auth):
             raise ApiError(404, "not_found", f"no monitor event {parts[1]}")
         return 200, {"event": e}, None
     if head == "events" and len(parts) == 1 and method == "GET":
-        evs = cond.journal.rows(since_ms=int(q.get("since") or 0), kind="monitor",
-                                limit=min(2000, int(q.get("limit") or 100)),
+        # _int: garbage query params must be a clamped default, not an uncaught ValueError;
+        # limit=-1 would become SQLite LIMIT -1 = unlimited
+        evs = cond.journal.rows(since_ms=_int(q.get("since"), 0, 0, 10**13), kind="monitor",
+                                limit=_int(q.get("limit"), 100, 1, 2000),
                                 session=q.get("session") or None,
-                                before_ms=int(q["before"]) if q.get("before") else None,
+                                before_ms=_int(q.get("before"), 0, 0, 10**13) or None,
                                 # VIS-44: one request's events, the row drawer's list
                                 request_ids=[q["request"]] if q.get("request") else None)
         if q.get("task"):
@@ -300,10 +302,10 @@ def _route(handler, cond, method, parts, q, body, auth):
                      "sessions": mon.watching() if mon is not None else []}, None
     if head == "decisions":
         if len(parts) == 1 and method == "GET":
-            rows = cond.journal.rows(since_ms=int(q.get("since") or 0),
-                                     limit=min(500, int(q.get("limit") or 100)),
+            rows = cond.journal.rows(since_ms=_int(q.get("since"), 0, 0, 10**13),
+                                     limit=_int(q.get("limit"), 100, 1, 500),
                                      session=q.get("session") or None,
-                                     before_ms=int(q["before"]) if q.get("before") else None,
+                                     before_ms=_int(q.get("before"), 0, 0, 10**13) or None,
                                      kind="router")
             return 200, {"decisions": cond.journal.with_events(rows)}, None
         if len(parts) == 2 and method == "GET":
@@ -323,7 +325,7 @@ def _route(handler, cond, method, parts, q, body, auth):
                                 labelled_at=int(time.time() * 1000) if label != "clear" else None)
             return 200, {"id": parts[1], "label": None if label == "clear" else label}, None
     if head == "stats" and method == "GET":
-        hours = max(1, min(168, int(q.get("hours") or 24)))
+        hours = _int(q.get("hours"), 24, 1, 168)
         since = int((time.time() - hours * 3600) * 1000)
         rows = cond.journal.rows(since_ms=since, limit=100000)
         evs = (cond.journal.rows(since_ms=since, limit=200000, kind="monitor")
