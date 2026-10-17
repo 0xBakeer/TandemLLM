@@ -294,7 +294,7 @@ def _route(handler, cond, method, parts, q, body, auth):
         return 200, {"event": e}, None
     if head == "events" and len(parts) == 1 and method == "GET":
         evs = cond.journal.rows(since_ms=_q_int(q, "since", 0), kind="monitor",
-                                limit=min(2000, _q_int(q, "limit", 100)),
+                                limit=max(1, min(2000, _q_int(q, "limit", 100))),
                                 session=q.get("session") or None,
                                 before_ms=_q_int(q, "before", 0) if q.get("before") else None,
                                 # VIS-44: one request's events, the row drawer's list
@@ -315,7 +315,7 @@ def _route(handler, cond, method, parts, q, body, auth):
     if head == "decisions":
         if len(parts) == 1 and method == "GET":
             rows = cond.journal.rows(since_ms=_q_int(q, "since", 0),
-                                     limit=min(500, _q_int(q, "limit", 100)),
+                                     limit=max(1, min(500, _q_int(q, "limit", 100))),
                                      session=q.get("session") or None,
                                      before_ms=_q_int(q, "before", 0) if q.get("before") else None,
                                      kind="router")
