@@ -82,7 +82,7 @@ def test_the_markdown_lands_next_to_the_upload_and_becomes_a_text_attachment():
     a = _placed_image(ws)
 
     def run():
-        return svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a)
+        return svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a, b"\x89PNG a picture of text")
     att = _with_engine(["READABLE TEXT 42"], run)
 
     assert att is not None and att["kind"] == "text" and att["name"] == "scan.png.md"
@@ -93,16 +93,72 @@ def test_the_markdown_lands_next_to_the_upload_and_becomes_a_text_attachment():
     assert svc.attachment(att["id"])[1] == b"READABLE TEXT 42"   # and in the blob store
 
 
-def test_a_second_scan_of_one_name_gets_its_own_file():
+def test_a_second_scan_of_one_name_gets_its_own_file_and_the_same_pass_is_memoized():
     root = tempfile.mkdtemp()
     svc = _svc(root)
     ws = _ws(root, "c1")
     a = _placed_image(ws)
-    first = _with_engine(["one"], lambda: svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a))
-    second = _with_engine(["two"], lambda: svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a))
+    calls = []
+    pages = ["one"]
+    eng = types.SimpleNamespace(
+        convert=lambda path, **kw: (calls.append(1) or
+                                    [(i, types.SimpleNamespace(markdown=md))
+                                     for i, md in enumerate(pages)]))
+    old = ocr._conv
+    ocr._conv = eng                                        # one engine, its identity in the key
+    try:
+        first = svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a, b"\x89PNG same bytes")
+        pages[:] = ["two"]                                 # what a second pass would say
+        second = svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a, b"\x89PNG same bytes")
+    finally:
+        ocr._conv = old
     assert first is not None and second is not None
     assert first["path"] != second["path"]                 # save_upload's free names: -2
     assert second["path"] == "/workspace/uploads/scan.png-2.md"
+    assert second["name"] == "scan.png-2.md"               # the blob name follows the saved file
+    assert len(calls) == 1                                 # one OCR pass for the same bytes
+    assert svc.attachment(second["id"])[1] == b"one"       # the memoized text, not "two"
+
+
+def test_a_symlinked_upload_is_refused():
+    root = tempfile.mkdtemp()
+    ws = _ws(root, "c1")
+    secret = os.path.join(root, "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("HOST SECRET")
+    target = os.path.join(ws, "uploads", "scan.png")
+    os.symlink(secret, target)                             # the sandbox owner's swap
+    calls = []
+
+    def counting(path, **kw):
+        calls.append(path)
+        return [(0, types.SimpleNamespace(markdown="READ"))]
+
+    old = ocr._conv
+    ocr._conv = types.SimpleNamespace(convert=counting)
+    try:
+        assert ocr.convert(target) is None                 # refused: nothing reaches the prompt
+    finally:
+        ocr._conv = old
+    assert calls == []                                     # the engine never opened it
+
+
+def test_a_missing_blob_says_why_unplaced():
+    from chatd.service import Service as S
+
+    class Stub(S):
+        def model_info(self, model):
+            return {"max_len": 0}
+        def _branch(self, conv, head):
+            return [], {}
+
+    root = tempfile.mkdtemp()
+    svc = Stub(root, "http://127.0.0.1:1/v1")
+    ws = _ws(root, "c1")
+    a = {"id": "att_missing", "name": "scan.png", "kind": "image"}
+    svc._place(types.SimpleNamespace(id="c1"), {"settings": "{}", "head_id": None}, [a])
+    assert a.get("unplaced") == "blob missing"             # the prompt says why, like PathError
+    assert "path" not in a
 
 
 def test_a_scan_that_cannot_be_read_sends_unscanned():
@@ -116,7 +172,7 @@ def test_a_scan_that_cannot_be_read_sends_unscanned():
     old = ocr._conv
     ocr._conv = types.SimpleNamespace(convert=broken)
     try:
-        assert svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a) is None
+        assert svc._ocr_ws(types.SimpleNamespace(id="c1"), ws, a, b"broken bytes") is None
     finally:
         ocr._conv = old
 

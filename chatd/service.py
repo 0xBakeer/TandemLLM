@@ -106,6 +106,10 @@ def prefill_words(pre: dict) -> str:
     return f"Prefilling {total:,} tokens"
 
 
+# the OCR memo (Service._ocr_ws): sha256(blob) + engine identity -> the pages' markdown.
+# The blob's bytes never change, so one pass serves every copy of the same file; FIFO, capped.
+OCR_CACHE_MAX = 32
+_OCR_CACHE: dict[str, "str | None"] = {}
 class ApiError(Exception):
     def __init__(self, status: int, kind: str, message: str, extra: dict | None = None):
         super().__init__(message)
@@ -1538,6 +1542,10 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             try:
                 _, data = self.attachment(a["id"])
             except (ApiError, OSError):
+                # the blob is gone (an old delta deleted, a store hiccup): the message still
+                # goes, and the prompt says why, as with any other unplaced attachment
+                a["unplaced"] = "blob missing"
+                self.log(f"[attach] {a['id']} not saved: blob missing")
                 continue
             try:
                 a["path"] = attach_mod.save_upload(ws_dir, a.get("name") or "file", data)
@@ -1551,7 +1559,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 # markdown becomes a text attachment of its own, appended for this message,
                 # and the code below is then the only flow it knows: whole while it fits
                 # the budget, one line and paged by read_file past it.
-                extra = self._ocr_ws(conv, ws_dir, a)
+                extra = self._ocr_ws(conv, ws_dir, a, data)
                 if extra is None:
                     continue
                 atts.append(extra)
@@ -1566,24 +1574,37 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 self.log(f"[attach] {a['id']} {tokens} tokens over the budget: one line, the file "
                          f"at {a['path']}")
 
-    def _ocr_ws(self, conv, ws_dir: str, a: dict) -> dict | None:
+    def _ocr_ws(self, conv, ws_dir: str, a: dict, blob: bytes) -> dict | None:
         """One OCR pass over a placed PDF or image (chatd/ocr.py), its text as an attachment.
 
         The markdown goes next to the upload as `uploads/<name>.md` — the file the model
         pages through when the text is over the inline budget — and into the blob store as
-        an ordinary text attachment with the name suffixed `.md`, which is all the renderer
-        needs to run it through the decisions that already exist (chatd/render.py).
+        an ordinary text attachment named after the file that was actually saved (a second
+        scan of one name lands as `<name>-2.md`: save_upload's free names, chatd/attach.py).
+
+        The pass is memoized on the blob's sha256 and the engine's identity: the same PDF
+        re-attached weeks later is minutes of CPU otherwise, and a blob's bytes never change
+        (the store keeps one copy per content), so one pass serves every copy of it. Bounded
+        at OCR_CACHE_MAX entries, FIFO — a memo, not a collection.
 
         None when there is nothing to read, nothing readable, or anything fails: a message
         is never lost because a scan could not be read, it only goes unscanned.
         """
         name = (a.get("name") or "file") + ".md"
         host = os.path.join(ws_dir, attach_mod.UPLOADS, os.path.basename(a["path"]))
-        try:
-            text = ocr.convert(host)
-        except Exception as exc:                       # an engine's surprise is not the user's
-            self.log(f"[ocr] {a['id']}: {type(exc).__name__}: {exc}")
-            return None
+        key = hashlib.sha256(blob).hexdigest() + "|" + ocr.engine_key()
+        if key in _OCR_CACHE:
+            text = _OCR_CACHE[key]
+            self.log(f"[ocr] {a['id']}: {name}: memoized, {len(text or ''):,} characters")
+        else:
+            try:
+                text = ocr.convert(host)
+            except Exception as exc:                   # an engine's surprise is not the user's
+                self.log(f"[ocr] {a['id']}: {type(exc).__name__}: {exc}")
+                return None
+            _OCR_CACHE[key] = text
+            if len(_OCR_CACHE) > OCR_CACHE_MAX:
+                _OCR_CACHE.pop(next(iter(_OCR_CACHE)))          # FIFO: the oldest pass goes
         if not text:
             self.log(f"[ocr] {a['id']}: {name}: nothing readable")
             return None
@@ -1593,9 +1614,10 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         except (PathError, OSError) as exc:
             self.log(f"[ocr] {a['id']}: {name} not saved: {attach_mod.unplaced_words(exc)}")
             return None
-        att = self.store_blob(conv.id, name, "text/markdown", data)
+        att = self.store_blob(conv.id, os.path.basename(path), "text/markdown", data)
         att["path"] = path
-        self.log(f"[ocr] {a['id']}: {name}: {len(text):,} characters, the file at {path}")
+        self.log(f"[ocr] {a['id']}: {os.path.basename(path)}: {len(text):,} characters, "
+                 f"the file at {path}")
         return att
 
     # ================================================================== the stream

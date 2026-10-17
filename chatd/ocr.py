@@ -23,6 +23,7 @@ on the sending request's thread, so a long PDF delays its own message and nothin
 from __future__ import annotations
 
 import os
+import stat
 import threading
 from typing import Any
 
@@ -76,13 +77,30 @@ def engine() -> "Any":
     return _conv if _conv is not False else None
 
 
+def engine_key() -> str:
+    """The engine's identity for a cache key (empty with none): a memo keyed on the file's bytes
+    alone would serve one engine's text after another engine had replaced it."""
+    eng = engine()
+    return "" if eng is None else str(id(eng))
+
+
 def convert(host_path: str) -> str | None:
     """The file's pages as markdown, page breaks joined; None when it will not or cannot."""
+    # the sandbox owns uploads/, but between the file's placement and this call the directory's
+    # owner can swap the placed file for a symlink to any host file — and the OCR text would go
+    # into the model's prompt. So: lstat, no following, and only a regular file is read. A
+    # refusal is None, like any unreadable scan: the message keeps the file itself, unscanned.
+    try:
+        st = os.stat(host_path, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
     eng = engine()
-    if eng is None or not os.path.isfile(host_path):
+    if eng is None:
         return None
     try:
-        if MAX_MB and os.path.getsize(host_path) > MAX_MB * 1_000_000:
+        if MAX_MB and st.st_size > MAX_MB * 1_000_000:
             return None
         parts = [page.markdown for _i, page in eng.convert(host_path)]
     except Exception:
