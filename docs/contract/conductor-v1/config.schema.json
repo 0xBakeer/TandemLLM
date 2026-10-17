@@ -147,6 +147,9 @@
         "monitor_rows": {
           "type": "integer"
         },
+        "writer_alive": {
+          "type": "boolean"
+        },
         "table": {
           "type": "string"
         }

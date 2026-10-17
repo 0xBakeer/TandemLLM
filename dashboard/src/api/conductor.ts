@@ -565,7 +565,7 @@ export interface Explain {
 export interface ConfigInfo {
   server: { composite: string; raw_model: string | null; reasoning_effort: string | null; global_mode: string | null; monitor_mode?: 'raw' | 'shadow' | 'on'; self_url: string | null };
   store: { root: string; readonly: boolean; writes: number; documents: Record<string, { version: number | null; loaded_at: string | null; error: VersionMeta['error']; note?: string | null }> };
-  journal: { path: string | null; ring: number; queue: number; dropped: number; errors: number; retention_days: number; events_ring?: number; monitor_rows?: number; table?: string };
+  journal: { path: string | null; ring: number; queue: number; dropped: number; errors: number; retention_days: number; events_ring?: number; monitor_rows?: number; writer_alive?: boolean; table?: string };
   time: string;
 }
 export interface TaskMeta {
