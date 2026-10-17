@@ -65,6 +65,21 @@ _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
 # the engine's memory refusal (engine/cache.py MemoryRefused, a 503 from server/app.py `_busy`)
 _MEMORY = re.compile(r"a (\d+)-token prefill needs ([\d.]+) GiB with every cache given back; "
                      r"the engine's peak is ([\d.]+) GiB")
+
+# a 400 saying the request is over the window, in the shapes vLLM and OpenAI answer with — the
+# engine's own counts are the prompt's exact sizes, which the guard can only estimate. One retry
+# recomputes the room from them (2026-10-16: a relay backend with no max_output on its card asked
+# a 262,144-token window for 260,976 output tokens against 1,169 of input — 1 token over, died).
+_OVERRUN = re.compile(r"maximum context(?: length)? is [\d,]+ tokens", re.I)
+
+
+def is_overrun(message: str) -> bool:
+    """A 400 saying the request is over the engine's window, in the shapes vLLM and OpenAI
+    answer with. What the engine claims about the split is not information: two refusals of
+    requests 4,097 tokens apart both said 'a total of at least 262,145' — the input number is
+    back-computed from the refusal total (window + 1) against whatever output was asked. The
+    run halves its output instead of sizing by these numbers."""
+    return bool(_OVERRUN.search(message or ""))
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
 # anything else in it is replaced (the part's id is the one the next request sends back)
@@ -124,6 +139,8 @@ class Run:
         self.request_ids: set[str] = set()     # every call of the run
         self.stop_mode: str | None = None
         self.call = None
+        self.shrink_half = False         # the next request is the overrun retry: half output
+        self.overload_retried = False    # one retry per run: a loop of shrinks is a stall
         self.wake = threading.Event()
         self.thread: threading.Thread | None = None
         # the parts as they stream (the conversation's lock guards these and `pending`)
@@ -372,6 +389,15 @@ class Run:
             except EngineError as exc:
                 self.call = None
                 if not exc.retryable:
+                    if exc.status == 400 and is_overrun(exc.args[0]) and \
+                            not self.overload_retried:
+                        # one retry at half the output: the engine's refusal numbers are
+                        # self-referential (above), the guard's estimate is the only estimate
+                        self.overload_retried = True
+                        self.shrink_half = True
+                        self.svc.log(f"[guard] {self.id} step {self.step}: {exc.args[0][:120]} — "
+                                     f"retrying at half the output")
+                        continue
                     self.error = exc.args[0]
                     return "failed"
                 memory = memory_words(exc)
