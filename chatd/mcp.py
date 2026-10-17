@@ -45,6 +45,8 @@ from chatd.tools import Result, Tool, ToolError
 PROTOCOL = "2025-06-18"
 CLIENT = {"name": "tandemllm-chatd", "version": "0.1"}
 DEFAULT_TIMEOUT_S = 120.0
+MAX_BODY = 4 << 20        # a hostile/surprise MCP server must not balloon chatd's memory
+MAX_SSE_LINE = 1 << 20    # per SSE line; a stream of huge lines is cut here, not at r.read()
 
 class McpError(Exception):
     pass
@@ -254,12 +256,18 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
                     on_line(ln)
 
         def reader():
-            box = sandboxes.box(cid)
-            box.busy += 1
+            # box() may raise (a chat gone mid-connect): even then on_line(None) must run, or
+            # the pending request hangs until timeout and the socket leaks
             try:
-                demux(sock, first, data)
+                box = sandboxes.box(cid)
+                with box.lock:               # run threads vs reader threads: keep the count exact
+                    box.busy += 1
+                try:
+                    demux(sock, first, data)
+                finally:
+                    with box.lock:
+                        box.busy -= 1
             finally:
-                box.busy -= 1
                 on_line(None)
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),
                 lambda: sock.close())
@@ -324,7 +332,7 @@ class HttpTransport:
                 self.session_id = sid
             ctype = (r.getheader("Content-Type") or "").lower()
             if r.status in (202, 204):
-                r.read()
+                r.read(MAX_BODY)
                 return
             if r.status >= 400:
                 body = r.read(2000).decode("utf-8", "replace")
@@ -334,10 +342,14 @@ class HttpTransport:
                 return
             if "text/event-stream" in ctype:
                 data: list[str] = []
+                total = 0
                 while True:
-                    raw = r.readline()
+                    raw = r.readline(MAX_SSE_LINE)
                     if not raw:
                         break
+                    total += len(raw)
+                    if total > MAX_BODY:
+                        raise ValueError("the SSE stream is over the 4 MiB cap")
                     line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if line == "":
                         if data and self.on_message:
@@ -349,7 +361,7 @@ class HttpTransport:
                     elif line.startswith("data:"):
                         data.append(line[5:].lstrip(" "))
             else:
-                raw = r.read()
+                raw = r.read(MAX_BODY)
                 if raw.strip() and self.on_message:
                     obj = json.loads(raw)
                     for m in obj if isinstance(obj, list) else [obj]:

@@ -222,12 +222,26 @@ class Engine:
         return s, head.split(b"\r\n\r\n", 1)[1]
 
 
+def _proc_starttime(pid: int) -> int | None:
+    """Field 22 of /proc/<pid>/stat (jiffies since boot): the cheap fingerprint that the pid
+    still names the process we read it for (it changes on every pid recycle)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return int(fh.read().rpartition(b")")[2].split()[19])   # field 22, after comm
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def demux(sock: socket.socket, first: bytes, on_data) -> None:
     """A non-TTY attach stream: 8-byte frames [stream, 0, 0, 0, size(4, big-endian)]."""
     buf = first
     while True:
         while len(buf) >= 8:
             stream, size = buf[0], struct.unpack(">I", buf[4:8])[0]
+            # a corrupt or hostile stream can announce a ~4GB frame and then drip bytes:
+            # one frame over 64 MiB is junk, drop the connection rather than buffer it
+            if size > 64 << 20:
+                raise OSError(f"an exec frame claims {size:,} bytes (over the 64 MiB cap)")
             if len(buf) < 8 + size:
                 break
             on_data(stream, buf[8:8 + size])
@@ -705,16 +719,20 @@ class Sandboxes:
         """Run `cmd` to its end; (exit code, timed out). Output goes to `on_output(text)`."""
         cid = container_or_cid
         b = self.box(cid)
-        b.busy += 1
+        with b.lock:                     # run threads vs reader threads: keep the count exact
+            b.busy += 1
         b.last_used = self.clock()
         try:
             exec_id, sock, first = self.open_exec(cid, ["setsid", "--wait", *cmd])
             done = threading.Event()
 
             def pump():
-                demux(sock, first, lambda s, d: on_output and on_output(
-                    d.decode("utf-8", "replace")))
-                done.set()
+                try:
+                    demux(sock, first, lambda s, d: on_output and on_output(
+                        d.decode("utf-8", "replace")))
+                finally:
+                    # a demux that drops the stream (frame cap) still ends the run
+                    done.set()
             threading.Thread(target=pump, daemon=True).start()
             t0, timed_out = time.monotonic(), False
             while not done.wait(0.2):
@@ -734,17 +752,26 @@ class Sandboxes:
                 time.sleep(0.1)
             return -1, timed_out
         finally:
-            b.busy -= 1
+            with b.lock:
+                b.busy -= 1
             b.last_used = self.clock()
 
     def _kill_exec(self, exec_id: str) -> None:
         """The exec's process group (setsid made it a leader): TERM, then KILL. Without user
-        namespaces its pid is a pid of this host, owned by chatd's user."""
-        _, _, pid = self.exit_code(exec_id)
-        if not pid:
+        namespaces its pid is a pid of this host, owned by chatd's user. Between reading the
+        exec's pid and killpg'ing it, the exec can exit and the pid be recycled into an
+        unrelated host process: /proc/<pid>'s starttime is pinned while the exec still runs
+        and re-checked before each signal, so a recycled pid is left alone."""
+        running, _, pid = self.exit_code(exec_id)
+        if not running or not pid:
             return
+        born = _proc_starttime(pid)
+        if born is None:
+            return                       # the exec already exited; nothing to signal
         import signal
         for sig in (signal.SIGTERM, signal.SIGKILL):
+            if _proc_starttime(pid) != born:
+                return                   # the pid is someone else's process now
             try:
                 os.killpg(pid, sig)
             except (ProcessLookupError, PermissionError):
