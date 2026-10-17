@@ -34,7 +34,9 @@ import yaml  # noqa: E402
 from server.conductor import migrations, residency, schema  # noqa: E402
 from server.conductor.store import Store  # noqa: E402
 
-NARRATOR = [m for m in migrations.MIGRATIONS if m[0].startswith("2026-10-17-")]
+NARRATOR = [m for m in migrations.MIGRATIONS if m[0].startswith("2026-10-17-")
+            and m[2] != "router" and m[1] != "router"]
+CORE = [m for m in migrations.MIGRATIONS if m[0] == "2026-10-17-router-coding-core"]
 
 
 # ---------------------------------------------------------------------- 1: a new box
@@ -166,6 +168,45 @@ def test_2_a_roles_document_from_before_the_narrator_gets_the_new_role():
     got = {r["id"]: r["result"] for r in migrations.run(st, migrations=NARRATOR)}
     assert got["2026-10-17-roles-narrator-off"] == "unchanged", got
     assert st.get("roles")[1]["narrator"]["mode"] == "off"
+
+
+def _router_without_core(*drop) -> dict:
+    r = copy.deepcopy(schema.SHIPPED_ROUTER)
+    for c in r["classes"]:
+        if c["id"] in drop:
+            c["policy"].pop("core", None)
+    return r
+
+
+def _router_store() -> Store:
+    st = Store(tempfile.mkdtemp(prefix="srv534-"))
+    st.put("packages", None, copy.deepcopy(schema.SHIPPED_PACKAGES), note="shipped", author="shipped")
+    return st
+
+
+def test_2_a_router_from_before_fx6_gets_the_coding_core():
+    """SRV-534: the reference box's router (v24) has no core on code_edit and debug, so under the
+    fit's `packages: core` a coding turn, decided or fallen back, got no package; the migration
+    gives them FX6's ["coding"] unless a stored version had a core there."""
+    assert CORE and CORE[0][1] == "router"
+    st = _router_store()
+    st.put("router", None, _router_without_core("code_edit", "debug"), note="old", author="owner")
+    got = migrations.run(st, migrations=CORE)
+    assert (got[0]["result"], got[0]["changes"]) == (
+        "changed", ["classes.code_edit.core=[coding]", "classes.debug.core=[coding]"]), got
+    doc = st.get("router")[1]
+    core = {c["id"]: c["policy"].get("core") for c in doc["classes"]}
+    assert core["code_edit"] == ["coding"] and core["debug"] == ["coding"]
+    assert core["three_d"] == ["threejs-scene"] and core["design_ui"] is None
+    assert migrations.run(st, migrations=CORE) == [], "runs once"
+    # a core someone removed stays removed; the shipped router is unchanged
+    st = _router_store()
+    st.put("router", None, copy.deepcopy(schema.SHIPPED_ROUTER), note="shipped", author="shipped")
+    st.put("router", None, _router_without_core("code_edit"), note="no core", author="owner")
+    assert migrations.run(st, migrations=CORE)[0]["result"] == "unchanged"
+    st = _router_store()
+    st.put("router", None, copy.deepcopy(schema.SHIPPED_ROUTER), note="shipped", author="shipped")
+    assert migrations.run(st, migrations=CORE)[0]["result"] == "unchanged"
 
 
 # ---------------------------------------------------------------------- 3: /health
