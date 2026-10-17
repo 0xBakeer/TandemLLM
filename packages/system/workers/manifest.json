@@ -13,7 +13,7 @@
   "fallback": null,
   "classes": [],
   "files": {"body": "PACKAGE.md", "references": ["references/main.md", "references/brief.md", "references/report.md"], "exemplars": []},
-  "limits": {"task_max_steps": 40, "task_max_per_run": 8, "brief_max_chars": 3000, "brief_line_min_chars": 10, "title_max_chars": 80, "result_max_chars": 8000, "salvage_max_tokens": 1500},
+  "limits": {"task_max_steps": 40, "task_max_per_run": 8, "brief_line_min_chars": 10, "title_max_chars": 80, "result_max_chars": 8000, "salvage_max_tokens": 1500},
   "eval": null,
   "calibration": null,
   "measured": null,

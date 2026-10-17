@@ -6,8 +6,9 @@ expect}` (chatd/tools.py). A worker is a full run (chatd/runs.py) on a hidden co
 `task` whose parent is the chat: the same loop, retries, compaction guard, verify phase and
 permission handling as any run, so a loop fix lands once. Its context starts fresh: the worker
 block (packages/system/workers/PACKAGE.md, then the chat-app tool rules), the worker tools
-(tools.py WORKER_TOOLS) and one user message with the task's number, title, brief, expect and the
-chat's todo list. Nothing else of the chat goes in, and only the task result comes back.
+(tools.py WORKER_TOOLS) and one user message with the task's number, title, brief, expect, the
+chat's todo list and the user's message that started the run. Nothing else of the chat goes in,
+and only the task result comes back.
 
 SHARED. Every sandbox, workspace, setting and rule lookup of a task conversation resolves to its
 chat (`root_cid`, `settings_of`): one container, one /workspace, the chat's permission mode and
@@ -27,11 +28,13 @@ with its transcript. A snapshot of the workspace at the worker's start (key: the
 base of the task's diff and a rewind point.
 
 THE CONTRACT (SRV-581). A brief has four labelled lines, Goal, Files, Constraints and Check, each
-saying something, in at most 3,000 characters, and no code: a fence, more than 4 tags, a run of
-more than 8 lines that look like code, a line of minified code or a "CODE:" block (`code_lines`).
-A brief describes the job and the worker writes the code; a brief that carried a whole page made
-the worker a typist and put the page in the main context (2026-10-17). A task call that breaks
-this is refused before any worker starts, with the template (`check_brief`). The worker ends with a report in a fixed shape,
+saying something, and no code: a fence, more than 4 tags, a run of more than 8 lines that look
+like code, a line of minified code or a "CODE:" block (`code_lines`). A brief describes the job
+and the worker writes the code; a brief that carried a whole page made the worker a typist and put
+the page in the main context (2026-10-17). Its length is the main agent's: a cap made it cut
+requirements to pass. A task call that breaks this is refused before any worker starts, with the
+template (`check_brief`). The worker also gets the user's request word for word, after the brief
+(`first_message`), so the brief scopes the job and need not repeat its details. The worker ends with a report in a fixed shape,
 which chatd parses into a `report.v1` object (`parse_report`): a report that misses a field or
 breaks a cap goes back to the worker once, as a one-call tail (`task_report`); missing fields a
 second time, chatd builds the report from the worker's calls (`build_report`). At its cap of calls
@@ -52,6 +55,7 @@ import json
 import os
 import re
 
+from chatd import attach as attach_mod
 from chatd import render
 from chatd import context as ctx_mod
 from chatd.ids import iso, now_ms, ulid
@@ -106,14 +110,35 @@ def worker_block(max_steps: int) -> str:
     return texts()["worker"].replace("{max_steps}", str(max_steps))
 
 
-def first_message(n: int, title: str, brief: str, expect: str, todos: list[dict]) -> str:
-    """The worker's one user message (the plan note's layout)."""
+def first_message(n: int, title: str, brief: str, expect: str, todos: list[dict],
+                  request: str = "") -> str:
+    """The worker's one user message (the plan note's layout), then the user's request as the
+    user wrote it: the brief comes first and says which part of it is this task."""
     lines = [f"Task {n}: {title}", "Brief:", brief.strip(),
              f"The report must also contain: {expect.strip()}"]
     if todos:
         lines.append("The chat's todo list (the main agent keeps it; you cannot change it):")
         lines += [f"- [{t['state']}] {t['text']}" for t in todos]
+    if request.strip():
+        lines += [REQUEST_LINE, request]
     return "\n".join(lines)
+
+
+REQUEST_LINE = ("The user's request (verbatim; the main agent's brief above says which part is this "
+                "task):")
+
+
+def request_text(parts: list[dict], attachments: list[dict] | None) -> str:
+    """A user message as the worker reads it: its text, and each attachment by its name and where
+    it is (never its content)."""
+    text = "".join(p.get("text") or "" for p in parts if p.get("type") == "text")
+    for a in attachments or []:
+        where = (f"at {a['path']}" if a.get("path") else
+                 f"not in the workspace ({a['unplaced']})" if a.get("unplaced") else
+                 "not in the workspace")
+        text += (f"\n[Attached file {a.get('name') or 'file'}: "
+                 f"{attach_mod.size_words(int(a.get('bytes') or 0))}, {where}]")
+    return text
 
 
 def final_text(parts: list[dict], after: int = 0) -> str:
@@ -127,7 +152,6 @@ def final_text(parts: list[dict], after: int = 0) -> str:
 
 # ---------------------------------------------------------------------- the brief (SRV-581)
 BRIEF_LINES = ("Goal", "Files", "Constraints", "Check")
-BRIEF_MAX_CHARS = 3000
 BRIEF_LINE_MIN = 10
 TITLE_MAX_CHARS = 80
 CODE_RUN_MAX = 8          # more lines of code in a run: the brief carries code
@@ -209,8 +233,6 @@ def check_brief(args: dict) -> str | None:
         n = len(carried)
         why = (texts()["code"].replace("{lines}", f"{n} line" + ("s" if n != 1 else ""))
                .replace("{line}", str(carried[0] + 1)))
-    elif len(brief) > BRIEF_MAX_CHARS:
-        why = f"the brief is {len(brief):,} characters; at most {BRIEF_MAX_CHARS:,}."
     else:
         found: dict[str, str] = {}
         for ln in brief.splitlines():
@@ -608,7 +630,12 @@ class TasksMixin:
                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
                            (tid, root, parent.id, part["id"], n, title, brief, expect, tcid, steps,
                             t))
-            text = first_message(n, title, brief, expect, self.todos(root))
+            um = self.store.one("SELECT parts, attachments FROM messages WHERE id = ?",
+                                (parent.user_message_id,))
+            request = request_text(json.loads(um["parts"]) if um else [],
+                                   json.loads(um["attachments"]) if um and um["attachments"] else
+                                   None)
+            text = first_message(n, title, brief, expect, self.todos(root), request)
             self._insert_message(tcid, None, "user", [{"type": "text", "text": text}], "done")
         try:                                     # the task's diff starts here (SRV-581's check)
             self.snaps.take(root, self.workspace(root), tid, "before")

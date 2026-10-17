@@ -2,12 +2,14 @@
 the check and the result on fixtures, then the send-back, the built report and the salvage on
 tests/fake_backend.py with a script for the main agent and its worker (tests/test_chatd_tasks.py).
 
-  1  the brief: each missing line, a line that says too little, 3,001 characters, an empty
-     expect, a long or empty title each get their own refusal with the template; a good one none
-                                                            test_the_brief_check
+  1  the brief: each missing line, a line that says too little, an empty expect, a long or empty
+     title each get their own refusal with the template; a good one none, and one of 20,000
+     characters without code none (no length cap)          test_the_brief_check
  1b  a brief that carries code: the live shape of 2026-10-17 (the four lines, then a CODE block of
      HTML), HTML without the marker, a fenced block, minified code on one line are refused with
      the lines; inline names and one-line snippets pass   test_a_brief_that_carries_code
+ 1c  the worker's message: the brief first, then the user's message that started the run word for
+     word, its attachment by name and path               test_the_worker_gets_the_users_request
   2  report.v1: the note's shape, fields in another order, labels in another case or bold, two
      reports (the last counts), text outside the fields dropped, the missing fields and the caps
      by name, a code block cut and named           test_the_report_parser
@@ -73,11 +75,9 @@ def test_the_brief_check():
     assert tk.check_brief(args(short)).startswith(
         'task refused: the "Check:" line says too little (at least 10 characters after the '
         'label).')
-    big = BRIEF + "\n" + "x" * (3001 - len(BRIEF) - 1)
-    assert len(big) == 3001
-    assert tk.check_brief(args(big)).startswith(
-        "task refused: the brief is 3,001 characters; at most 3,000.")
-    assert tk.check_brief(args(big[:-1])) is None
+    big = BRIEF + "".join(f"\n- requirement {i}: the second hand sweeps smoothly and the face "
+                          f"stays readable on a phone" for i in range(400))
+    assert len(big) > 20_000 and tk.check_brief(args(big)) is None
     assert tk.check_brief(args(expect=" ")).startswith("task refused: expect is empty")
     assert tk.check_brief(args(title="t" * 95)).startswith(
         "task refused: the title is 95 characters; at most 80.")
@@ -85,7 +85,7 @@ def test_the_brief_check():
     # labels in another case and with spaces are lines all the same
     assert tk.check_brief(args(BRIEF.replace("Goal:", "goal :"))) is None
     assert all(tk.check_brief(a).endswith(TEMPLATE) for a in (
-        args(three), args(big), args(title=""), args(expect="")))
+        args(three), args(title=""), args(expect="")))
 
 
 CLOCK_HTML = """<!DOCTYPE html>
@@ -192,6 +192,35 @@ def test_a_brief_that_carries_code():
            "'C+r2\\*Math.cos' clock.html prints 0")
     assert tk.check_brief(args(fix)) is None
     assert tk.check_brief(args(FOUR)) is None
+
+
+def test_the_worker_gets_the_users_request():
+    c = Chat()
+    try:
+        b = "XyZ"
+        raw = (f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"spec.txt\"\r\n"
+               f"Content-Type: text/plain\r\n\r\nthe dial is brass\r\n--{b}--\r\n").encode()
+        att = c.ok("POST", "/attachments", raw=raw,
+                   headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+        c.fake.script = Script(lambda b, k: {"calls": [task_call()]} if k == 0 else
+                               {"content": "ok"}, worker=worker_says(REPORT))
+        cid = agents_chat(c)
+        c.send(cid, "an earlier message")
+        c.wait_idle(cid, 30)
+        ask = ("Build a clock page in /workspace/clock.html.\n\n  - brass dial, Roman numerals\n"
+               "  - a smooth second hand; dark mode by default")
+        c.ok("POST", f"/conversations/{cid}/messages",
+             {"client_msg_id": "r1", "text": ask, "attachments": [att["id"]]})
+        c.wait_idle(cid, 30)
+        first = worker_calls(c, 2)[0][1]["messages"][1]["content"]
+        head = ("Task 2: Hello file\nBrief:\n" + BRIEF + "\nThe report must also contain: nothing\n"
+                "The user's request (verbatim; the main agent's brief above says which part is "
+                "this task):\n" + ask + "\n[Attached file spec.txt: 17 bytes, at ")
+        assert first.startswith(head), first
+        assert first.endswith("spec.txt]") and "the dial is brass" not in first
+        assert "an earlier message" not in first
+    finally:
+        c.close()
 
 
 # ---------------------------------------------------------------------- the report

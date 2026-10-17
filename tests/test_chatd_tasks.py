@@ -181,7 +181,7 @@ def test_the_worker_starts_with_a_fresh_context():
         assert b["messages"][0]["content"] == (
             "You are a worker in TandemLLM. Another assistant, the main agent, talks with the user "
             "and gave you one task. You do not see that chat. Everything you know about the task "
-            "is in the brief below. The files are in /workspace, which you share with the main "
+            "is in the brief below and in the user's request after it. The files are in /workspace, which you share with the main "
             "agent.\n\nDo the task with your tools. Change only what the brief asks for. Check "
             "your work the way the brief's Check line says, and run that check before you report. "
             "If the brief is unclear or the task is impossible, do what you can, stop, and say "
@@ -211,7 +211,9 @@ def test_the_worker_starts_with_a_fresh_context():
             "The chat's todo list (the main agent keeps it; you cannot change it):\n"
             "- [done] Scene skeleton with WebGPU and a WebGL2 fallback\n"
             "- [in_progress] Ocean shader: fix the horizon banding\n"
-            "- [pending] Sun and sky colours at sunset")
+            "- [pending] Sun and sky colours at sunset\n"
+            "The user's request (verbatim; the main agent's brief above says which part is this "
+            "task):\nfix the banding")
         assert "earlier message number" not in json.dumps(b)
         assert [t["function"]["name"] for t in b["tools"]] == [
             "read_file", "write_file", "edit_file", "glob", "grep", "web_search", "web_fetch",

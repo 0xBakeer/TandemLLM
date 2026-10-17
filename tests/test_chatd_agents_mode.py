@@ -214,6 +214,8 @@ def test_the_paragraph_is_in_agents_mode_only():
         task = [t["function"] for t in main_calls(c, on)[-1][1]["tools"]
                 if t["function"]["name"] == "task"][0]
         assert task["description"].endswith(" " + NO_CODE)
+        assert ("The worker also gets the user's request word for word: name which part is this "
+                "task and what is already done; you do not need to repeat the details.") in sys_on
     finally:
         c.close()
 

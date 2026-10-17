@@ -602,7 +602,7 @@ A run that built or changed a web page or app checks it in a browser before it e
 
 ## Tasks (VIS-E15)
 
-Agents mode (`ChatSettings.agents`, default false): the main agent talks with the user and plans; a `task` tool call gives the hands-on work to a worker, a fresh assistant that works in the chat's own sandbox and /workspace and sees nothing of the chat but its brief and the todo list. Only the task result reaches the main context; the worker's transcript is stored on its own and shown in the Task card. chatd/tasks.py is the authority; the plan is the Memo note "Chat: main agent and workers (context folding), 2026-10-17".
+Agents mode (`ChatSettings.agents`, default false): the main agent talks with the user and plans; a `task` tool call gives the hands-on work to a worker, a fresh assistant that works in the chat's own sandbox and /workspace and sees nothing of the chat but its brief, the todo list and the user's message that started the run. Only the task result reaches the main context; the worker's transcript is stored on its own and shown in the Task card. chatd/tasks.py is the authority; the plan is the Memo note "Chat: main agent and workers (context folding), 2026-10-17".
 
 ```ts
 interface ChatSettings {                  // additions
