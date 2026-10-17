@@ -306,6 +306,18 @@ class Journal:
                 except sqlite3.Error as exc:
                     self.errors += 1
                     print(f"[conductor] journal write failed: {exc}", flush=True)
+                except Exception as exc:                       # noqa: BLE001
+                    # a bug in the shaping of one item used to take the thread down with it:
+                    # every record after that hit a full queue and dropped, and nothing said
+                    # the writer was gone. One bad batch is counted and the loop goes on —
+                    # rolled back, so its half-applied rows can't ride the next commit in
+                    self.errors += 1
+                    print(f"[conductor] journal batch skipped: {type(exc).__name__}: {exc}",
+                          flush=True)
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
                 finally:
                     for _ in batch:
                         self._q.task_done()
@@ -501,6 +513,7 @@ class Journal:
     def info(self) -> dict:
         return {"path": self.path, "ring": len(self.ring), "events_ring": len(self.events_ring),
                 "queue": self._q.qsize(), "dropped": self.dropped, "errors": self.errors,
+                "writer_alive": self._thread is not None and self._thread.is_alive(),
                 "monitor_rows": self.monitor_rows, "retention_days": self.retention_days,
                 "table": "conductor_events"}
 
