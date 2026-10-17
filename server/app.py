@@ -6038,10 +6038,9 @@ class Handler(BaseHTTPRequestHandler):
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
-                # through the proxy, the status and nothing about the configuration (OPS-175: and
-                # the status responder's port, which the page asks while this engine restarts)
-                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok",
-                                         "status_port": _status_port()})
+                # through the proxy, the status and nothing about the configuration (a page there
+                # reaches the status responder through the same proxy, OPS-175)
+                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
                 "status_port": _status_port(),
