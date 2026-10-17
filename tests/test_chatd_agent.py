@@ -181,6 +181,24 @@ def test_the_step_cap_ends_interrupted_and_continue_goes_on():
         c.close()
 
 
+def test_a_new_chat_runs_up_to_100_model_calls():
+    """Live (2026-10-17, the pagoda replay): a 15-file build used all 50 calls of the old default,
+    22 of them writing files, and stopped while it fixed its first errors, before any check."""
+    c = Chat()
+    try:
+        cid = c.new()
+        snap = c.ok("GET", f"/conversations/{cid}")
+        assert snap["settings"]["max_steps"] == 100
+        assert c.ok("GET", "/capabilities")["defaults"]["max_steps"] == 100
+        c.send(cid, calls(("glob", {"pattern": "**/*"})))
+        s = c.wait_idle(cid, 20)
+        assert s["messages"][-1]["status"] == "done"
+        run = c.svc.store.one("SELECT max_steps FROM runs WHERE conversation_id = ?", (cid,))
+        assert run["max_steps"] == 100
+    finally:
+        c.close()
+
+
 def test_the_same_call_three_times_stops_the_run():
     c = Chat()
     try:
