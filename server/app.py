@@ -6368,7 +6368,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
                                                          f"SameSite=Strict; Path=/; Max-Age=0"
                                                          f"{secure}"),))
-        who = self.headers.get("X-Real-IP") or self._peer()
+        who = a.login_key(self._peer(), self.headers)   # the single rule (server/auth.py):
+        # X-Real-IP counts only from loopback or a TANDEM_TRUSTED_PROXY peer; every other
+        # peer is keyed as itself, so a rotating header cannot file failures in fake buckets.
         if a.login_blocked(who):
             return self._json(429, {"error": {"type": "too_many",
                                               "message": "too many failed logins; wait a minute"}},

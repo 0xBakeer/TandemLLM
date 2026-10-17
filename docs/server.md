@@ -33,7 +33,7 @@ The admin password is the admin token, `QSE_ADMIN_TOKEN` in `secrets.env` (mode 
 
 The dashboard has no sign-in screen in this release. With a password set, its reads still work while the login is off, but its edits and the memory views show the server's 401 as an error and the page shows a banner. The sign-in for that case comes later; until then, use the API with the bearer header or leave the password unset.
 
-The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by default) matters only with a password set: then `on` makes `/v1/dashboard/*` need the token or a session too. With no password it changes nothing. [dashboard.md](dashboard.md#access) says what the dashboard shows.
+The dashboard login (`--dashboard-login`, from `QSE_DASHBOARD_LOGIN`, off by default) matters only with a password set: then `on` makes `/v1/dashboard/*` need the token or a session too. With no password it changes nothing. Failed logins are throttled per client: a fronting proxy's `X-Real-IP` is believed only when the TCP peer is loopback (a proxy on this box) or names itself in `TANDEM_TRUSTED_PROXY` — the LAN shape, where every real client shares the one peer; any other peer is keyed as itself (server/auth.py). [dashboard.md](dashboard.md#access) says what the dashboard shows.
 
 ## What the API supports
 
