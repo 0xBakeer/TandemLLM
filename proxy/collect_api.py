@@ -427,7 +427,15 @@ class Collector:
                 if st.instances:
                     last = max(st.instances.items(), key=lambda kv: kv[1]["requests"])[1]
                     cur = dict(last)
-            self._pull(bk, st, cur)
+            try:
+                self._pull(bk, st, cur)
+            except Exception as exc:                                   # noqa: BLE001
+                # a sample that fails outside `_pull`'s own net (a bad url, an unexpected
+                # ingest error) must not cost the other backends their round; the failing
+                # one keeps its own error state and the PULL_OFF_S backoff between tries
+                if st.pull["state"] != "error":
+                    self.log(f"[collect] pull {bk['id']} failed: {type(exc).__name__}: {exc}")
+                st.pull.update(state="error", next=self.clock() + PULL_OFF_S)
 
     def _pull(self, bk: dict, st: _Backend, cur: dict) -> None:
         from proxy import engines
