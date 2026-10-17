@@ -18,6 +18,10 @@ selection's checked numbers, `shell=False`, a minimal environment, a timeout eac
     fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when the weights and
                       the assets are on disk; OPS-95: it fetches the missing assets too; VIS-153:
                       and the models of the tools the selection turns on, QSE_FETCH_ASSETS)
+    preflight         OPS-169: before anything stops, what the restart needs (`preflight` below):
+                      the scripts parse, the new configuration sources under set -u, the weights
+                      are complete (the hub manifest's sizes), memory, the port and the locks, the
+                      interpreters; a failure ends the job here and the running setup keeps running
     (waiting)         write_config waits until no request runs or waits on the engine (its /health,
                       IDLE_WAIT_S at most; then nothing has changed and the job fails)
     write_config      run/setup.env from the registry's keys and the selection, the old one kept
@@ -96,6 +100,7 @@ PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 STEPS = (("check", "Check the selection, the disk and the box"),
          ("unload_assistant", "Unload Wren"),
          ("fetch", "Download the weights"),
+         ("preflight", "Check the new setup before the restart"),
          ("write_config", "Write the configuration (run/setup.env)"),
          ("switch", "Restart the engine with the new setup"),
          ("smoke", "Check that the new engine answers"),
@@ -745,7 +750,7 @@ def spawn(jid: str) -> int:
     env = {k: v for k, v in os.environ.items()
            if k in ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "HF_TOKEN", "HF_HOME",
                     "HF_HUB_CACHE", "HF_TOKEN_PATH", "QSE_OPS_DIR", "BOX_LOCK", "TZ",
-                    "CUDA_HOME")}
+                    "CUDA_HOME", "MEM_NEED_GB")}
     with open(os.path.join(d, "runner.out"), "ab") as out:
         p = subprocess.Popen([sys.executable, "-m", "server.setup.apply", "run", d], cwd=ROOT,
                              env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
@@ -843,7 +848,7 @@ class Runner:
 
     def env(self, **extra) -> dict:
         keep = ("PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
-                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME")
+                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB")
         e = {k: v for k, v in os.environ.items() if k in keep}
         e.update({k: str(v) for k, v in extra.items()})
         return e
@@ -942,8 +947,11 @@ class Runner:
                 return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
                                            f"else changed")
             self.step("fetch", "done")
-        # write_config: nothing has changed until the engine is idle
         old_port, new_port = spec["ports"]["current"], spec["ports"]["next"]
+        if not self._preflight_step(m, sel["profile"], render_overlay(m, sel), old_port, new_port,
+                                    secrets=sel["advanced"].get("admin_password") == "generate"):
+            return False
+        # write_config: nothing has changed until the engine is idle
         if not self._wait_idle("write_config", old_port):
             return False
         self.step("write_config", "running")
@@ -1088,6 +1096,8 @@ class Runner:
                                            f"else changed")
             self.step("fetch", "done")
         old_port, new_port = p["ports"]["current"], p["ports"]["next"]
+        if not self._preflight_step(m, prof, None, old_port, new_port):
+            return False
         if not self._wait_idle("write_config", old_port):
             return False
         self.step("write_config", "running")
@@ -1122,6 +1132,24 @@ class Runner:
         self.step("smoke", "done", f"{prof} answers on port {new_port}")
         self.job["message"] = f"The shipped configuration runs, on {prof}."
         self._drop_marker_copy()
+        return True
+
+    # -- the preflight (OPS-169)
+    def _preflight_step(self, m: dict, profile: str, overlay: str | None, old_port: int,
+                        new_port: int, secrets: bool = False) -> bool:
+        self.step("preflight", "running")
+        try:
+            problems = preflight(m, profile, overlay, ops=self.ops, old_port=old_port,
+                                 new_port=new_port, setup_mode=bool(self.spec.get("setup_mode")),
+                                 secrets=secrets, http=self.http)
+        except Exception as exc:                                  # noqa: BLE001
+            problems = [f"the check itself failed ({type(exc).__name__}: {exc})"]
+        for t in problems:
+            self.log(f"[preflight] {t}")
+        if problems:
+            return self._fail("preflight", " ".join(problems) + " Nothing was stopped or changed.")
+        self.step("preflight", "done", "the scripts, the new configuration, the weights, memory and "
+                                       "the port are ready")
         return True
 
     # -- idle, the setup-mode marker
@@ -1229,6 +1257,147 @@ class Runner:
                                             f"see logs/engine.log on the box")
             self.job["rolled_back"] = False
         return False
+
+
+# ---------------------------------------------------------------------- the preflight (OPS-169)
+#: the scripts the switch runs (a missing roles.sh only warns in start.sh; make-secrets.sh only with
+#: a generated password)
+PREFLIGHT_SCRIPTS = ("use-profile.sh", "start.sh", "stop.sh", "engines.sh")
+PREFLIGHT_PY = ("engine_status.py", "fetch_weights.py")
+
+
+def _sources(ops: str, profile: str, overlay: str | None, keys: list[str]) -> tuple[dict, str | None]:
+    """serve.env with `profile` and the overlay text the job will write (None: no overlay), under
+    set -u as start.sh sources it, in a subshell: the keys' values, and the shell's own error."""
+    import tempfile
+    envf = os.path.join(ops, "serve.env")
+    fd, tmp = tempfile.mkstemp(prefix="setup-preflight-", suffix=".env")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(overlay or "")
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.path.expanduser("~"),
+               "ENVF": envf, "QSE_PROFILE_OVERRIDE": profile, "QSE_SETUP_ENV": tmp}
+        script = ('set -u; set -a; . "$ENVF" || exit 3; set +a; for k in "$@"; do '
+                  'if [ -n "${!k+x}" ]; then printf "%s\\t%s\\n" "$k" "${!k}"; fi; done')
+        r = subprocess.run(["bash", "-c", script, "-", *keys], capture_output=True, text=True,
+                           timeout=20, env=env)
+    finally:
+        os.unlink(tmp)
+    out = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition("\t")
+        out[k] = v
+    if r.returncode != 0:
+        return out, (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1].replace(envf, "serve.env")
+    return out, None
+
+
+def _runs(py: str) -> str | None:
+    if not py:
+        return "is not set"
+    if os.sep in py and not os.path.exists(py):
+        return f"({py}) does not exist"
+    try:
+        r = subprocess.run([py, "-c", "import json, os, sys"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"({py}) does not run: {exc}"
+    return None if r.returncode == 0 else f"({py}) does not run: " + \
+        (r.stderr.strip().splitlines() or ["?"])[-1]
+
+
+def _weights_sizes(wdir: str) -> list[str]:
+    """The files of the folder's hub manifest (ops/fetch_weights.py) whose size is not the hub's."""
+    try:
+        with open(os.path.join(wdir, "_hub_manifest.json")) as fh:
+            files = json.load(fh).get("files") or {}
+    except (OSError, ValueError):
+        return []
+    bad = []
+    for name, f in sorted(files.items()):
+        p = os.path.join(wdir, name)
+        if isinstance(f, dict) and f.get("size") and os.path.isfile(p) and os.path.getsize(p) != f["size"]:
+            bad.append(f"{name} has {os.path.getsize(p):,} bytes, the hub lists {f['size']:,}")
+    return bad
+
+
+def preflight(m: dict, profile: str, overlay: str | None, *, ops: str, old_port: int, new_port: int,
+              setup_mode: bool, secrets: bool = False, http=None) -> list[str]:
+    """What the restart needs, checked while the running setup still runs (OPS-169): each problem as a
+    sentence; none: go on. Nothing here changes anything."""
+    out = []
+    # 1. the scripts the switch runs are there and parse
+    for name in PREFLIGHT_SCRIPTS + (("make-secrets.sh",) if secrets else ()) + ("serve.env",):
+        p = os.path.join(ops, name)
+        if not os.path.isfile(p):
+            out.append(f"ops/{name} is missing on this box (run tandem doctor, or the installer again).")
+            continue
+        r = subprocess.run(["bash", "-n", p], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            out.append(f"ops/{name} has an error: {(r.stderr.strip().splitlines() or ['?'])[-1]}")
+    for name in PREFLIGHT_PY:
+        p = os.path.join(ops, name)
+        try:
+            with open(p) as fh:
+                compile(fh.read(), p, "exec")
+        except OSError:
+            out.append(f"ops/{name} is missing on this box.")
+        except SyntaxError as exc:
+            out.append(f"ops/{name} has an error on line {exc.lineno}: {exc.msg}.")
+    # 2. the new configuration sources as start.sh sources it
+    env, err = _sources(ops, profile, overlay, ["QSE_WEIGHTS", "QSE_WEIGHTS_DIR", "PY", "CHATD_PY",
+                                                 "QSE_CHATD", "QSE_MEM_NEED_GIB"])
+    if err:
+        out.append(f"serve.env does not load with the new configuration: {err}.")
+    elif env.get("QSE_WEIGHTS") and not profile.startswith(registry.COMMUNITY_PREFIX) and \
+            env["QSE_WEIGHTS"] != profile:
+        out.append(f"serve.env names the weights {env['QSE_WEIGHTS']} with the new configuration, not "
+                   f"{profile}.")
+    # 3. the weights are complete
+    disk = device_mod.on_disk(m, fresh=True).get(profile, {})
+    if not disk.get("weights"):
+        out.append(f"The weights of {profile} are not complete on this box"
+                   f"{' (' + disk['dir'] + ')' if disk.get('dir') else ''}: run the install again to "
+                   f"finish the download.")
+    else:
+        out += [f"A weight file is cut short: {b}." for b in _weights_sizes(disk.get("dir") or
+                                                                            env.get("QSE_WEIGHTS_DIR", ""))]
+    missing = [registry.asset(m, a)["label"] for a in disk.get("assets_missing", []) if registry.asset(m, a)]
+    if missing:
+        out.append("Files the profile reads are not on this box: " + ", ".join(missing) + ".")
+    # 4. memory: what is free now and what the running engine gives back at its stop
+    mem = device_mod.meminfo()
+    # what ops/use-profile.sh waits for after the stop: MEM_NEED_GB, else the profile's, else 80
+    need = float(os.environ.get("MEM_NEED_GB") or env.get("QSE_MEM_NEED_GIB") or 80)
+    if "MemAvailable" in mem:
+        freed = 0.0
+        if not setup_mode and http is not None:
+            try:
+                mm = (http(f"http://127.0.0.1:{old_port}/health", timeout=5) or {}).get("memory") or {}
+                freed = max([float(mm[k]) for k in ("engine_reserved_gb", "reserved_gb", "rss_gb")
+                             if isinstance(mm.get(k), (int, float))] or [0.0])
+            except Exception:                                     # noqa: BLE001
+                freed = None
+        if freed is not None and mem["MemAvailable"] + freed + 2 < need:
+            out.append(f"Not enough memory for {profile}: it needs {need:g} GiB free to start; "
+                       f"{mem['MemAvailable']:.1f} GiB are free now and the running engine gives back "
+                       f"about {freed:.1f}. Stop other programs that use memory, then try again.")
+    # 5. the port, the box lock, a hold
+    if new_port != old_port and _port_taken(new_port):
+        out.append(f"Port {new_port} is in use by another program on this box.")
+    if _box_lock_held():
+        out.append("The box lock (~/.qwen38-box.flock) is held: a hold or another job owns the board.")
+    pause = os.path.join(ROOT, ".watchdog.off")
+    if os.path.exists(pause) and time.time() - os.stat(pause).st_mtime < 2400:
+        out.append("A hold owns the board (.watchdog.off): the start would refuse.")
+    # 6. the interpreters
+    why = _runs(env.get("PY", ""))
+    if why:
+        out.append(f"The engine's Python {why}.")
+    if (env.get("QSE_CHATD") or "on") != "off":
+        why = _runs(env.get("CHATD_PY") or env.get("PY", ""))
+        if why:
+            out.append(f"chatd's Python {why}.")
+    return out
 
 
 def write_overlay(m: dict, sel: dict, clock=time.time) -> str | None:

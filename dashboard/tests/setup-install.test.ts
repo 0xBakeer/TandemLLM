@@ -6,7 +6,7 @@ import type { SetupEnvChange, SetupJob, SetupJobEvent, SetupJobStep, SetupJobSte
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
 import { appendLog, applyJobEvent, changeText, dedupes, doneMessage, durationText, finishedLines, isFinal, type JobLog, LOG_KEEP, needsJob, streamAction, streamFinished } from '../src/setup/job-view';
 
-const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
+const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
 
 function step(id: SetupJobStepId, state: SetupJobStep['state']): SetupJobStep {
   return { id, label: id, state, started_at: null, ended_at: null, detail: null };
@@ -29,7 +29,7 @@ function job(state: SetupJob['state'], states: Partial<Record<SetupJobStepId, Se
   };
 }
 
-const DONE = job('done', { check: 'done', unload_assistant: 'done', fetch: 'done', write_config: 'done', switch: 'done', smoke: 'done', rollback: 'skipped' });
+const DONE = job('done', { check: 'done', unload_assistant: 'done', fetch: 'done', preflight: 'done', write_config: 'done', switch: 'done', smoke: 'done', rollback: 'skipped' });
 
 /** a fetch whose body hands over `chunks` (each one read() of the stream) and then ends */
 function fetchOf(chunks: string[]): typeof fetch {
@@ -330,7 +330,7 @@ describe('VIS-211: the install page shows the job\'s true end', () => {
   it('a fresh page on a job whose last event is a log line holds the job (and the old rule did not)', async () => {
     const j = await followDeduped(old, true);
     expect(j?.state).toBe('done');
-    expect(j?.steps.map((x) => x.state)).toEqual(['done', 'done', 'done', 'done', 'done', 'done', 'skipped']);
+    expect(j?.steps.map((x) => x.state)).toEqual(['done', 'done', 'done', 'done', 'done', 'done', 'done', 'skipped']);
     // the negative control: deduping every id dropped the snapshot, and with no job the done event too
     expect(await followDeduped(old, false)).toBeNull();
   });

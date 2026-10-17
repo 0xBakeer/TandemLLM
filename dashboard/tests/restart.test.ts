@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { SetupJob, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { cardModel, fetchStatus, knownJob, rememberJob, restarting, type SetupStatus, statusUrls } from '../src/lib/restart';
 
-const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
+const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
 function job(states: Partial<Record<SetupJobStepId, SetupJobStep['state']>>, state: SetupJob['state'] = 'running'): SetupJob {
   return {
     id: '0123456789abcdef', kind: 'apply', state, created_at: 1760678000, ended_at: null, profile: 'exl3-6.0',
@@ -13,7 +13,7 @@ function job(states: Partial<Record<SetupJobStepId, SetupJobStep['state']>>, sta
     summary: { model: 'Qwen3.8-27B', profile: 'exl3-6.0', profile_label: 'EXL3 6.0', tools: [], slots: 1, window: 262144, side_window: null },
   };
 }
-const RUNNING = job({ check: 'done', unload_assistant: 'done', fetch: 'skipped', write_config: 'done', switch: 'running' });
+const RUNNING = job({ check: 'done', unload_assistant: 'done', fetch: 'skipped', preflight: 'done', write_config: 'done', switch: 'running' });
 const STATUS: SetupStatus = {
   engine: { state: 'starting', typical_start_s: 240, left_s: 120 },
   job: null,
@@ -35,7 +35,7 @@ describe('VIS-209: one restart status card', () => {
     const t0 = 1760678100_000;
     const m = cardModel(RUNNING, STATUS, t0 + 120_000, t0);
     expect(m.title).toBe('Restarting the engine with Qwen3.8-27B');
-    expect(m.step).toBe('Step 5 of 6: Restart the engine with the new setup');
+    expect(m.step).toBe('Step 6 of 7: Restart the engine with the new setup');
     expect(m.phases.find((p) => p.current)?.id).toBe('warmup');
     expect(m.elapsed).toBe('2 min');
     expect(m.left).toBe('about 2 min left');
@@ -57,7 +57,7 @@ describe('VIS-209: one restart status card', () => {
   it('a rollback says it goes back', () => {
     const j = job({ switch: 'failed', rollback: 'running' });
     expect(cardModel(j, null, 0, 0).title).toBe('Going back to the previous setup');
-    expect(cardModel(j, null, 0, 0).step).toBe('Step 7 of 7: rollback');
+    expect(cardModel(j, null, 0, 0).step).toBe('Step 8 of 8: rollback');
   });
 
   it('which jobs are in their restart', () => {

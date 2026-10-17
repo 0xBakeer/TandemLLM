@@ -174,6 +174,7 @@ const STEP_LABELS: Record<SetupJobStepId, string> = {
   check: 'Check the selection, the disk and the box',
   unload_assistant: 'Unload Wren',
   fetch: 'Download the weights',
+  preflight: 'Check the new setup before the restart',
   write_config: 'Write the configuration (run/setup.env)',
   switch: 'Restart the engine with the new setup',
   smoke: 'Check that the new engine answers',
@@ -385,7 +386,7 @@ export class MockSetup {
     const prof = sel.profile;
     const fetch = !this.onDisk[prof];
     const slow = scenario === 'slow' ? 3 : 1;
-    const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
+    const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
     const steps: SetupJobStep[] = ids.map((s) => ({ id: s, label: STEP_LABELS[s], state: 'pending', started_at: null, ended_at: null, detail: null }));
     const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes, kind, rolled_back: false, failed_step: null, url: `http://<this box>:${sel.advanced.port ?? 8000}/dashboard/` };
     const tl: { at: number; ev: SetupJobEvent }[] = [];
@@ -407,6 +408,7 @@ export class MockSetup {
     step('unload_assistant', 600 * slow, ['[wren] unloading qwen3.5-2b (4.4 GiB back)']);
     if (fetch) step('fetch', 2600 * slow, [`[profile] fetching ${prof} from ${MODEL.profiles.find((p) => p.id === prof)?.hf_repo}`, '[hf] 25 % of 18.4 GB', '[hf] 50 %', '[hf] 75 %', '[hf] 100 %, sha256 ok']);
     else step('fetch', 0, [], 'skipped', 'already on the box');
+    step('preflight', 400 * slow, ['[preflight] scripts, configuration, weights, memory and port ready']);
     if (this.o.waitIdle) {
       // apply.py _wait_idle: the step waits for the engine's requests before anything stops
       tl.push({ at: t, ev: { type: 'step', step: { id: 'write_config', label: STEP_LABELS.write_config, state: 'waiting', started_at: null, ended_at: null, detail: 'waiting for 2 requests to finish before the restart' } } });

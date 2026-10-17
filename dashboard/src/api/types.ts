@@ -1526,7 +1526,7 @@ export interface SetupPlan {
   dry_run?: boolean;
 }
 
-export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'write_config' | 'switch' | 'smoke' | 'rollback';
+export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'preflight' | 'write_config' | 'switch' | 'smoke' | 'rollback';
 /** waiting: the step waits for the engine's requests to finish before anything stops (1.0+) */
 export type SetupJobStepState = 'pending' | 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
 export interface SetupJobStep {
