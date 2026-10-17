@@ -57,6 +57,13 @@ lists task classes) is answered without a stream, with logprobs. A body with
 `continue_final_message` continues: it streams `closed` words as content. Every request body is
 kept in `fake.bodies`.
 
+A script (in a test): `fake.script = fn(body, headers)` answers a chat completion it returns a
+dict for (None: the words above decide). The dict: `content` (the answer's text), `reasoning`,
+`calls` ([{name, arguments, id?}], as FAKE_CALLS), `status` (an error answer with that status and
+`message`), `drop` (the stream breaks after five pieces), `finish` (`error`: our engine's failure
+mid-stream), `tps` (pieces a second; a piece is five characters). The tests of the workers (VIS-E15) steer the main agent and each worker by the
+request's `x-session-id`.
+
 A prefix cache: a request whose messages begin with the messages of an earlier request reports
 those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
 here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
@@ -153,6 +160,8 @@ class Fake:
         # how many prewarms came
         self.peek: dict | None = None
         self.prewarms = 0
+        self.script = None              # fn(body, headers) -> dict | None (see the module doc)
+        self.calls: list = []           # (headers, body) of every chat completion, in order
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -321,7 +330,49 @@ def make_handler(fake: Fake):
                 return self._json(404, {"error": {"message": "no route"}})
             if p.endswith("chat/completions") and _is_question(body):
                 return self._question(body, text)
+            if p.endswith("chat/completions"):
+                with fake.lock:
+                    fake.calls.append((dict(self.headers.items()), body))
+                got = fake.script(body, dict(self.headers.items())) if fake.script else None
+                if got is not None:
+                    return self._scripted(body, got)
             return self._complete(p, body, text)
+
+        def _scripted(self, body, got: dict):
+            """A completion the test's script wrote (`fake.script`)."""
+            if got.get("status"):
+                return self._json(int(got["status"]), {"error": {
+                    "message": got.get("message") or f"fake {got['status']}",
+                    "type": "invalid_request_error"}})
+            content = got.get("content") or ""
+            reasoning = [got["reasoning"]] if got.get("reasoning") else []
+            answer = [content[i:i + 5] for i in range(0, len(content), 5)]
+            self._special, self._calls = None, got.get("calls")
+            self._n_msgs = len(body.get("messages") or [])
+            tools = bool(self._calls)
+            usage = self._usage(body, "", len(reasoning) + len(answer) + (8 if tools else 0),
+                                len(reasoning))
+            words = ("FAKE_DROP " if got.get("drop") else "") + \
+                ("FAKE_FINISH_ERROR " if got.get("finish") == "error" else "") + \
+                (f"FAKE_TPS {got['tps']} " if got.get("tps") else "")
+            if not body.get("stream"):
+                msg = {"role": "assistant", "content": content}
+                return self._json(200, {"id": "chatcmpl-s", "object": "chat.completion",
+                                        "created": 1, "model": body.get("model"), "choices": [
+                                            {"index": 0, "message": msg, "finish_reason": "stop"}],
+                                        "usage": usage})
+            opts = body.get("stream_options") or {}
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            try:
+                self._stream(True, "chatcmpl-s" + ulid_ish(), body.get("model"), reasoning, answer,
+                             tools, usage, opts.get("include_usage") is True, False, words, 0.0)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                with fake.lock:
+                    fake.closed_early += 1
 
         def _question(self, body, text):
             """The router's class question: an option, greedy, with logprobs."""
@@ -639,6 +690,14 @@ def make_handler(fake: Fake):
             self._send_chunk(b"")
 
     return H
+
+
+_N = [0]
+
+
+def ulid_ish() -> str:
+    _N[0] += 1
+    return f"{_N[0]:06d}"
 
 
 def _is_question(body: dict) -> bool:

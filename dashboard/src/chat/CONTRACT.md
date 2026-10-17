@@ -565,3 +565,52 @@ A run that built or changed a web page or app checks it in a browser before it e
 - Meanwhile `run.phase` is `verifying`, `now` "Verifying the app: loading <target> in a browser (check N of 2)", `tool` the call. The model then fixes what the check found or answers; at most two checks a run.
 - A completed run that built or changed an app ends with a `VerifyPart` (`part.added`): `state` passed, problems (the last check's, not fixed), not_run (no check could run: no sandbox, the step limit, the sandbox failed) or stale (files changed after the last check); `text` a lead line, then "Checked: ..." and "Not checked: ..." lines with the items of `checked` and `not_checked`. The model never reads it.
 - `ChatSettings.verify` (default true; absent on an older server = on) turns it off; the composer's tools menu has the switch.
+
+
+## Tasks (VIS-E15)
+
+Agents mode (`ChatSettings.agents`, default false): the main agent talks with the user and plans; a `task` tool call gives the hands-on work to a worker, a fresh assistant that works in the chat's own sandbox and /workspace and sees nothing of the chat but its brief and the todo list. Only the task result reaches the main context; the worker's transcript is stored on its own and shown in the Task card. chatd/tasks.py is the authority; the plan is the Memo note "Chat: main agent and workers (context folding), 2026-10-17".
+
+```ts
+interface ChatSettings {                  // additions
+  agents?: boolean;                       // default false; absent on an older server = off
+  task_max_steps?: number;                // a worker's model calls, default 40
+  task_max_per_run?: number;              // the tasks one run may give, default 8
+}
+type RunPhase = /* ... */ | 'task';       // the parent's phase while its worker runs
+
+type TaskStatus = 'running' | 'done' | 'partial' | 'failed' | 'cancelled' | 'interrupted';
+interface Task {
+  id: string; n: number;                  // n: the chat's tasks from 1 ("Task 2")
+  title: string; brief: string; expect: string;
+  status: TaskStatus; attempt: number;
+  conversation_id: string;                // the chat
+  task_conversation_id: string;           // the worker's hidden conversation (never in the list)
+  run_id: string; call_id: string;        // the parent run and its task call (a ToolCallPart, name 'task')
+  session: string;                        // the engine's session: chat-<chat>-task-<n>
+  steps: number; max_steps: number;       // the worker's model calls so far, its limit
+  prompt_tokens: number; completion_tokens: number; cached_tokens: number;   // summed over its calls
+  started_at: string; ended_at: string | null;
+  report: object | null;                  // what the worker reported, as chatd took it
+  report_source: 'worker' | 'worker-second' | 'chatd' | null;
+  check: string | null;                   // chatd's check of the work
+  error: string | null;
+}
+interface TaskDetail { task: Task; messages: Message[]; seq: string }   // the transcript; seq: the chat's log it includes
+```
+
+- `GET /conversations/{id}/tasks` -> `{tasks: Task[]}` (by `n`); `GET /conversations/{id}/tasks/{task_id}` -> `TaskDetail`: the worker's messages (its user message is the brief chatd wrote; tool calls with their arguments and results), the running one's from memory. Apply the chat's events after `seq` that carry this `task_id`.
+- The task call itself is a normal `ToolCallPart` (`name: 'task'`, `risk: 'task'`) in the main agent's message; its `output.content` is the task result the main agent read. The card finds its task by `call_id`.
+- Events, all on the chat's own stream:
+
+```ts
+  | { type: 'task.started'; run_id: string; task: Task }
+  | { type: 'task.phase'; task_id: string; phase: RunPhase; now: string; step: number; max_steps: number; tool?: Run['tool'] }
+  | { type: 'task.metrics'; task_id: string; prompt_tokens: number; completion_tokens: number; decode_tps: number | null }   // E, once a second
+  | { type: 'task.done'; task_id: string; status: TaskStatus; report: object | null; check: string | null;
+      stats: { steps: number; max_steps: number; prompt_tokens: number; completion_tokens: number; cached_tokens: number; ms: number; report_source: Task['report_source'] } }
+```
+
+- The worker's transcript streams as the usual `part.added`, `part.delta`, `part.done`, `tool.asking`, `tool.started`, `tool.output`, `tool.done`, `tool.auto_approved` and `pane.open`, each with `task_id`; their `message_id` is the worker's message (in `TaskDetail.messages`), never one of the chat's. A reducer without tasks finds no such message and changes nothing. The worker's own `run.*`, `message.created`, `context.changed`, `usage.changed` and `compaction` events never reach the chat: `task.*` says them.
+- While a worker runs the parent run's `phase` is `task` and its `now` "Task 2: Ocean shader: fix the horizon banding, call 12 of 40: writing src/ocean.wgsl" (the worker's own Now line at the end). A worker's permission prompt is a `tool.asking` with `task_id`; answer it with `POST /conversations/{chat}/permissions/{call_id}` as any prompt; the chat's status is `waiting` meanwhile.
+- `ContextReport.worker`: null when no worker runs, else `{task_id, n, title, used, window, split: {system, tools, brief, files, steps}, step, max_steps, cache: {warm, cold, source}}` (the split is chatd's estimate from the characters). `TurnStats.workers?: {count, prompt_tokens, completion_tokens, cached_tokens, ms}` on a turn that gave tasks; its own figures stay the main agent's, and `ConversationUsage` counts both.

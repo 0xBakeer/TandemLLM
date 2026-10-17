@@ -77,7 +77,7 @@ class ToolCtx:
         self.svc, self.run, self.part = svc, run, part
         self.call_id = part["id"]
         self.run_id = run.id
-        self.cid = run.conv.id
+        self.cid = svc.root_cid(run.conv.id)     # a worker works in its chat's sandbox and files
         self.ws = svc.workspace(self.cid)
         self.engine = svc.engine
         self._out: list[str] = []
@@ -294,6 +294,8 @@ class AgentMixin:
         sandbox = self.sandboxes.available()
         library = self.library_available()
         for t in tools_mod.BUILTINS:
+            if t.name in tools_mod.MODE_TOOLS:      # a mode's tool (task), never the picker's
+                continue
             if t.sandbox and not sandbox:
                 continue
             if t.needs == "library" and not library:
@@ -302,10 +304,12 @@ class AgentMixin:
         return ok
 
     def tools_for(self, settings: dict, info: dict, cid: str | None = None,
-                  listing: bool = True) -> list:
+                  listing: bool = True, agents: bool = False) -> list:
         """The chat's tools, in the fixed order: built-ins, MCP servers by name, then imported
         Open WebUI toolkits by name (they need the sandbox). `listing` False: an MCP server whose
-        tools were never listed is not started for it (the cache peek's body)."""
+        tools were never listed is not started for it (the cache peek's body). A task
+        conversation's: the worker's (tools.py WORKER_TOOLS of the chat's enabled ones, nothing
+        else). `agents`: the main agent of a run in Agents mode (VIS-E15), with `task`."""
         if not info.get("tools", True):
             return []
         prefs = self._prefs()
@@ -318,9 +322,13 @@ class AgentMixin:
                 self.web_search_settings(settings)["provider"] == "off":
             # SRV-469: no provider for this chat, no search tool in its request
             out = [t for t in out if t.needs != "web_search"]
+        if cid and self.root_cid(cid) != cid:
+            return [t for t in out if t.name in tools_mod.WORKER_TOOLS]
         if settings.get("plan_mode"):
             # SRV-363: the read tools and the todo list, nothing that changes the world
             return [t for t in out if t.name in PLAN_TOOLS]
+        if agents:
+            out.append(tools_mod.BY_NAME["task"])
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
             out += mcp.tools_for(settings, cid if listing else None)
@@ -417,6 +425,8 @@ class AgentMixin:
         conv = self.conv(cid)
         run = conv.run
         w = run.waiting.get(call_id) if run is not None else None
+        if w is None and run is not None and run.child is not None:
+            w = run.child.waiting.get(call_id)          # a worker's prompt, shown in its chat
         if w is None or w["answer"] is not None:
             raise ApiError(409, "already_answered", "this prompt is not open (answered on another "
                                                     "device, or the run ended)")
@@ -432,7 +442,10 @@ class AgentMixin:
         part's `approved` (and tool.started's): user (the prompt), rule (a rule, an always
         policy, auto-accept edits), auto or yolo (the chat's mode), None (the tool's default). A
         call the mode allowed also leaves a `tool.auto_approved` event in the chat's log."""
-        d, by = self._decide(run.conv.id, tool, args, settings)
+        if tool.name == "task":
+            return "allow", ""          # each call of its worker is decided on its own
+        root = self.root_cid(run.conv.id)               # a worker's rules are its chat's
+        d, by = self._decide(root, tool, args, settings)
         if d == "allow" and by:
             conv = run.conv
             with conv.lock:
@@ -448,7 +461,7 @@ class AgentMixin:
         if d == "deny":
             return "deny", "A permission rule denies this call."
         conv = run.conv
-        allows = [r for r in self.rules(conv.id) if r["decision"] == "allow"]
+        allows = [r for r in self.rules(root) if r["decision"] == "allow"]
         rule = tools_mod.suggested_rule(tool.name, args, allows)
         words = tools_mod.summary(tool.name, args)
         w = {"event": threading.Event(), "answer": None}
@@ -462,9 +475,9 @@ class AgentMixin:
                              "suggested_rule": rule}, run_id=run.id)
         run.set_phase("permission", f"Waiting for permission: {tool.name}",
                       tool={"call_id": part["id"], "name": tool.name})
-        self.emit_global({"type": "tool.asking", "conversation_id": conv.id,
+        self.emit_global({"type": "tool.asking", "conversation_id": root,
                           "call_id": part["id"], "summary": words})
-        self.summary_changed(conv, status="waiting")
+        self.summary_changed(self.conv(root), status="waiting")
         # the answer can take hours: the run's engine slot goes back meanwhile (live: one chat
         # waiting for a bash prompt held one of the two, and two other chats ran one at a time)
         self.slots.release_if(run)
@@ -478,7 +491,7 @@ class AgentMixin:
             note = a["note"]
             return "deny", "The user denied this call." + (f" Their note: {note}" if note else "")
         if a["decision"] == "always":
-            scope = None if a["scope"] == "all" else conv.id
+            scope = None if a["scope"] == "all" else root
             for m in rule["matches"] if "matches" in rule else [rule.get("match")]:
                 self.add_rule(rule["tool"], m, "allow", scope)
         part["approved"] = "user"
@@ -489,13 +502,12 @@ class AgentMixin:
         conv = run.conv
         self.new_step(run)
         with conv.lock:
-            row = self._row(conv.id)
-            from chatd.service import DEFAULT_SETTINGS
-            settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+            settings = self.settings_of(conv.id)
             parts = [conv.live["parts"][k] for k in idxs]
         info = self.model_info(settings.get("model"))
-        enabled = {t.name: t for t in self.tools_for(settings, info, conv.id)}
+        enabled = {t.name: t for t in self.tools_for(settings, info, conv.id, agents=run.agents)}
         jobs = []
+        tasks = 0
         for part in parts:
             tool = enabled.get(part.get("name") or "")
             try:
@@ -511,6 +523,11 @@ class AgentMixin:
                     f"The tool {part.get('name')!r} is not available in this chat. Available: "
                     f"{', '.join(enabled) or 'none'}.", is_error=True))
                 continue
+            if tool.name == "task":
+                tasks += 1
+                if tasks > 1:                       # VIS-E15: one worker at a time, in call order
+                    self._finish_call(run, part, Result(tools_mod.ONE_TASK, is_error=True))
+                    continue
             sig = (tool.name, json.dumps(args, sort_keys=True))
             run.recent_calls.append(sig)
             if len(run.recent_calls) == 3 and len(set(run.recent_calls)) == 1:
@@ -568,10 +585,10 @@ class AgentMixin:
         if not tool.sandbox:
             run.set_phase("tool", ctx._running_words(), tool={"call_id": part["id"],
                                                                "name": tool.name})
-        if tool.risk in ("write", "exec") and not run.snapshotted:
+        if tool.risk in ("write", "exec", "task") and not run.snapshotted:
             run.snapshotted = True
             try:
-                self.snaps.take(conv.id, ctx.ws, run.id, "before")
+                self.snaps.take(ctx.cid, ctx.ws, run.id, "before")
             except OSError:
                 pass
         failure = None                       # the sandbox's own, not the command's
@@ -593,7 +610,7 @@ class AgentMixin:
             res.content = f"{ctx.note}\n{res.content}"
         if tool.sandbox:
             self._sandbox_streak(run, failure, res.content)
-        status = "cancelled" if run.cancel.is_set() and run.stop_mode else None
+        status = "cancelled" if run.cancel.is_set() and run.stop_mode else res.status
         self._finish_call(run, part, res, status=status, ctx=ctx)
 
     def _sandbox_streak(self, run, failure: str | None, words: str) -> None:
@@ -672,9 +689,11 @@ class AgentMixin:
                                         "ORDER BY created", (cid,))
                 if str(r["boundary_id"]).partition("@")[0] in ids]
 
-    def _system(self, settings: dict, tools: list, summary: str | None) -> str | None:
+    def _system(self, settings: dict, tools: list, summary: str | None,
+                worker: str | None = None) -> str | None:
+        """`worker`: a task run's block (chatd/tasks.py `_head`), in place of the chat's prompt."""
         prompt = None
-        if settings.get("prompt_id"):
+        if settings.get("prompt_id") and not worker:
             r = self.store.one("SELECT template FROM prompts WHERE id = ?",
                                (settings["prompt_id"],))
             prompt = r["template"] if r else None
@@ -682,18 +701,21 @@ class AgentMixin:
         today = _dt.date.today().isoformat() if tools else None
         return render.system_block(today=today, tools=bool(tools), summary=summary,
                                    skills=skills, prompt=prompt,
-                                   plan=PLAN_RULE if settings.get("plan_mode") else None)
+                                   plan=PLAN_RULE if settings.get("plan_mode") and not worker
+                                   else None, worker=worker)
 
-    def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c, **kw) -> dict:
+    def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c,
+                 head: dict | None = None, **kw) -> dict:
         """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
         None): the system block with its summary, the messages from its first kept one on, its
-        steps and its stubs."""
+        steps and its stubs. `head`: who asks (`_head`: a worker's block)."""
         b = c[1] if c else 0
         ours = info.get("backend") == "engine"
         if "keep_reasoning_from" in kw:
             kw["keep_reasoning_from"] = max(0, kw["keep_reasoning_from"] - b)
         return render.body(settings.get("model") or info.get("id") or "default", settings,
-                           path[b:], system=self._system(settings, tools, c[0] if c else None),
+                           path[b:], system=self._system(settings, tools, c[0] if c else None,
+                                                         **(head or {})),
                            vision=bool(info.get("vision")), blob=self._blob_of,
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
@@ -708,18 +730,17 @@ class AgentMixin:
         if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
             settings = {**settings, "effort": "high"}
         info = self.model_info(settings.get("model"))
-        tools = self.tools_for(settings, info, conv.id, listing=False)
+        tools = self.tools_for(settings, info, conv.id, listing=False,
+                               agents=bool(settings.get("agents")))
         return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
-        from chatd.service import DEFAULT_SETTINGS
         conv = run.conv
         if run.step and run.conv.live is not None:
             self.new_step(run)
         with conv.lock:
-            row = self._row(conv.id)
-            settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+            settings = self.settings_of(conv.id)
             msgs = self._messages(conv.id)
             path = [msgs[m] for m in self._path(msgs, run.user_message_id)]
             live = conv.live
@@ -738,7 +759,8 @@ class AgentMixin:
             raise GuardError("The message is empty: nothing was sent to the model. Write the "
                              "message again, or attach a file.")
         info = self.model_info(settings.get("model"))
-        tools = self.tools_for(settings, info, conv.id)
+        tools = self.tools_for(settings, info, conv.id, agents=run.agents)
+        head = self._head(conv, run)
         schemas = [t.openai() for t in tools]
         window = int(info.get("max_len") or 0)
         ours = info.get("backend") == "engine"
@@ -746,7 +768,7 @@ class AgentMixin:
 
         def build(keep_from: int = 0) -> dict:
             return self._request(settings, info, tools, path,
-                                 self._compaction_for(conv.id, path),
+                                 self._compaction_for(conv.id, path), head,
                                  continue_final=run.continue_final, keep_reasoning_from=keep_from,
                                  nudge=NUDGE if run.nudge else None)
         if ours and run.step <= 1 and not run.remark:
@@ -783,11 +805,13 @@ class AgentMixin:
         if run.backend == "cloud":
             run.split_est = estimated_split(body, conv.tok_ratio, self.skill_index(settings)
                                             if hasattr(self, "skill_index") else None)
+        if run.parent is not None:                  # the chat's Context panel: the worker's split
+            self.worker_split(run, body, path)
         self.store.run("UPDATE runs SET request = ?, state = 'running', step = ? WHERE id = ?",
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
                                "continue": run.continue_final, "estimate": est}),
                         run.step, run.id))
-        return render.encode(body), render.headers(conv.id)
+        return render.encode(body), self.headers_of(conv)
 
     # ================================================================== compaction
     def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False,
@@ -795,17 +819,19 @@ class AgentMixin:
         """Summarize the earlier part of the conversation (chatd/compaction.py): everything before
         the last two user turns, or a long run's steps but its last ones, as deep as it takes for
         the next request to land under TARGET_SHARE of the guard's limit."""
-        from chatd.service import DEFAULT_SETTINGS
         with conv.lock:
             row = self._row(conv.id)
-            settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
+            settings = self.settings_of(conv.id)
             if path is None:
                 msgs = self._messages(conv.id)
                 path = [msgs[m] for m in self._path(msgs, row["head_id"])]
         info = self.model_info(settings.get("model"))
         window = int(info.get("max_len") or 0)
         if tools is None:
-            tools = self.tools_for(settings, info, conv.id, listing=False)
+            tools = self.tools_for(settings, info, conv.id, listing=False,
+                                   agents=run.agents if run is not None else
+                                   bool(settings.get("agents")))
+        head = self._head(conv, run)
         ratio = conv.tok_ratio
         prior = self._compaction_for(conv.id, path)
         done = prior[2] if prior else None             # a long run's compaction: (index, step)
@@ -822,7 +848,7 @@ class AgentMixin:
                 cuts.append((sb[0], sb))
         if not cuts:
             return False
-        before = comp.estimate(self._request(settings, info, tools, path, prior), ratio)
+        before = comp.estimate(self._request(settings, info, tools, path, prior, head), ratio)
         # the first cut whose request (with a summary at its longest) lands under the target,
         # else the deepest. Live (2026-10-17) a compaction at 162k tokens kept 138,673, three
         # steps of shader and JS texts, and the engine read 131,505 of them again for a 15 % cut
@@ -830,7 +856,7 @@ class AgentMixin:
         now = iso(now_ms())
         for b, sb in cuts:
             after = comp.estimate(self._request(settings, info, tools, path,
-                                                self._cut(path, b, sb, None, now)), ratio)
+                                                self._cut(path, b, sb, None, now), head), ratio)
             if not target or after + comp.SUMMARY_TOKENS <= target:
                 break
         start = prior[1] if prior else 0
@@ -864,7 +890,7 @@ class AgentMixin:
             run.set_phase("prefill", "Compacting the conversation")
         t0 = time.monotonic()
         st, obj = self.engine.post_json("/v1/chat/completions", body,
-                                        render.headers(conv.id), timeout=900.0)
+                                        self.headers_of(conv), timeout=900.0)
         if st != 200 or not isinstance(obj, dict):
             self.log(f"[compact] {conv.id} failed ({st})")
             return False
@@ -881,7 +907,8 @@ class AgentMixin:
         created = now_ms()
         # before and after: the chat's request, as the guard counts it, without and with this one
         after = comp.estimate(self._request(settings, info, tools, path,
-                                            self._cut(path, b, sb, text, iso(created))), ratio)
+                                            self._cut(path, b, sb, text, iso(created)), head),
+                              ratio)
         bid = path[b]["id"] if sb is None else f"{path[sb[0]]['id']}@{sb[1]}"
         cid = ulid()
         ms = int((time.monotonic() - t0) * 1000)

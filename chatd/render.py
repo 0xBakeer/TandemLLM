@@ -46,6 +46,12 @@ def session_id(conversation_id: str) -> str:
     return SESSION_PREFIX + conversation_id
 
 
+def task_session_id(parent_id: str, n: int) -> str:
+    """A worker's `x-session-id` (VIS-E15): its own key beside the chat's, so the router, the
+    prefix cache, the park and the live row keep the chat and its task n apart."""
+    return f"{SESSION_PREFIX}{parent_id}-task-{n}"
+
+
 def text_of(parts: list[dict], kind: str = "text") -> str:
     return "".join(p.get("text") or "" for p in parts if p.get("type") == kind)
 
@@ -358,11 +364,14 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
 
 def system_block(*, today: str | None, tools: bool, summary: str | None = None,
                  skills: str | None = None, prompt: str | None = None,
-                 plan: str | None = None) -> str | None:
+                 plan: str | None = None, worker: str | None = None) -> str | None:
     """The system message: the chat's own prompt, then the tool rules, the skill index and the
-    summary of compacted turns. None for a plain chat with nothing to say."""
+    summary of compacted turns. None for a plain chat with nothing to say. `worker`: a task run's
+    block (packages/system/workers/PACKAGE.md), in place of the chat's own prompt."""
     parts = []
-    if prompt:
+    if worker:
+        parts.append(worker.strip())
+    elif prompt:
         parts.append(prompt.strip())
     if tools:
         parts.append(
@@ -402,11 +411,21 @@ def encode(obj: dict) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def headers(conversation_id: str) -> dict:
+def headers(conversation_id: str, *, session: str | None = None,
+            parent_session: str | None = None, worker: bool = False) -> dict:
     """The call's headers, also fixed: the session id and the client kind (`chat-app`: the
     conductor maps it to its chat-app profile, SRV-351). Never a profile header: the conductor's
     other profiles belong to other clients (opencode, Open WebUI, Hermes) and to tests.
     `X-Tandem-Cost: 1`: a call the proxy relays to a priced model ends with its cost, an SSE
-    comment before [DONE] (proxy/relay.py); our engine's own calls cost nothing and get none."""
-    return {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app",
-            "X-Tandem-Cost": "1"}
+    comment before [DONE] (proxy/relay.py); our engine's own calls cost nothing and get none.
+    A worker's (VIS-E15): its own session, the chat's as `X-Tandem-Parent-Session` (the session
+    that comes back when the worker ends), `X-Tandem-Worker: 1`, and `X-Tandem-Memory: off`: the
+    memory notes are the main agent's (server/conductor/memory.py reads nothing, writes nothing)."""
+    h = {"x-session-id": session or session_id(conversation_id), "X-QSE-Client": "chat-app",
+         "X-Tandem-Cost": "1"}
+    if parent_session:
+        h["X-Tandem-Parent-Session"] = parent_session
+    if worker:
+        h["X-Tandem-Worker"] = "1"
+        h["X-Tandem-Memory"] = "off"
+    return h

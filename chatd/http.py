@@ -61,6 +61,9 @@ ROUTES = [
     ("GET", rf"/conversations/{_ID}/todos", "todos"),
     ("PUT", rf"/conversations/{_ID}/todos", "put_todos"),
     ("POST", rf"/conversations/{_ID}/rewind", "rewind"),
+    # workers (VIS-E15)
+    ("GET", rf"/conversations/{_ID}/tasks", "tasks"),
+    ("GET", rf"/conversations/{_ID}/tasks/{_ID}", "task"),
     ("GET", r"/events", "global_events"),
     ("POST", r"/attachments", "upload"),
     ("GET", rf"/attachments/{_ID}", "attachment"),
@@ -385,6 +388,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def r_rewind(self, cid):
         self._json(200, self.svc.rewind(cid, self._body(), self.viewer))
+
+    def r_tasks(self, cid):
+        self._json(200, self.svc.list_tasks(cid))
+
+    def r_task(self, cid, task_id):
+        self._json(200, self.svc.get_task(cid, task_id))
 
     def r_upload(self):
         n = int(self.headers.get("Content-Length") or 0)

@@ -71,13 +71,14 @@ class Tool:
 
 class Result:
     def __init__(self, content: str = "", *, is_error=False, exit_code=None, images=None,
-                 pane=None, data=None):
+                 pane=None, data=None, status=None):
         self.content = content
         self.is_error = is_error
         self.exit_code = exit_code
         self.images = images or []      # [(mime, bytes)]
         self.pane = pane
         self.data = data                # structured output for the UI (`output.data`)
+        self.status = status            # the part's status when not done/failed (a task: interrupted)
 
 
 class ToolError(Exception):
@@ -542,6 +543,27 @@ def _todo_write(ctx, a):
     return Result(f"todo list saved: {len(got)} items, {done} done")
 
 
+def _task(ctx, a):
+    return ctx.svc.start_task(ctx.run, ctx.part, a)
+
+
+#: VIS-E15: the task tool's description and schema, as the plan note gives them
+TASK_DESCRIPTION = (
+    "Give a job to a worker: a fresh assistant that works in this chat's sandbox and /workspace "
+    "with every file and command tool, and that sees nothing of this chat except your brief and "
+    "the todo list. Use it for every file write and for any build or fix that takes more than one "
+    "step. Returns the worker's report and chatd's check of it. One task at a time.")
+TASK_SCHEMA = {"type": "object", "required": ["title", "brief", "expect"], "properties": {
+    "title": {"type": "string", "description": "A short name for the card the user sees, at most "
+                                               "80 characters."},
+    "brief": {"type": "string", "description": "Four lines, each with its label. Goal: what must "
+              "be true when the worker is done. Files: the paths to read or change and what each "
+              "holds. Constraints: what must not change, versions, limits. Check: how the worker "
+              "proves it is done (a command, render_page on a path or port, what the console must "
+              "show)."},
+    "expect": {"type": "string", "description": "What the report must contain beyond its standard "
+               "fields, for example the port of the dev server or the FPS line."}}}
+
 BUILTINS = [
     Tool("bash", "Run a shell command in this chat's own Linux sandbox. The working directory is "
          "/workspace (the chat's files, kept across sessions). Python 3, Node, git, ripgrep, jq, "
@@ -595,8 +617,18 @@ BUILTINS = [
              "id": _S, "text": _S, "state": {"type": "string",
                                             "enum": ["pending", "in_progress", "done"]}},
              ["text", "state"])}}, ["items"]), executor=_todo_write),
+    # last, so the tools before it keep their order: only Agents mode lists it (chatd/agent.py
+    # tools_for), never the chat's tool picker
+    Tool("task", TASK_DESCRIPTION, TASK_SCHEMA, risk="task", default="allow", executor=_task),
 ]
 BY_NAME = {t.name: t for t in BUILTINS}
+#: the tools a mode adds, not the chat's picker (capabilities, GET /tools)
+MODE_TOOLS = ("task",)
+#: a worker's tools (VIS-E15), in BUILTINS order: every file and command tool; no task (depth 1),
+#: no todo_write (the main agent keeps the list), no MCP in phase 1
+WORKER_TOOLS = ("bash", "read_file", "write_file", "edit_file", "glob", "grep", "web_search",
+                "web_fetch", "render_page", "present", "library_search", "library_read")
+ONE_TASK = "one task at a time: call it again after you read this report"
 
 
 # ---------------------------------------------------------------------- permissions
