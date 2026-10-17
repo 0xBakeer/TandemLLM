@@ -537,8 +537,10 @@ SHIPPED_ROUTER: dict = {
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
          "reading": "a flat web page",
+         # SRV-534 follow-up: a core, so a model fit with `packages: core` (Super VL) gets a
+         # package on a design_ui turn (Laya read a three.js prompt as design_ui, 2026-10-17)
          "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design", "charts"],
-                    "rules": []}},
+                    "core": ["ui-design"], "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
@@ -550,7 +552,7 @@ SHIPPED_ROUTER: dict = {
                     "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
                                                   "one-line-portrait", "creative-coding",
                                                   "charts", "explainer-video"],
-                    "rules": []}},
+                    "core": ["creative-coding"], "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
          "reading": "a 3D three.js scene",
