@@ -562,6 +562,8 @@ export interface LiveRequest {
   decode_tps: number | null; // running average since the first token; the final number when done
   decode_tps_now: number | null; // the last ~2 s
   lane?: SideLane | null;
+  /** 1.3: the backend a relayed request went to (proxy/); null for the engine's own */
+  backend?: string | null;
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
@@ -709,6 +711,8 @@ export interface LiveRecent {
   cached_tokens?: number | null;
   forwarded_tokens?: number | null;
   cache_source?: CacheSource | null;
+  /** 0.11.3: the backend a relayed request went to; its cached tokens are the backend's own */
+  backend?: string | null;
 }
 
 export interface LiveCounts {

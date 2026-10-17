@@ -3156,6 +3156,8 @@ mark {
 .tier-disk { --tier: var(--series-yellow); }
 .tier-cold { --tier: var(--series-orange); }
 .tier-response { --tier: var(--series-muted); }
+/* a relayed request (a cloud model): the backend's own cache, never an engine tier */
+.tier-backend { --tier: var(--series-red); }
 .recent-table td.rc-cache .cache-split {
   display: block;
   font-size: var(--fs-xs);

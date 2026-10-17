@@ -229,7 +229,7 @@ Measured or null, never estimated:
 | cost | the model's price when the row is written |
 | proxy overhead | arrival to the upstream send, plus the first frame's delay through the proxy |
 
-Queue, prefill time, blocks, draft acceptance and the cache source come off an engine's loop and are null for a relayed row; the views say "not reported by this backend". The Usage view filters by backend (`engine` is the engine's own rows) and by user, and shows the cost of the priced models.
+Queue, prefill time, blocks, draft acceptance and the cache source come off an engine's loop and are null for a relayed row; the views say "not reported by this backend". The Usage view filters by backend (`engine` is the engine's own rows) and by user, and shows the cost of the priced models. With a relayed backend in the ledger, Usage has a table of the engine and each relayed backend side by side (requests, tokens, decode and TTFT p50, cost), and Performance draws them apart: relayed requests are red dots of their own on a log axis in Recent requests, and a line of their own beside the engine's in the decode and TTFT history. The cache sources table and the engine's history count the engine's own requests only; the Live panel names a relayed request's backend and says its tokens are counted at its end.
 
 ## Every request at once: Performance, Parallel
 
@@ -250,6 +250,8 @@ Without a count a lane shows its frames and "not reported"; its tokens and rate 
 `tools/parallel_load.py` drives the page: N agent-like sessions (a system prompt, two tools, up to three streamed turns each, tool results fed back) over the models you name, for example `--mix deepseek-flash=10,fake-a=18,TandemLLM=2 --duration 90 --budget-usd 0.5 --board`. It reports TTFT, decode rate, cache hit, throughput and cost per model, stops starting turns at the budget, and with `--board` puts the page's per-second series beside the frames its own clients received.
 
 ## Prices and cost
+
+A streamed request with `X-Tandem-Cost: 1` (the Chat tab's chatd sends it) gets the request's cost as one SSE comment just before `data: [DONE]`: `: tandem-cost {"cost_micros": 6140, "backend": "deepseek"}`, every request the harness sent for it summed, the figure its ledger row gets; `cost_micros` is null without a price. SSE readers skip comments; without the header the stream is the backend's, byte for byte.
 
 A price row per model holds USD per million tokens for input, cached input, cache write and output. The cost of a request is `(prompt - cached) x input + cached x cached input + cache write x its price + completion x output`, written into the row when the request ends, so a later price change never rewrites history. A model without a price has a null cost. DeepSeek charges half outside its peak hours (01:00-04:00 and 06:00-10:00 UTC on weekdays); a price row can carry an `offpeak` block, and the DeepSeek adapter picks by the request's UTC hour. Chinese public holidays count as peak here, so their cost reads high.
 
