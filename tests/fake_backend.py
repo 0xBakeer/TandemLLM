@@ -61,7 +61,10 @@ A prefix cache: a request whose messages begin with the messages of an earlier r
 those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
 here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
 request's path, headers and body; `GET /fake/stats` the counts and the most streams it served at
-once. `refuse=<status>` (in a test) makes every completion answer that status. `--key` makes every route need `Authorization: Bearer <key>`.
+once. `refuse=<status>` (in a test) makes every completion answer that status. `memory=<n>` (in a
+test) answers a completion of more than n prompt tokens with our engine's memory refusal: a 503
+"a <n>-token prefill needs ... GiB with every cache given back", Retry-After 1 (`fake.refused`
+counts them). `--key` makes every route need `Authorization: Bearer <key>`.
 """
 
 from __future__ import annotations
@@ -131,6 +134,8 @@ class Fake:
         self.cards: dict[str, dict] = {}
         self.cache = cache              # the prefix cache (off: every request is cold)
         self.refuse = refuse            # a status every completion answers (a backend that is down)
+        self.memory: int | None = None  # the prompt tokens over which the engine has no memory
+        self.refused = 0
         self.key = key
         self.tps = float(tps)
         self.dialect = dialect
@@ -276,6 +281,18 @@ def make_handler(fake: Fake):
                 return self._json(fake.refuse, {"error": {"message": f"fake {fake.refuse}",
                                                           "type": "server_error"}},
                                   (("Retry-After", "1"),))
+            if fake.memory is not None and p.endswith("/completions"):
+                n_prompt = sum(_words((m or {}).get("content")) + 4
+                               for m in body.get("messages") or [])
+                if n_prompt > fake.memory:
+                    # server/app.py `_busy` with engine/cache.py MemoryRefused's words
+                    with fake.lock:
+                        fake.refused += 1
+                    return self._json(503, {"error": {
+                        "message": f"a {n_prompt}-token prefill needs 53.3 GiB with every cache "
+                                   f"given back; the engine's peak is 52.6 GiB; retry when the "
+                                   f"engine is idle", "type": "server_busy", "code": 503}},
+                        (("Retry-After", "1"),))
             for word, code in (("FAKE_429", 429), ("FAKE_503", 503), ("FAKE_500", 500)):
                 if word + "_ONCE" in text:
                     with fake.lock:

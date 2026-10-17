@@ -14,7 +14,8 @@ base64 is never counted as text). Then:
    Inside one long run (one user message, many steps: nothing before the last two user turns)
    the run's earlier steps are summarized instead, all but the last KEEP_STEPS, between two steps
    (`step_boundary`); the user's message stays. Live (2026-10-13) a 21-step run hit the guard
-   with no compaction, as there was no earlier user turn to summarize;
+   with no compaction, as there was no earlier user turn to summarize. A chat the engine refused
+   for memory compacts at 80 % of the refused request as well (`compact_at`; chatd/runs.py);
 2. still too long (one huge turn, nothing before the last two to summarize): the reasoning of
    earlier, finished turns is left out of the request. Templates such as Qwen's drop it anyway;
    others keep it, and 28,000 tokens of thinking then fill a 40,960 window (seen live on
@@ -129,6 +130,16 @@ def learn(prompt_tokens: int, request_chars: int, image_tokens: int = 0) -> floa
     if text > 0 and request_chars > 200:
         return max(0.15, min(0.8, text / request_chars))
     return None
+
+
+def compact_at(window: int, memory: int | None = None) -> int:
+    """The estimate over which the guard compacts: 80 % of the window, or of the smallest request
+    the engine refused for memory in this chat (`Conv.memory_limit`) when that is less; 0 when
+    neither is known. Live (2026-10-17) a run grew back to 215,247 tokens after a compaction, under
+    80 % of its 262,144 window, and the engine refused every call: the prefill needed 53.3 GiB
+    of a 52.6 GiB peak while another chat ran on its other slot."""
+    at = [int(x * COMPACT_SHARE) for x in (window, memory) if x]
+    return min(at) if at else 0
 
 
 def boundary(branch: list[dict]) -> int | None:

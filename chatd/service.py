@@ -32,6 +32,7 @@ import threading
 import time
 
 from chatd import attach as attach_mod
+from chatd import compaction as comp
 from chatd import context as ctx_mod
 from chatd import render
 from chatd import tools as tools_mod
@@ -130,6 +131,9 @@ class Conv:
         self.sandbox_sent: tuple[float, dict | None] = (0.0, None)
         self.peek: tuple[float, dict | None] | None = None
         self.tok_ratio: float | None = None       # tokens per request character, learned
+        # chatd's estimate of the smallest request the engine refused for memory (runs.py): the
+        # context guard compacts under it from then on (compaction.compact_at)
+        self.memory_limit: int | None = None
 
 
 class Slots:
@@ -1273,9 +1277,32 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 files += (int(a.get("tokens") or 0) if render.inlined(a) else
                           attach_mod.LINE_TOKENS)
         cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
-        files += ctx_mod.file_tokens(branch, cp[1] if cp else 0,
-                                     (cp[2][0], cp[2][1]) if cp and cp[2] else None)
-        tokens = _branch_tokens(branch)
+        step_from = (cp[2][0], cp[2][1]) if cp and cp[2] else None
+        files += ctx_mod.file_tokens(branch, cp[1] if cp else 0, step_from)
+        # the run in flight counts from its own calls, whoever asks (a snapshot too)
+        on = run or (conv.run if conv.run is not None and conv.run.active else None)
+        tokens = _branch_tokens(branch, on, step_from)
+        if on is not None and on.step_usage:
+            # its last call's cache, not the run's before Continue (live 2026-10-17: "178,858 warm
+            # from the end", the figure of step 100 while step 114 was refused)
+            last = on.step_usage[-1]
+            stats = dict(stats or {}, prompt_tokens=last.get("prompt_tokens"),
+                         cached_tokens=last.get("cached_tokens"),
+                         cache_source=last.get("cache_source"))
+        # the turn's thinking the next request carries, the call in flight's too: what
+        # `_branch_tokens` left out
+        k = next((i for i in range(len(branch) - 1, -1, -1) if branch[i]["role"] == "assistant"),
+                 None)
+        thinking = None
+        if k is not None:
+            usage = _usage_of(branch[k], on)
+            if on is not None and branch[k].get("id") == on.message_id and \
+                    on.step not in {u.get("step") for u in usage}:
+                usage.append({"step": on.step,
+                              "reasoning_tokens": on.thinking_tokens - on.call_base[1]})
+            thinking = _turn_thinking(branch[k], usage, step_from[1] if step_from and
+                                      step_from[0] == k else 1,
+                                      total=(branch[k].get("stats") or {}).get("reasoning_tokens"))
         if harness is None and conv.context is not None:
             harness = conv.context.get("harness")
         if split is None and conv.context is not None:
@@ -1299,10 +1326,12 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
                              files_tokens=files, stats=stats,
                              run=run.as_dict() if run is not None else None, row=live_row,
-                             facts=self.facts(), peek=peek,
+                             facts=self.facts(), peek=peek, thinking=thinking,
                              harness=harness if isinstance(harness, dict) else None,
                              split=split if isinstance(split, dict) else None,
                              session=render.session_id(conv.id))
+        if conv.memory_limit:                       # where the guard compacts this chat now
+            out["compact_at"] = comp.compact_at(out["window"], conv.memory_limit)
         out["skills"] = self.skills_report(settings)
         return out
 
@@ -1841,28 +1870,86 @@ def _usage(branch: list[dict]) -> dict:
     return out
 
 
-def _branch_tokens(branch: list[dict]) -> int:
+def _usage_of(m: dict, run=None) -> list[dict]:
+    """An assistant message's calls' counts by step: its stats', then the run in flight's on it,
+    whose calls are in no stats until it ends (the stats are an earlier run's: Continue goes on in
+    the same message)."""
+    usage = list((m.get("stats") or {}).get("step_usage") or [])
+    if run is not None and m.get("id") == run.message_id:
+        usage += run.step_usage
+    by = {int(u.get("step") or 0): u for u in usage}
+    return [by[k] for k in sorted(by)]
+
+
+def _turn_thinking(m: dict, usage: list[dict], from_step: int = 1, upto: int | None = None,
+                   total: int | None = None) -> int:
+    """The thinking of an agent turn that its next request carries: its steps from `from_step`
+    (a compaction inside the run took the ones before it into the summary) to `upto`, each by its
+    call's count (`usage`), else estimated from its text; `total`, the turn's own count, for a
+    turn saved before the calls' counts."""
+    exact = {int(u["step"]): int(u["reasoning_tokens"]) for u in usage
+             if u.get("step") and u.get("reasoning_tokens") is not None}
+    if not exact and from_step <= 1 and total is not None:
+        return int(total)
+    chars: dict[int, int] = {}
+    for p in m.get("parts") or []:
+        if p.get("type") == "thinking":
+            k = int(p.get("step") or 1)
+            chars[k] = chars.get(k, 0) + len(p.get("text") or "")
+    return sum(exact[k] if k in exact else (chars[k] + 3) // 4 for k in set(chars) | set(exact)
+               if k >= from_step and (upto is None or k <= upto))
+
+
+def _after_step(m: dict, step: int) -> int:
+    """What the next request carries of an agent turn after its call at `step`, estimated: that
+    step's tool results, the later steps' text, calls and results (their thinking apart)."""
+    n = 0
+    for p in m.get("parts") or []:
+        k = int(p.get("step") or 1)
+        if k < step:
+            continue
+        if p.get("type") == "tool_call":
+            n += ctx_mod.estimate_tokens(render.result_text(p))
+            if k > step:
+                n += ctx_mod.estimate_tokens(p.get("input") or "")
+        elif p.get("type") == "text" and k > step:
+            n += ctx_mod.estimate_tokens(p.get("text") or "")
+    return n
+
+
+def _branch_tokens(branch: list[dict], run=None,
+                   step_from: tuple[int, int] | None = None) -> int:
     """What the next request carries: the last answered request's prompt and answer (the engine's
-    own counts), plus an estimate for what came after it."""
+    own counts), plus an estimate for what came after it, less the turn's thinking (the panel
+    counts it apart, `_turn_thinking`). `run`: the run in flight; `step_from`: (message index,
+    step) of a compaction inside a run. Live (2026-10-17) the panel said 45,778 tokens while the
+    engine got 215,247: the message's stats were those of the run before a Continue, the steps
+    since were in none, and the whole turn's thinking came off, that of the 42 steps in the
+    summary too."""
     base, since = 0, 0
-    for m in branch:
+    for i, m in enumerate(branch):
         s = m.get("stats")
-        if m["role"] == "assistant" and s and s.get("prompt_tokens"):
+        usage = _usage_of(m, run) if m["role"] == "assistant" else []
+        if m["role"] == "assistant" and (usage or s and s.get("prompt_tokens")):
             # the last call's prompt (the earlier calls' answers are in it) and answer, less the
             # turn's thinking; a turn's completion_tokens are every call's (live 2026-10-16: an
             # agent turn of 13,270 counted ~11,000 tokens twice)
-            last = (s.get("step_usage") or [{}])[-1]
-            reasoning = int(s.get("reasoning_tokens") or 0)
+            last = usage[-1] if usage else {}
+            reasoning = int((s or {}).get("reasoning_tokens") or 0)
+            since = 0
             if last.get("completion_tokens") is not None:
-                base = int(last.get("prompt_tokens") or s["prompt_tokens"]) + int(
-                    last["completion_tokens"]) - reasoning
+                step = int(last.get("step") or 0)
+                frm = step_from[1] if step_from and step_from[0] == i else 1
+                prompt = int(last.get("prompt_tokens") or (s or {}).get("prompt_tokens") or 0)
+                base = prompt + int(last["completion_tokens"]) - _turn_thinking(
+                    m, usage, frm, step or None, reasoning)
+                since = _after_step(m, step) if step else 0
             elif int(s.get("steps") or 1) > 1:     # a turn saved before the calls' own counts
                 base = int(s["prompt_tokens"]) + ctx_mod.estimate_tokens(
                     render.text_of(render.steps(m.get("parts") or [])[-1]))
             else:
                 base = int(s["prompt_tokens"]) + int(s.get("completion_tokens") or 0) - reasoning
             base = max(0, base)
-            since = 0
         else:
             since += ctx_mod.estimate_tokens(render.text_of(m.get("parts") or []))
     return base + since

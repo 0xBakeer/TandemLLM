@@ -37,10 +37,12 @@ READ_TIMEOUT_S = 900.0       # a 158k prefill is about 3.5 minutes of silence
 
 
 class EngineError(Exception):
-    def __init__(self, status: int, message: str, retryable: bool):
+    def __init__(self, status: int, message: str, retryable: bool,
+                 retry_after: float | None = None):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.retry_after = retry_after        # the refusal's Retry-After, in seconds
 
 
 class Call:
@@ -183,7 +185,11 @@ class Engine:
                     msg = str(err["message"])[:300]
             except (ValueError, AttributeError):
                 pass
-            raise EngineError(resp.status, msg, resp.status == 429 or resp.status >= 500)
+            try:
+                after = float(resp.getheader("Retry-After") or "")
+            except ValueError:
+                after = None
+            raise EngineError(resp.status, msg, resp.status == 429 or resp.status >= 500, after)
         return Call(conn, resp)
 
     def models(self) -> list[dict]:
