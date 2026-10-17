@@ -37,9 +37,16 @@
 0.11.0 & 10-16 & a fifth model, Nemotron 3.5 Super VL 120B-A12B: EXL3 packs at 4.0 and 2.0, NVIDIA's NVFP4 release read as stored, its LiLiCorr drafter \\
 0.11.1 & 10-16 & chatd's access to the sandbox's folders follows no symlink; StairCut price files for Bolt's EXL3 2.5 to 6.0; each weight pack's maker in the setup guide; the install through the setup guide \\
 0.11.2 & 10-16 & chatd starts with the engine and the Chat tab says when it is down; install script and secrets fixes; sandbox containers scoped to their chatd; the preview opens the running app; Context panel figures; no horizontal overflow on a phone; a model picker with one row a model; Setup Guide steppers for chats and windows; Super VL window up to 1,048,576 \\
+0.11.3 & 10-17 & Setup Guide hardening: \code{tandem doctor}, a check before the restart, Retry and Copy diagnostics, the restart card, removing weights; Super VL reads images; a cloud model's figures and cost; slot affinity \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.11.3, the Setup Guide hardened}\label{sec:changelog-0113}
+
+0.11.3 makes a Setup Guide install safe to retry. \code{tandem doctor} checks an install and repairs what is safe (file modes against \code{ops/executables.txt}, the \code{run/ops} copies, stale pid files, the secrets file's mode); it runs before every \code{tandem start} and in the install's check step, and as \code{tandem doctor [--check] [--json]}. A step before the restart checks the scripts, \code{serve.env}, the weights, the memory and the port, and a failure there stops nothing. The scripts call each other through \code{bash}, never through the execute bit. A failed step says what broke in plain words, with Retry from that step and Copy diagnostics. A restart is one card with the job's step and the load's phases, served by the tree's own status responder while the engine is away; a finished install has its own screen with Start chatting. The weights step lists the weights on the box and removes a model's weights, never the running profile's or a shared folder. \code{tools/release\_gate\_setup.sh} installs a candidate twice in scratch folders beside the live engine and drives the whole flow in a phone-sized browser.
+
+Super VL reads images through its C-RADIO tower. A cloud model's turns in the Chat tab have their speed, the first token's wait, the provider's cache and the cost, and Performance and Usage keep the engine's requests apart from relayed ones. A conversation stays on the side slot that holds its rows, the narrator is off by default, the decider's residency claim is 3.0~GiB, and a chat sandbox has 4~GiB of memory. Requests on the raw path write the same text as in 0.11.2; under the conductor a turn can get packages it did not get before, and its text changes with them. To upgrade, run the installer again, then \code{tandem restart} and \code{tandem chat restart}; the conductor's migrations run at the engine's first start.
 
 \section{0.11.2, chatd with the engine}\label{sec:changelog-0112}
 

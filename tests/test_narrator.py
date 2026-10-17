@@ -415,7 +415,7 @@ def test_a_narrated_line_is_stripped():
 # ------------------------------------------------------------------ the handler
 
 def narrator_on(cond) -> None:
-    """The roles document's narrator switched on, as an owner does (0.11.3: off by default)."""
+    """The roles document's narrator switched on by hand (0.11.3: off by default)."""
     _, roles = cond.store.get("roles")
     roles["narrator"] = dict(roles.get("narrator") or schema.seed("roles")["narrator"], mode="on")
     cond.store.put("roles", None, roles, note="narrator on", author="test")

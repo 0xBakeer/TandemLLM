@@ -775,7 +775,7 @@ class ConfigDB:
         None when discovery failed: the last list stays. Returns the ids the discovery found that
         the backend never had a row for. After the backend's first discovery, such a new id (DeepSeek's
         `deepseek-v4.1-flash-1017`, in its list for minutes on 2026-10-17) is stored disabled:
-        nothing new reaches the picker until the owner turns it on under Backends."""
+        nothing new reaches the picker until it is turned on under Backends."""
         now = _now_ms()
         new: list[str] = []
         with self._lock:

@@ -66,7 +66,7 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
 # what the shipped documents changed on purpose since that day, keyed by the document: the path
 # and the value they ship. SRV-473: the same-call guard on (the live box: coding v21 by hand,
 # overnight and chat by the migration), chat's C3 acting, chat's description. SRV-534: the
-# narrator off in coding and chat (the owner, 2026-10-17); a core on design_ui and drawing (the
+# narrator off in coding and chat; a core on design_ui and drawing (the
 # migration stores it on the live box too)
 CHANGED = {"router": {"classes.design_ui.policy.core": ["ui-design"],
                       "classes.drawing.policy.core": ["creative-coding"],

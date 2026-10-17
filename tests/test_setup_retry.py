@@ -35,7 +35,7 @@ from server.setup import apply, device as device_mod  # noqa: E402
 
 INCIDENT = ["[use-profile 07:05:06] switching setup mode -> exl3-6.0 (MemAvailable 115 GB)",
             "[stop] stopped",
-            "/home/u/tandem-bolt/ops/use-profile.sh: line 172: /home/u/tandem-bolt/ops/start.sh: Permission denied",
+            "/home/u/TandemLLM/src/ops/use-profile.sh: line 172: /home/u/TandemLLM/src/ops/start.sh: Permission denied",
             "[use-profile 07:05:06] FAILED on exl3-6.0; the caller rolls back"]
 
 

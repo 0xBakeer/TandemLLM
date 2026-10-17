@@ -79,7 +79,7 @@ free_port() {
 # a copy of a Python 3.11 that has torch (the fake engine runs on its CPU), as a venv of its own
 # named tandem-gate-py: a scratch engine never reads as one of the live box's engines
 if [ -z "$BASEPY" ]; then
-    for c in "$HOME/exl3k/venv/bin/python" "$HOME/tandem-bolt/venv/bin/python" python3.11; do
+    for c in "$HOME/TandemLLM/venv/bin/python" python3.11; do
         if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys, torch, yaml; sys.exit(sys.version_info[:2] != (3, 11))' 2>/dev/null; then
             BASEPY="$c"; break
         fi
