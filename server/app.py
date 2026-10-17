@@ -951,17 +951,24 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             with pool._lk:
                 pool.stats["too_long"] = pool.stats.get("too_long", 0) + 1
             return None
+    # FX16: the side slot that holds this conversation's rows (its last turn ran there and
+    # nothing wrote over them since): the turn resumes at its end there, beside slot 0
+    home = _side_home(pool, ids, need, chunk, conv)
     if why.get("wait"):
+        here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill"))
+        if home is not None and home[1] > here:
+            # SRV-528: a side slot holds more of it than slot 0 does (live 2026-10-17: a chat whose
+            # first prompt matched slot 0's view waited 3.0 s for slot 0 at every turn, then took
+            # the lowest free side slot)
+            why.update(home=home[0], home_share=home[1])
+            return need
         # 0.8.2: it continues slot 0's conversation (view, resident) or reads it back from the
         # NVMe there (spill): slot 0 first, for SIDE_SLOT0_WAIT_S, then a free side slot (the
         # handler); never minutes behind another conversation's run on slot 0
         why["slot0_first"] = True
         return need
-    # FX16: the side slot that holds this conversation's rows (its last turn ran there and
-    # nothing wrote over them since): the turn resumes at its end there, beside slot 0
-    home = _side_home(pool, ids, need, chunk, conv)
     if home is not None:
-        why["home"] = home
+        why["home"] = home[0]
     elif (SIDE_NEW_FIRST == "on" and res is not None
           and not why.get("guest") and not why.get("wait")):
         # FX16: a new conversation beside a resident one a side slot could never hold takes an
@@ -1026,12 +1033,13 @@ def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
     return max(1, min(int(max_new), room))
 
 
-def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) -> int | None:
-    """FX16: the index of the side slot that holds this conversation, when its window holds `need`
-    rows; else None. A slot holds it when the prompt continues the last prompt served there (judged
-    on the client's tokens, as `_continues_view` judges slot 0's) or shares at least a chunk of the
-    slot's own rows past the first user message (`res.common`). A request of another conversation
-    served there since cleared them (`ResidentPrefix.begin`), and so the view.
+def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) -> tuple | None:
+    """FX16: (the index of the side slot that holds this conversation, the tokens of the prompt it
+    holds), when its window holds `need` rows; else None. A slot holds it when the prompt continues
+    the last prompt served there (judged on the client's tokens, as `_continues_view` judges slot
+    0's) or shares at least a chunk of the slot's own rows past the first user message
+    (`res.common`). A request of another conversation served there since cleared them
+    (`ResidentPrefix.begin`), and so the view.
 
     SRV-528: with or without an end anchor, and the slot with the longest share wins. FX16 named a
     slot home only when it kept an end anchor and took the first such slot; a turn that kept none
@@ -1072,8 +1080,9 @@ def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) ->
     if not found:
         return None
     top = max(h for h, _ in found)
-    near = [s for h, s in found if h >= top - chunk]
-    return next((s for s in near if not s.busy), next(s for h, s in found if h == top)).index
+    near = [(h, s) for h, s in found if h >= top - chunk]
+    h, s = next(((h, s) for h, s in near if not s.busy), next((h, s) for h, s in found if h == top))
+    return s.index, h
 
 
 def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
@@ -2486,9 +2495,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     offset for a continuation's own generation, which wrote its rows after the images.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
-    token has been decided and not forwarded -- or `len(ctx)` when the end token was a drafted row
-    the block verified (the commit stops there, `_end_cut`) -- so what is snapshotted is the prefix that really
-    was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
+    token has been decided and not forwarded -- or `len(ctx)` when the end token was a drafted
+    row the block verified (the commit stops there, `_end_cut`) -- so what is snapshotted is the
+    prefix that really was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
@@ -7228,8 +7237,9 @@ class Handler(BaseHTTPRequestHandler):
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "home", "home_wait", "hop_from", "prefer_side",
-                                                          "slot0_stale", "new_wait", "spill", "spill_head",
+                                                          "home", "home_share", "home_wait",
+                                                          "hop_from", "prefer_side", "slot0_stale",
+                                                          "new_wait", "spill", "spill_head",
                                                           "slot0_wait")
                             if k in par_why)
             if side is not None:
