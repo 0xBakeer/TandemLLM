@@ -12,6 +12,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { api, apiBase, describeError, engineAway, onApi } from './api/client';
 import { awayText, restartText, swAway, whenEngineUp } from './lib/away';
+import './views/hw-rail'; // the shell's hardware rail — revert this import to remove it
 import { config } from './api/config';
 import { perfEngineNote } from './lib/perf-note';
 import type { Summary, LiveStatus } from './api/types';
@@ -392,6 +393,7 @@ export class QseApp extends LightElement {
           ${this.renderView()}
         </main>
       </div>
+      ${this.booted && !this.setupMode ? html`<qse-hw-rail></qse-hw-rail>` : nothing}
     `;
   }
 

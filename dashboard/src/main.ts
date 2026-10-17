@@ -6,6 +6,7 @@ import './styles/backends.css';
 import './styles/hosts.css';
 import './styles/engines.css';
 import './styles/parallel.css';
+import './styles/hw-rail.css';
 import './charts/ribbon';
 import './charts/bars';
 import './charts/scatter';
