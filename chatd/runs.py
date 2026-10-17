@@ -205,6 +205,10 @@ class Run:
         self.report_misses = 0                 # the step of the report sent back, once
         self.salvage = False
         self.ignore_calls = False
+        # SRV-585: the steers typed while this worker runs ((time, text), appended to its next
+        # stored tool result), and a parent's task call that Continue resumes before any call
+        self.notes: list[tuple[str, str]] = []
+        self.resume_part: int | None = None
 
     # ------------------------------------------------------------------ the contract's Run
     def as_dict(self, viewer: str | None = None) -> dict:
@@ -244,6 +248,9 @@ class Run:
         call = self.call
         if call is not None:
             call.close()
+        child = self.child
+        if child is not None and child.active:      # Stop stops both (VIS-E15)
+            child.stop(mode)
 
     @property
     def active(self) -> bool:
@@ -322,6 +329,13 @@ class Run:
         if not self._slot():
             return self._stopped()
         self.state = "running"
+        if self.resume_part is not None:
+            # Continue of a parent whose worker was interrupted: the worker's loop goes on first,
+            # inside the task call (chatd/tasks.py), then this run's
+            self.step_parts, self.resume_part = [self.resume_part], None
+            end = self._after_tools()
+            if end is not None:
+                return end
         while True:
             if self.stop_mode:
                 return self._stopped()
@@ -359,15 +373,9 @@ class Run:
                               "the engine's log says why.")
                 return "failed"
             if self.step_parts:
-                if self.svc.run_tools(self, list(self.step_parts)) == "cancelled":
-                    return self._stopped()
-                if self.sandbox_stuck:              # Continue goes on once the sandbox is back
-                    self.interrupt = "sandbox"
-                    return "interrupted"
-                if self.notice:                     # the same call three times in a row
-                    return "completed"
-                if self.svc.queued(self.conv):      # a steer: the next run carries it
-                    return "completed"
+                end = self._after_tools()
+                if end is not None:
+                    return end
                 continue
             if self.finish_reason == "length" and not self.length_continued:
                 self.length_continued, self.continue_final = True, True
@@ -383,6 +391,24 @@ class Run:
             if self.parent is not None and self.svc.task_report(self):
                 continue                            # a worker's report, sent back once
             return "completed"
+
+    def _after_tools(self) -> str | None:
+        """The step's calls run; how the run ends after them, or None: the next step."""
+        done = self.svc.run_tools(self, list(self.step_parts))
+        if any(self.svc.call_part(self, k).get("name") == "task" and
+               self.svc.call_part(self, k).get("status") == "interrupted" for k in self.step_parts):
+            self.interrupt = "task"                 # Continue resumes the worker, then this run
+            return "interrupted"
+        if done == "cancelled":
+            return self._stopped()
+        if self.sandbox_stuck:                      # Continue goes on once the sandbox is back
+            self.interrupt = "sandbox"
+            return "interrupted"
+        if self.notice:                             # the same call three times in a row
+            return "completed"
+        if self.svc.queued(self.conv):              # a steer: the next run carries it
+            return "completed"
+        return None
 
     def _call(self) -> str:
         """One model call with its retries: completed, failed, interrupted or cancelled."""

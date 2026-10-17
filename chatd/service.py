@@ -835,6 +835,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if parent is None:
             # read once: a switch during the run applies to the next one (the prompt's head)
             run.agents = bool(settings.get("agents"))
+        if continue_mid and conv.live["parts"] and (parent is not None or run.agents):
+            self._cut_calls(conv, run)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
             run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])
@@ -864,6 +866,36 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         self.live.ensure()
         run.start()
         return run
+
+    def _cut_calls(self, conv: Conv, run: Run) -> None:
+        """Continue of a worker, or of a main agent in Agents mode (SRV-585): a call the stop cut
+        short is never run again. A write, a command or an MCP call reads that its effect is
+        unknown; a task call whose worker was cut is the one call that goes on (its worker
+        resumes inside it, chatd/tasks.py)."""
+        parts = conv.live["parts"]
+        for k, p in enumerate(parts):
+            if p.get("type") != "tool_call" or p.get("status") not in (
+                    "running", "asking", "cancelled", "interrupted"):
+                continue
+            if p.get("name") == "task":
+                r = self.store.one("SELECT 1 FROM tasks WHERE conversation_id = ? AND call_id = ?",
+                                   (conv.id, p["id"]))
+                if r is not None and k == max(i for i, q in enumerate(parts)
+                                              if q.get("type") == "tool_call"):
+                    run.resume_part = k
+                continue
+            if p.get("status") == "interrupted":
+                continue
+            risky = p.get("name") in ("bash", "write_file", "edit_file") or \
+                str(p.get("name") or "").startswith("mcp__")
+            words = tools_mod.INTERRUPTED_CALL if risky else tools_mod.INTERRUPTED_READ
+            before = p.get("model_content") or ""
+            p["model_content"] = (before + "\n" if before else "") + words
+            p["status"], p["permission"] = "interrupted", None
+            p["ended_at"] = p.get("ended_at") or iso(now_ms())
+            self.emit(conv, {"type": "tool.done", "message_id": conv.live["id"],
+                             "call_id": p["id"], "status": "interrupted", "is_error": True})
+        self._persist_live(conv)
 
     def _budget(self, settings: dict) -> int | None:
         """The thinking budget in force, from the model's card (effort levels with their caps)."""
@@ -1060,6 +1092,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
 
     def _enqueue(self, conv: Conv, cmid: str, text: str) -> dict:
         q = {"id": ulid(), "text": text, "created": now_ms(), "client_msg_id": cmid}
+        child = conv.run.child if conv.run is not None else None
+        if child is not None and child.active:
+            # a steer while a worker runs: the main agent reads it after the report, as any
+            # steer; the worker sees it as a note on its next tool result (SRV-585)
+            child.notes.append((time.strftime("%H:%M"), text))
         self.store.run("INSERT INTO queue VALUES (?, ?, ?, ?, ?)",
                        (q["id"], conv.id, text, cmid, q["created"]))
         self.emit(conv, {"type": "queue.changed", "queue": self._queue(conv.id)})

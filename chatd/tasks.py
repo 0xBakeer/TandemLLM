@@ -58,6 +58,9 @@ PKG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
                    "system", "workers")
 RESULT_MAX_CHARS = 8000
 SALVAGE_TOKENS = 1500
+#: after Stop, how long the task call waits for its worker to store its end (it closes its stream
+#: at once); a worker slower than that stores its report later, and Continue delivers it
+STOP_WAIT_S = 15.0
 IGNORED_CALL = "Not run: this task's model calls are used up, and this answer is its report."
 _TEXTS: dict = {}
 
@@ -75,6 +78,11 @@ def texts() -> dict:
             for head, body in re.findall(r"^## (.+?)\n(.*?)(?=^## |\Z)", read(rel), re.M | re.S):
                 _TEXTS[head.strip().lower()] = body.strip()
     return _TEXTS
+
+
+def steer_note(at: str, text: str) -> str:
+    """A message the user typed while a worker ran, as the worker reads it (SRV-585)."""
+    return texts()["steer note"].replace("{time}", at).replace("{text}", " ".join(text.split()))
 
 
 def worker_block(max_steps: int) -> str:
@@ -472,6 +480,15 @@ class TasksMixin:
         settings = self.settings_of(parent.conv.id)
         if parent.parent is not None:
             return Result("task: a worker cannot give tasks", is_error=True)
+        row = self.store.one("SELECT * FROM tasks WHERE conversation_id = ? AND call_id = ?",
+                             (parent.conv.id, part["id"]))
+        if row is not None:
+            # Continue reached this call again (SRV-585): an interrupted worker goes on in its own
+            # message; one that ended meanwhile (its report stored late) is not run again
+            row = dict(row)
+            if row["status"] not in ("running", "interrupted"):
+                return self._task_answer(row)
+            return self._resume_task(parent, row)
         refused = check_brief(args)
         if refused:
             return Result(refused, is_error=True)
@@ -528,14 +545,45 @@ class TasksMixin:
         try:
             while worker.thread.is_alive() and not parent.cancel.is_set():
                 worker.thread.join(1.0)
+            if worker.thread.is_alive():            # Stop reached it through the parent
+                worker.thread.join(STOP_WAIT_S)
         finally:
             parent.child = None
         row = self.task_row(row["id"])
+        if row["status"] == "running":              # still storing its end: Continue delivers it
+            return Result(f"task {row['n']} was stopped and has not stored its report yet; "
+                          f"Continue delivers it.", is_error=True, status="interrupted")
         parent.workers.append({"task_id": row["id"], "prompt_tokens": row["prompt_tokens"],
                                "completion_tokens": row["completion_tokens"],
                                "cached_tokens": row["cached_tokens"],
                                "ms": int((row["ended"] or now_ms()) - row["started"])})
-        return Result(self.task_result(row), is_error=row["status"] == "failed")
+        return self._task_answer(row)
+
+    def _task_answer(self, row: dict) -> Result:
+        """The task call's result: an interrupted task's leaves the call `interrupted` (its run
+        ends interrupted, `stats.interrupted` task, and Continue resumes the worker)."""
+        return Result(self.task_result(row), is_error=row["status"] == "failed",
+                      status="interrupted" if row["status"] == "interrupted" else None)
+
+    def _resume_task(self, parent, row: dict) -> Result:
+        tcid = row["task_conversation_id"]
+        on = self.conv(tcid).run
+        if on is not None and on.active:            # the stopped worker still ends: its answer
+            on.thread.join(STOP_WAIT_S)
+            row = self.task_row(row["id"])
+            if row["status"] != "running":
+                return self._task_answer(row)
+            return Result(f"task {row['n']} has not stored its report yet; Continue delivers it.",
+                          is_error=True, status="interrupted")
+        last = self.store.one("SELECT id FROM messages WHERE conversation_id = ? AND role = "
+                              "'assistant' ORDER BY id DESC LIMIT 1", (tcid,))
+        self.store.run("UPDATE tasks SET status = 'running', attempt = attempt + 1, ended = NULL "
+                       "WHERE id = ?", (row["id"],))
+        row = self.task_row(row["id"])
+        self.emit(parent.conv, {"type": "task.started", "run_id": parent.id, "task": wire(row)},
+                  run_id=parent.id)
+        self.log(f"[task] {row['id']} {row['n']} resumed (attempt {row['attempt']})")
+        return self._run_task(parent, row, continue_mid=last["id"] if last else None)
 
     def task_result(self, row: dict) -> str:
         """What the main agent reads (`render_result`)."""

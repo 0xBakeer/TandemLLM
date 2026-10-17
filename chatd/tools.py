@@ -629,6 +629,10 @@ MODE_TOOLS = ("task",)
 WORKER_TOOLS = ("bash", "read_file", "write_file", "edit_file", "glob", "grep", "web_search",
                 "web_fetch", "render_page", "present", "library_search", "library_read")
 ONE_TASK = "one task at a time: call it again after you read this report"
+#: a call a stop cut short, after Continue (SRV-585): never run again; the model checks and decides
+INTERRUPTED_CALL = ("this call was interrupted and its effect is unknown; check the file before "
+                    "you repeat it")
+INTERRUPTED_READ = "this call was interrupted before it returned; call it again if you need it"
 
 
 # ---------------------------------------------------------------------- permissions

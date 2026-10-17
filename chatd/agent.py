@@ -18,7 +18,7 @@ from chatd.ids import iso, now_ms, ulid
 from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
 from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
-from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS
+from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note
 from chatd.store import dumps
 from chatd.tools import PathError, Result, ToolError
 
@@ -69,6 +69,11 @@ def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio) -
             else "an answer")
     return head + (f"The largest part is {what}, about {n:,} tokens. Edit an earlier message to "
                    f"branch off before it, or start a new chat.")
+
+
+def st_is_result(status: str | None) -> bool:
+    """A call the model gets a result of: it ran (done, failed), not stopped or ignored."""
+    return status in (None, "done", "failed")
 
 
 class ToolCtx:
@@ -616,7 +621,7 @@ class AgentMixin:
             res.content = f"{ctx.note}\n{res.content}"
         if tool.sandbox:
             self._sandbox_streak(run, failure, res.content)
-        status = "cancelled" if run.cancel.is_set() and run.stop_mode else res.status
+        status = res.status or ("cancelled" if run.cancel.is_set() and run.stop_mode else None)
         self._finish_call(run, part, res, status=status, ctx=ctx)
 
     def _sandbox_streak(self, run, failure: str | None, words: str) -> None:
@@ -644,6 +649,11 @@ class AgentMixin:
                 # a worker's screenshots by id, for its report's Checks (chatd/tasks.py)
                 part["shot"] = f"shot-{1 + sum(1 for p in conv.live['parts'] if p.get('shot'))}"
                 res.content += f"\nscreenshot id: {part['shot']}"
+            if run.parent is not None and run.notes and st_is_result(status):
+                # SRV-585: a steer the user typed meanwhile, appended to the result when it is
+                # stored, so every later request renders the same bytes (append-only)
+                res.content += "".join("\n\n" + steer_note(t, x) for t, x in run.notes)
+                run.notes = []
             ui, cut = tools_mod.for_ui(res.content)
             st = status or ("failed" if res.is_error else "done")
             out = {"content": ui, "is_error": bool(res.is_error) or st == "failed",
