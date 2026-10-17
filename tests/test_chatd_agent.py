@@ -1107,6 +1107,55 @@ def test_render_page_on_a_port_takes_a_file_path_below_the_server_and_says_an_er
     assert "curl" not in ctx.cmds[-1][-1]
 
 
+def test_render_page_reports_a_failed_module_load_through_the_kit():
+    """Live (2026-10-17, pagoda replay 3): js/main.js imported "./util.js", which answered 404;
+    the app stayed on "Loading garden..." and Chromium's screenshot mode logged nothing, so
+    render_page said "no console errors" six times over the same picture. The kit's page check
+    (Chrome under DevTools) sees the failed load."""
+    ws = Workspace(tempfile.mkdtemp())
+    listening = [{"port": 5173, "addresses": ["0.0.0.0"], "command": "python3 -m http.server",
+                  "cwd": "/workspace"}]
+    rep = {"url": "http://localhost:5173/", "ok": False, "verdict": "FAIL: 1 console error(s)",
+           "errors": ["network: Failed to load resource: the server responded with a status of "
+                      "404 (File not found) http://localhost:5173/js/util.js"],
+           "steps": [], "widths": [{"width": 1280, "text": "Loading garden...",
+                                     "scroll_width": 1280}]}
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self):
+            self.ws, self.cmds, self.out = ws, [], ""
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "laya_drive.py page" in cmd[-1]:
+                ws.write(".tandem/shots/call1/page-1280.png", b"\x89PNG fake")
+                self.out += json.dumps(rep, indent=1) + "\n"
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx()
+    res = T._render(ctx, {"port": 5173})
+    assert not any("chromium" in c[-1] for c in ctx.cmds)
+    kit = ctx.cmds[-1][-1]
+    assert "python3 .tandem/laya_drive.py page http://localhost:5173/ --no-laya --widths 1280 " \
+           "--shots /workspace/.tandem/shots/call1 --timeout 60" in kit
+    assert ws.read(".tandem/laya_drive.py").startswith(b"#!/usr/bin/env python3")
+    assert res.content.startswith("rendered http://localhost:5173/ at 1280x900 just now")
+    assert 'visible text: "Loading garden..."' in res.content
+    assert res.content.endswith("console errors, exceptions and failed loads:\nnetwork: Failed to "
+                                "load resource: the server responded with a status of 404 (File "
+                                "not found) http://localhost:5173/js/util.js")
+    assert res.images and res.pane["ref"] == "file:/workspace/.tandem/shots/call1/page-1280.png"
+    rep["errors"], rep["widths"][0]["text"] = [], ""
+    assert T._render(Ctx(), {"port": 5173}).content.endswith(
+        "no console errors and no failed loads")
+
+
 def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():
     """ops/sandbox/relay.py as chatd sends it (python3 -c): a server on ::1 only and one on
     127.0.0.1 only both answer through `connect`; a closed port says what listens instead."""

@@ -271,6 +271,9 @@ def _render(ctx, a):
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
+    kit = _render_kit(ctx, url, w)
+    if kit is not None:
+        return kit
     shot = f"/workspace/{SHOTS_DIR}/{ctx.call_id}.png"
     # WebGL through SwiftShader by name (the automatic fallback is deprecated and says so on
     # every page); the page's console only: Chromium's own pages (chrome://) and its services
@@ -309,6 +312,53 @@ def _render(ctx, a):
         msg += (f"the server answered HTTP {code} for {url}: the screenshot is its error page, not "
                 f"the app\n")
     msg += ("console:\n" + "\n".join(errors[:40])) if errors else "no console errors"
+    return Result(msg, images=[("image/png", png)],
+                  pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
+
+
+def kit_ok(ctx) -> bool:
+    """The laya kit in the chat's files (chatd/verify.py `vendor_kit`); False without the source
+    tree (an installed package): render_page then shoots with Chromium's own flags."""
+    from chatd import verify
+    return verify.vendor_kit(ctx.ws)
+
+
+def _render_kit(ctx, url: str, w: int) -> Result | None:
+    """render_page through the laya kit's page check (Chrome under DevTools, real time): the
+    page's console errors, uncaught exceptions and failed loads, after the page has loaded. Live
+    (2026-10-17, pagoda replay 3) a module the page imports answered 404, the app stayed on its
+    loading screen, and Chromium's own screenshot mode logged nothing: render_page said "no
+    console errors" six times over the same picture. None when the kit is not there or its run
+    gives no report (the caller shoots with Chromium's own flags)."""
+    if not kit_ok(ctx):
+        return None
+    from chatd import verify
+    shots = f"/workspace/{SHOTS_DIR}/{ctx.call_id}"
+    cmd = (f"cd /workspace && python3 {verify.KIT_IN_BOX} page {shlex.quote(url)} --no-laya "
+           f"--widths {w} --shots {shots} --timeout 60")
+    mark = len(ctx.output_text())
+    ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
+    out = ctx.output_text()[mark:]
+    try:
+        rep = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        png = ctx.ws.read(f"{shots}/page-{w}.png")
+    except (ValueError, PathError, OSError):
+        if getattr(ctx, "oom", False):
+            raise ToolError(f"the page did not render: {oom_words()}, the kernel killed Chromium. "
+                            f"A lighter page or a smaller width and height may fit",
+                            oom_data()) from None
+        return None
+    h = 844 if w < 600 else 900
+    shot = f"{shots}/page-{w}.png"
+    msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
+           f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
+           f"screenshot {shot}\n")
+    errors = rep.get("errors") or []
+    text = (((rep.get("widths") or [{}])[0]).get("text") or "").strip()
+    if text:
+        msg += f'visible text: "{text[:200]}"\n'
+    msg += ("console errors, exceptions and failed loads:\n" + "\n".join(errors[:40])) \
+        if errors else "no console errors and no failed loads"
     return Result(msg, images=[("image/png", png)],
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
 
