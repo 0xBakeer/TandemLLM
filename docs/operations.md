@@ -51,13 +51,15 @@ chatd, the Chat tab's service, is its own process ([chat.md](chat.md)): `ops/sta
 
 At boot, two cron lines bring the service up:
 
-    @reboot sleep 90 && $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
-    * * * * * $HOME/<checkout>/ops/watchdog.sh
+    @reboot sleep 90 && bash $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
+    * * * * * bash $HOME/<checkout>/ops/watchdog.sh
 
 On a box that `install.sh` set up, the scripts run from `run/ops`, beside the `serve.env` the installer rendered with this box's paths; the checkout's `src/ops/serve.env` is the release's template. The installer copies `start.sh`, `stop.sh`, `engines.sh`, `roles.sh`, `watchdog.sh`, `hold.sh`, `use-profile.sh`, `make-secrets.sh`, `engine_status.py` and `fetch_weights.py` there on every run; `chatd.sh` stays in `src/ops`. The lines are:
 
-    @reboot sleep 90 && $HOME/TandemLLM/bin/tandem start >> $HOME/TandemLLM/src/logs/boot.log 2>&1
-    * * * * * $HOME/TandemLLM/run/ops/watchdog.sh
+    @reboot sleep 90 && bash $HOME/TandemLLM/bin/tandem start >> $HOME/TandemLLM/src/logs/boot.log 2>&1
+    * * * * * bash $HOME/TandemLLM/run/ops/watchdog.sh
+
+Every line runs its script through `bash`, as the scripts call each other: a copy that lost its execute bit (a deploy that did not keep file modes) still runs. `tests/test_no_exec_bit.py` fails on a new direct call (OPS-167).
 
 `bin/tandem` reads `run/ops/serve.env` under `set -e`. A missing `ops/active-profile` is the normal state of a plain install and loads the template's values; a command in the config that fails stops it with the file and the line. Boxes installed before 0.11.2 need one run of the installer to get both, and the scripts above (OPS-159, OPS-161).
 
@@ -99,7 +101,7 @@ Each profile sets its engine's ceiling and peak (`MEM_CEILING_GIB`, `MEM_PEAK_GI
 
 Measurements need the board to themselves, and so does anything that loads a second copy of the model. `ops/hold.sh` makes the safe sequence the easy one:
 
-    flock ~/.qwen38-box.flock ops/hold.sh 30 python tools/verify_spec.py ...
+    flock ~/.qwen38-box.flock bash ops/hold.sh 30 python tools/verify_spec.py ...
 
 It arms a pause file so the watchdog stands back, and keeps it fresh for the whole hold. Then it stops the service and runs the command. Afterwards it restarts the service and waits for `/health`. On every exit path, including a killed command, it removes the pause. The lock file makes two holds wait for each other. A pause file older than 2,400 s is ignored, so a crashed hold cannot leave the service unsupervised for long.
 
@@ -183,4 +185,4 @@ On a box that `install.sh` set up, the installer is the deploy: `bash ~/TandemLL
 - An answer stops in the middle. Find the request's log line. `finish=length` hit the token limit, `timeout` the wall clock, `error` an exception (its traceback is in the log), and `abandoned` means the client hung up.
 - An agent turn waits minutes before the first token. Check `cached_tokens` for that request in the usage ledger. On a growing conversation it should be close to the previous turn's prompt. If it is not, read the `resident` block of `/v1/cache/stats`.
 - The server answers 503 or 429 while it looks idle. Read `inflight` in `/health`. A 503 means a full queue, and a 429 a request without a stream that waited longer than the queue timeout (a streamed chat request waits up to the request timeout and gets `: waiting` comments; docs/server.md). A high `waiting` count with nothing running is a bug.
-- The port answers but nothing generates. The watchdog handles three failed checks. By hand: `ops/stop.sh 30 && ops/start.sh`.
+- The port answers but nothing generates. The watchdog handles three failed checks. By hand: `bash ops/stop.sh 30 && bash ops/start.sh`.

@@ -30,9 +30,9 @@ Until an admin password is set, anyone who reaches the port can run the setup, a
 Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. The Setup Guide runs `ops/use-profile.sh` for you; to pick the weights from a shell instead, install with the two commands above, then:
 
 ```bash
-~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
-~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # what it would download: each URL and size
-~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
+bash ~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
+bash ~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # what it would download: each URL and size
+bash ~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
 ```
 
 Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installer wrote. The switch downloads what the profile needs, checks it, and starts the engine on port 8000. Two examples:

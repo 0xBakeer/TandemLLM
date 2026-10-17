@@ -318,7 +318,7 @@ if [ "$UNINSTALL" = 1 ]; then
             die "no terminal to confirm on: re-run with --uninstall --yes"
         fi
     fi
-    if [ -x "$DIR/bin/tandem" ]; then run "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
+    if [ -f "$DIR/bin/tandem" ]; then run bash "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
     # chatd too, should this tandem predate its stop (OPS-155)
     if [ -f "$SRC/ops/chatd.sh" ]; then run bash "$SRC/ops/chatd.sh" stop || true; fi
     if [ -f "$UNIT" ] && grep -q "$DIR/bin/tandem" "$UNIT" 2>/dev/null; then
@@ -989,7 +989,7 @@ if [ "$SYSTEMD" = 1 ]; then
     info "one engine per board: enable it only if nothing else (cron, another unit) starts one here;"
     info "bin/tandem start refuses while any engine is alive, but two supervisors can still race at boot"
     if [ "$DRY" = 1 ]; then
-        note "would write $UNIT (ExecStart=$DIR/bin/tandem start) and enable it"
+        note "would write $UNIT (ExecStart=/bin/bash $DIR/bin/tandem start) and enable it"
     else
         mkdir -p "$(dirname "$UNIT")"
         cat > "$UNIT" <<EOF
@@ -998,14 +998,15 @@ Description=TandemLLM: Qwen3.8-27B with StairCut, OpenAI-compatible API on :$POR
 After=network-online.target
 
 [Service]
-# bin/tandem start runs the release's ops/start.sh, which starts the server in the background
+# bin/tandem start runs the release's ops/start.sh (through bash, as every call of a script here: a
+# copy that lost its execute bit still runs, OPS-167), which starts the server in the background
 # and returns once /health answers, then chatd (the Chat tab's service); both stay in this unit's
 # cgroup. bin/tandem stop stops chatd first, then the engine, so systemctl restart restarts chatd
 # too; tandem restart leaves chatd and its runs alone.
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$DIR/bin/tandem start
-ExecStop=$DIR/bin/tandem stop 120
+ExecStart=/bin/bash $DIR/bin/tandem start
+ExecStop=/bin/bash $DIR/bin/tandem stop 120
 TimeoutStartSec=2400
 TimeoutStopSec=180
 
@@ -1061,9 +1062,9 @@ else
     if [ "$SYSTEMD" = 1 ] && systemctl --user is-enabled tandemllm.service >/dev/null 2>&1; then
         systemctl --user start tandemllm.service || die "tandemllm.service did not start: journalctl --user -u tandemllm; $SRC/logs/engine.log"
     else
-        "$DIR/bin/tandem" start || die "the engine did not come up; log: $SRC/logs/engine.log"
+        bash "$DIR/bin/tandem" start || die "the engine did not come up; log: $SRC/logs/engine.log"
     fi
-    "$DIR/bin/tandem" smoke || die "the smoke test failed; log: $SRC/logs/engine.log"
+    bash "$DIR/bin/tandem" smoke || die "the smoke test failed; log: $SRC/logs/engine.log"
 fi
 
 API_HOST="$HOST"; [ "$HOST" = 0.0.0.0 ] && API_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"; API_HOST="${API_HOST:-127.0.0.1}"
@@ -1073,7 +1074,7 @@ ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
   Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
-  Watchdog:  $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
+  Watchdog:  bash $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read

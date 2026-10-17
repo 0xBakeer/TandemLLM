@@ -316,7 +316,7 @@ def test_the_systemd_unit_stops_both():
     text = open(os.path.join(ROOT, "install.sh")).read()
     unit = text[text.index('cat > "$UNIT" <<EOF'):]
     unit = unit[:unit.index("\nEOF\n")]
-    assert "ExecStart=$DIR/bin/tandem start" in unit and "ExecStop=$DIR/bin/tandem stop 120" in unit
+    assert "ExecStart=/bin/bash $DIR/bin/tandem start" in unit and "ExecStop=/bin/bash $DIR/bin/tandem stop 120" in unit
     assert "systemctl restart restarts chatd" in unit
     # bin/tandem stop stops chatd (test_tandem_...); --uninstall runs it and chatd.sh stop as well
     un = text[text.index('if [ "$UNINSTALL" = 1 ]; then'):text.index("printf '%sTandemLLM installer%s")]

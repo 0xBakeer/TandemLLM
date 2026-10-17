@@ -55,6 +55,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 - The narrator is off by default: the roles document's `narrator.mode` is `off`, and no shipped profile sets `ui.narrator` (coding and chat had `live`). The model does not load, the keeper leaves it, `POST /v1/conductor/narrator/load` answers 409 `role_off`, and the residency plan leaves out a role the roles document switches off, so the narrator's 6 GiB claim is gone. No model card turns the narrator on in the Setup Guide. A stored coding or chat profile with `live`, the role `on` in a stored roles document: `off` by a one-time migration, unless a stored version had another value. The narrator stays switchable: the role `on` and a profile's `ui.narrator` (SRV-534).
 - The decider's residency claim is 3.0 GiB, measured with Laya in the engine (OPS-69), instead of the arbiter sidecar's 8.2. With 8.2 a new box refused Laya on Super VL at 3 slots of 262,144 (43.75 GiB available, 17.46 still to come to the engine's peak: 18.09 left, under the 21 of floor and margin); with 3.0, 23.29 are left. A stored residency document with 8.2 gets 3.0 by a one-time migration, unless a stored version had another value. While no Laya model is loaded because the planner refused it, the log says so once (`[deciders] WARNING`) and `/health` `roles.laya.refused` has the model, the reason and the numbers (SRV-534).
 
+### Install and the Setup Guide
+
+- Our scripts call each other through `bash`, never through the execute bit: `ops/use-profile.sh` (start.sh, stop.sh), `ops/watchdog.sh`, install.sh's calls of `bin/tandem` and its systemd unit (`ExecStart=/bin/bash DIR/bin/tandem start`), and the documented cron lines. A Setup Guide install failed at "Restart the engine" after 1.4 s with `ops/start.sh: Permission denied`: a deploy had written start.sh with mode 644. `tests/test_no_exec_bit.py` fails on a new direct call in the scripts, the Python code's subprocess calls, the units and the documented command lines (OPS-167).
+
 Upgrade: the migrations run at the engine's first start; `migrations.json` in the conductor's directory lists them.
 
 ## 0.11.2 (unreleased)

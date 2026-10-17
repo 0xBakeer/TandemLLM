@@ -21,8 +21,8 @@ bash TandemLLM-early-access/install.sh --setup --yes --repo https://github.com/0
 Then pick a model. The first command shows what it would download; the second downloads it, checks every file and starts the engine on port 8000:
 
 ```bash
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
+bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05 --dry-run
+bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 ```
 
 `flashnext-3.05` downloads 85.1 GB and needs about 145 GB free on disk. For Qwen3.8-27B use `exl3-4.5` (about 58 GB, 118 GB free); `use-profile.sh --list` prints every profile. No Hugging Face token is needed. If a download stops, run the same command again. It keeps the files that finished.
@@ -43,5 +43,5 @@ Once a profile runs, the box counts as configured, and `--setup` alone refuses t
 
 ```bash
 bash ~/TandemLLM/src/install.sh --setup --force-setup --yes --ref <new tag> --repo git@github.com:0xBakeer/TandemLLM-early-access.git
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
+bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 ```

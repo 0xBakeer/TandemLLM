@@ -207,9 +207,9 @@ Where the tag `v0.11.1` is missing, `curl` fails with a 404 and the installer st
 The Setup Guide runs `ops/use-profile.sh` for you. To pick the weights from a shell instead, after the two commands above:
 
 ```bash
-~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
-~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # each file's URL and size, nothing downloaded
-~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
+bash ~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
+bash ~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # each file's URL and size, nothing downloaded
+bash ~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
 ```
 
 Without `--setup`, the installer sets up the NVFP4 profile with StairCut in one run: the base checkpoint, the NVFP4 weights and both drafters go to the Hugging Face cache, then it starts the engine, waits for `/health` and runs a smoke test that prints tok/s.

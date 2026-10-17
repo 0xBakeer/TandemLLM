@@ -97,8 +97,8 @@ The watchdog restarts only what it is sure about. A healthy server is left alone
 At boot two cron\index{cron} lines bring the service up:
 
 \begin{plain}
-@reboot sleep 90 && $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
-* * * * * $HOME/<checkout>/ops/watchdog.sh
+@reboot sleep 90 && bash $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
+* * * * * bash $HOME/<checkout>/ops/watchdog.sh
 \end{plain}
 
 \code{ops/qwen38-engine.service} is a systemd\index{systemd} user unit for the same job, and the installer can write one (\code{--systemd}). A user unit survives logout only with \code{loginctl enable-linger}, which needs root. Install one mechanism, never both: two supervisors for one port start the service twice.
@@ -108,7 +108,7 @@ At boot two cron\index{cron} lines bring the service up:
 Measurements need the board to themselves, and so does anything that loads a second copy of the model. \code{ops/hold.sh}\index{ops/hold.sh@\texttt{ops/hold.sh}} makes the safe sequence the easy one:
 
 \begin{shell}
-flock ~/.qwen38-box.flock ops/hold.sh 30 python tools/verify_spec.py ...
+flock ~/.qwen38-box.flock bash ops/hold.sh 30 python tools/verify_spec.py ...
 \end{shell}
 
 It arms a pause file so the watchdog stands back, keeps it fresh for the whole hold, stops the service and runs the command. Afterwards it restarts the service and waits for \code{/health}. On every exit path, a killed command included, it removes the pause. The lock file makes two holds wait for each other, and a pause file older than 2,400~s is ignored, so a crashed hold cannot leave the service unsupervised for long. Background jobs of the engine itself (the summary written ahead, the shadow reader, the memory writer) take the same lock without waiting and give it back when a hold asks for it. Taking the service down stops everyone who uses it: hold the board when nobody needs the service, and keep holds short.

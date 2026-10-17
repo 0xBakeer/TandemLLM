@@ -103,7 +103,7 @@ say "health check failed (code $CODE), $N/$NEED"
 [ "$N" -lt "$NEED" ] && exit 0
 say "restarting"
 rm -f "$LOGS/loading.since"                            # the next loader times its own load
-"$HERE/stop.sh" 30 >> "$WD" 2>&1
+bash "$HERE/stop.sh" 30 >> "$WD" 2>&1
 sleep "${RESTART_SETTLE_S:-5}"                          # the kernel's memory back first (OPS-41)
-"$HERE/start.sh" >> "$WD" 2>&1 && say "restarted" || say "RESTART FAILED"
+bash "$HERE/start.sh" >> "$WD" 2>&1 && say "restarted" || say "RESTART FAILED"
 echo 0 > "$STATE"

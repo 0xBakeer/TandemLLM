@@ -66,9 +66,9 @@ The installer prints the addresses when it finishes, and while the box is in set
 The Setup Guide runs \code{ops/use-profile.sh} for you. To pick the weights from a shell instead, run the copy in \code{~/TandemLLM/run/ops/}, next to the \code{serve.env} the installer wrote:
 
 \begin{shell}
-~/TandemLLM/run/ops/use-profile.sh --list
-~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run
-~/TandemLLM/run/ops/use-profile.sh <profile>
+bash ~/TandemLLM/run/ops/use-profile.sh --list
+bash ~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run
+bash ~/TandemLLM/run/ops/use-profile.sh <profile>
 \end{shell}
 
 \code{--list} prints every profile and marks the active one. With \code{--dry-run} the script prints every file's URL and size and changes nothing. Without it, the script downloads what the profile needs and checks every weight file against the sha256 the hub lists. It then leaves setup mode, starts the engine on port 8000 and sends one smoke request. Since 0.8.2, \code{community/<id>} runs a pack someone else published (Chapter~\ref{ch:community}).
@@ -116,7 +116,7 @@ A box with a running profile counts as configured, and \code{--setup} alone refu
 \begin{shell}
 bash ~/TandemLLM/src/install.sh --setup --force-setup --yes --ref <new tag> \
     --repo git@github.com:0xBakeer/TandemLLM-early-access.git
-~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
+bash ~/TandemLLM/run/ops/use-profile.sh flashnext-3.05
 \end{shell}
 
 \section{The installer}\index{install.sh}
