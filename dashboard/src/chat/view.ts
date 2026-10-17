@@ -99,6 +99,8 @@ export class QseChat extends LightElement {
   @state() private notice: { kind: 'ok' | 'warn'; text: string } | null = null;
   /** VIS-219: what the Agents switch did, under the composer until the next send */
   @state() private agentsNote: string | null = null;
+  @state() private sending = false;
+  @state() private sendNote = '';
   @query('qse-chat-composer') private composer!: QseChatComposer | null;
 
   private sub: Subscription | null = null;
@@ -526,35 +528,47 @@ export class QseChat extends LightElement {
     const id = c.id;
     lsSet(LS.draft(id), null);
     this.agentsNote = null;
-    let atts = attachments;
-    if (this.backend!.kind === 'remote' && attachments.length) {
-      // the remote wants uploads first (CONTRACT section 8, request 9); a file that fails keeps
-      // the message in the composer. The thumbnail stays the device's own until `url` answers.
-      atts = [];
-      for (const a of attachments) {
-        try {
-          const f = this.composer?.fileOf(a.id);
-          if (!f && a.url) {
-            atts.push(a);                       // the server has it already (an MCP resource)
-            continue;
+    // a file goes to the server BEFORE the message, and the server reads a scanned PDF or image
+    // while the request is still open — without this the screen just sits there doing nothing.
+    this.sending = true;
+    try {
+      let atts = attachments;
+      if (this.backend!.kind === 'remote' && attachments.length) {
+        // the remote wants uploads first (CONTRACT section 8, request 9); a file that fails keeps
+        // the message in the composer. The thumbnail stays the device's own until `url` answers.
+        atts = [];
+        const total = attachments.length;
+        for (const [n, a] of attachments.entries()) {
+          try {
+            const f = this.composer?.fileOf(a.id);
+            if (!f && a.url) {
+              atts.push(a);                       // the server has it already (an MCP resource)
+              continue;
+            }
+            if (!f) throw new Error('the file is no longer there');
+            this.sendNote = total > 1 ? `Uploading ${a.name} (${n + 1} of ${total})…` : `Uploading ${a.name}…`;
+            const up = await this.backend!.uploadAttachment(f);
+            atts.push({ ...up, preview: a.preview ?? null });
+          } catch (e) {
+            this.composer?.restore(text, attachments);
+            this.say('warn', `${a.name} did not upload (${(e as Error).message}); the message stays in the composer.`);
+            return;
           }
-          if (!f) throw new Error('the file is no longer there');
-          const up = await this.backend!.uploadAttachment(f);
-          atts.push({ ...up, preview: a.preview ?? null });
-        } catch (e) {
-          this.composer?.restore(text, attachments);
-          this.say('warn', `${a.name} did not upload (${(e as Error).message}); the message stays in the composer.`);
-          return;
         }
       }
+      if (c.run) {
+        await this.guard(() => this.backend!.queue(id, text, clientMsgId()), 'Queue');
+        return;
+      }
+      this.sendNote = attachments.length
+        ? 'Sending — a scanned PDF or image is read on the server first, which can take a minute.'
+        : 'Sending…';
+      await this.guard(() => this.backend!.send(id, { client_msg_id: clientMsgId(), text, attachments: atts }), 'Send');
+    } finally {
+      this.sending = false;
+      this.sendNote = '';
     }
-    if (c.run) {
-      await this.guard(() => this.backend!.queue(id, text, clientMsgId()), 'Queue');
-      return;
-    }
-    await this.guard(() => this.backend!.send(id, { client_msg_id: clientMsgId(), text, attachments: atts }), 'Send');
   }
-
   private async command(command: string, args: string): Promise<void> {
     switch (command) {
       case 'clear':
@@ -849,7 +863,7 @@ export class QseChat extends LightElement {
   }
 
   private renderComposer(c: Conversation | null): TemplateResult {
-    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .resources=${this.resources} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
+    return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .resources=${this.resources} .prompts=${this.prompts} .running=${!!c?.run} .busy=${this.sending ? this.sendNote : ''} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
       .rereadTokens=${c?.messages.length ? c.context.used : null} .agentsNote=${this.agentsNote}
       @ch-agents-note-close=${() => (this.agentsNote = null)}
       .upload=${this.backend?.kind === 'remote' ? (f: File) => this.backend!.uploadAttachment(f) : null}

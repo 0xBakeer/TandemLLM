@@ -29,6 +29,8 @@ export class QseChatComposer extends LightElement {
   @property({ attribute: false }) prompts: Prompt[] = [];
   @property({ type: Boolean }) running = false;
   @property({ type: Boolean }) disabled = false;
+  /** a send/upload in flight — the button waits and the note tells the user why (SRV-issue). */
+  @property({ type: String }) busy = '';
   @property({ type: String }) draft = '';
   /** uploads a file as soon as it is added, so its chip shows the tokens and whether it goes
    *  as a file (SRV-487, VIS-169); without it the view uploads at the send */
@@ -143,6 +145,7 @@ export class QseChatComposer extends LightElement {
         return;
       }
     }
+    if (this.busy) return;
     this.fire('ch-send', { text, attachments: this.files });
     this.text = '';
     this.files = [];
@@ -274,9 +277,10 @@ export class QseChatComposer extends LightElement {
       }}>
       ${this.slash ? this.renderSlash() : nothing}
       ${this.agentsNote ? html`<p class="ch-agents-note small" role="status">${this.agentsNote}<button type="button" class="btn btn-ghost btn-sm" aria-label="Dismiss" @click=${() => this.fire('ch-agents-note-close')}>${icon('x')}</button></p>` : nothing}
-      ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn warn-ink">as a file</span>` : nothing}<button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>${this.files.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn warn-ink small" role="status">${w}</p>`)}` : nothing}
+      ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn muted">as a file</span>` : nothing}<button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>${this.files.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn muted small" role="status">${w}</p>`)}` : nothing}
       <label class="sr-only" for="ch-input">Message</label>
       <textarea id="ch-input" rows="1" placeholder=${this.running ? (this.phone ? 'Steer the run' : 'Steer: goes in after the current step') : this.phone ? 'Message TandemLLM' : 'Message TandemLLM, or / for a command'} .value=${this.text} ?disabled=${this.disabled} @input=${this.onInput} @keydown=${this.onKey} @paste=${this.onPaste}></textarea>
+      ${this.busy ? html`<p class="ch-send-note small muted" role="status">${this.busy}</p>` : nothing}
       <div class="ch-composer-row">
         <label class="btn btn-ghost btn-icon ch-attach-btn" title="Attach files" aria-label="Attach files"><input type="file" multiple class="sr-only" @change=${(e: Event) => {
           const inp = e.target as HTMLInputElement;
@@ -310,7 +314,7 @@ export class QseChatComposer extends LightElement {
         <label class="switch ch-enter" title="Enter sends; Shift+Enter is a new line. Off: Enter is a new line, Cmd/Ctrl+Enter sends."><input type="checkbox" .checked=${this.enterSends} @change=${(e: Event) => (this.enterSends = (e.target as HTMLInputElement).checked)} /><span>Enter sends</span></label>
         ${this.running
           ? html`<span class="ch-send-group"><button type="submit" class="btn btn-sm ch-queue-btn" ?disabled=${!this.text.trim()} title="Queue: goes in after the current step">${icon('send')} <span class="ch-btn-word">Queue</span></button><button type="button" class="btn ch-stop" aria-label="Stop" title="Stop the run" @click=${() => this.fire('ch-stop')}>${icon('stop')} <span class="ch-btn-word">Stop</span></button></span>`
-          : html`<button type="submit" class="btn btn-primary ch-send" aria-label="Send" ?disabled=${this.disabled || (!this.text.trim() && !this.files.length)}>${icon('send')} <span class="ch-btn-word">Send</span></button>`}
+          : html`<button type="submit" class="btn btn-primary ch-send" aria-label="Send" ?disabled=${this.disabled || this.busy !== '' || (!this.text.trim() && !this.files.length)}>${icon('send')} <span class="ch-btn-word">${this.busy ? 'Sending…' : 'Send'}</span></button>`}
       </div>
     </form>`;
   }
