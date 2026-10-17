@@ -9,6 +9,14 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { ChartElement, colorVar, nextId, type SeriesColor } from './chart-base';
 import { linear, monotonePath, nearestIndex, type Pt } from './svg';
 
+/** Two arrays of numbers and nulls, point for point (the window a spark plots, one second a slot). */
+function sameValues(a: (number | null)[], b: (number | null)[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 @customElement('qse-spark')
 export class QseSpark extends ChartElement {
   @property({ attribute: false }) values: (number | null)[] = [];
@@ -21,6 +29,10 @@ export class QseSpark extends ChartElement {
   @property({ type: String, attribute: 'aria-label' }) ariaLabelText = '';
   @state() private hover: number | null = null;
   private glowId = nextId('sp');
+  /** The Live panel re-renders at event speed — 4/s on a busy engine — while its ring moves
+   *  at one point a second (issue #7 on the Spark: the long frames were these splines). The
+   *  ribbon's path of an unchanged window is therefore built once and kept. */
+  private ribbonCache: { vals: (number | null)[]; w: number; h: number; d: string } | null = null;
 
   private setHover(e: MouseEvent | TouchEvent) {
     const rect = this.getBoundingClientRect();
@@ -51,6 +63,14 @@ export class QseSpark extends ChartElement {
     const x = linear([0, Math.max(1, n - 1)], [3, W - 3]);
     const pts: (Pt | null)[] = this.values.map((v, i) => (v == null || !Number.isFinite(v) ? null : { x: x(i), y: y(v) }));
     const col = colorVar(this.color);
+    let d = '';
+    if (this.mode === 'ribbon' && vals.length) {
+      // the two ribbons of one window share a single spline, and an unchanged window —
+      // every render that is not the second a new sample lands — keeps the one built
+      const c = this.ribbonCache;
+      d = c && c.w === W && c.h === H && sameValues(c.vals, this.values) ? c.d : monotonePath(pts);
+      this.ribbonCache = { vals: this.values, w: W, h: H, d };
+    }
     let last = -1;
     for (let i = n - 1; i >= 0; i--) {
       if (pts[i]) {
@@ -79,8 +99,8 @@ export class QseSpark extends ChartElement {
         ${!vals.length ? svg`<line class="spark-base" x1="3" x2=${W - 3} y1=${H - 3} y2=${H - 3} />` : nothing}
         ${this.mode === 'ribbon' && vals.length
           ? svg`
-            <path d=${monotonePath(pts)} fill="none" stroke=${col} stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity="0.26" filter="url(#${this.glowId}-glow)" />
-            <path d=${monotonePath(pts)} fill="none" stroke=${col} stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />`
+            <path d=${d} fill="none" stroke=${col} stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity="0.26" filter="url(#${this.glowId}-glow)" />
+            <path d=${d} fill="none" stroke=${col} stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />`
           : nothing}
         ${this.mode === 'dots' ? pts.map((p) => (p ? svg`<circle cx=${p.x} cy=${p.y} r="2.6" fill=${col} opacity="0.85" />` : nothing)) : nothing}
         ${last >= 0 ? svg`<circle class="spark-now" cx=${pts[last]!.x} cy=${pts[last]!.y} r=${this.mode === 'dots' ? 3.4 : 3} />` : nothing}

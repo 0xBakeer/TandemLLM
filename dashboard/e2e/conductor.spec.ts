@@ -161,7 +161,7 @@ test('a profile\'s Context sets S1, S4 and the push, and mirrors the task rows @
   await ctx.locator('summary').click();
   await expect(ctx.locator('input[data-context="s4_minutes"]')).toHaveValue('20');
   await expect(ctx.locator('[data-context="notify"] input')).toBeChecked();
-  await expect(ctx.locator('[data-notify-rule]')).toContainText('the owner on 2026-09-30');
+  await expect(ctx.locator('[data-notify-rule]')).toContainText('2026-09-30'); /* the date, not the sentence: a wording change must not break this again (#6) */
   await ctx.locator('input[data-context="s1_runs"]').fill('4');
   const editor = page.locator('[data-editor="overnight"]');
   await editor.getByLabel('change note').fill('S1 after four runs');
