@@ -575,7 +575,8 @@ class FakeAlloc:
 
 
 def test_the_buffers_are_asked_for_once_and_given_back_in_their_order():
-    assert cache.Budget.LEVELS == ("store", "anchors", "end", "stash", "park", "pin", "roles")
+    assert cache.Budget.LEVELS == ("store", "stash_idle", "anchors", "end", "stash", "park", "pin",
+                                   "roles")
     st = fresh().state
     nbytes = st.S.numel() * st.S.element_size() + st.conv.numel() * st.conv.element_size()
     full = cache.Budget(10 * BIG, 12 * BIG, 0, probe=FakeAlloc(10 * BIG), empty=lambda: None)

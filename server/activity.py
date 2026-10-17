@@ -318,6 +318,7 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
                     "eta_ms": None, "progress": mode or "chunked",
                     "at_ms": _r((rec.t_first - rec.t_arrival) * 1e3, 1),
                     "tps_live": None, "tps_live_avg": pl["tps_live_avg"],
+                    "why": info.get("why"),
                     "warmup": {"chunks": pl["chunks"], "reached": pl["reached"]}}
         marks = getattr(rec, "pf_marks", None)
         t0 = info.get("t0")
@@ -326,7 +327,7 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
             return {"done": start, "total": total, "cached": start, "pct": None,
                     "tps_now": None, "tps_avg": None, "eta_ms": None, "progress": mode,
                     "at_ms": None, "tps_live": pl["tps_live"],
-                    "tps_live_avg": pl["tps_live_avg"],
+                    "tps_live_avg": pl["tps_live_avg"], "why": info.get("why"),
                     "warmup": {"chunks": 0, "reached": pl["reached"]}}
         n = len(marks)
         done, total, t = marks[n - 1]                 # the hook's own total: what is prefilled
@@ -342,6 +343,7 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
                 "progress": mode or "chunked",
                 "at_ms": _r((t - rec.t_arrival) * 1e3, 1),
                 "tps_live": pl["tps_live"], "tps_live_avg": pl["tps_live_avg"],
+                "why": info.get("why"),
                 "warmup": {"chunks": n, "reached": pl["reached"]}}
     return _safe(read)
 

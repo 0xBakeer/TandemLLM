@@ -14,8 +14,9 @@ same bytes across calls and across a restart (a fresh store read).
                     images as `image_url` parts when the model reads images), assistant text with
                     its reasoning as `reasoning_content` (the engine's template decides what to keep);
                     notices (role `system` in the tree) are the UI's and are left out
-    tool images     in the tool message that returned them, the newest one only: an older
-                    screenshot is a line saying a newer one follows (TOOL_IMAGES_KEPT)
+    tool images     in the tool message that returned them, append-only: all up to
+                    TOOL_IMAGES_KEPT, then the first ones and the newest; the newest-but-one
+                    becomes a line saying a newer one follows (SRV-546)
     effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide)
     thinking off    `chat_template_kwargs.enable_thinking: false` (read by our engine, vLLM and
                     SGLang alike)
@@ -89,9 +90,13 @@ def steps(parts: list[dict]) -> list[list[dict]]:
     return [out[k] for k in sorted(out)]
 
 
-#: the tool images a request carries as images, the newest first: older ones become a line with
-#: their path. Live (2026-10-13), five 300 KB screenshots of one run stayed in every later request
-TOOL_IMAGES_KEPT = 1
+#: the tool images a request carries as images: every one up to TOOL_IMAGES_KEPT, past it the
+#: first TOOL_IMAGES_KEPT - 1 and the newest; the others become a line. An image once sent stays
+#: where it is: with only the newest kept (2026-10-13), each new screenshot turned the previous one
+#: into a line, the prompt changed where it sat, and the engine read everything after it again at
+#: every screenshot (SRV-546: 90,186 tokens in 161 s at 10:18:36 on 2026-10-17). Past the cap the
+#: line replaces the newest-but-one, at the prompt's tail
+TOOL_IMAGES_KEPT = 8
 LEFT_OUT = "\n[The image of this result is left out: a newer screenshot follows.]"
 
 
@@ -101,12 +106,18 @@ def _image_part(a: dict, data: bytes) -> dict:
 
 
 def kept_tool_images(branch: list[dict], n: int | None = None) -> set:
-    """The ids of the newest `n` (TOOL_IMAGES_KEPT) images tool results returned on `branch`."""
+    """The ids of the images tool results returned on `branch` that a request carries: all of
+    them up to `n` (TOOL_IMAGES_KEPT), else the first `n - 1` and the newest, so a kept image never
+    becomes a line later and the prompt before the newest-but-one never changes."""
     n = TOOL_IMAGES_KEPT if n is None else n
     ids = [a.get("id") for m in branch if m.get("role") == "assistant"
            for p in m.get("parts") or [] if p.get("type") == "tool_call"
            for a in (p.get("output") or {}).get("images") or []]
-    return set(ids[-n:]) if n > 0 else set()
+    if n <= 0:
+        return set()
+    if len(ids) <= n:
+        return set(ids)
+    return set(ids[:n - 1]) | {ids[-1]}
 
 
 def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,

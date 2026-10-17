@@ -62,6 +62,8 @@ from __future__ import annotations
 
 WS = b" \t\n\r"
 THINK_END = b"</think>"
+#: engine/vision.py's KEY_BASE: ids at or above it are image rows' content keys
+KEY_BASE = 1 << 40
 
 
 def _byte_decoder() -> dict:
@@ -85,6 +87,10 @@ def token_bytes(tok):
 
     def get(i: int) -> bytes:
         b = memo.get(i)
+        if b is None and int(i) >= KEY_BASE:
+            # SRV-546: an image row's key id (engine/vision.py `key_id`, past the vocabulary):
+            # content, never whitespace, and equal only to the same image's rows
+            b = memo[i] = b"\x00img" + int(i).to_bytes(8, "little")
         if b is None:
             s = conv(int(i)) if conv is not None else None
             if isinstance(s, str) and s and all(ch in dec for ch in s):

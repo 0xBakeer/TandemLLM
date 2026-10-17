@@ -373,7 +373,8 @@ class Budget:
         free blocks back to the driver once the request has finished.
 
     THE ORDER things are given back in, cheapest to lose first: `LEVELS`. The state store served 0
-    hits on 2026-10-01; the anchors in the body of a prompt serve only a divergence in its middle
+    hits on 2026-10-01; the guest stash's buffers with no guest's rows in them hold nothing
+    (SRV-546); the anchors in the body of a prompt serve only a divergence in its middle
     (none in a night's ledger); the end anchor saves the next turn a re-read of the last answer
     (`ResidentPrefix.keep_end`); the guest stash saves one session from a short
     request, and without it the end anchor's rows are gone too; the parked session saves a
@@ -392,7 +393,7 @@ class Budget:
 
     # `roles` last: an in-process role whose own pool holds free segments that
     # only dropping the pool returns (the shadow reader after a long conversation)
-    LEVELS = ("store", "anchors", "end", "stash", "park", "pin", "roles")
+    LEVELS = ("store", "stash_idle", "anchors", "end", "stash", "park", "pin", "roles")
 
     def __init__(self, ceiling_bytes: int, peak_bytes: int, slack_bytes: int, *,
                  probe=None, empty=None, exclude=None, peak_probe=None,
@@ -1112,6 +1113,7 @@ class ResidentPrefix:
         # and the drafter's mark; its state in `_end_bufs`, allocated once and reused
         self.end_on = bool(end)
         self.end: dict | None = None
+        self.end_lost: str | None = None   # why the last end anchor went (`_drop_end`)
         self._end_bufs: tuple | None = None
         # the tokenizer's whitespace-only tokens (the server's, at load): where the client's copy
         # of an answer may differ from the rows next to a hidden span (`replay`)
@@ -1250,6 +1252,7 @@ class ResidentPrefix:
         self.capturing = False
         if e > n_prompt:
             self.taint = n_prompt if self.taint is None else min(self.taint, n_prompt)
+        self.end_lost = None
         self.stats["end_kept"] += 1
         return "kept"
 
@@ -1315,10 +1318,12 @@ class ResidentPrefix:
         self.stats["end_replayed"] += len(out) - len(copy)
         return out, [(p, list(h)) for p, h in end["hidden"]]
 
-    def _drop_end(self) -> None:
-        """The end anchor's rows are not in place any more; its buffers stay for the next one."""
+    def _drop_end(self, why: str = "rows") -> None:
+        """The end anchor's rows are not in place any more; its buffers stay for the next one.
+        `why` stays for the words of the next turn's re-read (`reread_words`)."""
         if self.end is not None:
             self.end = None
+            self.end_lost = why
             self.stats["end_dropped"] += 1
 
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
@@ -2055,7 +2060,7 @@ class ResidentPrefix:
         `safe` gives back only buffers that hold no end anchor."""
         if self._end_bufs is None or (safe and self.end is not None):
             return 0
-        self._drop_end()
+        self._drop_end("memory")
         freed = sum(_nbytes(x) for x in self._end_bufs)
         self._end_bufs = None
         return freed
@@ -2379,7 +2384,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             c = res.common(keys)
             b = res.best(c, n - 1)
             # the parked end came back with its rows (`unpark`); the pin brings none
-            be = res.end_offer(c, n - 1)
+            be = res.end_offer(c, n - 1, mm_ok=end_mm)
             res.stats[f"{via}_tokens_reused"] += max(b, be)
         elif store is not None:
             hit = store.find(keys, hashes, max_len=n - 1, min_len=b)
@@ -2396,6 +2401,11 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         # the rows this prefill leaves as they are: a write still copying them may go on
         _disk(disk, "fence", start if kind in ("resident", "end")
               else dh.have if dh is not None else 0)
+    if info is not None:
+        info["why"] = (reread_words(res, c, start, n, kind, was_valid,
+                                    other=conv_id is not None and was_owner is not None
+                                    and conv_id != was_owner)
+                       if res is not None and n - start >= REREAD_WORDS_TOKENS else None)
     taint = res.taint if res is not None else None
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
@@ -2539,6 +2549,31 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                              "reread": n - start, "via": via or kind or "none",
                              "ms": round((time.perf_counter() - t_in) * 1e3, 1)})
     return logits, start, n - start
+
+
+#: SRV-546: a prefill that reads at least this many tokens again says why, in words the chat's
+#: Now line shows (`reread_words`, the live view's `prefill.why`)
+REREAD_WORDS_TOKENS = 8192
+
+
+def reread_words(res, c: int, start: int, n: int, kind, was_valid: int,
+                 other: bool = False) -> str:
+    """Why a prefill reads `n - start` of its `n` tokens again, in plain words: the rows in place
+    (`c` of them shared with the prompt, `was_valid` held, `other`: another session's) and the end
+    anchor, before this prefill's `begin` changes them."""
+    e = int(res.end["at"]) if res.end is not None else 0
+    if kind in ("disk", "prefix") and start:
+        return f"the chat came back from the cache tier at {start:,} of {n:,} tokens"
+    if not was_valid or c < res.chunk:
+        return ("nothing of this chat was cached: a new chat, a restart, or another chat used "
+                "the engine's slot since")
+    if other:
+        return "another chat's conversation was in the engine's slot; this one was not kept there"
+    if res.end is not None and c < e:
+        return f"the chat's text differs from what the engine read, at token {c:,} of {e:,}"
+    if res.end is None and getattr(res, "end_lost", None) == "memory":
+        return "the engine gave the last turn's cached state back to free memory"
+    return f"the cache held {start:,} of {n:,} tokens"
 
 
 def _disk(disk, op: str, *a, default=None):

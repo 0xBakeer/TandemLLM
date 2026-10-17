@@ -86,6 +86,25 @@ CONTEXT_RUN_S = 1.0
 CONTEXT_IDLE_S = 10.0
 SANDBOX_S = 10.0          # a running sandbox's memory and disk go out with the context this often
 PEEK_TTL_S = 30.0
+
+#: SRV-546: a prefill that reads this many tokens again names it a re-read, with the engine's reason
+REREAD_WORDS_TOKENS = 8192
+
+
+def prefill_words(pre: dict) -> str:
+    """The Now line of a prefill, from the engine's live row: what is read again and why (the
+    engine's words, `prefill.why`), what is new beside what the cache held, or the prompt."""
+    total = int(pre.get("total") or 0)
+    cached = int(pre.get("cached") or 0)
+    new = max(0, total - cached)
+    why = pre.get("why")
+    if why and new >= REREAD_WORDS_TOKENS:
+        return f"Re-reading {new:,} of {total:,} tokens: {why}"
+    if cached:
+        return f"Reading {new:,} new tokens ({cached:,} cached)"
+    return f"Prefilling {total:,} tokens"
+
+
 class ApiError(Exception):
     def __init__(self, status: int, kind: str, message: str, extra: dict | None = None):
         super().__init__(message)
@@ -1191,9 +1210,10 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             state = act.get("state")
             if state == "prefilling" and pre.get("total"):
                 run.prefill = {"done": int(pre.get("done") or 0), "total": int(pre["total"]),
-                               "tps": pre.get("tps_now"), "eta_ms": pre.get("eta_ms")}
+                               "tps": pre.get("tps_now"), "eta_ms": pre.get("eta_ms"),
+                               "cached": int(pre.get("cached") or 0), "why": pre.get("why")}
                 if run.phase in ("queued", "prefill"):
-                    run.set_phase("prefill", f"Prefilling {int(pre['total']):,} tokens")
+                    run.set_phase("prefill", prefill_words(pre))
             elif state == "queued" and run.phase in ("queued", "prefill"):
                 place = (act.get("queue") or {}).get("place")
                 run.set_phase("queued", act.get("label") or "Queued",

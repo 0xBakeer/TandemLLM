@@ -964,6 +964,13 @@
               "minimum": 0,
               "description": "from the warm-up anchor to the newest mark; when done, to the first token"
             },
+            "why": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "SRV-546: why this prefill reads 8,192 or more tokens again, in plain words; null otherwise"
+            },
             "warmup": {
               "type": "object",
               "properties": {

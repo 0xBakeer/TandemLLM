@@ -112,9 +112,12 @@ export class QseChatThread extends LightElement {
         <div class="ch-now-line">
           <span class="ch-now-words" title=${r.now}>${r.now}</span>
           <span class="ch-now-nums num">
-            ${r.decode_tps != null ? html`<span title="decode tok/s now">${fixed(r.decode_tps, 1)} tok/s</span>` : nothing}
-            ${r.tokens ? html`<span title="completion tokens so far">${exact(r.tokens)} tok</span>` : nothing}
-            <span title="time since the run began">${elapsedWords(elapsed)}</span>
+            ${r.phase === 'prefill' && pf
+              ? html`<span title="prompt tokens read of this call's prompt">${exact(pf.done)} / ${exact(pf.total)}</span>
+                ${pf.tps != null ? html`<span title="prefill tok/s now">${fixed(pf.tps, 0)} tok/s</span>` : nothing}`
+              : r.decode_tps != null ? html`<span title="decode tok/s now">${fixed(r.decode_tps, 1)} tok/s</span>` : nothing}
+            ${r.tokens ? html`<span title="tokens the run has written so far">${exact(r.tokens)} written</span>` : nothing}
+            <span title="time since the run began">run ${elapsedWords(elapsed)}</span>
           </span>
         </div>
         ${pf ? html`<div class="ch-now-bar" role="progressbar" aria-valuemin="0" aria-valuemax=${pf.total} aria-valuenow=${pf.done} aria-label="prefill progress"><span style="width:${Math.min(100, (pf.done / Math.max(1, pf.total)) * 100).toFixed(1)}%"></span></div>` : nothing}
