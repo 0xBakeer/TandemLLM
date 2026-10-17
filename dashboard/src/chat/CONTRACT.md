@@ -137,7 +137,7 @@ interface Run {
   id: string; conversation_id: string; message_id: string; started_at: string;
   started_by: string | null;                     // a device label when it was not this browser
   phase: RunPhase; now: string;
-  step: number; max_steps: number;               // v0.2: model calls so far, the cap (default 50)
+  step: number; max_steps: number;               // v0.2: model calls so far, the cap (default 100)
   queue_position: number | null;                 // v0.2: place in the engine's line while phase = queued
   tool: { call_id: string; name: string } | null;
   prefill: { done: number; total: number; tps?: number | null; eta_ms?: number | null } | null;
@@ -200,7 +200,7 @@ interface ChatSettings {
   prompt_id: string | null;                      // the system prompt (a saved prompt), null = default
   policies: Record<string, ToolPolicy>;          // per-tool overrides for this chat
   auto_accept_edits: boolean;                    // v0.2: write tools run without asking
-  max_steps: number;                             // v0.2: default 50
+  max_steps: number;                             // v0.2: default 100
   sandbox_network: 'off' | 'on';                 // v0.2: 'on' = internet without the LAN; see SandboxStatus.network
   verify?: boolean;                              // SRV-532: check a page or app the run built before it ends (default true)
 }

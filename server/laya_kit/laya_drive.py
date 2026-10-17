@@ -559,6 +559,10 @@ class Browser:
                  # Linux without unprivileged user namespaces (Ubuntu 23.10+) has no sandbox for
                  # it; Playwright starts Chromium the same way there
                  *(["--no-sandbox"] if sys.platform.startswith("linux") else []),
+                 # a container's /dev/shm is 64 MB: Chrome's shared memory goes to /tmp, one
+                 # renderer (a chat sandbox's memory limit counts every process)
+                 *(["--disable-dev-shm-usage", "--renderer-process-limit=1"]
+                   if sys.platform.startswith("linux") else []),
                  # SRV-195: without these Chrome waits ~25 s for the desktop keyring at its first
                  # network request (a page on http://127.0.0.1 took 25 s to load on the box, a
                  # file:// page 0.2 s); Playwright starts Chromium with the same two
@@ -723,8 +727,13 @@ def _problems(events: list[dict]) -> tuple[list[str], int]:
                 warns += 1
         elif m == "Runtime.exceptionThrown":
             d = p.get("exceptionDetails") or {}
+            # where it was thrown: the frame's script and line (1-based), so a reader can open it
+            top = ((d.get("stackTrace") or {}).get("callFrames") or [{}])[0]
+            url = d.get("url") or top.get("url") or ""
+            line = d.get("lineNumber") if d.get("url") else top.get("lineNumber")
+            at = f" ({url}:{int(line) + 1})" if url and line is not None else ""
             errs.append("exception: " + ((d.get("exception") or {}).get("description")
-                                         or d.get("text") or "?").split("\n")[0])
+                                         or d.get("text") or "?").split("\n")[0] + at)
         elif m == "Log.entryAdded":
             e = p.get("entry") or {}
             if "favicon.ico" in (e.get("url") or ""):

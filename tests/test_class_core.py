@@ -322,8 +322,8 @@ def test_shipped_router_audit():
     image; none of them is a drawing class's general skill, so `none` there is a right answer."""
     pk = schema.SHIPPED_PACKAGES["packages"]
     by = {c["id"]: c for c in schema.SHIPPED_ROUTER["classes"]}
-    assert by["three_d"]["policy"]["core"] == ["threejs-scene"]
-    assert "threejs-scene" in by["three_d"]["policy"]["packages"]
+    assert by["three_d"]["policy"]["core"] == ["threejs-scene", "coding"]
+    assert {"threejs-scene", "coding"} <= set(by["three_d"]["policy"]["packages"])
     for cid in ("code_edit", "debug"):
         pol = by[cid]["policy"]
         assert "coding" in pol["packages"] and ("coding" in pol.get("core", [])

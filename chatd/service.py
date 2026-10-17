@@ -57,7 +57,10 @@ from chatd.store import Store, dumps
 DEFAULT_SETTINGS = {
     "model": "", "profile": None, "effort": "auto", "thinking": True,
     "tools": [], "packages": [], "packages_blocked": [], "packages_mode": "auto", "mcp": [],
-    "prompt_id": None, "policies": {}, "auto_accept_edits": False, "max_steps": 50,
+    "prompt_id": None, "policies": {}, "auto_accept_edits": False,
+    # model calls a run may make before it stops for Continue: 50 ended the 2026-10-17 pagoda run
+    # (15 files, one or two a call) while it was still fixing its first errors, before any check
+    "max_steps": 100,
     "sandbox_network": "on", "plan_mode": False,
     # SRV-387/SRV-391: ask | auto | yolo (chatd/tools.py decide_mode); null: the default mode
     # (GET/PUT /permissions/mode), which a new chat copies when it is created
@@ -745,9 +748,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}
-        run = Run(self, conv, user_message_id=user_mid, message_id=mid,
-                  max_steps=int(settings.get("max_steps") or 50), started_by=viewer,
-                  continue_final=bool(continue_mid))
+        steps = int(settings.get("max_steps") or DEFAULT_SETTINGS["max_steps"])
+        run = Run(self, conv, user_message_id=user_mid, message_id=mid, max_steps=steps,
+                  started_by=viewer, continue_final=bool(continue_mid))
         run.permission_mode = self.permission_mode(settings)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
@@ -755,7 +758,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             # a cut text goes on in its own step; after tool results the next call is a new step
             run.continue_final = last.get("type") in ("text", "thinking")
             run.resume_same_step = run.continue_final
-            run.max_steps = run.step + int(settings.get("max_steps") or 50)
+            run.max_steps = run.step + steps
         self.store.run("UPDATE messages SET run_id = ? WHERE id = ?", (run.id, mid))
         self.store.run("INSERT INTO runs (id, conversation_id, user_message_id, "
                        "assistant_message_id, state, max_steps, model, started, started_by, "
@@ -1697,7 +1700,7 @@ def _clean_settings(patch: dict) -> dict:
     if "effort" in out and out["effort"] not in EFFORTS:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
     if "max_steps" in out:
-        out["max_steps"] = max(1, min(200, int(out["max_steps"] or 50)))
+        out["max_steps"] = max(1, min(200, int(out["max_steps"] or DEFAULT_SETTINGS["max_steps"])))
     if "verify" in out:
         out["verify"] = bool(out["verify"])
     if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):

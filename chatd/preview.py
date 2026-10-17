@@ -181,6 +181,45 @@ def _exists(ws, path: str) -> bool:
         return False
 
 
+#: a relative import inside an inline module (`from "./scene.js"`, `import("./a.js")`)
+_REL_IMPORT = re.compile(rb"""(?:\bfrom\s*|\bimport\s*\(?\s*)["']\.{1,2}/""")
+
+
+def file_blocks_modules(ws, path: str) -> bool:
+    """Whether the page at `path` loads a module from its own folder (a `<script type="module"
+    src>` with a relative or root path, or an inline module that imports one): Chromium refuses
+    module scripts from file:// (origin null, CORS), so the page runs only over HTTP."""
+    try:
+        doc = ws.read(path, limit=PAGE_LIMIT)
+    except (OSError, PathError):
+        return False
+    for attrs, body in _MODULE.findall(doc):
+        if not _TYPE_MODULE.search(attrs):
+            continue
+        m = _SRC.search(attrs)
+        if m:
+            src = (m.group(1) or m.group(2) or m.group(3) or b"").decode("utf-8", "replace")
+            if not re.match(r"^[a-z]+:|^//", src):
+                return True
+        elif _REL_IMPORT.search(body):
+            return True
+    return False
+
+
+def server_for(ports: list[dict] | None, path: str) -> tuple[dict, str] | None:
+    """The newest HTTP server in the sandbox that serves `path`: its working directory is the
+    page's folder or above it. `(row, the page's URL path)`; None without one."""
+    best = None
+    for p in ports or []:
+        cwd = (p.get("cwd") or "").rstrip("/")
+        if not p.get("http", True) or not cwd or not path.startswith(cwd + "/"):
+            continue
+        if best is None or (p.get("started") or 0, p.get("port") or 0) > \
+                (best.get("started") or 0, best.get("port") or 0):
+            best = p
+    return (best, path[len((best.get("cwd") or "").rstrip("/")) + 1:]) if best else None
+
+
 def needs_server(ws, path: str) -> dict | None:
     """Why the page at `path` cannot run as a file, with its project: {reason, dir, command,
     bundler}; None when it can. It cannot when a module script is a .ts/.jsx/.vue/... file or

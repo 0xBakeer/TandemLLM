@@ -132,7 +132,11 @@ guard asks the engine first and then stops the least recently used idle sandbox 
 kills them all under 2 GiB; an idle sandbox stops after 30 minutes. The files stay.
 
 A process the kernel kills at the memory limit (the cgroup's `oom_kill` count) fails its call with
-"out of memory (1 GiB sandbox limit)". What fits in 1 GiB, measured on the Spark (peak of the
+"out of memory (4 GiB sandbox limit)". The default was 1 GiB until 0.11.3; headless Chromium drawing
+a Three.js app in software (SwiftShader) went past it, so render_page and the verify phase failed on
+the apps they check. A container made under another limit takes the current one at its next start.
+render_page and the laya kit start Chromium with `--disable-dev-shm-usage` (a container's /dev/shm
+is 64 MB) and one renderer. What fits in 1 GiB, measured on the Spark (peak of the
 container's memory, page cache included): `pip install` of pillow, numpy, imageio-ffmpeg and
 piper-tts 549 MiB; `npm i` of typescript, eslint, @playwright/test, react and webpack 531 MiB; a
 Vite build 254 MiB; render_page of a 6,000-element page at 1280x800 503 MiB, at 2400x2400 442 MiB,
@@ -144,10 +148,10 @@ a 1.5 GB numpy array. The sandbox has 4 CPUs while `nproc` counts the whole box,
 starts a thread per core (x264, make -j, xargs -P) takes more memory than it needs: with
 `-threads 4` the 1080p slow encode peaks at 652 MiB. Knobs:
 
-- `QSE_SANDBOX_MEM_GB` (1): each sandbox's memory limit
+- `QSE_SANDBOX_MEM_GB` (4): each sandbox's memory limit
 - `QSE_SANDBOX_FLOOR_GB` (4): MemAvailable a new sandbox must leave after its limit
 - `QSE_SANDBOX_WAIT_S` (60): the longest a call waits for its sandbox
-- `QSE_SANDBOX_MAX_RUNNING` (4) and `QSE_SANDBOX_TOTAL_GB` (the two multiplied, 4): how many run at
+- `QSE_SANDBOX_MAX_RUNNING` (4) and `QSE_SANDBOX_TOTAL_GB` (the two multiplied, 16): how many run at
   once, and their limits' sum
 - `QSE_SANDBOX_IMAGE` (`tandem-sandbox:1`)
 

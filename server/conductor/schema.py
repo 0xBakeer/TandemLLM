@@ -537,8 +537,10 @@ SHIPPED_ROUTER: dict = {
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
          "reading": "a flat web page",
+         # SRV-534 follow-up: a core, so a model fit with `packages: core` (Super VL) gets a
+         # package on a design_ui turn (Laya read a three.js prompt as design_ui, 2026-10-17)
          "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design", "charts"],
-                    "rules": []}},
+                    "core": ["ui-design"], "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
@@ -550,7 +552,7 @@ SHIPPED_ROUTER: dict = {
                     "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
                                                   "one-line-portrait", "creative-coding",
                                                   "charts", "explainer-video"],
-                    "rules": []}},
+                    "core": ["creative-coding"], "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
          "reading": "a 3D three.js scene",
@@ -558,10 +560,13 @@ SHIPPED_ROUTER: dict = {
          # picks among the special recipes alone
          # OPS-39: voxel-worlds (the voxel build order, curated modules) and creative-coding
          # join the special recipes the package question picks among
+         # 2026-10-17 (pagoda replays 1-3 on Super VL): three first steps thought 6 to 11
+         # minutes and drafted the files in the thinking; coding's "plan in a few lines, code
+         # in files" goes in beside the 3D skill
          "policy": {"effort": "high",
                     "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons",
-                                                  "voxel-worlds", "creative-coding"],
-                    "core": ["threejs-scene"], "rules": []}},
+                                                  "voxel-worlds", "creative-coding", "coding"],
+                    "core": ["threejs-scene", "coding"], "rules": []}},
         # 2026-10-03 10:12 (a user's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",

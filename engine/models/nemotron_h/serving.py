@@ -313,7 +313,11 @@ class NemotronHServing:
             self._hidden = self.dg.rb["hidden"].view(1, 1, -1)
             self.stats["decode_steps"] += 1
             return lg.view(1, 1, -1)
-        lg = self.fn.prefill(ids, self.st, mm=self.mm)
+        # rows past the prompt hold no image: a forced close or a hidden note forwarded after the
+        # prompt (2026-10-17: the conductor closed a looping reasoning on a request with a
+        # screenshot, and the splice refused rows past the prompt; the request failed)
+        mm = self.mm if self.mm is not None and start < self.mm.n else None
+        lg = self.fn.prefill(ids, self.st, mm=mm)
         self._hidden = self.fn.prompt_hidden.unsqueeze(0)
         self.stats["prefill_rows"] += T
         return lg.view(1, 1, -1)

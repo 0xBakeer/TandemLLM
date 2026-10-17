@@ -35,6 +35,14 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  version gave it one: under a model fit with `packages: core`
                                  (NemotronH, LFM2.5) a coding turn, decided or fallen back,
                                  got no package at all on a router stored before FX6
+    2026-10-17-router-build-core    the same for design_ui (["ui-design"]) and drawing
+                                 (["creative-coding"]), which had no core: under that fit a turn
+                                 Laya decided as one of them got no package (a three.js prompt
+                                 read as design_ui, 2026-10-17)
+    2026-10-17-router-3d-coding-core  three_d's core gains `coding` (and its packages list it),
+                                 unless a stored version had it in the core: three pagoda
+                                 replays thought 6 to 11 minutes on their first step, drafting
+                                 the files in the thinking
 """
 
 from __future__ import annotations
@@ -128,30 +136,58 @@ def _decider_claim(doc, value):
     return dict(doc, claims=dict(doc["claims"], decider=claim))
 
 
-CODING_CORE = ("code_edit", "debug")
+def _class_core(cores: dict):
+    """A core on router classes stored without one: `cores` maps a class to its core package,
+    given when the stored class lists that package, has no `core`, and no stored version gave
+    the class a core (a core someone removed stays removed)."""
+    def change(doc: dict, past: list):
+        if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+            return None
+
+        def core_of(d, cid):
+            return next((c.get("policy") or {}).get("core") for c in d["classes"] if c["id"] == cid)
+
+        classes, changes = [], []
+        for c in doc["classes"]:
+            pol = c.get("policy") or {}
+            pkg = cores.get(c.get("id"))
+            if pkg and "core" not in pol and pkg in (pol.get("packages") or []) and \
+                    not (_ever(past, lambda d, i=c["id"]: core_of(d, i) is not None) - {False, None}):
+                c = dict(c, policy=dict(pol, core=[pkg]))
+                changes.append(f"classes.{c['id']}.core=[{pkg}]")
+            classes.append(c)
+        return (dict(doc, classes=classes), changes) if changes else None
+    change.history = True
+    return change
 
 
-def _coding_core(doc: dict, past: list):
-    """SRV-534: FX6's core on the coding classes of a router stored without it."""
-    if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
-        return None
+def _core_append(cid: str, pkg: str):
+    """`pkg` added to class `cid`'s core (and its packages) of a stored router, unless the core has
+    it or a stored version had it there (someone took it out)."""
+    def change(doc: dict, past: list):
+        if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+            return None
 
-    def core_of(d, cid):
-        return next((c.get("policy") or {}).get("core") for c in d["classes"] if c["id"] == cid)
+        def had(d):
+            return pkg in (next((c.get("policy") or {}).get("core") or []
+                                for c in d["classes"] if c["id"] == cid))
+        classes, changes = [], []
+        for c in doc["classes"]:
+            pol = c.get("policy") or {}
+            core = list(pol.get("core") or [])
+            if c.get("id") == cid and pkg not in core and True not in _ever(past, had):
+                pkgs = list(pol.get("packages") or [])
+                c = dict(c, policy=dict(pol, core=core + [pkg],
+                                        packages=pkgs + ([pkg] if pkg not in pkgs else [])))
+                changes.append(f"classes.{cid}.core+={pkg}")
+            classes.append(c)
+        return (dict(doc, classes=classes), changes) if changes else None
+    change.history = True
+    return change
 
-    classes, changes = [], []
-    for c in doc["classes"]:
-        pol = c.get("policy") or {}
-        if c.get("id") in CODING_CORE and "core" not in pol and \
-                "coding" in (pol.get("packages") or []) and \
-                not (_ever(past, lambda d, i=c["id"]: core_of(d, i) is not None) - {False, None}):
-            c = dict(c, policy=dict(pol, core=["coding"]))
-            changes.append(f"classes.{c['id']}.core=[coding]")
-        classes.append(c)
-    return (dict(doc, classes=classes), changes) if changes else None
 
-
-_coding_core.history = True
+# SRV-534: FX6's core on the coding classes of a router stored without it
+_coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
 
 _NARRATOR_OFF = _unless_chosen(lambda d: d["ui"]["narrator"], "live", "off", _ui_narrator,
                                "ui.narrator")
@@ -177,6 +213,9 @@ MIGRATIONS = [
      _unless_chosen(lambda d: d["claims"]["decider"]["gib"], 8.2, 3.0, _decider_claim,
                     "claims.decider.gib")),
     ("2026-10-17-router-coding-core", "router", None, _coding_core),
+    ("2026-10-17-router-build-core", "router", None,
+     _class_core({"design_ui": "ui-design", "drawing": "creative-coding"})),
+    ("2026-10-17-router-3d-coding-core", "router", None, _core_append("three_d", "coding")),
 ]
 
 

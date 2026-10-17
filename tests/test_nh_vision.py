@@ -434,6 +434,13 @@ def test_engine_prefill_splices_image_rows():
     lc = c2.forward(torch.tensor(full[s.start + 2:], device=DEV), s.start + 2)
     assert c2.stats["decode_steps"] == 0
     assert torch.equal(lc.argmax(), la.argmax())
+    # rows forwarded past the prompt in one call (a forced reasoning close, a hidden note), with
+    # the request's images still attached: plain rows, as on a text request
+    tail = [44, 45, 46]
+    a.forward(torch.tensor(tail, device=DEV), len(plain))
+    lt = b.forward(torch.tensor(tail, device=DEV), len(full))
+    assert torch.equal(a.forward(torch.tensor([7], device=DEV), len(plain) + 3),
+                       b.forward(torch.tensor([7], device=DEV), len(full) + 3)), lt
     # a text request after it: no image rows left anywhere
     d = NemotronHServing(eng, 256)
     d.forward(torch.tensor(plain[:cut], device=DEV), 0)

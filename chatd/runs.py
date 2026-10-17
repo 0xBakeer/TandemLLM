@@ -16,10 +16,11 @@ THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
    steer) ends the run here, and the next run carries it: the model reads it right after the
    results;
 4. a step without calls ends the run: `stop` completes it, `length` gets one continuation, an
-   empty turn one retry with a hidden nudge (a second empty turn is an error the user sees). A
+   empty turn one retry with a hidden nudge (a second empty turn is an error the user sees), a
+   call the engine ended with finish reason `error` one retry (a second fails the run). A
    run that built or changed a web page or app checks it first (chatd/verify.py): the check is a
    call of the harness's own in that step, and the model reads its result in the next one.
-Limits: `max_steps` model calls (50; the run ends `interrupted` with a notice and Continue goes
+Limits: `max_steps` model calls (100; the run ends `interrupted` with a notice and Continue goes
 on), the same call with the same arguments three times in a row ends the run with a notice, and
 so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
 whatever the calls were (live 2026-10-16: 28 calls with other arguments each answered
@@ -146,6 +147,7 @@ class Run:
         self.tc_parts: dict[int, int] = {}     # this step's tool_calls[].index -> part index
         self.length_continued = False
         self.empty_retries = 0
+        self.engine_errors = 0                 # calls the engine ended with finish reason error
         self.nudge = False
         self.recent_calls: collections.deque = collections.deque(maxlen=3)
         # the sandbox's own failures in a row (not the command's): three alike end the run
@@ -273,6 +275,18 @@ class Run:
             outcome = self._call()
             if outcome != "completed":
                 return outcome
+            if self.finish_reason == "error":
+                # the engine ended the call with an error of its own (its log says why), no empty
+                # answer: live 2026-10-17 a crash after 8,192 tokens of thinking, retried with the
+                # empty turn's nudge, failed the run as "answered with nothing, twice"
+                if self.engine_errors == 0:
+                    self.engine_errors = 1
+                    if self.step_parts:
+                        self.svc.drop_step(self)
+                    continue
+                self.error = ("The engine failed this model call twice (finish reason error); "
+                              "the engine's log says why.")
+                return "failed"
             if self.step_parts:
                 if self.svc.run_tools(self, list(self.step_parts)) == "cancelled":
                     return self._stopped()

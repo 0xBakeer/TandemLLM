@@ -375,6 +375,27 @@ def _serve_dir(d):
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
 
 
+def test_7b_an_exception_says_where_it_was_thrown():
+    """Pagoda replay 3 (2026-10-17): the model read "Cannot read properties of undefined" 13 times
+    without opening the line; the page check names the script and the 1-based line."""
+    ev = [{"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {
+        "text": "Uncaught", "lineNumber": 61, "url": "http://localhost:5174/js/scene/pond.js",
+        "exception": {"description": "TypeError: Cannot read properties of undefined (reading "
+                                     "'set')\n    at pond.js:62:22"}}}},
+          {"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {
+              "text": "Uncaught", "stackTrace": {"callFrames": [
+                  {"url": "http://localhost:5174/js/main.js", "lineNumber": 9}]},
+              "exception": {"description": "ReferenceError: x is not defined"}}}},
+          {"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {
+              "text": "Uncaught SyntaxError"}}}]
+    errs, _ = ld._problems(ev)
+    assert errs == ["exception: TypeError: Cannot read properties of undefined (reading 'set') "
+                    "(http://localhost:5174/js/scene/pond.js:62)",
+                    "exception: ReferenceError: x is not defined (http://localhost:5174/js/"
+                    "main.js:10)",
+                    "exception: Uncaught SyntaxError"], errs
+
+
 def test_8_browser_cdp_and_the_in_page_kit():
     if ld.find_chrome() is None:
         print("    (skipped: no Chrome or Chromium on this machine)")
