@@ -203,6 +203,36 @@ def test_a_prefill_has_a_rate_from_its_first_mark():
     assert p["tps_now"] == 1024.0 and p["tps_avg"] == round(6144 / 7.4, 2), p
 
 
+class _Ev:
+    def __init__(self, done):
+        self.done = done
+
+    def query(self):
+        return self.done
+
+
+def test_a_window_running_has_a_rate_before_its_mark():
+    """SRV-591: a layer-major window is one mark, written when the whole window has run; while it
+    runs, `tps_now` is its rows times the share of its layers that have run over its time."""
+    rec = _rec(prompt=7105)
+    rec.lock_acquired()
+    t0 = rec.t_lock
+    rec.prefill_info = {"start": 2048, "chunk": 1024, "t0": t0, "kind": "resident"}
+    live = {"rows": (2048, 7105), "t0": t0, "n": 64, "layers": []}
+    rec.prefill_info["window_live"] = live
+    assert activity.prefill_of(rec, t0 + 1.0)["tps_now"] is None     # no layer has run
+    live["layers"] = [_Ev(True)] * 32 + [_Ev(False)] * 8
+    p = activity.prefill_of(rec, t0 + 4.0)
+    assert p["tps_now"] == round(5057 * 32 / 64 / 4.0, 2), p              # 632.12
+    assert abs(p["eta_ms"] - (7105 - (2048 + 5057 / 2)) / (5057 / 8.0) * 1e3) < 1.0, p
+    assert p["done"] == 2048 and p["tps_avg"] is None, p                   # no mark yet
+    # past a mark, the window running now is the rate
+    rec.pf_marks.append((10240, 20000, t0 + 10.0))
+    live.update(rows=(10240, 18432), t0=t0 + 10.0, layers=[_Ev(True)] * 16, k=0)
+    p = activity.prefill_of(rec, t0 + 12.0)
+    assert p["tps_now"] == round(8192 * 16 / 64 / 2.0, 2) and p["done"] == 10240, p
+
+
 def test_a_single_call_prefill_shows_total_and_elapsed_only():
     rec = _rec(prompt=4000)
     rec.lock_acquired()

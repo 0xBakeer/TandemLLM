@@ -133,6 +133,38 @@ def test_cached_window_is_the_chunk_major_prefill():
     return "logits, KV, state, 4 anchors, snapshots, 5 syncs with their taps identical"
 
 
+def test_the_live_views_layer_marks_change_nothing():
+    """SRV-591: with the live view's info, a window marks each layer boundary (`window_live`, by
+    `WINDOW_YIELD` as the server sets it) while it runs and drops the record after it; the logits,
+    the rows and the state are the same."""
+    ids = _ids(70, seed=4)
+    off, _ = _run(0, ids)
+    seen = []
+    real = cache._layer_marks
+
+    def spy(live, device):
+        mark = real(live, device)
+
+        def m():
+            mark()
+            seen.append((len(live["layers"]), live["n"]))
+        return m
+    info = {}
+    real_prefill, old_yield = cache.prefill, M.WINDOW_YIELD
+    cache._layer_marks, M.WINDOW_YIELD = spy, cache.layer_mark
+    cache.prefill = lambda *a, **k: real_prefill(*a, info=info, **k)
+    try:
+        on, calls = _run(48, ids)
+    finally:
+        cache._layer_marks, cache.prefill, M.WINDOW_YIELD = real, real_prefill, old_yield
+    _same(off, on)
+    n = T.tiny_config().num_hidden_layers
+    assert seen == [(k, n) for _ in calls for k in range(1, n)], seen
+    assert info.get("window_live") is None and info.get("window") is not None, info
+    cache.layer_mark()                                  # between windows: nothing to mark
+    return f"{len(calls)} windows, {n - 1} layer marks each, logits and state identical"
+
+
 def test_free_window_is_the_chunk_major_prefill():
     ids = _ids(70, seed=2)
     off, _ = _run(0, ids, cached=False)

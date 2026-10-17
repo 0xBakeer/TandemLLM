@@ -2238,6 +2238,42 @@ def prefill_chunk(prefix_on: bool, prefix_chunk: int, max_rows: int) -> int:
     return prefix_chunk if prefix_on else max(0, int(max_rows))
 
 
+class _Done:
+    """A layer mark on the CPU, where a forward has run when it returns."""
+
+    @staticmethod
+    def query() -> bool:
+        return True
+
+
+#: SRV-591: the running window's layer mark on this thread (`_layer_marks`), None between windows
+LAYER = threading.local()
+
+
+def layer_mark() -> None:
+    """Between two layers of a layer-major window (engine/model.py calls `WINDOW_YIELD` there; the
+    server's calls this): the live view's mark of the layer just issued."""
+    mark = getattr(LAYER, "mark", None)
+    if mark is not None:
+        mark()
+
+
+def _layer_marks(live: dict, device):
+    """SRV-591: a window's layer mark: a CUDA event on the GPU (the live view asks it, without
+    waiting, whether the layer has run: server/activity.py `window_rate`), a done mark on the
+    CPU, where a forward has run when it returns."""
+    cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+
+    def mark() -> None:
+        if cuda:
+            ev = torch.cuda.Event()
+            ev.record()
+            live["layers"].append(ev)
+        else:
+            live["layers"].append(_Done)
+    return mark
+
+
 def _window_plan(eng, i: int, n: int, chunk: int, win: int) -> list | None:
     """The chunks (start, rows) one layer-major window takes from row `i`: the chunk loop's own
     grid, as many chunks as fit in `win` rows; None when fewer than two would (or the engine
@@ -2496,12 +2532,27 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                     bufs = [state_empty(eng) for _ in plan]
                 toks = [torch.tensor(ids[a:a + t], device=device, dtype=torch.long)
                         for a, t in plan]
-                logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
+                live = None
+                if info is not None:
+                    # SRV-591: the window's progress while it runs, one mark between two layers
+                    # (`window_live`, server/activity.py), so a prefill of one window has a rate
+                    # before its end
+                    live = info["window_live"] = {
+                        "rows": (plan[0][0], plan[-1][0] + plan[-1][1]),
+                        "t0": time.perf_counter(), "layers": [],
+                        "n": int(getattr(getattr(eng, "cfg", None), "num_hidden_layers", 0) or 0)}
+                    LAYER.mark = _layer_marks(live, device)
+                try:
+                    logits, hid, taps = eng.prefill_window(toks, [a for a, _ in plan], bufs)
+                finally:
+                    if live is not None:
+                        LAYER.mark = None
                 if info is not None:
                     # the window's rows were all computed by now: the chunk hook below reports
                     # them chunk by chunk within milliseconds, so the live view times them here
                     # (rows a, end, the host's clock once the window's forwards were issued)
                     info["window"] = (plan[0][0], plan[-1][0] + plan[-1][1], time.perf_counter())
+                    info["window_live"] = None
                 if bufs is not None:
                     state_save(bufs[-1], eng)
                 end = plan[-1][0] + plan[-1][1]

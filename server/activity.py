@@ -279,6 +279,28 @@ def prefill_live(rec, warm: int = 1, window_s: float = 2.0, end_p: float | None 
     return out
 
 
+def window_rate(info: dict, now_p: float) -> tuple[float, float] | None:
+    """SRV-591: (the rate, the rows computed) of the layer-major window running now
+    (`info["window_live"]`, engine/cache.py `_layer_marks`): its rows times the share of its
+    layers that have run (a CUDA event a layer, asked without waiting), over the time since it
+    started. A window is one progress mark, and only once it has run whole; this is its rate
+    before then. None with no window running or before its first layer has run."""
+    live = info.get("window_live")
+    if not live:
+        return None
+    marks, n = live["layers"], int(live.get("n") or 0)
+    k = int(live.get("k") or 0)
+    while k < len(marks) and marks[k].query():
+        k += 1
+    live["k"] = k
+    dt = now_p - float(live["t0"])
+    if not k or not n or dt <= 0:
+        return None
+    a, end = live["rows"]
+    rows = (end - a) * k / n
+    return rows / dt, a + rows
+
+
 def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int = 1,
                window_s: float = 2.0) -> dict | None:
     """Prefill progress: tokens done of total, the rates and the ETA.
@@ -291,7 +313,9 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
     or the first layer-major window) `tps_now` is that mark's rows over the time since the loop
     started, the same tokens a second, so a short prefill or re-read has a rate from its first
     mark on (before, it waited for a second mark, which a prefill of one window and a last chunk
-    never has); `tps_live` and `tps_live_avg` leave the first `warm` chunks out
+    never has); while a layer-major window runs, `tps_now` is that window's rate so far
+    (`window_rate`), so a prefill of one window has a rate before its end; `tps_live` and
+    `tps_live_avg` leave the first `warm` chunks out
     (`prefill_live`), and the ETA uses `tps_live_avg` once it exists, so the first chunk does not
     pull it."""
     if rec.t_lock is None or rec.cache_source in REPLAY or rec.prompt_tokens is None:
@@ -327,9 +351,12 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
         marks = getattr(rec, "pf_marks", None)
         t0 = info.get("t0")
         pl = prefill_live(rec, warm, window_s)
+        win = window_rate(info, now_p)
         if not marks:
+            eta = max(0.0, (total - win[1]) / win[0] * 1e3) if win else None
             return {"done": start, "total": total, "cached": start, "pct": None,
-                    "tps_now": None, "tps_avg": None, "eta_ms": None, "progress": mode,
+                    "tps_now": _r(win[0]) if win else None, "tps_avg": None,
+                    "eta_ms": _r(eta, 1), "progress": mode,
                     "at_ms": None, "tps_live": pl["tps_live"],
                     "tps_live_avg": pl["tps_live_avg"], "why": info.get("why"),
                     "warmup": {"chunks": 0, "reached": pl["reached"]}}
@@ -341,6 +368,8 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
         tps_now = (done - pdone) / (t - pt) if pdone is not None and t > pt else None
         if n == 1:
             tps_now = tps_avg                 # the first mark: rows computed since the start
+        if win is not None:
+            tps_now = win[0]                  # the window running now, past the last mark
         rate = pl["tps_live_avg"] or tps_avg
         eta = max(0.0, (total - done) / rate * 1e3) if rate else None
         return {"done": int(done), "total": total, "cached": start,

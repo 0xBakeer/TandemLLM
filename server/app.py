@@ -4446,6 +4446,20 @@ def _par_window_yield() -> None:
         pool.turn.pause(_par_index())
 
 
+#: SRV-321: whether `_window_layer` offers the GPU turn between two layers (side slots with a turn,
+#: `QSE_PARALLEL_LAYER_YIELD` not off)
+WINDOW_TURN = [False]
+
+
+def _window_layer() -> None:
+    """`engine.model.WINDOW_YIELD`, between two layers of a layer-major window: the live view's
+    layer mark (SRV-591, engine/cache.py `layer_mark`), then, with side slots, the GPU offered to
+    a waiting slot (`_par_window_yield`). Neither touches the window's rows."""
+    cache.layer_mark()
+    if WINDOW_TURN[0]:
+        _par_window_yield()
+
+
 def _par_window_cap() -> int | None:
     pool = dict.get(STATE, "pool")
     if pool is None:
@@ -9993,6 +10007,8 @@ def _load(a) -> None:
             a.prefix_chunk = int(eng.caps.anchor_grid)     # the model's own grid (its prefill chunk)
             STATE["anchor_grid"] = a.prefix_chunk          # the memory plan shows it (server/memlimits.py)
         caches = _load_caches(a, eng, tok, drafter, rcache)
+        from engine import model as model_mod
+        model_mod.WINDOW_YIELD = _window_layer          # SRV-591, SRV-321
     else:
         if not a.no_prefix_cache or not a.no_session_cache or getattr(a, "kv_pool", "off") == "on":
             print("[cache] prefix, session, resident and disk caches and the KV pool are not built for "
@@ -10523,8 +10539,7 @@ def _build_side_slots(a, cfg, w, tok) -> None:
     if PAR_WINDOW_ROWS > 0:
         cache.WINDOW_CAP = _par_window_cap      # SRV-309
     if PAR_LAYER_YIELD and turn is not None:
-        from engine import model as model_mod           # the real engine's (the fake has none)
-        model_mod.WINDOW_YIELD = _par_window_yield      # SRV-321
+        WINDOW_TURN[0] = True                           # SRV-321, in `_window_layer`
     print(f"[parallel] {pool.n} slots: slot 0 window {a.max_len:,}, {pool.n - 1} side slot(s) "
           f"window {L:,}; turn quantum {a.turn_quantum_ms:g} ms; joint verify "
           f"{'up to ' + str(a.parallel_max_rows) + ' rows' if meet else 'off'}; packed draft "
