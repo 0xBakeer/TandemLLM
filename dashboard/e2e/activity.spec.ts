@@ -314,7 +314,12 @@ test.describe('live activity', () => {
       });
       return { supported, tasks, maxGap: Math.max(...gaps) };
     }, soak);
-    if (longTasks.supported) expect(longTasks.tasks.filter((d) => d > 50)).toEqual([]);
+    // #7: the 50 ms budget is a developer-machine gate — a GB10 (aarch64,
+    // Spark-class) repeats this soak at 57-112 ms with no pathology: the
+    // cores share the unified memory with real serving work. 120 ms on
+    // arm64 matches the frame-gap gate below; every other arch keeps 50.
+    const longTaskBudget = process.arch === 'arm64' ? 120 : 50;
+    if (longTasks.supported) expect(longTasks.tasks.filter((d) => d > longTaskBudget)).toEqual([]);
     // a frame gap above 50 ms + one 16.7 ms frame means a task blocked the thread past the budget
     expect(longTasks.maxGap).toBeLessThan(120);
     // the ring gained about one point a second, not four (the second sparkline has dots, count the ribbon's)
