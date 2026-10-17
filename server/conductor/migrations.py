@@ -30,6 +30,11 @@ migration never runs twice: a switch the owner removes after it ran stays remove
     2026-10-17-residency-decider    the decider's claim 8.2 GiB (the arbiter sidecar's) to the 3.0
                                  measured with Laya in the engine (OPS-69), unless a stored
                                  version had another value
+    2026-10-17-router-coding-core   the router's code_edit and debug classes get FX6's core
+                                 ["coding"] when the stored class has no `core` and no stored
+                                 version gave it one: under a model fit with `packages: core`
+                                 (NemotronH, LFM2.5) a coding turn, decided or fallen back,
+                                 got no package at all on a router stored before FX6
 """
 
 from __future__ import annotations
@@ -123,6 +128,31 @@ def _decider_claim(doc, value):
     return dict(doc, claims=dict(doc["claims"], decider=claim))
 
 
+CODING_CORE = ("code_edit", "debug")
+
+
+def _coding_core(doc: dict, past: list):
+    """SRV-534: FX6's core on the coding classes of a router stored without it."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+        return None
+
+    def core_of(d, cid):
+        return next((c.get("policy") or {}).get("core") for c in d["classes"] if c["id"] == cid)
+
+    classes, changes = [], []
+    for c in doc["classes"]:
+        pol = c.get("policy") or {}
+        if c.get("id") in CODING_CORE and "core" not in pol and \
+                "coding" in (pol.get("packages") or []) and \
+                not (_ever(past, lambda d, i=c["id"]: core_of(d, i) is not None) - {False, None}):
+            c = dict(c, policy=dict(pol, core=["coding"]))
+            changes.append(f"classes.{c['id']}.core=[coding]")
+        classes.append(c)
+    return (dict(doc, classes=classes), changes) if changes else None
+
+
+_coding_core.history = True
+
 _NARRATOR_OFF = _unless_chosen(lambda d: d["ui"]["narrator"], "live", "off", _ui_narrator,
                                "ui.narrator")
 
@@ -146,6 +176,7 @@ MIGRATIONS = [
     ("2026-10-17-residency-decider", "residency", None,
      _unless_chosen(lambda d: d["claims"]["decider"]["gib"], 8.2, 3.0, _decider_claim,
                     "claims.decider.gib")),
+    ("2026-10-17-router-coding-core", "router", None, _coding_core),
 ]
 
 
