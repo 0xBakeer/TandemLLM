@@ -2,7 +2,9 @@
 // split by part, glowing where the cache is warm, dim where it is cold, an orange tip where the
 // prefill is now. Then Now (tok/s with a sparkline, tokens per round, acceptance, the thinking
 // budget, the prefill), the model and pack, the memory this chat holds, the compaction events,
-// and the usage. A text twin of the ribbon serves screen readers.
+// and the usage. A text twin of the ribbon serves screen readers. With Agents (VIS-219) the window
+// is the main agent's, a running worker's context has its own section beside it, one line stays
+// for the last worker, and the usage names the workers' part.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -12,7 +14,8 @@ import { icon } from '../ui/bits';
 import '../charts/spark';
 import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
-import { effortWord, type Conversation, type ContextPartKind } from './types';
+import { effortWord, type Conversation, type ContextPartKind, type WorkerContext } from './types';
+import { lastWorkerLine, workerCacheWords, workerParts } from './tasks';
 import { elapsedWords } from './thread';
 import { budgetWords, cacheWords, draftFigure, HARNESS_PENDING, kvWords, liveFigure, memoryWords, partWords, residentWords, sandboxWords, skillTokens, slotWords, turnFigure } from './context-words';
 
@@ -25,6 +28,15 @@ const PART_COLOR: Record<ContextPartKind, string> = {
   messages: 'var(--cobalt)',
   thinking: 'var(--think)',
   reserved: 'transparent',
+};
+
+/** a worker's split in the main ribbon's inks: the brief reads as the conversation does */
+const WORKER_COLOR: Record<string, string> = {
+  system: 'var(--series-muted)',
+  tools: 'var(--series-aqua)',
+  brief: 'var(--series-violet)',
+  steps: 'var(--cobalt)',
+  files: 'var(--series-yellow)',
 };
 
 @customElement('qse-chat-context')
@@ -44,6 +56,7 @@ export class QseChatContext extends LightElement {
     if (!c) return html`<div class="ch-ctx-empty muted small">Open a chat to see its context.</div>`;
     return html`<div class="ch-ctx-scroll">
       ${this.renderWindow(c)}
+      ${this.renderWorker(c)}
       ${this.renderNow(c)}
       ${this.renderModel(c)}
       ${this.renderSkills(c)}
@@ -81,8 +94,10 @@ export class QseChatContext extends LightElement {
     const tip = pf ? ((ctx.cache.warm + pf.done) / total) * W : null;
     const twin = `${exact(ctx.used)} of ${exact(ctx.window)} tokens used; ${exact(ctx.cache.warm)} warm, ${exact(ctx.cache.cold)} cold`;
     const cw = cacheWords(ctx.cache);
+    // the main agent's window, once the chat has Agents or a worker; else as it always was
+    const main = !!c.settings.agents || !!ctx.worker || !!c.tasks?.length;
     return html`<section class="ch-ctx-sec" data-sec="window">
-      <h3 class="ch-ctx-h">Context window</h3>
+      <h3 class="ch-ctx-h">${main ? 'Main agent' : 'Context window'}</h3>
       <div class="ch-rib-wrap">
         <svg class="ch-rib" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label=${twin}>
           <defs><filter id="ch-rib-glow" x="-2%" y="-60%" width="104%" height="220%"><feGaussianBlur stdDeviation="3" /></filter></defs>
@@ -100,6 +115,50 @@ export class QseChatContext extends LightElement {
       </ul>
       <div class="ch-ctx-row"><button type="button" class="btn btn-sm" ?disabled=${!!c.run || ctx.used < 4_000} title="fold the older turns into a summary" @click=${() => this.fire('ch-compact')}>Compact now</button></div>
     </section>`;
+  }
+
+  // ---- the worker (VIS-219) ----------------------------------------------------------------------
+
+  /** the running worker's context apart from the main agent's: its tokens of the window, its split,
+   *  its calls and cache tier. After it ended one line stays until the next task. */
+  private renderWorker(c: Conversation): TemplateResult {
+    const w = c.context.worker;
+    if (!w) {
+      const last = c.tasks?.length ? c.tasks.reduce((a, t) => (t.n > a.n ? t : a)) : null;
+      return last ? html`<section class="ch-ctx-sec ch-ctx-lastworker" data-sec="last-worker"><p class="small" data-last-worker>${lastWorkerLine(last, c.last_worker)}</p></section>` : html``;
+    }
+    return html`<section class="ch-ctx-sec is-live" data-sec="worker">
+      <h3 class="ch-ctx-h">Worker: Task ${w.n}</h3>
+      <p class="ch-ctx-sub small">${w.title}</p>
+      ${this.renderWorkerRibbon(w)}
+      <div class="ch-rib-line num"><b>${exact(w.used)}</b> of ${exact(w.window)}, ${pct(w.used / Math.max(1, w.window), 0)}</div>
+      <ul class="ch-legend">
+        ${workerParts(w).map((p) => html`<li class=${p.tokens ? '' : 'is-zero'}><span class="swatch" style=${`background:${WORKER_COLOR[p.key]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${exact(p.tokens)}</span></li>`)}
+      </ul>
+      <dl class="kv ch-kv">
+        <div data-worker="calls"><dt>calls</dt><dd class="num">call ${exact(w.step)} of ${exact(w.max_steps)}</dd></div>
+        <div data-worker="cache"><dt>cache</dt><dd>${workerCacheWords(w, c.context.model.backend)}</dd></div>
+      </dl>
+    </section>`;
+  }
+
+  private renderWorkerRibbon(w: WorkerContext): TemplateResult {
+    const W = 1000;
+    const H = 18;
+    const total = Math.max(1, w.window);
+    let x = 0;
+    const segs = workerParts(w).map((p) => {
+      const width = (p.tokens / total) * W;
+      const seg = svg`<rect class="ch-rib-seg is-warm" x=${x} y="0" width=${Math.max(0, width)} height=${H} fill=${WORKER_COLOR[p.key]} />`;
+      x += width;
+      return seg;
+    });
+    // a split the report lacks still shows the worker's use as one bar
+    if (!segs.length && w.used) segs.push(svg`<rect class="ch-rib-seg is-warm" x="0" y="0" width=${(w.used / total) * W} height=${H} fill="var(--cobalt)" />`);
+    return html`<div class="ch-rib-wrap"><svg class="ch-rib ch-rib-worker" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label=${`the worker: ${exact(w.used)} of ${exact(w.window)} tokens used`}>
+      <rect class="ch-rib-track" x="0" y="0" width=${W} height=${H} rx="3" />
+      ${segs}
+    </svg></div>`;
   }
 
   // ---- now ------------------------------------------------------------------------------------
@@ -205,6 +264,11 @@ export class QseChatContext extends LightElement {
 
   private renderUsage(c: Conversation): TemplateResult {
     const u = c.usage;
+    // the turns' totals count the workers too; their part, from each turn's `workers`
+    const workers = c.messages.reduce<{ count: number; prompt_tokens: number; completion_tokens: number } | null>((a, m) => {
+      const w = m.stats?.workers;
+      return w?.count ? { count: (a?.count ?? 0) + w.count, prompt_tokens: (a?.prompt_tokens ?? 0) + w.prompt_tokens, completion_tokens: (a?.completion_tokens ?? 0) + w.completion_tokens } : a;
+    }, null);
     return html`<section class="ch-ctx-sec" data-sec="usage">
       <h3 class="ch-ctx-h">Usage, this chat</h3>
       <dl class="kv ch-kv">
@@ -214,6 +278,7 @@ export class QseChatContext extends LightElement {
         <div><dt>thinking</dt><dd class="num">${exact(u.reasoning_tokens)}</dd></div>
         <div><dt>cached</dt><dd class="num">${exact(u.cached_tokens)}</dd></div>
         <div><dt>tool calls</dt><dd class="num">${exact(u.tool_calls)}</dd></div>
+        ${workers ? html`<div data-usage="workers"><dt>of it, workers</dt><dd class="num">${exact(workers.count)} task${workers.count === 1 ? '' : 's'}, ${exact(workers.prompt_tokens)} in, ${exact(workers.completion_tokens)} out</dd></div>` : nothing}
         <div><dt>time</dt><dd class="num">${elapsedWords(u.wall_s)}</dd></div>
         ${u.cost_usd != null ? html`<div data-usage="cost"><dt>cost</dt><dd class="num" title="at the prices set per model under Backends">${money(Math.round(u.cost_usd * 1e6))}</dd></div>` : nothing}
       </dl>

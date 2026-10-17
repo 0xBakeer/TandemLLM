@@ -5,7 +5,7 @@
 // mock (VIS-179).
 
 import { apiBase } from '../api/client';
-import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, StampedEvent, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
+import type { Attachment, Capabilities, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, StampedEvent, Task, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 import type { StreamState } from '../lib/sse';
 
 export interface Subscription {
@@ -72,7 +72,8 @@ export interface ChatBackend {
   edit(id: string, messageId: string, text: string, clientMsgId: string): Promise<void>;
   switchBranch(id: string, messageId: string, index: number): Promise<Conversation>;
   permission(id: string, callId: string, decision: 'once' | 'always' | 'deny', scope?: 'chat' | 'all'): Promise<void>;
-  updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings>;
+  /** `reread_tokens` (SRV-583): what the next message re-reads after a switch of `agents` */
+  updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings & { reread_tokens?: number | null }>;
   /** the server's defaults for new chats (Capabilities.defaults): the settings page writes them */
   updateDefaults(patch: Partial<ChatSettings>): Promise<ChatSettings>;
   compact(id: string): Promise<void>;
@@ -80,6 +81,10 @@ export interface ChatBackend {
   approvePlan(id: string, items?: string[]): Promise<void>;
   /** the files back to before the runs after this user message; the head to its parent */
   rewind(id: string, messageId: string): Promise<{ conversation: Conversation; text: string; files: number }>;
+  /** VIS-E15: the chat's tasks, without their transcripts */
+  tasks(id: string): Promise<Task[]>;
+  /** one task with its transcript (`messages`); `seq` the last event it includes, when it says */
+  task(id: string, taskId: string): Promise<Task & { seq?: string }>;
 
   // the session (only when the server has a password set)
   signIn(password: string): Promise<void>;

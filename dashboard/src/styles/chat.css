@@ -1161,6 +1161,382 @@ qse-chat-thread {
   border-color: color-mix(in srgb, var(--ok) 55%, transparent);
   color: var(--ok);
 }
+/* VIS-217: a worker's Task card in place of its `task` call. The tool card's language one step
+   heavier: the same head row and dot, the task's number and title, a status chip in words, a quiet
+   row of figures, the Now line while it runs. Opened: the brief, the report and chatd's check in the
+   verify block's labels, the screenshots, the worker's transcript (a sheet on a phone). */
+.ch-task {
+  position: relative;
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--ch-tool);
+  border-radius: var(--ch-r);
+  background: var(--bg-2);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.ch-task.is-running {
+  border-left-color: var(--orange-hi);
+}
+.ch-task.is-waiting {
+  border-left-color: var(--warn);
+}
+.ch-task.is-done {
+  border-left-color: var(--ok);
+}
+.ch-task.is-partial,
+.ch-task.is-interrupted {
+  border-left-color: var(--warn);
+}
+.ch-task.is-failed {
+  border-left-color: var(--err);
+}
+.ch-task.is-cancelled {
+  border-left-color: var(--ink-3);
+}
+.ch-task-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  background: none;
+  border: 0;
+  border-radius: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+  min-height: 38px;
+  min-width: 0;
+}
+.ch-task-head.is-static {
+  cursor: default;
+  padding-bottom: 8px;
+}
+.ch-task-head:hover:not(.is-static) {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.ch-task-head[aria-expanded='true'] .ch-call-chev {
+  transform: rotate(90deg);
+}
+.is-waiting .ch-call-dot {
+  background: var(--warn-ink);
+}
+.is-done .ch-call-dot {
+  background: var(--ok);
+}
+.is-partial .ch-call-dot,
+.is-interrupted .ch-call-dot {
+  background: var(--warn-ink);
+}
+.ch-task-n {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  flex: none;
+}
+.ch-task-title {
+  font-weight: 550;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ch-task-head .grow {
+  flex: 1;
+}
+.ch-task-chip {
+  flex: none;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.ch-task-chip.is-live {
+  border-color: color-mix(in srgb, var(--orange) 55%, transparent);
+  color: var(--orange-hi);
+}
+.ch-task-chip.is-warn {
+  border-color: color-mix(in srgb, var(--warn) 60%, transparent);
+  color: var(--warn-ink);
+  background: var(--orange-wash);
+}
+.ch-task-chip.is-ok {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+}
+.ch-task-chip.is-err {
+  border-color: color-mix(in srgb, var(--err) 60%, transparent);
+  color: var(--err);
+}
+.ch-task-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 0 12px 6px 27px;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  min-height: 24px;
+}
+.ch-task-meta .grow {
+  flex: 1;
+}
+.ch-task-meta .btn {
+  margin: -2px 0;
+}
+.ch-task-now,
+.ch-task-sum {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 0 12px 9px 27px;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.ch-task-now .pulse {
+  flex: none;
+  align-self: center;
+}
+.ch-task-ask {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+.ch-task-ask-h {
+  margin: 0;
+  color: var(--warn-ink);
+  font-weight: 600;
+}
+.ch-task-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--rule);
+}
+.ch-task-brief summary {
+  cursor: pointer;
+  color: var(--ink-2);
+  font-weight: 500;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+}
+.ch-task-brief .ch-call-pre {
+  margin-top: 4px;
+}
+.ch-task-report,
+.ch-task-check {
+  display: grid;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r-sm);
+  background: var(--bg-inset);
+  overflow-wrap: anywhere;
+}
+.ch-task-report p,
+.ch-task-check p {
+  margin: 0;
+}
+.ch-task-report .ch-verify-k:first-child,
+.ch-task-check .ch-verify-k:first-child {
+  margin-top: 0;
+}
+.ch-task-summary {
+  color: var(--ink);
+}
+.ch-task-flag {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent);
+  color: var(--warn-ink);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.ch-task-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ch-task-shot {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--rule);
+  border-radius: var(--ch-r-sm);
+  background: var(--bg-2);
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.ch-task-shot:hover {
+  border-color: var(--cobalt);
+}
+.ch-task-shot img {
+  display: block;
+  width: 120px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--bg-inset);
+}
+.ch-task-txbtn {
+  align-self: flex-start;
+}
+.ch-task-tx {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ch-gap);
+  padding: 10px 0 0;
+  border-top: 1px dashed var(--rule);
+  min-width: 0;
+}
+.ch-task-tx-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ch-gap);
+  min-width: 0;
+}
+.ch-task-tx-head {
+  display: none;
+}
+.ch-task-scrim {
+  display: none;
+}
+@media (max-width: 768px) {
+  .ch-task-head {
+    padding: 8px 10px 4px;
+  }
+  .ch-task-meta,
+  .ch-task-now,
+  .ch-task-sum {
+    padding-left: 25px;
+    padding-right: 10px;
+  }
+  .ch-task-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .ch-task-shot img {
+    width: 96px;
+    height: 58px;
+  }
+  /* the transcript opens as a sheet from the bottom, over the thread */
+  .ch-task-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: rgba(0, 0, 0, 0.45);
+  }
+  .ch-task-tx {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    max-height: 82vh;
+    max-height: 82dvh;
+    overflow: auto;
+    padding: 0 12px calc(14px + env(safe-area-inset-bottom));
+    border: 1px solid var(--rule-strong);
+    border-bottom: 0;
+    border-radius: var(--ch-r-lg) var(--ch-r-lg) 0 0;
+    background: var(--bg);
+    box-shadow: var(--shadow-pop);
+  }
+  .ch-task-tx-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 0 -12px;
+    padding: 8px 8px 8px 14px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--bg);
+    font-weight: 600;
+  }
+  .ch-task-tx-head span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+/* VIS-219: the Agents switch's question and its answer under the composer */
+.ch-pop-agents {
+  min-width: 300px;
+}
+/* the chip sits at the strip's end: its question opens leftwards (a phone's spans the composer) */
+@media (min-width: 769px) {
+  .ch-pop.ch-pop-agents {
+    left: auto;
+    right: 0;
+  }
+}
+.ch-wfigs {
+  margin: -6px 0 -10px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--ink-3);
+}
+.ch-pop-text {
+  margin: 6px 8px;
+  color: var(--ink);
+  font-size: var(--fs-sm);
+}
+.ch-pop-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 2px 6px 4px;
+}
+.ch-agents-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--cobalt) 45%, transparent);
+  border-radius: var(--ch-r-sm);
+  background: var(--cobalt-wash);
+  color: var(--ink);
+}
+.ch-agents-note .btn {
+  margin-left: auto;
+  flex: none;
+}
+.ch-agents-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ch-ctx-sub {
+  margin: -6px 0 0;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.ch-rib-worker {
+  height: 18px;
+}
+.ch-ctx-lastworker p {
+  margin: 0;
+  color: var(--ink-2);
+}
 .ch-artifact {
   display: inline-flex;
   align-items: center;

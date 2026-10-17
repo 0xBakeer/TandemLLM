@@ -25,7 +25,8 @@ import './settings';
 import { isChatDown, pickBackend, probeChat, VersionConflict, type ChatBackend, type ChatDown, type Subscription } from './backend';
 import { downBanner, Reprobe } from './chat-down';
 import { attachLabel, initialAttachment, onEvent as attachEvent, onStreamState, onTick, type Attachment as Attach } from './connection';
-import { adopt, applyEvent, messageText } from './store';
+import { adopt, adoptTask, applyEvent, mergeTasks, messageText } from './store';
+import { agentsDone } from './tasks';
 import { badge, notify, notifyKind } from './notify';
 import type { QseChatComposer } from './composer';
 import { defaultPane, type OpenPane, type Dock, type QseChatPanes } from './panes';
@@ -96,6 +97,8 @@ export class QseChat extends LightElement {
   @state() private paneSize = Number(lsGet(LS.size) ?? 0.4);
   @state() private more = false;
   @state() private notice: { kind: 'ok' | 'warn'; text: string } | null = null;
+  /** VIS-219: what the Agents switch did, under the composer until the next send */
+  @state() private agentsNote: string | null = null;
   @query('qse-chat-composer') private composer!: QseChatComposer | null;
 
   private sub: Subscription | null = null;
@@ -310,10 +313,12 @@ export class QseChat extends LightElement {
       const c = await this.backend!.getConversation(id);
       if (this.wantId !== id) return;
       this.conv = c;
+      this.agentsNote = null;
       lsSet(LS.last, id);
       if (this.path[0] !== id && !this.section) navigate('chat' as never, this.params);
       this.unread.delete(id);
       this.attachTo(c);
+      void this.loadTasks(id);
     } catch (e) {
       if (this.wantId !== id) return;
       this.conv = null;
@@ -392,12 +397,27 @@ export class QseChat extends LightElement {
     if (e.type === 'run.done' || e.type === 'run.started' || e.type === 'run.phase' || e.type === 'conversation.updated' || e.type === 'tool.asking') this.patchList(next);
   }
 
-  /** a fresh snapshot of the open chat, with the events that came while it was on its way */
+  /** a fresh snapshot of the open chat, with the events that came while it was on its way; the
+   *  tasks are not in a snapshot and stay */
   private adoptSnapshot(c: Conversation): void {
     if (this.conv?.id !== c.id) return;
-    const { conv, floor } = adopt(c, this.recent);
+    const { conv, floor } = adopt({ ...c, tasks: c.tasks ?? this.conv.tasks, last_worker: this.conv.last_worker }, this.recent);
     this.conv = conv;
     this.floor = floor;
+  }
+
+  /** VIS-217: the chat's tasks after a load (a reload, another device), then the transcript of a
+   *  running one, so its card follows the worker from its next event on */
+  private async loadTasks(id: string): Promise<void> {
+    const list = await this.backend!.tasks(id).catch(() => null);
+    if (!list || this.conv?.id !== id) return;
+    this.conv = { ...this.conv, tasks: mergeTasks(this.conv.tasks, list) };
+    for (const t of this.conv.tasks ?? []) if (t.status === 'running' && !t.messages) void this.loadTask(id, t.id);
+  }
+
+  private async loadTask(id: string, taskId: string): Promise<void> {
+    const full = await this.guard(() => this.backend!.task(id, taskId), 'Task');
+    if (full && this.conv?.id === id) this.conv = adoptTask(this.conv, full, this.recent);
   }
 
   private patchList(c: Conversation): void {
@@ -505,6 +525,7 @@ export class QseChat extends LightElement {
     if (!c) return;
     const id = c.id;
     lsSet(LS.draft(id), null);
+    this.agentsNote = null;
     let atts = attachments;
     if (this.backend!.kind === 'remote' && attachments.length) {
       // the remote wants uploads first (CONTRACT section 8, request 9); a file that fails keeps
@@ -560,7 +581,11 @@ export class QseChat extends LightElement {
     const id = this.conv.id;
     this.conv = { ...this.conv, settings: { ...this.conv.settings, ...patch } };
     const s = await this.guard(() => this.backend!.updateSettings(id, patch), 'Settings');
-    if (s && this.conv?.id === id) this.conv = { ...this.conv, settings: s };
+    if (!s || this.conv?.id !== id) return;
+    const { reread_tokens, ...settings } = s;
+    this.conv = { ...this.conv, settings };
+    // VIS-219: the switch says what the next message costs, in chatd's own figure
+    if (patch.agents !== undefined && this.conv.messages.length) this.agentsNote = agentsDone(patch.agents, reread_tokens);
   }
 
   /** the settings page's defaults for new chats (the permission mode) */
@@ -787,6 +812,8 @@ export class QseChat extends LightElement {
       @ch-edit=${(e: CustomEvent<{ messageId: string; text: string }>) => void this.guard(() => this.backend!.edit(c.id, e.detail.messageId, e.detail.text, clientMsgId()), 'Edit')}
       @ch-regenerate=${(e: CustomEvent<{ messageId: string }>) => void this.guard(() => this.backend!.regenerate(c.id, e.detail.messageId), 'Regenerate')}
       @ch-continue=${() => void this.guard(() => this.backend!.continueRun(c.id), 'Continue')}
+      @ch-stop=${() => void this.guard(() => this.backend!.stop(c.id), 'Stop')}
+      @ch-task-load=${(e: CustomEvent<{ taskId: string }>) => void this.loadTask(c.id, e.detail.taskId)}
       @ch-branch=${(e: CustomEvent<{ messageId: string; index: number }>) => void this.guard(() => this.backend!.switchBranch(c.id, e.detail.messageId, e.detail.index).then((n) => this.adoptSnapshot(n)), 'Branch')}
       @ch-approve-plan=${(e: CustomEvent<{ items?: string[] }>) => void this.guard(() => this.backend!.approvePlan(c.id, e.detail.items), 'Approve')}
       @ch-rewind=${(e: CustomEvent<{ messageId: string }>) =>
@@ -823,6 +850,8 @@ export class QseChat extends LightElement {
 
   private renderComposer(c: Conversation | null): TemplateResult {
     return html`<qse-chat-composer .settings=${c?.settings ?? this.caps?.defaults ?? null} .caps=${this.caps} .tools=${this.tools} .packages=${this.packages} .resources=${this.resources} .prompts=${this.prompts} .running=${!!c?.run} .draft=${c ? (lsGet(LS.draft(c.id)) ?? '') : ''}
+      .rereadTokens=${c?.messages.length ? c.context.used : null} .agentsNote=${this.agentsNote}
+      @ch-agents-note-close=${() => (this.agentsNote = null)}
       .upload=${this.backend?.kind === 'remote' ? (f: File) => this.backend!.uploadAttachment(f) : null}
       @ch-send=${(e: CustomEvent<{ text: string; attachments: Attachment[] }>) => void this.send(e.detail.text, e.detail.attachments)}
       @ch-stop=${() => c && void this.guard(() => this.backend!.stop(c.id), 'Stop')}

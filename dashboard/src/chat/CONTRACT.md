@@ -546,6 +546,39 @@ is on. Stop, like the mock, lets the queue drain afterwards. Not in phase 1: com
 `not_available`), tools, permissions, MCP, prompts, presets, the sandbox.
 
 
+Client requests, VIS-E15 (2026-10-17, VIS-217 and VIS-219; the client reads these shapes, the mock plays
+them; the server's own section "Tasks (VIS-E15)" is the authority where the two differ):
+
+1. A task row (`GET .../tasks`, an array or `{tasks}`; `task.started`'s `task`): `id, conversation_id, run_id,
+   call_id, n, title, brief, expect, status, steps, max_steps, prompt_tokens, completion_tokens, cached_tokens,
+   started, ended, report, report_source, check, error`. `check` is the column `check_text`. `status` may be
+   `partial (step limit)`. 404 on `GET .../tasks` reads as "no tasks" (an older chatd).
+2. `GET .../tasks/{task_id}` adds `messages: Message[]` and `seq`, the last event it includes: a device that
+   attaches mid-task applies the stream's events after it, none twice.
+3. `report` (report.v1): `changed_files: {path, change}[]`, `checks: {what, result, call_id?, shot?}[]`,
+   `expected: {item, answer}[]`, `open_problems: string[]`; an item sent as its line of text is shown as it is.
+4. `check`: the four lines of the plan ("Changed in /workspace (snapshot diff): a (+41 -12), b (+3 -1)",
+   "Changed but not in the report: b", "Checks that ran: x (call c-31: ..., shot-7); y (call c-29: ...)",
+   "Claimed in Checks with no matching call: ..."; `none` for an empty list). Other lines show as written.
+5. `task.done.stats`: `{steps, prompt_tokens, completion_tokens, cached_tokens, ms}`.
+6. A worker's `part.*` and `message.created` carry `task_id`. Its `tool.*` events and its run's `run.done` /
+   `run.error` are matched to the task by `message_id` (a `task_id` on them is welcome). No `run.started` for a
+   worker run on the parent's stream: it would replace the parent's run.
+7. A worker call's prompt: `POST /conversations/{parent id}/permissions/{call_id}`; Stop and Continue are the
+   parent's routes.
+8. `shot-N`: the card shows the render_page call's own image (`output.images`) and opens its `pane`; without
+   the transcript it opens `file:/workspace/.tandem/shots/shot-N.png` (main names shots `<call_id>.png`).
+9. `context.worker.split` keys: `system, tools, brief, steps, files`; `cache` as `ContextReport.cache`, null
+   when not known. A worker's compactions have no field yet; the worker section does not show them.
+10. `PATCH .../settings` answers the settings plus a top-level `reread_tokens` (0 for a chat without messages).
+    The question before a switch uses `context.used` (no chatd figure exists before the PATCH); the note after it
+    uses `reread_tokens`.
+11. "Last worker: Task 2, 51,204 tokens, done": the tokens are the newest `context.worker.used` the device saw;
+    after a reload the line has none. A `context.last_worker` (or the task row's last `used`) would keep them.
+12. The Usage section's workers row sums `stats.workers` of the active branch; a `usage.workers` would count
+    every branch like the rest of `usage`.
+13. `Conversation.tasks` may come with the snapshot; the client merges it with `GET .../tasks` either way.
+
 ## Permission modes (frontend, 2026-10-13; the server's section lands in chat-ui-brief/community/CONTRACT.md "Permission modes (API)")
 
 The ask: fewer allow prompts for `cd` and `ls`, and a mode that asks for nothing. A chat runs in one of three modes; `chat/permission.ts` holds the words and the mock's copy of the decision.
