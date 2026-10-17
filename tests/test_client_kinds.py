@@ -111,7 +111,7 @@ def test_the_profile_each_kind_gets():
 
 def test_chatd_is_the_chat_app_and_gets_codings_policy_without_state_lines():
     from chatd import engine, render
-    h = dict(render.headers("C1", {}), **{"User-Agent": engine.USER_AGENT})
+    h = dict(render.headers("C1"), **{"User-Agent": engine.USER_AGENT})
     assert ledger.client_of(h)[1] == "chat-app"
     # an engine older than the kind reads chatd as the dashboard: its chat profile, as before
     assert "qse-dashboard" in engine.USER_AGENT.lower()
