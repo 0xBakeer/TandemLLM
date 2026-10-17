@@ -45,6 +45,8 @@ from chatd.tools import Result, Tool, ToolError
 PROTOCOL = "2025-06-18"
 CLIENT = {"name": "tandemllm-chatd", "version": "0.1"}
 DEFAULT_TIMEOUT_S = 120.0
+EXEC_FIRST_FRAME_S = 30.0    # a hijacked exec stream answers its 101 at once; 30 s of
+                             # silence after that is a server that never got going
 MAX_BODY = 64 << 20       # one JSON answer over this is refused BY NAME, never truncated
                          # into a json.loads failure: a screenshot result is a few MB,
                          # the cap has to clear the work, not just the hostility
@@ -76,6 +78,7 @@ def _sse_line(r, cap: int) -> bytes | None:
     if not parts:
         return None
     return b"".join(parts)
+
 
 class McpError(Exception):
     pass
@@ -292,7 +295,9 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
                 with box.lock:               # run threads vs reader threads: keep the count exact
                     box.busy += 1
                 try:
-                    demux(sock, first, data)
+                    # an exec that hijacks and never writes would otherwise sit on this
+                    # socket and the box's busy slot until its own socket dies
+                    demux(sock, first, data, first_timeout=EXEC_FIRST_FRAME_S)
                 finally:
                     with box.lock:
                         box.busy -= 1
