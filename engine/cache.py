@@ -1951,7 +1951,14 @@ class ResidentPrefix:
         two sets of rows are swapped a block at a time, and so are the anchors and the end anchors
         (the one in place is parked with its rows when they fit the park's buffers, as `_park`
         parks it). False, and nothing changed, if the buffers the rows came from are not the ones
-        in service any more."""
+        in service any more.
+
+        ENG-371: the park's buffers are as large as the conversation that went in, and one in
+        place that is longer lost its end and every row above the buffers here: two workers
+        taking turns on slot 0, the longer one's next call read its prompt again from 0 (live
+        2026-10-18 01:1x, 15,260 tokens). Its end now goes to the park whole: the buffers grow
+        to hold it within `park_bytes` (`_grow_park`), and when the memory policy refuses that,
+        the conversation goes to the NVMe first (`_spill`), as an eviction writes it."""
         views = _kv_views(eng, drafter)
         if (self._park_views is None or len(views) != len(self._park_views)
                 or any(a is not b or x != y
@@ -1963,6 +1970,12 @@ class ResidentPrefix:
         cap = self._park_bufs[0].shape[views[0][1]]
         # the prompt in place is parked in turn unless it is the parked one's own session
         other = self.owner is None or self.owner != self.park_owner
+        if (other and self.end is not None and int(self.end["at"]) == self.valid
+                and self.valid - base > cap):
+            cap = self._grow_park(eng, drafter, views, self.valid - base, ra)
+            if (self.valid - base > cap and self.spiller is not None
+                    and self.valid >= int(self.spiller.cfg.get("drain_min_tokens", 4096))):
+                self._spill(eng, drafter, "switch")
         end_b = self._end_to_park(base, cap) if other else None
         regions_b = self._end_regions() if end_b is not None else []
         if end_b is not None:
@@ -2025,6 +2038,30 @@ class ResidentPrefix:
         self._trim_pool()
         self.stats["park_hits"] += 1
         return True
+
+    def _grow_park(self, eng, drafter, views, rows: int, keep: int) -> int:
+        """ENG-371: the park's buffers grown to hold `rows` (whole 4-line steps, within
+        `park_bytes`), the `keep` rows they hold copied over; their size in rows after it, the old
+        size when the memory policy refuses the growth or the budget cannot hold `rows`."""
+        ax = views[0][1]
+        have = self._park_bufs[0].shape[ax]
+        per_row = sum(t.numel() // t.shape[a] * t.element_size() for t, a in views)
+        cap_rows = self._park_cap_rows(eng, drafter)
+        size = min(cap_rows, -(-rows // (4 * self.chunk)) * 4 * self.chunk)
+        if size < rows or size <= have:
+            return have
+        if self.mem is not None and not self.mem.admit("park", (size - have) * per_row):
+            self.stats["refused_park"] += 1
+            return have
+        bufs = []
+        for (t, a), old in zip(views, self._park_bufs):
+            b = torch.empty(*(t.shape[:a] + (size,) + t.shape[a + 1:]), dtype=t.dtype,
+                            device=t.device)
+            b.narrow(a, 0, keep).copy_(old.narrow(a, 0, keep))
+            bufs.append(b)
+        self._park_bufs = bufs
+        self.stats["park_grown"] = self.stats.get("park_grown", 0) + 1
+        return size
 
     def _adopt_parked_end(self, eng, pe: dict, regions: list) -> None:
         """The parked end anchor is the end in place again: its buffers become the end's (or are

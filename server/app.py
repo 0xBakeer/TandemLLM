@@ -946,6 +946,12 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 if (not why.get("wait") and not why.get("guest") and not stay
                         and _waiting_parent(session)):
                     why["wait"] = "parent"            # ENG-371: slot 0 reads its rows back
+                if (not why.get("wait") and stay and session is not None and valid
+                        and getattr(res, "owner", None) == session
+                        and rc >= max(chunk, conv or 0)):
+                    # ENG-371: a worker's own rows on slot 0, its copy parting inside them (a
+                    # write_file's content folded to a stub): it resumes there, below the part
+                    why["wait"] = "own"
         except Exception:                                          # noqa: BLE001
             pass
     if not stay and _waiting_parent(session) and why.get("wait") in ("parent", "spill", "park"):
@@ -3255,6 +3261,9 @@ def _session_header(headers) -> str | None:
 #: the memory policy gives the park back (`_shed_park`). An entry lasts PARENT_KEEP_S past its
 #: worker's last request.
 PARENTS: dict = {}
+#: the workers' own sessions, the same way: a worker comes back at its next call, and its rows on a
+#: side slot are written before another session's prefill cuts them too
+WORKERS: dict = {}
 PARENT_KEEP_S = 600.0
 #: the longest a returning parent waits for slot 0 before a side slot reads its prompt again, and
 #: the prefill rate that wait is estimated at when the engine has measured none (`_par_side_need`)
@@ -3275,14 +3284,16 @@ def _worker_of(headers) -> tuple[bool, str | None]:
     return w or p is not None, p
 
 
-def _note_parent(parent: str | None, now: float | None = None) -> None:
-    """A worker's request: its parent waits for it from now (stale entries go)."""
-    if not parent:
-        return
+def _note_parent(parent: str | None, now: float | None = None, worker: str | None = None) -> None:
+    """A worker's request: its parent waits for it from now, and the worker's own session comes
+    back at its next call (stale entries go)."""
     now = time.monotonic() if now is None else now
-    for k in [k for k, t in list(PARENTS.items()) if now - t >= PARENT_KEEP_S]:
-        PARENTS.pop(k, None)
-    PARENTS[parent] = now
+    for d, k in ((PARENTS, parent), (WORKERS, worker)):
+        if not k:
+            continue
+        for old in [x for x, t in list(d.items()) if now - t >= PARENT_KEEP_S]:
+            d.pop(old, None)
+        d[k] = now
 
 
 def _waiting_parent(owner, now: float | None = None) -> bool:
@@ -3291,26 +3302,35 @@ def _waiting_parent(owner, now: float | None = None) -> bool:
     return t is not None and (time.monotonic() if now is None else now) - t < PARENT_KEEP_S
 
 
+def _comes_back(owner, now: float | None = None) -> bool:
+    """A waiting parent, or a worker whose last call was within PARENT_KEEP_S: rows to keep."""
+    t = WORKERS.get(owner) if owner else None
+    return _waiting_parent(owner, now) or (
+        t is not None and (time.monotonic() if now is None else now) - t < PARENT_KEEP_S)
+
+
 def _keep_parent(res, eng, drafter) -> None:
     """ENG-371 (a side slot's `ResidentPrefix.keeper`): before another session's prefill cuts a
-    side slot's rows, a parent's go to the NVMe (a side slot has no park and no spill of its own),
-    as a planned stop writes them (`_drain_side_slots`). Its return reads them back on slot 0
-    (`_par_side_need`'s `spill` wait) and prefills its tail. Live 2026-10-17 23:39: a worker's
-    second call took the side slot its parent's 15,066 rows were on, and the parent's return
-    re-read 11,039 of 16,159 tokens."""
+    side slot's rows, a parent's or a worker's go to the NVMe (a side slot has no park and no
+    spill of its own), as a planned stop writes them (`_drain_side_slots`). They come back on slot
+    0 (`_par_side_need`'s `parent` and `spill` waits) and the request prefills its tail. Live
+    2026-10-17 23:39: a worker's second call took the side slot its parent's 15,066 rows were on,
+    and the parent's return re-read 11,039 of 16,159 tokens; 2026-10-18 01:1x one chat's worker
+    took the side slot the other chat's worker ran on, whose next call read 6,115 tokens again."""
     sp = dict.get(STATE, "spill")
-    if (sp is None or not _waiting_parent(res.owner) or res._stash is not None
+    if (sp is None or not _comes_back(res.owner) or res._stash is not None
             or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
         return
     with torch.no_grad():
         info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
     where = f"slot {slot.index}" if slot is not None else "slot 0"
+    who = "parent" if _waiting_parent(res.owner) else "worker"
     if info:
-        print(f"[spill] parent {res.owner} on {where}: {info['tokens']} tokens to the NVMe before "
+        print(f"[spill] {who} {res.owner} on {where}: {info['tokens']} tokens to the NVMe before "
               f"another session's prefill, {info['ms']:.0f} ms", flush=True)
     else:
-        print(f"[spill] parent {res.owner} on {where}: not written, its rows go", flush=True)
+        print(f"[spill] {who} {res.owner} on {where}: not written, its rows go", flush=True)
 
 
 def _shed_park(res, safe: bool = False) -> int:
@@ -3319,7 +3339,7 @@ def _shed_park(res, safe: bool = False) -> int:
     writes slot 0's rows below the park; on a side slot's thread it goes as before. Live 2026-10-17
     23:05: the gate gave a parked 15,417-token parent back at the ceiling, unwritten, and its
     return re-read 11,895 of 17,015 tokens."""
-    if res.park_rows and _waiting_parent(res.park_owner) and slots_mod.current() is None:
+    if res.park_rows and _comes_back(res.park_owner) and slots_mod.current() is None:
         eng, drafter = dict.get(STATE, "engine"), dict.get(STATE, "drafter")
         try:
             with torch.no_grad():
@@ -3330,7 +3350,7 @@ def _shed_park(res, safe: bool = False) -> int:
                     res.settle_guest(eng)
                 owner, rows = res.park_owner, res.park_base + res.park_rows
                 ok = res._spill_park(eng, drafter)
-            print(f"[spill] parked parent {owner}: {rows} tokens "
+            print(f"[spill] parked {owner}: {rows} tokens "
                   f"{'to the NVMe' if ok else 'not written'} before the memory policy takes the "
                   f"park", flush=True)
         except Exception:                                          # noqa: BLE001
@@ -7033,7 +7053,8 @@ class Handler(BaseHTTPRequestHandler):
         conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
         # ENG-371: an agent's worker (its session comes back at its next call) and its parent
         stay, parent = _worker_of(self.headers)
-        _note_parent(parent)
+        if stay:
+            _note_parent(parent, worker=conv_id)
         # SRV-349: the prompt's system and tool tokens for `usage.tandem`, rendered here on the
         # host (before the queue), once per head
         head_parts = _head_parts(body, client) if chat else None

@@ -204,6 +204,27 @@ def test_a_parent_on_a_side_slot_goes_to_the_nvme_before_its_worker_takes_the_sl
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_workers_side_rows_go_to_the_nvme_before_another_session_takes_the_slot():
+    """Live 2026-10-18 01:1x: one chat's worker took the side slot the other chat's worker ran
+    on (slot 0 busy), and the other worker's next call read its prompt again."""
+    d = tempfile.mkdtemp()
+    try:
+        _state()
+        sp, _ = _spill(d, app.STATE["resident"], min_tokens=64)
+        side = cache.ResidentPrefix(BIG, CH, end=True, stash_bytes=BIG, guest_frac=1.0)
+        side.keeper = app._keep_parent
+        app.PARENTS.clear()
+        app.WORKERS.clear()
+        app.STATE.update(engine=fresh(), resident=side)
+        wturn(WHEAD + tokens(200, seed=104), 8, "chat-a-task-1", stay=True)
+        app._note_parent("chat-a", worker="chat-a-task-1")
+        wturn(WHEAD + tokens(220, seed=105), 6, "chat-b-task-1", stay=True)
+        assert len(sp.entries) == 1, sp.entries
+    finally:
+        app.WORKERS.clear()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_a_side_slots_rows_of_a_session_that_is_no_parent_are_not_written():
     d = tempfile.mkdtemp()
     try:
@@ -218,6 +239,38 @@ def test_a_side_slots_rows_of_a_session_that_is_no_parent_are_not_written():
         assert not sp.entries, sp.entries
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _swap_longer(grow):
+    """Two workers on slot 0 with one park: A (short) is parked by B (long); A's next call swaps
+    them, and B must go to the park whole with its end, although the park's buffers were sized
+    for A. Then B's next call."""
+    per = sum(t.numel() // t.shape[ax] * t.element_size()
+              for t, ax in cache._kv_views(fresh(), None))
+    res = _state(guest_max=8192, park_bytes=480 * per + 8 * fresh().state.nbytes)
+    if not grow:                                 # the park as before ENG-371: no growth
+        res._grow_park = lambda eng, drafter, views, rows, keep: \
+            res._park_bufs[0].shape[views[0][1]]
+    a = WHEAD + tokens(60, seed=100)
+    oa, _ = wturn(a, 6, "chat-a-task-1", stay=True)
+    b = WHEAD + tokens(300, seed=101)
+    ob, _ = wturn(b, 6, "chat-b-task-1", stay=True)        # A to the park: a small buffer
+    assert res.park_owner == "chat-a-task-1"
+    a = a + oa + tokens(10, seed=102)
+    oa, pa = wturn(a, 6, "chat-a-task-1", stay=True)       # the swap: B to the park
+    b = b + ob + tokens(10, seed=103)
+    ob2, pb = wturn(b, 6, "chat-b-task-1", stay=True)
+    return res, a, pa, b, pb, ob2
+
+
+def test_a_swap_parks_a_longer_conversation_whole():
+    res, a, pa, b, pb, ob2 = _swap_longer(grow=True)
+    assert _tail(pa, a) <= 10 + 1, pa                    # A back from the park
+    assert _tail(pb, b) <= 10 + 1 and res.stats.get("park_grown"), (pb, res.stats)
+    assert ob2 == cold(b, 6)
+    _, _, _, b0, pb0, _ = _swap_longer(grow=False)
+    # the old swap dropped B's end and every row above A's buffers: B resumed at a grid line
+    assert pb0["kind"] != "end" and _tail(pb0, b0) > 150, pb0
 
 
 # ------------------------------------------------------------------ 4: the park and the memory policy
@@ -351,6 +404,20 @@ def test_a_conversation_slot_0_has_parked_tries_slot_0_first():
     assert why.get("wait") == "park" and why.get("slot0_first") and why["park"] == 11_000, why
     _, why = _need(FakeRes(tokens(12_000, seed=5)), tokens(11_500, seed=6))
     assert why.get("wait") is None, why
+
+
+def test_a_worker_whose_copy_parts_inside_its_own_rows_stays_on_slot_0():
+    """Live 2026-10-18 01:1x: a worker's call 2 (its write_file content a stub, so the copy parts
+    inside call 1's answer: 8,627 of 10,844 rows) counted as no continuation of slot 0 and took
+    the side slot another worker's rows were on."""
+    own = FakeRes(tokens(10_844, seed=10), owner="chat-b-task-1")
+    ids = own.tokens[:8_627] + tokens(100, seed=11)
+    _, why = _need(own, ids, session="chat-b-task-1")
+    assert why.get("wait") is None, why                # not a worker: as before
+    _, why = _need(own, ids, session="chat-b-task-1", stay=True, parent="chat-b")
+    assert why.get("wait") == "own" and why.get("slot0_first"), why
+    _, why = _need(own, ids, session="chat-a-task-1", stay=True, parent="chat-a")
+    assert why.get("wait") is None, why                # another worker's rows
 
 
 def test_a_returning_parent_tries_slot_0_for_as_long_as_a_re_read_would_take():
