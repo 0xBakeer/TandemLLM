@@ -6144,8 +6144,25 @@ class BodyError(Exception):
 # embedder can set it; QSE_MAX_BODY_MB overrides at import.
 MAX_BODY_BYTES = int(os.environ.get("QSE_MAX_BODY_MB", 512)) * (1 << 20)
 
+# The socket timeout of one connection, seconds (2026-10-17, the timeout half of the
+# unbounded-read issue). socketserver's BaseRequestHandler.setup applies it to the connection
+# before rfile/wfile exist, so it governs every socket op: the wait for the next request line
+# (a keep-alive client that stops talking), the headers, the body read, and a write to a
+# client that stopped draining. A live-but-slow client is never cut off mid-request: the
+# clock restarts at every socket op that makes progress, as nginx's *_{read,send}_timeout.
+# 60 s is the value nginx ships for client_header_timeout and client_body_timeout, and the
+# one this server's own proxies use; QSE_HANDLER_TIMEOUT_S overrides, a test may set
+# Handler.timeout directly.
+HANDLER_TIMEOUT_S = float(os.environ.get("QSE_HANDLER_TIMEOUT_S", 60.0))
+
 
 class Handler(BaseHTTPRequestHandler):
+    # None, as every stdlib server, until now: headers + a stalled body meant a handler
+    # thread held forever (ThreadingHTTPServer is one thread per connection). With a
+    # timeout the stdlib does the right thing already -- handle_one_request catches
+    # TimeoutError, logs one line and closes the connection -- and a timeout inside the
+    # body read is answered as a 408 by _read_body below.
+    timeout = HANDLER_TIMEOUT_S
     protocol_version = "HTTP/1.1"
     server_version = "TandemLLM"
     # 2026-10-05: no Nagle, as uvicorn's servers. The headers and the first frame
@@ -6261,7 +6278,7 @@ class Handler(BaseHTTPRequestHandler):
                          extra_headers=(("Retry-After", str(retry)),))
 
     def _body_error(self, exc) -> None:
-        """A framing/body refusal: 400 or 413 with the error's own message. The connection
+        """A framing/body refusal: 400, 408 or 413 with the error's own message. The connection
         closes afterwards (handle_one_request): the unread body would be the next request."""
         self._json(exc.code, {"error": {"type": exc.type, "message": exc.message}})
 
@@ -6286,17 +6303,26 @@ class Handler(BaseHTTPRequestHandler):
         """The request's body, consumed whole or not at all. An answer written with the body
         still unread is a desync one request away: every path out of here has read to the end
         of the framing, and BodyError (or handle_one_request) closes the connection."""
-        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
-            raw = self._read_chunked()           # Transfer-Encoding outranks Content-Length
-        else:
-            try:
-                n = self._content_length()
-            except BodyError:
-                self.close_connection = True     # the promised bytes, if they ever come,
-                raise                           # would be read as the next request
-            raw = self.rfile.read(n)
+        try:
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                body = self._read_chunked()      # Transfer-Encoding outranks Content-Length
+            else:
+                try:
+                    n = self._content_length()
+                except BodyError:
+                    self.close_connection = True  # the promised bytes, if they ever come,
+                    raise                        # would be read as the next request
+                body = self.rfile.read(n)
+        except TimeoutError:
+            # the stalled mid-body client of the timeout issue: headers, a promise, a few
+            # bytes, silence. The framing is unfinished, so the connection closes; a
+            # response is still writable (a stalled reader does not block our writer
+            # until its window fills), so the 408 says what happened, and the handler
+            # thread is free after Handler.timeout seconds instead of forever.
+            self.close_connection = True
+            raise BodyError(408, "timeout", "the request body stopped arriving") from None
         self._body_done = True
-        return raw
+        return body
 
     def _content_length(self) -> int:
         """The promised body size, validated before a single byte of it is read. This header
