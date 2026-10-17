@@ -1156,6 +1156,52 @@ def test_render_page_reports_a_failed_module_load_through_the_kit():
         "no console errors and no failed loads")
 
 
+def test_render_page_quotes_the_line_an_error_names():
+    """Live (2026-10-17, pagoda replay 3): "Cannot read properties of undefined (reading 'set')"
+    at pond.js (62) reached the model 13 times and it edited main.js for 20 minutes; line 62 was
+    `petal.position.set(...)` on a geometry. The result now shows that line."""
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("js/scene/pond.js", ("\n" * 61 + "      petal.position.set(1, 2, 3);\n").encode())
+    listening = [{"port": 5174, "addresses": ["0.0.0.0"], "command": "python3 -m http.server",
+                  "cwd": "/workspace"}]
+    exc = ("exception: TypeError: Cannot read properties of undefined (reading 'set') "
+           "(http://localhost:5174/js/scene/pond.js:62)")
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, kit):
+            self.ws, self.cmds, self.out, self.kit = ws, [], "", kit
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "laya_drive.py page" in cmd[-1] and self.kit:
+                ws.write(".tandem/shots/call1/page-1280.png", b"\x89PNG fake")
+                self.out += json.dumps({"errors": [exc], "widths": [{"text": ""}]}) + "\n"
+            elif "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                self.out += ('[1:1:1017/045852.1:INFO:CONSOLE:62] "Uncaught TypeError: Cannot '
+                             'read properties of undefined (reading \'set\')", source: '
+                             'http://localhost:5174/js/scene/pond.js (62)\n')
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    quoted = "    /workspace/js/scene/pond.js:62: petal.position.set(1, 2, 3);"
+    res = T._render(Ctx(True), {"port": 5174})
+    assert res.content.endswith(exc + "\n" + quoted), res.content
+    res = T._render(Ctx(False), {"port": 5174})            # no report from the kit: Chromium
+    assert res.content.endswith("(reading 'set')\", source: http://localhost:5174/js/scene/"
+                                "pond.js (62)\n" + quoted), res.content
+    # another port's script, or a line past the end, is not quoted
+    assert T.quote_lines(Ctx(True), [exc.replace("5174", "9999")], 5174, "/workspace") == \
+        [exc.replace("5174", "9999")]
+    assert T.quote_lines(Ctx(True), [exc.replace(":62", ":99")], 5174, "/workspace") == \
+        [exc.replace(":62", ":99")]
+
+
 def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():
     """ops/sandbox/relay.py as chatd sends it (python3 -c): a server on ::1 only and one on
     127.0.0.1 only both answer through `connect`; a closed port says what listens instead."""

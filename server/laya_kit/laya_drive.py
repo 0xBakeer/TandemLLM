@@ -723,8 +723,13 @@ def _problems(events: list[dict]) -> tuple[list[str], int]:
                 warns += 1
         elif m == "Runtime.exceptionThrown":
             d = p.get("exceptionDetails") or {}
+            # where it was thrown: the frame's script and line (1-based), so a reader can open it
+            top = ((d.get("stackTrace") or {}).get("callFrames") or [{}])[0]
+            url = d.get("url") or top.get("url") or ""
+            line = d.get("lineNumber") if d.get("url") else top.get("lineNumber")
+            at = f" ({url}:{int(line) + 1})" if url and line is not None else ""
             errs.append("exception: " + ((d.get("exception") or {}).get("description")
-                                         or d.get("text") or "?").split("\n")[0])
+                                         or d.get("text") or "?").split("\n")[0] + at)
         elif m == "Log.entryAdded":
             e = p.get("entry") or {}
             if "favicon.ico" in (e.get("url") or ""):

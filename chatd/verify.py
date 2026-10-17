@@ -336,7 +336,7 @@ class VerifyMixin:
                     row, rel = served
                     return {"label": f"{page} on port {row['port']}",
                             "url": f"http://localhost:{row['port']}/{rel}", "port": row["port"],
-                            "path": rel}
+                            "path": rel, "cwd": row.get("cwd") or ""}
                 return {"label": page, "why": f"{posixpath.basename(page)} loads its module "
                         f"scripts from its folder, which a browser refuses from file:// (CORS), "
                         f"and no HTTP server runs from {posixpath.dirname(page)} in the sandbox. "
@@ -427,6 +427,9 @@ class VerifyMixin:
                    "it timed out" if timed_out else (out.strip()[-300:] or f"exit {code}"))
             return Result(f"The check could not run: {why}", is_error=True), \
                 {"state": "not_run", "facts": why}
+        # the line each error names, from the chat's files (tools.quote_lines)
+        rep["errors"] = tools_mod.quote_lines(ctx, rep.get("errors") or [], tgt.get("port"),
+                                              tgt.get("cwd") or "")
         verdict = str(rep.get("verdict") or "")
         if code == 2 and not verdict.startswith("CHECK FAILED"):
             return Result(f"The check could not run: {verdict}", is_error=True), \

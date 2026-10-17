@@ -271,7 +271,8 @@ def _render(ctx, a):
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
-    kit = _render_kit(ctx, url, w)
+        cwd = ""
+    kit = _render_kit(ctx, url, w, a.get("port") and int(a["port"]), cwd)
     if kit is not None:
         return kit
     shot = f"/workspace/{SHOTS_DIR}/{ctx.call_id}.png"
@@ -302,7 +303,8 @@ def _render(ctx, a):
         raise ToolError("the page did not render: " + (log.strip() or "no screenshot") +
                         (f" ({url}; {_ports_words(_ports(ctx))})" if a.get("port") else "")
                         ) from None
-    errors = [ln for ln in log.splitlines() if ln.strip()]
+    errors = quote_lines(ctx, [ln for ln in log.splitlines() if ln.strip()],
+                         a.get("port") and int(a["port"]), cwd)
     # a new render of the page as it is now, each call (its own file): live (2026-10-13) the
     # model read a correct clock as "still tilted" four times and took the screenshots for stale
     msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
@@ -316,6 +318,37 @@ def _render(ctx, a):
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
 
 
+# a script and line in an error: `http://localhost:5174/js/scene/pond.js:62` (the kit) or
+# `source: http://localhost:5174/js/scene/pond.js (62)` (Chromium's log)
+_AT_LINE = re.compile(r"(?:https?://(?:localhost|127\.0\.0\.1):(\d+)|file://)(/[^\s():\"']+?)"
+                      r"(?::(\d+)(?::\d+)?|\s\((\d+)\))")
+
+
+def quote_lines(ctx, errors: list[str], port: int | None, cwd: str) -> list[str]:
+    """Each error that names a script of this page and a line, followed by that line of the file
+    in the chat's files: live (2026-10-17, pagoda replay 3) "Cannot read properties of undefined
+    (reading 'set')" at pond.js (62) went to the model 13 times, and it edited main.js for 20
+    minutes; line 62 was `petal.position.set(...)` on a geometry."""
+    out = []
+    for e in errors:
+        out.append(e)
+        m = _AT_LINE.search(e)
+        if not m:
+            continue
+        p, path, line = m.group(1), m.group(2), m.group(3) or m.group(4)
+        if p is not None:
+            if port is None or int(p) != port or not cwd:
+                continue
+            path = cwd.rstrip("/") + path
+        try:
+            src = ctx.ws.read(path, limit=512 * 1024).decode("utf-8", "replace").splitlines()
+            text = src[int(line) - 1].strip()
+        except (PathError, OSError, IndexError, ValueError):
+            continue
+        out.append(f"    {ctx.ws.show(ctx.ws.resolve(path))}:{line}: {text[:200]}")
+    return out
+
+
 def kit_ok(ctx) -> bool:
     """The laya kit in the chat's files (chatd/verify.py `vendor_kit`); False without the source
     tree (an installed package): render_page then shoots with Chromium's own flags."""
@@ -323,7 +356,7 @@ def kit_ok(ctx) -> bool:
     return verify.vendor_kit(ctx.ws)
 
 
-def _render_kit(ctx, url: str, w: int) -> Result | None:
+def _render_kit(ctx, url: str, w: int, port: int | None = None, cwd: str = "") -> Result | None:
     """render_page through the laya kit's page check (Chrome under DevTools, real time): the
     page's console errors, uncaught exceptions and failed loads, after the page has loaded. Live
     (2026-10-17, pagoda replay 3) a module the page imports answered 404, the app stayed on its
@@ -353,7 +386,7 @@ def _render_kit(ctx, url: str, w: int) -> Result | None:
     msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
            f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
            f"screenshot {shot}\n")
-    errors = rep.get("errors") or []
+    errors = quote_lines(ctx, rep.get("errors") or [], port, cwd)
     text = (((rep.get("widths") or [{}])[0]).get("text") or "").strip()
     if text:
         msg += f'visible text: "{text[:200]}"\n'
