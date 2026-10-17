@@ -80,7 +80,7 @@ class Stamps:
     """What one response's frames said, filled by `read_frame`; the relay adds the times."""
 
     __slots__ = ("usage", "finish_reason", "reasoning", "tools", "tokens_seen", "error",
-                 "model", "think_open", "kind", "tool_name", "tool_chars")
+                 "model", "think_open", "kind", "tool_name", "tool_chars", "fingerprint")
 
     def __init__(self):
         self.usage = None              # the provider's usage object, as sent
@@ -96,6 +96,8 @@ class Stamps:
         self.kind = None
         self.tool_name = None
         self.tool_chars = 0            # the tool calls' argument characters streamed so far
+        # the backend configuration the answer names (`system_fingerprint`), the first one seen
+        self.fingerprint = None
 
 
 def sse_data(event: bytes) -> bytes | None:
@@ -162,7 +164,9 @@ class Adapter:
             out = dict(body, reasoning_effort=word)
             return out, f"reasoning_effort={word}"
         if sw == "thinking_type":
-            if isinstance(body.get("thinking"), dict):
+            # DeepSeek's `reasoning_effort` (none, low, high, max) is a switch of its own: a
+            # client that set it chose (the Chat tab's effort chip, 0.11.3)
+            if isinstance(body.get("thinking"), dict) or body.get("reasoning_effort") is not None:
                 return body, "client"
             if on:
                 return body, "thinking=default"
@@ -280,6 +284,8 @@ class Adapter:
             return False, False
         if obj.get("model") and st.model is None:
             st.model = obj["model"]
+        if st.fingerprint is None and isinstance(obj.get("system_fingerprint"), str):
+            st.fingerprint = obj["system_fingerprint"][:64]
         token = False
         for ch in obj.get("choices") or []:
             if not isinstance(ch, dict):
@@ -380,6 +386,8 @@ class Adapter:
         """A whole JSON answer (no stream)."""
         if not isinstance(obj, dict):
             return
+        if st.fingerprint is None and isinstance(obj.get("system_fingerprint"), str):
+            st.fingerprint = obj["system_fingerprint"][:64]
         if path == RESPONSES:
             if isinstance(obj.get("usage"), dict):
                 st.usage = obj["usage"]
@@ -481,7 +489,10 @@ class Adapter:
     models_path = "/models"
 
     def parse_models(self, obj) -> list[dict]:
-        """`GET /models` into [{id, context_length}]."""
+        """`GET /models` into [{id, context_length, name, max_output, input_modalities,
+        effort}], each None where the list does not say it. DeepSeek's list (2026-10-17) has
+        `name`, `context_window`, `max_output_tokens`, `input_modalities` and
+        `effort: {supported_levels, default_level}`; vLLM's has `max_model_len` only."""
         out = []
         data = obj.get("data") if isinstance(obj, dict) else None
         for m in data or []:
@@ -491,5 +502,23 @@ class Adapter:
                     if isinstance(m.get(k), int):
                         ctx = m[k]
                         break
-                out.append({"id": m["id"], "context_length": ctx})
+                mods = m.get("input_modalities")
+                eff = m.get("effort") if isinstance(m.get("effort"), dict) else {}
+                levels = eff.get("supported_levels")
+                ok_levels = isinstance(levels, list) and levels and \
+                    all(isinstance(x, str) for x in levels)
+                out.append({"id": m["id"], "context_length": ctx,
+                            "name": self.display_name(m.get("name")),
+                            "max_output": _int(m.get("max_output_tokens")),
+                            "input_modalities": [x for x in mods if isinstance(x, str)]
+                            if isinstance(mods, list) else None,
+                            "effort": {"levels": list(levels),
+                                       "default": eff.get("default_level")
+                                       if eff.get("default_level") in levels else None}
+                            if ok_levels else None})
         return out
+
+    @staticmethod
+    def display_name(name) -> str | None:
+        """The provider's name of a model as the picker shows it."""
+        return name.strip() if isinstance(name, str) and name.strip() else None
