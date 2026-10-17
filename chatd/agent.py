@@ -25,6 +25,22 @@ EVENT_OUTPUT_CAP = 64 * 1024        # tool.output per call in events (CONTRACT s
 READ_PARALLEL = 4
 
 
+def estimated_split(body: dict, ratio: float | None, skills: str | None) -> dict:
+    """A cloud model's prompt split: our engine counts the system prompt's
+    and the tool schemas' tokens in its usage frame (`tandem.parts`), a provider does not, so
+    these are chatd's estimate from the characters at the chat's learned tokens per character.
+    The skill index sits inside the system prompt and counts apart. `estimated` says so."""
+    r = ratio or comp.DEFAULT_RATIO
+    msgs = body.get("messages") or []
+    sys_text = "".join(m.get("content") or "" for m in msgs[:1]
+                       if m.get("role") == "system" and isinstance(m.get("content"), str))
+    tools = body.get("tools") or []
+    sk = int(len(skills) * r) if skills and skills in sys_text else 0
+    return {"system": max(0, int(len(sys_text) * r) - sk),
+            "tools": int(len(json.dumps(tools, ensure_ascii=False)) * r) if tools else 0,
+            "skills": sk, "images": comp.measure({"messages": msgs})[1], "estimated": True}
+
+
 class ApiConflict(Exception):
     pass
 
@@ -756,6 +772,10 @@ class AgentMixin:
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)
         run.request_est = est
+        run.backend = info.get("backend") or "engine"
+        if run.backend == "cloud":
+            run.split_est = estimated_split(body, conv.tok_ratio, self.skill_index(settings)
+                                            if hasattr(self, "skill_index") else None)
         self.store.run("UPDATE runs SET request = ?, state = 'running', step = ? WHERE id = ?",
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
                                "continue": run.continue_final, "estimate": est}),

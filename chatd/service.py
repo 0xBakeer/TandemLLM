@@ -885,6 +885,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             frame = (run.usage or {}).get("tandem") or {}
             if frame.get("harness") or frame.get("parts"):
                 stats["tandem"] = {"harness": frame.get("harness"), "parts": frame.get("parts")}
+            elif run.split_est is not None:         # a relayed call's: chatd's estimate
+                stats["tandem"] = {"harness": None, "parts": run.split_est}
             self.store.run("UPDATE messages SET stats = ? WHERE id = ?",
                            (dumps(stats), run.message_id))
             self.store.run("UPDATE runs SET state = ?, ended = ?, error = ?, step = ? WHERE id = ?",
@@ -1123,6 +1125,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if row is not None and row.get("phase") == "done" and \
                 row.get("request_id") not in run.request_ids:
             row = None                              # another run's call, or a previous turn's
+        if row is not None and (row.get("backend") or run.backend != "engine"):
+            # a relayed call's row (a cloud model's) counts no tokens (proxy/measure.py: a frame
+            # is not a token), and its zeros overwrote chatd's own counts: live 2026-10-17 a
+            # DeepSeek turn read 0 thinking and "not tracked" for a minute of thinking
+            row = None
         act = (row or {}).get("activity") or {}
         dec = act.get("decode") or {}
         pre = act.get("prefill") or {}
@@ -1158,6 +1165,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.metrics["decode_tps"] = run.local_decode_tps()
             run.metrics["tokens_per_round"] = turn["tokens_per_round"]
             run.metrics["acceptance"] = turn["acceptance"]
+        run.metrics["ttft_ms"] = (row.get("ttft_ms") if row is not None and
+                                  row.get("phase") != "done" and row.get("ttft_ms") is not None
+                                  else run.live_ttft_ms())
         run.tps_history.append(run.metrics["decode_tps"])
         del run.tps_history[:-120]
         self.emit(conv, {"type": "run.metrics", "run_id": run.id,
@@ -1167,6 +1177,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                          "thinking_used": run.thinking_tokens,
                          "thinking_call": run.thinking_tokens - run.call_base[1],
                          "thinking_budget": run.metrics["thinking_budget"],
+                         "ttft_ms": run.metrics["ttft_ms"],
                          "prefill": run.prefill}, persist=False)
         if time.monotonic() - conv.context_sent_at >= CONTEXT_RUN_S:
             with conv.lock:
@@ -1218,6 +1229,16 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if split is None:
             split = kept.get("parts")
         peek = conv.peek[1] if conv.peek is not None else None
+        if run is not None and run.backend != "engine":
+            # a relayed call (a cloud model): no live row counts its prompt; chatd's estimate of
+            # the request in flight, the split it estimated, and the provider's cache as the last
+            # finished call's usage said
+            split = run.split_est or split
+            last = run.step_usage[-1] if run.step_usage else {}
+            live_row = {"prompt_tokens": run.request_est or None,
+                        "cached_tokens": min(int(last.get("cached_tokens") or 0),
+                                             run.request_est or 0),
+                        "cache_source": "provider"} if run.request_est else None
         out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
                              files_tokens=files, stats=stats,
                              run=run.as_dict() if run is not None else None, row=live_row,
@@ -1740,6 +1761,8 @@ def _usage(branch: list[dict]) -> dict:
         out["turns"] += 1
         for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens"):
             out[k] += int(s.get(k) or 0)
+        if s.get("cost_usd") is not None:         # a cloud model's turns, at the proxy's prices
+            out["cost_usd"] = round((out["cost_usd"] or 0) + float(s["cost_usd"]), 6)
         wall += float(s.get("total_ms") or 0) / 1000
     out["wall_s"] = round(wall)
     return out

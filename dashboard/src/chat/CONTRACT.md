@@ -126,9 +126,9 @@ interface TurnStats {
   ttft_ms: number | null; decode_tps: number | null; total_ms: number | null;
   prompt_tokens: number; completion_tokens: number; reasoning_tokens: number; cached_tokens: number;
   tokens_per_round: number | null; acceptance: number | null;
-  cache_source?: CacheSource | string;           // v0.2: resident, end, park, spill, disk, none ... (the engine's cache_source)
+  cache_source?: CacheSource | string;           // v0.2: resident, end, park, spill, disk, none ... (the engine's cache_source); `provider` for a relayed model (0.11.3)
   prefill_tps?: number | null;                   // v0.2
-  cost_usd?: number | null;                      // v0.2: cloud backends only
+  cost_usd?: number | null;                      // v0.2: cloud backends only; 0.11.3: the proxy's price of every call (`: tandem-cost`)
 }
 
 // ---- the run
@@ -142,6 +142,7 @@ interface Run {
   tool: { call_id: string; name: string } | null;
   prefill: { done: number; total: number; tps?: number | null; eta_ms?: number | null } | null;
   decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null;
+  ttft_ms?: number | null;                       // 0.11.3: this model call's first token, once it came
   thinking: { used: number; budget: number | null };
   tokens: number;
   tps_history: (number | null)[];                // one-second decode samples, oldest first, at most 120
@@ -359,7 +360,7 @@ replayed, and the snapshot holds their latest value. Text deltas are coalesced t
 type ChatEvent =
   | { type: 'run.started'; run: Run }
   | { type: 'run.phase'; run_id: string; phase: RunPhase; now: string; tool?: Run['tool']; prefill?: Run['prefill']; step?: number; queue_position?: number | null }
-  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_budget?: number | null; prefill?: Run['prefill'] }   // E, at most 4 a second
+  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_budget?: number | null; ttft_ms?: number | null; prefill?: Run['prefill'] }   // E, at most 4 a second
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
   | { type: 'message.created'; message: Message }
@@ -403,6 +404,16 @@ chat in the slot) and the sandbox runtime's stats. The `files` part is what the 
 from the first message a compaction kept. Live rates follow the dashboard's NOW rule: `null` when
 idle; decode rates skip the first 50 tokens. A figure without a value says why in words ("measured
 after the first turn", "not tracked for this model"), never a bare dash.
+
+A model the proxy relays (`model.backend` `cloud` or `proxy`, 0.11.3) has no live row with counts:
+chatd measures its stream itself. Live: tokens per text chunk (one token each on DeepSeek), a tool
+call's arguments at 3.5 characters a token, thinking from `reasoning_content`, the first token's
+wait from the send. After each call: the provider's usage (DeepSeek's `prompt_cache_hit_tokens` as
+the cached tokens, `cache.source` `provider`), tok/s = (completion tokens - 1) over the stream's
+span, and the proxy's price as `cost_usd`. A cloud model's `split` is chatd's estimate from the
+request's characters at the chat's learned tokens per character (`estimated: true`, the skill
+index apart as `skills`); the panel marks those parts "est.". The `reserved` part is what a request
+asks for: the model's output limit, or the window's room when less is left.
 
 ## 5. Rules the UI can rely on
 

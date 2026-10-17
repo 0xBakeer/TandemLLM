@@ -42,6 +42,7 @@ the run ends `interrupted`. A retry after text came continues the answer with
 from __future__ import annotations
 
 import collections
+import json
 import re
 import threading
 import time
@@ -60,7 +61,18 @@ _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
 # anything else in it is replaced (the part's id is the one the next request sends back)
 _CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
+# the proxy's price of a relayed call, an SSE comment the client asked for (X-Tandem-Cost: 1)
+COST_COMMENT = "tandem-cost "
 NUDGE = "(Your last turn was empty. Answer the user now, or call a tool.)"
+
+
+def cached_of(u: dict) -> int:
+    """The prompt tokens a provider served from its cache: DeepSeek's `prompt_cache_hit_tokens`
+    when it sends one, else the OpenAI field (our engine's)."""
+    hit = u.get("prompt_cache_hit_tokens")
+    if isinstance(hit, int) and not isinstance(hit, bool):
+        return hit
+    return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
 
 
 class GuardError(Exception):
@@ -112,11 +124,18 @@ class Run:
         self.call_base = (0, 0)                # tokens, thinking_tokens before this call
         self.t_sent: float | None = None
         self.t_first: float | None = None
+        # this model call's first and newest token: a relayed call's (a cloud model's) TTFT and
+        # tok/s, which no usage frame times, are chatd's own from these
+        self.call_first: float | None = None
+        self.call_last: float | None = None
+        self.backend = "engine"                 # the model's backend: engine, cloud or proxy
+        self.split_est: dict | None = None      # a relayed call's prompt split, estimated
+        self.cost_micros: int | None = None     # the proxy's price of the run's calls
         self.marks: list[tuple[float, int]] = []
         self.finish_reason: str | None = None
         self.usage: dict | None = None
         self.metrics: dict = {"decode_tps": None, "tokens_per_round": None, "acceptance": None,
-                              "thinking_budget": None}
+                              "thinking_budget": None, "ttft_ms": None}
         self.tps_history: list = []
         self.error: str | None = None
         self.notice: str | None = None         # why the run ended early (step cap, a loop)
@@ -161,6 +180,8 @@ class Run:
             "decode_tps": self.metrics["decode_tps"],
             "tokens_per_round": self.metrics["tokens_per_round"],
             "acceptance": self.metrics["acceptance"],
+            # this model call's first token, once it came
+            "ttft_ms": self.metrics["ttft_ms"],
             # used: the run's; call: this model call's (the budget caps each call)
             "thinking": {"used": self.thinking_tokens, "budget": self.metrics["thinking_budget"],
                          "call": self.thinking_tokens - self.call_base[1]},
@@ -299,6 +320,7 @@ class Run:
             self.set_phase("queued", "Sending to the engine")
             try:
                 self.t_sent = time.monotonic()
+                self.call_first = self.call_last = None
                 self.call = self.svc.engine.stream(body, headers)
             except EngineError as exc:
                 self.call = None
@@ -342,6 +364,9 @@ class Run:
         finished = False
         for kind, obj in self.call.events():
             if kind == "comment":
+                if (obj or "").startswith(COST_COMMENT):
+                    self._cost(obj[len(COST_COMMENT):])
+                    continue
                 m = _WAITING.search(obj or "")
                 if m:
                     pos = int(m.group(1))
@@ -369,11 +394,18 @@ class Run:
                 t = obj.get("timings") or {}
                 comp = int(u.get("completion_tokens") or 0)
                 reas = int((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
+                if not t and self.call_first is not None:
+                    # a relayed call (a cloud model): no engine timed it, chatd's stamps do --
+                    # the first token's wait, and the usage's tokens over the stream's span
+                    t = {"ttft_ms": round((self.call_first - self.t_sent) * 1000, 1),
+                         "predicted_n": comp,
+                         "predicted_ms": round((self.call_last - self.call_first) * 1000, 1)}
+                    self.usage["timings"] = dict(t, cache_source="provider")
                 self.step_usage.append({"step": self.step,
                                         "prompt_tokens": int(u.get("prompt_tokens") or 0),
-                                        "cached_tokens": int((u.get("prompt_tokens_details") or {})
-                                                             .get("cached_tokens") or 0),
-                                        "cache_source": t.get("cache_source"),
+                                        "cached_tokens": cached_of(u),
+                                        "cache_source": t.get("cache_source") or (
+                                            "provider" if self.backend != "engine" else None),
                                         "ttft_ms": t.get("ttft_ms"),
                                         "completion_tokens": comp, "reasoning_tokens": reas})
                 self.acc["completion"] += comp
@@ -439,10 +471,16 @@ class Run:
             self.svc.call_part(self, k)["name"] = str(fn["name"])
         args = fn.get("arguments")
         if isinstance(args, str) and args:
+            now = time.monotonic()
             if self.t_first is None:
-                self.t_first = time.monotonic()
-            self.tokens += 1
-            self.marks.append((time.monotonic(), self.tokens))
+                self.t_first = now
+            if self.call_first is None:
+                self.call_first = now
+            self.call_last = now
+            # a backend may stream a call's arguments several tokens a chunk (DeepSeek does):
+            # one token per 3.5 characters, the harness's estimate (proxy/harness.py)
+            self.tokens += max(1, int(round(len(args) / 3.5)))
+            self.marks.append((now, self.tokens))
             self.svc.append_input(self, k, args)
 
     def _content(self, text: str) -> None:
@@ -482,6 +520,9 @@ class Run:
         now = time.monotonic()
         if self.t_first is None:
             self.t_first = now
+        if self.call_first is None:
+            self.call_first = now
+        self.call_last = now
         self.tokens += 1
         if kind == "thinking":
             self.thinking_tokens += 1
@@ -498,7 +539,9 @@ class Run:
     # ------------------------------------------------------------------ figures
     def local_decode_tps(self) -> float | None:
         """Tokens over the last 2 s, after the first WARMUP_TOKENS; None when idle (the NOW rule).
-        A token here is a delta chunk: an estimate, used only when the live row is missing."""
+        A token here is a text chunk (one token a chunk on DeepSeek: 320 chunks for 321 tokens,
+        2026-10-17) or a call's argument characters / 3.5: the live figure of a relayed call,
+        and of the engine's when its live row is missing."""
         if self.tokens <= WARMUP_TOKENS or len(self.marks) < 2:
             return None
         now = time.monotonic()
@@ -510,6 +553,22 @@ class Run:
             return None
         (t0, n0) = older[0]
         return round((n1 - n0) / (t1 - t0), 1) if t1 > t0 else None
+
+    def live_ttft_ms(self) -> float | None:
+        """This model call's wait for its first token, once it came."""
+        if self.call_first is None or self.t_sent is None:
+            return None
+        return round((self.call_first - self.t_sent) * 1000, 1)
+
+    def _cost(self, text: str) -> None:
+        """The proxy's price of one call (`: tandem-cost {...}` before its [DONE]; proxy/relay.py),
+        added to the run's; a call without a price adds nothing."""
+        try:
+            c = json.loads(text).get("cost_micros")
+        except (ValueError, AttributeError):
+            return
+        if isinstance(c, int) and not isinstance(c, bool):
+            self.cost_micros = (self.cost_micros or 0) + c
 
     def add_spec(self, t: dict) -> None:
         """One finished call's timings into the run's sums."""
@@ -546,8 +605,8 @@ class Run:
         turn = self.turn_figures()
         ttft = t.get("ttft_ms") if t.get("ttft_ms") is not None else mt.get(
             "time_to_first_token_ms")
-        if ttft is None and self.t_first is not None and self.t_sent is not None:
-            ttft = round((self.t_first - self.t_sent) * 1000, 1)
+        if ttft is None:
+            ttft = self.live_ttft_ms()
         total = t.get("total_ms")
         if total is None and self.t_sent is not None:
             total = round((time.monotonic() - self.t_sent) * 1000, 1)
@@ -569,14 +628,16 @@ class Run:
                                     self.thinking_tokens),
             "steps": self.step,
             "step_usage": self.step_usage[-50:],
-            "cached_tokens": int(ptd.get("cached_tokens") or 0),
+            "cached_tokens": cached_of(u),
             "tokens_per_round": turn["tokens_per_round"] or t.get("tokens_per_block") or
             spec.get("mean_acceptance_length"),
             "acceptance": turn["acceptance"] if turn["acceptance"] is not None else
             spec.get("draft_acceptance_rate"),
-            "cache_source": t.get("cache_source"),
+            "cache_source": t.get("cache_source") or ("provider" if self.backend != "engine"
+                                                      and u else None),
             "prefill_tps": t.get("prompt_per_second") or None,
-            "cost_usd": None,
+            "cost_usd": round(self.cost_micros / 1e6, 6) if self.cost_micros is not None
+            else None,
         }
         if ptd.get("hidden_tokens"):
             out["hidden_tokens"] = int(ptd["hidden_tokens"])

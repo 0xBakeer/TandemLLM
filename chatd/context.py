@@ -81,7 +81,11 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     tools = int((split or {}).get("tools") or 0)
     # the prompt's image rows as the engine counted them (VIS-205: a screenshot is 1,000 rows on Super VL)
     images = int((split or {}).get("images") or 0)
-    messages = max(0, messages - system - tools - images)
+    # a relayed request's split is chatd's estimate (agent.py `estimated_split`): its skill
+    # index sits inside the system prompt, counted apart
+    est_skills = int((split or {}).get("skills") or 0) if (split or {}).get("estimated") else 0
+    skills += est_skills
+    messages = max(0, messages - system - tools - images - est_skills)
     parts = [
         {"kind": "system", "label": "system prompt", "tokens": system},
         {"kind": "tools", "label": "tool schemas", "tokens": tools},
@@ -94,6 +98,10 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
         {"kind": "reserved", "label": "kept for the answer", "tokens": reserved},
     ]
     used = sum(p["tokens"] for p in parts if p["kind"] != "reserved")
+    if window and reserved:
+        # what a request asks for (agent.py `request_for`): the output limit, or the window's
+        # room when less is left
+        parts[-1]["tokens"] = reserved = max(0, min(reserved, window - used - 256))
 
     if row and row.get("prompt_tokens") is not None:
         cached = int(row.get("cached_tokens") or 0)
