@@ -282,23 +282,19 @@ def prefill_live(rec, warm: int = 1, window_s: float = 2.0, end_p: float | None 
 def window_rate(info: dict, now_p: float) -> tuple[float, float] | None:
     """SRV-591: (the rate, the rows computed) of the layer-major window running now
     (`info["window_live"]`, engine/cache.py `_layer_marks`): its rows times the share of its
-    layers that have run (a CUDA event a layer, asked without waiting), over the time since it
-    started. A window is one progress mark, and only once it has run whole; this is its rate
-    before then. None with no window running or before its first layer has run."""
+    layers the prefill's thread has seen run (`k` at `t_k`, read between two layers), over the
+    time from the window's start to then. A window is one progress mark, and only once it has run
+    whole; this is its rate before then. None with no window running or before a layer has been
+    seen to run. `now_p` is unused: the rate is measured to `t_k`, not to the tick."""
     live = info.get("window_live")
     if not live:
         return None
-    marks, n = live["layers"], int(live.get("n") or 0)
-    k = int(live.get("k") or 0)
-    while k < len(marks) and marks[k].query():
-        k += 1
-    live["k"] = k
-    dt = now_p - float(live["t0"])
-    if not k or not n or dt <= 0:
+    n, k, t_k = int(live.get("n") or 0), int(live.get("k") or 0), live.get("t_k")
+    if not k or not n or t_k is None or t_k <= live["t0"]:
         return None
     a, end = live["rows"]
     rows = (end - a) * k / n
-    return rows / dt, a + rows
+    return rows / (t_k - live["t0"]), a + rows
 
 
 def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int = 1,

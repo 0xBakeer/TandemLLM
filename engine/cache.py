@@ -2298,18 +2298,27 @@ def layer_mark() -> None:
 
 
 def _layer_marks(live: dict, device):
-    """SRV-591: a window's layer mark: a CUDA event on the GPU (the live view asks it, without
-    waiting, whether the layer has run: server/activity.py `window_rate`), a done mark on the
-    CPU, where a forward has run when it returns."""
+    """SRV-591: a window's layer mark, on the prefill's own thread between two layers: a CUDA
+    event recorded behind the layer just issued (a done mark on the CPU, where a forward has run
+    when it returns), then the events asked, without waiting, which layers have run: `k` of them
+    at `t_k` (the host issues a few layers ahead of the GPU, so this lags by those). The live
+    view reads the two numbers only (server/activity.py `window_rate`): no thread but this one
+    calls CUDA for it, so none does inside another slot's graph capture."""
     cuda = str(device).startswith("cuda") and torch.cuda.is_available()
 
     def mark() -> None:
+        marks = live["layers"]
         if cuda:
             ev = torch.cuda.Event()
             ev.record()
-            live["layers"].append(ev)
+            marks.append(ev)
         else:
-            live["layers"].append(_Done)
+            marks.append(_Done)
+        k = int(live.get("k") or 0)
+        while k < len(marks) and marks[k].query():
+            k += 1
+        if k > int(live.get("k") or 0):
+            live["k"], live["t_k"] = k, time.perf_counter()
     return mark
 
 

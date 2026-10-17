@@ -147,7 +147,7 @@ def test_the_live_views_layer_marks_change_nothing():
 
         def m():
             mark()
-            seen.append((len(live["layers"]), live["n"]))
+            seen.append((len(live["layers"]), live["k"], live["n"]))
         return m
     info = {}
     real_prefill, old_yield = cache.prefill, M.WINDOW_YIELD
@@ -159,7 +159,8 @@ def test_the_live_views_layer_marks_change_nothing():
         cache._layer_marks, cache.prefill, M.WINDOW_YIELD = real, real_prefill, old_yield
     _same(off, on)
     n = T.tiny_config().num_hidden_layers
-    assert seen == [(k, n) for _ in calls for k in range(1, n)], seen
+    # on the CPU a layer has run when it returns: each mark sees every layer issued so far
+    assert seen == [(k, k, n) for _ in calls for k in range(1, n)], seen
     assert info.get("window_live") is None and info.get("window") is not None, info
     cache.layer_mark()                                  # between windows: nothing to mark
     return f"{len(calls)} windows, {n - 1} layer marks each, logits and state identical"

@@ -43,6 +43,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine import cache  # noqa: E402
 from engine import kvpool  # noqa: E402  (SRV-307 the shared KV pool)
+from engine import capture_lock  # noqa: E402  (no CUDA call inside a graph capture)
 from engine.settings import SETTINGS as _S  # noqa: E402  (every QWEN38_* knob)
 from engine.drafters import tree_steps  # noqa: E402
 from engine.methods import walk  # noqa: E402  (ENG-E8 the walk every model's blocks take)
@@ -3321,7 +3322,10 @@ def _keep_parent(res, eng, drafter) -> None:
     if (sp is None or not _comes_back(res.owner) or res._stash is not None
             or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
         return
-    with torch.no_grad():
+    # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
+    # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
+    # slot 0, and its request ended in an error)
+    with capture_lock.LOCK, torch.no_grad():
         info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
     where = f"slot {slot.index}" if slot is not None else "slot 0"
