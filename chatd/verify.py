@@ -14,8 +14,12 @@ it first. The chat setting `verify` (on by default) turns it off; plan mode chan
 
 THE TARGET. The preview the run presented (`present`, SRV-511); else the dev server that runs for
 the changed files' project; else the changed page that runs as a file (an index.html first). A
-page that runs only from its dev server (preview.needs_server) with none running is a finding too:
-the check names the command that starts it. Changed files with no page and no dev server (a script,
+page that loads module scripts from its folder (preview.file_blocks_modules) does not run as a
+file, a browser refuses them from file://: it is loaded through the HTTP server that runs from its
+folder in the sandbox (live 2026-10-17, a 15-file Three.js app behind `python3 -m http.server`),
+and with none running that is the finding. A page that runs only from its dev server
+(preview.needs_server) with none running is a finding too: the check names the command that
+starts it. Changed files with no page and no dev server (a script,
 a library) are not checked.
 
 THE CHECK. The laya kit's page check (server/laya_kit/laya_drive.py `page`, the check the
@@ -318,10 +322,25 @@ class VerifyMixin:
             if row:
                 return {"label": f"the app on port {row['port']}",
                         "url": f"http://localhost:{row['port']}/", "port": row["port"]}
+        ports = None
         for page in pages:
             need = pv.needs_server(ws, page)
-            if need is None:
+            if need is None and not pv.file_blocks_modules(ws, page):
                 return {"label": page, "url": "file://" + page, "path": page}
+            if need is None:
+                # modules from its folder: the page as the user opens it, through the server
+                # that runs from that folder (a browser refuses them from file://)
+                ports = self.listening(cid, http=True) if ports is None else ports
+                served = pv.server_for(ports, page)
+                if served:
+                    row, rel = served
+                    return {"label": f"{page} on port {row['port']}",
+                            "url": f"http://localhost:{row['port']}/{rel}", "port": row["port"],
+                            "path": rel}
+                return {"label": page, "why": f"{posixpath.basename(page)} loads its module "
+                        f"scripts from its folder, which a browser refuses from file:// (CORS), "
+                        f"and no HTTP server runs from {posixpath.dirname(page)} in the sandbox. "
+                        f"Serve the folder, for example `python3 -m http.server 8000` there."}
             what = f"{posixpath.basename(page)} runs only from its dev server ({need['reason']})"
             return {"label": page, "why": f"{what}, and none runs in the sandbox." +
                     (f" The command is `{need['command']}` in {need['dir']}." if need.get("command")
@@ -337,7 +356,8 @@ class VerifyMixin:
         from chatd.agent import ToolCtx
         conv, st = run.conv, run.verify
         n = len(st["checks"]) + 1
-        args = {"port": tgt["port"]} if tgt.get("port") else {"path": tgt.get("path") or tgt["label"]}
+        args = ({"port": tgt["port"], **({"path": tgt["path"]} if tgt.get("path") else {})}
+                if tgt.get("port") else {"path": tgt.get("path") or tgt["label"]})
         k = self.add_call(run, f"verify_{ulid()[-12:]}", "render_page", harness="verify",
                           source={"kind": "harness"}, input=json.dumps(args))
         part = self.call_part(run, k)

@@ -248,6 +248,74 @@ def test_a_page_that_needs_its_dev_server_names_the_command():
         c.close()
 
 
+MODULE_PAGE = ('<!doctype html><script type="importmap">{"imports":{"three":"https://unpkg.com/'
+               'three@0.170.0/build/three.module.js"}}</script><canvas></canvas>'
+               '<script type="module" src="js/main.js"></script>')
+
+
+def test_a_module_page_is_checked_through_the_server_that_serves_its_folder():
+    """Live (2026-10-17, the pagoda replay): a 15-file Three.js app with
+    `<script type="module" src="js/main.js">` and an import map, served by `python3 -m
+    http.server` from its folder. Loaded as file://, Chromium refuses the module (origin null,
+    CORS) and the page stays blank: the check must load it through the server."""
+    c, boxes = chat_with_kit()
+    try:
+        c.svc.listening = lambda cid, http=False: [
+            {"port": 8124, "addresses": ["0.0.0.0"], "command": "python3 -m http.server 8124",
+             "cwd": "/workspace/garden", "started": 2, "http": True},
+            {"port": 9000, "addresses": ["0.0.0.0"], "command": "python3 -m http.server 9000",
+             "cwd": "/workspace/other", "started": 3, "http": True}]
+        cid = c.new()
+        c.send(cid, calls(("write_file", {"path": "garden/index.html", "content": MODULE_PAGE}),
+                          ("write_file", {"path": "garden/js/main.js",
+                                          "content": "import * as THREE from 'three';"})))
+        s = c.wait_idle(cid, 30)
+        assert json.loads(checks(s)[0]["input"]) == {"port": 8124, "path": "index.html"}
+        assert "page http://localhost:8124/index.html --no-laya" in boxes.checks[0]
+        assert verify_parts(s)[0]["text"].startswith(
+            "Verified by the harness.\nChecked: /workspace/garden/index.html on port 8124 in "
+            "headless Chromium")
+    finally:
+        c.close()
+
+
+def test_a_module_page_without_a_server_is_not_loaded_as_a_file():
+    c, boxes = chat_with_kit()
+    try:
+        c.svc.listening = lambda cid, http=False: []
+        cid = c.new()
+        c.send(cid, calls(("write_file", {"path": "garden/index.html", "content": MODULE_PAGE}),
+                          ("write_file", {"path": "garden/js/main.js", "content": "let a = 1;"})))
+        s = c.wait_idle(cid, 30)
+        assert boxes.checks == [], "a file:// load would only show the CORS refusal"
+        tool = requests(c)[-1]["messages"][-1]["content"]
+        assert "index.html loads its module scripts from its folder, which a browser refuses " \
+               "from file:// (CORS), and no HTTP server runs from /workspace/garden in the " \
+               "sandbox. Serve the folder, for example `python3 -m http.server 8000` there." in tool
+        assert checks(s)[0]["status"] == "failed"
+    finally:
+        c.close()
+
+
+def test_which_pages_need_http_and_which_server_serves_them():
+    from chatd import preview as pv
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("a/index.html", MODULE_PAGE.encode())
+    ws.write("b/index.html", b'<script type="module">import { x } from "./x.js";</script>')
+    ws.write("c/index.html", b'<script type="module">import * as T from "https://unpkg.com/'
+                             b'three@0.170.0/build/three.module.js";</script>')
+    ws.write("d/index.html", PAGE.encode())
+    got = {d: pv.file_blocks_modules(ws, f"/workspace/{d}/index.html") for d in "abcd"}
+    assert got == {"a": True, "b": True, "c": False, "d": False}, got
+    rows = [{"port": 1, "cwd": "/workspace", "started": 1},
+            {"port": 2, "cwd": "/workspace/a", "started": 5},
+            {"port": 3, "cwd": "/workspace/ab", "started": 9},
+            {"port": 4, "cwd": "/workspace/a", "started": 7, "http": False}]
+    assert pv.server_for(rows, "/workspace/a/index.html") == (rows[1], "index.html")
+    assert pv.server_for(rows[:1], "/workspace/a/x/index.html") == (rows[0], "a/x/index.html")
+    assert pv.server_for([], "/workspace/a/index.html") is None
+
+
 def test_a_presented_port_is_the_target():
     c, boxes = chat_with_kit()
     try:
