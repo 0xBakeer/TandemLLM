@@ -136,7 +136,7 @@ class HostCollector:
         self._scan_at = 0.0
         self._scan_key: tuple | None = None
         self._prev: dict = {}          # counters of the previous fast sample
-        self._prev_proc: dict = {}     # pid -> (t, cpu seconds)
+        self._prev_proc: dict = {}     # (pid, starttime) -> (t, cpu seconds)
         self._port_pid: dict = {}      # port -> pid, checked first on the next scan
         self.cost = {"samples": 0, "scans": 0, "cpu_ms_total": 0.0, "last_ms": None,
                      "last_scan_ms": None}
@@ -574,7 +574,7 @@ class HostCollector:
             out.append(entry)
         live = {e["pid"] for e in out if e["pid"]} | {c["pid"] for e in out
                                                        for c in e["children"]}
-        self._prev_proc = {p: v for p, v in self._prev_proc.items() if p in live}
+        self._prev_proc = {k: v for k, v in self._prev_proc.items() if k[0] in live}
         return {"processes": out}
 
     def _pid_of_port(self, port: int) -> tuple[int | None, str | None]:
@@ -715,6 +715,7 @@ class HostCollector:
         info = {"name": None, "cmdline": None, "rss_bytes": None, "threads": None,
                 "open_files": None, "uptime_s": None, "cpu": None}
         cpu_s = None
+        start = None            # the starttime: a pid alone does not identify a process
         if ps is not None:
             try:
                 p = ps.Process(pid)
@@ -730,7 +731,8 @@ class HostCollector:
                         info["open_files"] = p.num_fds()
                     except Exception:                                # noqa: BLE001
                         pass
-                    info["uptime_s"] = round(max(0.0, now - p.create_time()), 1)
+                    start = p.create_time()
+                    info["uptime_s"] = round(max(0.0, now - start), 1)
                     t = p.cpu_times()
                     cpu_s = t.user + t.system
             except Exception:                                        # noqa: BLE001
@@ -743,13 +745,14 @@ class HostCollector:
                 info["name"] = st[st.index("(") + 1:st.rindex(")")]
                 rest = st[st.rindex(")") + 2:].split()
                 cpu_s = (int(rest[11]) + int(rest[12])) / self._tick
-                start = int(rest[19]) / self._tick
+                start_ticks = int(rest[19]) / self._tick
+                start = float(rest[19])   # raw ticks since boot: a recycled pid gets a new one
                 btime = None
                 for line in (self._read("stat") or "").splitlines():
                     if line.startswith("btime "):
                         btime = int(line.split()[1])
                 if btime is not None:
-                    info["uptime_s"] = round(max(0.0, now - (btime + start)), 1)
+                    info["uptime_s"] = round(max(0.0, now - (btime + start_ticks)), 1)
             except (ValueError, IndexError):
                 pass
             status = self._read(f"{pid}/status") or ""
@@ -766,10 +769,12 @@ class HostCollector:
             except OSError:
                 pass
         if cpu_s is not None:
-            prev = self._prev_proc.get(pid)
+            # (P2#8): a recycled pid is a different process -- the starttime is in the key, so
+            # the new process finds no baseline and never divides against the dead one's counters
+            prev = self._prev_proc.get((pid, start))
             if prev is not None and now > prev[0] and cpu_s >= prev[1]:
                 info["cpu"] = round((cpu_s - prev[1]) / (now - prev[0]), 3)
-            self._prev_proc[pid] = (now, cpu_s)
+            self._prev_proc[(pid, start)] = (now, cpu_s)
         return info
 
 
