@@ -76,6 +76,11 @@ SCHEMA VERSION 9 (SRV-241): `sampling`, how the request sampled: null for greedy
 (server/conductor/loopescape.py, SRV-475). The dashboard's speed sample leaves the regenerate,
 loop-escape and card rows out.
 
+SCHEMA VERSION 10 (VIS-207): `system_fingerprint`, the backend configuration a relayed answer names
+(OpenAI's and DeepSeek's `system_fingerprint`, the first one a response carries); null for the
+engine's own rows and for a backend that sends none. A model id such as `deepseek-flash` stays
+while the provider swaps the snapshot behind it; a new fingerprint in the rows shows the swap.
+
 RETENTION. Rows older than `--usage-retention-days` (400; less is refused outside tests) are
 deleted once a day at 04:00 local, then `PRAGMA incremental_vacuum`. Once an ISO week, an online
 backup (the sqlite3 backup API) goes to `backup/ledger-<year>-W<week>.sqlite3` beside the file,
@@ -99,7 +104,7 @@ import time
 from server.conductor import signals
 
 PRODUCTION = "~/.qwen38-spark-engine/usage/ledger.sqlite3"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 MIN_RETENTION_DAYS = 400
 QUEUE_MAX = 10_000
 BACKUP_KEEP = 8
@@ -114,7 +119,8 @@ COLUMNS = ("ts_ms", "request_id", "model", "client_id", "client_kind", "endpoint
            "backend_model", "public_model", "usage_source", "cache_write_tokens", "cost_micros",
            "proxy_ms", "retries", "fallback_from", "upstream_status", "user", "preemptions",
            "engine_finish", "corrupted", "l2_join", "wait_own_ms", "parent_request",
-           "slot", "engine_cached", "forwarded_tokens", "wait_mem_ms", "sampling")
+           "slot", "engine_cached", "forwarded_tokens", "wait_mem_ms", "sampling",
+           "system_fingerprint")
 
 # The conductor's columns (SRV-117, then SRV-115's three of schema version 2), added in place to a
 # ledger that lacks them. Additive and idempotent: an old row reads null in each.
@@ -145,7 +151,9 @@ ADDED = (("model_served", "TEXT"), ("profile", "TEXT"), ("profile_version", "INT
          ("engine_cached", "INTEGER"), ("forwarded_tokens", "INTEGER"), ("wait_mem_ms", "REAL"),
          # schema version 9 (SRV-241): how the request sampled (null greedy, `client`,
          # `regenerate`)
-         ("sampling", "TEXT"))
+         ("sampling", "TEXT"),
+         # schema version 10 (VIS-207): a relayed answer's `system_fingerprint`
+         ("system_fingerprint", "TEXT"))
 
 # the columns `Ledger.amend` may set on a row already written (proxy/collect_api.py)
 AMENDABLE = ("queue_ms", "prompt_ms", "decode_ms", "decode_tps", "prefill_tps", "cached_tokens",

@@ -573,6 +573,7 @@ class Relay:
         rec.set_usage(u)
         rec.cost_micros = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
                                                               or rec.public_model), rec.ts)
+        rec.system_fingerprint = st.fingerprint
 
     def _cost_line(self, st: Stamps, adapter, path, backend, rec) -> bytes:
         """The cost comment: the usage so far (the harness's requests summed, else the stream's
