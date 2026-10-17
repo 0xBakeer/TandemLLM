@@ -364,10 +364,34 @@ export interface ConversationUsage {
 
 // ---- settings ---------------------------------------------------------------------------------
 
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh';
+/** `max`: a provider's own top level (DeepSeek's low, high, max), offered for its models only */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 /** 'auto' (the default): the harness decides per turn */
 export type EffortChoice = Effort | 'auto';
 export const EFFORTS: EffortChoice[] = ['auto', 'low', 'medium', 'high', 'xhigh'];
+const EFFORT_RANK: Record<Effort, number> = { low: 1, medium: 2, high: 3, xhigh: 4, max: 5 };
+
+/** the effort choices for a model: a cloud model's own levels from its provider's model list
+ *  (DeepSeek: low, high, max), else the engine's */
+export function effortsFor(caps: Pick<Capabilities, 'models' | 'efforts'> | null | undefined, modelId: string | null | undefined): EffortChoice[] {
+  const m = caps?.models.find((x) => x.id === modelId);
+  const lv = (m?.capabilities?.effort_levels ?? []).filter((x): x is Effort => x in EFFORT_RANK);
+  if (m && m.backend && m.backend !== 'engine' && lv.length) return ['auto', ...lv];
+  return caps?.efforts ?? EFFORTS;
+}
+
+/** the level a request carries for the chat's effort on a model with `levels` (chatd/render.py
+ *  `nearest_effort`): itself, else the nearest by rank, a tie going to high */
+export function nearestEffort(e: EffortChoice, levels: string[] | null | undefined): EffortChoice {
+  const known = (levels ?? []).filter((x): x is Effort => x in EFFORT_RANK);
+  if (e === 'auto' || !known.length || known.includes(e as Effort)) return e;
+  const r = EFFORT_RANK[e as Effort];
+  return known.reduce((a, b) => {
+    const da = Math.abs(EFFORT_RANK[a] - r);
+    const db = Math.abs(EFFORT_RANK[b] - r);
+    return db < da || (db === da && Math.abs(EFFORT_RANK[b] - 3) < Math.abs(EFFORT_RANK[a] - 3)) ? b : a;
+  });
+}
 
 export interface ChatSettings {
   model: string;
@@ -527,7 +551,8 @@ export interface ModelInfo {
   max_len: number;
   profiles: { id: string; name: string; description: string }[];
   backend?: 'engine' | 'proxy' | 'cloud';
-  capabilities?: { thinking: boolean; effort_levels: string[]; tools: boolean; vision: boolean; structured: boolean };
+  /** `effort_default`: a provider's default level (DeepSeek's high), from its model list */
+  capabilities?: { thinking: boolean; effort_levels: string[]; effort_default?: string | null; tools: boolean; vision: boolean; structured: boolean };
   loaded?: boolean;
 }
 

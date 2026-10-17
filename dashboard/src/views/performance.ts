@@ -262,6 +262,7 @@ export class QsePerformance extends LightElement {
             <div><dt>accepted</dt><dd class="num">${exact(s.draft_accepted)}</dd></div>
             <div><dt>cache</dt><dd>${s.prompt_tokens == null ? '—' : s.backend ? html`<span class="cache-tag tier-backend">the backend's</span>` : html`<span class="cache-tag tier-${cacheTier(s.cache_source)}">${TIER_LABEL[cacheTier(s.cache_source)]}</span>`}</dd></div>
             ${s.cost_micros != null ? html`<div data-cost><dt>cost</dt><dd class="num">${money(s.cost_micros)}</dd></div>` : nothing}
+            ${s.system_fingerprint ? html`<div data-fingerprint><dt>fingerprint</dt><dd><code title="the backend configuration this answer named (system_fingerprint)">${s.system_fingerprint}</code></dd></div>` : nothing}
             <div><dt>reused</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).reused)}</dd></div>
             <div><dt>forwarded</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).forwarded)}</dd></div>
             <div><dt>finish</dt><dd>${s.finish_reason ?? '—'}${s.error_type ? html` <span class="err-ink">${s.error_type}</span>` : nothing}</dd></div>

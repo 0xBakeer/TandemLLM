@@ -270,6 +270,9 @@ export interface RequestRow {
   retries?: number | null;
   fallback_from?: string | null;
   upstream_status?: number | null;
+  /** VIS-207: the backend configuration a relayed answer named (its `system_fingerprint`); a
+   *  new value under the same model id is a snapshot the provider swapped in */
+  system_fingerprint?: string | null;
   /** P6: the queue, prefill and decode split and the cached tokens came from the engine's plugin */
   l2?: { join: 'exact' | 'approximate'; preemptions?: number | null; engine_finish?: string | null; corrupted?: boolean | null } | null;
 }

@@ -235,7 +235,7 @@ interface Capabilities {
     id: string; name: string; weights: string; max_len: number;
     profiles: { id: string; name: string; description: string }[];                 // VIS-203: always []; the picker lists models only
     backend?: 'engine' | 'proxy' | 'cloud';                                         // v0.2
-    capabilities?: { thinking: boolean; effort_levels: string[]; tools: boolean; vision: boolean; structured: boolean };   // v0.2, from the model card
+    capabilities?: { thinking: boolean; effort_levels: string[]; effort_default?: string | null; tools: boolean; vision: boolean; structured: boolean };   // v0.2, from the model card; 0.11.3: a cloud model's levels and default from its provider's model list (DeepSeek: low, high, max; high)
     loaded?: boolean;
   }[];
   efforts: (Effort | 'auto')[];

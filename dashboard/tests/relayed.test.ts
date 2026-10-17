@@ -3,9 +3,9 @@
 import { describe, expect, it } from 'vitest';
 import { backendName, compareRows, ENGINE, relayedBackends, scatterGroup } from '../src/lib/relayed';
 import { SCATTER_COLORS } from '../src/charts/scatter';
-import type { Usage } from '../src/api/types';
+import type { BackendRef, Usage } from '../src/api/types';
 
-const usage = (over: Partial<Usage['totals']> = {}, backends = [{ id: ENGINE, kind: 'engine', label: 'this engine' }, { id: 'deepseek', kind: 'deepseek', label: 'DeepSeek (cloud)' }]): Usage =>
+const usage = (over: Partial<Usage['totals']> = {}, backends: BackendRef[] = [{ id: ENGINE, kind: 'engine', label: 'this engine' }, { id: 'deepseek', kind: 'deepseek', label: 'DeepSeek (cloud)' }]): Usage =>
   ({ dimensions: { models: [], clients: [], backends }, totals: { requests: 10, prompt_tokens: 1000, cached_tokens: 800, completion_tokens: 300, decode_tps_p50: 35.6, ttft_ms_p50: 824, cost_micros: null, ...over } }) as unknown as Usage;
 
 describe('relayed backends', () => {

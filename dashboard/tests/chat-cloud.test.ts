@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { budgetWords, cacheWords, draftFigure, kvWords, liveFigure, NO_DRAFTING, NOT_TRACKED, partWords, PROVIDER_DECIDES } from '../src/chat/context-words';
 import { figsParts } from '../src/chat/turn-figures';
 import { figsLine } from '../src/chat/thread';
-import type { ContextReport, Run, TurnStats } from '../src/chat/types';
+import { EFFORTS, effortsFor, nearestEffort, type ContextReport, type EffortChoice, type ModelInfo, type Run, type TurnStats } from '../src/chat/types';
+import { effortDesc, modelDesc } from '../src/chat/composer';
 
 const run = (over: Partial<Run> = {}): Run => ({ phase: 'thinking', thinking: { used: 0, budget: null }, ...over }) as Run;
 const cache = (c: Partial<ContextReport['cache']>): ContextReport['cache'] => ({ warm: 0, cold: 0, cold_eta_ms: null, source: 'none', slot: null, ...c });
@@ -59,5 +60,33 @@ describe("a cloud turn's figures line", () => {
   });
   it('has no cost on an engine turn', () => {
     expect(figsParts({ ...s, cost_usd: null }).some((p) => p.k === 'cost')).toBe(false);
+  });
+});
+
+describe("a cloud model's effort chip (DeepSeek: low, high, max, high by default)", () => {
+  const caps = {
+    efforts: ['auto', 'low', 'medium', 'high', 'xhigh'] as EffortChoice[],
+    models: [
+      { id: 'TandemLLM', name: 'TandemLLM', weights: 'exl3', max_len: 262144, profiles: [], backend: 'engine' as const, capabilities: { thinking: true, effort_levels: ['low', 'medium', 'high', 'xhigh'], tools: true, vision: true, structured: false } },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash (cloud)', weights: '', max_len: 1048576, profiles: [], backend: 'cloud' as const, capabilities: { thinking: true, effort_levels: ['low', 'high', 'max'], effort_default: 'high', tools: true, vision: true, structured: false } },
+    ],
+  };
+  it("offers the provider's levels for its model, the engine's for ours", () => {
+    expect(effortsFor(caps, 'deepseek-flash')).toEqual(['auto', 'low', 'high', 'max']);
+    expect(effortsFor(caps, 'TandemLLM')).toEqual(caps.efforts);
+    expect(effortsFor(null, 'x')).toEqual(EFFORTS);
+  });
+  it('shows the level the request carries (chatd/render.py nearest_effort)', () => {
+    expect(nearestEffort('medium', ['low', 'high', 'max'])).toBe('high');
+    expect(nearestEffort('xhigh', ['low', 'high', 'max'])).toBe('high');
+    expect(nearestEffort('max', ['low', 'medium', 'high', 'xhigh'])).toBe('xhigh');
+    expect(nearestEffort('auto', ['low', 'high', 'max'])).toBe('auto');
+    expect(nearestEffort('max', null)).toBe('max');
+  });
+  it("names the provider's default and says the model reads images", () => {
+    expect(effortDesc('auto', 'high')).toBe("the provider's default (high)");
+    expect(effortDesc('auto')).toBe('the harness decides per turn');
+    expect(effortDesc('max')).toMatch(/deepest/);
+    expect(modelDesc(caps.models[1] as ModelInfo)).toBe('1024k window, reads images');
   });
 });
