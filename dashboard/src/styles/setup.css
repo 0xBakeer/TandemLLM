@@ -4097,3 +4097,80 @@ qse-wren-figure::before {
     min-height: 44px;
   }
 }
+
+/* VIS-209: the restart card: one screen while the engine restarts under an install */
+.rcard {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--cobalt) 45%, var(--rule-strong));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--cobalt) 8%, var(--bg-2));
+}
+.rcard-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rcard-title {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  margin: 0;
+}
+.rcard-step {
+  margin: 2px 0 0;
+}
+.rcard-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.rcard-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--cobalt);
+  transition: width 0.8s ease;
+}
+.rcard-time {
+  margin: 0;
+  color: var(--ink-2);
+}
+.rcard-phases {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.rcard-phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+}
+.rcard-phase.is-done {
+  color: var(--ink-2);
+}
+.rcard-phase.is-done .rcard-phase-mark {
+  color: var(--ok);
+}
+.rcard-phase.is-current {
+  color: var(--ink);
+  font-weight: 600;
+}
+.rcard-phase-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rcard-bar > span {
+    transition: none;
+  }
+}
+@media (max-width: 768px) {
+  .rcard {
+    padding: 14px;
+  }
+}

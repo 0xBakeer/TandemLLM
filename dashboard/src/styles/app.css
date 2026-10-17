@@ -215,6 +215,14 @@ textarea {
   color: var(--cobalt);
   border-color: var(--cobalt);
 }
+/* VIS-209: the engine restarts under a Setup Guide job */
+.pill-restarting {
+  color: var(--cobalt-hi);
+  border-color: var(--cobalt);
+}
+.pill-restarting::before {
+  animation: pulse 1.2s ease-in-out infinite;
+}
 .rail {
   grid-area: rail;
   position: sticky;

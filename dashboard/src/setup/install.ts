@@ -13,6 +13,8 @@ import { ResumableStream, type StreamState } from '../lib/sse';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import { apiBase } from '../api/client';
+import { rememberJob, rememberStatusPort, restarting } from '../lib/restart';
+import './restart-card';
 import { setupApi, setupUnauthorized } from './api';
 import { appendLog, applyJobEvent, changeText, dedupes, finishedLines, isFinal, type JobLog, needsJob, STALE_MS, streamAction, streamFinished } from './job-view';
 import { S } from './strings';
@@ -79,8 +81,10 @@ export class QseInstallProgress extends LightElement {
     if ((this.awaySince != null || !this.job || this.lost) && Date.now() - this.healthAt >= 3000) {
       this.healthAt = Date.now();
       void fetch(apiBase() + '/health', { cache: 'no-store', credentials: 'same-origin' })
-        .then((r) => {
-          if (r.ok) void this.readJob(true);
+        .then(async (r) => {
+          if (!r.ok) return;
+          rememberStatusPort(await r.json().catch(() => null));
+          void this.readJob(true);
         })
         .catch(() => undefined);
     }
@@ -198,6 +202,12 @@ export class QseInstallProgress extends LightElement {
     return html`<span class="inst-dot" aria-hidden="true"></span>`;
   }
 
+  /** VIS-209: when the restart began: the restart step's start, else when the page saw it go */
+  private restartSince(j: SetupJob): number {
+    const st = j.steps.find((s) => (s.id === 'switch' || s.id === 'rollback') && (s.state === 'running' || s.state === 'waiting'));
+    return st?.started_at ? st.started_at * 1000 : (this.awaySince ?? Date.now());
+  }
+
   /** VIS-155: the plan's settings under the check step, old -> new, collapsed with the count */
   private changeList(j: SetupJob) {
     return html`<details class="inst-changes" data-job-changes>
@@ -251,10 +261,13 @@ export class QseInstallProgress extends LightElement {
       </div>`;
     }
     const away = this.awaySince != null && !final;
+    // VIS-209: the restart is one card; the steps and the log fold under it
+    const card = !final && !!j && (restarting(j) || away);
     const stateWord = j ? (j.kind === 'reset' ? S.resetJobState : S.jobState)[j.state] : S.installStarting;
     const failedStep = j?.steps.find((s) => s.state === 'failed');
+    const stopped = card && j!.steps.some((s) => (s.id === 'switch' || s.id === 'rollback') && (s.state === 'running' || s.state === 'waiting'));
     return html`<div class="inst ${j ? `is-${j.state}` : ''}" data-job-state=${j?.state ?? 'starting'}>
-      <div class="inst-head" role="status" aria-live="polite">
+      <div class="inst-head" role="status" aria-live="polite" ?hidden=${stopped}>
         <span class="inst-badge" aria-hidden="true">${final || (this.stale && !j) ? icon('warn') : html`<span class="inst-spin"></span>`}</span>
         <div>
           <p class="inst-title">${stateWord}</p>
@@ -262,7 +275,8 @@ export class QseInstallProgress extends LightElement {
           ${(j?.state === 'failed' || j?.state === 'rolled_back') && j.message ? html`<p class="inst-sub" data-job-reason>${S.jobReason(j.message)}</p>` : nothing}
         </div>
       </div>
-      ${away
+      ${card ? html`<qse-restart-card .job=${j} .since=${this.restartSince(j!)} @engine-up=${() => void this.readJob(true)}></qse-restart-card>` : nothing}
+      ${away && !card
         ? html`<div class="inst-away" role="status" data-restarting>
             <span class="inst-spin" aria-hidden="true"></span>
             <div><p>${S.restarting}</p><p class="muted small num">${S.restartingSince((Date.now() - this.awaySince!) / 1000)}</p></div>
@@ -298,6 +312,7 @@ export class QseInstallProgress extends LightElement {
 
 /** VIS-211: the page-wide state of a setup job (the app hides the new-version banner while one runs) */
 function publishActive(job: SetupJob | null): void {
+  rememberJob(job);
   window.dispatchEvent(new CustomEvent('qse-setup-job', { detail: { active: !!job && !isFinal(job), id: job?.id ?? null } }));
 }
 
