@@ -36,9 +36,14 @@
 0.10.0 & 10-15 & a fourth model, Nemotron 3.5 Bolt 74B-A9B: seven EXL3 sizes, NVIDIA's IQ2 GGUF and its LiLiCorr drafter; a 1~GiB limit for each Chat tab sandbox; attachments never inlined past the window \\
 0.11.0 & 10-16 & a fifth model, Nemotron 3.5 Super VL 120B-A12B: EXL3 packs at 4.0 and 2.0, NVIDIA's NVFP4 release read as stored, its LiLiCorr drafter \\
 0.11.1 & 10-16 & chatd's access to the sandbox's folders follows no symlink; StairCut price files for Bolt's EXL3 2.5 to 6.0; each weight pack's maker in the setup guide; the install through the setup guide \\
+0.11.2 & 10-16 & chatd starts with the engine and the Chat tab says when it is down; install script and secrets fixes; sandbox containers scoped to their chatd; the preview opens the running app; Context panel figures; no horizontal overflow on a phone; a model picker with one row a model; Setup Guide steppers for chats and windows; Super VL window up to 1,048,576 \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.11.2, chatd with the engine}\label{sec:changelog-0112}
+
+0.11.2 starts chatd, the Chat tab's service, with the engine (\code{tandem start}, the systemd unit, the Setup Guide) and stops it with \code{tandem stop}; the Chat tab names chatd when it is down instead of switching to the in-browser mock. The installer copies \code{roles.sh}, \code{watchdog.sh} and \code{hold.sh}, \code{bin/tandem} loads its config on an install without \code{ops/active-profile}, and the Setup Guide's reset keeps the secrets file the engine reads. A second chatd on the same Docker no longer adopts another's sandbox containers, and a sandbox container removed outside chatd starts again at the next tool call. The preview pane opens the running app, the Context panel shows a live run's figures, and the Chat tab has no horizontal overflow on a phone. The model picker lists models, one row each, and DeepSeek V4 Flash and V4 Pro through the proxy can be picked. The Setup Guide sets the number of chats and both windows with steppers, and Nemotron 3.5 Super VL takes a window up to 1,048,576 tokens, checked to 249,983 prompt tokens. Update every box that runs the Chat tab: run the installer again, then \code{tandem chat restart}. Every model writes the same text as in 0.11.1.
 
 \section{0.11.1, the Chat tab's sandbox folders}\label{sec:changelog-0111}
 

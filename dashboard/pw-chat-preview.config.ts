@@ -1,6 +1,6 @@
 // The preview pane on a real sandbox (e2e/chat-preview-live.spec.ts, SRV-512): WebKit as a 390 px
 // iPhone and desktop Chromium, one worker. Against the throwaway stack or a live box's https name:
-//   PW_LIVE=1 PW_BASE=https://tandem.khaled.de/dashboard/ npx playwright test -c pw-chat-preview.config.ts
+//   PW_LIVE=1 PW_BASE=https://<box>/dashboard/ npx playwright test -c pw-chat-preview.config.ts
 // WebKit needs its system libraries; the Playwright image (mcr.microsoft.com/playwright) has them.
 import { defineConfig, devices } from '@playwright/test';
 

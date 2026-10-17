@@ -94,7 +94,7 @@ VITE_CLIENT = (b'const base$1 = "/" || "/";\nconst socketHost = `${null || impor
 
 # ---------------------------------------------------------------------- the port proxy
 def test_the_port_proxy_lets_the_opaque_preview_read_its_modules_and_adds_the_shim():
-    """Live (2026-10-16, WebKit via tandem.khaled.de): "Origin null is not allowed by
+    """Live (2026-10-16, WebKit behind a box's https name): "Origin null is not allowed by
     Access-Control-Allow-Origin" for /src/main.js and /@vite/client (a dark pane) and for
     dist/assets/*.css and *.js under `vite preview` (a white one). Each answer now allows the
     opaque origin; the server sees a local client; a page gets the shim before Vite's client; the
@@ -111,7 +111,7 @@ def test_the_port_proxy_lets_the_opaque_preview_read_its_modules_and_adds_the_sh
         cid = c.new()
         c.ok("POST", f"/conversations/{cid}/sandbox/start")
         base = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}"
-        h_null = {"Origin": "null", "Referer": "https://tandem.khaled.de/x",
+        h_null = {"Origin": "null", "Referer": "https://tandem.example/x",
                   "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "script"}
         st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/", headers=h_null)
         assert st == 200 and h["Access-Control-Allow-Origin"] == "null" and "X-Frame-Options" not in h
@@ -377,7 +377,7 @@ def test_the_shim_sends_runtime_urls_and_the_hot_reload_socket_to_the_ports_pref
     shim = PV.page_shim(prefix, 5173).decode()[len("<script>"):-len("</script>")]
     harness = r"""
 const got = [];
-globalThis.location = new URL('https://tandem.khaled.de/v1/chat-app/conversations/C1/sandbox/ports/5173/');
+globalThis.location = new URL('https://tandem.example/v1/chat-app/conversations/C1/sandbox/ports/5173/');
 globalThis.window = globalThis;
 globalThis.fetch = (u) => { got.push(['fetch', String(u)]); return Promise.resolve(); };
 globalThis.Request = class { constructor(u) { this.url = u; } };
@@ -394,7 +394,7 @@ globalThis.parent = { postMessage() {} };
 """ + shim + r"""
 fetch('/textures/a.jpg'); fetch('https://cdn.example/x.js'); fetch(location.href + 'data.json');
 new XMLHttpRequest().open('GET', '/api/x?y=1');
-new WebSocket('wss://tandem.khaled.de:/?token=T', 'vite-hmr');
+new WebSocket('wss://tandem.example:/?token=T', 'vite-hmr');
 new WebSocket('ws://localhost:5173/?token=T', 'vite-hmr');
 new WebSocket('ws://localhost:9999/');
 const img = new HTMLImageElement(); img.src = '/textures/b.png';
@@ -409,12 +409,12 @@ console.log(JSON.stringify(got));
         os.unlink(fh.name)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout.strip().splitlines()[-1])
-    p = "https://tandem.khaled.de" + prefix
+    p = "https://tandem.example" + prefix
     assert got == [
         ["fetch", p + "/textures/a.jpg"], ["fetch", "https://cdn.example/x.js"],
         ["fetch", p + "/data.json"], ["xhr", p + "/api/x?y=1"],
-        ["ws", "wss://tandem.khaled.de" + prefix + "/?token=T", "vite-hmr"],
-        ["ws", "wss://tandem.khaled.de" + prefix + "/?token=T", "vite-hmr"],
+        ["ws", "wss://tandem.example" + prefix + "/?token=T", "vite-hmr"],
+        ["ws", "wss://tandem.example" + prefix + "/?token=T", "vite-hmr"],
         ["ws", "ws://localhost:9999/", None],
         ["img", p + "/textures/b.png"], ["attr", "src", p + "/c.png"], ["attr", "href", "/about"]]
 

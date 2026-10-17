@@ -5,7 +5,7 @@
 // no model is needed: it runs against the throwaway stack or a live box behind its https name.
 //   python3 tests/chat_e2e_stack.py --front 127.0.0.1:4188 --dashboard dashboard/dist &
 //   PW_LIVE=1 PW_BASE=http://127.0.0.1:4188/dashboard/ npx playwright test -c pw-chat-preview.config.ts
-//   PW_LIVE=1 PW_BASE=https://tandem.khaled.de/dashboard/ npx playwright test -c pw-chat-preview.config.ts
+//   PW_LIVE=1 PW_BASE=https://<box>/dashboard/ npx playwright test -c pw-chat-preview.config.ts
 // Each test makes its own chat and deletes it with its sandbox at the end. The sandboxes need the
 // internet (npm install vite); WebKit runs in the Playwright image (mcr.microsoft.com/playwright).
 import { expect, test, type APIRequestContext, type FrameLocator, type Page } from '@playwright/test';
