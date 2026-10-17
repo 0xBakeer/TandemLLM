@@ -255,9 +255,17 @@ export class QseDev extends LightElement {
   }
 
   // ---- requests -----------------------------------------------------------------------------
+  private reqSeq = 0;
+
   private async loadRequests(): Promise<void> {
+    // reachable both from the poll and from the 'show internal' toggle calling loadRequests()
+    // directly: the newest call owns the table, a response whose internal flag was since toggled is discarded.
+    const my = ++this.reqSeq;
+    const mine = () => my === this.reqSeq;
+    const internal = this.showInternal; // captured before the await
     try {
-      const r = await api.requests({ limit: 25, internal: this.showInternal });
+      const r = await api.requests({ limit: 25, internal });
+      if (!mine()) return;
       if (this.requests.state === 'ready') {
         // Keep the older pages already loaded: merge newest-first by id.
         const seen = new Set(r.requests.map((x) => x.id));
@@ -269,6 +277,7 @@ export class QseDev extends LightElement {
       }
       if (this.nextBefore == null && r.next_before != null && this.requests.data.length <= 25) this.nextBefore = r.next_before;
     } catch (e) {
+      if (!mine()) return;
       const d = describeError(e);
       this.requests = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
