@@ -15,7 +15,10 @@ base64 is never counted as text). Then:
    the run's earlier steps are summarized instead, all but the last KEEP_STEPS, between two steps
    (`step_boundary`); the user's message stays. Live (2026-10-13) a 21-step run hit the guard
    with no compaction, as there was no earlier user turn to summarize. A chat the engine refused
-   for memory compacts at 80 % of the refused request as well (`compact_at`; chatd/runs.py);
+   for memory compacts at 80 % of the refused request as well (`compact_at`; chatd/runs.py).
+   The request after a compaction lands under TARGET_SHARE of that limit: the long read_file
+   and bash results of what it keeps become stubs (chatd/render.py), and a long run keeps fewer
+   steps until it fits;
 2. still too long (one huge turn, nothing before the last two to summarize): the reasoning of
    earlier, finished turns is left out of the request. Templates such as Qwen's drop it anyway;
    others keep it, and 28,000 tokens of thinking then fill a 40,960 window (seen live on
@@ -152,21 +155,25 @@ def boundary(branch: list[dict]) -> int | None:
     return i if i > 0 else None
 
 
-#: a long run's steps kept whole after its earlier ones are compacted
+#: a long run's steps kept whole after its earlier ones are compacted, at most
 KEEP_STEPS = 3
+#: the request after a compaction, at most, as a share of the limit that set it off (`compact_at`):
+#: fewer steps are kept until it fits (one at the least)
+TARGET_SHARE = 0.5
 
 
-def step_boundary(branch: list[dict], prior_step: int = 0) -> tuple[int, int] | None:
+def step_boundary(branch: list[dict], prior_step: int = 0,
+                  keep: int = KEEP_STEPS) -> tuple[int, int] | None:
     """A long run's compaction: (the index of the last assistant message, the first of its steps
-    kept), when it has more than KEEP_STEPS steps after the ones a compaction already took
+    kept), when it has more than `keep` steps after the ones a compaction already took
     (`prior_step`); None otherwise. Its user message stays, so the request keeps one user turn."""
     if not branch or branch[-1].get("role") != "assistant" or len(branch) < 2:
         return None
     done = sorted({int(p.get("step") or 1) for p in branch[-1].get("parts") or []})
     done = [x for x in done if x >= prior_step]
-    if len(done) <= KEEP_STEPS:
+    if len(done) <= keep:
         return None
-    return len(branch) - 1, done[-KEEP_STEPS]
+    return len(branch) - 1, done[-keep]
 
 
 def shrink(messages: list[dict], budget_chars: int) -> list[dict]:

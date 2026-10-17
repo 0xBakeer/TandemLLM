@@ -33,6 +33,16 @@ engine refuses for memory (503, "needs ... GiB with every cache given back") is 
 its Retry-After, then the chat is compacted and the smaller prompt sent; from then on the chat
 compacts at 80 % of the refused size, not only of the window.
 
+File texts stay out of the request: a finished `write_file`'s content, and an `edit_file`'s old or
+new text over 2,000 characters, go to the model as a stub (path, lines, bytes, sha256 and the
+`read_file` call that shows it) from the next request on; the store and the thread keep the text.
+A `read_file` or `bash` result over 4,000 characters stays whole until a compaction, which stubs
+it (a read names its `read_file` call; a command keeps its first and last lines), so a request only
+ever changes at its tail between compactions and the engine's prefix cache holds the rest. A
+compaction lands under half the limit that set it off: a long run keeps fewer than its last three
+steps until it does. The `[compact]` log line and the Context panel give the chat's request size
+before and after, and the summary call's size apart.
+
 ## Starting and stopping
 
 chatd starts with the engine and stops with `tandem stop` (OPS-155). `tandem start` and
@@ -140,7 +150,10 @@ A process the kernel kills at the memory limit (the cgroup's `oom_kill` count) f
 a Three.js app in software (SwiftShader) went past it, so render_page and the verify phase failed on
 the apps they check. A container made under another limit takes the current one at its next start.
 render_page and the laya kit start Chromium with `--disable-dev-shm-usage` (a container's /dev/shm
-is 64 MB) and one renderer. What fits in 1 GiB, measured on the Spark (peak of the
+is 64 MB) and one renderer. The check browser has WebGL2 (SwiftShader) and no WebGPU, and render_page
+says so in each result: with `--enable-unsafe-webgpu --enable-features=Vulkan
+--use-vulkan=swiftshader --use-webgpu-adapter=swiftshader` headless Chromium 155 gets an adapter
+that draws offscreen but presents nothing to a canvas, so a page's WebGPU path is not checked. What fits in 1 GiB, measured on the Spark (peak of the
 container's memory, page cache included): `pip install` of pillow, numpy, imageio-ffmpeg and
 piper-tts 549 MiB; `npm i` of typescript, eslint, @playwright/test, react and webpack 531 MiB; a
 Vite build 254 MiB; render_page of a 6,000-element page at 1280x800 503 MiB, at 2400x2400 442 MiB,

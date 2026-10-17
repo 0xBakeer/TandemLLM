@@ -17,6 +17,11 @@ the last two turns to summarize.
   3  a long run compacts its earlier steps between two steps, keeps its user message and goes on
   4  the Context panel after such a compaction counts what the next request carries (live
      2026-10-17: 45,778 tokens, "conversation 0", while the engine got 215,247-token prompts)
+  5  file texts stay out of the request (live 2026-10-17, chat 01M556JVWDQVDCAMBMVFZCT7XF: a run
+     grew from 25k to 162k tokens of write_file, edit_file and read_file texts, and its
+     compaction kept 138,673 tokens): a finished write's content is a stub from the next request
+     on (only the tail changes), long reads stay whole until a compaction and are stubs after
+     it, and a compaction lands under half the limit that set it off
 
 CPU only. Run: python -m pytest -q tests/test_chatd_context.py
 """
@@ -285,5 +290,196 @@ def test_the_panel_counts_a_run_compacted_mid_way_and_continued():
         ctx = c.svc._context(conv, dict(DEFAULT_SETTINGS), branch)
         got = {p["kind"]: p["tokens"] for p in ctx["parts"]}
         assert ctx["used"] == want and got["thinking"] == thinking, (ctx["used"], got)
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------- 5. file texts
+
+def _prefix_kept(prev: dict, cur: dict) -> bool:
+    """`cur` starts with `prev`, byte for byte: its head and every message `prev` had."""
+    n = len(prev["messages"])
+    return (render.encode(cur["messages"][:n]) == render.encode(prev["messages"]) and
+            render.encode(cur.get("tools") or []) == render.encode(prev.get("tools") or []))
+
+
+def test_a_finished_write_is_a_stub_from_the_next_request_on_and_the_store_keeps_the_text():
+    c = Chat()
+    try:
+        cid = c.new()
+        page = "".join(f"const wave{i} = Math.sin({i} * t) * 0.25;\n" for i in range(150))
+        assert len(page) > render.FOLD_ARG_CHARS
+        c.send(cid, calls(("write_file", {"path": "ocean.js", "content": page})))
+        s = c.wait_idle(cid, 20)
+        c.send(cid, calls(("edit_file", {"path": "ocean.js", "old": page[:2500],
+                                         "new": page[:2500].replace("0.25", "0.5")}),
+                          ("write_file", {"path": "ocean.js", "content": render.wrote_stub(
+                              "ocean.js", page)})))
+        s = c.wait_idle(cid, 20)
+        reqs = requests(c)
+        # the request after the write: its call reads as the stub, the text is not in it
+        after = reqs[1]
+        call = next(tc for m in after["messages"] if m.get("tool_calls")
+                    for tc in m["tool_calls"])
+        args = json.loads(call["function"]["arguments"])
+        assert args["path"] == "ocean.js" and args["content"].startswith(
+            "[wrote /workspace/ocean.js: 150 lines, ") and \
+            'read_file {"path": "/workspace/ocean.js"} shows it]' in args["content"], args
+        # (the fake's user message carries the calls it makes: the text is in that one only)
+        assert not any("wave149" in json.dumps(m) for b in (after, reqs[-1])
+                       for m in b["messages"] if m["role"] != "user")
+        assert _prefix_kept(reqs[0], reqs[1])
+        # the store and the thread keep the whole text
+        made = [p for m in s["messages"] if m["role"] == "assistant" for p in m["parts"]
+                if p["type"] == "tool_call"]
+        assert json.loads(made[0]["input"])["content"] == page
+        assert c.svc.workspace(cid).read("ocean.js").decode().count("0.5") > 0
+        # an edit's long old and new text are stubs too; a write of a stub is refused
+        edit = json.loads(next(tc for m in reqs[-1]["messages"] if m.get("tool_calls")
+                               for tc in m["tool_calls"]
+                               if tc["function"]["name"] == "edit_file")["function"]["arguments"])
+        assert edit["old"].startswith("[the old text of this edit: ") and \
+            edit["new"].startswith("[the new text of this edit: "), edit
+        stubbed = next(p for p in made if p["name"] == "write_file" and p is not made[0])
+        assert stubbed["status"] == "failed" and "stub of an earlier write" in \
+            stubbed["output"]["content"], stubbed["output"]
+        assert "wave149" in c.svc.workspace(cid).read("ocean.js").decode()
+    finally:
+        c.close()
+
+
+def test_an_edit_of_text_the_model_never_read_tells_it_to_read_the_file():
+    c = Chat()
+    try:
+        cid = c.new()
+        c.svc.workspace(cid).write("a.js", b"let x = 1;\n")
+        c.send(cid, calls(("edit_file", {"path": "a.js", "old": "let y = 2;", "new": "z"})))
+        s = c.wait_idle(cid, 20)
+        out = next(p for m in s["messages"] if m["role"] == "assistant" for p in m["parts"]
+                   if p["type"] == "tool_call")["output"]["content"]
+        assert "read it again with read_file" in out and "stub" in out, out
+    finally:
+        c.close()
+
+
+def _read_call(k, path, text, ended="2026-10-17T19:00:00.000Z", name="read_file", code=None):
+    return {"type": "tool_call", "id": f"r{k}", "name": name, "step": k, "status": "done",
+            "input": json.dumps({"path": path} if name == "read_file" else {"command": path}),
+            "ended_at": ended, "output": {"content": text, "exit_code": code}}
+
+
+def test_long_reads_stay_whole_until_a_compaction_and_are_stubs_after_it():
+    lines = [f"  vec3 c{i} = mix(deep, foam, {i}.0 / 64.0);" for i in range(200)]
+    read = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(lines, 1))
+    odd = "/workspace/a [b] \"c\".js"
+    log = "build start\n" + "".join(f"compiling module {i}\n" for i in range(400)) + "done in 3 s"
+    branch = [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "an ocean"}]},
+              {"id": "a", "role": "assistant", "parts": [
+                  _read_call(1, "ocean.frag", read), _read_call(2, odd, read),
+                  _read_call(3, "npm run build", log, name="bash", code=0),
+                  _read_call(4, "late.frag", read, ended="2026-10-17T19:45:00.000Z")]}]
+
+    def results(fold):
+        body = render.body("m", {}, branch, system="s", fold_before=fold)
+        return [m["content"] for m in body["messages"] if m["role"] == "tool"]
+    whole = results(None)
+    assert whole[0] == read and whole[2] == log and whole[3] == read
+    out = results("2026-10-17T19:44:00.000Z")          # a compaction at 19:44
+    assert out[0] == ('[read /workspace/ocean.frag lines 1-200: %s bytes, left out at a '
+                      'compaction; read_file {"path": "/workspace/ocean.frag", "offset": 1, '
+                      '"limit": 200} reads it again]' % f"{len(read.encode()):,}"), out[0]
+    # an odd path: the call in the stub is exact JSON
+    call = json.loads(out[1][out[1].index("read_file ") + 10:out[1].rindex(" reads it again")])
+    assert call == {"path": odd, "offset": 1, "limit": 200}
+    # a command's output is not read again faithfully: its ends stay, the stub does not pretend
+    assert out[2].startswith("build start\ncompiling module 0\n") and out[2].endswith(
+        "compiling module 399\ndone in 3 s") and "exit code 0" in out[2] and \
+        "the output is not stored, run the command again only if needed" in out[2], out[2]
+    assert len(out[2]) < 1200
+    # a read after the compaction stays whole
+    assert out[3] == read
+    # a write stub for an odd path parses as the arguments it sits in, and the guard knows it
+    stub = render.wrote_stub(odd, "x\n" * 3000)
+    assert json.loads(json.dumps({"content": stub}))["content"] == stub
+    assert render.WROTE_STUB.fullmatch(stub) and render.WROTE_STUB.fullmatch(
+        render.wrote_stub("/workspace/[draft] ocean v2.js", "y"))
+    assert not render.WROTE_STUB.fullmatch("[wrote the intro] and more text")
+
+
+def _ocean_run(c, window: int, max_steps: int = 10):
+    """The live case's shape: one user message, then steps that each read two long shader files
+    and write one back."""
+    small_window(c, window=window)
+    c.svc.learn_ratio = lambda *a: None                 # the fake counts words, not tokens
+    cid = c.new()
+    c.svc.conv(cid).tok_ratio = 0.5
+    ws = c.svc.workspace(cid)
+    text = "".join(f"  float h{i} = sin(p.x * {i}.0 + t) * cos(p.y * {i}.0);\n" for i in range(110))
+    ws.write("ocean.frag", text.encode())
+    ws.write("sky.frag", text.replace("h", "s").encode())
+    c.ok("PATCH", f"/conversations/{cid}/settings", {"max_steps": max_steps})
+    c.send(cid, calls(("read_file", {"path": "ocean.frag"}), ("read_file", {"path": "sky.frag"}),
+                      ("write_file", {"path": "ocean.js", "content": text}))
+           + " FAKE_CALLS_ALWAYS")
+    return cid
+
+
+def test_a_compaction_lands_under_half_its_trigger_with_big_kept_steps():
+    c = Chat()
+    try:
+        window = 50_000
+        cid = _ocean_run(c, window)
+        s = c.wait_idle(cid, 90)
+        at = comp.compact_at(window)
+        assert s["compactions"], "the run compacted"
+        cp = s["compactions"][0]
+        reqs = requests(c)
+        first = next(i for i, b in enumerate(reqs) if "Summary of the earlier part" in
+                     (b["messages"][0].get("content") or ""))
+        before, after = (comp.estimate(reqs[k], 0.5) for k in (first - 1, first))
+        assert after <= at * comp.TARGET_SHARE, (after, at)
+        # the row's figures are the chat's request sizes, before and after
+        assert cp["before_tokens"] > at * 0.9 and cp["after_tokens"] <= at * comp.TARGET_SHARE, cp
+        assert abs(cp["after_tokens"] - after) <= 0.1 * after, (cp, after)
+        # the reads it kept are stubs; the steps after it read whole again, and from there on each
+        # request starts with the one before, byte for byte
+        kept = [m["content"] for m in reqs[first]["messages"] if m["role"] == "tool"]
+        assert kept and all(not k.startswith("     1\t") for k in kept), kept
+        for k in range(first + 1, len(reqs)):
+            assert _prefix_kept(reqs[k - 1], reqs[k]), f"request {k} rewrote the prompt"
+        line = next(ln for ln in c.lines if ln.startswith("[compact]"))
+        assert line.startswith(f"[compact] {cid} {cp['before_tokens']} -> {cp['after_tokens']} "
+                               f"(summary call ") and line.endswith(" ms"), line
+    finally:
+        c.close()
+
+
+def test_a_run_whose_kept_steps_have_no_stubs_keeps_fewer_steps():
+    """Results that are no file text (grep's lines) stay whole: the compaction keeps fewer than
+    KEEP_STEPS steps until the request lands under half its trigger."""
+    c = Chat()
+    try:
+        window = 24_000
+        small_window(c, window=window)
+        c.svc.learn_ratio = lambda *a: None
+        cid = c.new()
+        c.svc.conv(cid).tok_ratio = 0.5
+        c.svc.workspace(cid).write("waves.txt", "".join(
+            f"wave {i}: amplitude 0.25 phase {i}\n" for i in range(60)).encode())
+        c.ok("PATCH", f"/conversations/{cid}/settings", {"max_steps": 10})
+        c.send(cid, calls(("grep", {"pattern": "wave", "include": "*.txt"}),
+                          ("grep", {"pattern": "phase", "include": "*.txt"})) + " FAKE_CALLS_ALWAYS")
+        s = c.wait_idle(cid, 90)
+        at = comp.compact_at(window)
+        assert s["compactions"], "the run compacted"
+        for cp in s["compactions"]:
+            assert cp["after_tokens"] <= at * comp.TARGET_SHARE, (cp, at)
+        cp = s["compactions"][0]
+        reqs = requests(c)
+        first = next(i for i, b in enumerate(reqs) if "Summary of the earlier part" in
+                     (b["messages"][0].get("content") or ""))
+        kept = {m["tool_call_id"] for m in reqs[first]["messages"] if m["role"] == "tool"}
+        assert 0 < len(kept) < 2 * comp.KEEP_STEPS, kept     # two calls a step
+        assert comp.estimate(reqs[first], 0.5) <= at * comp.TARGET_SHARE
     finally:
         c.close()

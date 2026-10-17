@@ -1206,7 +1206,9 @@ def test_render_page_reports_the_page_console_without_chromium_noise():
     ctx = Ctx(chromium_log)
     res = T._render(ctx, {"path": "index.html"})
     assert "--use-angle=swiftshader --enable-unsafe-swiftshader" in ctx.cmds[-1][-1]
-    assert res.content.split("\n", 1)[1] == (
+    assert res.content.split("\n", 2)[1] == "WebGPU: not available in the check browser (WebGL2 " \
+        "only): a page with a WebGPU path was not checked on it"
+    assert res.content.split("\n", 2)[2] == (
         'console:\n"Uncaught TypeError: THREE.MathUtils.lerpAngle is not a function", source: '
         'http://localhost:8124/js/scene/koi.js (61)')
     # only Chromium's lines: the page logged nothing
@@ -1305,6 +1307,43 @@ def test_render_page_reports_a_failed_module_load_through_the_kit():
     rep["errors"], rep["widths"][0]["text"] = [], ""
     assert T._render(Ctx(), {"port": 5173}).content.endswith(
         "no console errors and no failed loads")
+
+
+def test_render_page_says_which_graphics_api_the_check_browser_has():
+    """Live (2026-10-17, chat 01M556JVWDQVDCAMBMVFZCT7XF): a WebGPU ocean with a WebGL2 fallback
+    was checked on its fallback only ("WebGL2" in every screenshot) while Safari ran its WebGPU
+    path and drew black; render_page said "no console errors". The kit reads the page's graphics
+    in the same render, and the result says what was not checked."""
+    import shlex
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("index.html", b"<canvas></canvas>")
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, probe):
+            self.ws, self.cmds, self.out, self.probe = ws, [], "", probe
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if "laya_drive.py page" in cmd[-1]:
+                ws.write(".tandem/shots/call1/page-1280.png", b"\x89PNG fake")
+                step = shlex.split(cmd[-1])[-1]
+                self.out += json.dumps({"errors": [], "widths": [{"text": ""}], "steps": [
+                    {"step": step, "ok": True, "value": self.probe}]}) + "\n"
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx("no adapter true")
+    res = T._render(ctx, {"path": "index.html"})
+    assert shlex.split(ctx.cmds[-1][-1])[-2:] == ["--step", "read:" + T.GRAPHICS_PROBE]
+    assert res.content.endswith("WebGPU: not available in the check browser (WebGL2 only): a "
+                                "page with a WebGPU path was not checked on it\nno console errors "
+                                "and no failed loads"), res.content
+    assert "\nWebGPU and WebGL2 in the check browser\n" in T._render(
+        Ctx("adapter true"), {"path": "index.html"}).content
+    assert "(no WebGL2 either)" in T._render(Ctx("none false"), {"path": "index.html"}).content
 
 
 def test_render_page_quotes_the_line_an_error_names():

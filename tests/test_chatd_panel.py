@@ -4,8 +4,9 @@ write_file of 7.8 KB and seven edit_file calls, "KV for this chat —", "residen
 "sandbox running, 0 B".
 
   1  the usage counts every tool call of the branch
-  2  the context's `files` part counts what the file tools carried (a write's content, an edit's
-     old and new text, a read's result), from the first message a compaction kept
+  2  the context's `files` part counts what the file tools carry in the next request (a write's
+     content or its stub, an edit's old and new text, a read's result), from the first message
+     a compaction kept
   3  the memory says where the engine holds the chat: its rows in the slot or the park, by the
      owner's tag (or its short key from an engine without tags), else the tier the next turn reads
   4  a running sandbox's memory is the runtime's figure (usage less the inactive file cache),
@@ -25,7 +26,7 @@ import shutil
 from chatd_util import Chat
 from test_chatd_agent import calls
 
-from chatd import context as ctx_mod
+from chatd import context as ctx_mod, render
 from chatd import sandbox as sb_mod
 
 
@@ -41,7 +42,10 @@ def test_the_usage_counts_every_tool_call_and_the_files_part_what_the_file_tools
                 if p["type"] == "tool_call"]
         assert len(made) == 2 and s["usage"]["tool_calls"] == 2, s["usage"]
         files = next(p for p in s["context"]["parts"] if p["kind"] == "files")["tokens"]
-        assert files >= len(page) // 4, s["context"]["parts"]
+        # the write's content is a stub in the next request (chatd/render.py): its tokens, not
+        # the page's
+        stub = render.wrote_stub("site/a.html", page)
+        assert 0 < files <= ctx_mod.estimate_tokens(stub) + 10, (files, s["context"]["parts"])
         c.send(cid, calls(("read_file", {"path": "site/a.html"})))
         s = c.wait_idle(cid, 20)
         assert s["usage"]["tool_calls"] == 3

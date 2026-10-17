@@ -21,12 +21,16 @@ def estimate_tokens(text: str) -> int:
 FILE_TOOLS = ("read_file", "write_file", "edit_file")
 
 
-def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] | None = None) -> int:
-    """The files in the window: what the file tools carried (the content a write sent, an edit's
-    old and new text, what a read returned), estimated, from message `start` on (the first one a
-    compaction kept); `step_from` (message index, step): that message's earlier steps were
-    folded. Attachments count apart (their own token counts)."""
+def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] | None = None,
+                fold_before: str | None = None) -> int:
+    """The files in the window: what the file tools carry in the next request (the content a
+    write sent, an edit's old and new text, what a read returned; a stub where the request has
+    one, chatd/render.py), estimated, from message `start` on (the first one a compaction kept);
+    `step_from` (message index, step): that message's earlier steps were folded; `fold_before`:
+    the newest compaction's time. Attachments count apart (their own token counts)."""
     import json
+
+    from chatd import render
     n = 0
     for i, m in enumerate(branch):
         if i < start or m.get("role") != "assistant":
@@ -37,11 +41,11 @@ def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] |
             if step_from and i == step_from[0] and int(p.get("step") or 1) < step_from[1]:
                 continue
             if p["name"] == "read_file":
-                out = p.get("model_content") or (p.get("output") or {}).get("content") or ""
-                n += estimate_tokens(out) if not (p.get("output") or {}).get("is_error") else 0
+                if not (p.get("output") or {}).get("is_error"):
+                    n += estimate_tokens(render.result_for(p, fold_before))
                 continue
             try:
-                a = json.loads(p.get("input") or "{}")
+                a = json.loads(render.call_arguments(p))
             except ValueError:
                 continue
             if isinstance(a, dict):
