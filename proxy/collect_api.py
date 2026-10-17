@@ -165,6 +165,10 @@ class Collector:
         self.backends: dict[str, _Backend] = {}
         self.expect: dict = {}          # (bid, key) -> rec, while the request runs
         self.done: dict = {}            # (bid, key or row id) -> row info, after the row
+        # (bid, prompt_tokens, completion_tokens) -> done keys, so an untagged item finds its
+        # candidate rows without scanning every row: tick() tried each loose item against
+        # every done row — both near ITEMS_MAX that is the ingest lock held for seconds
+        self.done_by: dict = {}
         self.items: dict = {}           # (bid, key) -> (item, t), an item before its row
         self.loose: dict = {}           # (bid, n) -> (item, t), an item with no tag at all
         self._n = 0
@@ -260,10 +264,26 @@ class Collector:
                     return
             if len(self.done) >= ITEMS_MAX:
                 self._expire(force=True)
-            self.done[(bid, key or f"row:{rec.request_id}")] = {
+            dk = (bid, key or f"row:{rec.request_id}")
+            self._done_pop(dk)            # a re-used key must leave its old (p, c) bucket first
+            self.done[dk] = {
                 "request_id": rec.request_id, "ts_ms": row.get("ts_ms"), "t": self.clock(),
                 "end": self.wall(), "prompt_tokens": row.get("prompt_tokens"),
                 "completion_tokens": row.get("completion_tokens"), "tagged": key is not None}
+            self.done_by.setdefault((bid, row.get("prompt_tokens"),
+                                     row.get("completion_tokens")), set()).add(dk)
+
+    def _done_pop(self, dk):
+        """Take a row out of `done` and out of the (bid, p, c) index with it."""
+        row = self.done.pop(dk, None)
+        if row is not None:
+            sig = (dk[0], row["prompt_tokens"], row["completion_tokens"])
+            s = self.done_by.get(sig)
+            if s is not None:
+                s.discard(dk)
+                if not s:
+                    self.done_by.pop(sig, None)
+        return row
 
     # ----------------------------------------------------------------- the plugin's side
     def check_token(self, authorization: str | None) -> bool:
@@ -333,7 +353,7 @@ class Collector:
         key = it.get("id") if isinstance(it.get("id"), str) else None
         now = self.clock()
         if key is not None:
-            row = self.done.pop((bid, key), None)
+            row = self._done_pop((bid, key))
             if row is not None:
                 b.counts["exact"] += 1
                 f = fields_of(it, row["prompt_tokens"], row["completion_tokens"])
@@ -344,7 +364,7 @@ class Collector:
                 return None
         row_key = self._approx(bid, it)
         if row_key is not None:
-            row = self.done.pop(row_key)
+            row = self._done_pop(row_key)
             b.counts["approximate"] += 1
             f = fields_of(it, row["prompt_tokens"], row["completion_tokens"])
             f["l2_join"] = "approximate"
@@ -364,9 +384,12 @@ class Collector:
             return None
         now = self.clock()
         found = None
-        for k, row in self.done.items():
-            if k[0] != bid or row["prompt_tokens"] != p or row["completion_tokens"] != c:
+        for k in self.done_by.get((bid, p, c), ()):
+            row = self.done.get(k)
+            if row is None:
                 continue
+            if row["prompt_tokens"] != p or row["completion_tokens"] != c:
+                continue                  # the scan's token equality, kept on the indexed path
             if row["tagged"] and now - row["t"] < APPROX_AFTER_S:
                 continue
             if abs(row["end"] - t) > APPROX_WINDOW_S:
@@ -384,7 +407,7 @@ class Collector:
             for k, (it, t) in list(self.loose.items()):
                 rk = self._approx(k[0], it)
                 if rk is not None:
-                    row = self.done.pop(rk)
+                    row = self._done_pop(rk)
                     self.loose.pop(k)
                     b = self._b(k[0])
                     b.counts["approximate"] += 1
@@ -409,6 +432,10 @@ class Collector:
             for k, v in list(store.items()):
                 t = v["t"] if idx is None else v[idx]
                 if now - t > (limit if name != "item_untagged" else min(limit, 60.0)):
+                    if idx is None:                    # done rows leave through the index
+                        self._done_pop(k)
+                        self._b(k[0]).counts[name] += 1
+                        continue
                     store.pop(k, None)
                     self._b(k[0]).counts[name] += 1
         for k, (_rec, t) in list(self.expect.items()):
