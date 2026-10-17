@@ -26,6 +26,10 @@
 // harness's check card, the Checked / Not checked block, the composer's switch): 434.2 KB.
 // 445 KB with the Setup Guide's restart card, finished screen, Retry and diagnostics and its weights list
 // on top (VIS-209, VIS-211, VIS-213, VIS-215, 2026-10-17: 442.5 KB).
+// 456 KB with a main agent's workers (VIS-217, VIS-219, 2026-10-17: 455.1 KB from 442.7): the Task card,
+// its report, chatd's check and the transcript sheet, the worker's part of the Context panel and the
+// Agents switch add 5.9 KB to the chat chunk; the mock's scripted worker and its four seeded tasks
+// 5.7 KB to the mock chunk, which loads only with ?chat=mock.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -44,8 +48,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 445 KB)`);
-if (total > 445 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 456 KB)`);
+if (total > 456 * 1024) {
   console.error('over budget');
   process.exit(1);
 }

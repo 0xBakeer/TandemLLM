@@ -2,13 +2,16 @@
 // (thinking, text, tool calls with permission prompts, artifacts for the panes), one run that is
 // already on when the tab opens ("started on another device"), a reconnect scenario, the settings
 // stores, a sandbox with files, and a terminal. Every event goes through the same reducer the
-// real stream uses, and the event log serves a catch-up from any Last-Event-ID. No network.
+// real stream uses, and the event log serves a catch-up from any Last-Event-ID. No network. With
+// Agents on (VIS-E15) a build request goes to a scripted worker: its task.* events and its parts
+// (with `task_id`) play on the same stream, and GET .../tasks serves the chat's tasks.
 
 import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import { decideCall, modeOf } from './permission';
-import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, PACKAGES, PRESETS, PROMPTS, SEARCH_RESULTS, TOOLS, WEB_SEARCH, contextFor, iso, sandboxFor } from './mock-data';
+import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, OCEAN_TASKS, PACKAGES, PRESETS, PROMPTS, SEARCH_RESULTS, TOOLS, WEB_SEARCH, contextFor, iso, sandboxFor, taskResult, workerContext } from './mock-data';
 import { applyEvent } from './store';
+import type { Task, TaskReport, TaskStatus, WorkerContext, WorkerStats } from './types';
 import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit, ToolApproval, ToolRisk, ToolOutput, WebSearchData, WebSearchPatch, WebSearchSettings, WebSearchTest, WebSearchView } from './types';
 import { localId, planItems } from './types';
 import { draftErrors, draftOf, providerWord } from './websearch';
@@ -58,6 +61,9 @@ interface ConvState {
   /** a rewind: the path ends before this message until the next send */
   cut?: string | null;
   todos?: TodoItem[];
+  /** VIS-E15: the chat's tasks with their transcripts, and the running worker's context */
+  tasks?: Task[];
+  worker?: WorkerContext | null;
 }
 
 const EMPTY_UI: ConversationUi = { panes: [], active: null, split: 0.6 };
@@ -69,7 +75,9 @@ type Step =
   | { kind: 'thinking'; text: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; input: Record<string, unknown>; output: string[]; ms: number; pane?: PaneRef; error?: boolean; denied?: string; data?: WebSearchData }
-  | { kind: 'done'; finish?: TurnStats['finish'] };
+  | { kind: 'done'; finish?: TurnStats['finish'] }
+  /** a task for a worker: its own steps play on the stream with `task_id`, then its report */
+  | { kind: 'task'; title: string; brief: string; expect: string; worker: Step[]; status: TaskStatus; report: TaskReport | null; check: string | null };
 
 const WORD_MS = 34;
 
@@ -152,6 +160,46 @@ const EDIT_SCRIPT: Step[] = [
   { kind: 'tool', name: 'read_file', input: { path: 'src/sync/worker.py' }, output: [FILES['/work/sync/src/sync/worker.py']], ms: 500, pane: { kind: 'files', ref: '/work/sync/src/sync/worker.py', title: 'worker.py' } },
   { kind: 'tool', name: 'edit_file', input: { path: 'src/sync/worker.py', find: 'from .queue import Queue', replace: 'from .jobs import Queue' }, output: ['edited src/sync/worker.py: 1 block, +1 -1 lines'], ms: 400, pane: { kind: 'diff', ref: 'diff:worker', title: 'worker.py' }, denied: 'Not writing then. The three places to change by hand: the import in `worker.py`, the file name `queue.py` to `jobs.py`, and the import in the test.' },
   { kind: 'text', text: 'Done in three places: the import in `worker.py`, the module file, and the test. The diff is in the Diff pane. Nothing else imports the module; `grep -rn "sync.queue"` finds no other hit.' },
+  { kind: 'done' },
+];
+
+const WAVE_BRIEF = 'Goal: a slider sets the wave height of the sea live, from 0 to 2\nFiles: src/main.js (the uniforms and the render loop), index.html (the panel)\nConstraints: one page, no build step; keep the WebGL2 fallback working\nCheck: render_page index.html shows the slider and 0 console errors';
+const WAVE_REPORT: TaskReport = {
+  status: 'done',
+  summary: 'A lil-gui panel sets the wave height from 0 to 2; the shader reads it as a uniform each frame.',
+  changed_files: [{ path: 'src/main.js', change: 'the wave height uniform and the panel' }, { path: 'package.json', change: 'lil-gui 0.20' }],
+  checks: [{ what: 'render_page index.html', result: '0 console errors, the panel at the top right, shot-3', call_id: null, shot: 'shot-3' }],
+  expected: ['nothing asked'],
+  open_problems: ['none'],
+};
+const WAVE_CHECK = '- Changed in /workspace (snapshot diff): src/main.js (+24 -2), package.json (+3 -0), package-lock.json (+41 -0)\n- Changed but not in the report: package-lock.json\n- Checks that ran: render_page index.html (0 console errors, shot-3)\n- Claimed in Checks with no matching call: none';
+
+/** Agents on: the main agent plans, gives the work to a worker and reads its report. The worker
+ *  reads the files, installs a package (a bash call that asks in ask mode) and checks the page. */
+const AGENT_SCRIPT: Step[] = [
+  { kind: 'thinking', text: 'This writes files: a task for a worker. The brief needs the goal, the files, the constraints and the check.' },
+  { kind: 'text', text: 'A worker gets this one: it adds the slider and checks the page, and I read its report.' },
+  {
+    kind: 'task',
+    title: 'Wave height slider with lil-gui',
+    brief: WAVE_BRIEF,
+    expect: 'nothing beyond the standard fields',
+    worker: [
+      { kind: 'thinking', text: 'Read the render loop and the uniforms first, then add the panel.' },
+      ...['src/main.js', 'src/ocean.wgsl', 'index.html', 'package.json', 'src/sky.js', 'README.md'].map((path): Step => ({ kind: 'tool', name: 'read_file', input: { path }, output: [`(${path}, 1-80 of 112 lines)`], ms: 300 })),
+      ...['wave', 'uniform', 'requestAnimationFrame'].map((q): Step => ({ kind: 'tool', name: 'grep', input: { pattern: q, path: 'src' }, output: [`src/main.js:41: ${q}`], ms: 200 })),
+      { kind: 'tool', name: 'glob', input: { pattern: 'node_modules/*' }, output: ['no match'], ms: 200 },
+      { kind: 'text', text: 'No packages yet: install lil-gui for the panel.' },
+      { kind: 'tool', name: 'bash', input: { command: 'npm install lil-gui', cwd: '/workspace' }, output: ['added 1 package in 2s'], ms: 2_000 },
+      { kind: 'tool', name: 'edit_file', input: { path: 'src/main.js', find: 'const uniforms = {', replace: 'const uniforms = { waveHeight: 1,' }, output: ['edited src/main.js: 2 blocks, +24 -2 lines'], ms: 400 },
+      { kind: 'tool', name: 'render_page', input: { path: 'index.html' }, output: ['loaded index.html at 1280 px: 0 console errors; screenshot shot-3'], ms: 1_600, pane: { kind: 'image', ref: 'image:shot-3', title: 'shot-3' } },
+      { kind: 'text', text: 'Status: done\nSummary: a lil-gui panel sets the wave height from 0 to 2…' },
+    ],
+    status: 'done',
+    report: WAVE_REPORT,
+    check: WAVE_CHECK,
+  },
+  { kind: 'text', text: 'Done: the slider is at the top right and sets the wave height from 0 to 2. chatd\'s check found one file the report left out, `package-lock.json`, which npm writes with the install. The page loads with no console errors.' },
   { kind: 'done' },
 ];
 
@@ -266,6 +314,29 @@ export class MockChatBackend implements ChatBackend {
       sql.status = 'error';
     }
 
+    // VIS-E15: a chat with Agents on and four finished tasks (done, partial, failed, cancelled)
+    const ocean = mk('c_ocean', 'WebGPU ocean sunset scene', 90 * 60_000, {
+      sandbox: sandboxFor(true),
+      turns: [
+        ['Build a WebGPU ocean at sunset in one page, with a WebGL2 fallback. Then fix the horizon banding.', [
+          { type: 'text', text: 'Two tasks: the scene first, then the horizon.' },
+          oceanCall(OCEAN_TASKS[0]),
+          oceanCall(OCEAN_TASKS[1]),
+          { type: 'text', text: 'The scene runs; WebGL2 drew it in the check browser. The banding is better but not gone: the worker hit its 40 calls, and chatd\'s check shows a change to `src/main.js` its report left out and a test it claimed but never ran. Next: a narrower brief for the horizon blend alone.' },
+        ], { ...statsFor([]), prompt_tokens: 127_614, completion_tokens: 9_342, cached_tokens: 98_400, workers: workersOf(OCEAN_TASKS.slice(0, 2)) }],
+        ['Add a wave height slider, and warmer sky colours.', [
+          oceanCall(OCEAN_TASKS[2]),
+          { type: 'text', text: 'The slider needs lil-gui and the sandbox has no network, so that task failed. Trying the sky colours meanwhile.' },
+          oceanCall(OCEAN_TASKS[3]),
+        ], { ...statsFor([]), finish: 'stopped', prompt_tokens: 44_310, completion_tokens: 1_480, cached_tokens: 30_200, workers: workersOf(OCEAN_TASKS.slice(2)) }],
+      ],
+    });
+    ocean.settings = { ...ocean.settings, agents: true };
+    ocean.tasks = OCEAN_TASKS.map((t) => ({ ...t, messages: t.messages?.map((m) => ({ ...m, parts: m.parts.slice() })) }));
+    // the second answer was stopped while Task 4 ran
+    const leaf = ocean.nodes.get(this.pathIds(ocean).pop()!)!;
+    leaf.msg = { ...leaf.msg, status: 'stopped' };
+
     // the pending permission chat: the run paused on an edit_file that asks
     const ren = this.convs.get('c_rename')!;
     this.pausedRun(ren);
@@ -279,6 +350,12 @@ export class MockChatBackend implements ChatBackend {
     sync.ui = { panes: [{ id: 'pane_term', kind: 'terminal', ref: 'shell', title: 'Terminal' }], active: 'pane_term', split: 0.6 };
     const runner = new Runner(this, sync, uid, CODING_SCRIPT, { startedBy: 'another browser', startedAgoMs: 180_000, skip: { steps: 3, outputLines: 3 } });
     runner.start();
+
+    // VIS-E15: a worker that waits for permission at its 12th call, started on another device
+    const waves = mk('c_waves', 'Wave height slider for the ocean scene', 4 * 60_000, { turns: [], sandbox: sandboxFor(true) });
+    waves.settings = { ...waves.settings, agents: true, permission_mode: 'ask' };
+    const wid = this.node(waves, { id: localId('m'), role: 'user', created_at: iso(-240_000, now), parent_id: null, run_id: null, parts: [{ type: 'text', text: 'Add a slider for the wave height, with lil-gui.' }], status: 'done' }, null);
+    new Runner(this, waves, wid, AGENT_SCRIPT, { startedBy: 'another browser', startedAgoMs: 240_000, fast: true, policy: { read_file: 'always', grep: 'always', glob: 'always', edit_file: 'always', render_page: 'always' } }).start();
   }
 
   /** c_rename: an edit_file that waits for permission, with the run on. */
@@ -365,7 +442,7 @@ export class MockChatBackend implements ChatBackend {
     const compacted = st.compactions.length ? Math.max(0, tokens - 4_000) : tokens;
     const ctx = contextFor(compacted, { tools: st.settings.tools.length > 0, files, thinking, warmAll: st.seen, profile: st.settings.profile, effort: st.settings.effort, thinkingOn: st.settings.thinking, slot: st.run ? 'slot 1' : null, cold: st.cold, packages: st.settings.packages });
     const pkg = (n: string) => this.pkgs.find((p) => p.id === n);
-    return { ...ctx, skills: { mode: st.settings.packages_mode, pinned: st.settings.packages.map((n) => ({ name: n, tokens: pkg(n)?.tokens ?? null, missing: !pkg(n) })), blocked: st.settings.packages_blocked } };
+    return { ...ctx, worker: st.worker ?? null, skills: { mode: st.settings.packages_mode, pinned: st.settings.packages.map((n) => ({ name: n, tokens: pkg(n)?.tokens ?? null, missing: !pkg(n) })), blocked: st.settings.packages_blocked } };
   }
 
   // ---- events ---------------------------------------------------------------------------------
@@ -376,8 +453,9 @@ export class MockChatBackend implements ChatBackend {
     st.events.push(stamped);
     if (st.events.length > 5_000) st.events.splice(0, st.events.length - 5_000);
     // keep the server's own view current through the same reducer the client uses
-    const before = this.full(st);
+    const before: Conversation = { ...this.full(st), tasks: st.tasks };
     const after = applyEvent(before, ev);
+    st.tasks = after.tasks;
     for (const m of after.messages) {
       const n = st.nodes.get(m.id);
       if (n) {
@@ -467,18 +545,23 @@ export class MockChatBackend implements ChatBackend {
     let closed = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const later = (ms: number, f: () => void) => timers.push(setTimeout(() => !closed && f(), ms));
+    const at = st.seq;
     const open = (resume: string | null, first: boolean) => {
       h.onState(first ? 'connecting' : 'reconnecting');
       later(first ? 120 : 700, () => {
         h.onState('open');
-        const after = resume ? Number(resume) : null;
-        const replay = after != null ? st.events.filter((e) => Number(e.id) > after) : [];
-        // the catch-up: fast, but not instant, so the state reads as a replay
-        replay.forEach((e, i) => later(8 * i, () => h.onEvent(e, true)));
-        later(8 * replay.length + 20, () => {
-          h.onCurrent();
-          st.subs.add(h);
-        });
+        // the catch-up: fast, but not instant, so the state reads as a replay. It reads the log
+        // until it is current, so the events a run adds meanwhile are not lost before it goes live
+        const step = (from: number) => {
+          const next = st.events.find((e) => Number(e.id) > from);
+          if (!next) {
+            h.onCurrent();
+            st.subs.add(h);
+            return;
+          }
+          later(8, () => (h.onEvent(next, true), step(Number(next.id))));
+        };
+        later(20, () => step(resume ? Number(resume) : at));
       });
     };
     open(lastEventId, true);
@@ -517,7 +600,9 @@ export class MockChatBackend implements ChatBackend {
     }
     this.emit(st, { type: 'message.created', message: um });
     const longChat = this.context(st).used > 20_000 || !st.seen;
-    const runner = new Runner(this, st, um.id, script(msg.text, longChat), {});
+    // Agents on: work that changes files goes to a worker; a question stays with the main agent
+    const work = st.settings.agents && /\b(add|build|make|fix|change|write|create|slider|page)\b/i.test(msg.text);
+    const runner = new Runner(this, st, um.id, work ? AGENT_SCRIPT : script(msg.text, longChat), {});
     runner.start();
   }
 
@@ -611,12 +696,14 @@ export class MockChatBackend implements ChatBackend {
     st.runner?.decide(callId, decision === 'deny' ? 'deny' : 'allow');
   }
 
-  async updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings> {
+  async updateSettings(id: string, patch: Partial<ChatSettings>): Promise<ChatSettings & { reread_tokens?: number | null }> {
     const st = this.get(id);
     st.settings = { ...st.settings, ...patch, policies: { ...st.settings.policies, ...(patch.policies ?? {}) } };
     this.emit(st, { type: 'settings.changed', settings: st.settings });
     this.emit(st, { type: 'context.changed', context: this.context(st) });
-    return st.settings;
+    // SRV-583: a switch of Agents answers what the next message reads again (the chat's last prompt)
+    if (patch.agents === undefined) return st.settings;
+    return { ...st.settings, reread_tokens: this.materialize(st).length ? this.context(st).used : 0 };
   }
 
   async updateDefaults(patch: Partial<ChatSettings>): Promise<ChatSettings> {
@@ -655,6 +742,17 @@ export class MockChatBackend implements ChatBackend {
     const conversation = this.full(st);
     this.emit(st, { type: 'branch.changed', head_id: conversation.head_id ?? '' });
     return { conversation, text: n.msg.parts.map((p) => (p.type === 'text' ? p.text : '')).join(''), files: 0 };
+  }
+
+  /** the snapshot carries no tasks: a device loads them here, like the server's */
+  async tasks(id: string): Promise<Task[]> {
+    return (this.get(id).tasks ?? []).map(({ messages: _m, phase: _p, now: _n, tool: _t, decode_tps: _d, ...t }) => ({ ...t }));
+  }
+  async task(id: string, taskId: string): Promise<Task & { seq?: string }> {
+    const st = this.get(id);
+    const t = st.tasks?.find((x) => x.id === taskId);
+    if (!t) throw new Error(`no task ${taskId}`);
+    return { ...t, messages: (t.messages ?? []).map((m) => ({ ...m, parts: m.parts.slice() })), seq: String(st.seq) };
   }
 
   async compact(id: string): Promise<void> {
@@ -966,6 +1064,10 @@ interface RunnerOptions {
   resumeAt?: { step: number; message: Message; call: ToolCallPart };
   /** Continue: the new run writes into this interrupted message instead of a new one */
   replaceId?: string;
+  /** a seed that plays at once up to its first permission prompt (c_waves) */
+  fast?: boolean;
+  /** policies this run's tools get over the chat's (the seed's reads run, its bash asks) */
+  policy?: Record<string, ToolPolicy>;
 }
 
 class Runner {
@@ -980,6 +1082,11 @@ class Runner {
   private phaseTps: number | null = null;
   private toolStart = 0;
   pending: { call: ToolCallPart; resolve: (d: 'allow' | 'deny') => void } | null = null;
+  /** the run's workers, for the turn's `workers` */
+  private workers: WorkerStats | null = null;
+  /** Stop while a worker runs: its task ends cancelled first */
+  private taskStop: (() => void) | null = null;
+  private fast = false;
 
   constructor(
     private mock: MockChatBackend,
@@ -995,6 +1102,7 @@ class Runner {
   }
 
   private later(ms: number, f: () => void): Promise<void> {
+    if (this.fast) ms = 0;
     return new Promise((resolve) => {
       this.timers.push(
         setTimeout(() => {
@@ -1007,6 +1115,7 @@ class Runner {
 
   start(): void {
     this.st.runner = this;
+    this.fast = !!this.opts.fast;
     const now = Date.now();
     if (this.opts.resumeAt) {
       this.msgId = this.opts.resumeAt.message.id;
@@ -1157,12 +1266,113 @@ class Runner {
         if (this.cancelled || this.stopped) break;
         this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: callId, status: s.error ? 'failed' : 'done', is_error: !!s.error, ...(s.data ? { output: stepOutput(s) } : {}) });
         this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
+      } else if (s.kind === 'task') {
+        await this.playTask(s);
       } else if (s.kind === 'done') {
         this.finish(s.finish ?? 'stop');
         return;
       }
     }
     if (this.stopped && !this.cancelled) this.finish('stopped');
+  }
+
+  /** VIS-E15: the main agent's task call, its worker on the stream (task.*, parts with `task_id`,
+   *  the run's phase `task` with the worker's Now line), the report back as the call's output */
+  private async playTask(s: Extract<Step, { kind: 'task' }>): Promise<void> {
+    const callId = localId('call');
+    const input = JSON.stringify({ title: s.title, brief: s.brief, expect: s.expect }, null, 2);
+    const idx = this.addPart({ type: 'tool_call', id: callId, name: 'task', input: '', output: null, status: 'running', started_at: null, ended_at: null, permission: null, pane: null });
+    this.phaseTps = 52;
+    this.phase('writing', 'Calling task');
+    await this.stream(idx, input, 'input', false);
+    if (this.cancelled || this.stopped) return;
+    this.mock.emit(this.st, { type: 'tool.started', message_id: this.msgId, call_id: callId, approved: 'auto' });
+    const max = this.st.settings.task_max_steps ?? 40;
+    const n = (this.st.tasks?.length ?? 0) + 1;
+    const task: Task = { id: localId('task'), conversation_id: this.st.id, run_id: this.run.id, call_id: callId, n, title: s.title, brief: s.brief, expect: s.expect, status: 'running', steps: 0, max_steps: max, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, started: new Date(Date.now() - (this.fast ? 150_000 : 0)).toISOString(), ended: null, report: null, report_source: null, check: null, error: null };
+    this.mock.emit(this.st, { type: 'task.started', run_id: this.run.id, task });
+    const wmid = localId('m');
+    let k = 0;
+    let tin = 0;
+    let tout = 0;
+    const say = (phase: Run['phase'], now: string, tool: Run['tool'] = null) => {
+      this.mock.emit(this.st, { type: 'task.phase', task_id: task.id, phase, now, step: k, max_steps: max, tool });
+      this.mock.emit(this.st, { type: 'run.phase', run_id: this.run.id, phase: 'task', now: `Task ${n}: ${s.title}, call ${k} of ${max}: ${now}` });
+      this.st.worker = workerContext(task, k);
+      tin += 2_400 + k * 380;
+      tout += 140;
+      this.mock.emit(this.st, { type: 'task.metrics', task_id: task.id, prompt_tokens: tin, completion_tokens: tout, decode_tps: phase === 'writing' ? 54 : null });
+      this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
+    };
+    const wpart = (p: Part) => {
+      this.mock.emit(this.st, { type: 'part.added', message_id: wmid, part: p, task_id: task.id });
+      return (this.st.tasks?.find((t) => t.id === task.id)?.messages?.find((m) => m.id === wmid)?.parts.length ?? 1) - 1;
+    };
+    const wstream = async (i: number, text: string, field: 'text' | 'input') => {
+      for (const delta of text.match(/\S+\s*/g) ?? []) {
+        if (this.cancelled || this.stopped) return;
+        this.mock.emit(this.st, { type: 'part.delta', message_id: wmid, index: i, delta, field, task_id: task.id });
+        await this.later(WORD_MS, () => undefined);
+      }
+    };
+    const end = (status: TaskStatus, report: TaskReport | null, check: string | null) => {
+      this.taskStop = null;
+      const stats = { steps: k, prompt_tokens: tin, completion_tokens: tout, cached_tokens: Math.round(tin * 0.8), ms: Date.now() - Date.parse(task.started) };
+      const w = this.workers ?? { count: 0, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, ms: 0 };
+      this.workers = { count: w.count + 1, prompt_tokens: w.prompt_tokens + stats.prompt_tokens, completion_tokens: w.completion_tokens + stats.completion_tokens, cached_tokens: w.cached_tokens + stats.cached_tokens, ms: w.ms + stats.ms };
+      this.mock.emit(this.st, { type: 'task.done', task_id: task.id, status, report, check, stats });
+      this.st.worker = null;
+      const done = this.st.tasks!.find((t) => t.id === task.id)!;
+      this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: callId, status: status === 'cancelled' ? 'cancelled' : 'done', is_error: false, output: { content: taskResult(done), is_error: false, bytes: 0 } });
+      this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
+    };
+    this.taskStop = () => {
+      for (const m of this.st.tasks?.find((t) => t.id === task.id)?.messages ?? []) for (const p of m.parts) if (p.type === 'tool_call' && (p.status === 'running' || p.status === 'asking')) this.mock.emit(this.st, { type: 'tool.done', message_id: wmid, call_id: p.id, status: 'cancelled', is_error: false });
+      end('cancelled', null, `- Changed in /workspace (snapshot diff): none\n- Checks that ran: none`);
+    };
+    for (const w of s.worker) {
+      if (this.cancelled || this.stopped) return;
+      if (w.kind === 'thinking') {
+        say('thinking', 'Thinking');
+        const i = wpart({ type: 'thinking', text: '', tokens: null, done: false });
+        await wstream(i, w.text, 'text');
+        this.mock.emit(this.st, { type: 'part.done', message_id: wmid, index: i, tokens: Math.round(w.text.length / 4), task_id: task.id });
+      } else if (w.kind === 'text') {
+        k++;
+        say('writing', 'Writing');
+        await wstream(wpart({ type: 'text', text: '' }), w.text, 'text');
+      } else if (w.kind === 'tool') {
+        k++;
+        const id = localId('call');
+        const wi = JSON.stringify(w.input, null, 2);
+        const call: ToolCallPart = { type: 'tool_call', id, name: w.name, input: wi, output: null, status: 'running', started_at: null, ended_at: null, permission: null, pane: w.pane ?? null };
+        wpart(call);
+        const policy = this.opts.policy?.[w.name] ?? this.mock.policyFor(this.st, w.name);
+        const decision = decideCall(modeOf(this.st.settings), policy, this.mock.riskOf(w.name), this.st.settings.auto_accept_edits);
+        if (decision.run === 'ask') {
+          this.fast = false;
+          say('permission', `Waiting for permission: ${w.name}`, { call_id: id, name: w.name });
+          this.mock.emit(this.st, { type: 'tool.asking', message_id: wmid, call_id: id, summary: permissionSummary(w.name, w.input), risk: this.mock.riskOf(w.name) });
+          const d = await new Promise<'allow' | 'deny'>((resolve) => (this.pending = { call, resolve }));
+          this.pending = null;
+          if (this.cancelled || this.stopped) return;
+          if (d === 'deny') {
+            this.mock.emit(this.st, { type: 'tool.done', message_id: wmid, call_id: id, status: 'denied', is_error: false });
+            continue;
+          }
+        }
+        const now = w.name === 'bash' ? `Running bash: ${String(w.input.command ?? '')}` : w.name === 'render_page' ? `Loading ${String(w.input.path ?? '')} in a browser` : `Running ${w.name}: ${String(w.input.path ?? w.input.pattern ?? '')}`;
+        say('tool', now, { call_id: id, name: w.name });
+        this.mock.emit(this.st, { type: 'tool.started', message_id: wmid, call_id: id, approved: decision.run === 'ask' ? 'user' : decision.approved, pane: w.pane ?? null });
+        await this.later(w.ms, () => this.mock.emit(this.st, { type: 'tool.output', message_id: wmid, call_id: id, delta: w.output.join('\n') }));
+        if (this.cancelled || this.stopped) return;
+        const shot = w.name === 'render_page' ? ARTIFACTS['image:shot-3'] : null;
+        this.mock.emit(this.st, { type: 'tool.done', message_id: wmid, call_id: id, status: w.error ? 'failed' : 'done', is_error: !!w.error, ...(shot ? { output: { content: w.output.join('\n'), is_error: false, bytes: w.output.join('\n').length, images: [{ id: 'shot-3', name: 'shot-3.png', kind: 'image', bytes: shot.content.length, mime: shot.mime, preview: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(shot.content)}` }] } } : {}) });
+      }
+    }
+    this.mock.emit(this.st, { type: 'run.done', run_id: localId('run'), message_id: wmid, stats: statsFor([]), status: 'done' });
+    end(s.status, s.report, s.check);
+    this.phaseTps = 54;
   }
 
   private continueFrom(step: number, call: ToolCallPart, d: 'allow' | 'deny'): void {
@@ -1193,7 +1403,9 @@ class Runner {
   private finish(finish: TurnStats['finish']): void {
     if (this.metricsTimer) clearInterval(this.metricsTimer);
     this.metricsTimer = null;
-    const stats = statsFor(this.msg.parts, finish);
+    const base = statsFor(this.msg.parts, finish);
+    const w = this.workers;
+    const stats: TurnStats = w ? { ...base, prompt_tokens: base.prompt_tokens + w.prompt_tokens, completion_tokens: base.completion_tokens + w.completion_tokens, cached_tokens: base.cached_tokens + w.cached_tokens, workers: w } : base;
     this.st.seen = true;
     this.mock.emit(this.st, { type: 'run.done', run_id: this.run.id, message_id: this.msgId, stats, status: finish === 'stopped' ? 'stopped' : 'done' });
     this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
@@ -1208,6 +1420,7 @@ class Runner {
 
   stop(): void {
     this.stopped = true;
+    this.taskStop?.();
     if (this.pending) this.pending.resolve('deny');
     // the loop ends at its next await; a tool in flight ends here
     for (const p of this.msg.parts) if (p.type === 'tool_call' && (p.status === 'running' || p.status === 'asking')) this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: p.id, status: 'cancelled', is_error: false });
@@ -1222,6 +1435,15 @@ class Runner {
 }
 
 // ---- helpers ----------------------------------------------------------------------------------
+
+/** a seeded task's call in the main thread, its result what the main agent read */
+function oceanCall(t: Task): ToolCallPart {
+  return { type: 'tool_call', id: t.call_id, name: 'task', input: JSON.stringify({ title: t.title, brief: t.brief, expect: t.expect }, null, 2), output: { content: taskResult(t), is_error: false, bytes: 0 }, status: t.status === 'cancelled' ? 'cancelled' : 'done', started_at: t.started, ended_at: t.ended, permission: null, approved: 'auto', pane: null };
+}
+
+function workersOf(ts: Task[]): WorkerStats {
+  return { count: ts.length, prompt_tokens: ts.reduce((a, t) => a + t.prompt_tokens, 0), completion_tokens: ts.reduce((a, t) => a + t.completion_tokens, 0), cached_tokens: ts.reduce((a, t) => a + t.cached_tokens, 0), ms: ts.reduce((a, t) => a + (t.stats?.ms ?? 0), 0) };
+}
 
 function stepOutput(s: Extract<Step, { kind: 'tool' }>): ToolOutput {
   const content = s.output.join('\n');

@@ -5,7 +5,7 @@
 import { apiBase } from '../api/client';
 import { ResumableStream } from '../lib/sse';
 import { VersionConflict, type Artifact, type ChatBackend, type ListeningPort, type PreviewReport, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
-import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
+import type { Attachment, Capabilities, ChatEvent, ChatSettings, Conversation, ConversationSummary, ConversationUi, Folder, McpServer, McpServerDraft, PackageInfo, Preset, Prompt, SandboxFile, SandboxFileView, SandboxStatus, Task, ToolInfo, ToolPolicy, UserToolkit, WebSearchPatch, WebSearchTest, WebSearchView } from './types';
 
 const PREFIX = '/v1/chat-app';
 
@@ -187,7 +187,17 @@ export class RemoteChatBackend implements ChatBackend {
     await post(`/conversations/${enc(id)}/permissions/${enc(callId)}`, { decision, scope });
   }
   updateSettings(id: string, p: Partial<ChatSettings>) {
-    return patch<ChatSettings>(`/conversations/${enc(id)}/settings`, p);
+    return patch<ChatSettings & { reread_tokens?: number | null }>(`/conversations/${enc(id)}/settings`, p);
+  }
+  async tasks(id: string) {
+    // a chatd before VIS-E15 has no tasks route: a chat without tasks
+    return call<Task[] | { tasks: Task[] }>(`/conversations/${enc(id)}/tasks`).then((r) => (Array.isArray(r) ? r : r.tasks)).catch((e: unknown) => {
+      if (e instanceof ChatApiError && e.status === 404) return [];
+      throw e;
+    });
+  }
+  task(id: string, taskId: string) {
+    return call<Task & { seq?: string }>(`/conversations/${enc(id)}/tasks/${enc(taskId)}`);
   }
   updateDefaults(p: Partial<ChatSettings>) {
     return patch<ChatSettings>('/defaults', p);

@@ -58,6 +58,10 @@ export interface Conversation extends ConversationSummary {
   seq: string;
   /** the task's todo list (todo_write, an approved plan); the plan pane shows it */
   todos?: TodoItem[];
+  /** VIS-E15: the chat's tasks (GET .../tasks, then the task.* events); never in the main thread */
+  tasks?: Task[];
+  /** the newest `context.worker` this device saw: the Context panel's "Last worker" line */
+  last_worker?: WorkerContext | null;
 }
 
 export interface TodoItem {
@@ -224,13 +228,26 @@ export interface TurnStats {
   prefill_tps?: number | null;
   /** cloud backends only */
   cost_usd?: number | null;
-  /** an `interrupted` answer: why (VIS-197); absent on answers from before 0.11.2 */
-  interrupted?: 'limit' | 'sandbox' | 'engine' | 'restart' | string;
+  /** an `interrupted` answer: why (VIS-197); absent on answers from before 0.11.2; `task`: its
+   *  worker was interrupted (VIS-E15) */
+  interrupted?: 'limit' | 'sandbox' | 'engine' | 'restart' | 'task' | string;
+  /** VIS-E15: the turn's workers; prompt_tokens, completion_tokens and cached_tokens above count
+   *  the main agent and the workers together */
+  workers?: WorkerStats | null;
+}
+
+export interface WorkerStats {
+  count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  ms: number;
 }
 
 // ---- the run ----------------------------------------------------------------------------------
 
-export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing';
+/** task: a worker runs; `now` reads "Task 2: <title>, call 12 of 40: <the worker's now>" */
+export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing' | 'task';
 
 export interface Run {
   id: string;
@@ -338,6 +355,22 @@ export interface ContextReport {
     thinking: boolean;
     backend?: 'engine' | 'proxy' | 'cloud';
   };
+  /** VIS-E15: the running worker's own context; null when no worker runs */
+  worker?: WorkerContext | null;
+}
+
+/** a running worker's context, apart from the main agent's */
+export interface WorkerContext {
+  task_id: string;
+  n: number;
+  title: string;
+  used: number;
+  window: number;
+  /** system and tools, the brief, its steps, files */
+  split: { system?: number; tools?: number; brief?: number; steps?: number; files?: number } | null;
+  step: number;
+  max_steps: number;
+  cache: ContextReport['cache'] | null;
 }
 
 export interface Compaction {
@@ -428,6 +461,12 @@ export interface ChatSettings {
   /** SRV-532: a run that built or changed a page or app checks it in a browser before it ends;
    *  absent on an older server */
   verify?: boolean;
+  /** VIS-E15: a main agent plans and gives the file work to workers (the `task` tool); off by
+   *  default; a change applies at the next message. Absent on an older server = off */
+  agents?: boolean;
+  /** a worker's model calls (40) and the tasks a run may give (8) */
+  task_max_steps?: number;
+  task_max_per_run?: number;
 }
 /** ask: every tool asks unless its policy says always; auto (the default): what stays in the
  *  sandbox runs (commands, reads, workspace writes), the internet asks; yolo: nothing asks */
@@ -617,6 +656,65 @@ export interface WebSearchData {
   results: WebSearchResult[];
 }
 
+// ---- tasks (VIS-E15: a main agent with workers) -----------------------------------------------
+
+/** chatd's states; `partial` may carry its reason ("partial (step limit)") */
+export type TaskStatus = 'running' | 'done' | 'partial' | 'failed' | 'cancelled' | 'interrupted' | string;
+
+/** report.v1 as chatd parsed it; an item may come as its line of text */
+export interface TaskReport {
+  status: 'done' | 'partial' | 'failed' | string;
+  summary: string;
+  changed_files: ({ path: string; change: string } | string)[];
+  checks: ({ what: string; result: string; call_id?: string | null; shot?: string | null } | string)[];
+  expected: ({ item: string; answer: string } | string)[];
+  open_problems: string[];
+}
+
+export interface TaskStats {
+  steps?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+  ms?: number;
+}
+
+/** one worker's task: a row of GET .../tasks; GET .../tasks/{task_id} adds the transcript */
+export interface Task {
+  id: string;
+  conversation_id: string;
+  run_id: string;
+  /** the main agent's `task` call this card stands for */
+  call_id: string;
+  /** counts the chat's tasks from 1 */
+  n: number;
+  title: string;
+  brief: string;
+  expect: string;
+  status: TaskStatus;
+  steps: number;
+  max_steps: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  started: string;
+  ended: string | null;
+  report: TaskReport | null;
+  /** worker, worker-second (after the send-back) or chatd (built from the step trace) */
+  report_source: 'worker' | 'worker-second' | 'chatd' | string | null;
+  /** chatd's check, its lines as the main agent reads them */
+  check: string | null;
+  error: string | null;
+  stats?: TaskStats | null;
+  /** the worker's messages; undefined until loaded (a running task's grow from its part events) */
+  messages?: Message[];
+  /** the live figures from task.phase and task.metrics */
+  phase?: RunPhase | null;
+  now?: string | null;
+  tool?: Run['tool'];
+  decode_tps?: number | null;
+}
+
 // ---- the sandbox ------------------------------------------------------------------------------
 
 /** a call the sandbox could not run: it did not start within its wait (short of memory, or the
@@ -693,10 +791,11 @@ export type ChatEvent =
   | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; ttft_ms?: number | null; prefill?: Run['prefill'] }
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
-  | { type: 'message.created'; message: Message }
-  | { type: 'part.added'; message_id: string; part: Part }
-  | { type: 'part.delta'; message_id: string; index: number; delta: string; field?: 'text' | 'input' }
-  | { type: 'part.done'; message_id: string; index: number; tokens?: number | null }
+  | { type: 'message.created'; message: Message; task_id?: string }
+  /** `task_id`: a worker's part, for its Task card only (VIS-E15) */
+  | { type: 'part.added'; message_id: string; part: Part; task_id?: string }
+  | { type: 'part.delta'; message_id: string; index: number; delta: string; field?: 'text' | 'input'; task_id?: string }
+  | { type: 'part.done'; message_id: string; index: number; tokens?: number | null; task_id?: string }
   | { type: 'tool.asking'; message_id: string; call_id: string; summary: string; risk?: string; suggested_rule?: { tool: string; match?: string; matches?: string[] } }
   | { type: 'tool.started'; message_id: string; call_id: string; pane?: PaneRef | null; approved?: ToolApproval | null }
   | { type: 'tool.output'; message_id: string; call_id: string; delta: string }
@@ -714,7 +813,12 @@ export type ChatEvent =
   | { type: 'sandbox.changed'; sandbox: SandboxStatus }
   | { type: 'usage.changed'; usage: ConversationUsage }
   | { type: 'settings.changed'; settings: ChatSettings }
-  | { type: 'todos.changed'; todos: TodoItem[] };
+  | { type: 'todos.changed'; todos: TodoItem[] }
+  // VIS-E15: a worker's task, on the parent conversation's stream
+  | { type: 'task.started'; run_id: string; task: Task }
+  | { type: 'task.phase'; task_id: string; phase: RunPhase; now: string; step: number; max_steps: number; tool?: Run['tool'] }
+  | { type: 'task.metrics'; task_id: string; prompt_tokens: number; completion_tokens: number; decode_tps: number | null }
+  | { type: 'task.done'; task_id: string; status: TaskStatus; report: TaskReport | null; check: string | null; stats?: TaskStats | null };
 
 export interface StampedEvent {
   id: string;

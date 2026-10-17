@@ -35,7 +35,7 @@ export function isHarnessCall(t: Pick<ToolCallPart, 'harness'>): boolean {
   return t.harness === 'verify';
 }
 
-/** the Now line's figure acts while a tool or the verify check runs */
+/** the Now line's figure acts while a tool, the verify check or a worker (VIS-E15) runs */
 export function actingPhase(phase: RunPhase): boolean {
-  return phase === 'tool' || phase === 'verifying';
+  return phase === 'tool' || phase === 'verifying' || phase === 'task';
 }

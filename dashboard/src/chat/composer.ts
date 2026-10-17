@@ -1,7 +1,8 @@
 // <qse-chat-composer>: the text area and one row of controls. Left: attach, the model and pack
 // pill, the effort pill, the tools pill, each with a small popover. Right: Send, or Stop while a
 // run is on; Enter then queues the message. A slash at the start opens the command list from the
-// server's capabilities and the saved prompts. Files drop anywhere on the thread.
+// server's capabilities and the saved prompts. Files drop anywhere on the thread. The Agents chip
+// (VIS-219) switches a main agent with workers on or off; in a chat with messages it asks first.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -13,6 +14,7 @@ import { effortsFor, effortWord, nearestEffort, promptArgs, localId, toolLabel }
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { chatProvider, providerWord } from './websearch';
 import { attachmentWords } from './context-words';
+import { AGENTS_HINT, agentsAsk } from './tasks';
 
 const MAX_PREVIEW_BYTES = 400_000;
 
@@ -31,11 +33,15 @@ export class QseChatComposer extends LightElement {
   /** uploads a file as soon as it is added, so its chip shows the tokens and whether it goes
    *  as a file (SRV-487, VIS-169); without it the view uploads at the send */
   @property({ attribute: false }) upload: ((f: File) => Promise<Attachment>) | null = null;
+  /** the chat's context now, what a switch of Agents re-reads; null: no messages, nothing to ask */
+  @property({ attribute: false }) rereadTokens: number | null = null;
+  /** what the last switch of Agents did (the view's, from chatd's answer) */
+  @property({ attribute: false }) agentsNote: string | null = null;
   @state() private text = '';
   @state() private files: Attachment[] = [];
   /** the File behind each attachment chip, for the upload before a send (CONTRACT 8, request 9) */
   private blobs = new Map<string, File>();
-  @state() private pop: 'none' | 'model' | 'effort' | 'tools' | 'mode' = 'none';
+  @state() private pop: 'none' | 'model' | 'effort' | 'tools' | 'mode' | 'agents' = 'none';
   @state() private slash: { items: SlashCommand[]; index: number } | null = null;
   @state() private dragging = false;
   @state() private enterSends = !(typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
@@ -267,6 +273,7 @@ export class QseChatComposer extends LightElement {
         if (e.dataTransfer?.files.length) void this.addFiles(e.dataTransfer.files);
       }}>
       ${this.slash ? this.renderSlash() : nothing}
+      ${this.agentsNote ? html`<p class="ch-agents-note small" role="status">${this.agentsNote}<button type="button" class="btn btn-ghost btn-sm" aria-label="Dismiss" @click=${() => this.fire('ch-agents-note-close')}>${icon('x')}</button></p>` : nothing}
       ${this.files.length ? html`<div class="ch-attachments ch-attachments-draft">${this.files.map((a) => html`<span class="ch-chip">${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn warn-ink">as a file</span>` : nothing}<button type="button" class="ch-chip-x" aria-label=${`Remove ${a.name}`} @click=${() => (this.files = this.files.filter((x) => x.id !== a.id))}>${icon('x')}</button></span>`)}</div>${this.files.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn warn-ink small" role="status">${w}</p>`)}` : nothing}
       <label class="sr-only" for="ch-input">Message</label>
       <textarea id="ch-input" rows="1" placeholder=${this.running ? (this.phone ? 'Steer the run' : 'Steer: goes in after the current step') : this.phone ? 'Message TandemLLM' : 'Message TandemLLM, or / for a command'} .value=${this.text} ?disabled=${this.disabled} @input=${this.onInput} @keydown=${this.onKey} @paste=${this.onPaste}></textarea>
@@ -292,6 +299,10 @@ export class QseChatComposer extends LightElement {
           <span class="ch-pillwrap">
             <button type="button" class="ch-pill ch-pill-mode ${modeOf(s) === 'yolo' ? 'is-yolo' : ''}" aria-haspopup="menu" aria-expanded=${this.pop === 'mode'} ?disabled=${!s} title="permissions: who allows a tool call" @click=${() => (this.pop = this.pop === 'mode' ? 'none' : 'mode')}><span class="ch-pill-main">${modeWord(modeOf(s))}</span></button>
             ${this.pop === 'mode' && s ? this.renderModePop(s) : nothing}
+          </span>
+          <span class="ch-pillwrap">
+            <button type="button" class="ch-pill ch-pill-agents ${s?.agents ? 'is-on' : ''}" aria-pressed=${!!s?.agents} ?disabled=${!s || model?.capabilities?.tools === false} title=${`Agents: ${AGENTS_HINT.toLowerCase()}`} @click=${() => s && this.toggleAgents(s)}><span class="ch-pill-main">agents</span>${s?.agents ? html`<span class="ch-pill-sub">workers</span>` : nothing}</button>
+            ${this.pop === 'agents' && s ? this.renderAgentsPop(s) : nothing}
           </span>
           <button type="button" class="ch-pill ${s?.plan_mode ? 'is-on' : ''}" aria-pressed=${!!s?.plan_mode} ?disabled=${!s || model?.capabilities?.tools === false} title="Plan mode: the model reads and writes a plan, changes nothing until you approve it" @click=${() => s && this.patch({ plan_mode: !s.plan_mode })}><span class="ch-pill-main">plan</span>${s?.plan_mode ? html`<span class="ch-pill-sub">reads only</span>` : nothing}</button>
         </span>
@@ -336,6 +347,27 @@ export class QseChatComposer extends LightElement {
     return html`<div class="ch-pop" role="menu">
       <div class="ch-pop-group"><div class="ch-pop-title">Before a tool runs</div>
         ${PERMISSION_MODES.map((m) => html`<button type="button" role="menuitemradio" aria-checked=${cur === m} class="ch-pop-item ${cur === m ? 'is-on' : ''} ${m === 'yolo' ? 'is-yolo' : ''}" @click=${() => (this.patch({ permission_mode: m }), (this.pop = 'none'))}><span class="ch-pop-name">${modeWord(m)}</span><span class="ch-pop-desc">${modeDesc(m)}</span></button>`)}
+      </div>
+    </div>`;
+  }
+
+  /** VIS-219: a new chat switches at once; a chat with messages asks first, since the switch
+   *  changes the prompt head and the next message reads the chat once more */
+  private toggleAgents(s: ChatSettings): void {
+    if (this.rereadTokens == null) {
+      this.patch({ agents: !s.agents });
+      return;
+    }
+    this.pop = this.pop === 'agents' ? 'none' : 'agents';
+  }
+
+  private renderAgentsPop(s: ChatSettings): TemplateResult {
+    const on = !s.agents;
+    return html`<div class="ch-pop ch-pop-agents" role="dialog" aria-label=${on ? 'Turn Agents on' : 'Turn Agents off'}>
+      <div class="ch-pop-group"><div class="ch-pop-title">${on ? 'Agents on' : 'Agents off'}</div>
+        <p class="ch-pop-desc">${on ? `${AGENTS_HINT}. Only their reports enter this chat's context.` : 'One agent again: it writes the files itself.'}</p>
+        <p class="ch-pop-text" data-agents-ask>${agentsAsk(this.rereadTokens ?? 0, this.running)}</p>
+        <div class="ch-pop-actions"><button type="button" class="btn btn-ghost btn-sm" @click=${() => (this.pop = 'none')}>Cancel</button><button type="button" class="btn btn-primary btn-sm" @click=${() => (this.patch({ agents: on }), (this.pop = 'none'))}>${on ? 'Turn on' : 'Turn off'}</button></div>
       </div>
     </div>`;
   }

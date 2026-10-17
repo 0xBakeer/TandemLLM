@@ -5,7 +5,7 @@ import type { TurnStats } from './types';
 
 export interface TurnFigure {
   /** the reading's key: the line hides some on a phone by it */
-  k: 'finish' | 'tps' | 'tok' | 'ttft' | 'round' | 'acc' | 'cost';
+  k: 'finish' | 'tps' | 'tok' | 'ttft' | 'round' | 'acc' | 'cost' | 'main' | 'workers' | 'total';
   /** the number, set a step brighter than its words */
   n: string;
   w: string;
@@ -29,5 +29,18 @@ export function figsParts(s: TurnStats): TurnFigure[] {
   // a cloud model's turn at the proxy's prices
   if (s.cost_usd != null) out.push({ k: 'cost', n: money(Math.round(s.cost_usd * 1e6)), w: '' });
   return out;
+}
+
+/** VIS-E15: a turn that gave tasks reads its prompt tokens apart and together, "main 31,204 ·
+ *  workers 2 (96,410) · total 127,614 prompt tokens" (the turn's totals count both), on a row of
+ *  its own under the figures line, so none of it is cut. A turn without workers has none. */
+export function workerFigures(s: Pick<TurnStats, 'prompt_tokens' | 'workers'>): TurnFigure[] {
+  const w = s.workers;
+  if (!w?.count) return [];
+  return [
+    { k: 'main', n: exact(Math.max(0, s.prompt_tokens - w.prompt_tokens)), w: 'main ', pre: true },
+    { k: 'workers', n: exact(w.count), w: 'workers ', pre: true, sub: `(${exact(w.prompt_tokens)})` },
+    { k: 'total', n: exact(s.prompt_tokens), w: 'total ', pre: true, sub: 'prompt tokens' },
+  ];
 }
 

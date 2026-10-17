@@ -16,6 +16,7 @@ import { draftErrors, draftOf, draftPatch, hostOf, LANGUAGES, MAX_RESULTS, overr
 import { EFFORTS, effortWord, valveValues } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { NOTIFY_WORDS, notifyPrefs, notifyState, setNotifyPrefs, type NotifyKind } from './notify';
+import { AGENTS_HINT, agentsAsk } from './tasks';
 
 /** a stored secret's field (an Open WebUI valve, the SearXNG auth value): masked, never prefilled */
 const SECRET_INPUT = 'password';
@@ -54,6 +55,8 @@ export class QseChatSettings extends LightElement {
   @state() private editPrompt: Partial<Prompt> | null = null;
   @state() private editPreset: Partial<Preset> | null = null;
   @state() private confirmReset = false;
+  /** VIS-219: this chat's Agents switch waits for its confirmation */
+  @state() private confirmAgents = false;
   @state() private notice: string | null = null;
   /** web search: the stored settings (null: an older server without the routes), the form */
   @state() private ws: WebSearchView | null = null;
@@ -130,6 +133,7 @@ export class QseChatSettings extends LightElement {
     return html`<h3 class="ch-settings-h">Tools</h3>
       <p class="ch-settings-lead">What the model may call, and when it has to ask. These are the defaults for new chats; a chat's own choices sit in its composer.</p>
       ${this.renderMode()}
+      ${this.renderAgents()}
       <label class="field field-search ch-settings-search"><span class="sr-only">Search tools</span>${icon('search')}<input type="search" placeholder="Search tools" .value=${this.filter} @input=${(e: Event) => (this.filter = (e.target as HTMLInputElement).value)} /></label>
       <ul class="ch-tool-list">
         ${list.map(
@@ -223,6 +227,31 @@ export class QseChatSettings extends LightElement {
           <span class="ch-mode-name">${modeWord(m)}${m === 'auto' ? html` <span class="muted small">default</span>` : nothing}</span>
           <span class="ch-mode-desc">${modeDesc(m)}</span>
         </label>`)}
+      </div>`;
+  }
+
+  /** VIS-219: Agents mode for new chats, and for the open chat (which asks first once it has
+   *  messages: the next message reads the chat once more) */
+  private renderAgents(): TemplateResult {
+    const c = this.conv;
+    const def = !!this.caps?.defaults.agents;
+    const on = !!c?.settings.agents;
+    const flip = () => {
+      if (c?.messages.length && !this.confirmAgents) {
+        this.confirmAgents = true;
+        return;
+      }
+      this.confirmAgents = false;
+      this.fire('ch-settings-patch', { patch: { agents: !on } });
+    };
+    return html`<h4 class="ch-settings-h4">Agents</h4>
+      <p class="ch-settings-lead">${AGENTS_HINT}: the main agent talks with you and gives each job that writes files to a worker with a fresh context. Only the worker's report and chatd's check of it enter the chat's context.</p>
+      <div class="ch-agents-rows">
+        <label class="switch ch-agents-row" data-agents="default"><input type="checkbox" .checked=${def} ?disabled=${!this.caps} @change=${(e: Event) => this.fire('ch-defaults-patch', { patch: { agents: (e.target as HTMLInputElement).checked } })} /><span>Agents on for new chats</span></label>
+        ${c
+          ? html`<label class="switch ch-agents-row" data-agents="chat"><input type="checkbox" .checked=${on} @change=${(e: Event) => ((e.target as HTMLInputElement).checked = on, flip())} /><span>Agents in "${c.title}"</span></label>
+            ${this.confirmAgents ? html`<span class="ch-confirm" data-agents-ask><span class="small">${agentsAsk(c.context.used, !!c.run)}</span><button type="button" class="btn btn-ghost btn-sm" @click=${() => (this.confirmAgents = false)}>Cancel</button><button type="button" class="btn btn-sm btn-primary" @click=${flip}>${on ? 'Turn off' : 'Turn on'}</button></span>` : nothing}`
+          : nothing}
       </div>`;
   }
 
