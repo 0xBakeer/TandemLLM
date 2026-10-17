@@ -849,7 +849,8 @@ def _holder_name() -> str:
 
 
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
-                   why: dict | None = None) -> int | None:
+                   why: dict | None = None, stay: bool = False,
+                   parent: str | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images (side slots are text only),
     or one no side slot is long enough for. A request that continues slot 0's resident
@@ -857,7 +858,12 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     hold) gets its window too, with `why["slot0_first"]`: the handler tries slot 0 first, for
     SIDE_SLOT0_WAIT_S (0.8.2). Host work only: the ids are rendered on the CPU, before any lock.
     `why`, when given, gets the numbers the choice was made on and the rendered ids (`ids`, for
-    `_par_view_keep`)."""
+    `_par_view_keep`).
+
+    ENG-371: `stay`, an agent's worker (`_worker_of`), is never a guest of slot 0's conversation;
+    a new one takes a free side slot first when slot 0 holds its `parent`, so the parent stays in
+    place, and it never waits SIDE_NEW_WAIT_S for one. A request whose conversation slot 0's park
+    holds (a parent whose worker took slot 0) tries slot 0 first, as one on the NVMe does."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
@@ -906,7 +912,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
             else:
-                if SIDE_GUESTS == "on" and _guest_of_slot0(res, len(ids), rc, chunk):
+                if SIDE_GUESTS == "on" and not stay and _guest_of_slot0(res, len(ids), rc, chunk):
                     why["guest"] = valid  # FX5: an idle side slot first (the handler's `_take`)
                 # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
                 # comes back through slot 0, whose prefill reads the spill; a side slot has none
@@ -926,6 +932,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                             pool.stats["spill_waits"] = pool.stats.get("spill_waits", 0) + 1
                     elif got is not None:
                         why["spill_head"] = int(got[1])
+                if not why.get("wait") and not why.get("guest") and res.park_rows:
+                    # ENG-371: slot 0's park holds this conversation past its first user message
+                    bk = res.park_offer(ids, rc, len(ids) - 1)
+                    if bk and (conv is None or bk >= conv):
+                        why.update(wait="park", park=int(bk))
         except Exception:                                          # noqa: BLE001
             pass
     if lane and not why.get("guest"):
@@ -987,12 +998,15 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # and the 140,191-token pagoda run went to the NVMe)
             bound = (valid + margin + SIDE_MIN_ROOM > longest
                      or bool(res.end is not None and res.end.get("mm")))
-            stale = (_slot0_stale() if other and valid >= 2 * chunk and bound else None)
+            # ENG-371: a worker beside its own parent: the parent stays on slot 0
+            mine = stay and parent is not None and getattr(res, "owner", None) == parent
+            stale = (_slot0_stale() if other and valid >= 2 * chunk and bound and not mine
+                     else None)
             if stale is not None:
                 why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
-            elif other and valid >= 2 * chunk and bound:
+            elif other and valid >= 2 * chunk and (bound or mine):
                 why["prefer_side"] = valid
-                if len(ids) <= SIDE_NEW_SHORT:
+                if len(ids) <= SIDE_NEW_SHORT and not stay:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
                     # takes slot 0 and sends the long conversation to the NVMe
                     why["prefer_side_wait"] = True
@@ -1410,7 +1424,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     sampler: "Sampler | None" = None, lpr: "lp_mod.Recorder | None" = None,
                     on_prefill=None, mm=None, sup=None, compacting: bool = False, probe=None,
                     disk_tag: dict | None = None, pos_delta: int = 0, end_mm: bool = False,
-                    scratch: bool = False):
+                    scratch: bool = False, stay: bool = False):
     """Yield token ids as they are decided, speculation included.
 
     Same loop as `engine.spec.generate_spec`, rewritten as a generator so a token reaches the
@@ -1526,7 +1540,7 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             on_chunk=on_chunk, info=where,
             key_ids=mm.key_ids if mm is not None else None, mem=STATE.get("mem"),
             compacting=compacting, disk=_slot_disk(), disk_tag=disk_tag,
-            end_mm=end_mm, scratch=scratch,
+            end_mm=end_mm, scratch=scratch, stay=stay,
             # FX5: the highest row this generation can write, for a guest's stash; the monitor's
             # hidden tokens are not in `max_new`
             reach=len(ctx) + int(max_new) + (GUEST_HIDDEN_ROWS if sup is not None else 0))
@@ -3217,6 +3231,92 @@ def _session_header(headers) -> str | None:
     except Exception:                                              # noqa: BLE001
         v = None
     return v[:128] if isinstance(v, str) and v else None
+
+
+#: ENG-371: the sessions an agent's worker names as its parent (`X-Tandem-Parent-Session`,
+#: chatd/render.py `headers`), each with the time of its worker's last request. The parent comes
+#: back when its worker ends, so while it waits its rows go to the NVMe rather than being dropped:
+#: from a side slot another session's prefill takes (`_keep_parent`), and from slot 0's park when
+#: the memory policy gives the park back (`_shed_park`). An entry lasts PARENT_KEEP_S past its
+#: worker's last request.
+PARENTS: dict = {}
+PARENT_KEEP_S = 600.0
+
+
+def _worker_of(headers) -> tuple[bool, str | None]:
+    """ENG-371: whether the request is an agent's worker (`X-Tandem-Worker: 1`, or a parent
+    session named), and the parent's session key. A worker's session comes back at its next call,
+    so the caches never serve it as a guest (engine/cache.py `ResidentPrefix.begin`, `stay`)."""
+    try:
+        w = (headers.get("X-Tandem-Worker") or "").strip() == "1"
+        p = headers.get("X-Tandem-Parent-Session")
+    except Exception:                                              # noqa: BLE001
+        return False, None
+    p = p[:128] if isinstance(p, str) and p else None
+    return w or p is not None, p
+
+
+def _note_parent(parent: str | None, now: float | None = None) -> None:
+    """A worker's request: its parent waits for it from now (stale entries go)."""
+    if not parent:
+        return
+    now = time.monotonic() if now is None else now
+    for k in [k for k, t in list(PARENTS.items()) if now - t >= PARENT_KEEP_S]:
+        PARENTS.pop(k, None)
+    PARENTS[parent] = now
+
+
+def _waiting_parent(owner, now: float | None = None) -> bool:
+    """Is `owner` (a cache's session key) a parent whose worker ran within PARENT_KEEP_S?"""
+    t = PARENTS.get(owner) if owner else None
+    return t is not None and (time.monotonic() if now is None else now) - t < PARENT_KEEP_S
+
+
+def _keep_parent(res, eng, drafter) -> None:
+    """ENG-371 (a side slot's `ResidentPrefix.keeper`): before another session's prefill cuts a
+    side slot's rows, a parent's go to the NVMe (a side slot has no park and no spill of its own),
+    as a planned stop writes them (`_drain_side_slots`). Its return reads them back on slot 0
+    (`_par_side_need`'s `spill` wait) and prefills its tail. Live 2026-10-17 23:39: a worker's
+    second call took the side slot its parent's 15,066 rows were on, and the parent's return
+    re-read 11,039 of 16,159 tokens."""
+    sp = dict.get(STATE, "spill")
+    if (sp is None or not _waiting_parent(res.owner) or res._stash is not None
+            or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
+        return
+    with torch.no_grad():
+        info = sp.save_resident(res, eng, drafter, "switch")
+    slot = slots_mod.current()
+    where = f"slot {slot.index}" if slot is not None else "slot 0"
+    if info:
+        print(f"[spill] parent {res.owner} on {where}: {info['tokens']} tokens to the NVMe before "
+              f"another session's prefill, {info['ms']:.0f} ms", flush=True)
+    else:
+        print(f"[spill] parent {res.owner} on {where}: not written, its rows go", flush=True)
+
+
+def _shed_park(res, safe: bool = False) -> int:
+    """The memory policy's `park` level. ENG-371: a parked parent whose worker runs is written to
+    the NVMe first (`ResidentPrefix._spill_park`) on slot 0's own thread, where nothing else
+    writes slot 0's rows below the park; on a side slot's thread it goes as before. Live 2026-10-17
+    23:05: the gate gave a parked 15,417-token parent back at the ceiling, unwritten, and its
+    return re-read 11,895 of 17,015 tokens."""
+    if res.park_rows and _waiting_parent(res.park_owner) and slots_mod.current() is None:
+        eng, drafter = dict.get(STATE, "engine"), dict.get(STATE, "drafter")
+        try:
+            with torch.no_grad():
+                if res._stash is not None:
+                    disk = dict.get(STATE, "disk_cache")
+                    if disk is not None:
+                        disk.fence(0)
+                    res.settle_guest(eng)
+                owner, rows = res.park_owner, res.park_base + res.park_rows
+                ok = res._spill_park(eng, drafter)
+            print(f"[spill] parked parent {owner}: {rows} tokens "
+                  f"{'to the NVMe' if ok else 'not written'} before the memory policy takes the "
+                  f"park", flush=True)
+        except Exception:                                          # noqa: BLE001
+            logbuf.print_exc()
+    return res.shed_park(safe)
 
 
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
@@ -6898,6 +6998,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # the caches' session key: the body's conversation, else opencode's x-session-id (OPS-47)
         conv_id = conversation_id(body, self.headers) or _session_header(self.headers)
+        # ENG-371: an agent's worker (its session comes back at its next call) and its parent
+        stay, parent = _worker_of(self.headers)
+        _note_parent(parent)
         # SRV-349: the prompt's system and tool tokens for `usage.tandem`, rendered here on the
         # host (before the queue), once per head
         head_parts = _head_parts(body, client) if chat else None
@@ -7203,7 +7306,7 @@ class Handler(BaseHTTPRequestHandler):
         par = dict.get(STATE, "pool")
         par_why: dict = {}
         side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
-                                    par_why)
+                                    par_why, stay=stay, parent=parent)
                      if par is not None else None)
         side = None
         me = {"rank": rank, "t": time.monotonic(),
@@ -7403,7 +7506,7 @@ class Handler(BaseHTTPRequestHandler):
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "home", "home_share", "home_wait",
+                                                          "park", "home", "home_share", "home_wait",
                                                           "hop_from", "prefer_side", "slot0_stale",
                                                           "new_wait", "spill", "spill_head",
                                                           "slot0_wait")
@@ -7901,6 +8004,8 @@ class Handler(BaseHTTPRequestHandler):
                     kw["disk_tag"] = disk_tag
                 if comp is not None:
                     kw["pos_delta"], kw["end_mm"] = comp["record"].delta, True
+                if stay:
+                    kw["stay"] = True                  # ENG-371: never a guest of the resident
                 return rec.track(generate_stream(prompt, max_new, eos, budget_state, conv_id,
                                                  deadline, pen=pen, pstop=guard, sampler=samp,
                                                  on_prefill=watch, **kw))
@@ -10086,7 +10191,7 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
         mem.register("anchors", resident.shed_anchors)
         mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)
-        mem.register("park", resident.shed_park)
+        mem.register("park", lambda safe=False: _shed_park(resident, safe))
         mem.register("pin", resident.shed_pin)
     suffix = None
     if a.suffix_store:
@@ -10262,6 +10367,7 @@ def _side_resident(a, tok):
                                guest_max=a.resident_guest_max, guest_frac=1.0, pin_bytes=0,
                                park_bytes=0, mem=mem, end=res0.end_on)
     res.glue = glue_ids(tok)
+    res.keeper = _keep_parent             # ENG-371: a parent's rows to the NVMe before they go
     if mem is not None:
         for level, fn in (("anchors", res.shed_anchors), ("end", res.shed_end),
                           ("stash", res.shed_stash)):

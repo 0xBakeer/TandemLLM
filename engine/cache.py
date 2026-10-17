@@ -989,7 +989,10 @@ class ResidentPrefix:
     the resident prompt and `guest_max` tokens is a guest: before its prefill the rows it can
     reach are copied aside (up to `stash_bytes`), and they are copied back at the start of the
     next request. If the guest ran further than the stash, the resident prefix is cut to what
-    the stash covered.
+    the stash covered. A request whose session comes back (`stay`: an agent's worker, ENG-371) is
+    never a guest, whatever its length: its next call continues its own rows, and as a guest
+    they were put back under the resident's after every call (2026-10-17 23:38: a worker's first
+    three calls, 2,532, 5,764 and 7,925 tokens beside a 24,200-token chat, each read from 0).
 
     MEMORY. `budget_bytes` bounds the anchors (27 at the default 4 GiB) and `stash_bytes` the
     guest stash (2 GiB = ~20k rows at 104 kB a row). Both are allocated once and reused: an
@@ -1142,6 +1145,10 @@ class ResidentPrefix:
         # the session spill (engine/spill.py): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
+        # ENG-371: (res, eng, drafter) -> None, for a prefix with no park and no spill of its own
+        # (a side slot's): another session's rows are about to be cut; the server writes them to
+        # the NVMe first when their session is a parent whose worker runs
+        self.keeper = None
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -1328,7 +1335,7 @@ class ResidentPrefix:
 
     def begin(self, eng, drafter, ids, start: int, c: int, kind: str | None,
               session: str | None = None, compacting: bool = False,
-              scratch: bool = False, reach: int | None = None) -> None:
+              scratch: bool = False, reach: int | None = None, stay: bool = False) -> None:
         """What the rows will hold once this request's prefill has run.
 
         `start` is where the prefill resumes (a resident anchor, a store entry, or 0) and `c` how
@@ -1340,7 +1347,8 @@ class ResidentPrefix:
         of them; the caller puts the resident prompt's bookkeeping back afterwards. `reach`: the
         prompt's length plus the request's token budget, the highest row its generation can
         commit; a guest's stash then holds the rows up to there (and two slack margins), not as
-        many as the stash budget holds (FX5).
+        many as the stash budget holds (FX5). `stay`: the session comes back (ENG-371), so this
+        request is never a guest.
         """
         self.capturing = False
         if kind == "session":
@@ -1353,7 +1361,7 @@ class ResidentPrefix:
             self.owner = session
             return
         n = len(ids)
-        if self.is_guest(n, c):
+        if not stay and self.is_guest(n, c):
             self._stash_for(eng, drafter, min(start, (c // self.chunk) * self.chunk), reach)
             return
         if self.valid and c < self.valid:
@@ -1370,6 +1378,12 @@ class ResidentPrefix:
         if (self.park_budget and self.valid > keep and not compacting and other
                 and not spilled):
             self._park(eng, drafter, keep)
+        if (self.keeper is not None and self.valid > keep and not compacting and other
+                and not spilled and self.stats["parks"] == parked):
+            try:
+                self.keeper(self, eng, drafter)
+            except Exception:                                      # noqa: BLE001
+                pass
         # A parked prompt keeps its rows above `keep`, and its head below `keep` stays in place
         # (the new prompt shares it): pinning that head too held the same session twice -- 3.8 GiB
         # of pin beside 4 GiB of park in the 2026-10-01 gate. The pin stays the compaction's (and
@@ -2275,7 +2289,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
             key_ids: list[int] | None = None, mem: "Budget | None" = None,
             compacting: bool = False, checkpoint_upto: int | None = None,
             disk=None, disk_tag: dict | None = None, end_mm: bool = False,
-            scratch: bool = False, reach: int | None = None):
+            scratch: bool = False, reach: int | None = None, stay: bool = False):
     """Bring the engine to `len(ids)` and return the logits of the last position.
 
     Returns `(logits, reused, forwarded)`. `reused` is how many prompt tokens came out of the
@@ -2326,6 +2340,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     `end_mm`: this prompt may resume at an end anchor kept after images
     (`ResidentPrefix.keep_end`); the caller has set the engine's rotary offset to that end's.
     `scratch`: the rows written are nobody's (`ResidentPrefix.begin`); no prefix snapshot is taken.
+    `stay`: the session comes back (an agent's worker, ENG-371): never a guest of the resident.
     """
     n = len(ids)
     if scratch:
@@ -2410,7 +2425,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
     if res is not None:
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
-                  scratch=scratch, reach=reach)
+                  scratch=scratch, reach=reach, stay=stay)
         if kind in ("prefix", "disk"):
             # the restore writes over the rows below it. dropped after `begin`, whose
             # eviction writes the conversation to the NVMe with its end anchor first; dropped
