@@ -8,11 +8,14 @@
 # ~/gate-setup-<utc>, spare ports, QSE_CHATD=off, the CPU fake engine instead of a model, a few KB of
 # stand-in weights instead of a download):
 #
-#   A  install --setup, setup mode answers; the Setup Guide's apply through its API (the browser does
-#      it at 390 px in the Playwright container: the restart card shows while the fake engine loads,
-#      the finished screen with Start chatting within 10 s of the engine answering; screenshots);
-#      the job ends done, /health names the profile, a chat answers; then a second profile's weights
-#      are removed through POST /v1/setup/remove and the re-download line is written
+#   A  install --setup, setup mode answers; the Setup Guide's apply through its API, followed by
+#      WebKit at 390 px in the Playwright container: the first try stops at the preflight (this script
+#      breaks run/ops/stop.sh and puts it back once the job failed), the failed screen says so in
+#      plain words and Copy diagnostics works; Retry runs again without a download; the restart card
+#      shows while the fake engine loads, the finished screen with Start chatting within 10 s of the
+#      engine answering; the weights step's Remove button removes a second profile's weights; then
+#      the job is done, /health names the profile, a chat answers, the re-download line is written,
+#      and removing the running profile is refused (screenshots of each screen)
 #   B  the same install with the execute bit stripped from src/ops/start.sh, run/ops/start.sh,
 #      run/ops/stop.sh and run/ops/use-profile.sh first: the apply must still end done
 #
@@ -274,12 +277,30 @@ if install_box a "$PORT" && start_setup_mode; then
         DU=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
         [ -d "$PW/node_modules/@playwright/test" ] || cmd docker run --rm "${DU[@]}" --network host -v "$PW:/work" -w /work \
             mcr.microsoft.com/playwright:v1.63.0-noble npm install --no-save --no-audit --no-fund @playwright/test@1.63.0
+        # the first try must fail at the preflight: a stop.sh that does not parse (VIS-213); put back
+        # once the job says failed, which the spec waits for (shots/fixed.txt) before its Retry
+        cp -p "$DIR/run/ops/stop.sh" "$GATE/stop.sh.good"
+        printf '\nif then fi (\n' >> "$DIR/run/ops/stop.sh"
+        (
+            exec 0</dev/null >/dev/null 2>&1
+            for _ in $(seq 1 600); do
+                J="$(cat "$OUT/shots/first-job-id.txt" 2>/dev/null)"
+                if [ -n "$J" ] && [ "$(job_state "$J")" = failed ]; then
+                    cp -p "$GATE/stop.sh.good" "$DIR/run/ops/stop.sh" && echo fixed > "$OUT/shots/fixed.txt"
+                    exit 0
+                fi
+                sleep 1
+            done
+        ) &
+        PIDS_TO_STOP+=("$!")
         cmd docker run --rm "${DU[@]}" --network host --ipc=host -v "$PW:/work" -v "$OUT/shots:/shots" -w /work \
             -e GATE_URL="http://127.0.0.1:$PORT" -e GATE_SELECTION="$(selection)" -e GATE_SHOTS=/shots \
             mcr.microsoft.com/playwright:v1.63.0-noble npx playwright test -c playwright.gate.config.ts
         PWRC=$?
-        check "the browser at 390 px: the restart card during the restart, the finished screen within 10 s" test "$PWRC" = 0
+        check "the browser at 390 px: a failed try in plain words, Copy diagnostics, Retry without a download, the restart card, the finished screen within 10 s, Remove with its confirmation" test "$PWRC" = 0
         JOB="$(cat "$OUT/shots/job-id.txt" 2>/dev/null)"
+        check "the first try failed at the preflight and nothing stopped" bash -c \
+            "curl -s -m 5 'http://127.0.0.1:$PORT/v1/setup/jobs/$(cat "$OUT/shots/first-job-id.txt" 2>/dev/null)?format=json' | grep -q '\"failed_step\": \"preflight\"'"
     else
         api POST /v1/setup/apply "{\"selection\": $(selection)}" > "$GATE/apply.json"
         JOB="$("$GATEPY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["job"]["id"])' "$GATE/apply.json" 2>/dev/null)"
@@ -290,10 +311,12 @@ if install_box a "$PORT" && start_setup_mode; then
         say "job $JOB: $STATE"
         verify_live "$STATE"
         api GET "/v1/setup/jobs/$JOB?format=json" >> "$REPORT"
-        # remove the other profile's weights
-        R="$(api POST /v1/setup/remove '{"profiles": ["exl3-3.0"], "confirm": true}')"
-        echo "$R" >> "$REPORT"
-        check "remove exl3-3.0: 200 and its folder gone" bash -c "[ '$CODE' = 200 ] && [ ! -e '$H/exl3-quants/3.0' ]"
+        # the other profile's weights: removed by the browser's Remove button, else through the API
+        if [ "$BROWSER" != 1 ]; then
+            R="$(api POST /v1/setup/remove '{"profiles": ["exl3-3.0"], "confirm": true}')"
+            echo "$R" >> "$REPORT"
+        fi
+        check "exl3-3.0 removed: its folder is gone" test ! -e "$H/exl3-quants/3.0"
         check "the re-download line is written" grep -q "exl3-3.0.*bash ops/use-profile.sh exl3-3.0 --fetch-only" "$DIR/src/run/weights-removed.txt"
         check "the running profile is refused" bash -c "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
             -d '{\"profiles\": [\"exl3-2.5\"], \"confirm\": true}' http://127.0.0.1:$PORT/v1/setup/remove | grep -q 409"

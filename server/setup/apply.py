@@ -1008,6 +1008,9 @@ class Runner:
             if s["state"] == "pending":
                 s["state"] = "skipped"
         self._save()
+        # the job as it ended, the steps that did not run skipped, for a page that follows it live
+        # (it showed them "not started" under a failed job, VIS-213)
+        self._emit({"type": "job", "job": dict(self.job)})
         # VIS-153: the tools that did not load reach a page that follows the job live too
         self._emit({"type": "done", "state": end, "message": self.job["message"],
                     "warnings": self.job.get("warnings") or [], "notes": self.job.get("notes") or []})

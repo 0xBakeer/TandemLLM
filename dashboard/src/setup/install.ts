@@ -66,7 +66,9 @@ export class QseInstallProgress extends LightElement {
   }
 
   protected willUpdate(changed: Map<string, unknown>): void {
-    if (changed.has('initial') && this.initial && !this.job) this.job = this.initial;
+    // VIS-213: another job (a Retry) starts from nothing of the one before, or from its own first state
+    if (changed.has('jobId')) this.job = this.initial && this.initial.id === this.jobId ? this.initial : null;
+    else if (changed.has('initial') && this.initial && !this.job) this.job = this.initial;
     if (changed.has('jobId')) this.connect();
   }
 
@@ -109,7 +111,8 @@ export class QseInstallProgress extends LightElement {
       this.lost = false;
       this.awaySince = null;
       this.final();
-      if (reopen && !isFinal(this.job) && this.stream && this.stream.state !== 'open') this.stream.start();
+      // a final job's stream still brings its log and ends at done
+      if (reopen && this.stream && this.stream.state !== 'open') this.stream.start();
     } catch {
       /* not readable now: the clock decides when to say so */
     } finally {
@@ -117,11 +120,12 @@ export class QseInstallProgress extends LightElement {
     }
   }
 
+  /** the job turned final: said once. The stream is not closed here: it reads on to its done event
+   *  (the log a page that re-attached has not read yet comes before it) */
   private final(): void {
     publishActive(this.job);
     if (isFinal(this.job) && !this.finalSent) {
       this.finalSent = true;
-      this.stream?.close();
       this.dispatchEvent(new CustomEvent('job-final', { detail: this.job, bubbles: true }));
     }
   }
@@ -142,6 +146,11 @@ export class QseInstallProgress extends LightElement {
     this.log = { lines: [], dropped: 0 };
     this.finalSent = false;
     this.connectedAt = Date.now();
+    this.retrying = false;
+    this.retryError = null;
+    this.copy = 'idle';
+    this.diag = null;
+    this.awaySince = null;
     if (!this.jobId) return;
     const id = this.jobId;
     this.stream = new ResumableStream({
