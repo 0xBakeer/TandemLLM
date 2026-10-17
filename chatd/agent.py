@@ -639,9 +639,11 @@ class AgentMixin:
 
     # ================================================================== the request
     def _compaction_for(self, cid: str, path: list[dict]) -> tuple | None:
-        """The newest compaction on `path`: (its summary, the first message kept, None) for one
-        before a user turn; for one inside a long run (boundary `<message id>@<step>`), (its
-        summary, that run's user message, (the run's message index, its first step kept))."""
+        """The newest compaction on `path`: (its summary, the first message kept, None, its time)
+        for one before a user turn; for one inside a long run (boundary `<message id>@<step>`),
+        (its summary, that run's user message, (the run's message index, its first step kept),
+        its time). The time (ISO 8601): the long results of calls that ended before it are stubs
+        in the request (chatd/render.py `result_for`)."""
         ids = {m["id"]: i for i, m in enumerate(path) if m.get("id")}
         best = None
         for r in self.store.all("SELECT * FROM compactions WHERE conversation_id = ? ORDER BY "
@@ -652,9 +654,9 @@ class AgentMixin:
             i = ids[mid]
             if step:
                 u = next((k for k in range(i - 1, -1, -1) if path[k]["role"] == "user"), 0)
-                best = (r["summary"], u, (i, int(step)))
+                best = (r["summary"], u, (i, int(step)), iso(r["created"]))
             else:
-                best = (r["summary"], i, None)
+                best = (r["summary"], i, None, iso(r["created"]))
         return best
 
     @staticmethod
@@ -682,6 +684,23 @@ class AgentMixin:
                                    skills=skills, prompt=prompt,
                                    plan=PLAN_RULE if settings.get("plan_mode") else None)
 
+    def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c, **kw) -> dict:
+        """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
+        None): the system block with its summary, the messages from its first kept one on, its
+        steps and its stubs."""
+        b = c[1] if c else 0
+        ours = info.get("backend") == "engine"
+        if "keep_reasoning_from" in kw:
+            kw["keep_reasoning_from"] = max(0, kw["keep_reasoning_from"] - b)
+        return render.body(settings.get("model") or info.get("id") or "default", settings,
+                           path[b:], system=self._system(settings, tools, c[0] if c else None),
+                           vision=bool(info.get("vision")), blob=self._blob_of,
+                           tools=[t.openai() for t in tools],
+                           tandem=self.tandem_field(settings) if ours else None,
+                           inline_images=ours, step_from=self._step_from(c),
+                           fold_before=c[3] if c else None, levels=info.get("effort_levels"),
+                           effort_off=info.get("effort_off"), **kw)
+
     def peek_body(self, conv, settings: dict, branch: list[dict]) -> dict:
         """The body of the chat's next call as `request_for` builds it (the system block, the
         tools, the effort, the skills field), over the branch as it is: what the engine's cache
@@ -690,16 +709,7 @@ class AgentMixin:
             settings = {**settings, "effort": "high"}
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id, listing=False)
-        c = self._compaction_for(conv.id, branch)
-        b = c[1] if c else 0
-        ours = info.get("backend") == "engine"
-        return render.body(settings.get("model") or info.get("id") or "default", settings,
-                           branch[b:], system=self._system(settings, tools, c[0] if c else None),
-                           vision=bool(info.get("vision")), blob=self._blob_of,
-                           tools=[t.openai() for t in tools],
-                           tandem=self.tandem_field(settings) if ours else None,
-                           inline_images=ours, step_from=self._step_from(c),
-                           levels=info.get("effort_levels"), effort_off=info.get("effort_off"))
+        return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -730,24 +740,15 @@ class AgentMixin:
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id)
         schemas = [t.openai() for t in tools]
-        model = settings.get("model") or info.get("id") or "default"
         window = int(info.get("max_len") or 0)
         ours = info.get("backend") == "engine"
         user_i = next((i for i in range(len(path) - 1, -1, -1) if path[i]["role"] == "user"), 0)
 
         def build(keep_from: int = 0) -> dict:
-            c = self._compaction_for(conv.id, path)
-            b = c[1] if c else 0
-            return render.body(model, settings, path[b:],
-                               system=self._system(settings, tools, c[0] if c else None),
-                               vision=bool(info.get("vision")), blob=self._blob_of,
-                               continue_final=run.continue_final, tools=schemas,
-                               keep_reasoning_from=max(0, keep_from - b),
-                               nudge=NUDGE if run.nudge else None,
-                               tandem=self.tandem_field(settings) if ours else None,
-                               inline_images=ours, step_from=self._step_from(c),
-                               levels=info.get("effort_levels"),
-                               effort_off=info.get("effort_off"))
+            return self._request(settings, info, tools, path,
+                                 self._compaction_for(conv.id, path),
+                                 continue_final=run.continue_final, keep_reasoning_from=keep_from,
+                                 nudge=NUDGE if run.nudge else None)
         if ours and run.step <= 1 and not run.remark:
             gone = self.missing_pins(settings)
             if gone:
@@ -761,7 +762,7 @@ class AgentMixin:
         force, run.compact_next = run.compact_next, False
         if (force or at and est > at) and run.compacted != run.step:
             run.compacted = run.step            # once a step: a long run compacts again later
-            if self.compact(conv, run, [m for m in path if m.get("id")]):
+            if self.compact(conv, run, [m for m in path if m.get("id")], tools=tools):
                 body = build()
                 est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:
@@ -789,8 +790,11 @@ class AgentMixin:
         return render.encode(body), render.headers(conv.id)
 
     # ================================================================== compaction
-    def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False) -> bool:
-        """Summarize everything before the last two user turns (chatd/compaction.py)."""
+    def compact(self, conv, run=None, path: list[dict] | None = None, force: bool = False,
+                tools: list | None = None) -> bool:
+        """Summarize the earlier part of the conversation (chatd/compaction.py): everything before
+        the last two user turns, or a long run's steps but its last ones, as deep as it takes for
+        the next request to land under TARGET_SHARE of the guard's limit."""
         from chatd.service import DEFAULT_SETTINGS
         with conv.lock:
             row = self._row(conv.id)
@@ -798,41 +802,58 @@ class AgentMixin:
             if path is None:
                 msgs = self._messages(conv.id)
                 path = [msgs[m] for m in self._path(msgs, row["head_id"])]
-        b = comp.boundary(path)
-        prior = self._compaction_for(conv.id, path)
-        sb = None
-        done = prior[2] if prior else None             # a long run's compaction: (index, step)
-        if b is None or (prior is not None and (done[0] if done else prior[1]) >= b):
-            # one long run: its earlier steps instead (its user message stays)
-            prior_step = done[1] if done and done[0] == len(path) - 1 else 0
-            sb = comp.step_boundary(path, prior_step)
-            if sb is None:
-                return False
         info = self.model_info(settings.get("model"))
         window = int(info.get("max_len") or 0)
+        if tools is None:
+            tools = self.tools_for(settings, info, conv.id, listing=False)
+        ratio = conv.tok_ratio
+        prior = self._compaction_for(conv.id, path)
+        done = prior[2] if prior else None             # a long run's compaction: (index, step)
+        # the cuts, shallow to deep: before the last two user turns; a long run's steps but its
+        # last KEEP_STEPS, ..., but its last one (its user message stays)
+        cuts: list[tuple[int, tuple[int, int] | None]] = []
+        b = comp.boundary(path)
+        if b is not None and not (prior is not None and (done[0] if done else prior[1]) >= b):
+            cuts.append((b, None))
+        prior_step = done[1] if done and done[0] == len(path) - 1 else 0
+        for keep in range(comp.KEEP_STEPS, 0, -1):
+            sb = comp.step_boundary(path, prior_step, keep)
+            if sb is not None:
+                cuts.append((sb[0], sb))
+        if not cuts:
+            return False
+        before = comp.estimate(self._request(settings, info, tools, path, prior), ratio)
+        # the first cut whose request (with a summary at its longest) lands under the target,
+        # else the deepest. Live (2026-10-17) a compaction at 162k tokens kept 138,673, three
+        # steps of shader and JS texts, and the engine read 131,505 of them again for a 15 % cut
+        target = int(comp.compact_at(window, conv.memory_limit) * comp.TARGET_SHARE)
+        now = iso(now_ms())
+        for b, sb in cuts:
+            after = comp.estimate(self._request(settings, info, tools, path,
+                                                self._cut(path, b, sb, None, now)), ratio)
+            if not target or after + comp.SUMMARY_TOKENS <= target:
+                break
         start = prior[1] if prior else 0
         system = render.system_block(today=None, tools=False, summary=prior[0] if prior else None)
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
-        if sb is None:
-            for k in range(start, b):
-                msgs.extend(render.message(path[k], False, self._blob_of,
-                                           from_step=done[1] if done and done[0] == k else 0))
-        else:
+        fold = prior[3] if prior else None
+        end = b if sb is None else sb[0]
+        for k in range(start, end):
+            msgs.extend(render.message(path[k], False, self._blob_of, fold_before=fold,
+                                       from_step=done[1] if done and done[0] == k else 0))
+        if sb is not None:
             i, keep_step = sb
-            first = done[1] if done and done[0] == i else 0
             run_msg = dict(path[i], parts=[p for p in path[i].get("parts") or []
                                            if int(p.get("step") or 1) < keep_step])
-            for m in path[start:i]:
-                msgs.extend(render.message(m, False, self._blob_of))
-            msgs.extend(render.message(run_msg, False, self._blob_of, from_step=first))
-            b = i
-        before = comp.estimate({"messages": msgs}, conv.tok_ratio)
+            msgs.extend(render.message(run_msg, False, self._blob_of, fold_before=fold,
+                                       from_step=done[1] if done and done[0] == i else 0))
+        asked = comp.estimate({"messages": msgs}, ratio)
         # a chat the engine refused for memory: the summary's request stays under the guard's
         # share of the refused one, or the engine refuses it too
         cap = comp.compact_at(window, conv.memory_limit) if conv.memory_limit else window
-        if cap and before + comp.SUMMARY_TOKENS + 512 > cap:
-            ratio = conv.tok_ratio or comp.DEFAULT_RATIO
-            msgs = comp.shrink(msgs, int((cap - comp.SUMMARY_TOKENS - 1024) / ratio))
+        if cap and asked + comp.SUMMARY_TOKENS + 512 > cap:
+            msgs = comp.shrink(msgs, int((cap - comp.SUMMARY_TOKENS - 1024) /
+                                         (ratio or comp.DEFAULT_RATIO)))
         msgs.append({"role": "user", "content": comp.INSTRUCTIONS})
         body = {"model": settings.get("model") or info.get("id") or "default", "messages": msgs,
                 "stream": False, "max_tokens": comp.SUMMARY_TOKENS,
@@ -856,28 +877,34 @@ class AgentMixin:
         text = text.strip()
         if len(text) < 40:
             return False
-        usage = obj.get("usage") or {}
-        before_tokens = int(usage.get("prompt_tokens") or before)
-        if sb is None:
-            rest, bid = [x for m in path[b:] for x in render.message(m, False)], path[b]["id"]
-        else:
-            u = next((k for k in range(b - 1, -1, -1) if path[k]["role"] == "user"), 0)
-            rest = [x for m in path[u:b] for x in render.message(m, False)]
-            rest += render.message(path[b], False, from_step=sb[1])
-            bid = f"{path[b]['id']}@{sb[1]}"              # the run's message and its first step kept
-        kept = comp.estimate({"messages": [{"content": text}] + rest}, conv.tok_ratio)
+        asked = int((obj.get("usage") or {}).get("prompt_tokens") or asked)
+        created = now_ms()
+        # before and after: the chat's request, as the guard counts it, without and with this one
+        after = comp.estimate(self._request(settings, info, tools, path,
+                                            self._cut(path, b, sb, text, iso(created))), ratio)
+        bid = path[b]["id"] if sb is None else f"{path[sb[0]]['id']}@{sb[1]}"
         cid = ulid()
         ms = int((time.monotonic() - t0) * 1000)
         with conv.lock:
             self.store.run("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (cid, conv.id, bid, text, before_tokens, kept, now_ms(), ms,
+                           (cid, conv.id, bid, text, before, after, created, ms,
                             run.id if run else None))
             self.emit(conv, {"type": "compaction", "compaction": {
-                "id": cid, "at": iso(now_ms()), "before_tokens": before_tokens,
-                "after_tokens": kept, "summary": text, "duration_ms": ms,
+                "id": cid, "at": iso(created), "before_tokens": before,
+                "after_tokens": after, "summary": text, "duration_ms": ms,
                 "boundary_id": bid}})
-        self.log(f"[compact] {conv.id} {before_tokens} -> {kept} tokens in {ms} ms")
+        self.log(f"[compact] {conv.id} {before} -> {after} (summary call {asked} tokens) in {ms} ms")
         return True
+
+    @staticmethod
+    def _cut(path: list[dict], b: int, sb: tuple[int, int] | None, summary: str | None,
+             at: str) -> tuple:
+        """A compaction at a cut as `_compaction_for` gives one: before message `b`, or a long
+        run's steps before `sb` (its message index, its first step kept)."""
+        if sb is None:
+            return summary, b, None, at
+        u = next((k for k in range(sb[0] - 1, -1, -1) if path[k]["role"] == "user"), 0)
+        return summary, u, sb, at
 
     def compact_now(self, cid: str) -> None:
         from chatd.service import ApiError

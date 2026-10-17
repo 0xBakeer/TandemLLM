@@ -36,7 +36,7 @@ import stat
 import time
 import urllib.parse
 
-from chatd import sandbox as sandbox_mod
+from chatd import render, sandbox as sandbox_mod
 from chatd.workspace import ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
@@ -161,6 +161,10 @@ def _write(ctx, a):
     path, content = str(a.get("path") or ""), a.get("content")
     if not isinstance(content, str):
         raise ToolError("content must be a string")
+    if render.WROTE_STUB.match(content.strip()):
+        # an earlier write's content reads as this stub in the request (chatd/render.py)
+        raise ToolError("content is the stub of an earlier write, not the file's text; send the "
+                        "whole text, or use edit_file for a change")
     ctx.ws.write(path, content.encode())
     ctx.changed(path)
     return Result(f"wrote {ctx.ws.show(ctx.ws.resolve(path))} ({len(content.encode()):,} bytes)")
@@ -173,7 +177,9 @@ def _edit(ctx, a):
     text = ctx.ws.read(path).decode("utf-8")
     n = text.count(old)
     if n == 0:
-        raise ToolError("old was not found in the file; read it again and copy it exactly")
+        # the request shows an earlier write's or read's text as a stub (chatd/render.py)
+        raise ToolError("old was not found in the file; read it again with read_file and copy it "
+                        "exactly (an earlier write or read of it may show only a stub)")
     if n > 1 and not a.get("replace_all"):
         raise ToolError(f"old occurs {n} times; give more context to make it unique, or set "
                         f"replace_all")
