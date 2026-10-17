@@ -298,8 +298,15 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
                         box.busy -= 1
             finally:
                 on_line(None)
+
+        def closer():
+            # a dropped or restarted server: closing the socket alone leaves its process
+            # running in the sandbox (and forever), so end the exec itself; it dies, the
+            # engine closes the stream, the reader reaps the slot
+            sandboxes.end_exec(exec_id)
+            sock.close()
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),
-                lambda: sock.close())
+                closer)
     return open_pipe
 
 
