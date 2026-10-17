@@ -321,7 +321,17 @@ class Pool:
                         raise last
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if self.tls:
-                sock = self._context().wrap_socket(sock, server_hostname=self.host)
+                # 2026-10-17: a handshake that raises leaves nothing to close unless we do
+                # it here. The rebinding below only happens when wrap_socket RETURNS, so
+                # the excepts at the bottom of this try raise with the connected socket
+                # owned by no one -- a backend pointed at a plain port as https leaked one
+                # fd per request, and at relay request rate the proxy walks to EMFILE,
+                # after which the healthy backends fail too.
+                try:
+                    sock = self._context().wrap_socket(sock, server_hostname=self.host)
+                except (OSError, ssl.SSLError):
+                    sock.close()
+                    raise
         except socket.timeout:
             raise Timeout("connect")
         except (OSError, ssl.SSLError) as exc:
