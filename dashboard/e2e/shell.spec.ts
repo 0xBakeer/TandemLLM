@@ -27,7 +27,7 @@ test.describe('shell', () => {
     await context.clearCookies();
     await page.goto('./');
     await expect(page.locator('.shell')).toBeVisible();
-    await expect(page.locator('.rail-tab.is-on')).toHaveText(/Usage/);
+    await expect(page.locator('.rail a.rail-tab.is-on')).toHaveText(/Usage/);
     await expect(page.locator('qse-usage')).toBeVisible();
     await expect(page.locator('#token, #cond-token, .login-card')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
@@ -57,7 +57,7 @@ test.describe('shell', () => {
     await page.reload();
     await expect(page.locator('qse-dev')).toBeVisible();
     // on the phone the Dev link is behind More and the More slot shows Dev: the visible one counts
-    await expect(page.locator('.rail-tab.is-on:visible')).toHaveText(/Dev/);
+    await expect(page.locator('.rail a.rail-tab.is-on:visible')).toHaveText(/Dev/);
   });
 
   test('theme: follows a light OS preference, and a toggle to dark is remembered', async ({ page }) => {
@@ -117,7 +117,7 @@ test.describe('shell', () => {
     await expect(page).toHaveURL(/#\/dev/);
     await expect(page.locator('.more-sheet')).toBeHidden();
     await expect(page.locator('.rail-more')).toHaveText('Dev');
-    await expect(page.locator('.rail-more')).toHaveClass(/is-on/);
+    await expect(page.locator('.rail-more')).toHaveClass(/is-on/); // the button's own state — on purpose, not the view's
   });
 
   test('AU1: no password set, Performance reads /v1/dashboard/metrics with no session and System opens; no cookie is set', { tag: '@mock' }, async ({ page, context }) => {

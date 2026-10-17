@@ -91,6 +91,7 @@ export class QseSetup extends LightElement {
   private warnedDiff = false;
   private touchedAt = new Map<string, number>();
   private loadingModel: string | null = null;
+  private modelSeq = 0;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -108,6 +109,8 @@ export class QseSetup extends LightElement {
   }
   disconnectedCallback(): void {
     this.devPoll?.stop();
+    if (this.estTimer) clearTimeout(this.estTimer);
+    if (this.planTimer) clearTimeout(this.planTimer);
     this.estCtrl?.abort();
     this.planCtrl?.abort();
     this.commCtrl?.abort();
@@ -157,16 +160,21 @@ export class QseSetup extends LightElement {
   private async loadModel(id: string): Promise<void> {
     if (this.loadingModel === id) return;
     this.loadingModel = id;
+    // two rapid selections: an answer older than the newest request is dropped, so a stale
+    // model never opens and rewrites the hash of the one the user just picked
+    const seq = ++this.modelSeq;
     this.model = { state: 'loading' };
     try {
       const m = withCommunityProfiles(await setupApi.model(id));
+      if (seq !== this.modelSeq) return;
       this.model = { state: 'ready', data: m };
       await this.openModel(m, this.routeStep() ?? undefined);
     } catch (e) {
+      if (seq !== this.modelSeq) return;
       const d = describeError(e);
       this.model = { state: 'error', endpoint: d.endpoint, message: d.status === 404 ? `${S.modelsError} (${id})` : d.message };
     } finally {
-      this.loadingModel = null;
+      if (seq === this.modelSeq) this.loadingModel = null;
     }
   }
 
@@ -189,6 +197,9 @@ export class QseSetup extends LightElement {
         seed = null; // an older server, or none: the recommended setup
       }
     }
+    // the user may have picked another model while the seed was in flight: a stale seed must
+    // not open its model and rewrite the hash away from the one now on screen
+    if (!(this.model?.state === 'ready' && this.model.data.id === m.id)) return;
     this.dispatch({ type: 'open', model: m, step, seed }, false);
     if (this.wiz.step === 'weights') void this.syncCommunity();
   }
@@ -476,6 +487,9 @@ export class QseSetup extends LightElement {
     try {
       const old = this.device?.active_profile;
       const res = await setupApi.apply({ selection, ...(this.removeAfter && old && old !== selection.profile ? { remove_after: [old] } : {}) });
+      // the user may have left while apply was in flight: a response that lands elsewhere must
+      // not push its job's hash and drag them back into a setup wizard they abandoned
+      if (!this.isConnected || this.path[0] !== selection.model || this.wiz.step !== 'review') return;
       this.jobInitial = res.job;
       this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
