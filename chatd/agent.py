@@ -18,12 +18,14 @@ from chatd.ids import iso, now_ms, ulid
 from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
 from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
-from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note
+from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note, ws_digest
 from chatd.store import dumps
 from chatd.tools import PathError, Result, ToolError
 
 EVENT_OUTPUT_CAP = 64 * 1024        # tool.output per call in events (CONTRACT section 3)
 READ_PARALLEL = 4
+#: SRV-583: the main agent's reads in Agents mode answered from its context when nothing changed
+READ_CACHED = ("read_file", "grep", "glob")
 
 
 def estimated_split(body: dict, ratio: float | None, skills: str | None) -> dict:
@@ -91,6 +93,7 @@ class ToolCtx:
         self.oom = False                     # the last exec lost a process at the memory limit
         self.note: str | None = None         # for the result: the sandbox restarted
         self.phase, self.words = "tool", None    # the run's phase while it runs (verify: its own)
+        self.agents = bool(getattr(run, "agents", False))  # a main agent in Agents mode (SRV-583)
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
@@ -320,7 +323,7 @@ class AgentMixin:
             return []
         prefs = self._prefs()
         enabled = set(settings.get("tools") or [])
-        if cid and (settings.get("plan_mode") or self.todos(cid)):
+        if cid and (settings.get("plan_mode") or agents or self.todos(cid)):
             enabled.add("todo_write")
         out = [t for t in self.available_builtins() if t.name in enabled and
                (prefs.get(t.name) is None or prefs[t.name]["enabled"] in (None, 1))]
@@ -334,7 +337,8 @@ class AgentMixin:
             # SRV-363: the read tools and the todo list, nothing that changes the world
             return [t for t in out if t.name in PLAN_TOOLS]
         if agents:
-            out.append(tools_mod.BY_NAME["task"])
+            # SRV-583: no bash, write_file or edit_file; the todo list and task
+            out = [t for t in out if t.name in tools_mod.AGENTS_TOOLS] + [tools_mod.BY_NAME["task"]]
         mcp = getattr(self, "mcp", None)
         if mcp is not None:
             out += mcp.tools_for(settings, cid if listing else None)
@@ -529,6 +533,9 @@ class AgentMixin:
             if tool is None and settings.get("plan_mode") and self.tool(part.get("name") or ""):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
+            if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
+                self._finish_call(run, part, Result(tools_mod.AGENTS_REFUSAL, is_error=True))
+                continue
             if tool is None:
                 self._finish_call(run, part, Result(
                     f"The tool {part.get('name')!r} is not available in this chat. Available: "
@@ -603,6 +610,14 @@ class AgentMixin:
             except OSError:
                 pass
         failure = None                       # the sandbox's own, not the command's
+        if run.agents and tool.name in READ_CACHED:
+            # SRV-583: the same read of an unchanged workspace whose result is still in the
+            # context answers with that call's id (chatd/tasks.py `_read_hit`)
+            part["digest"] = ws_digest(ctx.ws)
+            hit = self._read_hit(run, part, tool.name, args)
+            if hit is not None:
+                self._finish_call(run, part, hit, ctx=ctx)
+                return
         try:
             res = tool.executor(ctx, args)
         except (ToolError, PathError, Unavailable, egress.Refused) as exc:
@@ -662,8 +677,10 @@ class AgentMixin:
             if st in ("denied", "cancelled") and not res.content:
                 out = None
             part["output"] = out
+            limit = (tools_mod.AGENTS_LIMIT_CHARS, tools_mod.AGENTS_EDGE_CHARS) if run.agents \
+                else (tools_mod.MODEL_LIMIT_CHARS, tools_mod.MODEL_EDGE_CHARS)
             part["model_content"] = tools_mod.for_model(ctx or ToolCtx(self, run, part), part["id"],
-                                                        res.content)
+                                                        res.content, *limit)
             part["status"], part["ended_at"] = st, iso(now_ms())
             if res.pane:
                 part["pane"] = res.pane
@@ -710,8 +727,9 @@ class AgentMixin:
                 if str(r["boundary_id"]).partition("@")[0] in ids]
 
     def _system(self, settings: dict, tools: list, summary: str | None,
-                worker: str | None = None) -> str | None:
-        """`worker`: a task run's block (chatd/tasks.py `_head`), in place of the chat's prompt."""
+                worker: str | None = None, agents: str | None = None) -> str | None:
+        """`worker`: a task run's block (chatd/tasks.py `_head`), in place of the chat's prompt;
+        `agents`: the main agent's paragraph in Agents mode."""
         prompt = None
         if settings.get("prompt_id") and not worker:
             r = self.store.one("SELECT template FROM prompts WHERE id = ?",
@@ -722,7 +740,7 @@ class AgentMixin:
         return render.system_block(today=today, tools=bool(tools), summary=summary,
                                    skills=skills, prompt=prompt,
                                    plan=PLAN_RULE if settings.get("plan_mode") and not worker
-                                   else None, worker=worker)
+                                   else None, worker=worker, agents=agents)
 
     def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c,
                  head: dict | None = None, **kw) -> dict:
@@ -752,7 +770,8 @@ class AgentMixin:
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id, listing=False,
                                agents=bool(settings.get("agents")))
-        return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch))
+        return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch),
+                             self._head(conv, None, settings))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -780,7 +799,7 @@ class AgentMixin:
                              "message again, or attach a file.")
         info = self.model_info(settings.get("model"))
         tools = self.tools_for(settings, info, conv.id, agents=run.agents)
-        head = self._head(conv, run)
+        head = self._head(conv, run, settings)
         schemas = [t.openai() for t in tools]
         window = int(info.get("max_len") or 0)
         ours = info.get("backend") == "engine"
@@ -854,7 +873,7 @@ class AgentMixin:
             tools = self.tools_for(settings, info, conv.id, listing=False,
                                    agents=run.agents if run is not None else
                                    bool(settings.get("agents")))
-        head = self._head(conv, run)
+        head = self._head(conv, run, settings)
         ratio = conv.tok_ratio
         prior = self._compaction_for(conv.id, path)
         done = prior[2] if prior else None             # a long run's compaction: (index, step)

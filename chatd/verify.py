@@ -265,7 +265,8 @@ class VerifyMixin:
         root = self.root_cid(conv.id)                   # a worker's files are its chat's
         with conv.lock:
             settings = self.settings_of(conv.id)
-        if not settings.get("verify", True) or settings.get("plan_mode") or not run.snapshotted:
+        if not settings.get("verify", True) or settings.get("plan_mode") or not run.snapshotted \
+                or run.agents:                  # Agents mode: its workers check what they built
             return False
         base = st["base"] or self.snaps.load(root, run.id, "before")
         if base is None:

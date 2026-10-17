@@ -44,6 +44,7 @@ says it is data, at most RESULT_MAX_CHARS; the whole report is in
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -83,6 +84,19 @@ def texts() -> dict:
 def steer_note(at: str, text: str) -> str:
     """A message the user typed while a worker ran, as the worker reads it (SRV-585)."""
     return texts()["steer note"].replace("{time}", at).replace("{text}", " ".join(text.split()))
+
+
+def ws_digest(ws) -> str:
+    """The workspace's state by its files' paths, sizes and times (no file is read): what the
+    main agent's read cache compares (SRV-583)."""
+    h = hashlib.sha256()
+    for full in ws.walk():
+        try:
+            st = os.stat(full, follow_symlinks=False)
+        except OSError:
+            continue
+        h.update(f"{os.path.relpath(full, ws.root)}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()[:16]
 
 
 def worker_block(max_steps: int) -> str:
@@ -466,10 +480,12 @@ class TasksMixin:
         return render.headers(conv.id, session=self.session_of(conv),
                               parent_session=render.session_id(conv.parent_id), worker=True)
 
-    def _head(self, conv, run=None) -> dict:
-        """The system block's own part by who asks: a worker's block."""
+    def _head(self, conv, run=None, settings: dict | None = None) -> dict:
+        """The system block's own part by who asks: a worker's block, or the main agent's
+        paragraph in Agents mode (the run's mode, read at its start; else the chat's setting)."""
         if conv.parent_id is None:
-            return {}
+            on = run.agents if run is not None else bool((settings or {}).get("agents"))
+            return {"agents": texts()["main"]} if on else {}
         task = run.task if run is not None and run.task else self.task_row(conv.task_id)
         return {"worker": worker_block(int(task["max_steps"]))}
 
@@ -749,6 +765,71 @@ class TasksMixin:
                 "step": w.step, "max_steps": w.max_steps,
                 "cache": {"warm": cached, "cold": max(0, prompt - cached),
                           "source": last.get("cache_source") or "none"}}
+
+    # ------------------------------------------------------------------ Agents mode (SRV-583)
+    def _read_hit(self, run, part: dict, name: str, args: dict) -> Result | None:
+        """A read the main agent made before with the same arguments, whose result the next
+        request still carries (after the newest compaction), with no worker run and no file
+        changed since: "unchanged since call <id> (step <k>)". None: the read runs."""
+        key = json.dumps(args, sort_keys=True)
+        conv = run.conv
+        with conv.lock:
+            msgs = self._messages(conv.id)
+            path = [msgs[m] for m in self._path(msgs, run.user_message_id)]
+            path.append({"id": run.message_id, "role": "assistant",
+                         "parts": [p for p in (conv.live or {}).get("parts") or [] if p is not part]})
+        c = self._compaction_for(conv.id, path)
+        start = c[1] if c else 0
+        for i in range(len(path) - 1, start - 1, -1):
+            m = path[i]
+            if m.get("role") != "assistant":
+                continue
+            for p in reversed(m.get("parts") or []):
+                if p.get("type") != "tool_call":
+                    continue
+                if c and c[2] and i == c[2][0] and int(p.get("step") or 1) < c[2][1]:
+                    return None                      # compacted away
+                if p.get("name") == "task":
+                    return None                      # a worker ran since
+                if p.get("name") != name or p.get("cached_from") or p.get("status") != "done":
+                    continue
+                try:
+                    same = json.dumps(json.loads(p.get("input") or "{}"), sort_keys=True) == key
+                except ValueError:
+                    same = False
+                if not same:
+                    continue
+                if p.get("digest") != part.get("digest"):
+                    return None                      # a file changed since
+                part["cached_from"] = p["id"]
+                return Result(f"unchanged since call {p['id']} (step {p.get('step') or 1})")
+        return None
+
+    def reread_tokens(self, cid: str) -> int:
+        """The prompt tokens of the chat's last request: what a switch of Agents mode makes the
+        engine read once more (the prompt's head changes)."""
+        row = self._row(cid)
+        msgs = self._messages(cid)
+        for mid in reversed(self._path(msgs, row["head_id"])):
+            s = msgs[mid].get("stats") or {}
+            if msgs[mid]["role"] == "assistant" and s:
+                last = (s.get("step_usage") or [{}])[-1]
+                return int(last.get("prompt_tokens") or s.get("prompt_tokens") or 0)
+        return 0
+
+    def last_worker(self, cid: str) -> dict | None:
+        """The Context panel's `last_worker`: the chat's newest task, its context at its last
+        call (null before any)."""
+        r = self.store.one("SELECT * FROM tasks WHERE conversation_id = ? ORDER BY n DESC LIMIT 1",
+                           (cid,))
+        if r is None:
+            return None
+        m = self.store.one("SELECT stats FROM messages WHERE conversation_id = ? AND role = "
+                           "'assistant' ORDER BY id DESC LIMIT 1", (r["task_conversation_id"],))
+        last = ((json.loads(m["stats"]) if m and m["stats"] else {}).get("step_usage") or [{}])[-1]
+        return {"task_id": r["id"], "n": r["n"], "title": r["title"], "status": r["status"],
+                "used": int(last.get("prompt_tokens") or 0) + int(last.get("completion_tokens")
+                                                                  or 0)}
 
     # ------------------------------------------------------------------ routes
     def list_tasks(self, cid: str) -> dict:

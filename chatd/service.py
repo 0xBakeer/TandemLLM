@@ -684,16 +684,26 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return self.permission_modes()
 
     def patch_defaults(self, body: dict) -> dict:
-        """PATCH /defaults {permission_mode}: the settings a new chat starts with that the user
-        sets (the permission mode, today); answers the capabilities' defaults."""
+        """PATCH /defaults {permission_mode, agents}: the settings a new chat starts with that the
+        user sets; answers the capabilities' defaults."""
         clean = _clean_settings(body)
-        other = sorted(k for k in clean if k != "permission_mode")
+        other = sorted(k for k in clean if k not in ("permission_mode", "agents"))
         if other or not clean:
-            raise ApiError(400, "bad_request", "only permission_mode can be set as a default")
-        if clean["permission_mode"] is None:
-            raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
-        self.set_permission_default({"default": clean["permission_mode"]})
+            raise ApiError(400, "bad_request", "only permission_mode and agents can be set as "
+                                               "defaults")
+        if "permission_mode" in clean:
+            if clean["permission_mode"] is None:
+                raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
+            self.set_permission_default({"default": clean["permission_mode"]})
+        if "agents" in clean:                   # SRV-583: off until the eval rows exist
+            self.store.run("INSERT OR REPLACE INTO meta VALUES ('agents_default', ?)",
+                           ("1" if clean["agents"] else "0",))
+            self._caps = None
         return self.capabilities()["defaults"]
+
+    def agents_default(self) -> bool:
+        r = self.store.one("SELECT value FROM meta WHERE key = 'agents_default'")
+        return bool(r and r["value"] == "1")
 
     def permission_modes(self) -> dict:
         """GET /permissions/mode: the default and the modes there are."""
@@ -1443,6 +1453,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             out["compact_at"] = comp.compact_at(out["window"], conv.memory_limit)
         out["skills"] = self.skills_report(settings)
         out["worker"] = self.worker_context(on)     # the running worker's own context (VIS-E15)
+        out["last_worker"] = self.last_worker(conv.id) if out["worker"] is None else None
         return out
 
     def _maybe_peek(self, conv: Conv, settings: dict, branch: list[dict]) -> None:
@@ -1564,6 +1575,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         defaults = dict(DEFAULT_SETTINGS)
         defaults["model"] = first["id"] if first else ""
         defaults["permission_mode"] = self.permission_default()
+        defaults["agents"] = self.agents_default()
         return {
             "models": [{k: v for k, v in m.items() if not k.startswith("_")} for m in out],
             "_models": out,
@@ -1970,7 +1982,8 @@ def _empty_stats(finish: str) -> dict:
 
 def _usage(branch: list[dict]) -> dict:
     out = {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0,
-           "cached_tokens": 0, "tool_calls": 0, "wall_s": 0, "cost_usd": None}
+           "cached_tokens": 0, "tool_calls": 0, "wall_s": 0, "cost_usd": None,
+           "workers": {"count": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}}
     wall = 0.0
     for m in branch:
         s = m.get("stats")
@@ -1983,8 +1996,11 @@ def _usage(branch: list[dict]) -> dict:
         out["turns"] += 1
         for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens"):
             out[k] += int(s.get(k) or 0)
+        w = s.get("workers") or {}
+        out["workers"]["count"] += int(w.get("count") or 0)
         for k in ("prompt_tokens", "completion_tokens", "cached_tokens"):   # its workers' calls
-            out[k] += int((s.get("workers") or {}).get(k) or 0)
+            out[k] += int(w.get(k) or 0)
+            out["workers"][k] += int(w.get(k) or 0)
         if s.get("cost_usd") is not None:         # a cloud model's turns, at the proxy's prices
             out["cost_usd"] = round((out["cost_usd"] or 0) + float(s["cost_usd"]), 6)
         wall += float(s.get("total_ms") or 0) / 1000

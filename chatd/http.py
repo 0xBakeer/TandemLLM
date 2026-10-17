@@ -364,7 +364,9 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self.svc.switch_branch(cid, self._body(), self.viewer))
 
     def r_settings(self, cid):
-        self._json(200, self.svc.update_settings(cid, self._body()))
+        # VIS-219: `reread_tokens`, what the switch of Agents mode makes the engine read once more
+        self._json(200, {**self.svc.update_settings(cid, self._body()),
+                         "reread_tokens": self.svc.reread_tokens(cid)})
 
     def r_mcp_prompt(self, sid):
         b = self._body()

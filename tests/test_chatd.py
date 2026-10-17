@@ -115,7 +115,7 @@ def test_capabilities_list_models_only_each_by_its_own_name():
             "cloud": False, "upstream_id": "Qwen/Qwen3.5-4B", "context_length": 32768}},
     ]
     stub = SimpleNamespace(engine=SimpleNamespace(models=lambda: cards),
-                           permission_default=lambda: "auto")
+                           permission_default=lambda: "auto", agents_default=lambda: False)
     caps = Service._build_caps(stub, {"engine": {"max_len": 262144}})
     rows = {m["id"]: m for m in caps["models"]}
     assert [m["name"] for m in caps["models"]] == [

@@ -365,10 +365,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
 
 def system_block(*, today: str | None, tools: bool, summary: str | None = None,
                  skills: str | None = None, prompt: str | None = None,
-                 plan: str | None = None, worker: str | None = None) -> str | None:
+                 plan: str | None = None, worker: str | None = None,
+                 agents: str | None = None) -> str | None:
     """The system message: the chat's own prompt, then the tool rules, the skill index and the
     summary of compacted turns. None for a plain chat with nothing to say. `worker`: a task run's
-    block (packages/system/workers/PACKAGE.md), in place of the chat's own prompt."""
+    block (packages/system/workers/PACKAGE.md), in place of the chat's own prompt; `agents`: the
+    main agent's paragraph in Agents mode (references/main.md), right after the tool rules."""
     parts = []
     if worker:
         parts.append(worker.strip())
@@ -382,6 +384,8 @@ def system_block(*, today: str | None, tools: bool, summary: str | None = None,
             "you edit it, and prefer edit_file for small changes. Use present to show the user a "
             "page, a file or this run's changes. When the task is done, answer in plain words; do "
             "not call tools you do not need.")
+    if agents and tools:
+        parts.append(agents.strip())
     if plan:
         parts.append(plan)
     if skills:
