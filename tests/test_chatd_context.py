@@ -15,6 +15,8 @@ the last two turns to summarize.
   2  the estimate counts an image by its pixels (32 x 32 a token), never by its base64, and the
      tokens-per-character ratio is learned on the text alone
   3  a long run compacts its earlier steps between two steps, keeps its user message and goes on
+  4  the Context panel after such a compaction counts what the next request carries (live
+     2026-10-17: 45,778 tokens, "conversation 0", while the engine got 215,247-token prompts)
 
 CPU only. Run: python -m pytest -q tests/test_chatd_context.py
 """
@@ -225,5 +227,63 @@ def test_a_long_run_compacts_between_steps_and_keeps_its_user_message():
             assert comp.estimate(b, 0.5) + comp.MIN_ANSWER <= 6000
         assert len(reqs) > 8, "the run went on past the window"
         assert "no room left" not in json.dumps(s["messages"][-1])
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------- 4. the panel after it
+
+def test_the_panel_counts_a_run_compacted_mid_way_and_continued():
+    """The live case's shape: run 1 compacted at step 43 and stopped at its step cap (100); a
+    Continue (run 2) went on in the same message to step 113, and the engine refused step 114.
+    The panel took run 1's stats (step 100's prompt less the whole turn's thinking, the 42 steps'
+    in the summary too), counted none of run 2's calls and showed 0 for the conversation."""
+    from chatd.ids import now_ms, ulid
+    from chatd.runs import Run
+    from chatd.service import DEFAULT_SETTINGS
+    c = Chat()
+    try:
+        cid = c.new()
+        conv = c.svc.conv(cid)
+
+        def step(k, out=400):
+            return [{"type": "thinking", "text": "t" * 8000, "step": k, "done": True},
+                    {"type": "tool_call", "id": f"call_{k}", "name": "bash", "step": k,
+                     "input": "{}", "status": "done", "output": {"content": "ok"},
+                     "model_content": "o" * out}]
+        parts = [p for k in range(1, 113) for p in step(k)] + step(113, out=4000)
+
+        def usage(k, prompt):
+            return {"step": k, "prompt_tokens": prompt, "cached_tokens": prompt,
+                    "cache_source": "end", "completion_tokens": 2100, "reasoning_tokens": 2000}
+        run1 = {"finish": "length", "prompt_tokens": 178_858, "completion_tokens": 210_000,
+                "reasoning_tokens": 200_000, "steps": 100, "cached_tokens": 178_858,
+                "step_usage": [usage(k, 178_858 - (100 - k) * 400) for k in range(51, 101)]}
+        branch = [{"id": "u1", "role": "user", "parts": [{"type": "text", "text": "a pagoda"}]},
+                  {"id": "a1", "role": "assistant", "parts": parts, "stats": run1}]
+        c.svc.store.run("INSERT INTO compactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (ulid(), cid, "a1@43", "the summary", 195_532, 18_750, now_ms(), 1000,
+                         None))
+        run = Run(c.svc, conv, user_message_id="u1", message_id="a1", max_steps=200,
+                  started_by=None)
+        run.step_usage = [usage(k, 180_795 + (k - 101) * 1867) for k in range(101, 114)]
+        run.step_usage[-1].update(prompt_tokens=203_199, completion_tokens=2_795)
+        run.step, run.thinking_tokens, run.call_base = 114, 26_000, (30_000, 26_000)
+        # the next request: step 113's prompt and answer, and its tool's result (4,000 characters)
+        want = 203_199 + 2_795 + 1_000
+        # the thinking it carries: steps 43 to 113, 2,000 tokens each
+        thinking = (113 - 43 + 1) * 2000
+        ctx = c.svc._context(conv, dict(DEFAULT_SETTINGS), branch, run=run)
+        got = {p["kind"]: p["tokens"] for p in ctx["parts"]}
+        assert ctx["used"] == want, (ctx["used"], got)
+        assert got["thinking"] == thinking and got["messages"] == want - thinking, got
+        assert ctx["cache"]["warm"] == 203_199               # step 113's, not step 100's
+        # run 2 ended with its last call refused: its stats have no prompt, its calls' do
+        branch[1]["stats"] = {"finish": "error", "prompt_tokens": 0, "reasoning_tokens": 26_000,
+                              "steps": 114, "interrupted": "engine",
+                              "step_usage": run.step_usage}
+        ctx = c.svc._context(conv, dict(DEFAULT_SETTINGS), branch)
+        got = {p["kind"]: p["tokens"] for p in ctx["parts"]}
+        assert ctx["used"] == want and got["thinking"] == thinking, (ctx["used"], got)
     finally:
         c.close()

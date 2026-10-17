@@ -52,7 +52,7 @@ def file_tokens(branch: list[dict], start: int = 0, step_from: tuple[int, int] |
 def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int,
            stats: dict | None, run: dict | None, row: dict | None, facts: dict,
            peek: dict | None, harness: dict | None, split: dict | None = None,
-           session: str | None = None) -> dict:
+           session: str | None = None, thinking: int | None = None) -> dict:
     """`model`: the chat's model as `service.model_info` gives it. `branch_tokens`: the branch as
     the next request carries it (the last request's prompt plus its answer, plus what came since).
     `stats`: the last finished answer's TurnStats; `run`/`row`: the run in flight and its live row.
@@ -60,7 +60,9 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     schemas' and the images' tokens as the engine counted them, which come out of the conversation's
     share.
     `session`: the session key the chat's requests carry, to find its rows in the engine's
-    caches (`holding`)."""
+    caches (`holding`). `thinking`: the turn's thinking that the next request carries (a
+    compaction inside the run took its earlier steps'), when the service counted it; else the
+    run's, or the last answer's."""
     window = int(model.get("max_len") or 0)
     skills = 0
     if row and row.get("hidden_tokens"):
@@ -71,7 +73,9 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     # the turn the last answer's, which the engine holds until the next message drops it (it
     # read 0 there, live 2026-10-16, beside "2,193 thinking" on the answer)
     th = (run or {}).get("thinking") or {}
-    thinking = int(th.get("used") or 0) if run else int((stats or {}).get("reasoning_tokens") or 0)
+    if thinking is None:
+        thinking = int(th.get("used") or 0) if run else int((stats or {}).get("reasoning_tokens")
+                                                            or 0)
     earlier = max(0, thinking - int(th.get("call") or 0)) if run else 0
     messages = max(0, branch_tokens - files_tokens)
     if row and row.get("prompt_tokens"):
