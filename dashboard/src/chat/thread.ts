@@ -151,7 +151,7 @@ export class QseChatThread extends LightElement {
     const text = messageText(m);
     return html`<article class="ch-msg ch-user ${editing ? 'is-editing' : ''}" data-mid=${m.id} data-role="user">
       ${m.attachments?.length
-        ? html`<div class="ch-attachments">${m.attachments.map((a) => html`<span class="ch-chip" title=${`${a.name}, ${bytes(a.bytes)}`}>${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn warn-ink" title=${attachmentWords(a).warn ?? ''}>as a file</span>` : nothing}</span>`)}</div>${m.attachments.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn warn-ink small">${w}</p>`)}`
+        ? html`<div class="ch-attachments">${m.attachments.map((a) => html`<span class="ch-chip" title=${`${a.name}, ${bytes(a.bytes)}`}>${a.kind === 'image' && a.preview ? html`<img src=${a.preview} alt="" />` : icon('file')}<span class="ch-chip-name">${a.name}</span><span class="ch-chip-size num">${attachmentWords(a).size}</span>${a.inline === false ? html`<span class="ch-chip-warn muted" title=${attachmentWords(a).warn ?? ''}>as a file</span>` : nothing}</span>`)}</div>${m.attachments.map((a) => attachmentWords(a).warn).filter(Boolean).map((w) => html`<p class="ch-attach-warn muted small">${w}</p>`)}`
         : nothing}
       ${editing
         ? html`<div class="ch-bubble ch-edit">
