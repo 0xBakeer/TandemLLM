@@ -5,18 +5,13 @@ description: Building a WebGL scene with Three.js - renderer, camera, lights, me
 # Three.js scene
 
 Rules:
-- One import source (an import map or a bundler), one version.
-- Renderer: `antialias`, `setPixelRatio(min(dpr, 2))`, `toneMapping = ACESFilmicToneMapping`; colour textures get `colorSpace = SRGBColorSpace`.
-- Light for the mood asked. Day: a sky-blue background, fog of the same colour starting beyond the subject, a `HemisphereLight` (sky, warm ground, ~1.5) and a sun `DirectionalLight` (~3) with shadows. Night is a choice, never the default; a day/night switch changes background, fog, both lights and exposure together.
-- Materials: a distinct, saturated colour per part; `metalness: 0` for wood, stone and leaves (metal without an environment map renders black); `flatShading` for low-poly forms. Foliage is clustered icosahedra or cones, never flat squares.
-- Camera first: if nothing shows, print `camera.position` and the subject's bounding box. Reuse geometries and materials; `InstancedMesh` for many of one.
+- One version through an import map (Reference). Addons are named exports: `import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'`. Not in three.js: `Matrix4.makeRotationXYZ`, `Matrix4.rotateY`, `renderer.shadowMap.size`; use `geometry.rotateY(a).translate(x, y, z)` before merging, `light.shadow.mapSize.set(1024, 1024)`.
+- Renderer: `antialias`, `setPixelRatio(min(dpr, 2))`, ACES tone mapping. With bloom: `EffectComposer` -> `RenderPass` -> `UnrealBloomPass` (threshold ~0.85: only lamps glow) -> `OutputPass` last, or the frame has no tone mapping and looks flat.
+- Light for the mood asked, numbers since r155: day sky background, hemisphere ~1.5, sun ~3 with shadows; golden hour a low warm sun 0xffb070 ~3, warm sky, exposure ~1.1; night background 0x0b1530, hemisphere 0.3, moon 0.8, emissive lanterns with point lights. A cycle starts in the look the request names; the Day/Night control jumps to it.
+- Materials: saturated, `metalness: 0` for wood, stone and leaves. Foliage is clustered icosahedra, never flat squares.
+- Frame the subject: `controls.target` at its centre, the camera at ~2x its size, the scene filling most of the view.
 
-Check: screenshot at 1280 and 390 and compare it with the request: daylight reads bright, the subject is recognisable, the colours differ. Console 0 errors; `renderer.info.render.calls` under 1,000.
-
-Done when:
-- [ ] The screenshot shows the lit subject centered at both widths, in the light the request names.
-- [ ] Draw calls and fps read through the state hook (the page shows no stats readout).
-- [ ] Orbit or key input moves the camera; position read back.
+Check: screenshots at 1280 and 390 in each mode, compared with the request; console 0 errors; `window.__state()` returns frames, draw calls (under 1,000) and the mode.
 
 ## Reference
 
@@ -50,6 +45,28 @@ window.__state = () => ({ tandem_state: 1, frames, calls: renderer.info.render.c
 ```
 Night: background and fog 0x0b1530, hemisphere 0.3, moon 0.8 (0xaac4ff), lanterns as `PointLight`s.
 
+Bloom with tone mapping kept, and a mode switch that moves everything together:
+```js
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.6, 0.4, 0.85));
+composer.addPass(new OutputPass());          // tone mapping and sRGB; without it the frame is flat
+const MODES = { golden: { sky: 0xf6c38b, hemi: 1.2, sun: 3, sunColor: 0xffb070, exp: 1.1, lamps: 0 },
+                night: { sky: 0x0b1530, hemi: 0.3, sun: 0.8, sunColor: 0xaac4ff, exp: 0.9, lamps: 2 } };
+let mode = 'golden';
+function setMode(m) { const v = MODES[mode = m]; scene.background.set(v.sky); scene.fog.color.set(v.sky);
+  hemi.intensity = v.hemi; sun.intensity = v.sun; sun.color.set(v.sunColor); renderer.toneMappingExposure = v.exp;
+  lanternMat.emissiveIntensity = v.lamps; }
+// render with composer.render() in the loop; composer.setSize() on resize
+window.__state = () => ({ tandem_state: 1, frames, mode, calls: renderer.info.render.calls });
+```
+Merging placed parts: `const g = new THREE.BoxGeometry(w, h, d); g.rotateY(a); g.translate(x, y, z); parts.push(g);` then `mergeGeometries(parts)`; or an `Object3D` with `updateMatrix()` and `g.applyMatrix4(o.matrix)`.
+
 What goes wrong:
 - Dull, grey or dark: lights at 1 or less (dim since r155), a dark or grey background, fog nearer than the subject, metalness above 0. Black: no light, or the camera looks away.
+- A TypeError on a three.js call: the name does not exist in this version. List the class's methods from its readable source of the same version, `curl -s https://unpkg.com/three@0.170.0/src/math/Matrix4.js | grep -nP '^\t\w+\('` (addons under `examples/jsm/`), never by grepping a minified build.
 - Frame rate collapses: shadows on every light, `new` objects each frame, thousands of meshes instead of an `InstancedMesh`; dispose what you remove.
