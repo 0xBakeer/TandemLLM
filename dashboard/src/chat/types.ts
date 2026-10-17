@@ -252,6 +252,9 @@ export interface Run {
   decode_tps: number | null;
   tokens_per_round: number | null;
   acceptance: number | null;
+  /** this model call's wait for its first token, once it came (a cloud model's: chatd's own
+   *  stamps, the network included) */
+  ttft_ms?: number | null;
   /** used: the run's, every model call; call: this call's, which the budget caps */
   thinking: { used: number; budget: number | null; call?: number };
   /** the completion tokens so far, every model call of the run */
@@ -303,8 +306,10 @@ export interface ContextReport {
   };
   /** the chat's skill mode and pins (SRV-361); a pin the library lost is `missing` */
   skills?: { mode: 'auto' | 'manual' | 'model'; pinned: { name: string; tokens: number | null; missing: boolean }[]; blocked: string[] };
-  /** the engine's split of the last prompt (its usage frame); null before the first frame */
-  split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
+  /** the engine's split of the last prompt (its usage frame); null before the first frame. A
+   *  cloud model's is chatd's estimate from the characters: `estimated`, and the skill index
+   *  apart (`skills`) */
+  split?: { system: number; tools: number; history?: number; injected?: number; images: number; skills?: number; estimated?: boolean } | null;
   /** what the harness decided for this chat; never inside the answer text */
   harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[]; memory?: HarnessMemory | null } | null;
   memory: {
@@ -660,7 +665,7 @@ export interface PaneRef {
 export type ChatEvent =
   | { type: 'run.started'; run: Run }
   | { type: 'run.phase'; run_id: string; phase: RunPhase; now: string; tool?: Run['tool']; prefill?: Run['prefill']; step?: number; queue_position?: number | null }
-  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; prefill?: Run['prefill'] }
+  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; ttft_ms?: number | null; prefill?: Run['prefill'] }
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
   | { type: 'message.created'; message: Message }

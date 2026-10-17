@@ -6,7 +6,7 @@
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { bytes, exact, fixed, pct, timeShort } from '../lib/format';
+import { bytes, exact, fixed, money, ms, pct, timeShort } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import '../charts/spark';
@@ -14,7 +14,7 @@ import { lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind } from './types';
 import { elapsedWords } from './thread';
-import { HARNESS_PENDING, kvWords, liveFigure, memoryWords, partWords, residentWords, sandboxWords, skillTokens, slotWords, turnFigure } from './context-words';
+import { budgetWords, cacheWords, draftFigure, HARNESS_PENDING, kvWords, liveFigure, memoryWords, partWords, residentWords, sandboxWords, skillTokens, slotWords, turnFigure } from './context-words';
 
 const PART_COLOR: Record<ContextPartKind, string> = {
   system: 'var(--series-muted)',
@@ -80,6 +80,7 @@ export class QseChatContext extends LightElement {
     const usedPct = ctx.used / total;
     const tip = pf ? ((ctx.cache.warm + pf.done) / total) * W : null;
     const twin = `${exact(ctx.used)} of ${exact(ctx.window)} tokens used; ${exact(ctx.cache.warm)} warm, ${exact(ctx.cache.cold)} cold`;
+    const cw = cacheWords(ctx.cache);
     return html`<section class="ch-ctx-sec" data-sec="window">
       <h3 class="ch-ctx-h">Context window</h3>
       <div class="ch-rib-wrap">
@@ -93,7 +94,7 @@ export class QseChatContext extends LightElement {
         </svg>
       </div>
       <div class="ch-rib-line num"><b>${exact(ctx.used)}</b> of ${exact(ctx.window)}, ${pct(usedPct, 0)}</div>
-      <p class="ch-rib-cache">${ctx.cache.warm ? html`<span class="ch-warm">${exact(ctx.cache.warm)} warm</span> from the ${ctx.cache.source === 'none' ? 'cache' : ctx.cache.source}` : 'nothing cached yet'}${ctx.cache.cold ? html`, <span class="ch-cold">${exact(ctx.cache.cold)} cold</span> to prefill` : ''}${pf ? html`, prefilling ${exact(pf.done)} of ${exact(pf.total)}` : ''}</p>
+      <p class="ch-rib-cache" data-cache=${ctx.cache.source}>${cw.warm ? html`<span class="ch-warm">${cw.warm}</span>` : cw.none}${cw.cold ? html`, <span class="ch-cold">${cw.cold}</span>` : ''}${pf ? html`, prefilling ${exact(pf.done)} of ${exact(pf.total)}` : ''}</p>
       <ul class="ch-legend" @mouseleave=${() => (this.hover = null)}>
         ${ctx.parts.map((p) => html`<li class="${p.tokens ? '' : 'is-zero'}" @mouseenter=${() => (this.hover = p.kind)}><span class="swatch ${p.kind === 'reserved' ? 'swatch-outline' : ''}" style=${p.kind === 'reserved' ? '' : `background:${PART_COLOR[p.kind]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${partWords(p.kind, p.tokens, ctx.split, c.context.model.backend)}</span></li>`)}
       </ul>
@@ -115,7 +116,10 @@ export class QseChatContext extends LightElement {
     const capped = r ? r.thinking.call ?? r.thinking.used : used;
     const be = c.context.model.backend;
     const drafter = c.context.model.drafter;
-    const fig = (v: number | null | undefined, fmt: (v: number) => string, kind: 'tps' | 'round' | 'accepted') => (r ? liveFigure(v, fmt, r, kind, be, drafter) : turnFigure(v, fmt, !!last));
+    const fig = (v: number | null | undefined, fmt: (v: number) => string, kind: 'tps' | 'round' | 'accepted') => (r ? liveFigure(v, fmt, r, kind, be, drafter) : kind === 'tps' ? turnFigure(v, fmt, !!last) : draftFigure(v, fmt, !!last, be));
+    // this call's first token while a run is on (a cloud model's: the network and the provider's
+    // queue in it), else the last turn's
+    const ttft = r ? r.ttft_ms : last?.ttft_ms;
     const elapsed = r ? Math.max(0, Math.round((this.now - Date.parse(r.started_at)) / 1000)) : null;
     return html`<section class="ch-ctx-sec ${r ? 'is-live' : 'is-idle'}" data-sec="now">
       <h3 class="ch-ctx-h">${r ? 'Now' : 'Last turn'}</h3>
@@ -126,14 +130,15 @@ export class QseChatContext extends LightElement {
       <dl class="kv ch-kv">
         <div><dt>phase</dt><dd>${r ? r.phase : last ? last.finish : 'idle'}</dd></div>
         ${r && elapsed != null ? html`<div><dt>running for</dt><dd class="num">${elapsedWords(elapsed)}</dd></div>` : nothing}
+        ${r || last ? html`<div data-fig="ttft"><dt>first token</dt><dd class="num">${ttft != null ? ms(ttft) : r ? 'waiting for it' : turnFigure(null, String, true)}</dd></div>` : nothing}
         <div><dt>tokens per round</dt><dd class="num">${fig(r ? r.tokens_per_round : last?.tokens_per_round, (v) => fixed(v, 2), 'round')}</dd></div>
         <div><dt>accepted</dt><dd class="num">${fig(r ? r.acceptance : last?.acceptance, (v) => pct(v, 0), 'accepted')}</dd></div>
         ${r?.prefill ? html`<div><dt>prefill</dt><dd class="num">${exact(r.prefill.done)} / ${exact(r.prefill.total)}</dd></div>` : nothing}
         ${r?.tool ? html`<div><dt>tool</dt><dd><code>${r.tool.name}</code></dd></div>` : nothing}
       </dl>
       <div class="ch-meter-block">
-        <div class="meter-head"><span>thinking budget</span><span class="num">${budget ? `${exact(capped)} of ${exact(budget)}, this call` : budget === 0 ? 'off' : `${exact(used)}, no cap`}</span></div>
-        <div class="meter ch-meter"><span class="meter-fill ${budget && capped / budget > 0.85 ? 'is-warn' : ''}" style="width:${budget ? Math.min(100, (capped / budget) * 100).toFixed(1) : 0}%"></span></div>
+        <div class="meter-head"><span>thinking budget</span><span class="num">${budgetWords(budget, used, capped, be)}</span></div>
+        <div class="meter ch-meter"><span class="meter-fill ${budget && be !== 'cloud' && capped / budget > 0.85 ? 'is-warn' : ''}" style="width:${budget && be !== 'cloud' ? Math.min(100, (capped / budget) * 100).toFixed(1) : 0}%"></span></div>
       </div>
     </section>`;
   }
@@ -210,6 +215,7 @@ export class QseChatContext extends LightElement {
         <div><dt>cached</dt><dd class="num">${exact(u.cached_tokens)}</dd></div>
         <div><dt>tool calls</dt><dd class="num">${exact(u.tool_calls)}</dd></div>
         <div><dt>time</dt><dd class="num">${elapsedWords(u.wall_s)}</dd></div>
+        ${u.cost_usd != null ? html`<div data-usage="cost"><dt>cost</dt><dd class="num" title="at the prices set per model under Backends">${money(Math.round(u.cost_usd * 1e6))}</dd></div>` : nothing}
       </dl>
       <div class="ch-ctx-row"><a class="linkish" href="#/usage">${icon('usage')} All usage</a></div>
     </section>`;

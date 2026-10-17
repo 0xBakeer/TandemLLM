@@ -8,7 +8,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
-import { bytes, exact, fixed, ms, pct } from '../lib/format';
+import { bytes, exact, fixed, money, ms, pct } from '../lib/format';
 import { renderMarkdown } from '../playground/markdown';
 import { LightElement } from '../ui/base';
 import { copyButton, icon } from '../ui/bits';
@@ -344,6 +344,7 @@ export function figsLine(s: TurnStats): string {
   parts.push(`${exact(s.completion_tokens)} tok${s.reasoning_tokens ? ` (${exact(s.reasoning_tokens)} thinking)` : ''}`);
   if (s.tokens_per_round != null) parts.push(`${fixed(s.tokens_per_round, 1)} per round`);
   if (s.acceptance != null) parts.push(`${pct(s.acceptance, 0)} accepted`);
+  if (s.cost_usd != null) parts.push(money(Math.round(s.cost_usd * 1e6)));
   return parts.join(' · ');
 }
 

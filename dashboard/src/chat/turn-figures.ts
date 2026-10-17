@@ -1,11 +1,11 @@
 // The figures line under an answer, as readings (VIS-185). Pure, so it is tested without a DOM.
 
-import { exact, fixed, ms, pct } from '../lib/format';
+import { exact, fixed, money, ms, pct } from '../lib/format';
 import type { TurnStats } from './types';
 
 export interface TurnFigure {
   /** the reading's key: the line hides some on a phone by it */
-  k: 'finish' | 'tps' | 'tok' | 'ttft' | 'round' | 'acc';
+  k: 'finish' | 'tps' | 'tok' | 'ttft' | 'round' | 'acc' | 'cost';
   /** the number, set a step brighter than its words */
   n: string;
   w: string;
@@ -26,6 +26,8 @@ export function figsParts(s: TurnStats): TurnFigure[] {
   if (s.ttft_ms != null) out.push({ k: 'ttft', n: ms(s.ttft_ms), w: 'first token ', pre: true });
   if (s.tokens_per_round != null) out.push({ k: 'round', n: fixed(s.tokens_per_round, 1), w: ' per round' });
   if (s.acceptance != null) out.push({ k: 'acc', n: pct(s.acceptance, 0), w: ' accepted' });
+  // a cloud model's turn at the proxy's prices
+  if (s.cost_usd != null) out.push({ k: 'cost', n: money(Math.round(s.cost_usd * 1e6)), w: '' });
   return out;
 }
 

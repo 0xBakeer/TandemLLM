@@ -25,8 +25,9 @@ describe('the Now figures of a live run', () => {
     expect(liveFigure(null, one, run('thinking'), 'accepted', 'engine', null)).toBe('no drafter');
     for (const ph of ['tool', 'thinking', 'writing'] as const) expect(liveFigure(null, one, run(ph), 'tps', 'engine', 'x')).not.toBe(NOT_TRACKED);
   });
-  it('is not tracked on another backend', () => {
-    expect(liveFigure(null, one, run('thinking'), 'tps', 'proxy', null)).toBe(NOT_TRACKED);
+  it("is not tracked on another backend, except chatd's own count of its stream (0.11.3)", () => {
+    expect(liveFigure(null, one, run('thinking'), 'round', 'proxy', null)).toBe(NOT_TRACKED);
+    expect(liveFigure(null, one, run('thinking'), 'tps', 'proxy', null)).toBe('warming up, the first 50 tokens');
   });
   it("keeps the call's thinking beside the run's from run.metrics", () => {
     const c = { run: run('thinking') } as Conversation;
@@ -36,7 +37,7 @@ describe('the Now figures of a live run', () => {
   it('the panel reads them through liveFigure while a run is live, and caps the budget meter per call', () => {
     const src = readFileSync(new URL('../src/chat/context-panel.ts', import.meta.url), 'utf8');
     const now = src.slice(src.indexOf('private renderNow('), src.indexOf('private renderModel('));
-    expect(now).toContain("r ? liveFigure(v, fmt, r, kind, be, drafter) : turnFigure(v, fmt, !!last)");
+    expect(now).toContain("r ? liveFigure(v, fmt, r, kind, be, drafter) : kind === 'tps' ? turnFigure(v, fmt, !!last) : draftFigure(v, fmt, !!last, be)");
     expect(now).toContain("fig(r ? r.acceptance : last?.acceptance");
     expect(now).toContain('(capped / budget)');
   });

@@ -5,6 +5,10 @@ import { bytes, compact, exact } from '../lib/format';
 import type { Attachment, ContextReport, HarnessMemory, Run, SandboxCallData, SandboxStatus } from './types';
 
 export const NOT_TRACKED = 'not tracked for this model';
+/** a cloud model's tokens per round and acceptance: nothing drafts on this box */
+export const NO_DRAFTING = 'no drafting (cloud)';
+/** a cloud model's thinking: DeepSeek's reasoning has no budget knob, OpenAI's a word only */
+export const PROVIDER_DECIDES = 'the provider decides';
 export const AFTER_TURN = 'measured after the first turn';
 export const NEXT_TURN = 'counted on its next turn';
 /** no usage frame from the engine yet (a new chat, another server) */
@@ -24,12 +28,41 @@ export function turnFigure(v: number | null | undefined, fmt: (v: number) => str
  *  model": between two model calls, in a call's first 50 tokens, before a call had ended. */
 export function liveFigure(v: number | null | undefined, fmt: (v: number) => string, r: Run, kind: 'tps' | 'round' | 'accepted', backend: Backend, drafter: string | null): string {
   if (v != null && Number.isFinite(v)) return fmt(v);
-  if (backend && backend !== 'engine') return NOT_TRACKED;
+  const relayed = !!backend && backend !== 'engine';
+  if (kind !== 'tps' && backend === 'cloud') return NO_DRAFTING;
+  if (kind !== 'tps' && relayed) return NOT_TRACKED;
   if (kind !== 'tps' && !drafter) return 'no drafter';
   if (r.phase === 'queued') return 'queued';
-  if (r.phase === 'prefill') return 'prefilling';
+  // a relayed call's tok/s is chatd's own count of the stream (0.11.3): until its first token
+  // the backend reads the prompt where nobody sees it
+  if (r.phase === 'prefill') return relayed ? 'waiting for the first token' : 'prefilling';
   if (r.phase === 'tool' || r.phase === 'permission') return kind === 'tps' ? 'between model calls' : 'measured when a model call ends';
   return kind === 'tps' ? 'warming up, the first 50 tokens' : 'measured when a model call ends';
+}
+
+/** a figure of the last turn that only a drafter has: a cloud model drafts nothing */
+export function draftFigure(v: number | null | undefined, fmt: (v: number) => string, hadTurn: boolean, backend: Backend): string {
+  if ((v == null || !Number.isFinite(v)) && backend === 'cloud') return NO_DRAFTING;
+  return turnFigure(v, fmt, hadTurn);
+}
+
+/** the thinking budget row: the call's cap, off, or for a cloud model that the provider sets it
+ *  (it read "0, no cap" through a minute of DeepSeek's thinking, 2026-10-17) */
+export function budgetWords(budget: number | null, used: number, capped: number, backend: Backend): string {
+  if (budget === 0) return 'off';
+  if (backend === 'cloud') return `${exact(used)}, ${PROVIDER_DECIDES}`;
+  return budget ? `${exact(capped)} of ${exact(budget)}, this call` : `${exact(used)}, no cap`;
+}
+
+/** the ribbon's cache line: the engine's tier, or what the provider said it cached (a cloud
+ *  model's usage: DeepSeek's prompt_cache_hit_tokens) */
+export function cacheWords(cache: ContextReport['cache']): { warm: string | null; cold: string | null; none: string | null } {
+  if (cache.source === 'provider') {
+    if (!cache.warm) return { warm: null, cold: null, none: 'nothing cached by the provider yet' };
+    return { warm: `${exact(cache.warm)} cached by the provider`, cold: cache.cold ? `${exact(cache.cold)} uncached` : null, none: null };
+  }
+  if (!cache.warm) return { warm: null, cold: cache.cold ? `${exact(cache.cold)} cold to prefill` : null, none: 'nothing cached yet' };
+  return { warm: `${exact(cache.warm)} warm from the ${cache.source === 'none' ? 'cache' : cache.source}`, cold: cache.cold ? `${exact(cache.cold)} cold to prefill` : null, none: null };
 }
 
 /** the slot row: the engine's lane tag while a request runs, else who holds the slot. It said
@@ -43,6 +76,7 @@ export function slotWords(slot: string | null, mem: Mem): string {
 
 /** where the engine keeps this chat's rows */
 export function kvWords(mem: Mem, backend: Backend): string {
+  if (backend === 'cloud') return 'none on this box: the provider keeps it';
   if (backend && backend !== 'engine') return NOT_TRACKED;
   if (mem.kv_tokens != null && mem.kv_where === 'slot') return `${exact(mem.kv_tokens)} tokens, in the engine's slot`;
   if (mem.kv_tokens != null && mem.kv_where === 'park') return `${exact(mem.kv_tokens)} tokens, parked in RAM`;
@@ -64,6 +98,7 @@ export function kvWords(mem: Mem, backend: Backend): string {
 
 /** the resident prefix's snapshots of this chat */
 export function residentWords(mem: Mem, backend: Backend): string {
+  if (backend === 'cloud') return 'none on this box';
   if (backend && backend !== 'engine') return NOT_TRACKED;
   if (mem.resident_owner === 'this') return bytes(mem.resident_bytes ?? 0, 1);
   if (mem.resident_owner === 'other') return 'held by another chat';
@@ -100,6 +135,8 @@ export function skillTokens(tokens: number | null | undefined): string {
 /** a part of the context bar: the engine counts the system prompt and the tool schemas in its
  *  usage frame, so before the first frame (or on a server without one) they have no count yet */
 export function partWords(kind: string, tokens: number, split: ContextReport['split'], backend: Backend): string {
+  // a cloud model's split is chatd's count of the characters, and the conversation the rest
+  if (split?.estimated && (kind === 'system' || kind === 'tools' || kind === 'skills' || kind === 'messages')) return `${exact(tokens)} est.`;
   if ((kind === 'system' || kind === 'tools') && !split && !tokens) return backend && backend !== 'engine' ? 'not tracked' : 'next turn';
   return exact(tokens);
 }

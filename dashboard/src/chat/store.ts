@@ -21,7 +21,7 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
     case 'run.metrics': {
       if (!c.run || c.run.id !== ev.run_id) return c;
       const hist = [...c.run.tps_history, ev.decode_tps].slice(-TPS_SLOTS);
-      return { ...c, run: { ...c.run, decode_tps: ev.decode_tps, tokens_per_round: ev.tokens_per_round, acceptance: ev.acceptance, tokens: ev.tokens, thinking: { used: ev.thinking_used, call: ev.thinking_call, budget: ev.thinking_budget === undefined ? c.run.thinking.budget : ev.thinking_budget }, prefill: ev.prefill ?? c.run.prefill, tps_history: hist } };
+      return { ...c, run: { ...c.run, decode_tps: ev.decode_tps, tokens_per_round: ev.tokens_per_round, acceptance: ev.acceptance, tokens: ev.tokens, ttft_ms: ev.ttft_ms === undefined ? c.run.ttft_ms : ev.ttft_ms, thinking: { used: ev.thinking_used, call: ev.thinking_call, budget: ev.thinking_budget === undefined ? c.run.thinking.budget : ev.thinking_budget }, prefill: ev.prefill ?? c.run.prefill, tps_history: hist } };
     }
     case 'run.done': {
       const messages = mapMessage(c.messages, ev.message_id, (m) => ({ ...m, status: ev.status, stats: ev.stats, parts: m.parts.map((p) => (p.type === 'thinking' ? { ...p, done: true } : p)) }));
