@@ -698,7 +698,8 @@ class AgentMixin:
                            vision=bool(info.get("vision")), blob=self._blob_of,
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
-                           inline_images=ours, step_from=self._step_from(c))
+                           inline_images=ours, step_from=self._step_from(c),
+                           levels=info.get("effort_levels"), effort_off=info.get("effort_off"))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -744,7 +745,9 @@ class AgentMixin:
                                keep_reasoning_from=max(0, keep_from - b),
                                nudge=NUDGE if run.nudge else None,
                                tandem=self.tandem_field(settings) if ours else None,
-                               inline_images=ours, step_from=self._step_from(c))
+                               inline_images=ours, step_from=self._step_from(c),
+                               levels=info.get("effort_levels"),
+                               effort_off=info.get("effort_off"))
         if ours and run.step <= 1 and not run.remark:
             gone = self.missing_pins(settings)
             if gone:

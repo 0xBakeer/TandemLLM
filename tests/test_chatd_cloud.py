@@ -22,13 +22,16 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import sys
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from chatd_util import Chat, is_done, run_all  # noqa: E402
 from proxy_util import FIXTURE_KEYS, Proxy, fake  # noqa: E402
 
-from chatd import agent, context as ctx_mod, runs  # noqa: E402
+from chatd import agent, context as ctx_mod, render, runs  # noqa: E402
+from test_chatd_attach import upload  # noqa: E402
 
 PRICE = (0.30, 0.006, 1.2)      # DeepSeek V4 Flash's list price, USD per million tokens
 
@@ -129,6 +132,81 @@ def test_estimated_split_counts_the_skill_index_apart():
                            settings={}, branch_tokens=5_000, files_tokens=0, stats=None, run=None,
                            row=None, facts={}, peek=None, harness=None)
     assert {p["kind"]: p["tokens"] for p in small["parts"]}["reserved"] == 8_000 - 5_000 - 256
+
+
+def _png(w: int = 8, h: int = 8) -> bytes:
+    raw = b"".join(b"\x00" + b"\x80\x40\x20" * w for _ in range(h))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def test_effort_is_the_models_own_level():
+    ds = ["low", "high", "max"]
+    assert render.nearest_effort("max", ds) == "max"
+    assert render.nearest_effort("medium", ds) == "high"    # DeepSeek maps it so itself
+    assert render.nearest_effort("xhigh", ds) == "high"
+    assert render.nearest_effort("low", ds) == "low"
+    assert render.nearest_effort("max", ["low", "medium", "high", "xhigh"]) == "xhigh"
+    assert render.nearest_effort("high", []) == "high"
+    b = render.body("deepseek-flash", {"thinking": False, "effort": "max"}, [], levels=ds,
+                    effort_off="none")
+    assert b["reasoning_effort"] == "none" and "chat_template_kwargs" not in b
+    b = render.body("TandemLLM", {"thinking": False, "effort": "high"}, [])
+    assert b["chat_template_kwargs"] == {"enable_thinking": False} and "reasoning_effort" not in b
+
+
+DS_CARDS = {"deepseek-flash": {"name": "DeepSeek-V4.1-Flash", "context_window": 1048576,
+                               "max_model_len": None, "max_output_tokens": 393216,
+                               "input_modalities": ["text", "image"],
+                               "effort": {"supported_levels": ["low", "high", "max"],
+                                          "default_level": "high"}},
+            "deepseek-v4-pro": {"name": "DeepSeek-V4-Pro", "context_window": 1048576,
+                                "max_model_len": None, "max_output_tokens": 393216,
+                                "input_modalities": ["text"],
+                                "effort": {"supported_levels": ["low", "high", "max"],
+                                           "default_level": "high"}}}
+
+
+def test_the_providers_name_levels_and_images_reach_the_chat():
+    srv, port = fake(models=["deepseek-flash", "deepseek-v4-pro"])
+    srv.fake.cards = DS_CARDS
+    # the first discovery of a new backend: both models come enabled
+    env = {k: v for k, v in _env(port).items() if "_MODELS" not in k}
+    with Proxy(env) as px:
+        px.sync()
+        c = Chat(engine_url=f"http://127.0.0.1:{px.port}")
+        try:
+            caps = c.ok("GET", "/capabilities")
+            m = {x["id"]: x for x in caps["models"]}
+            assert m["deepseek-flash"]["name"] == "DeepSeek V4.1 Flash (cloud)"
+            assert m["deepseek-v4-pro"]["name"] == "DeepSeek V4 Pro (cloud)"
+            assert m["deepseek-flash"]["capabilities"]["effort_levels"] == ["low", "high", "max"]
+            assert m["deepseek-flash"]["capabilities"]["effort_default"] == "high"
+            assert m["deepseek-flash"]["capabilities"]["vision"] is True
+            assert m["deepseek-v4-pro"]["capabilities"]["vision"] is False
+            img = upload(c, "shot.png", "image/png", _png())
+            for model, effort, want_effort, sees in (("deepseek-flash", "max", "max", True),
+                                                     ("deepseek-v4-pro", "medium", "high", False)):
+                cid = c.new()
+                c.ok("PATCH", f"/conversations/{cid}/settings", {"model": model, "effort": effort})
+                c.ok("POST", f"/conversations/{cid}/messages",
+                     {"client_msg_id": f"i-{model}", "text": "what is in it? FAKE_DEEPSEEK",
+                      "attachments": [img["id"]]})
+                assert c.wait_idle(cid)["messages"][-1]["status"] == "done"
+                body = [b for b in srv.fake.bodies if b.get("model") == model][-1]
+                assert body["reasoning_effort"] == want_effort
+                content = body["messages"][-1]["content"]
+                parts = content if isinstance(content, list) else []
+                has_img = any(p.get("type") == "image_url" and
+                              p["image_url"]["url"].startswith("data:image/png;base64,")
+                              for p in parts)
+                assert has_img is sees, (model, content if isinstance(content, str) else parts)
+        finally:
+            c.close()
+    srv.shutdown()
 
 
 if __name__ == "__main__":

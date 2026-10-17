@@ -69,7 +69,8 @@ DEFAULT_SETTINGS = {
     # ends (chatd/verify.py)
     "verify": True,
 }
-EFFORTS = ("auto", "low", "medium", "high", "xhigh")
+# `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
+EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
 TITLE_NEW = "New chat"
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -1347,6 +1348,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "capabilities": {
                     "thinking": bool(c.get("thinking", False)),
                     "effort_levels": [x for x in levels if x != "off"],
+                    # a provider's default level (DeepSeek's `high`), null for our engine
+                    "effort_default": c.get("effort_default"),
                     "tools": bool(c.get("tools", True)), "vision": bool(c.get("vision", False)),
                     "structured": bool(c.get("structured", False))},
                 "loaded": bool(card.get("loaded", True)),
@@ -1358,6 +1361,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "_drafter": (w.get("drafters") if isinstance(w, dict) else None)
                             or eng.get("drafter"),
                 "_effort_budgets": card.get("effort_budgets") or {},
+                # the word a provider takes to turn thinking off (DeepSeek: reasoning_effort none)
+                "_effort_off": c.get("effort_off"),
             })
         first = out[0] if out else None
         levels = (first or {}).get("capabilities", {}).get("effort_levels") or []
@@ -1367,7 +1372,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return {
             "models": [{k: v for k, v in m.items() if not k.startswith("_")} for m in out],
             "_models": out,
-            "efforts": ["auto"] + [x for x in EFFORTS[1:] if x in levels],
+            "efforts": ["auto"] + [x for x in EFFORTS[1:-1] if x in levels],
             "commands": [{"command": "clear", "description": "start a new chat"}],
             "defaults": defaults,
         }
@@ -1383,7 +1388,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "max_output": m.get("_max_output"),
                 "vision": (m.get("capabilities") or {}).get("vision", False),
                 "tools": (m.get("capabilities") or {}).get("tools", True),
-                "effort_budgets": m.get("_effort_budgets") or {}}
+                "effort_budgets": m.get("_effort_budgets") or {},
+                "effort_levels": (m.get("capabilities") or {}).get("effort_levels") or [],
+                "effort_off": m.get("_effort_off")}
 
     # ================================================================== attachments
     def upload(self, content_type: str, body: bytes) -> dict:
