@@ -17,7 +17,7 @@ plus a tool result, as chatd's agent loop does:
 
 For every turn the ledger row (by the response's id) gives what the engine reused and read: a turn
 passes when it forwarded at most what is new since the previous turn's end (its tool result, the
-glue, the last decided token) plus 64, i.e. it resumed at the end of the previous generation.
+router's note of a new user turn, the glue, the last decided token) plus 64, i.e. it resumed at the end of the previous generation.
 Reports reuse = engine_cached / (engine_cached + forwarded) per turn. Text only, no personal data:
 the history is generated filler, the screenshots are generated PNGs. Never run it while the box
 serves someone: it takes slot 0.
@@ -171,10 +171,13 @@ def main() -> int:
             th.join()
         row = ledger_row(a.ledger, r["id"]) or {}
         msg = r["choices"][0]["message"]
+        # what the engine read is the served prompt: the client's tokens and the router's hidden
+        # notes (a new user turn gets one), engine_cached + forwarded
         new = None
         if prev is not None and row:
-            new = int(row["prompt_tokens"]) - int(prev["prompt_tokens"]) - \
-                int(prev["completion_tokens"])
+            served = int(row["engine_cached"] or 0) + int(row["forwarded_tokens"] or 0)
+            served_prev = int(prev["engine_cached"] or 0) + int(prev["forwarded_tokens"] or 0)
+            new = served - served_prev - int(prev["completion_tokens"])
         fwd = int(row.get("forwarded_tokens") or 0)
         ec = int(row.get("engine_cached") or 0)
         ok = None if new is None else fwd <= new + 64
