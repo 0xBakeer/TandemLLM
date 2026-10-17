@@ -1328,12 +1328,13 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 run.tokens = run.call_base[0] + int(dec["tokens"])
                 run.thinking_tokens = run.call_base[1] + int(dec.get("thinking_tokens") or 0)
             state = act.get("state")
-            if state == "prefilling" and pre.get("total"):
+            # a row polled before the first token came says prefilling after it: the call has
+            # left its prefill once its phase did
+            if state == "prefilling" and pre.get("total") and run.phase in ("queued", "prefill"):
                 run.prefill = {"done": int(pre.get("done") or 0), "total": int(pre["total"]),
                                "tps": pre.get("tps_now"), "eta_ms": pre.get("eta_ms"),
                                "cached": int(pre.get("cached") or 0), "why": pre.get("why")}
-                if run.phase in ("queued", "prefill"):
-                    run.set_phase("prefill", prefill_words(pre))
+                run.set_phase("prefill", prefill_words(pre))
             elif state == "queued" and run.phase in ("queued", "prefill"):
                 place = (act.get("queue") or {}).get("place")
                 run.set_phase("queued", act.get("label") or "Queued",
@@ -1452,8 +1453,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if conv.memory_limit:                       # where the guard compacts this chat now
             out["compact_at"] = comp.compact_at(out["window"], conv.memory_limit)
         out["skills"] = self.skills_report(settings)
-        out["worker"] = self.worker_context(on)     # the running worker's own context (VIS-E15)
-        out["last_worker"] = self.last_worker(conv.id) if out["worker"] is None else None
+        # the running workers' own contexts, by task (VIS-E15)
+        out["workers"] = [self.worker_context(w) for w in self.running_workers(on)]
+        out["last_worker"] = self.last_worker(conv.id) if not out["workers"] else None
         return out
 
     def _maybe_peek(self, conv: Conv, settings: dict, branch: list[dict]) -> None:

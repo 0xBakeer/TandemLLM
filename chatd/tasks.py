@@ -22,10 +22,11 @@ has no task tool (depth 1).
 THE CHAT SEES IT. The worker's session is `chat-<chat>-task-<n>` (render.task_session_id) and its
 headers turn the memory notes off. Its transcript's events go to the chat's log with `task_id`
 (service.py TASK_FORWARD), beside `task.started`, `task.phase`, `task.metrics` (ephemeral, once a
-second) and `task.done`; meanwhile the parent's phase is `task`, its Now line "Task 2: <title>, call
-12 of 40: <the worker's Now>". `GET .../tasks` lists a chat's tasks, `GET .../tasks/{id}` gives one
-with its transcript. A snapshot of the workspace at the worker's start (key: the task's id) is the
-base of the task's diff and a rewind point.
+second: the prefill or decode figures of its own live row) and `task.done`; meanwhile the parent's
+phase is `task`, its Now line "Task 2: <title>, call 12 of 40: <the worker's Now>". The context
+report lists each running worker under `workers`. `GET .../tasks` lists a chat's tasks,
+`GET .../tasks/{id}` gives one with its transcript. A snapshot of the workspace at the worker's
+start (key: the task's id) is the base of the task's diff and a rewind point.
 
 THE CONTRACT (SRV-581). A brief has four labelled lines, Goal, Files, Constraints and Check, each
 saying something, and no code: a fence, more than 4 tags, a run of more than 8 lines that look
@@ -825,13 +826,24 @@ class TasksMixin:
             p.set_phase("task", f"Task {t['n']}: {t['title']}, call {worker.step} of "
                                 f"{worker.max_steps}: {worker.now}")
 
+    def worker_metrics(self, worker) -> dict:
+        """A worker's live figures (`task.metrics`, `context.workers[].metrics`), from its own
+        live row (its session chat-<chat>-task-<n>, service.py `_metrics`) and its usage frames:
+        the prefill's progress while it reads its prompt, else the decode; its tokens so far."""
+        pre = worker.prefill
+        m = worker.metrics
+        return {"task_id": worker.task["id"], "phase": worker.phase,
+                "prefill": {k: pre.get(k) for k in ("done", "total", "tps", "eta_ms", "cached")}
+                if pre else None,
+                "decode_tps": m["decode_tps"], "ttft_ms": m["ttft_ms"],
+                "tokens_per_round": m["tokens_per_round"], "acceptance": m["acceptance"],
+                "prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in worker.step_usage),
+                "completion_tokens": worker.tokens, "thinking_used": worker.thinking_tokens}
+
     def task_metrics(self, worker) -> None:
-        """Once a second from the ticker (service.py `_metrics`): the worker's tokens so far."""
-        self.emit(worker.parent.conv, {
-            "type": "task.metrics", "task_id": worker.task["id"],
-            "prompt_tokens": sum(int(u.get("prompt_tokens") or 0) for u in worker.step_usage),
-            "completion_tokens": worker.tokens, "decode_tps": worker.metrics["decode_tps"]},
-            persist=False)
+        """Once a second from the ticker (service.py `_metrics`): `task.metrics` on the chat."""
+        self.emit(worker.parent.conv, {"type": "task.metrics", **self.worker_metrics(worker)},
+                  persist=False)
 
     def worker_split(self, worker, body: dict, path: list[dict]) -> None:
         """At each of a worker's requests: the parts of its context, estimated from the
@@ -843,11 +855,14 @@ class TasksMixin:
                           "brief": ctx_mod.estimate_tokens(render.text_of(user.get("parts") or [])),
                           "files": ctx_mod.file_tokens(path)}
 
-    def worker_context(self, run) -> dict | None:
-        """The Context panel's `worker`: the running worker's own window (null when none runs)."""
+    def running_workers(self, run) -> list:
+        """A run's workers in flight, by task: one at a time today (SRV-589 runs more)."""
         w = getattr(run, "child", None) if run is not None else None
-        if w is None or not w.active:
-            return None
+        return [w] if w is not None and w.active else []
+
+    def worker_context(self, w) -> dict:
+        """One item of the Context panel's `workers`: a running worker's own window, its Now line
+        and its live figures."""
         t = w.task
         last = w.step_usage[-1] if w.step_usage else {}
         used = int(last.get("prompt_tokens") or 0) + int(last.get("completion_tokens") or 0) \
@@ -861,7 +876,8 @@ class TasksMixin:
                 "split": {**est, "steps": max(0, used - sum(est.values()))},
                 "step": w.step, "max_steps": w.max_steps,
                 "cache": {"warm": cached, "cold": max(0, prompt - cached),
-                          "source": last.get("cache_source") or "none"}}
+                          "source": last.get("cache_source") or "none"},
+                "phase": w.phase, "now": w.now, "metrics": self.worker_metrics(w)}
 
     # ------------------------------------------------------------------ Agents mode (SRV-583)
     def _read_hit(self, run, part: dict, name: str, args: dict) -> Result | None:

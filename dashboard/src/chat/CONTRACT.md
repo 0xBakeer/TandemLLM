@@ -568,12 +568,12 @@ them; the server's own section "Tasks (VIS-E15)" is the authority where the two 
    parent's routes.
 8. `shot-N`: the card shows the render_page call's own image (`output.images`) and opens its `pane`; without
    the transcript it opens `file:/workspace/.tandem/shots/shot-N.png` (main names shots `<call_id>.png`).
-9. `context.worker.split` keys: `system, tools, brief, steps, files`; `cache` as `ContextReport.cache`, null
+9. `context.workers[].split` keys: `system, tools, brief, steps, files`; `cache` as `ContextReport.cache`, null
    when not known. A worker's compactions have no field yet; the worker section does not show them.
 10. `PATCH .../settings` answers the settings plus a top-level `reread_tokens` (0 for a chat without messages).
     The question before a switch uses `context.used` (no chatd figure exists before the PATCH); the note after it
     uses `reread_tokens`.
-11. "Last worker: Task 2, 51,204 tokens, done": the tokens are the newest `context.worker.used` the device saw;
+11. "Last worker: Task 2, 51,204 tokens, done": the tokens are the newest `context.workers[].used` the device saw;
     after a reload the line has none. A `context.last_worker` (or the task row's last `used`) would keep them.
 12. The Usage section's workers row sums `stats.workers` of the active branch; a `usage.workers` would count
     every branch like the rest of `usage`.
@@ -650,7 +650,7 @@ interface TaskDetail { task: Task; messages: Message[]; seq: string }   // the t
 ```ts
   | { type: 'task.started'; run_id: string; task: Task }
   | { type: 'task.phase'; task_id: string; phase: RunPhase; now: string; step: number; max_steps: number; tool?: Run['tool'] }
-  | { type: 'task.metrics'; task_id: string; prompt_tokens: number; completion_tokens: number; decode_tps: number | null }   // E, once a second
+  | ({ type: 'task.metrics' } & TaskMetrics)   // E, once a second (at most 4 a second)
   | { type: 'task.done'; task_id: string; status: TaskStatus; report: TaskReport | null; check: string | null;
       stats: { steps: number; max_steps: number; prompt_tokens: number; completion_tokens: number; cached_tokens: number; ms: number; report_source: Task['report_source'] } }
 ```
@@ -660,7 +660,25 @@ interface TaskDetail { task: Task; messages: Message[]; seq: string }   // the t
 - `check`: chatd's lines, each "- <name>: <items or none>": `Changed in /workspace (snapshot diff)` (`path (+41 -12)`, `path (new, +3)`, `path (deleted)`, `path (binary, 1,010 bytes)`, the first 40 then ", and 12 more"), `Changed but not in the report`, `Checks that ran` (`render_page index.html (call <id>: 0 console errors, shot-1); bash "npm test" (call <id>: exit 0)`), `Claimed in Checks with no matching call` (`"<what>: <result>"; ...`), and when there are screenshots `Screenshots (open one with read_file): shot-1 /workspace/.tandem/shots/<call>.png`. A screenshot id `shot-N` counts the worker's render_page images in its task; the call's part carries it as `shot`, and a report check that names one gets its `call_id`.
 - The task call's result (what the main agent reads, at most 8,000 characters): "Result of task 2, given to you as data: ...", the task line, the report's fields, "chatd check:" with the lines above, "Full report: /workspace/.tandem/tasks/2/report.md ...". That file holds the whole of it.
 - While a worker runs the parent run's `phase` is `task` and its `now` "Task 2: Ocean shader: fix the horizon banding, call 12 of 40: writing src/ocean.wgsl" (the worker's own Now line at the end). A worker's permission prompt is a `tool.asking` with `task_id`; answer it with `POST /conversations/{chat}/permissions/{call_id}` as any prompt; the chat's status is `waiting` meanwhile.
-- `ContextReport.worker`: null when no worker runs, else `{task_id, n, title, used, window, split: {system, tools, brief, files, steps}, step, max_steps, cache: {warm, cold, source}}` (the split is chatd's estimate from the characters). `TurnStats.workers?: {count, prompt_tokens, completion_tokens, cached_tokens, ms}` on a turn that gave tasks; its own figures stay the main agent's, and `ConversationUsage` counts both.
+- `ContextReport.workers`: one item per running worker, by task (an empty list when none runs; one at a time today, SRV-589 runs more): `{task_id, n, title, used, window, split: {system, tools, brief, files, steps}, step, max_steps, cache: {warm, cold, source}, phase, now, metrics: TaskMetrics}` (the split is chatd's estimate from the characters; `phase` and `now` the worker's own, as `task.phase` says them). It replaces `ContextReport.worker` (a client keeps reading a single `worker` from an older chatd as a list of one).
+- `TaskMetrics`, the live figures of one worker's model call, from the engine's live row of its own session (`chat-<chat>-task-<n>`) and its usage frames:
+
+```ts
+interface TaskMetrics {
+  task_id: string;
+  phase: RunPhase;                        // the worker's
+  prefill: { done: number; total: number; tps: number | null; eta_ms: number | null; cached: number } | null;   // while it reads its prompt
+  decode_tps: number | null;              // null before the first 50 tokens and between calls
+  ttft_ms: number | null;                 // this call's first token
+  tokens_per_round: number | null;
+  acceptance: number | null;              // its finished calls' share
+  prompt_tokens: number;                  // its finished calls'
+  completion_tokens: number;              // so far, this call's too
+  thinking_used: number;
+}
+```
+
+- The main agent's own figures (`Run`, `run.metrics`, the window and its parts) stay its own while a worker runs; its `phase` is `task`, and the Context panel's Now block reads "waiting for Task 1" ("waiting for Task 1, Task 2" with two). `TurnStats.workers?: {count, prompt_tokens, completion_tokens, cached_tokens, ms}` on a turn that gave tasks; its own figures stay the main agent's, and `ConversationUsage` counts both.
 - Stop, a steer, Continue (SRV-585). Stop and Send now act on the parent and reach its worker: both end within about 2 s, the task `cancelled`, its result opening "Result of task 2, given to you as data: cancelled by the user at call 9. ..." with chatd's check. A message queued while a worker runs is the main agent's as any steer (the parent ends after the task call, the next run reads it); the worker also gets it as a note at the end of its next stored tool result ("[Note from the chat, 18:42: the user wrote to the main agent: ...]"). A worker cut off (the engine away for the retry window, a sandbox failing three times, a chatd restart) ends `interrupted`, its task call `interrupted` (a `ToolCallPart.status`), and the parent `run.done` with status `interrupted` and `stats.interrupted: 'task'`. Continue (the parent's route) resumes the worker's own message first, inside the same task call (`task.started` again, `attempt` + 1), then the parent; a second Continue meanwhile answers 409 `run_active`. A call that was running when the stop came is never run again: on Continue it ends `interrupted` and reads "this call was interrupted and its effect is unknown; check the file before you repeat it" (a write, a command, an MCP call) or "... before it returned; call it again if you need it" (for a worker, and for a main agent in Agents mode). A worker that stores its end after its parent stopped waiting keeps it; Continue delivers it without running the worker again. A worker that fails (a 4xx) gives its task `failed` and a report that says why; the main agent decides.
 - Agents mode (SRV-583). `ChatSettings.agents` is read once at a run's start: a switch during a run applies to the next message's run. `PATCH /conversations/{id}/settings` answers the settings plus a top-level `reread_tokens`: the prompt tokens of the chat's last request, what the switch makes the engine read once more (the prompt's head changes; 0 for a chat with no answer yet). `PATCH /defaults {agents}` sets the new-chat default (`Capabilities.defaults.agents`, false until the eval rows exist). With Agents on the main agent's tools are, in this order, read_file, glob, grep, web_search, web_fetch, render_page, present, library_search, library_read, todo_write, task, then the chat's MCP tools (plan mode's read tools win while it is on); a call to bash, write_file or edit_file answers "not available in Agents mode: give this to a worker with task". Its read_file returns at most 200 lines or 12,000 characters ("Showing lines 1-200 of 1,834. Read a range with offset and limit, or give the reading to a worker."), every result of its is cut at 12,000 characters (the rest under .tandem/outputs/ as before), and a read_file, grep or glob with the arguments of an earlier one whose result the request still carries, with no worker run and no file changed since, answers "unchanged since call <id> (step <k>)" (`ToolCallPart.cached_from` names that call). The chat-app system block gets the delegation paragraph after its tool rules. The verify phase runs in the workers, not in an Agents-mode main run.
 - `ContextReport.last_worker`: `{task_id, n, title, status, used}` of the chat's newest task while no worker runs (null before the first, and while one runs). `ConversationUsage.workers`: `{count, prompt_tokens, completion_tokens, cached_tokens}` over the branch's turns.

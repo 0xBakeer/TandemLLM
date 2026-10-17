@@ -33,6 +33,12 @@ tests/test_chatd_agent.py.
                                                   test_the_schema_step_and_its_rollback
  13  Agents off: the stored chats' requests are origin/main's, byte for byte (tests/chatd_replay.py)
                                                   test_agents_off_requests_are_byte_identical_to_main
+ 14  the worker's own live row (its session chat-<conv>-task-1): its prefill, then its decode, reach
+     `task.metrics` and `context.workers` while it runs; `workers` is empty after it
+                                                  test_a_workers_live_row_reaches_its_metrics
+ 15  two running workers' figures stay apart by task_id: each its own row, its own task.metrics and
+     its own item in `context.workers` (chatd runs one today; SRV-589 runs two)
+                                                  test_two_workers_figures_stay_apart
 
 Run: PYTHONPATH=.:tests python3 tests/test_chatd_tasks.py
 """
@@ -506,7 +512,7 @@ def test_the_events_and_the_endpoints():
         # the parent's turn counts its worker
         a = c.snap(cid)["messages"][-1]
         assert a["stats"]["workers"]["count"] == 1 and a["stats"]["workers"]["prompt_tokens"] > 0
-        assert c.snap(cid)["context"]["worker"] is None
+        assert c.snap(cid)["context"]["workers"] == []
     finally:
         c.close()
 
@@ -553,6 +559,151 @@ def test_agents_off_requests_are_byte_identical_to_main():
         assert got[name]["body"] == want[name]["body"], name
     assert render.headers("x") == {"x-session-id": "chat-x", "X-QSE-Client": "chat-app",
                                    "X-Tandem-Cost": "1"}
+
+
+# ---------------------------------------------------------------------- live figures (SRV-579)
+# Live 2026-10-17 23:06: while a worker generated, the Context panel showed only the main agent
+# ("10,774 of 262,144", Now "warming up, the first 50 tokens") and nothing of the worker.
+
+def prefill_row(session: str, done=12_400, total=26_402, tps=1_950.0) -> dict:
+    return {"request_id": "w-req", "conversation_id": session, "phase": "prefill",
+            "activity": {"state": "prefilling", "prefill": {
+                "done": done, "total": total, "tps_now": tps, "eta_ms": 7_400, "cached": 3_072,
+                "why": None}}}
+
+
+def decode_row(session: str, tps=37.2) -> dict:
+    return {"request_id": "w-req", "conversation_id": session, "phase": "decode",
+            "ttft_ms": 6_350.0, "tokens_per_block": 3.1,
+            "activity": {"state": "writing", "decode": {
+                "tokens": 180, "thinking_tokens": 40, "tps_now": tps,
+                "tokens_per_round_now": 3.1}}}
+
+
+def test_a_workers_live_row_reaches_its_metrics():
+    import fake_backend
+    srv, port = fake_backend.start(models=["fake-a"])
+    # our engine's card: chatd reads its live rows (another backend's count no tokens)
+    srv.fake.cards["fake-a"] = {"owned_by": "tandemllm", "tandem": {"backend": "engine",
+                                                                   "context_length": 262_144}}
+    c = Chat(fake=(srv, port))
+    try:
+        cid = agents_chat(c)
+        session = render.task_session_id(cid, 1)
+        t0: list[float] = []
+
+        def live():
+            # the engine's rows of the worker's first call: its prefill until the first token
+            # (3 s), then its decode; a poll a second late still says prefilling
+            if not worker_calls(c):
+                return []
+            if not t0:
+                t0.append(time.monotonic())
+            return [prefill_row(session) if time.monotonic() - t0[0] < 3.8 else
+                    decode_row(session)]
+        c.fake.live = live
+        c.fake.script = Script(worker=lambda b, k, n: {
+            "content": "x" * 250, "ttft": 3.0, "tps": 10,
+            "calls": [{"name": "write_file", "arguments": {"path": "hello.txt", "content": "hi"}}]}
+            if k == 0 else {"content": REPORT})
+        ev = c.events(cid)
+        sent = time.monotonic()
+        c.send(cid, "go")
+        # while the worker decodes, the snapshot's context lists it with its live figures
+        w = c.wait(lambda: next((x for x in c.snap(cid)["context"]["workers"]
+                                 if (x["metrics"] or {}).get("decode_tps") == 37.2), None), 20)
+        tid = w["task_id"]
+        assert w["n"] == 1 and w["title"] == "Hello file" and w["max_steps"] == 40
+        assert w["window"] == 262_144
+        assert w["metrics"]["task_id"] == tid and w["metrics"]["ttft_ms"] == 6_350.0
+        assert w["metrics"]["tokens_per_round"] == 3.1 and w["metrics"]["prefill"] is None
+        assert w["phase"] in ("writing", "thinking") and w["now"]
+        assert set(w) >= {"used", "window", "split", "step", "cache"}
+        snap = c.snap(cid)
+        assert snap["context"]["last_worker"] is None and "worker" not in snap["context"]
+        frames = ev.until(lambda f: f[1] == "run.done", 40)
+        took = time.monotonic() - sent
+        ev.close()
+        mets = [json.loads(f[2]) for f in frames if f[1] == "task.metrics"]
+        assert mets and all(m["task_id"] == tid for m in mets)
+        pre = [m for m in mets if m["prefill"]]
+        assert pre, mets
+        assert pre[0]["prefill"] == {"done": 12_400, "total": 26_402, "tps": 1_950.0,
+                                     "eta_ms": 7_400, "cached": 3_072}
+        assert pre[0]["phase"] == "prefill" and pre[0]["decode_tps"] is None
+        dec = [m for m in mets if m["decode_tps"] == 37.2]
+        assert dec and dec[0]["prefill"] is None and dec[0]["completion_tokens"] >= 180
+        assert set(dec[0]) - {"type"} == {"task_id", "phase", "prefill", "decode_tps",
+                                          "ttft_ms", "tokens_per_round", "acceptance",
+                                          "prompt_tokens", "completion_tokens",
+                                          "thinking_used"}, dec[0]
+        # at most 4 a second; none says a prefill once the worker writes
+        assert len(mets) <= 4 * took + 1, (len(mets), took)
+        assert not [m for m in mets if m["prefill"] and m["phase"] != "prefill"], mets
+        # the parent's Now names the worker's prefill, then its writing
+        nows = [json.loads(f[2])["now"] for f in frames if f[1] == "run.phase" and
+                json.loads(f[2])["phase"] == "task"]
+        assert any("12,400" in n or "Reading" in n or "prefill" in n.lower() for n in nows), nows
+        after = c.snap(cid)["context"]
+        assert after["workers"] == [] and after["last_worker"]["task_id"] == tid
+    finally:
+        c.close()
+        srv.shutdown()
+
+
+def test_two_workers_figures_stay_apart():
+    import types
+
+    from chatd.engine import LiveTail
+    from chatd.runs import Run
+    from chatd.service import Service
+    from chatd.tasks import TasksMixin
+
+    events: list[tuple[str, dict]] = []
+    svc = types.SimpleNamespace()
+    svc.emit = lambda conv, ev, **kw: events.append((conv.id, ev))
+    svc.session_of = lambda conv: render.task_session_id(conv.parent_id, conv.n)
+    svc.settings_of = lambda cid: {"model": "fake-a"}
+    svc.model_info = lambda model: {"max_len": 262_144}
+    svc.summary_changed = lambda conv, **kw: None
+    for name in ("worker_metrics", "task_metrics", "worker_context", "task_phase"):
+        setattr(svc, name, getattr(TasksMixin, name).__get__(svc))
+    chat = types.SimpleNamespace(id="c1", parent_id=None, lock=threading.RLock())
+    parent = Run(svc, chat, user_message_id="u", message_id="m", max_steps=50, started_by=None)
+    workers = []
+    for n in (1, 2):
+        conv = types.SimpleNamespace(id=f"tc{n}", parent_id="c1", n=n,
+                                     context_sent_at=time.monotonic(), lock=threading.RLock())
+        w = Run(svc, conv, user_message_id="u", message_id=f"wm{n}", max_steps=40,
+                started_by=None, parent=parent, task={"id": f"t{n}", "n": n, "title": f"Part {n}"})
+        w.state, w.phase, w.step = "running", ("writing" if n == 1 else "prefill"), 5 + n
+        w.step_usage = [{"prompt_tokens": 20_000 * n, "completion_tokens": 400,
+                         "cached_tokens": 18_000 * n, "cache_source": "resident"}]
+        workers.append(w)
+    tail = LiveTail(None, lambda: False)
+    tail._take({"requests": [decode_row(render.task_session_id("c1", 1)),
+                             prefill_row(render.task_session_id("c1", 2))]})
+    svc.live = tail
+    for w in workers:
+        Service._metrics(svc, w.conv, w)
+    got = {ev["task_id"]: ev for cid, ev in events if ev["type"] == "task.metrics"}
+    assert {cid for cid, ev in events if ev["type"] == "task.metrics"} == {"c1"}
+    assert got["t1"]["decode_tps"] == 37.2 and got["t1"]["prefill"] is None
+    assert got["t2"]["decode_tps"] is None and got["t2"]["prefill"]["done"] == 12_400 and \
+        got["t2"]["prefill"]["tps"] == 1_950.0
+    assert got["t1"]["prompt_tokens"] == 20_000 and got["t2"]["prompt_tokens"] == 40_000
+    items = [svc.worker_context(w) for w in workers]
+    assert [i["task_id"] for i in items] == ["t1", "t2"]
+    assert [i["n"] for i in items] == [1, 2] and [i["step"] for i in items] == [6, 7]
+    assert items[0]["metrics"]["decode_tps"] == 37.2 and items[0]["metrics"]["prefill"] is None
+    assert items[1]["metrics"]["prefill"]["total"] == 26_402
+    assert items[1]["phase"] == "prefill" and items[1]["used"] == 40_400
+    assert items[0]["cache"] == {"warm": 18_000, "cold": 2_000, "source": "resident"}
+    # the report's list: the running ones only
+    parent.child = workers[0]
+    assert TasksMixin.running_workers(svc, parent) == [workers[0]]
+    workers[0].state = "done"
+    assert TasksMixin.running_workers(svc, parent) == []
 
 
 if __name__ == "__main__":

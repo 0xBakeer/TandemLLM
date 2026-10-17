@@ -61,8 +61,10 @@ A script (in a test): `fake.script = fn(body, headers)` answers a chat completio
 dict for (None: the words above decide). The dict: `content` (the answer's text), `reasoning`,
 `calls` ([{name, arguments, id?}], as FAKE_CALLS), `status` (an error answer with that status and
 `message`), `drop` (the stream breaks after five pieces), `finish` (`error`: our engine's failure
-mid-stream), `tps` (pieces a second; a piece is five characters). The tests of the workers (VIS-E15) steer the main agent and each worker by the
-request's `x-session-id`.
+mid-stream), `tps` (pieces a second; a piece is five characters), `ttft` (seconds before the first
+chunk). The tests of the workers (VIS-E15) steer the main agent and each worker by the request's
+`x-session-id`. `fake.live = fn()` serves the engine's live rows (`GET /v1/dashboard/live?follow=0`;
+the stream answers 429, so chatd's reader polls).
 
 A prefix cache: a request whose messages begin with the messages of an earlier request reports
 those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
@@ -162,6 +164,9 @@ class Fake:
         self.prewarms = 0
         self.script = None              # fn(body, headers) -> dict | None (see the module doc)
         self.calls: list = []           # (headers, body) of every chat completion, in order
+        # fn() -> the rows of GET /v1/dashboard/live?follow=0 (None: 404, a server without the
+        # route); the stream itself answers 429, so a reader polls
+        self.live = None
 
     def prompt_tokens(self, body: dict) -> tuple[int, int]:
         """(prompt tokens, cached) with the prefix cache: the longest earlier message prefix."""
@@ -228,6 +233,10 @@ def make_handler(fake: Fake):
                                         "max_streams": fake.max_streams,
                                         "streams": fake.streams,
                                         "closed_early": fake.closed_early})
+            if p == "/v1/dashboard/live" and fake.live is not None:
+                if "follow=0" not in self.path:
+                    return self._json(429, {"error": {"message": "too many live streams"}})
+                return self._json(200, {"requests": fake.live(), "engine": {}})
             if p in ("/health", "/v1/health"):
                 return self._json(200, {"status": "ok"})
             if p == "/version" and fake.dialect == "vllm":
@@ -369,7 +378,8 @@ def make_handler(fake: Fake):
             self.end_headers()
             try:
                 self._stream(True, "chatcmpl-s" + ulid_ish(), body.get("model"), reasoning, answer,
-                             tools, usage, opts.get("include_usage") is True, False, words, 0.0)
+                             tools, usage, opts.get("include_usage") is True, False, words,
+                             float(got.get("ttft") or 0.0))
             except (BrokenPipeError, ConnectionResetError, OSError):
                 with fake.lock:
                     fake.closed_early += 1
