@@ -224,9 +224,14 @@ class Engine:
         return s, head.split(b"\r\n\r\n", 1)[1]
 
 
-def demux(sock: socket.socket, first: bytes, on_data) -> None:
-    """A non-TTY attach stream: 8-byte frames [stream, 0, 0, 0, size(4, big-endian)]."""
+def demux(sock: socket.socket, first: bytes, on_data,
+          first_timeout: float | None = None) -> None:
+    """A non-TTY attach stream: 8-byte frames [stream, 0, 0, 0, size(4, big-endian)].
+    `first_timeout`: the wait for the first frame is bounded by it — a hijack that answers
+    its 101 and then never writes (an exec that started but never got going) would otherwise
+    hold this thread, the socket and the caller's slot forever on a blocking socket."""
     buf = first
+    deadline = None if first_timeout is None else time.monotonic() + first_timeout
     while True:
         while len(buf) >= 8:
             stream, size = buf[0], struct.unpack(">I", buf[4:8])[0]
@@ -234,7 +239,17 @@ def demux(sock: socket.socket, first: bytes, on_data) -> None:
                 break
             on_data(stream, buf[8:8 + size])
             buf = buf[8 + size:]
+            deadline = None                       # the stream is up: a quiet one after
+            try:
+                sock.settimeout(None)             # the first frame is its own business
+            except OSError:
+                return
         try:
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                sock.settimeout(left)
             d = sock.recv(65536)
         except OSError:
             return
