@@ -703,6 +703,18 @@ def events_from(jid: str, offset: int = 0, after: int = 0) -> tuple[list[dict], 
     return out, offset + end
 
 
+def job_summary(m: dict, sel: dict) -> dict:
+    """VIS-211: what the install sets up, in the words of the page's finished screen: the model,
+    the weights, the tools that are on, the parallel chats and their windows."""
+    prof = registry.profile(m, sel["profile"]) or {}
+    return {"model": m.get("name") or m["id"], "profile": sel["profile"],
+            "profile_label": prof.get("label") or sel["profile"],
+            "tools": [c["label"] for c in m["components"]
+                      if sel["components"].get(c["id"]) and not c.get("required")],
+            "slots": sel.get("slots"), "window": sel.get("window"),
+            "side_window": sel.get("side_window")}
+
+
 def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply") -> dict:
     """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
     reset (reset level 2: the overlay goes and the recommended profile starts)."""
@@ -715,7 +727,8 @@ def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply
     job = {"id": jid, "kind": kind, "state": "queued", "created_at": now, "ended_at": None,
            "profile": sel["profile"], "steps": steps, "message": None, "changes": p["changes"],
            "rolled_back": False, "failed_step": None, "pid": None,
-           "url": f"http://<this box>:{p['ports']['next']}/dashboard/"}
+           "url": f"http://<this box>:{p['ports']['next']}/dashboard/",
+           "model": m["id"], "summary": job_summary(m, sel)}
     _write_json(os.path.join(d, "job.json"),
                 {"kind": kind, "model": m["id"], "selection": sel, "setup_mode": setup_mode,
                  "previous": p["profile"]["current"], "ports": p["ports"],
@@ -979,12 +992,17 @@ class Runner:
                 self.sleep(ROLE_POLL_S)
         failed = [f"{want[k]} did not load ({why or 'no reason given'})."
                   for k, (state, why) in st.items() if state == "failed"]
-        notes = [f"{want[k]} waits for memory ({why}); it loads when memory frees up."
-                 for k, (state, why) in st.items() if state == "refused"]
-        notes += [f"{want[k]} is not loaded yet." for k, (state, _) in st.items()
+        # VIS-211: a tool that waits is normal, and the page says so in plain words; the log keeps
+        # the planner's reason
+        notes = [f"{want[k]} loads later, when memory frees up; nothing to do."
+                 for k, (state, _) in st.items() if state == "refused"]
+        notes += [f"{want[k]} is still loading; nothing to do." for k, (state, _) in st.items()
                   if state == "pending"]
-        for line in failed + notes:
+        for line in failed:
             self.log(f"[smoke] {line}")
+        for k, (state, why) in st.items():
+            if state in ("refused", "pending"):
+                self.log(f"[smoke] {want[k]}: {state}" + (f" ({why})" if why else ""))
         return failed, notes
 
     def _role_states(self, port: int, want: dict) -> dict:

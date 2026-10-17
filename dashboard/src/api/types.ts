@@ -1559,6 +1559,20 @@ export interface SetupJob {
   warnings?: string[];
   /** VIS-153: tools waiting for memory or not loaded yet */
   notes?: string[];
+  /** VIS-211: the model's id and what the job sets up, for the finished screen (jobs before 0.11.3
+   *  have neither) */
+  model?: string;
+  summary?: SetupJobSummary;
+}
+export interface SetupJobSummary {
+  model: string;
+  profile: string;
+  profile_label: string;
+  /** the optional tools the selection turns on, by label */
+  tools: string[];
+  slots: number | null;
+  window: number | null;
+  side_window: number | null;
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {

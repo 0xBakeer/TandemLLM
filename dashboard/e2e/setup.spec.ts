@@ -150,7 +150,11 @@ test('Finish: Wren is asked to unload, the steps run, the way out appears', asyn
   await expect(page).toHaveURL(new RegExp(`#/setup/${MODEL}/install$`));
   await expect(page.locator('[data-job-state="done"]')).toBeVisible({ timeout: 20_000 });
   await expect(page.locator('.inst-step[data-step="smoke"]')).toHaveClass(/is-done/);
-  await expect(page.locator('.inst-actions a', { hasText: 'See it run' })).toHaveAttribute('href', '#/performance');
+  // VIS-211: the finished screen and its way on
+  await expect(page.locator('[data-job-finished]')).toContainText('is ready');
+  await expect(page.locator('[data-start-chatting]')).toHaveAttribute('href', '#/chat');
+  await expect(page.locator('[data-back-to-guide]')).toHaveAttribute('href', '#/setup');
+  await expect(page.locator('.inst-done-actions a', { hasText: 'See it run' })).toHaveAttribute('href', '#/performance');
 });
 
 test('requests still running: the job waits for them before anything stops, and says so', async ({ page, request }) => {

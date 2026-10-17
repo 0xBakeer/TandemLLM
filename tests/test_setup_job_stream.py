@@ -8,7 +8,7 @@ dashboard/tests/setup-install.test.ts):
      done event; every log line of the job comes first, in order (236 lines)
                                                      test_reload_after_the_job_finished
   2  reload during the download: the log up to event 150, then the job with the fetch step
-     running and the steps before it done; the stream stays open
+     running and the steps before it done, with no id of a log line (VIS-211); the stream stays open
                                                      test_reload_during_the_download
   3  a final state never regresses: no job frame after a final one, also on a resume
      (Last-Event-ID) at every point of the job        test_a_final_state_never_regresses
@@ -118,7 +118,9 @@ def test_reload_during_the_download():
         assert offset == os.path.getsize(os.path.join(apply.job_dir(jid), "events.jsonl"))
         fr = _frames(h.wfile.getvalue().decode())
         assert [d["type"] for _, d in fr] == ["log"] * 145 + ["job"], [d["type"] for _, d in fr]
-        assert fr[-1][0] == 150
+        # VIS-211: the log line before it carries 150, the snapshot no id of its own (a page that
+        # counted 150 dropped a snapshot with that id and spun over a finished install)
+        assert fr[-1][0] is None and fr[-2][0] == 150, (fr[-2][0], fr[-1][0])
         steps = {s["id"]: s["state"] for s in fr[-1][1]["job"]["steps"]}
         assert steps["fetch"] == "running" and steps["check"] == "done", steps
         assert steps["unload_assistant"] == "done" and steps["switch"] == "pending", steps

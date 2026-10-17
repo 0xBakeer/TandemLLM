@@ -832,6 +832,20 @@ def test_the_job_route():
         again = [f for f in raw.split("\n\n") if f.strip()]
         assert len(again) == 2 and again[1].startswith(f"id: {ids[-1]}"), again
         assert json.loads(again[0].split("data: ", 1)[1])["job"]["state"] == "done"
+        # VIS-211: a job whose newest event is a log line: the snapshot carries no id, so a page
+        # that counted the line's id does not drop it as a repeat (it held no job and showed
+        # "Starting the install" over a finished one)
+        jid2 = _job(_sel())
+        r2 = apply.Runner(jid2, cmd=Recorder(), http=_smoke_ok(), ops=box.ops)
+        r2.step("check", "running")
+        r2.log("the newest line")
+        frames2 = _catch_up_frames(jid2)
+        snap = [f for f in frames2 if '"type": "job"' in f]
+        assert len(snap) == 1 and not snap[0].startswith("id: "), frames2
+        assert frames2[-2].startswith(f"id: {len(apply.events(jid2))}") and "the newest line" in frames2[-2]
+        r2.step("check", "done")
+        frames3 = _catch_up_frames(jid2)
+        assert frames3[-1].startswith(f"id: {len(apply.events(jid2))}") and '"type": "job"' in frames3[-1]
         for bad in ("0123456789abcdef", "../../etc", "nope"):
             code, _ = _api("GET", f"/v1/setup/jobs/{bad}?format=json")
             assert code == 404, bad
@@ -847,6 +861,16 @@ def test_the_job_route():
             fh.write('g", "line": "x", "ts": 1}}\n')
         more, off3 = apply.events_from(jid, off2)
         assert [r["seq"] for r in more] == [999] and off3 > off2
+
+
+def _catch_up_frames(jid: str) -> list[str]:
+    """The frames setup_api's catch-up writes for a running job (the stream itself would follow)."""
+    from server import setup_api
+
+    class H:
+        wfile = io.BytesIO()
+    setup_api._catch_up(H, jid, 0)
+    return [f for f in H.wfile.getvalue().decode().split("\n\n") if f.strip()]
 
 
 def test_secrets_are_redacted():

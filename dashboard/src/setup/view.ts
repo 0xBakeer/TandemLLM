@@ -575,6 +575,14 @@ export class QseSetup extends LightElement {
 
   private renderModelArea(): TemplateResult {
     const lm = this.model;
+    // VIS-211: an install in progress does not wait for the model's card: while the engine restarts
+    // the card cannot load, and the job is all the page needs
+    if (this.wiz.step === 'install' && this.wiz.job && lm?.state !== 'ready') {
+      return html`<section class="setup-step" data-step="install" aria-labelledby="setup-step-title">
+        <header class="step-head"><h1 class="step-title" id="setup-step-title" tabindex="-1">${STEP_TITLE.install}</h1></header>
+        ${this.stepInstall()}
+      </section>`;
+    }
     if (!lm || lm.state === 'loading') return skeleton(8);
     if (lm.state === 'error') return errorState(lm.endpoint, lm.message, () => void this.loadModel(this.path[0]));
     if (lm.state !== 'ready' || !this.wiz.selection) return skeleton(8);

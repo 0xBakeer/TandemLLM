@@ -106,6 +106,9 @@ export class QseApp extends LightElement {
   private parallelAsked = false;
   /** a new build's worker waits: the banner's Reload applies it */
   @state() private newBuild: (() => void) | null = null;
+  /** VIS-211: a setup job runs (its page says so): the engine restarts under it, so a waiting new
+   *  build waits for a safe moment and no banner shows */
+  @state() private setupJob = false;
   /** the phone's More sheet (the views behind the bottom bar) is open */
   @state() private more = false;
   /** a text field has focus: on the phone the bottom bar steps aside and the view takes its room */
@@ -130,6 +133,18 @@ export class QseApp extends LightElement {
         if (this.more && !this.pendingNav) this.closeMore();
       }),
     );
+    const onSetupJob = (e: Event) => {
+      const active = !!(e as CustomEvent<{ active: boolean }>).detail?.active;
+      // a job that ended: the box may have left setup mode, so the guide no longer holds the page
+      if (this.setupJob && !active && this.setupMode) void this.checkSetupMode();
+      this.setupJob = active;
+    };
+    // VIS-211: a finished install's way on (Start chatting, the guide): a waiting build loads now
+    const onSafe = () => this.newBuild?.();
+    window.addEventListener('qse-setup-job', onSetupJob);
+    window.addEventListener('qse-safe-moment', onSafe);
+    this.unsub.push(() => window.removeEventListener('qse-setup-job', onSetupJob));
+    this.unsub.push(() => window.removeEventListener('qse-safe-moment', onSafe));
     document.addEventListener('focusin', this.onFocusChange);
     document.addEventListener('focusout', this.onFocusChange);
     window.addEventListener('popstate', this.onPop);
@@ -359,7 +374,7 @@ export class QseApp extends LightElement {
           </footer>
         </section>
         <main class="content" id="main">
-          ${this.newBuild ? html`<div class="banner" role="status" data-update>${icon('refresh')} A new version of the dashboard is ready. <button type="button" class="btn btn-sm" @click=${() => this.newBuild?.()}>Reload</button></div>` : nothing}
+          ${this.newBuild && !this.setupJob && !this.restarting && !this.offline ? html`<div class="banner" role="status" data-update>${icon('refresh')} The dashboard on the box was updated. Reload to use the new version. <button type="button" class="btn btn-sm" @click=${() => this.newBuild?.()}>Reload</button></div>` : nothing}
           ${this.restarting ? html`<div class="banner banner-offline" role="status" data-engine-restarting>${icon('refresh')} ${restartText(this.restarting.status)}</div>` : nothing}
           ${this.offline && !this.restarting ? html`<div class="banner banner-offline" role="alert" data-engine-away=${engineAway()?.state ?? 'unreachable'}>${icon('warn')} ${awayText(engineAway())} — panels keep their last data and say which endpoint failed.</div>` : nothing}
           ${this.refused && this.route.view !== 'setup' ? html`<div class="banner banner-offline" role="status" data-refused>${icon('warn')} The server answered 401: an admin password is set on it, and the dashboard has no sign-in yet. Unset QSE_ADMIN_TOKEN to open it again (docs/server.md).</div>` : nothing}

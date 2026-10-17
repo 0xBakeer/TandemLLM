@@ -4056,3 +4056,44 @@ qse-wren-figure::before {
     opacity: 1;
   }
 }
+
+/* VIS-211: a finished install: what is ready and the way on */
+.inst-done {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--rule-strong));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ok) 7%, var(--bg-2));
+}
+.inst-done-title {
+  font-size: var(--fs-xl, 1.4rem);
+  font-weight: 650;
+  margin: 2px 0 0;
+}
+.inst-done-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  color: var(--ink-2);
+}
+.inst-done-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  width: 100%;
+}
+@media (max-width: 768px) {
+  .inst-done {
+    padding: 16px;
+  }
+  .inst-done-actions .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}

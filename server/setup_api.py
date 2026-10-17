@@ -366,13 +366,13 @@ def job_route(h, jid: str) -> None:
 def _catch_up(h, jid: str, after: int) -> tuple[int, int, bool]:
     """VIS-149: the events after `after` that are on disk now, as the log lines among them and
     then the job as it is now (`id:` the last of them), so a page never gets an older state after
-    a newer one: the steps and the job's first state (seq 1) are in that snapshot. A final job
-    ends with its `done` event. (the sequence followed, the byte offset, the stream ended)"""
+    a newer one: the steps and the job's first state (seq 1) are in that snapshot, with the id of
+    the last of them unless that is a log line's (VIS-211). A final job ends with its `done` event. (the sequence followed, the byte offset, the stream ended)"""
     import json
     from server.setup import apply
     recs, offset = apply.events_from(jid, 0, after)
     done = None
-    last = after
+    last = last_log = after
     for rec in recs:
         ev = rec["event"]
         if ev.get("type") == "done":
@@ -380,13 +380,17 @@ def _catch_up(h, jid: str, after: int) -> tuple[int, int, bool]:
             continue
         last = rec["seq"]
         if ev.get("type") == "log":
+            last_log = last
             h.wfile.write(f"id: {last}\ndata: {json.dumps(ev)}\n\n".encode())
     # read after the events: the snapshot is as new as the last of them (state.json is saved
     # before its event is written) or newer, and a later step event equals it or follows it
     job = apply.read_job(jid)
     if job is None:
         return last, offset, True
-    head = f"id: {last}\n" if last > after else ""
+    # VIS-211: the snapshot takes the id of the step events it stands for, never a log line's: a
+    # page that counted that line's id dropped the snapshot as a repeat, held no job, and showed
+    # "Starting the install" over a finished one
+    head = f"id: {last}\n" if last > last_log else ""
     h.wfile.write(f"{head}data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
     if done is not None:
         h.wfile.write(f"id: {done['seq']}\ndata: {json.dumps(done['event'])}\n\n".encode())
