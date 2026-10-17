@@ -108,6 +108,8 @@ export class QseSetup extends LightElement {
   }
   disconnectedCallback(): void {
     this.devPoll?.stop();
+    if (this.estTimer) clearTimeout(this.estTimer);   // the 150/200 ms debounce must die with the
+    if (this.planTimer) clearTimeout(this.planTimer); // element, or a late load starts a fetch (#11)
     this.estCtrl?.abort();
     this.planCtrl?.abort();
     this.commCtrl?.abort();

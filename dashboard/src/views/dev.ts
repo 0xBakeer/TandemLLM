@@ -73,6 +73,10 @@ export class QseDev extends LightElement {
     void this.loadSystem();
   }
   disconnectedCallback(): void {
+    if (this.grepTimer) {
+      clearTimeout(this.grepTimer);
+      this.grepTimer = null;
+    }
     this.stream?.close();
     this.reqPoll?.stop();
     this.testCtrl?.abort();
@@ -93,6 +97,9 @@ export class QseDev extends LightElement {
 
   // ---- console ------------------------------------------------------------------------------
   private openStream(resume = false): void {
+    // a timer-fuelled call after detach (the grep debounce fired late) must not start a stream
+    // nothing will ever close again
+    if (!this.isConnected) return;
     this.stream?.close();
     if (!resume) {
       this.lines = [];
