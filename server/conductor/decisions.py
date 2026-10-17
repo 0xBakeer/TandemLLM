@@ -82,9 +82,13 @@ def _detail(d) -> dict | None:
     out = {k: v for k, v in d.items() if k not in _DROP}
     if isinstance(d.get("calls"), list):
         out["calls"] = [((c or {}).get("function") or {}).get("name") for c in d["calls"]]
-    for f in out.get("findings") or ():
-        if isinstance(f, dict) and isinstance(f.get("detail"), dict):
-            f["detail"] = _detail(f["detail"])
+    fins = out.get("findings")
+    if isinstance(fins, list):
+        # the shallow copy shares the findings list: rewriting f["detail"] in place
+        # edited the caller's own event, not just the redacted copy
+        out["findings"] = [dict(f, detail=_detail(f["detail"]))
+                           if isinstance(f, dict) and isinstance(f.get("detail"), dict)
+                           else f for f in fins]
     return out
 
 
