@@ -560,10 +560,13 @@ SHIPPED_ROUTER: dict = {
          # picks among the special recipes alone
          # OPS-39: voxel-worlds (the voxel build order, curated modules) and creative-coding
          # join the special recipes the package question picks among
+         # 2026-10-17 (pagoda replays 1-3 on Super VL): three first steps thought 6 to 11
+         # minutes and drafted the files in the thinking; coding's "plan in a few lines, code
+         # in files" goes in beside the 3D skill
          "policy": {"effort": "high",
                     "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons",
-                                                  "voxel-worlds", "creative-coding"],
-                    "core": ["threejs-scene"], "rules": []}},
+                                                  "voxel-worlds", "creative-coding", "coding"],
+                    "core": ["threejs-scene", "coding"], "rules": []}},
         # 2026-10-03 10:12 (a user's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",

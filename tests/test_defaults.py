@@ -48,6 +48,8 @@ from test_conductor_e2e import ADMIN, LAUNCH, _call, _port, _wait  # noqa: E402
 
 import subprocess  # noqa: E402
 
+from server.conductor import schema  # noqa: E402
+
 FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 # what the store fills in a stored document that lacks it, keyed by the document
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
@@ -67,7 +69,11 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
 # narrator off in coding and chat (the owner, 2026-10-17); a core on design_ui and drawing (the
 # migration stores it on the live box too)
 CHANGED = {"router": {"classes.design_ui.policy.core": ["ui-design"],
-                      "classes.drawing.policy.core": ["creative-coding"]},
+                      "classes.drawing.policy.core": ["creative-coding"],
+                      "classes.three_d.policy.core": ["threejs-scene", "coding"],
+                      "classes.three_d.policy.packages": next(
+                          c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]
+                          if c["id"] == "three_d")},
            "profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off"},
            "profiles/overnight": {"toolgate.same_call": True},
            "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",

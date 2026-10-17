@@ -38,6 +38,7 @@ NARRATOR = [m for m in migrations.MIGRATIONS if m[0].startswith("2026-10-17-")
             and m[2] != "router" and m[1] != "router"]
 CORE = [m for m in migrations.MIGRATIONS if m[0] == "2026-10-17-router-coding-core"]
 BUILD_CORE = [m for m in migrations.MIGRATIONS if m[0] == "2026-10-17-router-build-core"]
+CODING_3D = [m for m in migrations.MIGRATIONS if m[0] == "2026-10-17-router-3d-coding-core"]
 
 
 # ---------------------------------------------------------------------- 1: a new box
@@ -198,7 +199,7 @@ def test_2_a_router_from_before_fx6_gets_the_coding_core():
     doc = st.get("router")[1]
     core = {c["id"]: c["policy"].get("core") for c in doc["classes"]}
     assert core["code_edit"] == ["coding"] and core["debug"] == ["coding"]
-    assert core["three_d"] == ["threejs-scene"] and core["design_ui"] == ["ui-design"]
+    assert core["three_d"] == ["threejs-scene", "coding"] and core["design_ui"] == ["ui-design"]
     assert migrations.run(st, migrations=CORE) == [], "runs once"
     # a core someone removed stays removed; the shipped router is unchanged
     st = _router_store()
@@ -227,7 +228,7 @@ def test_2_a_router_without_a_design_or_drawing_core_gets_one():
                     "classes.drawing.core=[creative-coding]"]), got
     core = {c["id"]: c["policy"].get("core") for c in st.get("router")[1]["classes"]}
     assert core["design_ui"] == ["ui-design"] and core["drawing"] == ["creative-coding"]
-    assert core["three_d"] == ["threejs-scene"] and core["code_edit"] == ["coding"]
+    assert core["three_d"] == ["threejs-scene", "coding"] and core["code_edit"] == ["coding"]
     assert migrations.run(st, migrations=BUILD_CORE) == [], "runs once"
     # a drawing class without creative-coding among its packages gets no core of it
     r = _router_without_core("design_ui", "drawing")
@@ -244,6 +245,35 @@ def test_2_a_router_without_a_design_or_drawing_core_gets_one():
     st.put("router", None, _router_without_core("design_ui", "drawing"), note="no core",
            author="owner")
     assert migrations.run(st, migrations=BUILD_CORE)[0]["result"] == "unchanged"
+
+
+def _router_3d_old() -> dict:
+    """The live box's three_d before the change: core threejs-scene, no coding in its packages."""
+    r = copy.deepcopy(schema.SHIPPED_ROUTER)
+    for c in r["classes"]:
+        if c["id"] == "three_d":
+            c["policy"]["core"] = ["threejs-scene"]
+            c["policy"]["packages"] = [p for p in c["policy"]["packages"] if p != "coding"]
+    return r
+
+
+def test_2_three_d_gets_the_coding_core_beside_the_3d_skill():
+    """Pagoda replays 1-3 (2026-10-17, Super VL, three_d): the first step thought 6 to 11 minutes
+    and drafted the 15 files in the thinking (63k characters, 65 code fences in replay 1); the
+    coding core's "a plan of 3 to 8 lines, code in files only" reached code_edit turns only."""
+    assert CODING_3D and CODING_3D[0][1] == "router"
+    st = _router_store()
+    st.put("router", None, _router_3d_old(), note="old", author="owner")
+    got = migrations.run(st, migrations=CODING_3D)
+    assert (got[0]["result"], got[0]["changes"]) == ("changed", ["classes.three_d.core+=coding"])
+    pol = {c["id"]: c["policy"] for c in st.get("router")[1]["classes"]}["three_d"]
+    assert pol["core"] == ["threejs-scene", "coding"] and "coding" in pol["packages"]
+    assert migrations.run(st, migrations=CODING_3D) == [], "runs once"
+    # taken out by someone after a version had it: stays out
+    st = _router_store()
+    st.put("router", None, copy.deepcopy(schema.SHIPPED_ROUTER), note="shipped", author="shipped")
+    st.put("router", None, _router_3d_old(), note="no coding", author="owner")
+    assert migrations.run(st, migrations=CODING_3D)[0]["result"] == "unchanged"
 
 
 # ---------------------------------------------------------------------- 3: /health

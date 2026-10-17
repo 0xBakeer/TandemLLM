@@ -39,6 +39,10 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  (["creative-coding"]), which had no core: under that fit a turn
                                  Laya decided as one of them got no package (a three.js prompt
                                  read as design_ui, 2026-10-17)
+    2026-10-17-router-3d-coding-core  three_d's core gains `coding` (and its packages list it),
+                                 unless a stored version had it in the core: three pagoda
+                                 replays thought 6 to 11 minutes on their first step, drafting
+                                 the files in the thinking
 """
 
 from __future__ import annotations
@@ -157,6 +161,31 @@ def _class_core(cores: dict):
     return change
 
 
+def _core_append(cid: str, pkg: str):
+    """`pkg` added to class `cid`'s core (and its packages) of a stored router, unless the core has
+    it or a stored version had it there (someone took it out)."""
+    def change(doc: dict, past: list):
+        if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+            return None
+
+        def had(d):
+            return pkg in (next((c.get("policy") or {}).get("core") or []
+                                for c in d["classes"] if c["id"] == cid))
+        classes, changes = [], []
+        for c in doc["classes"]:
+            pol = c.get("policy") or {}
+            core = list(pol.get("core") or [])
+            if c.get("id") == cid and pkg not in core and True not in _ever(past, had):
+                pkgs = list(pol.get("packages") or [])
+                c = dict(c, policy=dict(pol, core=core + [pkg],
+                                        packages=pkgs + ([pkg] if pkg not in pkgs else [])))
+                changes.append(f"classes.{cid}.core+={pkg}")
+            classes.append(c)
+        return (dict(doc, classes=classes), changes) if changes else None
+    change.history = True
+    return change
+
+
 # SRV-534: FX6's core on the coding classes of a router stored without it
 _coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
 
@@ -186,6 +215,7 @@ MIGRATIONS = [
     ("2026-10-17-router-coding-core", "router", None, _coding_core),
     ("2026-10-17-router-build-core", "router", None,
      _class_core({"design_ui": "ui-design", "drawing": "creative-coding"})),
+    ("2026-10-17-router-3d-coding-core", "router", None, _core_append("three_d", "coding")),
 ]
 
 
