@@ -4,8 +4,10 @@ router test kit of tests/test_conductor_router.py (the real Qwen template, fake 
 SRV-441's Gherkin, row by row:
   1. the served model does not answer the class question: the decider alone decides (also where the
      router leaves its stage off), a turn below its bar falls back without asking the served model;
-  2. a turn nobody classified gets the profile's default effort and no package, rule or effort
-     sentence (lean fallback), and so does a tool turn of that session;
+  2. a turn nobody classified gets the profile's default effort and no effort sentence (lean
+     fallback), and so does a tool turn of that session; SRV-534: it keeps the class's core and
+     rules as the fit lets them (the profile's default class: coding's for the Chat tab), the tool
+     turn keeps the note of its user message, and a decider that is down changes nothing of that;
   3. a classified turn keeps its level and budget, without the level's sentence;
   4. packages: the class's core alone (`core`), nothing on the chat class;
   5. memory off: no memory card or index; rules off: no class rules;
@@ -17,6 +19,7 @@ Run: python tests/test_conductor_modelfit.py
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 
@@ -96,22 +99,27 @@ def test_2_a_turn_nobody_classified_is_lean_and_so_is_its_tool_turn():
         r["classifier"]["below_accept"] = {"mode": "default"}
         cond.store.put("router", None, r, note="no below-build", author="t")
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "hello there"}]
-        plan, _, _ = turn(cond, body(msgs))
+        plan, ids1, _ = turn(cond, body(msgs))
         row = plan.row
         assert (row["class_id"], row["source"]) == ("code_edit", "fallback"), row["class_id"]
         assert row["extra"].get("model_fit_lean") is True
         assert row["effort"] == "medium", "the profile's default level, not the class's xhigh"
-        assert not [p for p in _parts(plan) if p in ("coding", "core-recipe", "task-skill",
-                                                       "code_edit")], _parts(plan)
+        # SRV-534: the default class's core and rules, as the fit lets them; never nothing
+        assert _parts(plan) == ["core-recipe", "code_edit"], _parts(plan)
+        assert sorted(row["extra"]["package_fit_dropped"]) == ["coding", "task-skill"]
+        assert schema.XHIGH_NOTE not in "".join(n["text"] for n in plan.injected)
         assert row["extra"]["model_fit"]["fallback"] == "lean"
-        # the tool turn of that session: still nobody decided
+        # the tool turn of that session: still nobody decided, the same note, the prefix holds
         msgs2 = msgs + [{"role": "assistant", "content": "", "tool_calls": [
             {"id": "c1", "type": "function", "function": {"name": "read", "arguments":
                                                           "{\"path\": \"a\"}"}}]},
                         {"role": "tool", "tool_call_id": "c1", "content": "ok"}]
-        plan2, _, _ = turn(cond, body(msgs2))
+        plan2, ids2, _ = turn(cond, body(msgs2))
         assert plan2.row["extra"].get("model_fit_lean") is True
-        assert plan2.row["effort"] == "medium" and not plan2.injected
+        assert plan2.row["effort"] == "medium" and not plan2.injected, plan2.injected
+        assert plan2.block["key"] == plan.block["key"], "the same note as its user message"
+        assert ids2[:len(ids1)] == ids1, "the tool turn's prompt begins with the first one's"
+        assert len(fakes["decider"].calls) == 1, "a tool turn asks no model"
         # the router as written: the default class's whole policy
         fitted(None)
         cond, fakes = setup(decider=by_label("research", 0.3))
@@ -119,6 +127,34 @@ def test_2_a_turn_nobody_classified_is_lean_and_so_is_its_tool_turn():
         cond.store.put("router", None, r, note="no below-build", author="t")
         plan, _, _ = turn(cond, body(msgs, ))
         assert plan.row["effort"] == "xhigh" and "coding" in _parts(plan)
+    finally:
+        fitted(None)
+
+
+def test_2b_the_decider_down_still_routes_the_default_packages():
+    """SRV-534: Laya refused or not loaded (the decider stage errs): the Chat tab (chat-app,
+    coding's default class) gets code_edit's core, Open WebUI's chat class still gets nothing."""
+    fitted(dict(LFM, rules=False))
+    try:
+        for why in ("decider_refused", "decider_unreachable", "decider_timeout"):
+            cond, fakes = setup(decider=lambda t, o, w=why: w)
+            _packages(cond)
+            cond.store.put("profiles", "chat-app", copy.deepcopy(
+                schema.SHIPPED_PROFILES["chat-app"]), note="shipped", author="t")
+            plan, _, _ = turn(cond, body([{"role": "user", "content": "make a three.js page "
+                                                                      "with a red cube"}]),
+                              kind="chat-app")
+            row = plan.row
+            assert (row["profile"], row["class_id"], row["source"], row["kept"]) == \
+                ("chat-app", "code_edit", "fallback", "fail_open"), row
+            assert row["stages"][0]["error"] == why
+            assert _parts(plan) == ["core-recipe"] and row["injected"], _parts(plan)
+            assert "rules_skipped:model_fit" in row["extra"]["notes"]
+        cond, _ = setup(decider=lambda t, o: "decider_refused")
+        _packages(cond)
+        plan, _, _ = turn(cond, body([{"role": "user", "content": "thanks, that helped"}],
+                                     tools=False), kind="open-webui")
+        assert plan.row["class_id"] == "chat" and "chat-help" not in _parts(plan)
     finally:
         fitted(None)
 

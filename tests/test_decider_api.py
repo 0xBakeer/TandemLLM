@@ -265,7 +265,7 @@ def test_screen_routes_status_unload_load_autoload_test_box():
     assert s["enabled"] and s["window"] == "idle" and s["ready"]
     m = s["models"][0]
     assert m["name"] == "other-decider" and m["state"] == "loaded" and m["stats"]["forwards"] >= 1
-    assert s["planner"]["allowed"] and s["planner"]["claim_gib"] == 8.2, s["planner"]
+    assert s["planner"]["allowed"] and s["planner"]["claim_gib"] == 3.0, s["planner"]
     # L1 adds the judge's and the Laya route's question ids (both `auto` in the seed)
     assert {q["id"] for q in s["questions"]} == {"classify", "packages", "judge", "laya_api"}
     assert s["api"]["mode"] == "on" and s["api"]["stats"]["calls"] == 0, s["api"]
@@ -329,7 +329,7 @@ def test_a_refused_load_is_a_409_with_the_planners_numbers():
 
     st, out, _ = routes._deciders(Cond, "POST", ["models", "other-decider", "load"], {})
     assert st == 409 and out["decision"]["reason"] == "refused_memory", out
-    assert out["decision"]["after_gib"] == 11.8 and out["state"] == "not_loaded"
+    assert out["decision"]["after_gib"] == 17.0 and out["state"] == "not_loaded"
     assert not contract_check.validate(dict(out, contract_version="1.0"),
                                        contract_check.load("decider-action", CONTRACT),
                                        root=CONTRACT)

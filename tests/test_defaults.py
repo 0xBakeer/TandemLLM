@@ -63,10 +63,12 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           "packages": {"packages.tandem-memory", "packages.memory"}}
 # what the shipped documents changed on purpose since that day, keyed by the document: the path
 # and the value they ship. SRV-473: the same-call guard on (the live box: coding v21 by hand,
-# overnight and chat by the migration), chat's C3 acting, chat's description
-CHANGED = {"profiles/coding": {"toolgate.same_call": True},
+# overnight and chat by the migration), chat's C3 acting, chat's description. SRV-534: the
+# narrator off in coding and chat (the owner, 2026-10-17)
+CHANGED = {"profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off"},
            "profiles/overnight": {"toolgate.same_call": True},
            "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",
+                             "ui.narrator": "off",
                              "description": "Open WebUI and the Playground: class-aware effort, "
                                             "the same-call guard."}}
 

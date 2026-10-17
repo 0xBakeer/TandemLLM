@@ -414,10 +414,18 @@ def test_a_narrated_line_is_stripped():
 
 # ------------------------------------------------------------------ the handler
 
+def narrator_on(cond) -> None:
+    """The roles document's narrator switched on, as an owner does (0.11.3: off by default)."""
+    _, roles = cond.store.get("roles")
+    roles["narrator"] = dict(roles.get("narrator") or schema.seed("roles")["narrator"], mode="on")
+    cond.store.put("roles", None, roles, note="narrator on", author="test")
+
+
 def _serve(narrator: str | None, slot=None, states_on: str = "on"):
     import test_ui_states as ui
     from server import app
     cond, seen = ui.serve(states_on)
+    narrator_on(cond)
     if narrator is not None:
         for name in ("coding", "chat"):
             _, doc = cond.store.get("profiles", name)
@@ -535,7 +543,8 @@ def test_the_role_signs_the_contract():
     r = roles["narrator"]
     assert r["kind"] == "generative" and r["window"] == "between_rounds"
     assert r["writes"] == "state_lines" and r["preemptible"] is True
-    assert r["latency_budget_ms"] == 150 and r["contract"] == "generate" and r["mode"] == "on"
+    # SRV-534: off by default
+    assert r["latency_budget_ms"] == 150 and r["contract"] == "generate" and r["mode"] == "off"
     assert schema.doc_errors("roles", roles) == []
     assert schema.role_errors(FakeGenerative().role(), "fake") == []
     from engine.generative.model import LlamaModel
@@ -644,6 +653,12 @@ def test_the_routes():
     assert call("POST", "/v1/conductor/narrator/try", {"events": [{"kind": "route"}]})[0] == 404
     s, m = fake_slot(planner=lambda name, **kw: {"allowed": True, "reason": None})
     app.STATE["narrator"] = narr_mod.Narrator(s, role=lambda: narr_mod.role_doc(app.STATE))
+    # SRV-534: the role off (the default) loads nothing and keeps the keeper away
+    app.STATE.pop("narrator_keep", None)
+    st, out = call("POST", "/v1/conductor/narrator/load", {"service_start": True})
+    assert st == 409 and out["error"]["type"] == "role_off", out
+    assert s.state == "not_loaded" and not app.STATE.get("narrator_keep")
+    narrator_on(cond)
     st, out = call("POST", "/v1/conductor/narrator/load")
     assert st == 202, out
     for _ in range(100):

@@ -398,6 +398,8 @@ def _serve(narrator="live", slot=None, live=None, channel="inline"):
     import test_ui_states as tu
     from server import app
     cond, seen = tu.serve("on")
+    from test_narrator import narrator_on
+    narrator_on(cond)               # SRV-534: the role is off by default
     for name in ("coding", "chat"):
         _, doc = cond.store.get("profiles", name)
         u = dict(doc["ui"], states_channel=channel)

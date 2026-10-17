@@ -167,6 +167,9 @@ class Box:
 
 
 def _sel(**kw):
+    """The selection the tests plan: the reference box's tools, the narrator on beside them (off by
+    default since 0.11.3, SRV-534), and what `kw` sets."""
+    kw["components"] = dict({"narrator": True}, **(kw.get("components") or {}))
     return estimate.check(M, dict({"model": M["id"]}, **kw))
 
 

@@ -3979,7 +3979,9 @@ def shadow_preload_once() -> str | None:
         return None
     slot = svc.slot
     narr = STATE.get("narrator")
-    if narr is not None and slot is getattr(narr, "slot", None):
+    # SRV-534: with the narrator role off (the default) its keeper never loads a shared slot
+    if narr is not None and slot is getattr(narr, "slot", None) and \
+            narr.settings()["mode"] != "off":
         return None                             # the narrator's slot: its keeper loads it
     since = slot.failed_for() if hasattr(slot, "failed_for") else None
     retry = since is not None and since >= SHADOW_RETRY_S
@@ -4392,6 +4394,10 @@ def roles_report() -> dict:
     if reg is not None:
         out["roles"]["laya"] = {"models": reg.loaded(), "state": "loaded" if reg.ready()
                                 else "not_loaded"}
+        refused = reg.refused() if hasattr(reg, "refused") else None
+        if refused is not None:
+            # 0.11.3: why Laya is not loaded (the planner's numbers), until a model loads
+            out["roles"]["laya"]["refused"] = refused
     return out
 
 

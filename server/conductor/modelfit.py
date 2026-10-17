@@ -11,7 +11,8 @@ keys changed (`DEFAULTS` is what a model without the field gets, the router as b
                        document leaves it off; a turn below its accept bar falls back
     fallback           `class`: a turn whose class nobody decided (no answer at the accept bar, or
                        a tool turn of such a session) gets the default class's whole policy;
-                       `lean`: the profile's default effort, no packages, rules or effort sentence
+                       `lean`: the profile's default effort and no effort sentence; the class's
+                       packages, core and rules as `packages` and `rules` let them (SRV-534)
     packages           `all`: the class's general packages, its core and the package question's
                        pick; `core`: the class's core and the pins; `none`: the pins alone
     no_package_classes classes that get no package at all (pins excepted)

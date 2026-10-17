@@ -51,17 +51,17 @@ def test_2_a_role_that_fits_is_allowed():
     d = residency.check("decider", 31.0, ARBITER)
     assert d["allowed"] and d["reason"] is None, d
     assert (d["after_gib"], d["need_gib"]) == (25.9, 21.0), d
-    # the claim the box uses: 8.2 GiB of MemAvailable, still allowed at 31
-    assert residency.check("decider", 31.0, DOC)["after_gib"] == 22.8
+    # the shipped claim, Laya inside the engine (OPS-69): 3.0 GiB of MemAvailable
+    assert residency.check("decider", 31.0, DOC)["after_gib"] == 28.0
 
 
 def test_3_a_role_that_would_break_the_floor_is_refused():
     d = residency.check("reader", 18.0, DOC)
     assert not d["allowed"] and d["reason"] == "refused_memory", d
     assert d["claim_gib"] == 12.0 and d["after_gib"] == 6.0
-    edge = residency.check("decider", 21.0 + 8.2, DOC)
+    edge = residency.check("decider", 21.0 + 3.0, DOC)
     assert edge["allowed"], "the floor plus the margin is allowed, not one byte under"
-    assert not residency.check("decider", 21.0 + 8.19, DOC)["allowed"]
+    assert not residency.check("decider", 21.0 + 2.99, DOC)["allowed"]
     assert residency.check("decider", None, DOC)["reason"] == "refused_memory", \
         "no reading is no load"
 
@@ -78,13 +78,13 @@ def test_5_never_during_a_hold_and_the_hold_comes_first():
 
 
 def test_the_plan_loads_one_after_the_other():
-    """At 40 GiB the decider fits (40 - 8.2 = 31.8 >= 21), the narrator (P1) then sees 31.8 and
-    fits too (31.8 - 6 = 25.8); the reader sees 25.8, and 25.8 - 12 = 13.8 is under 21: refused.
+    """At 40 GiB the decider fits (40 - 3 = 37 >= 21), the narrator (P1) then sees 37 and
+    fits too (37 - 6 = 31); the reader sees 31, and 31 - 12 = 19 is under 21: refused.
     The order is the document's."""
     p = residency.plan(40.0, DOC)
     assert p["order"] == ["decider", "narrator", "reader"] and p["spendable_gib"] == 19.0, p
     assert [(r["role"], r["allowed"], r["mem_available_gib"]) for r in p["rows"]] == \
-        [("decider", True, 40.0), ("narrator", True, 31.8), ("reader", False, 25.8)], p["rows"]
+        [("decider", True, 40.0), ("narrator", True, 37.0), ("reader", False, 31.0)], p["rows"]
     assert p["rows"][2]["reason"] == "refused_memory"
     roles = {"librarian": {"endpoint": "http://x", "memory_claim_gib": 1.5},
              "classifier": {"endpoint": "self", "memory_claim_gib": 3.0}}
@@ -93,9 +93,36 @@ def test_the_plan_loads_one_after_the_other():
         "a role the roles document claims joins the plan"
 
 
+def test_the_plan_leaves_out_a_role_switched_off():
+    """SRV-534: a role the roles document switches off (the narrator and the reader by default)
+    never loads, so the plan holds no claim for it; asked by name it is still checked."""
+    roles = schema.seed("roles")
+    assert roles["narrator"]["mode"] == "off" and roles["reader"]["mode"] == "off"
+    p = residency.plan(40.0, DOC, roles)
+    assert p["order"] == ["decider"], p["order"]
+    roles["narrator"] = dict(roles["narrator"], mode="on")
+    assert residency.plan(40.0, DOC, roles)["order"] == ["decider", "narrator"]
+    assert [r["role"] for r in residency.plan(40.0, DOC, schema.seed("roles"),
+                                              ["narrator"])["rows"]] == ["narrator"]
+
+
+def test_laya_fits_beside_super_vl_at_three_slots():
+    """SRV-534: the reference box's check of 2026-10-17 (Super VL EXL3 4.0, 3 slots of 262,144):
+    43.75 GiB available, the engine at 68.79 of its 86.25 GiB peak. The shipped claim fits with
+    2.29 GiB to spare; the arbiter's 8.2 refused Laya on a new box; the 1,048,576-token window
+    (98.08 held, past its 94.82 peak, 9.82 available) refuses it either way."""
+    d = residency.check("decider", 43.75, DOC, engine_peak_gib=86.25, engine_now_gib=68.79)
+    assert d["allowed"] and (d["engine_growth_gib"], d["after_gib"]) == (17.46, 23.29), d
+    old = dict(DOC, claims=dict(DOC["claims"], decider=dict(DOC["claims"]["decider"], gib=8.2)))
+    d = residency.check("decider", 43.75, old, engine_peak_gib=86.25, engine_now_gib=68.79)
+    assert not d["allowed"] and d["after_gib"] == 18.09, d
+    d = residency.check("decider", 9.82, DOC, engine_peak_gib=94.82, engine_now_gib=98.08)
+    assert d["reason"] == "refused_memory" and d["after_gib"] == 6.82, d
+
+
 def test_the_vllm_fraction_is_the_byte_math_rounded_down():
     assert residency.vllm_fraction("reader", 121.6, DOC) == 0.09        # 12 / 121.6 = 0.0987
-    assert residency.vllm_fraction("decider", 121.6, DOC) == 0.06
+    assert residency.vllm_fraction("decider", 121.6, DOC) == 0.02        # 3 / 121.6 = 0.0247
 
 
 def test_the_journal_keeps_the_last_refusal():
@@ -136,8 +163,8 @@ def test_the_command_line_reads_the_store_and_journals():
     run = lambda *a: subprocess.run([sys.executable, "-m", "server.conductor.residency",  # noqa: E731
                                      "--root", root, *a], capture_output=True, text=True,
                                     env=env, cwd=ROOT)
-    r = run("check", "decider", "--mem-available-gib", "31")
-    assert r.returncode == 3, r.stdout + r.stderr          # 31 - 8.2 = 22.8 < 15 + 10
+    r = run("check", "decider", "--mem-available-gib", "27")
+    assert r.returncode == 3, r.stdout + r.stderr          # 27 - 3 = 24 < 15 + 10
     assert json.loads(r.stdout)["reason"] == "refused_memory"
     assert run("check", "decider", "--mem-available-gib", "40").returncode == 0
     assert json.loads(run("plan", "--mem-available-gib", "40").stdout)["need_gib"] == 25.0
@@ -274,7 +301,7 @@ def test_2_ops_loads_a_role_that_fits_and_records_what_it_took():
         assert os.path.exists(os.path.join(repo, "logs", "roles", "decider.pid"))
         j = _journal(root)
         assert j[0]["kind"] == "check" and j[0]["allowed"] and j[0]["source"] == "ops", j
-        assert j[0]["after_gib"] == 22.8 and j[1]["kind"] == "loaded", j
+        assert j[0]["after_gib"] == 28.0 and j[1]["kind"] == "loaded", j
         assert not os.path.exists(os.path.join(repo, "logs", "roles", ".loading")), \
             "the load lock is released"
     finally:

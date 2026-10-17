@@ -567,7 +567,9 @@ export class MockConductor {
     const cur = this.cur('residency');
     const d = cur.doc as { floor_gib: number; margin_gib: number; settle_s: number; order: string[]; claims: Record<string, { gib: number; basis: string; note: string }> };
     const need = d.floor_gib + d.margin_gib;
-    const order = [...d.order.filter((r) => r in d.claims), ...Object.keys(d.claims).filter((r) => !d.order.includes(r)).sort()];
+    // SRV-534: a role the roles document switches off claims nothing (server/conductor/residency.py plan)
+    const roles = this.cur('roles').doc as Record<string, { mode?: string }>;
+    const order = [...d.order.filter((r) => r in d.claims), ...Object.keys(d.claims).filter((r) => !d.order.includes(r)).sort()].filter((r) => roles[r]?.mode !== 'off');
     const grow = this.engineGrowth();
     const eng = { engine_peak_gib: this.enginePeakGib, engine_now_gib: this.engineNowGib, engine_growth_gib: grow };
     let left: number | null = Math.round((this.residencyMemGib - grow) * 100) / 100;

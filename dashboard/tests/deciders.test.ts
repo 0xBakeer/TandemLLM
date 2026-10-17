@@ -35,7 +35,7 @@ describe('the contract of the decision-model routes', () => {
     check('deciders-status', s);
     expect(s.models.map((x) => [x.name, x.state])).toEqual([['laya-english', 'loaded'], ['laya-multilingual', 'not_loaded'], ['laya-typed-decisions', 'not_loaded']]);
     expect(s.models[1].limits.context_tokens).toBe(1024);
-    expect([s.planner.allowed, s.planner.claim_gib, s.planner.need_gib]).toEqual([true, 8.2, 21]);
+    expect([s.planner.allowed, s.planner.claim_gib, s.planner.need_gib]).toEqual([true, 3, 21]);
     check('document', m.handle('GET', '/v1/conductor/deciders', q(), {}, 't').body);
   });
   it('L1: the Laya route for scripts: its settings and counts in the status, its responses in the contract', () => {
@@ -78,13 +78,13 @@ describe('the contract of the decision-model routes', () => {
     expect(r.status).toBe(409);
     check('decider-action', r.body);
     const d = (r.body as { decision: { reason: string; after_gib: number } }).decision;
-    // OPS-47: 28 - 7 (the engine's growth to its 77 GiB peak) - 8.2
-    expect([d.reason, d.after_gib]).toEqual(['refused_memory', 12.8]);
+    // OPS-47: 28 - 7 (the engine's growth to its 77 GiB peak) - 3 (SRV-534: Laya in the engine)
+    expect([d.reason, d.after_gib]).toEqual(['refused_memory', 18]);
     const s = m.decidersStatus() as { models: { name: string; state: string; refusal: unknown }[]; last_refusal: unknown };
     check('deciders-status', s);
     const row = s.models.find((x) => x.name === 'laya-typed-decisions')!;
     expect(row.state).toBe('not_loaded');
-    expect(refusalWords(row.refusal as never)).toBe('not loaded: kept free for requests (MemAvailable 28.0 GiB, less 7.0 GiB the engine may still take for a long request and the 8.2 GiB claim, leaves 12.8 GiB; the box keeps 21.0 GiB free (a 15.0 GiB floor and a 6.0 GiB margin))');
+    expect(refusalWords(row.refusal as never)).toBe('not loaded: kept free for requests (MemAvailable 28.0 GiB, less 7.0 GiB the engine may still take for a long request and the 3.0 GiB claim, leaves 18.0 GiB; the box keeps 21.0 GiB free (a 15.0 GiB floor and a 6.0 GiB margin))');
   });
   it('the mapping is a versioned document (scenario 5)', () => {
     const m = new MockConductor(7);

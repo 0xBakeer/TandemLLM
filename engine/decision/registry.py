@@ -42,6 +42,25 @@ REFUSAL_REUSE_S = 60.0
 WARM_DEADLINE_S = 600.0
 
 
+# what /health and the loud log line keep of a planner's refusal
+REFUSAL_KEYS = ("reason", "at", "mem_available_gib", "engine_growth_gib", "claim_gib", "after_gib",
+                "need_gib")
+
+
+def _loud(name: str, d: dict) -> str:
+    """The one loud line when no decision model could load: without one the conductor decides no
+    class on a model whose fit leaves the class question to the decider (every turn falls back)."""
+    nums = ""
+    if d.get("after_gib") is not None:
+        nums = (f": {d.get('mem_available_gib')} GiB available - {d.get('engine_growth_gib')} "
+                f"the engine may still take - {d.get('claim_gib')} claim = {d['after_gib']} GiB, "
+                f"under floor + margin {d.get('need_gib')}")
+    return (f"[deciders] WARNING: no decision model is loaded: the residency planner refused "
+            f"{name} ({d.get('reason')}{nums}). Turns get the profile's default class until it "
+            f"loads; a question asks for the load again once a minute. /health roles.laya.refused "
+            f"has the numbers")
+
+
 class UnknownModel(ValueError):
     """A `model` no served decision model answers to."""
 
@@ -84,6 +103,8 @@ class Registry:
         self._batchers: dict[str, Batcher] = {}
         self._placements: dict = {}
         self._loading: str | None = None
+        # the loud line for a refusal while no model is loaded goes out once per server
+        self._refusal_said = False
         # models the role governor (server/rolemem.py) unloaded for memory: no on-demand load
         # brings them back; the governor lifts the hold and loads them when memory came back
         self.memory_hold: set[str] = set()
@@ -252,6 +273,9 @@ class Registry:
             if not d.get("allowed"):
                 self.refusal[name] = dict(d, at=time.time())
                 self.log(f"[deciders] {name}: load refused ({d.get('reason')})")
+                if not self.ready() and not self._refusal_said:
+                    self._refusal_said = True
+                    self.log(_loud(name, d))
                 return dict(d, state=st)
             self.refusal.pop(name, None)
             self.error.pop(name, None)
@@ -393,6 +417,14 @@ class Registry:
 
     def loaded(self) -> list[str]:
         return [n for n in self.order if self.state[n] == "loaded"]
+
+    def refused(self) -> dict | None:
+        """While no model is loaded: the newest refusal of a load (the model, the reason and the
+        planner's numbers) for /health; None when one is loaded or none was refused."""
+        if self.ready() or not self.refusal:
+            return None
+        name, d = max(self.refusal.items(), key=lambda kv: kv[1].get("at", 0))
+        return {"model": name, **{k: d.get(k) for k in REFUSAL_KEYS if d.get(k) is not None}}
 
     def status(self) -> list[dict]:
         pol = self.policy()
