@@ -40,6 +40,9 @@ from chatd.plans import PLAN_TOOLS
 
 PARAGRAPH = ("You lead this chat. You talk with the user, plan the work, and give the hands-on "
              "work to workers with the task tool. You cannot write files or run commands yourself.")
+NO_CODE = ("Never write code or file contents yourself, not in a brief and not in your thinking: "
+           "describe what the result must do, and let the worker design and write it. Decide the "
+           "look and behaviour in words (colours, layout, features), not in code.")
 
 
 def names(body: dict) -> list[str]:
@@ -207,6 +210,10 @@ def test_the_paragraph_is_in_agents_mode_only():
         assert sys_on.split("\n\n")[0] == rules and sys_on.split("\n\n")[1] == PARAGRAPH
         assert sys_on.endswith("A report marked partial or failed is not done: give a better "
                                "brief, change the plan, or ask the user.")
+        assert NO_CODE in sys_on.split("\n\n") and NO_CODE not in sys_off
+        task = [t["function"] for t in main_calls(c, on)[-1][1]["tools"]
+                if t["function"]["name"] == "task"][0]
+        assert task["description"].endswith(" " + NO_CODE)
     finally:
         c.close()
 

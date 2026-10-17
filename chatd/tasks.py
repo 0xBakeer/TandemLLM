@@ -27,8 +27,11 @@ with its transcript. A snapshot of the workspace at the worker's start (key: the
 base of the task's diff and a rewind point.
 
 THE CONTRACT (SRV-581). A brief has four labelled lines, Goal, Files, Constraints and Check, each
-saying something, in at most 8,000 characters; a task call without them is refused before any
-worker starts, with the template (`check_brief`). The worker ends with a report in a fixed shape,
+saying something, in at most 3,000 characters, and no code: a fence, more than 4 tags, a run of
+more than 8 lines that look like code, a line of minified code or a "CODE:" block (`code_lines`).
+A brief describes the job and the worker writes the code; a brief that carried a whole page made
+the worker a typist and put the page in the main context (2026-10-17). A task call that breaks
+this is refused before any worker starts, with the template (`check_brief`). The worker ends with a report in a fixed shape,
 which chatd parses into a `report.v1` object (`parse_report`): a report that misses a field or
 breaks a cap goes back to the worker once, as a one-call tail (`task_report`); missing fields a
 second time, chatd builds the report from the worker's calls (`build_report`). At its cap of calls
@@ -124,10 +127,73 @@ def final_text(parts: list[dict], after: int = 0) -> str:
 
 # ---------------------------------------------------------------------- the brief (SRV-581)
 BRIEF_LINES = ("Goal", "Files", "Constraints", "Check")
-BRIEF_MAX_CHARS = 8000
+BRIEF_MAX_CHARS = 3000
 BRIEF_LINE_MIN = 10
 TITLE_MAX_CHARS = 80
+CODE_RUN_MAX = 8          # more lines of code in a run: the brief carries code
+CODE_TAGS_MAX = 4         # more HTML/XML tags: a page, not a mention of <canvas>
+CODE_DENSE_MAX = 8        # more of ; { } on one line: minified code
 _BRIEF_LINE = re.compile(r"^\s*(goal|files|constraints|check)\s*:\s*(.*)$", re.I)
+_TAG = re.compile(r"</?[A-Za-z][\w:-]*(?:\s[^<>]*)?/?>|<!(?:DOCTYPE|--)", re.I)
+_CODE_FENCE = re.compile(r"^\s*(?:```|~~~)")
+_CODE_MARK = re.compile(r"(?:\bCODE\b|(?i:\b(?:exact|full) (?:contents?|code|source|text)\b))"
+                        r"[^:\n]{0,80}:")
+_CODE_LINE = re.compile(
+    r"[{};]\s*$|^\s*[})\]]"                                    # a statement or a block ends
+    r"|^\s*(?:function|const|let|var|return|import|export|def|class|elif|else|try|except|"
+    r"async|await|#include|#define)\b"
+    r"|^\s*(?:if|for|while|switch)\s*\(|^\s*(?:if|for|while|with)\b.*:\s*$"
+    r"|^\s*(?://|/\*|\*/|@media|@keyframes)"
+    r"|^\s*[\w.$\[\]]+\s*[-+*/]?=\s*\S"                         # an assignment
+    r"|^\s*[\w.$]+\(.*\)\s*$")                                  # a call on its own line
+
+
+def code_lines(brief: str) -> list[int]:
+    """The brief's lines (0-based) that carry code: a fenced block, every tag line when there are
+    more than CODE_TAGS_MAX tags, a run of more than CODE_RUN_MAX code lines (blank lines and a
+    single other line between code lines go on with it; a labelled line ends it), a line with more
+    than CODE_DENSE_MAX of ; { }, and a "CODE:"/"exact content:" block that holds any of these
+    signs. Inline names (`tick()`, `<canvas>`) and a one-line snippet are none of them."""
+    lines = brief.splitlines()
+    label = [bool(_BRIEF_LINE.match(ln)) for ln in lines]
+    tags = [len(_TAG.findall(ln)) for ln in lines]
+    code = [not label[i] and (bool(tags[i]) or bool(_CODE_LINE.search(ln)))
+            for i, ln in enumerate(lines)]
+    found: set[int] = set()
+    fence = None
+    for i, ln in enumerate(lines):
+        if _CODE_FENCE.match(ln):
+            if fence is None:
+                fence = i
+            else:
+                found.update(range(fence, i + 1))
+                fence = None
+    if fence is not None:
+        found.update(range(fence, len(lines)))
+    if sum(tags) > CODE_TAGS_MAX:                     # a labelled line names tags, the code follows
+        found.update([i for i, n in enumerate(tags) if n and not label[i]] or
+                     [i for i, n in enumerate(tags) if n])
+    found.update(i for i, ln in enumerate(lines)
+                 if sum(ln.count(ch) for ch in ";{}") > CODE_DENSE_MAX)
+    nonblank = [i for i, ln in enumerate(lines) if ln.strip()]
+    start = last = None
+    count = 0
+    for k, i in enumerate(nonblank + [None]):
+        if i is not None and code[i]:
+            start, last, count = (i if start is None else start), i, count + 1
+            continue
+        if (i is not None and start is not None and not label[i] and last == nonblank[k - 1]
+                and k + 1 < len(nonblank) and code[nonblank[k + 1]]):
+            continue                                        # one other line inside the code
+        if count > CODE_RUN_MAX:
+            found.update(range(start, last + 1))
+        start, count = None, 0
+    for i, ln in enumerate(lines):
+        if not label[i] and _CODE_MARK.search(ln):
+            end = next((j for j in range(i + 1, len(lines)) if label[j]), len(lines))
+            if any(code[j] for j in range(i, end)):
+                found.update(range(i, end))
+    return sorted(found)
 
 
 def check_brief(args: dict) -> str | None:
@@ -139,6 +205,10 @@ def check_brief(args: dict) -> str | None:
         why = "the title is empty."
     elif len(title) > TITLE_MAX_CHARS:
         why = f"the title is {len(title)} characters; at most {TITLE_MAX_CHARS}."
+    elif carried := code_lines(brief):
+        n = len(carried)
+        why = (texts()["code"].replace("{lines}", f"{n} line" + ("s" if n != 1 else ""))
+               .replace("{line}", str(carried[0] + 1)))
     elif len(brief) > BRIEF_MAX_CHARS:
         why = f"the brief is {len(brief):,} characters; at most {BRIEF_MAX_CHARS:,}."
     else:

@@ -2,9 +2,12 @@
 the check and the result on fixtures, then the send-back, the built report and the salvage on
 tests/fake_backend.py with a script for the main agent and its worker (tests/test_chatd_tasks.py).
 
-  1  the brief: each missing line, a line that says too little, 9,200 characters, an empty
+  1  the brief: each missing line, a line that says too little, 3,001 characters, an empty
      expect, a long or empty title each get their own refusal with the template; a good one none
                                                             test_the_brief_check
+ 1b  a brief that carries code: the live shape of 2026-10-17 (the four lines, then a CODE block of
+     HTML), HTML without the marker, a fenced block, minified code on one line are refused with
+     the lines; inline names and one-line snippets pass   test_a_brief_that_carries_code
   2  report.v1: the note's shape, fields in another order, labels in another case or bold, two
      reports (the last counts), text outside the fields dropped, the missing fields and the caps
      by name, a code block cut and named           test_the_report_parser
@@ -70,10 +73,11 @@ def test_the_brief_check():
     assert tk.check_brief(args(short)).startswith(
         'task refused: the "Check:" line says too little (at least 10 characters after the '
         'label).')
-    big = BRIEF + "\n" + "x" * (9200 - len(BRIEF) - 1)
-    assert len(big) == 9200
+    big = BRIEF + "\n" + "x" * (3001 - len(BRIEF) - 1)
+    assert len(big) == 3001
     assert tk.check_brief(args(big)).startswith(
-        "task refused: the brief is 9,200 characters; at most 8,000.")
+        "task refused: the brief is 3,001 characters; at most 3,000.")
+    assert tk.check_brief(args(big[:-1])) is None
     assert tk.check_brief(args(expect=" ")).startswith("task refused: expect is empty")
     assert tk.check_brief(args(title="t" * 95)).startswith(
         "task refused: the title is 95 characters; at most 80.")
@@ -82,6 +86,112 @@ def test_the_brief_check():
     assert tk.check_brief(args(BRIEF.replace("Goal:", "goal :"))) is None
     assert all(tk.check_brief(a).endswith(TEMPLATE) for a in (
         args(three), args(big), args(title=""), args(expect="")))
+
+
+CLOCK_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Analog clock</title>
+  <style>
+    body { margin: 0; background: #0b0d12; display: grid; place-items: center; height: 100vh; }
+    canvas { width: 360px; height: 360px; }
+  </style>
+</head>
+<body>
+  <canvas id="clock" width="720" height="720"></canvas>
+  <script>
+    const c = document.getElementById("clock");
+    const ctx = c.getContext("2d");
+    function hand(angle, length, width, colour) {
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.lineWidth = width;
+      ctx.strokeStyle = colour;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(0, -length);
+      ctx.stroke();
+      ctx.restore();
+    }
+    function tick() {
+      const now = new Date();
+      ctx.setTransform(1, 0, 0, 1, 360, 360);
+      ctx.clearRect(-360, -360, 720, 720);
+      hand((now.getHours() % 12) * Math.PI / 6, 160, 14, "#e8e8e8");
+      hand(now.getMinutes() * Math.PI / 30, 240, 8, "#e8e8e8");
+      hand(now.getSeconds() * Math.PI / 30, 280, 3, "#ff5a36");
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>"""
+FOUR = ("Goal: /workspace/clock.html shows an analog clock whose hands follow the local time\n"
+        "Files: clock.html (new), one file with its style and script inline\n"
+        "Constraints: no libraries, no network, nothing else in /workspace changes\n"
+        "Check: render_page clock.html shows the face and three hands, no console errors")
+CODE_WHY = ("A brief describes the job; the worker writes the code. Say what the file must do and "
+            "how to check it, not its contents.\n")
+
+
+def test_a_brief_that_carries_code():
+    n = len(CLOCK_HTML.splitlines())                     # 40 lines
+    live = FOUR + "\nCODE (exact content of /workspace/clock.html): " + CLOCK_HTML
+    assert len(live) < 3000
+    assert tk.check_brief(args(live)) == (
+        f"task refused: the brief carries code ({n} lines from line 5). " + CODE_WHY + TEMPLATE)
+    # as live: the labelled lines name the page's first and last tags, a blank line, the block
+    named = (FOUR.replace("follow the local time", "follow the local time, ending with </html>")
+             .replace("no console errors", "it starts with <!DOCTYPE html>") +
+             "\n\nCODE (exact content of /workspace/clock.html):\n" + CLOCK_HTML)
+    assert tk.check_brief(args(named)) == (
+        f"task refused: the brief carries code ({n + 1} lines from line 6). " + CODE_WHY +
+        TEMPLATE)
+    # the live size (7,968 characters) is refused for its code, not for its length
+    padded = live + "\n" + "\n".join(["    <!-- face markings -->"] * 200)
+    assert tk.check_brief(args(padded)).startswith("task refused: the brief carries code (")
+    # the same page with no marker: the tags and the run of code lines
+    bare = FOUR + "\n" + CLOCK_HTML
+    assert tk.check_brief(args(bare)) == (
+        f"task refused: the brief carries code ({n} lines from line 5). " + CODE_WHY + TEMPLATE)
+    # code after a label, at the end of the brief, with no tags (a script)
+    js = "\n".join(CLOCK_HTML.splitlines()[13:37])
+    tail = FOUR + "\nNotes: draw it this way\n" + js
+    assert tk.check_brief(args(tail)) == (
+        "task refused: the brief carries code (24 lines from line 6). " + CODE_WHY + TEMPLATE)
+    # a fenced block, however short
+    fenced = FOUR + "\nUse this:\n```js\nrequestAnimationFrame(tick);\n```"
+    assert tk.check_brief(args(fenced)) == (
+        "task refused: the brief carries code (3 lines from line 6). " + CODE_WHY + TEMPLATE)
+    # minified code on one line
+    one = FOUR + "\n" + " ".join(ln.strip() for ln in CLOCK_HTML.splitlines()[13:37])
+    assert tk.check_brief(args(one)) == (
+        "task refused: the brief carries code (1 line from line 5). " + CODE_WHY + TEMPLATE)
+    # inline names and one-line snippets are a description
+    words = ("Goal: /workspace/clock.html shows an analog clock; tick() redraws it on every "
+             "requestAnimationFrame\n"
+             "Files: clock.html (new): one <canvas> with inline <style> and <script>\n"
+             "Constraints: no libraries; rotate each hand with ctx.rotate(angle); the face dark "
+             "(#0b0d12), the hands light grey, the second hand signal orange (#ff5a36)\n"
+             "- the hour hand is the shortest and widest, the second hand the thinnest\n"
+             "- the page fits a 390 px phone screen (`width: min(90vw, 360px)`)\n"
+             "- tick marks: 12 long ones at the hours, 48 short ones\n"
+             "Check: render_page clock.html shows the face and three hands; the console has no "
+             "errors; document.querySelector('canvas') is not null")
+    assert tk.check_brief(args(words)) is None
+    # the live task 2: a fix named by one-line snippets
+    fix = ("Goal: /workspace/clock.html has its dial-tick geometry corrected: in the "
+           "el(\"line\",{...}) call inside the for(var i=0;i<60;i++) loop, y2 must be "
+           "(C-r2*Math.cos(a)) instead of (C+r2*Math.cos(a)).\n"
+           "Files: /workspace/clock.html, the only file to change. The buggy line is the long "
+           "el(\"line\",{x1:...}) line in the tick loop (around line 75).\n"
+           "Constraints: change exactly that one occurrence; do not touch any other character "
+           "of the file.\n"
+           "Check: grep -c 'C-r2\\*Math.cos' clock.html prints 1 and grep -c "
+           "'C+r2\\*Math.cos' clock.html prints 0")
+    assert tk.check_brief(args(fix)) is None
+    assert tk.check_brief(args(FOUR)) is None
 
 
 # ---------------------------------------------------------------------- the report

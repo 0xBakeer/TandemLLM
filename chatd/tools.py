@@ -577,7 +577,10 @@ TASK_DESCRIPTION = (
     "Give a job to a worker: a fresh assistant that works in this chat's sandbox and /workspace "
     "with every file and command tool, and that sees nothing of this chat except your brief and "
     "the todo list. Use it for every file write and for any build or fix that takes more than one "
-    "step. Returns the worker's report and chatd's check of it. One task at a time.")
+    "step. Returns the worker's report and chatd's check of it. One task at a time. Never write "
+    "code or file contents yourself, not in a brief and not in your thinking: describe what the "
+    "result must do, and let the worker design and write it. Decide the look and behaviour in "
+    "words (colours, layout, features), not in code.")
 TASK_SCHEMA = {"type": "object", "required": ["title", "brief", "expect"], "properties": {
     "title": {"type": "string", "description": "A short name for the card the user sees, at most "
                                                "80 characters."},
