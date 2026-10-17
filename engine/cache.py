@@ -1878,7 +1878,8 @@ class ResidentPrefix:
             self._free.pop()
             self._allocated -= 1
 
-    def park_offer(self, ids, c: int, max_len: int, align: bool = True) -> int:
+    def park_offer(self, ids, c: int, max_len: int, align: bool = True,
+                   mm_ok: bool = False) -> int:
         """The parked anchor a prompt could resume at, when it beats the rows in place; else 0.
         The head below the parked rows must be the rows in place: `ids` shares it with them.
 
@@ -1888,8 +1889,9 @@ class ResidentPrefix:
         by the server's end alignment on the parked rows and regions -- the tests an NVMe entry's
         offer makes (engine/spill.py `Entry.offer`). Such a copy is served as the rows up to the
         end and its own tail after it, so `max_len` (the copy's last position) does not bound it.
-        An end after images is not offered here: the caller set the rotary offset for the end in
-        place (`keep_end`)."""
+        An end after images only with `mm_ok`, as `end_offer`: a request with images whose keys
+        hold every row up to it (ENG-371: two workers with screenshots took turns on slot 0, and
+        each one's next call read its whole prompt again: its parked end was never offered)."""
         pe = self.park_end
         if not self.park_rows or (not self.park_anchors and pe is None) or c < self.park_base:
             return 0
@@ -1899,11 +1901,11 @@ class ResidentPrefix:
         if cp <= self.park_base:
             return 0
         bk = max((b for b in self.park_anchors if b <= min(cp, max_len)), default=0)
-        if pe is not None and not pe.get("mm"):
+        if pe is not None and (not pe.get("mm") or mm_ok):
             e = int(pe["at"])
             if cp >= e and e <= max_len:
                 bk = e
-            elif align and cp < e and self._continues_park(ids):
+            elif align and cp < e and not pe.get("mm") and self._continues_park(ids):
                 bk = e
         return bk if bk > self.best(c, max_len) else 0
 
@@ -1922,7 +1924,7 @@ class ResidentPrefix:
         except Exception:                                          # noqa: BLE001
             return False
 
-    def unpark_end(self, eng, drafter, ids, max_len: int) -> int:
+    def unpark_end(self, eng, drafter, ids, max_len: int, mm_ok: bool = False) -> int:
         """Before the server's replay: the parked conversation back in place when the client's
         copy `ids` continues it to its end anchor and that beats every other cache in RAM, so the
         replay (hidden spans, end alignment) works on its rows and the prefill resumes at its end.
@@ -1935,9 +1937,9 @@ class ResidentPrefix:
         if len(ids) <= e:
             return 0           # FX17: a continuation goes past the end; a shorter copy is another request
         c = self.common(ids)
-        if self.park_offer(ids, c, max_len) != e:
+        if self.park_offer(ids, c, max_len, mm_ok=mm_ok) != e:
             return 0
-        if e <= max(self.end_offer(c, max_len), self.pin_offer(ids, c, max_len)):
+        if e <= max(self.end_offer(c, max_len, mm_ok=mm_ok), self.pin_offer(ids, c, max_len)):
             return 0
         if not self.unpark(eng, drafter) or self.end is None or int(self.end["at"]) != e:
             return 0
@@ -2410,7 +2412,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         was_owner, was_valid, was_c = res.owner, res.valid, c
     bp = res.pin_offer(keys, c, n - 1) if res is not None else 0
     # the server has replayed the client's copy already: the park's end only for every token
-    bk = res.park_offer(keys, c, n - 1, align=False) if res is not None else 0
+    bk = res.park_offer(keys, c, n - 1, align=False, mm_ok=end_mm) if res is not None else 0
     be = res.end_offer(c, n - 1, mm_ok=end_mm) if res is not None else 0
     hit, via, dh = None, None, None
     if store is not None:

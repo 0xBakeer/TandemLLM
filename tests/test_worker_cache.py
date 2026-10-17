@@ -353,6 +353,27 @@ def test_a_conversation_slot_0_has_parked_tries_slot_0_first():
     assert why.get("wait") is None, why
 
 
+def test_a_returning_parent_tries_slot_0_for_as_long_as_a_re_read_would_take():
+    """Live 2026-10-18 01:00: two parents' returns, their rows on the NVMe, took the side slot
+    (`prefer_side`) and read 11,119 and 11,010 tokens again: the client's copy has none of the
+    router's notes, so no entry matched it before the lock. A parent whose worker ran waits for
+    slot 0, which reads its rows back, up to the time reading its prompt would take."""
+    app.PARENTS.clear()
+    worker = FakeRes(tokens(17_970, seed=7), owner="chat-a-task-1")
+    ids = tokens(11_594, seed=8)
+    _, why = _need(worker, ids, session="chat-a")
+    assert why.get("wait") is None, why                # no worker ran: as before
+    app._note_parent("chat-a")
+    _, why = _need(worker, ids, session="chat-a")
+    assert why.get("wait") == "parent" and why.get("slot0_first"), why
+    assert app.SIDE_SLOT0_WAIT_S <= why["slot0_wait_s"] < app.PARENT_WAIT_MAX_S, why
+    _, long_ = _need(worker, tokens(200_000, seed=9), session="chat-a")
+    assert long_["slot0_wait_s"] == app.PARENT_WAIT_MAX_S, long_     # never minutes
+    _, why = _need(worker, ids, session="chat-a-task-1", stay=True, parent="chat-a")
+    assert why.get("wait") != "parent" and "slot0_wait_s" not in why, why
+    app.PARENTS.clear()
+
+
 def test_a_parent_waits_for_its_worker_for_parent_keep_s():
     app.PARENTS.clear()
     app._note_parent("chat-p", now=100.0)

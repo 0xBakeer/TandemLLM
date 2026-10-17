@@ -850,7 +850,7 @@ def _holder_name() -> str:
 
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
-                   parent: str | None = None) -> int | None:
+                   parent: str | None = None, session: str | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
     lane job (served at slot 0's safe points), a request with images (side slots are text only),
     or one no side slot is long enough for. A request that continues slot 0's resident
@@ -863,7 +863,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     ENG-371: `stay`, an agent's worker (`_worker_of`), is never a guest of slot 0's conversation;
     a new one takes a free side slot first when slot 0 holds its `parent`, so the parent stays in
     place, and it never waits SIDE_NEW_WAIT_S for one. A request whose conversation slot 0's park
-    holds (a parent whose worker took slot 0) tries slot 0 first, as one on the NVMe does."""
+    holds tries slot 0 first, as one on the NVMe does; so does a parent whose worker ran
+    (`session` in PARENTS: its rows went to slot 0's park or the NVMe, which only slot 0 reads
+    back, unless a side slot still holds them, `_side_home`), and it waits for slot 0 up to the
+    time reading its prompt again would take (`slot0_wait_s`, PARENT_WAIT_MAX_S at most). Live
+    2026-10-18 01:00: two parents' returns, their rows on the NVMe, took the side slot after
+    `prefer_side` and read 11,119 and 11,010 tokens again: the client's copy, without the
+    router's notes, matched no entry there."""
     why = why if why is not None else {}
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
@@ -937,8 +943,15 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                     bk = res.park_offer(ids, rc, len(ids) - 1)
                     if bk and (conv is None or bk >= conv):
                         why.update(wait="park", park=int(bk))
+                if (not why.get("wait") and not why.get("guest") and not stay
+                        and _waiting_parent(session)):
+                    why["wait"] = "parent"            # ENG-371: slot 0 reads its rows back
         except Exception:                                          # noqa: BLE001
             pass
+    if not stay and _waiting_parent(session) and why.get("wait") in ("parent", "spill", "park"):
+        rate = _peek_rate() or PARENT_REREAD_TOK_S
+        why["slot0_wait_s"] = round(min(PARENT_WAIT_MAX_S,
+                                        max(SIDE_SLOT0_WAIT_S, len(ids) / rate)), 1)
     if lane and not why.get("guest"):
         return None
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
@@ -1033,10 +1046,12 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
     if why.get("hop_from") is not None:
         return (f"moved from slot {why['hop_from']} (busy {why.get('home_wait')} s): re-reading its "
                 f"conversation on the next free slot")
-    if why.get("slot0_first") and waited < SIDE_SLOT0_WAIT_S:
+    limit = float(why.get("slot0_wait_s") or SIDE_SLOT0_WAIT_S)
+    if why.get("slot0_first") and waited < limit:
         where = ("slot 0 reads its conversation back from the NVMe" if why.get("wait") == "spill"
+                 else "slot 0 reads its conversation back" if why.get("wait") == "parent"
                  else "slot 0 holds its conversation")
-        return f"{where}; a free side slot takes it after {SIDE_SLOT0_WAIT_S:g} s"
+        return f"{where}; a free side slot takes it after {limit:g} s"
     if why.get("prefer_side_wait") and why.get("new_wait") is None:
         return (f"a new chat: waits up to {SIDE_NEW_WAIT_S:g} s for a side slot, so slot 0 keeps "
                 f"its long conversation")
@@ -3241,6 +3256,10 @@ def _session_header(headers) -> str | None:
 #: worker's last request.
 PARENTS: dict = {}
 PARENT_KEEP_S = 600.0
+#: the longest a returning parent waits for slot 0 before a side slot reads its prompt again, and
+#: the prefill rate that wait is estimated at when the engine has measured none (`_par_side_need`)
+PARENT_WAIT_MAX_S = 60.0
+PARENT_REREAD_TOK_S = 700.0
 
 
 def _worker_of(headers) -> tuple[bool, str | None]:
@@ -7320,7 +7339,7 @@ class Handler(BaseHTTPRequestHandler):
         par = dict.get(STATE, "pool")
         par_why: dict = {}
         side_need = (_par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
-                                    par_why, stay=stay, parent=parent)
+                                    par_why, stay=stay, parent=parent, session=conv_id)
                      if par is not None else None)
         side = None
         me = {"rank": rank, "t": time.monotonic(),
@@ -7469,7 +7488,8 @@ class Handler(BaseHTTPRequestHandler):
                     own_rank = holder_own
                 waited = time.monotonic() - t_wait
                 if (not got and side_need is not None and _side_ok(waited, _own_holder())
-                        and (not slot0_first or waited >= SIDE_SLOT0_WAIT_S)):
+                        and (not slot0_first
+                             or waited >= float(par_why.get("slot0_wait_s") or SIDE_SLOT0_WAIT_S))):
                     side = par.take_side(side_need, owner=cid)
                     if side is not None:
                         side.no_carry = bool(me["own"]) or lane_kind is not None
@@ -7520,7 +7540,8 @@ class Handler(BaseHTTPRequestHandler):
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "park", "home", "home_share", "home_wait",
+                                                          "park", "slot0_wait_s", "home",
+                                                          "home_share", "home_wait",
                                                           "hop_from", "prefer_side", "slot0_stale",
                                                           "new_wait", "spill", "spill_head",
                                                           "slot0_wait")

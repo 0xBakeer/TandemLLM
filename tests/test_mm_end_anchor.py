@@ -402,6 +402,70 @@ def test_a_side_slots_conversation_with_its_first_screenshot_is_carried_into_slo
             f"equal; without the carry {pre0['forwarded']} forwarded")
 
 
+def _turn_as(session, ids, n, images=None):
+    """A text turn, or one with images as `image_turn` serves it, of `session`."""
+    res = app.STATE["resident"]
+    if not images:
+        out = list(app.generate_stream(torch.tensor(ids), n, set(), None, session))
+        pre = dict(app.STATE["last_prefill"])
+        app._remember(list(ids), out, session)
+        return out, pre, None
+    t = torch.tensor(ids)
+    prompt, mm = app._mm_prompt(t, images)
+    app._spill_before_replay(list(mm.key_ids), mm_ok=True)
+    if res.end is not None:
+        prompt, mm, _, _, _ = app._mm_end_replay(res, t, prompt, mm, images)
+    out = list(app.generate_stream(prompt, n, set(), None, session, mm=mm, end_mm=True))
+    pre = dict(app.STATE["last_prefill"])
+    app._remember(list(ids), out, session, mm=mm)
+    return out, pre, mm
+
+
+def _two_with_images(old_park: bool):
+    """A conversation with a screenshot, another session on slot 0 in between (A is parked with
+    its end kept after the image), then A's next request with the same image."""
+    x = TV.image(58, (1, 4, 6))
+    for k in range(30):
+        res = serve()
+        res.park_budget = BIG
+        if old_park:                       # the park as before ENG-371: an end after images unoffered
+            real = res.park_offer
+            res.park_offer = lambda ids, c, m, align=True, mm_ok=False: real(ids, c, m, align)
+        a1 = text(30, 30 + 1000 * k)
+        oa1, _, _ = _turn_as("A", a1, 12)
+        a2 = a1 + oa1 + with_image(text(5, 31)) + text(3, 32)
+        oa2, _, mm2 = _turn_as("A", a2, 12, [x])
+        if not ({IMG, VS, VE} & set(oa1 + oa2)):
+            break
+    e2 = res.end["at"]
+    assert res.end.get("mm"), res.end
+    _turn_as("B", text(40, 33), 8)                     # B takes slot 0: A goes to the park
+    assert res.park_owner == "A" and res.park_end is not None and res.park_end.get("mm")
+    # a worker's rows carried in from a side slot, or written by verify blocks, hold no grid
+    # anchor the park could offer instead (the live case)
+    for b in list(res.park_anchors):
+        res._free.append(res.park_anchors.pop(b))
+    a3 = a2 + oa2 + text(6, 34)
+    oa3, pre3, mm3 = _turn_as("A", a3, 10, [x])
+    return res, e2, oa3, pre3, mm3, x
+
+
+def test_a_parked_end_after_images_serves_its_next_request_with_them():
+    """ENG-371: two workers with screenshots take turns on slot 0 (side slots read no images), and
+    each parks the other. A parked end kept after images is offered to a request whose keys hold
+    every row up to it, as the end in place is (live 2026-10-18 00:58: a worker's call read
+    16,161 tokens again from 0 although its rows were in the park)."""
+    if need():
+        return need()
+    res, e2, out3, pre3, mm3, x = _two_with_images(old_park=False)
+    assert pre3["reused"] == e2 and res.stats["park_end_hits"] >= 1, (pre3, e2, res.stats)
+    assert out3 == cold(app._mm_collapse(list(mm3.key_ids), mm3), [x], 10)
+    _, e2o, out3o, pre3o, _, _ = _two_with_images(old_park=True)
+    assert pre3o["reused"] < e2o and out3o == out3, (pre3o, e2o)
+    return (f"resumed at the parked end ({e2} of {len(mm3.key_ids)}), 10 greedy tokens equal; "
+            f"the park as before: {pre3o['reused']}")
+
+
 def test_a_long_re_read_says_why():
     res = cache.ResidentPrefix(BIG, 1024, end=True)
     res.valid, res.tokens = 100_000, [1] * 100_000

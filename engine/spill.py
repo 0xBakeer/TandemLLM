@@ -1062,7 +1062,8 @@ class SessionSpill:
             return None
         c = res.common(keys)
         here = max(res.best(c, max_len), res.end_offer(c, max_len, mm_ok=mm_ok),
-                   res.pin_offer(keys, c, max_len), res.park_offer(keys, c, max_len, align=replay))
+                   res.pin_offer(keys, c, max_len),
+                   res.park_offer(keys, c, max_len, align=replay, mm_ok=mm_ok))
         end = res.end
         if replay and end is not None and here < end["at"]:
             e = int(end["at"])
@@ -1127,7 +1128,7 @@ class SessionSpill:
             if replay and res.park_end is not None:
                 if disk is not None:
                     cache_fence(disk, 0)       # the swap writes rows a disk job may be copying
-                res.unpark_end(eng, drafter, keys, max_len)
+                res.unpark_end(eng, drafter, keys, max_len, mm_ok=mm_ok)
             return None
         e, line, here = got
         if (res.valid >= self.min_tokens and (res.owner is None or res.owner != e.man.get("owner"))
