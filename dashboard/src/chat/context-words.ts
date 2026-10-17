@@ -26,7 +26,7 @@ export function turnFigure(v: number | null | undefined, fmt: (v: number) => str
 /** a Now figure while a run is live: the value, else why there is none at this moment. Live
  *  (2026-10-16, an agent turn on Nemotron 3.5 Super VL) every gap read "not tracked for this
  *  model": between two model calls, in a call's first 50 tokens, before a call had ended. */
-export function liveFigure(v: number | null | undefined, fmt: (v: number) => string, r: Run, kind: 'tps' | 'round' | 'accepted', backend: Backend, drafter: string | null): string {
+export function liveFigure(v: number | null | undefined, fmt: (v: number) => string, r: Pick<Run, 'phase'>, kind: 'tps' | 'round' | 'accepted', backend: Backend, drafter: string | null): string {
   if (v != null && Number.isFinite(v)) return fmt(v);
   const relayed = !!backend && backend !== 'engine';
   if (kind !== 'tps' && backend === 'cloud') return NO_DRAFTING;

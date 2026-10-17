@@ -3,7 +3,7 @@
 // code, and the order is unit-tested. Nothing here touches the DOM or the network.
 
 import { compact, fixed } from '../lib/format';
-import type { ChatEvent, Compaction, Conversation, Message, Part, Run, StampedEvent, Task, ToolCallPart } from './types';
+import type { ChatEvent, Compaction, ContextReport, Conversation, Message, Part, Run, StampedEvent, Task, ToolCallPart, WorkerContext } from './types';
 
 export const TPS_HISTORY = 120;
 
@@ -53,8 +53,10 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
     }
     case 'task.phase':
       return mapTask(c, ev.task_id, (t) => ({ ...t, phase: ev.phase, now: ev.now, steps: ev.step, max_steps: ev.max_steps, tool: ev.tool ?? null }));
-    case 'task.metrics':
-      return mapTask(c, ev.task_id, (t) => ({ ...t, prompt_tokens: ev.prompt_tokens, completion_tokens: ev.completion_tokens, decode_tps: ev.decode_tps }));
+    case 'task.metrics': {
+      const { type: _t, ...m } = ev;
+      return mapTask(c, ev.task_id, (t) => ({ ...t, prompt_tokens: ev.prompt_tokens, completion_tokens: ev.completion_tokens, decode_tps: ev.decode_tps, metrics: m }));
+    }
     case 'task.done':
       return mapTask(c, ev.task_id, (t) => {
         const st = ev.stats ?? {};
@@ -73,6 +75,7 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
           now: null,
           tool: null,
           decode_tps: null,
+          metrics: null,
           messages: t.messages?.map((m) => (m.status === 'streaming' ? { ...m, status: 'done', parts: m.parts.map((p) => (p.type === 'thinking' ? { ...p, done: true } : p)) } : m)),
         };
       });
@@ -80,7 +83,7 @@ export function applyEvent(c: Conversation, ev: ChatEvent): Conversation {
       return { ...c, queue: ev.queue };
     case 'context.changed':
       // the panel's "Last worker" line keeps the newest worker this device saw
-      return { ...c, context: ev.context, last_worker: ev.context.worker ?? c.last_worker ?? null };
+      return { ...c, context: ev.context, last_worker: newestWorker(ev.context) ?? c.last_worker ?? null };
     case 'compaction':
       return { ...c, compactions: c.compactions.some((x) => x.id === ev.compaction.id) ? c.compactions : [...c.compactions, ev.compaction] };
     case 'conversation.updated':
@@ -207,12 +210,21 @@ export function adoptTask(c: Conversation, full: Task & { seq?: string }, recent
   const had = c.tasks?.find((t) => t.id === full.id);
   if (had?.messages?.length) return c;
   const { seq, ...task } = full;
-  const merged: Task = { ...task, ...(had?.status === 'running' ? { status: had.status, steps: had.steps, phase: had.phase, now: had.now, tool: had.tool, decode_tps: had.decode_tps, prompt_tokens: had.prompt_tokens, completion_tokens: had.completion_tokens } : {}), messages: task.messages ?? [] };
+  const merged: Task = { ...task, ...(had?.status === 'running' ? { status: had.status, steps: had.steps, phase: had.phase, now: had.now, tool: had.tool, decode_tps: had.decode_tps, metrics: had.metrics, prompt_tokens: had.prompt_tokens, completion_tokens: had.completion_tokens } : {}), messages: task.messages ?? [] };
   let out: Conversation = { ...c, tasks: had ? c.tasks!.map((t) => (t.id === full.id ? merged : t)) : [...(c.tasks ?? []), merged].sort((a, b) => a.n - b.n) };
   if (seq == null) return out;
   const floor = Number(seq) || 0;
   for (const ev of recent) if (ev.id && Number(ev.id) > floor && workerTask(out, ev.event) === full.id) out = applyEvent(out, ev.event);
   return out;
+}
+
+/** the running workers of a context report, by task: `workers`, or an older chatd's `worker` */
+export function contextWorkers(ctx: Pick<ContextReport, 'workers' | 'worker'> | null | undefined): WorkerContext[] {
+  return ctx?.workers ?? (ctx?.worker ? [ctx.worker] : []);
+}
+
+function newestWorker(ctx: ContextReport): WorkerContext | null {
+  return contextWorkers(ctx).reduce<WorkerContext | null>((a, w) => (!a || w.n > a.n ? w : a), null);
 }
 
 /** the task a main-thread `task` call stands for */

@@ -19,7 +19,7 @@ import type { FigureState } from '../setup/figure-state';
 import { attachLabel, type Attachment as Attach } from './connection';
 import { argsSummary, dividersByMessage, dividerWords, interruptCard, interruptWords, messageText, taskForCall } from './store';
 import { planItems, toolLabel, type Compaction, type Conversation, type Message, type PaneRef, type Part, type Task, type ToolCallPart, type TurnStats } from './types';
-import { askingCall, callsWord, checkView, isUnmatched, reportView, shotsOf, sourceWord, summaryLine, taskSeconds, taskStatus, tokensWord } from './tasks';
+import { askingCall, callsWord, checkView, etaWords, isUnmatched, reportView, runningWorkers, shotsOf, sourceWord, summaryLine, taskSeconds, taskStatus, tokensWord, waitingWords, workerLine, workerPrefill, workerRate } from './tasks';
 import { approvedTitle, approvedWord } from './permission';
 import { callMedia, callPane, loadMediaView } from './file-panes';
 import { hostOf, resultsWord, searchResults } from './websearch';
@@ -112,11 +112,14 @@ export class QseChatThread extends LightElement {
     const label = this.attach ? attachLabel(this.attach, this.now) : null;
     const fig: FigureState = actingPhase(r.phase) ? 'acting' : r.phase === 'permission' ? 'listening' : r.phase === 'thinking' || r.phase === 'prefill' || r.phase === 'queued' ? 'thinking' : 'talking';
     const pf = r.prefill;
+    // VIS-E15: while the main agent waits in its task call, a row per running worker with its rate
+    const workers = r.phase === 'task' ? runningWorkers(c) : [];
+    const words = waitingWords(workers) ?? r.now;
     return html`<div class="ch-now ${r.phase === 'permission' ? 'is-permission' : ''}" data-phase=${r.phase} role="status">
       <qse-wren-figure class="ch-now-fig" .state=${fig} .size=${30}></qse-wren-figure>
       <div class="ch-now-main">
         <div class="ch-now-line">
-          <span class="ch-now-words" title=${r.now}>${r.now}</span>
+          <span class="ch-now-words" title=${r.now}>${words}</span>
           <span class="ch-now-nums num">
             ${r.phase === 'prefill' && pf
               ? html`<span title="prompt tokens read of this call's prompt">${exact(pf.done)} / ${exact(pf.total)}</span>
@@ -127,6 +130,14 @@ export class QseChatThread extends LightElement {
           </span>
         </div>
         ${pf ? html`<div class="ch-now-bar" role="progressbar" aria-valuemin="0" aria-valuemax=${pf.total} aria-valuenow=${pf.done} aria-label="prefill progress"><span style="width:${Math.min(100, (pf.done / Math.max(1, pf.total)) * 100).toFixed(1)}%"></span></div>` : nothing}
+        ${workers.length ? html`<ul class="ch-now-tasks" aria-label="running workers">${workers.map((v) => {
+          const wpf = workerPrefill(v);
+          const eta = wpf ? etaWords(wpf.eta_ms) : null;
+          return html`<li class="ch-now-task" data-task=${v.task_id} data-phase=${v.phase ?? ''}>
+            <div class="ch-now-task-line"><span class="ch-now-task-fig num" data-fig="task-rate">${workerLine(v)}</span><span class="ch-now-task-words">${v.title}${v.now ? `: ${v.now}` : ''}${eta ? ` · ${eta}` : ''}</span></div>
+            ${wpf ? html`<div class="ch-now-bar" role="progressbar" aria-valuemin="0" aria-valuemax=${wpf.total} aria-valuenow=${wpf.done} aria-label=${`Task ${v.n} prefill progress`}><span style="width:${Math.min(100, (wpf.done / Math.max(1, wpf.total)) * 100).toFixed(1)}%"></span></div>` : nothing}
+          </li>`;
+        })}</ul>` : nothing}
         <div class="ch-now-sub">
           ${r.started_by ? html`<span>started ${agoWords(elapsed)} on ${r.started_by}</span>` : nothing}
           ${r.phase === 'permission' ? html`<span class="warn-ink">a tool is waiting for your answer</span>` : nothing}
@@ -296,6 +307,9 @@ export class QseChatThread extends LightElement {
     const ask = askingCall(task);
     const running = task.status === 'running';
     const summary = running ? '' : summaryLine(task);
+    // its figures as the panel has them: task.metrics, else the context report's (after a reload)
+    const view = running ? runningWorkers(c).find((v) => v.task_id === task.id) : undefined;
+    const rate = view ? workerRate(view) : null;
     return html`<section class="ch-task is-${st.key} ${running ? 'is-running' : ''}" data-task=${task.id} data-call=${t.id} data-status=${st.key} aria-label=${`Task ${task.n}: ${task.title}, ${st.word}`}>
       <button type="button" class="ch-task-head" aria-expanded=${open} @click=${() => this.toggleTask(task)}>
         <span class="ch-call-dot" aria-hidden="true"></span>
@@ -307,6 +321,7 @@ export class QseChatThread extends LightElement {
       </button>
       <div class="ch-task-meta num">
         <span data-fig="calls">${callsWord(task)}</span>
+        ${running && rate ? html`<span class="ch-task-rate" data-fig="rate" title=${rate.startsWith('prefill') ? 'prompt tokens read of this call, prefill tok/s now' : 'decode tok/s now'}>${rate}</span>` : nothing}
         <span data-fig="tokens" title="the worker's prompt tokens in, completion tokens out">${tokensWord(task)}</span>
         <span data-fig="elapsed">${elapsedWords(taskSeconds(task, this.now))}</span>
         <span class="grow"></span>

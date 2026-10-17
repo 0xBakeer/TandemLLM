@@ -622,6 +622,44 @@ qse-chat-thread {
   border-radius: 2px;
   transition: width 0.2s linear;
 }
+.ch-now-tasks {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ch-now-task {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--cobalt-wash);
+}
+.ch-now-task-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  min-width: 0;
+  font-size: var(--fs-xs);
+}
+.ch-now-task-fig {
+  color: var(--orange-hi);
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ch-now-task-words {
+  color: var(--ink-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 12ch;
+}
 .ch-now-sub {
   display: flex;
   flex-wrap: wrap;
@@ -1532,6 +1570,32 @@ qse-chat-thread {
 }
 .ch-rib-worker {
   height: 18px;
+}
+.ch-wnow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.ch-wnow-pf {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ch-wnow-pfline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 0;
+  color: var(--ink-2);
+}
+.ch-wnow-pfline span:first-child {
+  color: var(--ink);
+  font-weight: 600;
+}
+.ch-task-rate {
+  color: var(--orange-hi);
+  font-weight: 600;
 }
 .ch-ctx-lastworker p {
   margin: 0;

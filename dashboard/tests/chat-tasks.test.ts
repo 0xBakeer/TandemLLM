@@ -297,7 +297,8 @@ describe('the mock tier', () => {
     expect(c.status).toBe('waiting');
     expect(c.run?.phase).toBe('task');
     expect(c.run?.now).toBe('Task 1: Wave height slider with lil-gui, call 12 of 40: Waiting for permission: bash');
-    expect(c.context.worker).toMatchObject({ n: 1, step: 12, max_steps: 40 });
+    expect(c.context.workers).toHaveLength(1);
+    expect(c.context.workers![0]).toMatchObject({ n: 1, step: 12, max_steps: 40, phase: 'permission' });
     const t = await mock.task('c_waves', c.tasks![0].id);
     c = adoptTask(c, t);
     expect(taskStatus(c.tasks![0]).key).toBe('waiting');
@@ -312,7 +313,7 @@ describe('the mock tier', () => {
     expect(end.run).toBeNull();
     expect(end.tasks![0].status).toBe('done');
     expect(checkView(end.tasks![0].check).unreported).toEqual(['package-lock.json']);
-    expect(end.context.worker).toBeNull();
+    expect(end.context.workers).toEqual([]);
     expect(end.last_worker?.task_id).toBe(end.tasks![0].id);
     const stats = end.messages.at(-1)!.stats!;
     expect(stats.workers?.count).toBe(1);

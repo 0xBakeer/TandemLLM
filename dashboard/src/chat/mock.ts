@@ -9,7 +9,7 @@
 import type { StreamState } from '../lib/sse';
 import { VersionConflict, type ChatBackend, type SendOptions, type StreamHandler, type Subscription, type TerminalSession } from './backend';
 import { decideCall, modeOf } from './permission';
-import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, OCEAN_TASKS, PACKAGES, PRESETS, PROMPTS, SEARCH_RESULTS, TOOLS, WEB_SEARCH, contextFor, iso, sandboxFor, taskResult, workerContext } from './mock-data';
+import { ARTIFACTS, CAPABILITIES, COMPACTION, DEFAULT_SETTINGS, FILES, MCP, MODEL, OCEAN_TASKS, PACKAGES, PRESETS, PROMPTS, SEARCH_RESULTS, TOOLS, WEB_SEARCH, contextFor, iso, sandboxFor, taskResult, workerContext, workerMetrics } from './mock-data';
 import { applyEvent } from './store';
 import type { Task, TaskReport, TaskStatus, WorkerContext, WorkerStats } from './types';
 import type { Attachment, Capabilities, ChatEvent, ChatSettings, Compaction, Conversation, ConversationStatus, ConversationSummary, ConversationUi, ConversationUsage, Folder, McpServer, McpServerDraft, Message, PackageInfo, PaneRef, Part, Preset, Prompt, Run, SandboxFile, SandboxStatus, StampedEvent, ToolCallPart, ToolInfo, ToolPolicy, TodoItem, TurnStats, UserToolkit, ToolApproval, ToolRisk, ToolOutput, WebSearchData, WebSearchPatch, WebSearchSettings, WebSearchTest, WebSearchView } from './types';
@@ -61,9 +61,11 @@ interface ConvState {
   /** a rewind: the path ends before this message until the next send */
   cut?: string | null;
   todos?: TodoItem[];
-  /** VIS-E15: the chat's tasks with their transcripts, and the running worker's context */
+  /** VIS-E15: the chat's tasks with their transcripts, and the running workers' contexts */
   tasks?: Task[];
-  worker?: WorkerContext | null;
+  workers?: WorkerContext[];
+  /** a seed shown in one state (two workers at once): no runner moves it; Stop ends it */
+  frozen?: boolean;
 }
 
 const EMPTY_UI: ConversationUi = { panes: [], active: null, split: 0.6 };
@@ -337,6 +339,25 @@ export class MockChatBackend implements ChatBackend {
     const leaf = ocean.nodes.get(this.pathIds(ocean).pop()!)!;
     leaf.msg = { ...leaf.msg, status: 'stopped' };
 
+    // VIS-E15 (SRV-589's state): two workers at once, Task 1 writing and Task 2 reading its prompt
+    const par = mk('c_parallel', 'Ocean scene: sky and sea at once', 6 * 60_000, { turns: [], sandbox: sandboxFor(true) });
+    par.settings = { ...par.settings, agents: true };
+    const pu = this.node(par, { id: localId('m'), role: 'user', created_at: iso(-6 * 60_000, now), parent_id: null, run_id: null, parts: [{ type: 'text', text: 'Make the sky a warm sunset and calm the sea down. Do both at once.' }], status: 'done' }, null);
+    const prun = localId('run');
+    const ptask = (n: number, title: string, steps: number, ago: number, p: Partial<Task>): Task => ({ id: `task_par_${n}`, conversation_id: par.id, run_id: prun, call_id: `call_par_${n}`, n, title, brief: OCEAN_TASKS[3].brief, expect: 'nothing', status: 'running', steps, max_steps: 40, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, started: iso(-ago, now), ended: null, report: null, report_source: null, check: null, error: null, messages: [], ...p });
+    const pm1 = workerMetrics('task_par_1', 'writing', 31_400, 2_180);
+    const pm2 = workerMetrics('task_par_2', 'prefill', 12_800, 610, { done: 12_400, total: 26_402, tps: 1_950, eta_ms: 7_200, cached: 3_072 });
+    const pt1 = ptask(1, 'Sky: a warm sunset gradient', 6, 300_000, { phase: 'writing', now: 'Writing src/sky.js', prompt_tokens: pm1.prompt_tokens, completion_tokens: pm1.completion_tokens, decode_tps: pm1.decode_tps, metrics: pm1 });
+    const pt2 = ptask(2, 'Sea: calmer waves, lower amplitude', 3, 140_000, { phase: 'prefill', now: 'Reading the prompt: 14,002 new tokens', prompt_tokens: pm2.prompt_tokens, completion_tokens: pm2.completion_tokens, metrics: pm2 });
+    const pcall = (t: Task): ToolCallPart => ({ type: 'tool_call', id: t.call_id, name: 'task', input: JSON.stringify({ title: t.title, brief: t.brief, expect: t.expect }, null, 2), output: null, status: 'running', started_at: t.started, ended_at: null, permission: null, approved: 'auto', pane: null });
+    const pam = this.node(par, { id: localId('m'), role: 'assistant', created_at: iso(-300_000, now), parent_id: pu, run_id: prun, parts: [{ type: 'text', text: 'Two tasks at once: the sky and the sea touch different files.' }, pcall(pt1), pcall(pt2)], status: 'streaming' }, pu);
+    par.tasks = [pt1, pt2];
+    par.workers = [workerContext(pt1, 6, { phase: 'writing', now: pt1.now!, metrics: pm1 }), workerContext(pt2, 3, { phase: 'prefill', now: pt2.now!, metrics: pm2 })];
+    par.run = { id: prun, conversation_id: par.id, message_id: pam, started_at: iso(-320_000, now), started_by: null, phase: 'task', now: `Task 1: ${pt1.title}, call 6 of 40: ${pt1.now}`, step: 2, max_steps: 50, queue_position: null, tool: null, prefill: null, decode_tps: null, tokens_per_round: 3.4, acceptance: 0.66, thinking: { used: 412, budget: 8_192 }, tokens: 980, tps_history: [] };
+    par.status = 'running';
+    par.now = par.run.now;
+    par.frozen = true;
+
     // the pending permission chat: the run paused on an edit_file that asks
     const ren = this.convs.get('c_rename')!;
     this.pausedRun(ren);
@@ -442,7 +463,7 @@ export class MockChatBackend implements ChatBackend {
     const compacted = st.compactions.length ? Math.max(0, tokens - 4_000) : tokens;
     const ctx = contextFor(compacted, { tools: st.settings.tools.length > 0, files, thinking, warmAll: st.seen, profile: st.settings.profile, effort: st.settings.effort, thinkingOn: st.settings.thinking, slot: st.run ? 'slot 1' : null, cold: st.cold, packages: st.settings.packages });
     const pkg = (n: string) => this.pkgs.find((p) => p.id === n);
-    return { ...ctx, worker: st.worker ?? null, skills: { mode: st.settings.packages_mode, pinned: st.settings.packages.map((n) => ({ name: n, tokens: pkg(n)?.tokens ?? null, missing: !pkg(n) })), blocked: st.settings.packages_blocked } };
+    return { ...ctx, workers: st.workers ?? [], skills: { mode: st.settings.packages_mode, pinned: st.settings.packages.map((n) => ({ name: n, tokens: pkg(n)?.tokens ?? null, missing: !pkg(n) })), blocked: st.settings.packages_blocked } };
   }
 
   // ---- events ---------------------------------------------------------------------------------
@@ -651,7 +672,21 @@ export class MockChatBackend implements ChatBackend {
   }
 
   async stop(id: string): Promise<void> {
-    this.get(id).runner?.stop();
+    const st = this.get(id);
+    if (st.runner) st.runner.stop();
+    else if (st.frozen && st.run) this.stopFrozen(st);
+  }
+
+  /** Stop on c_parallel: both workers end cancelled, then the main agent's turn */
+  private stopFrozen(st: ConvState): void {
+    const run = st.run!;
+    for (const t of (st.tasks ?? []).filter((x) => x.status === 'running')) {
+      this.emit(st, { type: 'task.done', task_id: t.id, status: 'cancelled', report: null, check: '- Changed in /workspace (snapshot diff): none\n- Checks that ran: none', stats: { steps: t.steps, prompt_tokens: t.prompt_tokens, completion_tokens: t.completion_tokens, cached_tokens: 0, ms: Date.now() - Date.parse(t.started) } });
+      this.emit(st, { type: 'tool.done', message_id: run.message_id, call_id: t.call_id, status: 'cancelled', is_error: false });
+    }
+    st.workers = [];
+    st.frozen = false;
+    this.emit(st, { type: 'run.done', run_id: run.id, message_id: run.message_id, stats: statsFor([], 'stopped'), status: 'stopped' });
   }
 
   async regenerate(id: string, messageId: string): Promise<void> {
@@ -746,7 +781,7 @@ export class MockChatBackend implements ChatBackend {
 
   /** the snapshot carries no tasks: a device loads them here, like the server's */
   async tasks(id: string): Promise<Task[]> {
-    return (this.get(id).tasks ?? []).map(({ messages: _m, phase: _p, now: _n, tool: _t, decode_tps: _d, ...t }) => ({ ...t }));
+    return (this.get(id).tasks ?? []).map(({ messages: _m, phase: _p, now: _n, tool: _t, decode_tps: _d, metrics: _x, ...t }) => ({ ...t }));
   }
   async task(id: string, taskId: string): Promise<Task & { seq?: string }> {
     const st = this.get(id);
@@ -1298,10 +1333,11 @@ class Runner {
     const say = (phase: Run['phase'], now: string, tool: Run['tool'] = null) => {
       this.mock.emit(this.st, { type: 'task.phase', task_id: task.id, phase, now, step: k, max_steps: max, tool });
       this.mock.emit(this.st, { type: 'run.phase', run_id: this.run.id, phase: 'task', now: `Task ${n}: ${s.title}, call ${k} of ${max}: ${now}` });
-      this.st.worker = workerContext(task, k);
       tin += 2_400 + k * 380;
       tout += 140;
-      this.mock.emit(this.st, { type: 'task.metrics', task_id: task.id, prompt_tokens: tin, completion_tokens: tout, decode_tps: phase === 'writing' ? 54 : null });
+      const metrics = workerMetrics(task.id, phase, tin, tout);
+      this.st.workers = [workerContext(task, k, { phase, now, metrics })];
+      this.mock.emit(this.st, { type: 'task.metrics', ...metrics });
       this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });
     };
     const wpart = (p: Part) => {
@@ -1321,7 +1357,7 @@ class Runner {
       const w = this.workers ?? { count: 0, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, ms: 0 };
       this.workers = { count: w.count + 1, prompt_tokens: w.prompt_tokens + stats.prompt_tokens, completion_tokens: w.completion_tokens + stats.completion_tokens, cached_tokens: w.cached_tokens + stats.cached_tokens, ms: w.ms + stats.ms };
       this.mock.emit(this.st, { type: 'task.done', task_id: task.id, status, report, check, stats });
-      this.st.worker = null;
+      this.st.workers = [];
       const done = this.st.tasks!.find((t) => t.id === task.id)!;
       this.mock.emit(this.st, { type: 'tool.done', message_id: this.msgId, call_id: callId, status: status === 'cancelled' ? 'cancelled' : 'done', is_error: false, output: { content: taskResult(done), is_error: false, bytes: 0 } });
       this.mock.emit(this.st, { type: 'context.changed', context: this.mock.context(this.st) });

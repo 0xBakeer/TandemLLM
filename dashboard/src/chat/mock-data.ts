@@ -1,7 +1,7 @@
 // The mock's content: generic conversations, the sandbox's files, the artifacts, the settings
 // stores. Nothing personal: a made-up project (a sync worker), a made-up shop page, a meal plan.
 
-import type { Capabilities, ChatSettings, Compaction, ContextReport, McpServer, Message, PackageInfo, Part, Preset, Prompt, SandboxStatus, Task, TaskReport, ToolCallPart, ToolInfo, WebSearchResult, WebSearchSettings, WorkerContext } from './types';
+import type { Capabilities, ChatSettings, Compaction, ContextReport, McpServer, Message, PackageInfo, Part, Preset, Prompt, RunPhase, SandboxStatus, Task, TaskMetrics, TaskReport, ToolCallPart, ToolInfo, WebSearchResult, WebSearchSettings, WorkerContext } from './types';
 
 export const MODEL = 'TandemLLM';
 
@@ -416,11 +416,17 @@ export function taskResult(t: Task): string {
   return `${head}${rep}${t.check ? `\nchatd check:\n${t.check}` : ''}\nThe transcript is in the Task ${t.n} card, not in your context.`;
 }
 
-/** a running worker's context: the brief and the tools, its steps growing */
-export function workerContext(t: Pick<Task, 'id' | 'n' | 'title' | 'max_steps'>, step: number): WorkerContext {
+/** a running worker's context: the brief and the tools, its steps growing; its Now and figures */
+export function workerContext(t: Pick<Task, 'id' | 'n' | 'title' | 'max_steps'>, step: number, live?: { phase: RunPhase; now: string; metrics: TaskMetrics | null }): WorkerContext {
   const steps = 1_900 * step;
   const files = Math.min(6_000, 400 * step);
   const split = { system: 2_410, tools: 3_880, brief: 610, steps, files };
   const used = split.system + split.tools + split.brief + steps + files;
-  return { task_id: t.id, n: t.n, title: t.title, used, window: 262_144, split, step, max_steps: t.max_steps, cache: { warm: used - 2_200, cold: 2_200, cold_eta_ms: 3_000, source: 'resident', slot: 'slot 0' } };
+  return { task_id: t.id, n: t.n, title: t.title, used, window: 262_144, split, step, max_steps: t.max_steps, cache: { warm: used - 2_200, cold: 2_200, cold_eta_ms: 3_000, source: 'resident', slot: 'slot 0' }, ...(live ?? {}) };
+}
+
+/** a worker's live figures: its prefill while it reads its prompt, else its decode */
+export function workerMetrics(taskId: string, phase: RunPhase, tin: number, tout: number, prefill: TaskMetrics['prefill'] = null): TaskMetrics {
+  const decoding = phase === 'writing' || phase === 'thinking';
+  return { task_id: taskId, phase, prefill: phase === 'prefill' ? prefill : null, decode_tps: decoding ? 37.2 : null, ttft_ms: phase === 'prefill' ? null : 640, tokens_per_round: 3.1, acceptance: 0.62, prompt_tokens: tin, completion_tokens: tout, thinking_used: Math.round(tout * 0.3) };
 }

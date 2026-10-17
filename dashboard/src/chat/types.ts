@@ -355,8 +355,12 @@ export interface ContextReport {
     thinking: boolean;
     backend?: 'engine' | 'proxy' | 'cloud';
   };
-  /** VIS-E15: the running worker's own context; null when no worker runs */
+  /** VIS-E15: each running worker's own context, by task (empty when none runs) */
+  workers?: WorkerContext[];
+  /** an older chatd's single running worker (null when none ran); read as a list of one */
   worker?: WorkerContext | null;
+  /** the chat's newest task while no worker runs: its context at its last call */
+  last_worker?: { task_id: string; n: number; title: string; status: TaskStatus; used: number } | null;
 }
 
 /** a running worker's context, apart from the main agent's */
@@ -371,6 +375,25 @@ export interface WorkerContext {
   step: number;
   max_steps: number;
   cache: ContextReport['cache'] | null;
+  /** the worker's own phase and Now line (absent on an older chatd) */
+  phase?: RunPhase;
+  now?: string;
+  metrics?: TaskMetrics | null;
+}
+
+/** one worker's live figures (`task.metrics`, `context.workers[].metrics`): its prefill while it
+ *  reads its prompt, else its decode */
+export interface TaskMetrics {
+  task_id: string;
+  phase?: RunPhase;
+  prefill?: { done: number; total: number; tps?: number | null; eta_ms?: number | null; cached?: number | null } | null;
+  decode_tps: number | null;
+  ttft_ms?: number | null;
+  tokens_per_round?: number | null;
+  acceptance?: number | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  thinking_used?: number;
 }
 
 export interface Compaction {
@@ -713,6 +736,8 @@ export interface Task {
   now?: string | null;
   tool?: Run['tool'];
   decode_tps?: number | null;
+  /** the newest task.metrics while it runs */
+  metrics?: TaskMetrics | null;
 }
 
 // ---- the sandbox ------------------------------------------------------------------------------
@@ -817,7 +842,7 @@ export type ChatEvent =
   // VIS-E15: a worker's task, on the parent conversation's stream
   | { type: 'task.started'; run_id: string; task: Task }
   | { type: 'task.phase'; task_id: string; phase: RunPhase; now: string; step: number; max_steps: number; tool?: Run['tool'] }
-  | { type: 'task.metrics'; task_id: string; prompt_tokens: number; completion_tokens: number; decode_tps: number | null }
+  | ({ type: 'task.metrics' } & TaskMetrics)
   | { type: 'task.done'; task_id: string; status: TaskStatus; report: TaskReport | null; check: string | null; stats?: TaskStats | null };
 
 export interface StampedEvent {

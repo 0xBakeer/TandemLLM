@@ -4,9 +4,10 @@
 // carry `task_id` and never reach the main thread) or from GET .../tasks/{task_id}. Pure, so every
 // state of the card is tested without a DOM.
 
-import { exact } from '../lib/format';
+import { duration, exact, fixed } from '../lib/format';
 import { sandboxPath, viewUrl } from './file-panes';
-import type { ContextReport, Message, PaneRef, Task, TaskReport, ToolCallPart, WorkerContext } from './types';
+import { contextWorkers } from './store';
+import type { ContextReport, Conversation, Message, PaneRef, RunPhase, Task, TaskMetrics, TaskReport, ToolCallPart, WorkerContext } from './types';
 
 export type TaskTone = 'live' | 'warn' | 'ok' | 'err' | 'muted';
 export type TaskKey = 'running' | 'waiting' | 'done' | 'partial' | 'failed' | 'cancelled' | 'interrupted';
@@ -193,10 +194,74 @@ export function workerCacheWords(w: Pick<WorkerContext, 'cache'>, backend: Conte
   return `${exact(w.cache.warm)} warm from the ${w.cache.source === 'none' ? 'cache' : w.cache.source}${w.cache.cold ? `, ${exact(w.cache.cold)} cold` : ''}`;
 }
 
+// ---- the running workers' live figures (SRV-579, VIS-219) ------------------------------------------
+
+/** one running worker as the panel, the Now dock and its card show it */
+export interface WorkerView {
+  task_id: string;
+  n: number;
+  title: string;
+  phase: RunPhase | null;
+  now: string | null;
+  step: number;
+  max_steps: number;
+  /** its context from the report; null until the report lists it */
+  ctx: WorkerContext | null;
+  /** its newest figures: task.metrics (once a second), else the report's */
+  m: TaskMetrics | null;
+}
+
+/** the running workers by task number (a list: SRV-589 runs two at once). The context report's,
+ *  each with the newest task.* figures of its task; a running task the report does not list yet
+ *  comes without its context; a task that ended leaves the list before the next report. */
+export function runningWorkers(c: Pick<Conversation, 'context' | 'tasks'>): WorkerView[] {
+  const out = new Map<string, WorkerView>();
+  for (const w of contextWorkers(c.context)) out.set(w.task_id, { task_id: w.task_id, n: w.n, title: w.title, phase: w.phase ?? null, now: w.now ?? null, step: w.step, max_steps: w.max_steps, ctx: w, m: w.metrics ?? null });
+  for (const t of c.tasks ?? []) {
+    const had = out.get(t.id);
+    if (t.status !== 'running') {
+      out.delete(t.id);
+      continue;
+    }
+    out.set(t.id, { task_id: t.id, n: t.n, title: t.title, phase: t.phase ?? had?.phase ?? null, now: t.now ?? had?.now ?? null, step: t.steps || had?.step || 0, max_steps: t.max_steps || had?.max_steps || 0, ctx: had?.ctx ?? null, m: t.metrics ?? had?.m ?? null });
+  }
+  return [...out.values()].sort((a, b) => a.n - b.n);
+}
+
+/** a worker's prefill while it reads its prompt (null once it writes) */
+export function workerPrefill(v: Pick<WorkerView, 'phase' | 'm'>): NonNullable<TaskMetrics['prefill']> | null {
+  const pf = v.m?.prefill;
+  return pf && pf.total && (v.phase ?? v.m?.phase) === 'prefill' ? pf : null;
+}
+
+/** its rate: "prefill 12,400 / 26,402 · 1,950 tok/s" while it reads its prompt, "37.2 tok/s"
+ *  while it writes, null when neither is measured */
+export function workerRate(v: Pick<WorkerView, 'phase' | 'm'>): string | null {
+  const pf = workerPrefill(v);
+  if (pf) return `prefill ${exact(pf.done)} / ${exact(pf.total)}${pf.tps != null ? ` · ${exact(Math.round(pf.tps))} tok/s` : ''}`;
+  return v.m?.decode_tps != null ? `${fixed(v.m.decode_tps, 1)} tok/s` : null;
+}
+
+/** the prefill's time left: "about 7 s left" */
+export function etaWords(eta: number | null | undefined): string | null {
+  return eta != null && Number.isFinite(eta) && eta > 0 ? `about ${duration(Math.ceil(eta / 1000))} left` : null;
+}
+
+/** one line of the Now dock: "Task 1 · call 6 of 40 · 37.2 tok/s" */
+export function workerLine(v: WorkerView): string {
+  const rate = workerRate(v);
+  return `Task ${v.n} · call ${exact(Math.max(1, v.step))} of ${exact(v.max_steps)}${rate ? ` · ${rate}` : ''}`;
+}
+
+/** the main agent's Now while its workers run: "waiting for Task 1" ("..., Task 2" with two) */
+export function waitingWords(views: Pick<WorkerView, 'n'>[]): string | null {
+  return views.length ? `waiting for ${views.map((v) => `Task ${v.n}`).join(', ')}` : null;
+}
+
 /** the line that stays after a worker ended, until the next task: "Last worker: Task 2, 51,204
  *  tokens, done". The tokens are its context as this device last saw it; after a reload the line
  *  goes without them. */
-export function lastWorkerLine(task: Pick<Task, 'id' | 'n' | 'status' | 'phase' | 'messages'>, seen: WorkerContext | null | undefined): string {
+export function lastWorkerLine(task: Pick<Task, 'id' | 'n' | 'status' | 'phase' | 'messages'>, seen: Pick<WorkerContext, 'task_id' | 'used'> | null | undefined): string {
   const used = seen && seen.task_id === task.id ? `, ${exact(seen.used)} tokens` : '';
   return `Last worker: Task ${task.n}${used}, ${taskStatus(task).word}`;
 }

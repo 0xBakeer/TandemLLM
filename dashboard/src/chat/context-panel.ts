@@ -3,8 +3,9 @@
 // prefill is now. Then Now (tok/s with a sparkline, tokens per round, acceptance, the thinking
 // budget, the prefill), the model and pack, the memory this chat holds, the compaction events,
 // and the usage. A text twin of the ribbon serves screen readers. With Agents (VIS-219) the window
-// is the main agent's, a running worker's context has its own section beside it, one line stays
-// for the last worker, and the usage names the workers' part.
+// is the main agent's; each running worker has its own section (a list: SRV-589 runs two at once)
+// with its Now figures, its context and its calls; one line stays for the last worker, and the
+// usage names the workers' part.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -12,10 +13,10 @@ import { bytes, exact, fixed, money, ms, pct, timeShort } from '../lib/format';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import '../charts/spark';
-import { lastStats } from './store';
+import { contextWorkers, lastStats } from './store';
 import type { Attachment as Attach } from './connection';
 import { effortWord, type Conversation, type ContextPartKind, type WorkerContext } from './types';
-import { lastWorkerLine, workerCacheWords, workerParts } from './tasks';
+import { etaWords, lastWorkerLine, runningWorkers, waitingWords, workerCacheWords, workerParts, workerPrefill, type WorkerView } from './tasks';
 import { elapsedWords } from './thread';
 import { budgetWords, cacheWords, draftFigure, HARNESS_PENDING, kvWords, liveFigure, memoryWords, partWords, residentWords, sandboxWords, skillTokens, slotWords, turnFigure } from './context-words';
 
@@ -56,7 +57,7 @@ export class QseChatContext extends LightElement {
     if (!c) return html`<div class="ch-ctx-empty muted small">Open a chat to see its context.</div>`;
     return html`<div class="ch-ctx-scroll">
       ${this.renderWindow(c)}
-      ${this.renderWorker(c)}
+      ${this.renderWorkers(c)}
       ${this.renderNow(c)}
       ${this.renderModel(c)}
       ${this.renderSkills(c)}
@@ -95,7 +96,7 @@ export class QseChatContext extends LightElement {
     const twin = `${exact(ctx.used)} of ${exact(ctx.window)} tokens used; ${exact(ctx.cache.warm)} warm, ${exact(ctx.cache.cold)} cold`;
     const cw = cacheWords(ctx.cache);
     // the main agent's window, once the chat has Agents or a worker; else as it always was
-    const main = !!c.settings.agents || !!ctx.worker || !!c.tasks?.length;
+    const main = !!c.settings.agents || contextWorkers(ctx).length > 0 || !!c.tasks?.length;
     return html`<section class="ch-ctx-sec" data-sec="window">
       <h3 class="ch-ctx-h">${main ? 'Main agent' : 'Context window'}</h3>
       <div class="ch-rib-wrap">
@@ -117,29 +118,69 @@ export class QseChatContext extends LightElement {
     </section>`;
   }
 
-  // ---- the worker (VIS-219) ----------------------------------------------------------------------
+  // ---- the workers (VIS-219) -------------------------------------------------------------------
 
-  /** the running worker's context apart from the main agent's: its tokens of the window, its split,
-   *  its calls and cache tier. After it ended one line stays until the next task. */
-  private renderWorker(c: Conversation): TemplateResult {
-    const w = c.context.worker;
-    if (!w) {
+  /** each running worker apart from the main agent, stacked by task: its Now (the prefill's
+   *  progress, or tok/s, first token, tokens per round, accepted, thinking), its tokens of the
+   *  window, its split, its calls and cache tier. After the last one ended one line stays until
+   *  the next task. */
+  private renderWorkers(c: Conversation): TemplateResult {
+    const views = runningWorkers(c);
+    if (!views.length) {
       const last = c.tasks?.length ? c.tasks.reduce((a, t) => (t.n > a.n ? t : a)) : null;
-      return last ? html`<section class="ch-ctx-sec ch-ctx-lastworker" data-sec="last-worker"><p class="small" data-last-worker>${lastWorkerLine(last, c.last_worker)}</p></section>` : html``;
+      return last ? html`<section class="ch-ctx-sec ch-ctx-lastworker" data-sec="last-worker"><p class="small" data-last-worker>${lastWorkerLine(last, c.last_worker ?? c.context.last_worker)}</p></section>` : html``;
     }
-    return html`<section class="ch-ctx-sec is-live" data-sec="worker">
-      <h3 class="ch-ctx-h">Worker: Task ${w.n}</h3>
-      <p class="ch-ctx-sub small">${w.title}</p>
-      ${this.renderWorkerRibbon(w)}
-      <div class="ch-rib-line num"><b>${exact(w.used)}</b> of ${exact(w.window)}, ${pct(w.used / Math.max(1, w.window), 0)}</div>
-      <ul class="ch-legend">
-        ${workerParts(w).map((p) => html`<li class=${p.tokens ? '' : 'is-zero'}><span class="swatch" style=${`background:${WORKER_COLOR[p.key]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${exact(p.tokens)}</span></li>`)}
-      </ul>
+    return html`${views.map((v) => this.renderWorker(c, v))}`;
+  }
+
+  private renderWorker(c: Conversation, v: WorkerView): TemplateResult {
+    const w = v.ctx;
+    return html`<section class="ch-ctx-sec is-live ch-ctx-worker" data-sec="worker" data-task=${v.task_id}>
+      <h3 class="ch-ctx-h">Worker: Task ${v.n}</h3>
+      <p class="ch-ctx-sub small">${v.title}</p>
+      ${this.renderWorkerNow(c, v)}
+      ${w ? html`${this.renderWorkerRibbon(w)}
+        <div class="ch-rib-line num"><b>${exact(w.used)}</b> of ${exact(w.window)}, ${pct(w.used / Math.max(1, w.window), 0)}</div>
+        <ul class="ch-legend">
+          ${workerParts(w).map((p) => html`<li class=${p.tokens ? '' : 'is-zero'}><span class="swatch" style=${`background:${WORKER_COLOR[p.key]}`}></span><span class="ch-legend-label">${p.label}</span><span class="num ch-legend-n">${exact(p.tokens)}</span></li>`)}
+        </ul>` : html`<p class="muted small" data-worker="no-context">its context comes with the next report</p>`}
       <dl class="kv ch-kv">
-        <div data-worker="calls"><dt>calls</dt><dd class="num">call ${exact(w.step)} of ${exact(w.max_steps)}</dd></div>
-        <div data-worker="cache"><dt>cache</dt><dd>${workerCacheWords(w, c.context.model.backend)}</dd></div>
+        <div data-worker="calls"><dt>calls</dt><dd class="num">call ${exact(Math.max(1, v.step))} of ${exact(v.max_steps)}</dd></div>
+        ${w ? html`<div data-worker="cache"><dt>cache</dt><dd>${workerCacheWords(w, c.context.model.backend)}</dd></div>` : nothing}
       </dl>
     </section>`;
+  }
+
+  /** a worker's Now in the main Now block's words: the prefill's bar while it reads its prompt,
+   *  else its decode figures */
+  private renderWorkerNow(c: Conversation, v: WorkerView): TemplateResult {
+    const m = v.m;
+    const pf = workerPrefill(v);
+    const be = c.context.model.backend;
+    const drafter = c.context.model.drafter;
+    const phase = { phase: v.phase ?? m?.phase ?? 'queued' };
+    const fig = (x: number | null | undefined, fmt: (x: number) => string, kind: 'tps' | 'round' | 'accepted') => liveFigure(x, fmt, phase, kind, be, drafter);
+    const eta = pf ? etaWords(pf.eta_ms) : null;
+    return html`<div class="ch-wnow" data-worker="now">
+      <div class="ch-fig">
+        <div class="ch-fig-value num" data-worker="rate">${pf
+          ? html`${pf.tps != null ? html`${exact(Math.round(pf.tps))}<span class="ch-fig-unit">tok/s prefill</span>` : html`<span class="ch-fig-why muted small">prefilling</span>`}`
+          : m?.decode_tps != null ? html`${fixed(m.decode_tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${fig(null, String, 'tps')}</span>`}</div>
+      </div>
+      ${pf ? html`<div class="ch-wnow-pf">
+        <div class="ch-now-bar" role="progressbar" aria-valuemin="0" aria-valuemax=${pf.total} aria-valuenow=${pf.done} aria-label=${`Task ${v.n} prefill progress`}><span style="width:${Math.min(100, (pf.done / Math.max(1, pf.total)) * 100).toFixed(1)}%"></span></div>
+        <p class="ch-wnow-pfline num small" data-worker="prefill"><span>${exact(pf.done)} / ${exact(pf.total)}</span>${pf.tps != null ? html`<span>${exact(Math.round(pf.tps))} tok/s</span>` : nothing}${eta ? html`<span>${eta}</span>` : nothing}${pf.cached ? html`<span>${exact(pf.cached)} cached</span>` : nothing}</p>
+      </div>` : nothing}
+      <dl class="kv ch-kv">
+        <div><dt>phase</dt><dd>${v.phase ?? m?.phase ?? 'starting'}</dd></div>
+        ${v.now ? html`<div data-worker="words"><dt>now</dt><dd>${v.now}</dd></div>` : nothing}
+        ${pf ? nothing : html`<div data-worker="ttft"><dt>first token</dt><dd class="num">${m?.ttft_ms != null ? ms(m.ttft_ms) : 'waiting for it'}</dd></div>
+        <div data-worker="round"><dt>tokens per round</dt><dd class="num">${fig(m?.tokens_per_round, (x) => fixed(x, 2), 'round')}</dd></div>
+        <div data-worker="accepted"><dt>accepted</dt><dd class="num">${fig(m?.acceptance, (x) => pct(x, 0), 'accepted')}</dd></div>`}
+        ${m ? html`<div data-worker="thinking"><dt>thinking</dt><dd class="num">${exact(m.thinking_used ?? 0)}</dd></div>
+        <div data-worker="tokens"><dt>tokens</dt><dd class="num">${exact(m.prompt_tokens)} in · ${exact(m.completion_tokens)} out</dd></div>` : nothing}
+      </dl>
+    </div>`;
   }
 
   private renderWorkerRibbon(w: WorkerContext): TemplateResult {
@@ -180,10 +221,12 @@ export class QseChatContext extends LightElement {
     // queue in it), else the last turn's
     const ttft = r ? r.ttft_ms : last?.ttft_ms;
     const elapsed = r ? Math.max(0, Math.round((this.now - Date.parse(r.started_at)) / 1000)) : null;
+    // the main agent waits in its task call while its workers run: its Now says for which
+    const waiting = r?.phase === 'task' ? waitingWords(runningWorkers(c)) : null;
     return html`<section class="ch-ctx-sec ${r ? 'is-live' : 'is-idle'}" data-sec="now">
       <h3 class="ch-ctx-h">${r ? 'Now' : 'Last turn'}</h3>
       <div class="ch-fig">
-        <div class="ch-fig-value num">${tps != null ? html`${fixed(tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${fig(null, String, 'tps')}</span>`}</div>
+        <div class="ch-fig-value num">${waiting ? html`<span class="ch-fig-why muted small" data-waiting>${waiting}</span>` : tps != null ? html`${fixed(tps, 1)}<span class="ch-fig-unit">tok/s</span>` : html`<span class="ch-fig-why muted small">${fig(null, String, 'tps')}</span>`}</div>
         ${hist.length > 1 ? html`<qse-spark .values=${hist} mode="ribbon" .height=${36} .format=${(v: number) => v.toFixed(1)} unit=" tok/s" aria-label="decode tok/s, last minute"></qse-spark>` : html`<div class="ch-fig-flat"></div>`}
       </div>
       <dl class="kv ch-kv">

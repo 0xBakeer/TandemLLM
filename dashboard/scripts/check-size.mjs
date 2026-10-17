@@ -30,6 +30,9 @@
 // its report, chatd's check and the transcript sheet, the worker's part of the Context panel and the
 // Agents switch add 5.9 KB to the chat chunk; the mock's scripted worker and its four seeded tasks
 // 5.7 KB to the mock chunk, which loads only with ?chat=mock.
+// 458 KB with each running worker's live figures (SRV-579, VIS-219, 2026-10-17: 457.3 KB from
+// 455.1): its own Now in the Context panel, a row per worker in the Now dock, the rate on its card,
+// and the mock's two workers at once.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -48,8 +51,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 456 KB)`);
-if (total > 456 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 458 KB)`);
+if (total > 458 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
