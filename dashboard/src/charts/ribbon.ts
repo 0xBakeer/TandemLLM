@@ -15,6 +15,8 @@ export interface RibbonSeries {
   band?: (number | null)[];
   bandName?: string;
   dashed?: boolean;
+  /** shown next to the name in the legend (a live 'now' value); format is the chart's own */
+  legendValue?: number | null;
 }
 
 @customElement('qse-ribbon')
@@ -26,6 +28,8 @@ export class QseRibbon extends ChartElement {
   @property({ type: String }) unit = '';
   @property({ type: Number }) xLabelCount = 6;
   @property({ type: String, attribute: 'aria-label' }) ariaLabelText = '';
+  /** y axis fits the data's own range instead of a 0-based nice max (tight bands, e.g. clocks) */
+  @property({ type: Boolean }) autoY = false;
   @state() private hover: number | null = null;
   private glowId = nextId('rb');
 
@@ -73,6 +77,17 @@ export class QseRibbon extends ChartElement {
       const hi = yMaxRaw * 1.3;
       y = log10([lo, hi], [H - pad.b, pad.t]);
       ticks = logTicks(lo, hi);
+    } else if (this.autoY && hasData && yMaxRaw > yMinRaw) {
+      // fit the band the data actually lives in — a 100 MHz wobble stays readable
+      const raw = (yMaxRaw - yMinRaw) / 4;
+      const mag = 10 ** Math.floor(Math.log10(raw));
+      const norm = raw / mag;
+      const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+      const lo = Math.floor(yMinRaw / step) * step;
+      const hi = Math.ceil(yMaxRaw / step) * step;
+      y = linear([lo, Math.max(hi, lo + step)], [H - pad.b, pad.t]);
+      ticks = [];
+      for (let v = lo; v <= Math.max(hi, lo + step) + step / 2; v += step) ticks.push(+v.toFixed(6));
     } else {
       const top = niceMax(yMaxRaw);
       y = linear([0, top], [H - pad.b, pad.t]);
@@ -140,7 +155,7 @@ export class QseRibbon extends ChartElement {
           : nothing}
         ${legend
           ? html`<div class="legend">
-              ${this.series.map((s) => html`<span class="legend-item"><span class="swatch" style="background:${colorVar(s.color)}"></span>${s.name}</span>${s.band ? html`<span class="legend-item"><span class="swatch swatch-dash" style="border-color:${colorVar(s.color)}"></span>${s.bandName ?? 'p90'}</span>` : nothing}`)}
+              ${this.series.map((s) => html`<span class="legend-item"><span class="swatch" style="background:${colorVar(s.color)}"></span>${s.name}${s.legendValue != null ? html` <b class="num">${this.format(s.legendValue)} ${this.unit}</b>` : nothing}</span>${s.band ? html`<span class="legend-item"><span class="swatch swatch-dash" style="border-color:${colorVar(s.color)}"></span>${s.bandName ?? 'p90'}</span>` : nothing}`)}
             </div>`
           : nothing}
       </div>
