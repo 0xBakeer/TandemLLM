@@ -104,8 +104,9 @@ cd "$REPO" || exit 1
 # that answers for the engine while it loads (the reverse proxy's fallback)
 STATUS_PY="${STATUS_PY:-python3}"
 status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || true; }
+# (OPS-173: one of another tree or release is replaced; it listens where the engine or setup mode does)
 [ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
-    --engine-port "$PORT" 2>&1 | tail -1
+    --engine-port "$PORT" --host "$( [ "$SETUP" = 1 ] && echo "$SETUP_HOST" || echo "${QSE_STATUS_HOST:-$HOST}")" 2>&1 | tail -1
 # The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
 # when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
 # token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin

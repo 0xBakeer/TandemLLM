@@ -6038,10 +6038,13 @@ class Handler(BaseHTTPRequestHandler):
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
-                # through the proxy, the status and nothing about the configuration
-                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+                # through the proxy, the status and nothing about the configuration (OPS-175: and
+                # the status responder's port, which the page asks while this engine restarts)
+                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok",
+                                         "status_port": _status_port()})
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
+                "status_port": _status_port(),
                 "model": served_name(), "base_model": STATE.get("model"),
                 "version": STATE.get("version", ""), "weights": weights_profile(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
@@ -9353,6 +9356,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--fake-prefill-tps", type=float, default=0.0,
                     help="with --fake-engine: the prefill rate of a FAKE_SLOW_PREFILL prompt "
                          "(0 = 2,000 tokens a second)")
+    ap.add_argument("--fake-load-s", type=float, default=0.0,
+                    help="with --fake-engine: a load of this many seconds before the port opens, "
+                         "writing the load's phases as the real engine does (the Setup Guide's "
+                         "restart screen and its release gate, OPS-175)")
     ap.add_argument("--structured-outputs", action=argparse.BooleanOptionalAction, default=True,
                     help="serve response_format json_object / json_schema and "
                          "structured_outputs (regex, choice, json) as masks over the target's "
@@ -10470,7 +10477,7 @@ class SetupHandler(Handler):
             w = STATE.get("wren")
             return self._json(503 if STATE.get("draining") else 200, {
                 "status": "draining" if STATE.get("draining") else "ok", "mode": "setup",
-                "version": STATE.get("version", ""),
+                "version": STATE.get("version", ""), "status_port": _status_port(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                 "assistant": w.state if w is not None else "off"})
         if path == "/v1/models":
@@ -10549,6 +10556,13 @@ def _identity_name() -> str | None:
     except Exception:                                              # noqa: BLE001
         return None
     return (c or {}).get("label") or None
+
+
+def _status_port() -> int | None:
+    """OPS-175: the status responder's port (QSE_STATUS_PORT, exported from serve.env by ops/start.sh),
+    which answers for this server while it restarts; None when there is none."""
+    v = os.environ.get("QSE_STATUS_PORT") or ""
+    return int(v) if v.isdigit() else None
 
 
 def weights_profile() -> dict:

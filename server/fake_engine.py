@@ -285,8 +285,27 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     return reasoning, answer
 
 
+#: OPS-175: the real engine's load lines, in its order, for `--fake-load-s` (ops/engine_status.py
+#: reads the phases from them): the share of the load each takes, the line
+LOAD_LINES = ((0.15, "[fake-load] 8.0 GB of 20.0 GB of weights read"),
+              (0.15, "[fake-load] 16.0 GB of 20.0 GB of weights read"),
+              (0.10, "[server] 400 quantised projections (17.00 GiB), 451 plain tensors (3.60 GiB), 20.61 GiB resident"),
+              (0.25, "[server] drafter=fake depth=0 k=0  loaded in 1.0s"),
+              (0.15, "[server] warm-up prefill of 2600 tokens in 1.0s"),
+              (0.20, "[server] verify graphs: 0 captured in 0.0s"))
+
+
+def fake_load(seconds: float, sleep=time.sleep) -> None:
+    """The phases of a real load over `seconds`, printed as the engine prints them."""
+    for share, line in LOAD_LINES:
+        sleep(max(0.0, seconds) * share)
+        print(line, flush=True)
+
+
 def load(app, a) -> None:
     """Put the fake in `app.STATE` and replace `app.generate_stream`. Called from `main()`."""
+    if float(getattr(a, "fake_load_s", 0.0) or 0.0) > 0:
+        fake_load(float(a.fake_load_s))
     tok = FakeTokenizer()
     tps = max(1.0, float(getattr(a, "fake_tps", 200.0)))
     ptps = float(getattr(a, "fake_prefill_tps", 0.0) or 0.0) or 2000.0

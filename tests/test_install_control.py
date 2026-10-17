@@ -293,6 +293,10 @@ def install(name: str, setup: bool, port: int, extra: tuple = ()) -> dict | None
         args.append("--setup")
     r = subprocess.run(args, env=env, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+    # no status responder in these boxes (OPS-175 gives every install one): it outlives the stub
+    # engine's stop on purpose, and the tests leave no process behind
+    with open(os.path.join(d, "run", "local.env"), "a") as fh:
+        fh.write("QSE_STATUS_PORT=\n")
     return {"home": home, "dir": d, "env": env, "out": r.stdout, "port": port, "args": args}
 
 

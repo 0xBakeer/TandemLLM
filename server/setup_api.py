@@ -6,6 +6,9 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/models/{id}/current    what the box runs now, as a selection (the wizard's seed)
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
+    GET  /v1/setup/status                 the engine, the running (or newest) setup job and its step n of
+                                          N; the status responder answers it while the engine
+                                          restarts, with the load's progress (OPS-175)
     GET  /v1/setup/community              the community packs of every model and the sync state
     POST /v1/setup/community/sync {}      fetch the community index now (the page opened, Refresh;
                                           server/setup/community.py), then the same answer
@@ -35,6 +38,7 @@ chat request's path: server/app.py imports this module the first time a /v1/setu
 
 from __future__ import annotations
 
+import os
 import threading
 from urllib.parse import unquote
 
@@ -176,6 +180,8 @@ def _get(h, app, parts: list[str]) -> None:
         return h._json(200, device(app), extra_headers=NO_STORE)
     if len(parts) == 2 and parts[0] == "jobs":
         return job_route(h, parts[1])
+    if parts == ["status"]:
+        return h._json(200, setup_status(app), extra_headers=NO_STORE)
     if parts == ["reset"]:
         from server.setup import reset
         return h._json(200, reset.levels(app, busy(app)), extra_headers=NO_STORE)
@@ -184,6 +190,34 @@ def _get(h, app, parts: list[str]) -> None:
         w.touch()
         return h._json(200, w.status(), extra_headers=NO_STORE)
     return _err(h, 404, "not_found", f"no route /v1/setup/{'/'.join(parts)}")
+
+
+def status_module():
+    """ops/engine_status.py of the ops folder this server was started with (stdlib only): the status
+    responder's own reading of the setup job and the load, so the page gets one shape from both."""
+    import importlib.util
+    from server.setup import device as dev
+    p = os.path.join(dev.ops_dir(), "engine_status.py")
+    if not os.path.isfile(p):
+        p = os.path.join(registry.ROOT, "ops", "engine_status.py")
+    spec = importlib.util.spec_from_file_location("tandem_engine_status", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def setup_status(app) -> dict:
+    """GET /v1/setup/status (OPS-175): what the status responder answers while the engine restarts,
+    from the engine itself while it runs: the engine up, the running or newest setup job, no load."""
+    from server.setup import apply
+    es = status_module()
+    up = {"state": "up", "words": "up", "since": int(app.STATE.get("started") or 0) or None,
+          "reason": None, "left_s": None, "version": app.STATE.get("version"),
+          "profile": os.environ.get("QSE_WEIGHTS") or None,
+          "mode": "setup" if app.STATE.get("setup_mode") else "serving"}
+    out = es.setup_status(t=apply.ROOT, engine=up)
+    out["contract_version"] = CONTRACT
+    return out
 
 
 def community_body() -> dict:

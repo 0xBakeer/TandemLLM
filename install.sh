@@ -321,6 +321,11 @@ if [ "$UNINSTALL" = 1 ]; then
     if [ -f "$DIR/bin/tandem" ]; then run bash "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
     # chatd too, should this tandem predate its stop (OPS-155)
     if [ -f "$SRC/ops/chatd.sh" ]; then run bash "$SRC/ops/chatd.sh" stop || true; fi
+    # the status responder of this install (OPS-175), which outlives an engine stop on purpose
+    SPORT="$(sed -n "s/^QSE_STATUS_PORT=//p" "$RUN/ops/serve.env" 2>/dev/null | tail -1 | tr -dc 0-9)"
+    if [ -n "$SPORT" ] && [ -f "$RUN/ops/engine_status.py" ]; then
+        run env QSE_STATUS_TREE="$SRC" python3 "$RUN/ops/engine_status.py" stop --port "$SPORT" || true
+    fi
     if [ -f "$UNIT" ] && grep -q "$DIR/bin/tandem" "$UNIT" 2>/dev/null; then
         run systemctl --user disable --now tandemllm.service || true
         run rm -f "$UNIT"
@@ -765,6 +770,9 @@ setv QWEN38_MODEL "$(q "$SNAP_BASE")"
 # look for the base and fetch into the same one (OPS-143)
 [ "$HF_HUB_DIR" = "$HOME/.cache/huggingface/hub" ] || setv HF_HUB_CACHE "$(q "$HF_HUB_DIR")"
 setv QSE_SECRETS "$(q "$DIR/state/secrets.env")"
+# the status responder (ops/engine_status.py): it answers for the engine while a Setup Guide install
+# restarts it, so the page shows the restart and the job instead of errors (OPS-175)
+[ "$PORT" -le 65526 ] && setv QSE_STATUS_PORT "$((PORT + 9))"
 if [ -n "$CUDA_HOME_FOUND" ]; then setv CUDA_HOME "$(q "$CUDA_HOME_FOUND")"; fi
 if [ "$SPARK" != 1 ]; then
     # best effort off the Spark: the skinny kernel is sm_121a code; a smaller context below 100 GiB
