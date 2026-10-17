@@ -248,7 +248,7 @@ export interface Run {
   /** the place in the engine's line while phase is queued */
   queue_position: number | null;
   tool: { call_id: string; name: string } | null;
-  prefill: { done: number; total: number; tps?: number | null; eta_ms?: number | null } | null;
+  prefill: { done: number; total: number; tps?: number | null; eta_ms?: number | null; cached?: number | null; why?: string | null } | null;
   decode_tps: number | null;
   tokens_per_round: number | null;
   acceptance: number | null;
