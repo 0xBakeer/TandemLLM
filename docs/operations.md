@@ -169,6 +169,15 @@ The placeholder is filled per request (Open WebUI 0.11 or later, `parse_custom_h
 
 Server behaviour (ports, limits, caches, reasoning) is set by command-line flags. `python server/app.py --help` lists them, and `ops/start.sh` builds them from `serve.env`.
 
+## Release checklist
+
+Every release runs these on the box before its tag, and ships only when all pass:
+
+1. `ops/gate.sh <label>`: the CPU and GPU tests, identity, agreement, the rows ([measurement.md](measurement.md)).
+2. `tools/client_smoke.py` and `tools/api_text_check.py` against the candidate.
+3. `bash tools/release_gate_setup.sh` (OPS-177), mandatory: a fresh scratch install of the candidate runs the whole Setup Guide flow beside the live engine without touching it. Run A installs with `install.sh --setup`, applies a profile through the Setup Guide's API while a phone-sized browser (WebKit at 390 px in the `mcr.microsoft.com/playwright:v1.63.0-noble` container) follows the job, checks that the restart card shows while the engine restarts and that the finished screen with Start chatting shows within 10 s of the engine answering, checks the job, `/health` and a chat, and removes a second profile's weights. Run B strips the execute bit from `start.sh`, `stop.sh` and `use-profile.sh` first and must still install. The scratch installs use spare ports (never 8000, 8009 or 8016), no chatd, the CPU fake engine and a few KB of stand-in weights, a HOME of their own, and an interpreter copy the live box's `ops/engines.sh` does not count; every process they start is stopped at the end. The report and the screenshots are in `results/gate-setup/<utc>/`.
+4. A real agent session with its own tool calls.
+
 ## Deploying a new version
 
 1. Copy the current serving directory to a dated backup (`<checkout>.bak-YYYYMMDD-HHMM`).

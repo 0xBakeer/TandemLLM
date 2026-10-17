@@ -237,7 +237,11 @@ wait_job() {   # wait_job ID -> the final state on stdout
     done
     echo "timeout"
 }
-SELECTION='{"model": "qwen3.8-27b", "profile": "exl3-2.5", "components": {"conductor": false, "narrator": false, "laya": false, "shadow": false, "proxy": false}}'
+# the fixture's selection: the scratch's own port and address (the plan refuses 8000, held by the live
+# engine), no tool with a model of its own, no conductor (a fake engine may not use one under HOME)
+selection() {
+    printf '{"model": "qwen3.8-27b", "profile": "exl3-2.5", "components": {"conductor": false, "narrator": false, "laya": false, "shadow": false, "proxy": false}, "advanced": {"port": %s, "host": "127.0.0.1"}}' "$PORT"
+}
 
 start_setup_mode() {
     cmd env -i "${ENVS[@]}" bash "$DIR/bin/tandem" start || return 1
@@ -267,14 +271,15 @@ if install_box a "$PORT" && start_setup_mode; then
         [ -d "$PW/node_modules/@playwright/test" ] || cmd docker run --rm --network host -v "$PW:/work" -w /work \
             mcr.microsoft.com/playwright:v1.63.0-noble npm install --no-save --no-audit --no-fund @playwright/test@1.63.0
         cmd docker run --rm --network host --ipc=host -v "$PW:/work" -v "$OUT/shots:/shots" -w /work \
-            -e GATE_URL="http://127.0.0.1:$PORT" -e GATE_SELECTION="$SELECTION" -e GATE_SHOTS=/shots \
+            -e GATE_URL="http://127.0.0.1:$PORT" -e GATE_SELECTION="$(selection)" -e GATE_SHOTS=/shots \
             mcr.microsoft.com/playwright:v1.63.0-noble npx playwright test -c playwright.gate.config.ts
         PWRC=$?
         check "the browser at 390 px: the restart card during the restart, the finished screen within 10 s" test "$PWRC" = 0
         JOB="$(cat "$OUT/shots/job-id.txt" 2>/dev/null)"
     else
-        api POST /v1/setup/apply "{\"selection\": $SELECTION}" > "$GATE/apply.json"
+        api POST /v1/setup/apply "{\"selection\": $(selection)}" > "$GATE/apply.json"
         JOB="$("$GATEPY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["job"]["id"])' "$GATE/apply.json" 2>/dev/null)"
+        [ -n "$JOB" ] || say "the apply answered: $(head -c 600 "$GATE/apply.json")"
     fi
     if [ -n "$JOB" ]; then
         STATE="$(wait_job "$JOB")"
@@ -304,7 +309,7 @@ if install_box b "$PORT"; then
     chmod -x "$DIR/src/ops/start.sh" "$DIR/run/ops/start.sh" "$DIR/run/ops/stop.sh" "$DIR/run/ops/use-profile.sh"
     say "stripped: $(stat -c '%a %n' "$DIR/src/ops/start.sh" "$DIR/run/ops/start.sh" "$DIR/run/ops/stop.sh" "$DIR/run/ops/use-profile.sh" | tr '\n' ' ')"
     if start_setup_mode; then
-        api POST /v1/setup/apply "{\"selection\": $SELECTION}" > "$GATE/apply.json"
+        api POST /v1/setup/apply "{\"selection\": $(selection)}" > "$GATE/apply.json"
         JOB="$("$GATEPY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["job"]["id"])' "$GATE/apply.json" 2>/dev/null)"
         if [ -n "$JOB" ]; then
             STATE="$(wait_job "$JOB")"
@@ -312,7 +317,7 @@ if install_box b "$PORT"; then
             verify_live "$STATE"
             api GET "/v1/setup/jobs/$JOB?format=json" >> "$REPORT"
         else
-            say "FAIL  no job started: $(cat "$GATE/apply.json")"; FAILS=$((FAILS + 1))
+            say "FAIL  no job started: $(head -c 600 "$GATE/apply.json")"; FAILS=$((FAILS + 1))
         fi
     else
         say "FAIL  setup mode did not start"; FAILS=$((FAILS + 1))
