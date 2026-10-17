@@ -10,8 +10,10 @@ list of steps in this file and the repository's own scripts. Nothing a client se
 THE STEPS (STEPS below; the argv of every command is built here from the registry's ids and the
 selection's checked numbers, `shell=False`, a minimal environment, a timeout each):
 
-    check             the selection again (the runner checks it itself), the estimate, the disk,
-                      the assets, the HF token, the overlay hook in serve.env, the box lock
+    check             tandem doctor first (OPS-171: modes, run/ops copies, stale pid files, the
+                      marker repaired; its report on the job as `doctor`), then the selection again
+                      (the runner checks it itself), the estimate, the disk, the assets, the HF
+                      token, the overlay hook in serve.env, the box lock
     unload_assistant  Wren unloaded (the server does it before it starts the runner)
     fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when the weights and
                       the assets are on disk; OPS-95: it fetches the missing assets too; VIS-153:
@@ -884,9 +886,27 @@ class Runner:
         self.job.update(failed_step=sid, message=why)
         return False
 
+    def _doctor(self) -> None:
+        """OPS-171: tandem doctor before anything else: what it repaired (file modes, the run/ops
+        copies, stale pid files, the setup marker) and what it found go into the job and its log; a
+        finding does not stop the job (the plan and the preflight decide)."""
+        from server.setup import doctor
+        try:
+            rep = doctor.run(ROOT, repair=True, log=False)
+        except Exception as exc:                                  # noqa: BLE001
+            self.log(f"[doctor] did not run: {type(exc).__name__}: {exc}")
+            return
+        self.job["doctor"] = {"repaired": rep["repaired"], "problems": rep["problems"]}
+        self._save()
+        for t in rep["repaired"]:
+            self.log(f"[doctor] repaired: {t}")
+        for t in rep["problems"]:
+            self.log(f"[doctor] to look at: {t}")
+
     def _steps(self) -> bool:
         spec = self.spec
         self.step("check", "running")
+        self._doctor()
         m = device_mod.windowed(registry.get(spec["model"]))
         if m is None:
             return self._fail("check", f"no model {spec['model']!r} in models/")

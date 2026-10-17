@@ -939,7 +939,7 @@ def test_the_detached_runner():
                 "import io; h = m.Handler.__new__(m.Handler); h.command = 'GET'; "
                 "h.path = '/v1/setup/jobs/' + sys.argv[3]; h.wfile = io.BytesIO(); "
                 "h.request_version = 'HTTP/1.1'; h.requestline = 'GET'; h.client_address = ('x', 0); "
-                "h.headers = {}; h._send = lambda c, b, t, r: print(c, b.decode()); h._answer()"),
+                "h.headers = {}; h._send = lambda c, b, t, r, **k: print(c, b.decode()); h._answer()"),
                 REPO, box.root, jid], capture_output=True, text=True, timeout=30)
             code, _, body = r.stdout.partition(" ")
             assert code == "200" and json.loads(body)["id"] == jid, r.stdout + r.stderr

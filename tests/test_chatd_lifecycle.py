@@ -326,7 +326,7 @@ def test_the_systemd_unit_stops_both():
 def test_the_install_says_what_it_did():
     text = open(os.path.join(ROOT, "install.sh")).read()
     done = text[text.index("${B}Done.${N}"):]
-    assert "Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat" in done
+    assert "Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | doctor | chat" in done
     assert re.search(r"Chat: +http://\$API_HOST:\$PORT/dashboard/#/chat +chatd starts and stops with the engine", done)
     assert "($DIR/bin/tandem chat status)" in done and "The sandbox is optional" in done
     assert "the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest" in done

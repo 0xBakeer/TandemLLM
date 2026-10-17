@@ -63,6 +63,10 @@ Every line runs its script through `bash`, as the scripts call each other: a cop
 
 `bin/tandem` reads `run/ops/serve.env` under `set -e`. A missing `ops/active-profile` is the normal state of a plain install and loads the template's values; a command in the config that fails stops it with the file and the line. Boxes installed before 0.11.2 need one run of the installer to get both, and the scripts above (OPS-159, OPS-161).
 
+## tandem doctor
+
+`bash ~/TandemLLM/bin/tandem doctor` checks an install and repairs what is safe to repair; `--check` only reports, `--json` prints the report (OPS-171). It runs by itself before every `tandem start` and in the check step of every Setup Guide install, which keeps its report on the job. On a checkout it is `python -m server.setup.doctor`. It repairs file modes (against `ops/executables.txt`, the release's executable files), a missing copy in `run/ops`, `bin/tandem`'s mode, stale pid files of the engine and chatd, a hold's pause left behind, a setup marker with an address `start.sh` refuses, and a secrets file readable by others (600). It reports, and never changes: a `run/ops` copy that differs from `src/ops` (run the installer again), a `serve.env` that does not load (the failing line), an interpreter that does not run, a secrets file where the engine does not read it, a fresh hold, and too little disk for a download (`--profile P` or `--need-gb N`). Each run appends to `logs/doctor.log`; the exit status is 0 when nothing is left to look at.
+
 `ops/qwen38-engine.service` is a systemd user unit for the same job. A user unit only survives logout with `loginctl enable-linger`, which needs root. Install one mechanism, never both: two supervisors for one port start the service twice.
 
 ## Setup mode and the setup guide

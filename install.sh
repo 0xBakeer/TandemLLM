@@ -842,13 +842,22 @@ else
     fi
 fi
 
-# DIR/bin/tandem: start | stop | restart | status | smoke | logs | env | chat
+# DIR/bin/tandem: start | stop | restart | status | smoke | logs | env | doctor | chat
 write_control() {
     printf '#!/usr/bin/env bash\n# TandemLLM control script, written by install.sh.\nTANDEM_DIR=%q\n' "$DIR"
     cat <<'CTL'
 set -euo pipefail
 RUN="$TANDEM_DIR/run"
 ENV_FILE="$RUN/ops/serve.env"
+# tandem doctor (OPS-171): checks this install and repairs what is safe (file modes, the run/ops
+# copies, stale pid files, the setup marker); before the config loads, so a config that does not
+# load is one of its findings. --check changes nothing.
+doctor() {
+    local py="$TANDEM_DIR/venv/bin/python"
+    [ -x "$py" ] || py=python3
+    (cd "$TANDEM_DIR/src" && PYTHONPATH="$TANDEM_DIR/src" "$py" -m server.setup.doctor "$@")
+}
+if [ "${1:-}" = doctor ]; then shift; doctor "$@"; exit $?; fi
 [ -f "$ENV_FILE" ] || { echo "[tandem] no $ENV_FILE; re-run install.sh" >&2; exit 1; }
 # a command that fails in the config (or a file it sources) names its file and line instead of
 # ending this script silently under set -e (OPS-159)
@@ -896,6 +905,8 @@ memcheck() {
 
 start() {
     if healthy; then echo "[tandem] already healthy on :$PORT"; chat_auto; return 0; fi
+    # what it repairs or finds is said; a finding does not stop the start (start.sh decides)
+    doctor --quiet || echo "[tandem] doctor found something to look at (above); starting anyway" >&2
     memcheck
     local rc=0 t0 limit
     bash "$RUN/ops/start.sh" || rc=$?
@@ -981,7 +992,7 @@ case "${1:-}" in
             logs) tail -n "${3:-100}" -f "$REPO/logs/chatd.log" ;;
             *) echo "usage: $0 chat start | stop | restart | status | logs [n]" >&2; exit 2 ;;
         esac ;;
-    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env | chat start|stop|restart|status|logs" >&2; exit 2 ;;
+    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env | doctor [--check] | chat start|stop|restart|status|logs" >&2; exit 2 ;;
 esac
 CTL
 }
@@ -1080,7 +1091,7 @@ cat <<EOF
 
 ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
-  Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
+  Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | doctor | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
   Watchdog:  bash $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
