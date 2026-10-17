@@ -5,7 +5,7 @@ description: Building a WebGL scene with Three.js - renderer, camera, lights, me
 # Three.js scene
 
 Rules:
-- One version through an import map. Addons are named exports (`import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'`); merged parts all indexed or all `.toNonIndexed()`. Not in three.js: `Matrix4.makeRotationXYZ`, `Matrix4.rotateY`, `renderer.shadowMap.size` (use `geometry.rotateY(a).translate(...)`, `light.shadow.mapSize`).
+- One version through an import map. Addons are named exports (`import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'`); merged parts all indexed or all `.toNonIndexed()`. Not in three.js: `Matrix4.makeRotationXYZ`, `Matrix4.rotateY`, `renderer.shadowMap.size` (use `geometry.rotateY(a).translate(...)`, `light.shadow.mapSize`). A geometry has `rotateY`, `translate`, `scale` and no `position`; a mesh has `position`, `rotation`, `scale` and no `translate`.
 - ACES tone mapping. Bloom: RenderPass -> UnrealBloomPass (threshold ~0.85) -> OutputPass last, or the frame looks flat.
 - Light since r155: hemisphere ~1.5, sun ~3, the sun on the camera's side so the faces it sees are lit. Golden hour: low warm sun 0xffb070, a sky gradient (warm horizon, blue top), fog the horizon colour. Night: sky 0x0b1530, hemisphere 0.3, moon 0.8, emissive lanterns with point lights. Start in the look asked; the Day/Night control jumps there and stops the cycle.
 - Saturated colours, `metalness: 0`; foliage clustered icosahedra. Stacked flat surfaces (ground, path, pond) 0.02 apart or they speckle. Water: `Reflector` (`library_read threejs-scene` has it), not a hand-made render target.
@@ -77,7 +77,7 @@ const pond = new Reflector(new THREE.CircleGeometry(6, 48), { textureWidth: 512,
 pond.rotation.x = -Math.PI / 2; pond.position.y = 0.03; scene.add(pond);   // 0.03 above the ground
 // tint and ripples: a transparent plane (opacity ~0.35, MeshStandardMaterial, roughness 0.1) 0.01 above it
 ```
-Merging placed parts: `const g = new THREE.BoxGeometry(w, h, d); g.rotateY(a); g.translate(x, y, z); parts.push(g);` then `mergeGeometries(parts)`; or an `Object3D` with `updateMatrix()` and `g.applyMatrix4(o.matrix)`.
+Merging placed parts: `const g = new THREE.BoxGeometry(w, h, d); g.rotateY(a); g.translate(x, y, z); parts.push(g);` then `mergeGeometries(parts)`. With a helper object instead: `const o = new THREE.Object3D(); o.position.set(x, y, z); o.rotation.y = a; o.updateMatrix(); g.applyMatrix4(o.matrix);` (`o` is an Object3D, `g` the geometry).
 
 What goes wrong:
 - Dull, grey or dark: lights at 1 or less (dim since r155), a dark or grey background, fog nearer than the subject, metalness above 0. Black: no light, or the camera looks away.
