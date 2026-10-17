@@ -186,6 +186,23 @@ def test_prefill_progress_from_the_chunk_hook():
     assert activity.label(a) == "Prefilling 36,864 of 48,210 (76 %)", activity.label(a)
 
 
+def test_a_prefill_has_a_rate_from_its_first_mark():
+    """ENG-373: a short prefill or re-read reports one mark (a chunk, or a layer-major window),
+    and its rate is that mark's rows over the time since the loop started, the unit of
+    `tps_avg`; a second mark makes it the last chunk's rate again."""
+    rec = _rec(prompt=8647)
+    rec.lock_acquired()
+    t0 = rec.t_lock
+    rec.prefill_info = {"start": 2048, "chunk": 1024, "t0": t0, "kind": "resident"}
+    assert activity.prefill_of(rec, t0)["tps_now"] is None          # nothing measured yet
+    rec.pf_marks.append((7168, 8647, t0 + 6.4))
+    p = activity.prefill_of(rec, t0 + 6.5)
+    assert p["tps_now"] == p["tps_avg"] == 800.0, p
+    rec.pf_marks.append((8192, 8647, t0 + 7.4))
+    p = activity.prefill_of(rec, t0 + 7.5)
+    assert p["tps_now"] == 1024.0 and p["tps_avg"] == round(6144 / 7.4, 2), p
+
+
 def test_a_single_call_prefill_shows_total_and_elapsed_only():
     rec = _rec(prompt=4000)
     rec.lock_acquired()

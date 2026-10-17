@@ -287,9 +287,13 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
     hook; `rec.prefill_info` holds the prefill's `start` (tokens restored), `t0` (the chunk loop
     started) and `chunk` (0 = one call). The counter counts chunks the host has ISSUED; the GPU
     may run up to one chunk behind it (measured in the design note). `tps_now` is the last chunk
-    and `tps_avg` runs from the loop's start, as in contract 1.1; `tps_live` and `tps_live_avg`
-    leave the first `warm` chunks out (`prefill_live`), and the ETA uses `tps_live_avg` once it
-    exists, so the first chunk does not pull it."""
+    and `tps_avg` runs from the loop's start, as in contract 1.1; with one mark (the first chunk
+    or the first layer-major window) `tps_now` is that mark's rows over the time since the loop
+    started, the same tokens a second, so a short prefill or re-read has a rate from its first
+    mark on (before, it waited for a second mark, which a prefill of one window and a last chunk
+    never has); `tps_live` and `tps_live_avg` leave the first `warm` chunks out
+    (`prefill_live`), and the ETA uses `tps_live_avg` once it exists, so the first chunk does not
+    pull it."""
     if rec.t_lock is None or rec.cache_source in REPLAY or rec.prompt_tokens is None:
         return None
 
@@ -333,8 +337,10 @@ def prefill_of(rec, now_p: float, last_prefill: dict | None = None, *, warm: int
         done, total, t = marks[n - 1]                 # the hook's own total: what is prefilled
         pdone, pt = (marks[n - 2][0], marks[n - 2][2]) if n > 1 else (None, None)
         base = start if start is not None else 0
-        tps_now = (done - pdone) / (t - pt) if pdone is not None and t > pt else None
         tps_avg = (done - base) / (t - t0) if t0 is not None and t > t0 and done > base else None
+        tps_now = (done - pdone) / (t - pt) if pdone is not None and t > pt else None
+        if n == 1:
+            tps_now = tps_avg                 # the first mark: rows computed since the start
         rate = pl["tps_live_avg"] or tps_avg
         eta = max(0.0, (total - done) / rate * 1e3) if rate else None
         return {"done": int(done), "total": total, "cached": start,

@@ -184,7 +184,8 @@ def test_the_prefill_warm_up_chunk_is_left_out():
     p = _row(ev, "B")["activity"]["prefill"]
     assert p["tps_live"] is None and ev["now"]["prefill_live_tps"] is None
     assert p["warmup"] == {"chunks": 1, "reached": True}
-    assert p["tps_now"] == None and p["tps_avg"] == round(1024 / 3.0, 2)   # 1.1 unchanged
+    # SRV-591: one mark's `tps_now` is its rows since the loop started, as `tps_avg`
+    assert p["tps_now"] == p["tps_avg"] == round(1024 / 3.0, 2)
     _chunk(c, b, 1.4)
     _chunk(c, b, 1.4)
     reg.tick()
