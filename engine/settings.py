@@ -180,6 +180,7 @@ KNOBS: dict[str, tuple] = {
     # FX17: the warm-up prefill at start (tokens; 0 skips)
     'WARM_PREFILL_TOKENS': ('2600', 'server/app.py'),
     'REREAD_SAY_TOKENS': ('8192', 'server/app.py'),
+    'MM_END': ('on', 'server/app.py'),
     # SRV-225: a client that sends no conversation id (Open WebUI): chats that open
     # with the same message are separate conductor sessions (`on`); `off`: one session per head
     'SESSION_GENERATIONS': ('on', 'server/conductor/router.py'),

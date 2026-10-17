@@ -981,11 +981,16 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # another conversation: the shared part ends before its first user message, or,
             # without the template's marks, more than a chunk short of the resident rows
             other = head < conv if conv is not None else head < valid - chunk
-            stale = (_slot0_stale() if other and valid >= 2 * chunk
-                     and valid + margin + SIDE_MIN_ROOM > longest else None)
+            # SRV-546: a conversation with images runs on slot 0 only (side slots read no images):
+            # a new chat that takes slot 0 from it sends it to the NVMe, as one too long for a side
+            # slot (live 2026-10-17 10:38: a 7,293-token chat took slot 0 beside a free side slot
+            # and the 140,191-token pagoda run went to the NVMe)
+            bound = (valid + margin + SIDE_MIN_ROOM > longest
+                     or bool(res.end is not None and res.end.get("mm")))
+            stale = (_slot0_stale() if other and valid >= 2 * chunk and bound else None)
             if stale is not None:
                 why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
-            elif other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
+            elif other and valid >= 2 * chunk and bound:
                 why["prefer_side"] = valid
                 if len(ids) <= SIDE_NEW_SHORT:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
@@ -2582,6 +2587,20 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             if why == "kept" and res.end is not None:
                 # SRV-233: where this served prompt held what its client did not send, for the
                 # next turn's count of the client's cached tokens
+                n_p = int(STATE.get("last_prompt_n") or 0)
+                res.end["served_hidden"] = [(int(a), int(b)) for a, b in (served_hidden or ())
+                                            if int(b) <= n_p]
+            al = STATE.get("end_align")
+            if al is not None:
+                al.kept(res, int(STATE.get("last_prompt_n") or 0), why)
+        elif mm is not None and MM_END == "on":
+            # SRV-546: kept as a text end is, with its hidden spans, the client's missing notes
+            # and the alignment's regions (rows coordinates: the expanded prompt's), and marked
+            # as kept after images: offered to a request with these images (`end_mm`)
+            why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
+                               list(hidden) + list(STATE.get("hidden_spans") or []),
+                               delta=int(mm.delta), mm=True)
+            if why == "kept" and res.end is not None:
                 n_p = int(STATE.get("last_prompt_n") or 0)
                 res.end["served_hidden"] = [(int(a), int(b)) for a, b in (served_hidden or ())
                                             if int(b) <= n_p]
@@ -4754,11 +4773,120 @@ def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
             rec.encoding = (i, n) if i is not None else None
 
     ids, mm = _vision_context(prompt.tolist(), images, STATE["engine"], on_encode)
+    # SRV-546: what `_mm_collapse` and `_mm_text_pos` read of the expansion
+    mm.n_text = int(prompt.numel())
+    mm.placeholder = int(STATE["vision"].cfg.image_token_id)
     if STATE.get("verbose"):
         grids = ",".join("x".join(str(g) for g in im.grid) for im in images)
         print(f"[vision] {len(images)} image(s) grids={grids} rows={mm.image_tokens} "
               f"delta={mm.delta} sources={','.join(im.source for im in images)}", flush=True)
     return torch.tensor(ids, dtype=torch.long, device=prompt.device), mm
+
+
+#: SRV-546: a request with images resumes at the end anchor as a text request does: the replay
+#: and the whitespace alignment run on its expanded key ids (`_mm_end_replay`), an end anchor or
+#: an NVMe entry kept after images is offered to it (`end_mm`). Off: the anchors in place only
+MM_END = (_S.get("MM_END") or "on").strip().lower()
+
+
+def _mm_collapse(keys: list[int], ref) -> list[int] | None:
+    """The text prompt of `keys` (an expanded prompt whose image rows are their key ids): each
+    image's rows, and the marks the tower's expansion puts around them, back to the one
+    placeholder the template writes. `ref` is the request's own context (`MMContext`), whose
+    expansion says how many marks an image takes. None when the rows do not come out whole."""
+    from engine.vision import KEY_BASE
+    pre = _mm_pre(ref)
+    ph = getattr(ref, "placeholder", None)
+    if pre is None or ph is None:
+        return None
+    ph = int(ph)
+    out: list[int] = []
+    i, n = 0, len(keys)
+    while i < n:
+        t = int(keys[i])
+        if t < KEY_BASE:
+            out.append(t)
+            i += 1
+            continue
+        r = i
+        while r < n and int(keys[r]) == t:
+            r += 1
+        if pre:
+            if len(out) < pre or r + pre > n:
+                return None
+            del out[-pre:]
+        out.append(ph)
+        i = r + pre
+    return out
+
+
+def _mm_runs(keys: list[int]) -> list[int]:
+    """The image key of each run of image rows in `keys`, in order."""
+    from engine.vision import KEY_BASE
+    runs, prev = [], None
+    for t in keys:
+        t = int(t)
+        if t >= KEY_BASE and t != prev:
+            runs.append(t)
+        prev = t if t >= KEY_BASE else None
+    return runs
+
+
+def _mm_end_replay(res, text: torch.Tensor, prompt: torch.Tensor, mm, images: list, rec=None):
+    """SRV-546: the end anchor's replay for a request with images. A text request's copy is
+    replayed (the hidden spans put back) and aligned (the whitespace the parser and the template
+    took out of the model's own tokens) before the end anchor serves it; a request with images was
+    served as rendered, so its copy parted from the rows at the first such spot of the whole
+    conversation and it resumed at a grid anchor below it (live 2026-10-17 10:10:28: the first
+    screenshot of a 114,336-token run parted at 88,640, an edit_file parameter's indentation,
+    and resumed at 29,696: 84,640 tokens re-read in 149 s). Here the replay runs on the
+    expanded key ids, which are the rows' own coordinates, and the served prompt is rebuilt
+    from what it returns. `(prompt, mm, spans put back, tokens aligned, added)`; the inputs as
+    they were when nothing applies."""
+    keys = list(mm.key_ids)
+    out, spans, aligned = _end_replay(res, keys)
+    if not spans and not aligned:
+        return prompt, mm, [], 0, 0
+    if out[:len(keys)] == keys and len(out) == len(keys):
+        return prompt, mm, [], 0, 0
+    if _mm_runs(out) != _mm_runs(keys):
+        return prompt, mm, [], 0, 0         # the images are not the same ones, in the same order
+    new_text = _mm_collapse(out, mm)
+    if new_text is None:
+        return prompt, mm, [], 0, 0
+    t = torch.tensor(new_text, dtype=text.dtype, device=text.device)
+    prompt2, mm2 = _mm_prompt(t, images, rec)
+    if list(mm2.key_ids) != out:
+        return prompt, mm, [], 0, 0         # never serve rows the replay did not ask for
+    mm.release()
+    return prompt2, mm2, list(spans), int(aligned), len(out) - len(keys)
+
+
+def _mm_pre(mm) -> int | None:
+    """The marks the tower's expansion puts before (and after) each image's rows: 0 for the
+    Qwen towers, 1 for Super VL's `<img>` and `</img>`; None for a context it cannot tell."""
+    spans = list(getattr(mm, "spans", None) or ())
+    n_text = int(getattr(mm, "n_text", 0) or 0)
+    if not spans or n_text <= 0:
+        return None
+    extra = int(mm.n) - n_text - sum(int(s.n) - 1 for s in spans)
+    if extra < 0 or extra % (2 * len(spans)):
+        return None
+    return extra // (2 * len(spans))
+
+
+def _mm_text_pos(mm, p: int) -> int:
+    """The expanded position of text position `p` of a request with images: `p` plus the rows
+    each image whose placeholder sits before it added (its rows and marks, less the placeholder)."""
+    pre = _mm_pre(mm)
+    if pre is None:
+        return int(p)
+    add = 0
+    for s in mm.spans:
+        if int(s.start) - pre - add >= p:      # the image's placeholder in text positions
+            break
+        add += int(s.n) - 1 + 2 * pre
+    return int(p) + add
 
 
 def _as_ids(enc, device: str | None = None) -> torch.Tensor:
@@ -7516,6 +7644,7 @@ class Handler(BaseHTTPRequestHandler):
             if images:
                 try:
                     n_text = int(prompt.numel())
+                    text_prompt = prompt
                     prompt, mm = _mm_prompt(prompt, images, rec)
                     if snaps is not None and snaps.pos is not None:
                         snaps.pos += int(prompt.numel()) - n_text   # the images sit before it
@@ -7523,6 +7652,38 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": {"message": str(exc),
                                                       "type": "invalid_request_error",
                                                       "param": "messages"}})
+                if MM_END == "on" and res_ is not None and comp is None and not guest:
+                    # SRV-546: the conversation on the NVMe read back, and the end anchor's replay
+                    # and alignment, on the expanded key ids (`_mm_end_replay`); SP4's note
+                    # (text positions) moves to the rows' coordinates with it
+                    try:
+                        _spill_before_replay(list(mm.key_ids), mm_ok=True)
+                        mm_old, keys_n = mm, int(prompt.numel())
+                        e_before = int(res_.end["at"]) if res_.end is not None else 0
+                        if res_.end is not None:
+                            prompt, mm, mm_spans, mm_aligned, added = _mm_end_replay(
+                                res_, text_prompt, prompt, mm, images, rec)
+                        else:
+                            mm_spans, mm_aligned, added = [], 0, 0
+                        sp4 = []
+                        for p_, h_ in hidden_spans:
+                            q_ = _mm_text_pos(mm_old, int(p_))
+                            sp4.append((q_ + added if q_ >= e_before - added else q_, h_))
+                        hidden_spans = list(mm_spans) + sp4
+                        if mm_spans or mm_aligned:
+                            replayed, aligned = list(mm_spans), mm_aligned
+                            hidden_prompt += added
+                            if snaps is not None and snaps.pos is not None:
+                                snaps.pos += added
+                            if plan is not None and plan.row is not None:
+                                plan.row["extra"]["end_replayed"] = added
+                                if mm_aligned:
+                                    plan.row["extra"]["end_aligned"] = mm_aligned
+                                plan.row["extra"]["end_mm"] = True
+                        elif keys_n >= REREAD_SAY_TOKENS:
+                            _say_reread(cid, res_, list(mm.key_ids), plan)
+                    except Exception:                              # noqa: BLE001
+                        logbuf.print_exc()      # served as rendered, as before SRV-546
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
@@ -7695,6 +7856,11 @@ class Handler(BaseHTTPRequestHandler):
                 kw = {"lpr": recorder} if recorder is not None else {}
                 if mm is not None:
                     kw["mm"] = mm
+                    if MM_END == "on" and comp is None:
+                        # SRV-546: an end anchor or an NVMe entry kept after images is this
+                        # prompt's when it holds every row up to it (the images' keys included):
+                        # the rows below it took the rotary these images give them
+                        kw["end_mm"] = True
                 if sup is not None:
                     kw["sup"] = sup
                 if compacting:
@@ -9883,6 +10049,10 @@ def _load_caches(a, eng, tok, drafter, rcache) -> dict:
                 reasoning=(_S.get("END_ALIGN_REASONING") or "on").strip().lower() != "off",
                 moved=(_S.get("END_ALIGN_MOVED") or "on").strip().lower() != "off")
             STATE["end_align"].marks = _marks_of(tok)       # FX16: the moved-block pass
+        # SRV-546: the guest stash's buffers while no guest's rows wait in them, before anything
+        # that holds a conversation (live 10:14:34: the end anchor went for 0.31 GB, then 1.27 GB
+        # of idle stash, and the next turn read the chat again)
+        mem.register("stash_idle", lambda safe: resident.shed_stash(True))
         mem.register("anchors", resident.shed_anchors)
         mem.register("end", resident.shed_end)
         mem.register("stash", resident.shed_stash)
