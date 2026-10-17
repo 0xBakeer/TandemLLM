@@ -19,8 +19,8 @@ A fetched index is untrusted. One with the wrong shape never replaces the cached
 \section{Running a pack}\label{sec:community-run}
 
 \begin{shell}
-~/TandemLLM/run/ops/use-profile.sh community/thinkingcap-27b-kearuga-exl3-4.00 --dry-run
-~/TandemLLM/run/ops/use-profile.sh community/thinkingcap-27b-kearuga-exl3-4.00
+bash ~/TandemLLM/run/ops/use-profile.sh community/thinkingcap-27b-kearuga-exl3-4.00 --dry-run
+bash ~/TandemLLM/run/ops/use-profile.sh community/thinkingcap-27b-kearuga-exl3-4.00
 \end{shell}
 
 The script writes the pack's profile from its entry to \code{run/community/<id>.env}, which \code{serve.env} reads. It downloads the pack at the commit the entry pins into \code{~/.tandemllm/community/<id>}, checks every weight file against the sha256 Hugging Face publishes, and fetches our draft models when they are missing. Then it stops the engine, starts it on the pack and sends one test chat. The checks are those of our own profiles: it refuses a download that would leave less than 60~GB of disk free, and it rolls back to the previous profile when the start or the test chat fails. \code{--dry-run} prints every URL and size and writes the profile into a folder of its own.

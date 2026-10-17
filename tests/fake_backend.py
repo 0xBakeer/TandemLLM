@@ -30,10 +30,13 @@ not ask gets no usage at all. Words in the last user message steer it:
     FAKE_429             429 with Retry-After: 1 (FAKE_429_ONCE: only the first time per text)
     FAKE_503             503 (FAKE_503_ONCE: only the first time per text)
     FAKE_500             500
-    FAKE_DEEPSEEK        DeepSeek's usage shape: prompt_cache_hit_tokens, prompt_cache_miss_tokens
+    FAKE_DEEPSEEK        DeepSeek's usage shape: prompt_cache_hit_tokens, prompt_cache_miss_tokens,
+                         and a `system_fingerprint` in every chunk
     FAKE_LONG <n>        <n> answer tokens (default 24)
     FAKE_SAY <text>      this answer (the rest of the line, `\\n` a line break)
     FAKE_ERROR_FRAME     an `error` object inside the stream after three tokens
+    FAKE_FINISH_ERROR    reasoning, then a finish chunk with `finish_reason: "error"` (our engine's
+                         failure mid-stream; FAKE_FINISH_ERROR_ONCE: only the first time per text)
 
 For the harness (P4):
 
@@ -124,6 +127,8 @@ class Fake:
     def __init__(self, models=("fake-a",), key=None, tps=400.0, dialect=None, name="fake",
                  refuse=None, cache=True):
         self.models = list(models)
+        # extra fields of a model in /v1/models, by id (DeepSeek's name, context_window, ...)
+        self.cards: dict[str, dict] = {}
         self.cache = cache              # the prefix cache (off: every request is cold)
         self.refuse = refuse            # a status every completion answers (a backend that is down)
         self.key = key
@@ -230,7 +235,7 @@ def make_handler(fake: Fake):
                     return
                 return self._json(200, {"object": "list", "data": [
                     {"id": m, "object": "model", "created": 1, "owned_by": fake.name,
-                     "max_model_len": 32768} for m in fake.models]})
+                     "max_model_len": 32768, **fake.cards.get(m, {})} for m in fake.models]})
             return self._json(404, {"error": {"message": "no route", "type": "not_found"}})
 
         def do_POST(self):
@@ -449,6 +454,16 @@ def make_handler(fake: Fake):
                 with fake.lock:
                     fake.streams -= 1
 
+        def _error_now(self, text: str) -> bool:
+            """FAKE_FINISH_ERROR: every call of the turn; FAKE_FINISH_ERROR_ONCE: its first."""
+            if "FAKE_FINISH_ERROR_ONCE" not in text:
+                return True
+            with fake.lock:
+                k = ("FAKE_FINISH_ERROR", text)
+                first = k not in fake.once
+                fake.once.add(k)
+            return first
+
         def _drop_now(self, text: str) -> bool:
             if "FAKE_DROP_ONCE" not in text:
                 return True
@@ -488,6 +503,8 @@ def make_handler(fake: Fake):
                                         "finish_reason": finish}]}
                 if asked:
                     obj["usage"] = None
+                if "FAKE_DEEPSEEK" in text:      # DeepSeek names its configuration per chunk
+                    obj["system_fingerprint"] = "fp_fake_e72d3c7f"
                 return obj
 
             if chat:
@@ -497,6 +514,12 @@ def make_handler(fake: Fake):
                 self._event(chunk({"reasoning_content": piece}))
                 k += 1
                 time.sleep(gap)
+            if "FAKE_FINISH_ERROR" in text and self._error_now(text):
+                # our engine's failure mid-stream: a finish chunk that says `error`, then [DONE]
+                self._event(chunk({}, finish="error"))
+                self._send_chunk(b"data: [DONE]\n\n")
+                self._send_chunk(b"")
+                return
             for piece in answer:
                 self._event(chunk({"content": piece}) if chat else chunk(text_piece=piece))
                 k += 1

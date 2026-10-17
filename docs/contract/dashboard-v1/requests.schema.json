@@ -463,6 +463,13 @@
               null
             ],
             "description": "SRV-241: how the request sampled: null greedy (the default), client the client's own sampling, regenerate a regenerate TandemLLM sampled (server/regenerate.py); SRV-475: loop_escape the model card's sampling after a repeated call, card the profile's agentic_default (server/conductor/loopescape.py)"
+          },
+          "system_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "VIS-207 (ledger schema 10): the backend configuration a relayed answer named (its system_fingerprint); null for the engine's own rows and a backend that sends none"
           }
         },
         "required": [

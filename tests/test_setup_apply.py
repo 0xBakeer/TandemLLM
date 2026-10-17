@@ -97,6 +97,8 @@ class Box:
             env = fh.read()
         env = env.replace("REPO=${HOME}/qwen38-spark-engine", f"REPO={self.root}")
         env = env.replace("PORT=8000", f"PORT={port}")
+        # OPS-169: the preflight runs the engine's interpreter; this one stands for it
+        env = env.replace("PY=${HOME}/recipes/ling3-flash-dgx-spark/.venv/bin/python", f"PY={sys.executable}")
         if not hook:
             env = env[:env.index("# The setup guide's overlay")]
         with open(os.path.join(ops, "serve.env"), "w") as fh:
@@ -104,6 +106,12 @@ class Box:
         for s in apply.SCRIPTS:
             with open(os.path.join(ops, s), "w") as fh:
                 fh.write(f'#!/bin/bash\necho "[{s}] $*"\nexit ${{STUB_RC:-0}}\n')
+        # what the preflight (OPS-169) checks beside them: they parse
+        for f in ("engines.sh",) + apply.PREFLIGHT_PY:
+            shutil.copy(os.path.join(REPO, "ops", f), os.path.join(ops, f))
+        # tandem doctor (OPS-171) reads the release's executable files from here: none in this box
+        with open(os.path.join(ops, "executables.txt"), "w") as fh:
+            fh.write("# none\n")
         os.makedirs(os.path.join(self.root, "run"))
         os.makedirs(self.home)
         if assets:
@@ -134,6 +142,9 @@ class Box:
             fh.write("exl3-6.0\n")
         apply.ROOT = self.root
         apply.DISK_MARGIN_GB = 0              # this machine's free disk is not the test's
+        # nor its free memory (OPS-169's preflight): a board with room for any profile
+        self.meminfo = device_mod.meminfo
+        device_mod.meminfo = lambda: {"MemTotal": 121.6, "MemAvailable": 115.0}
         device_mod.clear()
 
     def close(self):
@@ -144,6 +155,7 @@ class Box:
                 os.environ[k] = v
         apply.ROOT = REPO
         apply.DISK_MARGIN_GB = 60
+        device_mod.meminfo = self.meminfo
         device_mod.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -167,6 +179,9 @@ class Box:
 
 
 def _sel(**kw):
+    """The selection the tests plan: the reference box's tools, the narrator on beside them (off by
+    default since 0.11.3, SRV-534), and what `kw` sets."""
+    kw["components"] = dict({"narrator": True}, **(kw.get("components") or {}))
     return estimate.check(M, dict({"model": M["id"]}, **kw))
 
 
@@ -314,7 +329,29 @@ class Recorder:
         for ln in self.out:
             line(ln)
         key = " ".join(os.path.basename(a) for a in argv[1:])
-        return next((rc for k, rc in self.rc.items() if key.startswith(k)), 0)
+        rc = next((rc for k, rc in self.rc.items() if key.startswith(k)), 0)
+        if rc == 0 and key.endswith(" --fetch-only"):
+            fetched(argv[2], os.path.dirname(argv[1]))
+        return rc
+
+
+#: the files fetched() wrote (the allowlist test tells them from the runner's own)
+FETCHED: set = set()
+
+
+def fetched(profile: str, ops: str) -> None:
+    """What a download leaves: the profile's weights complete in its folder (the files its profile
+    lists, else config.json and one model.safetensors), so the preflight (OPS-169) finds them."""
+    d = device_mod.profile_dirs([profile], ops).get(profile)
+    if not d or not d["dir"]:
+        return
+    os.makedirs(d["dir"], exist_ok=True)
+    for f in d["files"] or ["config.json", "model.safetensors"]:
+        os.makedirs(os.path.dirname(os.path.join(d["dir"], f)), exist_ok=True)
+        FETCHED.add(os.path.realpath(os.path.join(d["dir"], f)))
+        with open(os.path.join(d["dir"], f), "w") as fh:
+            fh.write("{}" if f.endswith(".json") else "w")
+    device_mod.clear()
 
 
 def _smoke_ok(profile="exl3-4.5"):
@@ -334,7 +371,7 @@ def _job(sel, setup_mode=False, previous="exl3-6.0"):
 
 
 ALLOWED_ARGS = {"--fetch-only", "--setup", "--admin", "120"} | {p["id"] for p in M["profiles"]}
-ALLOWED_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
+ALLOWED_ENV = {"PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE", "MEM_NEED_GB",
                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "SMOKE_URL", "SMOKE_MODEL",
                "QSE_NO_ROLLBACK", "QSE_FETCH_ASSETS"}
 
@@ -373,7 +410,9 @@ def test_nothing_outside_the_allowlist():
                 assert set(argv[2:]) <= ALLOWED_ARGS, argv
                 assert set(c["env"]) <= ALLOWED_ENV, set(c["env"]) - ALLOWED_ENV
                 assert c["cwd"] == box.root and c["timeout"] > 0
-            new = {f for f in box.files() - before}
+            # the runner's own files are under run/; the stand-in download's are where it fetches
+            new = {f for f in box.files() - before
+                   if os.path.realpath(os.path.join(box.tmp, f)) not in FETCHED}
             assert all(f.startswith("repo/run/") for f in new), new
             assert "repo/run/setup.env" in new
             os.environ.pop("HF_TOKEN", None)
@@ -390,8 +429,8 @@ def test_the_steps():
         assert apply.Runner(jid, cmd=rec, http=_smoke_ok(), ops=box.ops).main() == 0
         st = _steps(jid)
         assert st == {"check": "done", "unload_assistant": "done", "fetch": "skipped",
-                      "write_config": "done", "switch": "done", "smoke": "done",
-                      "rollback": "skipped"}, st
+                      "preflight": "done", "write_config": "done", "switch": "done",
+                      "smoke": "done", "rollback": "skipped"}, st
         assert [os.path.basename(a) for a in rec.calls[0]["argv"][1:]] == ["use-profile.sh",
                                                                            "exl3-4.5"]
         assert rec.calls[0]["env"]["SMOKE_URL"] == "http://127.0.0.1:8000/v1"
@@ -412,6 +451,9 @@ def test_the_steps():
         assert seq == ["use-profile.sh exl3-4.5 --fetch-only", "stop.sh 120",
                        "make-secrets.sh --admin", "use-profile.sh exl3-4.5"], seq
         assert rec.calls[-1]["env"]["SMOKE_URL"] == "http://127.0.0.1:8124/v1"
+        # the stand-in download of the job before left the weights: gone again for a failed one
+        shutil.rmtree(os.path.join(box.home, "exl3-quants", "4.5"))
+        device_mod.clear()
         rec = Recorder(rc={"use-profile.sh exl3-4.5 --fetch-only": 5})
         jid = _job(_sel())
         assert apply.Runner(jid, cmd=rec, http=_smoke_ok(), ops=box.ops).main() == 1
@@ -688,7 +730,7 @@ def test_an_install_sh_box():
         run_ops = os.path.join(box.tmp, "install", "run", "ops")
         os.makedirs(run_ops)
         shutil.copy(os.path.join(box.ops, "serve.env"), run_ops)
-        for sc in apply.SCRIPTS:
+        for sc in apply.SCRIPTS + ("engines.sh",) + apply.PREFLIGHT_PY:
             shutil.copy(os.path.join(box.ops, sc), run_ops)
         os.environ["QSE_OPS_DIR"] = run_ops
         device_mod.clear()
@@ -829,6 +871,20 @@ def test_the_job_route():
         again = [f for f in raw.split("\n\n") if f.strip()]
         assert len(again) == 2 and again[1].startswith(f"id: {ids[-1]}"), again
         assert json.loads(again[0].split("data: ", 1)[1])["job"]["state"] == "done"
+        # VIS-211: a job whose newest event is a log line: the snapshot carries no id, so a page
+        # that counted the line's id does not drop it as a repeat (it held no job and showed
+        # "Starting the install" over a finished one)
+        jid2 = _job(_sel())
+        r2 = apply.Runner(jid2, cmd=Recorder(), http=_smoke_ok(), ops=box.ops)
+        r2.step("check", "running")
+        r2.log("the newest line")
+        frames2 = _catch_up_frames(jid2)
+        snap = [f for f in frames2 if '"type": "job"' in f]
+        assert len(snap) == 1 and not snap[0].startswith("id: "), frames2
+        assert frames2[-2].startswith(f"id: {len(apply.events(jid2))}") and "the newest line" in frames2[-2]
+        r2.step("check", "done")
+        frames3 = _catch_up_frames(jid2)
+        assert frames3[-1].startswith(f"id: {len(apply.events(jid2))}") and '"type": "job"' in frames3[-1]
         for bad in ("0123456789abcdef", "../../etc", "nope"):
             code, _ = _api("GET", f"/v1/setup/jobs/{bad}?format=json")
             assert code == 404, bad
@@ -844,6 +900,16 @@ def test_the_job_route():
             fh.write('g", "line": "x", "ts": 1}}\n')
         more, off3 = apply.events_from(jid, off2)
         assert [r["seq"] for r in more] == [999] and off3 > off2
+
+
+def _catch_up_frames(jid: str) -> list[str]:
+    """The frames setup_api's catch-up writes for a running job (the stream itself would follow)."""
+    from server import setup_api
+
+    class H:
+        wfile = io.BytesIO()
+    setup_api._catch_up(H, jid, 0)
+    return [f for f in H.wfile.getvalue().decode().split("\n\n") if f.strip()]
 
 
 def test_secrets_are_redacted():
@@ -890,7 +956,13 @@ def test_the_detached_runner():
     try:
         with Box(port=port) as box:
             jid = _job(_sel(advanced={"port": port}))
-            pid = apply.spawn(jid)
+            # the runner is a process of its own: this machine's memory is not the box's (the
+            # preflight and use-profile.sh read MEM_NEED_GB)
+            os.environ["MEM_NEED_GB"] = "0"
+            try:
+                pid = apply.spawn(jid)
+            finally:
+                os.environ.pop("MEM_NEED_GB", None)
             t0 = time.time()
             while time.time() - t0 < 60:
                 j = apply.read_job(jid)
@@ -912,7 +984,7 @@ def test_the_detached_runner():
                 "import io; h = m.Handler.__new__(m.Handler); h.command = 'GET'; "
                 "h.path = '/v1/setup/jobs/' + sys.argv[3]; h.wfile = io.BytesIO(); "
                 "h.request_version = 'HTTP/1.1'; h.requestline = 'GET'; h.client_address = ('x', 0); "
-                "h.headers = {}; h._send = lambda c, b, t, r: print(c, b.decode()); h._answer()"),
+                "h.headers = {}; h._send = lambda c, b, t, r, **k: print(c, b.decode()); h._answer()"),
                 REPO, box.root, jid], capture_output=True, text=True, timeout=30)
             code, _, body = r.stdout.partition(" ")
             assert code == "200" and json.loads(body)["id"] == jid, r.stdout + r.stderr

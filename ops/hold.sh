@@ -81,8 +81,11 @@ HOLD_NOTE="${HOLD_NOTE:-$(_from_env HOLD_NOTE)}"
 HOLD_WHY="${HOLD_REASON:-$( [ -n "${HOLD_NOTE:-}" ] && head -1 "$HOLD_NOTE" 2>/dev/null | cut -c1-120)}"
 "$STATUS_PY" "$HERE/engine_status.py" set held --reason "${HOLD_WHY:-maintenance: $(basename "${1:-hold}")}" \
     --expected-s "$((MIN * 60))" >/dev/null 2>&1 || true
-[ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
-    --engine-port "${PORT:-$(_from_env PORT)}" >/dev/null 2>&1
+# the responder of this tree, where start.sh would put it (OPS-173: the same tree and address, so it
+# is kept, not replaced)
+[ -n "${QSE_STATUS_PORT:-}" ] && QSE_STATUS_TREE="$REPO" "$STATUS_PY" "$HERE/engine_status.py" ensure \
+    --port "$QSE_STATUS_PORT" --engine-port "${PORT:-$(_from_env PORT)}" \
+    --host "$(h="${QSE_STATUS_HOST:-$(_from_env QSE_STATUS_HOST)}"; echo "${h:-$(_from_env HOST)}")" >/dev/null 2>&1
 echo "[hold] stopping the service (up to ${MIN}m budget for the command)"
 # the roles beside the engine first, then the engine (OPS-41)
 [ -f "$HERE/roles.sh" ] && bash "$HERE/roles.sh" down

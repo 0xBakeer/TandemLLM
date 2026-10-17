@@ -1133,6 +1133,7 @@ class ResidentPrefix:
                       "refused_park": 0,
                       "end_kept": 0, "end_hits": 0, "end_tokens_reused": 0, "end_saved": 0,
                       "end_replayed": 0, "end_ahead": 0, "end_refused": 0, "end_dropped": 0,
+                      "end_cut": 0,
                       "spills": 0, "spill_failed": 0, "spill_restores": 0,
                       "park_spills": 0, "park_given_up": 0, "side_carries": 0,
                       "carry_vacated": 0, "park_ends": 0, "park_end_hits": 0}

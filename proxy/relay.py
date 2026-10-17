@@ -17,6 +17,12 @@ tried again after 1 s, then 2 s, with jitter, or after its `Retry-After` up to 3
 went out a failure is an `error` frame to the client, then `[DONE]`. A 429 that survives the tries
 goes to the client with its `Retry-After`.
 
+THE COST, FOR A CLIENT THAT ASKS. A streamed request with `X-Tandem-Cost: 1` (chatd sends it) gets
+one SSE comment just before `data: [DONE]`: `: tandem-cost {"cost_micros": N, "backend": id}`, the
+price of the request (every request the harness sent for it) as its ledger row will have it, N
+null without a price. A comment is ignored by every SSE reader; without the header the bytes are
+the backend's.
+
 THE CLIENT LEAVES: the upstream connection is closed within a quarter second (the backend stops
 generating), and the row says `abandoned`.
 
@@ -31,6 +37,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import select
 import socket
 import threading
@@ -46,6 +53,29 @@ RETRY_AFTER_CAP = 30.0
 # response headers passed to the client (besides Content-Type)
 PASS_HEADERS = ("retry-after", "x-request-id", "openai-processing-ms")
 PASS_PREFIXES = ("x-ratelimit-",)
+
+
+_DONE = re.compile(rb"(?:^|\n)data: ?\[DONE\]")
+
+
+class CostTap:
+    """The client's stream writer, with the request's cost (`cost()`, bytes) written once just
+    before the first `data: [DONE]` (see THE COST above)."""
+
+    def __init__(self, w, cost):
+        self.w, self.cost, self.sent = w, cost, False
+
+    def write(self, data: bytes):
+        if not self.sent:
+            m = _DONE.search(data)
+            if m is not None:
+                self.sent = True
+                i = m.start() + (1 if data[m.start():m.start() + 1] == b"\n" else 0)
+                data = data[:i] + self.cost() + data[i:]
+        return self.w.write(data)
+
+    def flush(self) -> None:
+        self.w.flush()
 
 
 class Inflight:
@@ -325,6 +355,8 @@ class Relay:
         hx = getattr(rec, "hx", None)
         self._start(handler, 200, uh, backend, True)
         w = handler.wfile
+        if (handler.headers.get("X-Tandem-Cost") or "").strip() == "1":
+            w = CostTap(w, lambda: self._cost_line(st, adapter, path, backend, rec))
         try:
             self._pump(conn, path, adapter, st, injected, rec, w, to, poll, hx)
             if hx is not None:
@@ -541,6 +573,20 @@ class Relay:
         rec.set_usage(u)
         rec.cost_micros = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
                                                               or rec.public_model), rec.ts)
+        rec.system_fingerprint = st.fingerprint
+
+    def _cost_line(self, st: Stamps, adapter, path, backend, rec) -> bytes:
+        """The cost comment: the usage so far (the harness's requests summed, else the stream's
+        own) at the model's price, as `_finish` prices the ledger row."""
+        hx = getattr(rec, "hx", None)
+        if hx is not None and hx.usages:
+            u = hx.total_usage() or adapter.read_usage(None, path)
+        else:
+            u = adapter.read_usage(st.usage, path)
+        cost = adapter.price(u, self.svc.price_of(backend["id"], rec.backend_model
+                                                  or rec.public_model), rec.ts)
+        return (": tandem-cost " + json.dumps({"cost_micros": cost, "backend": backend["id"]})
+                + "\n\n").encode()
 
     def _write_plain(self, handler, status: int, headers, data: bytes, rec) -> None:
         rec.status = status

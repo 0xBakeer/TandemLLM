@@ -1753,6 +1753,13 @@
           ],
           "minimum": 0,
           "description": "VIS-58: the prompt tokens TandemLLM added (its notes); prompt_tokens is the client's count and cached_tokens never exceeds it"
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "0.11.3: the backend a relayed request went to (proxy/); its cached_tokens are the backend's own cache and cache_source is null. Null for the engine's own request"
         }
       },
       "required": [

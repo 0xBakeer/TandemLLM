@@ -41,6 +41,8 @@ from chatd.plans import PlansMixin
 from chatd.preview import PreviewMixin
 from chatd.skills import SkillsMixin
 from chatd.terminals import TerminalsMixin
+from chatd.verify import VerifyMixin
+from chatd.verify import summary as verify_summary
 from chatd import websearch
 from chatd.websearch import WebSearchMixin
 from chatd.engine import Engine, LiveTail
@@ -55,7 +57,10 @@ from chatd.store import Store, dumps
 DEFAULT_SETTINGS = {
     "model": "", "profile": None, "effort": "auto", "thinking": True,
     "tools": [], "packages": [], "packages_blocked": [], "packages_mode": "auto", "mcp": [],
-    "prompt_id": None, "policies": {}, "auto_accept_edits": False, "max_steps": 50,
+    "prompt_id": None, "policies": {}, "auto_accept_edits": False,
+    # model calls a run may make before it stops for Continue: 50 ended the 2026-10-17 pagoda run
+    # (15 files, one or two a call) while it was still fixing its first errors, before any check
+    "max_steps": 100,
     "sandbox_network": "on", "plan_mode": False,
     # SRV-387/SRV-391: ask | auto | yolo (chatd/tools.py decide_mode); null: the default mode
     # (GET/PUT /permissions/mode), which a new chat copies when it is created
@@ -63,8 +68,12 @@ DEFAULT_SETTINGS = {
     # SRV-469: null = the global web search settings; else some of provider, max_results,
     # safe_search, language, time_range (chatd/websearch.py)
     "web_search": None,
+    # SRV-532: a run that built or changed a web page or app checks it in a browser before it
+    # ends (chatd/verify.py)
+    "verify": True,
 }
-EFFORTS = ("auto", "low", "medium", "high", "xhigh")
+# `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
+EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
 TITLE_NEW = "New chat"
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -147,7 +156,7 @@ def device_label(ua: str | None) -> str | None:
 
 
 class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin, PlansMixin,
-              WebSearchMixin):
+              WebSearchMixin, VerifyMixin):
     def __init__(self, data_dir: str, engine_url: str, *, engine_key: str | None = None,
                  max_runs: int = 2, retry_window_s: float = 600.0, titles: bool = True,
                  log=None, store: Store | None = None, engine: Engine | None = None,
@@ -739,9 +748,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}
-        run = Run(self, conv, user_message_id=user_mid, message_id=mid,
-                  max_steps=int(settings.get("max_steps") or 50), started_by=viewer,
-                  continue_final=bool(continue_mid))
+        steps = int(settings.get("max_steps") or DEFAULT_SETTINGS["max_steps"])
+        run = Run(self, conv, user_message_id=user_mid, message_id=mid, max_steps=steps,
+                  started_by=viewer, continue_final=bool(continue_mid))
         run.permission_mode = self.permission_mode(settings)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
@@ -749,7 +758,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             # a cut text goes on in its own step; after tool results the next call is a new step
             run.continue_final = last.get("type") in ("text", "thinking")
             run.resume_same_step = run.continue_final
-            run.max_steps = run.step + int(settings.get("max_steps") or 50)
+            run.max_steps = run.step + steps
         self.store.run("UPDATE messages SET run_id = ? WHERE id = ?", (run.id, mid))
         self.store.run("INSERT INTO runs (id, conversation_id, user_message_id, "
                        "assistant_message_id, state, max_steps, model, started, started_by, "
@@ -863,6 +872,13 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                     conv.live["parts"].append(note)
                     self.emit(conv, {"type": "part.added", "message_id": run.message_id,
                                      "part": note}, run_id=run.id)
+                said = verify_summary(run.verify, conv.live["parts"]) if status == "done" \
+                    else None
+                if said is not None:                # what the verify phase checked, and what not
+                    said["step"] = run.step
+                    conv.live["parts"].append(said)
+                    self.emit(conv, {"type": "part.added", "message_id": run.message_id,
+                                     "part": said}, run_id=run.id)
                 conv.live["status"] = status
                 if status == "error":
                     conv.live["parts"].append({"type": "error", "message": run.error or "failed",
@@ -873,6 +889,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             frame = (run.usage or {}).get("tandem") or {}
             if frame.get("harness") or frame.get("parts"):
                 stats["tandem"] = {"harness": frame.get("harness"), "parts": frame.get("parts")}
+            elif run.split_est is not None:         # a relayed call's: chatd's estimate
+                stats["tandem"] = {"harness": None, "parts": run.split_est}
             self.store.run("UPDATE messages SET stats = ? WHERE id = ?",
                            (dumps(stats), run.message_id))
             self.store.run("UPDATE runs SET state = ?, ended = ?, error = ?, step = ? WHERE id = ?",
@@ -1111,6 +1129,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if row is not None and row.get("phase") == "done" and \
                 row.get("request_id") not in run.request_ids:
             row = None                              # another run's call, or a previous turn's
+        if row is not None and (row.get("backend") or run.backend != "engine"):
+            # a relayed call's row (a cloud model's) counts no tokens (proxy/measure.py: a frame
+            # is not a token), and its zeros overwrote chatd's own counts: live 2026-10-17 a
+            # DeepSeek turn read 0 thinking and "not tracked" for a minute of thinking
+            row = None
         act = (row or {}).get("activity") or {}
         dec = act.get("decode") or {}
         pre = act.get("prefill") or {}
@@ -1146,6 +1169,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.metrics["decode_tps"] = run.local_decode_tps()
             run.metrics["tokens_per_round"] = turn["tokens_per_round"]
             run.metrics["acceptance"] = turn["acceptance"]
+        run.metrics["ttft_ms"] = (row.get("ttft_ms") if row is not None and
+                                  row.get("phase") != "done" and row.get("ttft_ms") is not None
+                                  else run.live_ttft_ms())
         run.tps_history.append(run.metrics["decode_tps"])
         del run.tps_history[:-120]
         self.emit(conv, {"type": "run.metrics", "run_id": run.id,
@@ -1155,6 +1181,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                          "thinking_used": run.thinking_tokens,
                          "thinking_call": run.thinking_tokens - run.call_base[1],
                          "thinking_budget": run.metrics["thinking_budget"],
+                         "ttft_ms": run.metrics["ttft_ms"],
                          "prefill": run.prefill}, persist=False)
         if time.monotonic() - conv.context_sent_at >= CONTEXT_RUN_S:
             with conv.lock:
@@ -1206,6 +1233,16 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if split is None:
             split = kept.get("parts")
         peek = conv.peek[1] if conv.peek is not None else None
+        if run is not None and run.backend != "engine":
+            # a relayed call (a cloud model): no live row counts its prompt; chatd's estimate of
+            # the request in flight, the split it estimated, and the provider's cache as the last
+            # finished call's usage said
+            split = run.split_est or split
+            last = run.step_usage[-1] if run.step_usage else {}
+            live_row = {"prompt_tokens": run.request_est or None,
+                        "cached_tokens": min(int(last.get("cached_tokens") or 0),
+                                             run.request_est or 0),
+                        "cache_source": "provider"} if run.request_est else None
         out = ctx_mod.report(model=info, settings=settings, branch_tokens=tokens,
                              files_tokens=files, stats=stats,
                              run=run.as_dict() if run is not None else None, row=live_row,
@@ -1314,6 +1351,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "capabilities": {
                     "thinking": bool(c.get("thinking", False)),
                     "effort_levels": [x for x in levels if x != "off"],
+                    # a provider's default level (DeepSeek's `high`), null for our engine
+                    "effort_default": c.get("effort_default"),
                     "tools": bool(c.get("tools", True)), "vision": bool(c.get("vision", False)),
                     "structured": bool(c.get("structured", False))},
                 "loaded": bool(card.get("loaded", True)),
@@ -1325,6 +1364,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "_drafter": (w.get("drafters") if isinstance(w, dict) else None)
                             or eng.get("drafter"),
                 "_effort_budgets": card.get("effort_budgets") or {},
+                # the word a provider takes to turn thinking off (DeepSeek: reasoning_effort none)
+                "_effort_off": c.get("effort_off"),
             })
         first = out[0] if out else None
         levels = (first or {}).get("capabilities", {}).get("effort_levels") or []
@@ -1334,7 +1375,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         return {
             "models": [{k: v for k, v in m.items() if not k.startswith("_")} for m in out],
             "_models": out,
-            "efforts": ["auto"] + [x for x in EFFORTS[1:] if x in levels],
+            "efforts": ["auto"] + [x for x in EFFORTS[1:-1] if x in levels],
             "commands": [{"command": "clear", "description": "start a new chat"}],
             "defaults": defaults,
         }
@@ -1350,7 +1391,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "max_output": m.get("_max_output"),
                 "vision": (m.get("capabilities") or {}).get("vision", False),
                 "tools": (m.get("capabilities") or {}).get("tools", True),
-                "effort_budgets": m.get("_effort_budgets") or {}}
+                "effort_budgets": m.get("_effort_budgets") or {},
+                "effort_levels": (m.get("capabilities") or {}).get("effort_levels") or [],
+                "effort_off": m.get("_effort_off")}
 
     # ================================================================== attachments
     def upload(self, content_type: str, body: bytes) -> dict:
@@ -1657,7 +1700,9 @@ def _clean_settings(patch: dict) -> dict:
     if "effort" in out and out["effort"] not in EFFORTS:
         raise ApiError(400, "bad_request", f"effort must be one of {', '.join(EFFORTS)}")
     if "max_steps" in out:
-        out["max_steps"] = max(1, min(200, int(out["max_steps"] or 50)))
+        out["max_steps"] = max(1, min(200, int(out["max_steps"] or DEFAULT_SETTINGS["max_steps"])))
+    if "verify" in out:
+        out["verify"] = bool(out["verify"])
     if "permission_mode" in out and out["permission_mode"] not in (None, *tools_mod.MODES):
         raise ApiError(400, "bad_request", f"permission_mode must be one of {', '.join(tools_mod.MODES)}")
     if "web_search" in out:
@@ -1726,6 +1771,8 @@ def _usage(branch: list[dict]) -> dict:
         out["turns"] += 1
         for k in ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens"):
             out[k] += int(s.get(k) or 0)
+        if s.get("cost_usd") is not None:         # a cloud model's turns, at the proxy's prices
+            out["cost_usd"] = round((out["cost_usd"] or 0) + float(s["cost_usd"]), 6)
         wall += float(s.get("total_ms") or 0) / 1000
     out["wall_s"] = round(wall)
     return out

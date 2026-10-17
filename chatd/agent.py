@@ -25,6 +25,22 @@ EVENT_OUTPUT_CAP = 64 * 1024        # tool.output per call in events (CONTRACT s
 READ_PARALLEL = 4
 
 
+def estimated_split(body: dict, ratio: float | None, skills: str | None) -> dict:
+    """A cloud model's prompt split: our engine counts the system prompt's
+    and the tool schemas' tokens in its usage frame (`tandem.parts`), a provider does not, so
+    these are chatd's estimate from the characters at the chat's learned tokens per character.
+    The skill index sits inside the system prompt and counts apart. `estimated` says so."""
+    r = ratio or comp.DEFAULT_RATIO
+    msgs = body.get("messages") or []
+    sys_text = "".join(m.get("content") or "" for m in msgs[:1]
+                       if m.get("role") == "system" and isinstance(m.get("content"), str))
+    tools = body.get("tools") or []
+    sk = int(len(skills) * r) if skills and skills in sys_text else 0
+    return {"system": max(0, int(len(sys_text) * r) - sk),
+            "tools": int(len(json.dumps(tools, ensure_ascii=False)) * r) if tools else 0,
+            "skills": sk, "images": comp.measure({"messages": msgs})[1], "estimated": True}
+
+
 class ApiConflict(Exception):
     pass
 
@@ -68,6 +84,7 @@ class ToolCtx:
         self.quiet = False
         self.oom = False                     # the last exec lost a process at the memory limit
         self.note: str | None = None         # for the result: the sandbox restarted
+        self.phase, self.words = "tool", None    # the run's phase while it runs (verify: its own)
 
     def exec(self, cmd: list[str], timeout: float = 600, quiet: bool = False):
         sb = self.svc.sandboxes
@@ -75,7 +92,7 @@ class ToolCtx:
         def waiting(why):
             self.run.set_phase("tool", f"Waiting to start the sandbox ({why})")
         sb.ensure(self.cid, cancel=self.run.cancel, on_wait=waiting)
-        self.run.set_phase("tool", self._running_words())
+        self.run.set_phase(self.phase, self._running_words())
         self.quiet = quiet
         before = sb.oom_kills(self.cid)
         try:
@@ -97,6 +114,8 @@ class ToolCtx:
         return code, timed_out
 
     def _running_words(self) -> str:
+        if self.words:
+            return self.words
         name = self.part.get("name")
         if name == "bash":
             try:
@@ -165,7 +184,9 @@ class AgentMixin:
             if time.monotonic() - run.last_flush >= 0.05:
                 self.flush(run)
 
-    def add_call(self, run, call_id: str, name: str) -> int:
+    def add_call(self, run, call_id: str, name: str, **extra) -> int:
+        """A tool_call part in this step; `extra`: fields of a call the harness makes itself
+        (chatd/verify.py: `harness`, `source`, `input`)."""
         conv = run.conv
         with conv.lock:
             self.flush(run)
@@ -177,7 +198,7 @@ class AgentMixin:
                     "source": tool.source if tool else {"kind": "builtin"},
                     "risk": tool.risk if tool else None, "input": "", "output": None,
                     "status": "running", "started_at": None, "ended_at": None,
-                    "permission": None, "pane": None, "step": run.step}
+                    "permission": None, "pane": None, "step": run.step, **extra}
             conv.live["parts"].append(part)
             self.emit(conv, {"type": "part.added", "message_id": run.message_id,
                              "part": dict(part)}, run_id=run.id)
@@ -677,7 +698,8 @@ class AgentMixin:
                            vision=bool(info.get("vision")), blob=self._blob_of,
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
-                           inline_images=ours, step_from=self._step_from(c))
+                           inline_images=ours, step_from=self._step_from(c),
+                           levels=info.get("effort_levels"), effort_off=info.get("effort_off"))
 
     def request_for(self, run) -> tuple[bytes, dict]:
         """The body of the run's next call, after the context guard (chatd/compaction.py)."""
@@ -723,7 +745,9 @@ class AgentMixin:
                                keep_reasoning_from=max(0, keep_from - b),
                                nudge=NUDGE if run.nudge else None,
                                tandem=self.tandem_field(settings) if ours else None,
-                               inline_images=ours, step_from=self._step_from(c))
+                               inline_images=ours, step_from=self._step_from(c),
+                               levels=info.get("effort_levels"),
+                               effort_off=info.get("effort_off"))
         if ours and run.step <= 1 and not run.remark:
             gone = self.missing_pins(settings)
             if gone:
@@ -751,6 +775,10 @@ class AgentMixin:
         # the text's characters and the images' tokens apart: the ratio is learned on text only
         run.request_chars, run.request_images = comp.measure(body)
         run.request_est = est
+        run.backend = info.get("backend") or "engine"
+        if run.backend == "cloud":
+            run.split_est = estimated_split(body, conv.tok_ratio, self.skill_index(settings)
+                                            if hasattr(self, "skill_index") else None)
         self.store.run("UPDATE runs SET request = ?, state = 'running', step = ? WHERE id = ?",
                        (dumps({"messages": len(body["messages"]), "tools": len(schemas),
                                "continue": run.continue_final, "estimate": est}),

@@ -19,7 +19,8 @@ describe('the Context panel says why a figure is missing', () => {
     expect(residentWords(mem({ resident_owner: 'this', resident_bytes: 1474560 }), 'engine')).toBe('1.5 MB');
     expect(residentWords(mem({ resident_owner: 'other' }), 'engine')).toBe('held by another chat');
     expect(residentWords(mem({ resident_owner: 'none' }), 'engine')).toBe('none held');
-    expect(residentWords(mem({}), 'cloud')).toBe(NOT_TRACKED);
+    expect(residentWords(mem({}), 'proxy')).toBe(NOT_TRACKED);
+    expect(residentWords(mem({}), 'cloud')).toBe('none on this box');
   });
   it("gives the sandbox's memory, or says the runtime did not", () => {
     const sb = (s: Partial<SandboxStatus>) => ({ state: 'running', memory_bytes: null, ...s }) as SandboxStatus;

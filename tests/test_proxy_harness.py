@@ -286,6 +286,31 @@ def test_e1_second_request_is_one_client_stream():
     srv.shutdown()
 
 
+def test_cost_comment_sums_the_harness_requests():
+    """E1's second request is billed too: the cost comment chatd reads (X-Tandem-Cost: 1) is the
+    client row's cost, both requests' tokens in it, once, before the one [DONE]."""
+    srv, port = fake(models=["m1"])
+    body = {"model": "m1", "messages": [SYSTEM, {"role": "user", "content":
+                                                 "Do it FAKE_EMPTY_ANSWER FAKE_CLASS code_edit"}],
+            "tools": TOOLS, "stream": True, "stream_options": {"include_usage": True}}
+    with Proxy(env=_env("vllm", "on", port, extra={"TANDEM_PRICE_1": "v/m1=1,0.5,2"}),
+               conductor=True) as px:
+        px.sync()
+        st, _, out = px.post("/v1/chat/completions", body, headers=dict(UA, **{
+            "X-Tandem-Cost": "1"}))
+        assert st == 200 and len(_main_bodies(srv)) == 2
+        events = out.decode().split("\n\n")
+        costs = [e for e in events if e.startswith(": tandem-cost ")]
+        assert len(costs) == 1 and events[events.index(costs[0]) + 1] == "data: [DONE]"
+        row = [r for r in px.rows() if r["client_kind"] != "harness"][0]
+        said = json.loads(costs[0][len(": tandem-cost "):])
+        assert said["cost_micros"] == row["cost_micros"] and row["cost_micros"] > 0
+        c = row["cached_tokens"] or 0
+        assert row["cost_micros"] == round((row["prompt_tokens"] - c) * 1 + c * 0.5
+                                           + row["completion_tokens"] * 2)
+    srv.shutdown()
+
+
 def test_e1_off_on_a_cloud_backend_by_default():
     srv, port = fake(models=["deepseek-flash"])
     body = {"model": "deepseek-flash", "messages": [SYSTEM, {"role": "user", "content":

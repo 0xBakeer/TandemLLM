@@ -174,6 +174,7 @@ const STEP_LABELS: Record<SetupJobStepId, string> = {
   check: 'Check the selection, the disk and the box',
   unload_assistant: 'Unload Wren',
   fetch: 'Download the weights',
+  preflight: 'Check the new setup before the restart',
   write_config: 'Write the configuration (run/setup.env)',
   switch: 'Restart the engine with the new setup',
   smoke: 'Check that the new engine answers',
@@ -385,7 +386,7 @@ export class MockSetup {
     const prof = sel.profile;
     const fetch = !this.onDisk[prof];
     const slow = scenario === 'slow' ? 3 : 1;
-    const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
+    const ids: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
     const steps: SetupJobStep[] = ids.map((s) => ({ id: s, label: STEP_LABELS[s], state: 'pending', started_at: null, ended_at: null, detail: null }));
     const job: SetupJob = { id, state: 'queued', created_at: now / 1000, ended_at: null, profile: prof, steps, message: null, changes: this.plan(sel).changes, kind, rolled_back: false, failed_step: null, url: `http://<this box>:${sel.advanced.port ?? 8000}/dashboard/` };
     const tl: { at: number; ev: SetupJobEvent }[] = [];
@@ -407,6 +408,7 @@ export class MockSetup {
     step('unload_assistant', 600 * slow, ['[wren] unloading qwen3.5-2b (4.4 GiB back)']);
     if (fetch) step('fetch', 2600 * slow, [`[profile] fetching ${prof} from ${MODEL.profiles.find((p) => p.id === prof)?.hf_repo}`, '[hf] 25 % of 18.4 GB', '[hf] 50 %', '[hf] 75 %', '[hf] 100 %, sha256 ok']);
     else step('fetch', 0, [], 'skipped', 'already on the box');
+    step('preflight', 400 * slow, ['[preflight] scripts, configuration, weights, memory and port ready']);
     if (this.o.waitIdle) {
       // apply.py _wait_idle: the step waits for the engine's requests before anything stops
       tl.push({ at: t, ev: { type: 'step', step: { id: 'write_config', label: STEP_LABELS.write_config, state: 'waiting', started_at: null, ended_at: null, detail: 'waiting for 2 requests to finish before the restart' } } });
@@ -767,6 +769,21 @@ export class MockSetup {
       return MODELS.some((x) => x.id === id) ? json(200, { contract_version: '1.0', model: id, selection: { model: id }, unmatched: [] }) : err(404, 'not_found', `no model ${mc[1]}`);
     }
     if (path === '/v1/setup/device') return json(200, this.device());
+    // SRV-560: the weights on the box (the mock's onDisk) and removing one
+    if (path === '/v1/setup/weights') {
+      const gb: Record<string, number> = { 'exl3-4.0': 16.1, 'exl3-4.5': 18.4, 'exl3-6.0': 23.3, nvfp4: 14, 'exl3-2.5': 10.3, 'exl3-3.0': 12, 'exl3-3.5': 14 };
+      const weights = Object.entries(this.onDisk)
+        .filter(([, on]) => on)
+        .map(([id]) => ({ model: MODEL.id, model_name: MODEL.name, profile: id, label: MODEL.profiles.find((p) => p.id === id)?.label ?? id, dir: `~/exl3-quants/${id}`, removes: `~/exl3-quants/${id}`, gb: gb[id] ?? 10, active: id === o.active, removable: id !== o.active, shared_with: [] }));
+      return json(200, { contract_version: '1.0', weights, assets: [], active: o.active, free_gb: 412 });
+    }
+    if (path === '/v1/setup/remove' && method === 'POST') {
+      const ids = (body.profiles ?? []) as string[];
+      if (ids.includes(o.active)) return err(409, 'active_profile', `${o.active} is the running setup`);
+      if (body.confirm !== true) return err(422, 'confirm_required', 'confirm: true removes the weights');
+      for (const id of ids) this.onDisk[id] = false;
+      return json(200, { contract_version: '1.0', removed: ids.map((id) => ({ profile: id, dir: `~/exl3-quants/${id}`, gb: 18.4 })), freed_gb: 18.4 * ids.length, log: 'run/weights-removed.txt' });
+    }
     const refuse = (e: unknown) => (e instanceof SelectionError ? err(e.status, e.code, e.message) : err(500, 'internal_error', String(e)));
     if (path === '/v1/setup/estimate' && method === 'POST') {
       if (o.estimateDown) return err(500, 'internal_error', 'estimate failed');
@@ -787,7 +804,7 @@ export class MockSetup {
       }
     }
     if (path === '/v1/setup/apply' && method === 'POST') {
-      const extra = Object.keys(body).filter((k) => k !== 'selection' && k !== 'dry_run');
+      const extra = Object.keys(body).filter((k) => k !== 'selection' && k !== 'dry_run' && k !== 'remove_after');
       if (extra.length) return err(422, 'unknown_field', `unknown field '${extra[0]}'; apply takes selection and dry_run`);
       let sel: SetupSelection;
       try {

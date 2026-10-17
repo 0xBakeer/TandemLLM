@@ -56,8 +56,9 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     """`model`: the chat's model as `service.model_info` gives it. `branch_tokens`: the branch as
     the next request carries it (the last request's prompt plus its answer, plus what came since).
     `stats`: the last finished answer's TurnStats; `run`/`row`: the run in flight and its live row.
-    `split`: the last usage frame's `tandem.parts` (SRV-349): the system prompt's and the tool
-    schemas' tokens as the engine counted them, which come out of the conversation's share.
+    `split`: the last usage frame's `tandem.parts` (SRV-349): the system prompt's, the tool
+    schemas' and the images' tokens as the engine counted them, which come out of the conversation's
+    share.
     `session`: the session key the chat's requests carry, to find its rows in the engine's
     caches (`holding`)."""
     window = int(model.get("max_len") or 0)
@@ -78,18 +79,29 @@ def report(*, model: dict, settings: dict, branch_tokens: int, files_tokens: int
     reserved = int(model.get("max_output") or 0)
     system = int((split or {}).get("system") or 0)
     tools = int((split or {}).get("tools") or 0)
-    messages = max(0, messages - system - tools)
+    # the prompt's image rows as the engine counted them (VIS-205: a screenshot is 1,000 rows on Super VL)
+    images = int((split or {}).get("images") or 0)
+    # a relayed request's split is chatd's estimate (agent.py `estimated_split`): its skill
+    # index sits inside the system prompt, counted apart
+    est_skills = int((split or {}).get("skills") or 0) if (split or {}).get("estimated") else 0
+    skills += est_skills
+    messages = max(0, messages - system - tools - images - est_skills)
     parts = [
         {"kind": "system", "label": "system prompt", "tokens": system},
         {"kind": "tools", "label": "tool schemas", "tokens": tools},
         {"kind": "skills", "label": "skills and packages", "tokens": skills},
         {"kind": "files", "label": "files", "tokens": files_tokens},
+        {"kind": "images", "label": "images", "tokens": images},
         {"kind": "messages", "label": "conversation", "tokens": messages},
         {"kind": "thinking", "label": "thinking, this turn" if run or not thinking else
          "thinking, last turn", "tokens": thinking},
         {"kind": "reserved", "label": "kept for the answer", "tokens": reserved},
     ]
     used = sum(p["tokens"] for p in parts if p["kind"] != "reserved")
+    if window and reserved:
+        # what a request asks for (agent.py `request_for`): the output limit, or the window's
+        # room when less is left
+        parts[-1]["tokens"] = reserved = max(0, min(reserved, window - used - 256))
 
     if row and row.get("prompt_tokens") is not None:
         cached = int(row.get("cached_tokens") or 0)

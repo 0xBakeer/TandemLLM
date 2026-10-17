@@ -181,6 +181,48 @@ def test_the_step_cap_ends_interrupted_and_continue_goes_on():
         c.close()
 
 
+def test_a_new_chat_runs_up_to_100_model_calls():
+    """Live (2026-10-17, the pagoda replay): a 15-file build used all 50 calls of the old default,
+    22 of them writing files, and stopped while it fixed its first errors, before any check."""
+    c = Chat()
+    try:
+        cid = c.new()
+        snap = c.ok("GET", f"/conversations/{cid}")
+        assert snap["settings"]["max_steps"] == 100
+        assert c.ok("GET", "/capabilities")["defaults"]["max_steps"] == 100
+        c.send(cid, calls(("glob", {"pattern": "**/*"})))
+        s = c.wait_idle(cid, 20)
+        assert s["messages"][-1]["status"] == "done"
+        run = c.svc.store.one("SELECT max_steps FROM runs WHERE conversation_id = ?", (cid,))
+        assert run["max_steps"] == 100
+    finally:
+        c.close()
+
+
+def test_a_call_the_engine_ends_with_an_error_is_retried_once_then_fails_saying_so():
+    """Live (2026-10-17, pagoda replay 4): the engine failed a call after 8,192 tokens of thinking
+    (finish reason `error`); chatd took it for an empty answer, nudged, got the same, and the run
+    failed with "The model answered with nothing, twice." """
+    c = Chat()
+    try:
+        cid = c.new()
+        c.send(cid, "hello FAKE_REASONING FAKE_FINISH_ERROR_ONCE")
+        s = c.wait_idle(cid, 30)
+        a = s["messages"][-1]
+        assert a["status"] == "done" and a["stats"]["steps"] == 2, a["stats"]
+        assert "w0" in text_of(a)
+        assert not any("(Your last turn was empty" in json.dumps(b) for b in requests(c)), \
+            "no empty-turn nudge for an engine error"
+        c.send(cid, "again FAKE_REASONING FAKE_FINISH_ERROR")
+        s = c.wait_idle(cid, 30)
+        a = s["messages"][-1]
+        assert a["status"] == "error" and a["stats"]["steps"] == 2
+        assert "The engine failed this model call twice (finish reason error)" in json.dumps(a)
+        assert "answered with nothing" not in json.dumps(a)
+    finally:
+        c.close()
+
+
 def test_the_same_call_three_times_stops_the_run():
     c = Chat()
     try:
@@ -669,6 +711,7 @@ def guarded(avail_gb, release=None):
 def test_the_memory_guard_admits_stops_and_kills_by_the_numbers():
     mem = {"v": 60}
     sb, clock = guarded(mem)
+    # the tests pin 1 GiB (tests/chatd_util.py); the default is 4 (the next test)
     assert sb_mod.LIMIT_BYTES == 1 * sb_mod.GiB and sb_mod.FLOOR_GB == 4.0
     assert sb.max_running == 4 and sb.total_gb == 4.0, "the cap: max_running times 1 GiB"
     sb.max_running = 1
@@ -840,6 +883,48 @@ def test_the_memory_limit_follows_qse_sandbox_mem_gb():
         sb_mod.LIMIT_BYTES = old
 
 
+def test_the_default_limit_is_4_gib_and_an_older_container_takes_it_at_its_start():
+    """2026-10-17: headless Chromium drawing a Three.js app in software went past the 1 GiB
+    default, and render_page said "out of memory (1 GiB sandbox limit), the kernel killed
+    Chromium" on the app it was there to check."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QSE_SANDBOX_")}
+    out = subprocess.run([sys.executable, "-c", "from chatd import sandbox as m; "
+                          "s = m.Sandboxes('/tmp', engine=None, meminfo_fn=lambda: {}); "
+                          "print(m.LIMIT_BYTES, m.limit_words(), s.total_gb)"],
+                         capture_output=True, text=True, cwd=root, check=True,
+                         env=dict(env, PYTHONPATH=root)).stdout.split()
+    assert out == [str(4 * sb_mod.GiB), "4", "GiB", "16.0"], out
+
+    class Old(FakeEngineAPI):
+        def call(self, method, path, body=None, timeout=60):
+            self.calls.append((method, path, body))
+            if path.endswith("/json"):
+                return 200, {"Id": "old1", "State": {"Running": False},
+                             "Config": {"Labels": {sb_mod.LABEL: "c1",
+                                                   sb_mod.INSTANCE_LABEL: inst}},
+                             "HostConfig": {"Memory": 2 * sb_mod.GiB}}
+            return 204, None
+    api = Old()
+    sb = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=api, meminfo_fn=lambda: {})
+    inst = sb.instance
+    sb._proxy = lambda b: None
+    sb.run = lambda *a, **k: (0, False)
+    sb.ensure("c1")
+    upd = [c for c in api.calls if c[1] == "/containers/old1/update"]
+    assert upd == [("POST", "/containers/old1/update", {"Memory": sb_mod.LIMIT_BYTES,
+                                                       "MemorySwap": sb_mod.LIMIT_BYTES})]
+    assert api.calls.index(upd[0]) < api.calls.index(("POST", "/containers/old1/start", None))
+    # a container made under the current limit is started as it is
+    sb2 = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=FakeEngineAPI(), meminfo_fn=lambda: {})
+    sb2._proxy = lambda b: None
+    sb2.run = lambda *a, **k: (0, False)
+    sb2.ensure("c2")
+    assert not [c for c in sb2.engine.calls if c[1].endswith("/update")]
+
+
 def test_oom_kills_are_read_from_the_cgroup():
     d = tempfile.mkdtemp()
     sb, _ = guarded({"v": 60})
@@ -988,6 +1073,200 @@ def test_render_page_on_a_port_dials_localhost_and_says_what_listens():
         T._render(Ctx(), {"port": 5173})
     except T.ToolError as exc:
         assert str(exc).endswith("; nothing listens on any port in the sandbox")
+
+
+def test_render_page_reports_the_page_console_without_chromium_noise():
+    """Live (2026-10-16, the pagoda chat): every render_page result said "console:" over eight
+    lines of Chromium's own pages (chrome://, "Slow network is detected"), GCM registration errors
+    and the deprecated WebGL fallback, and no line of the page's; the model sifted them on each
+    of its renders."""
+    import subprocess
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("index.html", b"<canvas></canvas>")
+    chromium_log = "\n".join([
+        '[86:86:1016/215118.672506:INFO:CONSOLE:422] "Slow network is detected. See https://www.'
+        'chromestatus.com/feature/5636954674692096 for more details.", source: chrome://resources/'
+        'cr_components/composebox/composebox_input.js (422)',
+        '[86:86:1016/215118.764582:INFO:CONSOLE:0] "Slow network is detected.", source: '
+        'chrome://omnibox-popup.top-chrome/ (0)',
+        '[86:116:1016/215120.901110:ERROR:google_apis/gcm/engine/registration_request.cc:291] '
+        'Registration response error message: PHONE_REGISTRATION_ERROR',
+        '[86:86:1016/215123.040540:INFO:CONSOLE:0] "[]Automatic fallback to software WebGL has been '
+        'deprecated. Please use the --enable-unsafe-swiftshader flag", source: http://localhost:'
+        '8124/ (0)',
+        '[634:634:1016/215214.160964:INFO:CONSOLE:61] "Uncaught TypeError: THREE.MathUtils.'
+        'lerpAngle is not a function", source: http://localhost:8124/js/scene/koi.js (61)',
+        '[634:634:1016/215214.3:INFO:CONSOLE:0] "[.WebGL-0x2400177600]GL Driver Message (OpenGL, '
+        'Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels", source: http://'
+        'localhost:8124/ (0)',
+        '[634:640:1016/215214.2:ERROR:dbus/bus.cc:408] Failed to connect to the bus']) + "\n"
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, log):
+            self.ws, self.cmds, self.out, self.log = ws, [], "", log
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                # the command's own filter over Chromium's stderr, as bash runs it in the sandbox
+                pipe = cmd[-1].split(" 2>&1 | ", 1)[1]
+                self.out += subprocess.run(["bash", "-c", pipe], input=self.log, text=True,
+                                           capture_output=True).stdout
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx(chromium_log)
+    res = T._render(ctx, {"path": "index.html"})
+    assert "--use-angle=swiftshader --enable-unsafe-swiftshader" in ctx.cmds[-1][-1]
+    assert res.content.split("\n", 1)[1] == (
+        'console:\n"Uncaught TypeError: THREE.MathUtils.lerpAngle is not a function", source: '
+        'http://localhost:8124/js/scene/koi.js (61)')
+    # only Chromium's lines: the page logged nothing
+    res = T._render(Ctx(chromium_log.split("[634:634")[0]), {"path": "index.html"})
+    assert res.content.endswith("\nno console errors")
+
+
+def test_render_page_on_a_port_takes_a_file_path_below_the_server_and_says_an_error_page():
+    """Live (2026-10-17, pagoda replay 2): render_page {"port": 8080, "path":
+    "/workspace/_test.html"} on `python3 -m http.server` run from /workspace loaded
+    http://localhost:8080/workspace/_test.html, the server's 404 page, and said "no console
+    errors"."""
+    ws = Workspace(tempfile.mkdtemp())
+    listening = [{"port": 8080, "addresses": ["0.0.0.0"], "command": "python3 -m http.server 8080",
+                  "cwd": "/workspace"}]
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, status):
+            self.ws, self.cmds, self.out, self.status = ws, [], "", status
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                self.out += f"HTTP_STATUS {self.status}\n"
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx("200")
+    res = T._render(ctx, {"port": 8080, "path": "/workspace/_test.html"})
+    assert "http://localhost:8080/_test.html" in ctx.cmds[-1][-1]
+    assert "curl -s -o /dev/null -m 10 -w '%{http_code}' http://localhost:8080/_test.html" in \
+        ctx.cmds[-1][-1]
+    assert res.content.endswith("\nno console errors") and "HTTP" not in res.content
+    ctx = Ctx("404")
+    res = T._render(ctx, {"port": 8080, "path": "/elsewhere/x.html"})
+    assert "http://localhost:8080/elsewhere/x.html" in ctx.cmds[-1][-1]
+    assert "the server answered HTTP 404 for http://localhost:8080/elsewhere/x.html: the " \
+           "screenshot is its error page, not the app" in res.content
+    # a file render asks no server
+    ws.write("index.html", b"<p>hi</p>")
+    ctx = Ctx("200")
+    T._render(ctx, {"path": "index.html"})
+    assert "curl" not in ctx.cmds[-1][-1]
+
+
+def test_render_page_reports_a_failed_module_load_through_the_kit():
+    """Live (2026-10-17, pagoda replay 3): js/main.js imported "./util.js", which answered 404;
+    the app stayed on "Loading garden..." and Chromium's screenshot mode logged nothing, so
+    render_page said "no console errors" six times over the same picture. The kit's page check
+    (Chrome under DevTools) sees the failed load."""
+    ws = Workspace(tempfile.mkdtemp())
+    listening = [{"port": 5173, "addresses": ["0.0.0.0"], "command": "python3 -m http.server",
+                  "cwd": "/workspace"}]
+    rep = {"url": "http://localhost:5173/", "ok": False, "verdict": "FAIL: 1 console error(s)",
+           "errors": ["network: Failed to load resource: the server responded with a status of "
+                      "404 (File not found) http://localhost:5173/js/util.js"],
+           "steps": [], "widths": [{"width": 1280, "text": "Loading garden...",
+                                     "scroll_width": 1280}]}
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self):
+            self.ws, self.cmds, self.out = ws, [], ""
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "laya_drive.py page" in cmd[-1]:
+                ws.write(".tandem/shots/call1/page-1280.png", b"\x89PNG fake")
+                self.out += json.dumps(rep, indent=1) + "\n"
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx()
+    res = T._render(ctx, {"port": 5173})
+    assert not any("chromium" in c[-1] for c in ctx.cmds)
+    kit = ctx.cmds[-1][-1]
+    assert "python3 .tandem/laya_drive.py page http://localhost:5173/ --no-laya --widths 1280 " \
+           "--shots /workspace/.tandem/shots/call1 --timeout 60" in kit
+    assert ws.read(".tandem/laya_drive.py").startswith(b"#!/usr/bin/env python3")
+    assert res.content.startswith("rendered http://localhost:5173/ at 1280x900 just now")
+    assert 'visible text: "Loading garden..."' in res.content
+    assert res.content.endswith("console errors, exceptions and failed loads:\nnetwork: Failed to "
+                                "load resource: the server responded with a status of 404 (File "
+                                "not found) http://localhost:5173/js/util.js")
+    assert res.images and res.pane["ref"] == "file:/workspace/.tandem/shots/call1/page-1280.png"
+    rep["errors"], rep["widths"][0]["text"] = [], ""
+    assert T._render(Ctx(), {"port": 5173}).content.endswith(
+        "no console errors and no failed loads")
+
+
+def test_render_page_quotes_the_line_an_error_names():
+    """Live (2026-10-17, pagoda replay 3): "Cannot read properties of undefined (reading 'set')"
+    at pond.js (62) reached the model 13 times and it edited main.js for 20 minutes; line 62 was
+    `petal.position.set(...)` on a geometry. The result now shows that line."""
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("js/scene/pond.js", ("\n" * 61 + "      petal.position.set(1, 2, 3);\n").encode())
+    listening = [{"port": 5174, "addresses": ["0.0.0.0"], "command": "python3 -m http.server",
+                  "cwd": "/workspace"}]
+    exc = ("exception: TypeError: Cannot read properties of undefined (reading 'set') "
+           "(http://localhost:5174/js/scene/pond.js:62)")
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, kit):
+            self.ws, self.cmds, self.out, self.kit = ws, [], "", kit
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if cmd[-1] == "ports":
+                self.out += json.dumps(listening) + "\n"
+            elif "laya_drive.py page" in cmd[-1] and self.kit:
+                ws.write(".tandem/shots/call1/page-1280.png", b"\x89PNG fake")
+                self.out += json.dumps({"errors": [exc], "widths": [{"text": ""}]}) + "\n"
+            elif "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                self.out += ('[1:1:1017/045852.1:INFO:CONSOLE:62] "Uncaught TypeError: Cannot '
+                             'read properties of undefined (reading \'set\')", source: '
+                             'http://localhost:5174/js/scene/pond.js (62)\n')
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    quoted = "    /workspace/js/scene/pond.js:62: petal.position.set(1, 2, 3);"
+    res = T._render(Ctx(True), {"port": 5174})
+    assert res.content.endswith(exc + "\n" + quoted), res.content
+    res = T._render(Ctx(False), {"port": 5174})            # no report from the kit: Chromium
+    assert res.content.endswith("(reading 'set')\", source: http://localhost:5174/js/scene/"
+                                "pond.js (62)\n" + quoted), res.content
+    # another port's script, or a line past the end, is not quoted
+    assert T.quote_lines(Ctx(True), [exc.replace("5174", "9999")], 5174, "/workspace") == \
+        [exc.replace("5174", "9999")]
+    assert T.quote_lines(Ctx(True), [exc.replace(":62", ":99")], 5174, "/workspace") == \
+        [exc.replace(":62", ":99")]
 
 
 def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():

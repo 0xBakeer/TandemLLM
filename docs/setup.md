@@ -7,7 +7,7 @@ The dashboard's `#/setup` page walks through an install in eight steps, from pic
 A new box has no configured engine yet. Two commands install TandemLLM and start setup mode, with no model loaded:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.2/install.sh
+curl -fsSLO https://raw.githubusercontent.com/0xBakeer/TandemLLM/v0.11.3/install.sh
 bash install.sh --setup --yes
 ```
 
@@ -30,9 +30,9 @@ Until an admin password is set, anyone who reaches the port can run the setup, a
 Since 0.8.1 a new DGX Spark needs no files from anyone and no Hugging Face token. Every file a profile reads is public on Hugging Face. The Setup Guide runs `ops/use-profile.sh` for you; to pick the weights from a shell instead, install with the two commands above, then:
 
 ```bash
-~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
-~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # what it would download: each URL and size
-~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
+bash ~/TandemLLM/run/ops/use-profile.sh --list                 # every profile, the active one marked
+bash ~/TandemLLM/run/ops/use-profile.sh <profile> --dry-run    # what it would download: each URL and size
+bash ~/TandemLLM/run/ops/use-profile.sh <profile>              # download, check, leave setup mode, start
 ```
 
 Run the copy in `~/TandemLLM/run/ops/`, which reads the `serve.env` the installer wrote. The switch downloads what the profile needs, checks it, and starts the engine on port 8000. Two examples:
@@ -46,7 +46,7 @@ The other EXL3 sizes download 12.0 to 23.3 GB of weights and share the rest. Bef
 
 On a box in setup mode the switch removes `run/setup-pending`, so the engine starts with the profile. If the profile does not come up, the marker comes back and setup mode starts again. The setup page does the same through its install job.
 
-The `curl` line fetches the installer from the tag `v0.11.2`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.11.2'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
+The `curl` line fetches the installer from the tag `v0.11.3`, and the installer checks out the same tag from the repository `--repo` names, `https://github.com/0xBakeer/TandemLLM.git` by default. Where the tag is missing, `curl` fails with a 404, and `install.sh` stops at its clone step with "no tag, branch or commit 'v0.11.3'"; `--ref` picks another release. The manual ([`tandemllm-manual.pdf`](../manual/tandemllm-manual.pdf), chapter "Installing TandemLLM") has the details.
 
 ## The model registry
 
@@ -118,9 +118,10 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 
 | step | what it runs |
 |-|-|
-| check | the selection, the memory, the disk, the files the profile needs, the HF token (only a private repository needs one; every published profile is public), the box lock |
+| check | `tandem doctor` first (file modes, the `run/ops` copies, stale pid files, the marker; its report on the job as `doctor`, OPS-171), then the selection, the memory, the disk, the files the profile needs, the HF token (only a private repository needs one; every published profile is public), the box lock |
 | unload_assistant | Wren is unloaded before the job starts |
 | fetch | `bash ops/use-profile.sh <profile> --fetch-only`: the profile's weights and the files it needs beside them (the `assets_required` with a `fetch` list in the registry), and the models of the tools the selection turns on (`QSE_FETCH_ASSETS`: the shadow reader's, the narrator's, Laya's; each once); skipped when all of them are on disk |
+| preflight | before anything stops (OPS-169): the scripts the switch runs are there and parse (`bash -n`; the Python ones compile), `serve.env` with the profile and the overlay the job will write sources under `set -u` as `start.sh` sources it, the weights are complete (the folder's files and the hub manifest's sizes), memory (MemAvailable now and what the running engine gives back cover the profile's need), the new port is free, no box lock and no hold, the engine's and chatd's interpreters run; a failure ends the job here, in plain words, and the running setup keeps running |
 | write_config | first `waiting` until no request runs or waits on the engine (10 minutes at most, else nothing changes); then `run/setup.env`, every value quoted, the old one kept as `run/setup.env.bak-<time>`; with a port change, `bash ops/stop.sh 120` first, and a failure after that stop goes through the rollback; with "generate", `bash ops/make-secrets.sh --admin` |
 | switch | `bash ops/use-profile.sh <profile>` with `QSE_NO_ROLLBACK=1`: stop, start, smoke; a failure is this job's rollback, not the script's (which would start the old profile under the new overlay); in setup mode `run/setup-pending` goes first, a copy kept in the job's folder |
 | smoke | `/health` names the profile and one chat answers (512 tokens at most, as use-profile.sh asks); then the tools with a model of their own, from `/health` `roles` and the decision models, polled up to 90 s: one that failed to load is a warning on the job (`warnings`, with its error), one waiting for memory a note (`notes`); the job still ends `done` |
@@ -128,9 +129,15 @@ The job runs a fixed list of steps from `server/setup/apply.py`, and nothing a c
 
 `ops/serve.env` is never edited. It reads `run/setup.env` after the weight profile, so the overlay never sets the weights. The overlay leaves out a key that serve.env leaves unset when its value is what the engine runs with anyway, so the engine's environment does not change for nothing: the disk tier's fingerprint counts every `QWEN38_*` variable that is set, and a new one sweeps that profile's saved heads and parked chats at the next start. A box whose `serve.env` predates the setup guide must get those last lines first; the plan says so.
 
-The job runs as a process of its own, because the switch replaces the server that started it. Its state is in `run/setup-jobs/<id>/`, and the status page (`ops/engine_status.py`) answers `GET /v1/setup/jobs/{id}` while the engine restarts. Apply is refused while requests run (409 `busy`), while another job runs (409 `job_running`), when the selection does not fit (409 `over_budget`), and when the box lacks something (412 `missing_assets`, `missing_token`, `disk_full`, `no_overlay_hook`).
+The job runs as a process of its own, because the switch replaces the server that started it. Its state is in `run/setup-jobs/<id>/`, and the status responder (`ops/engine_status.py`) answers `GET /v1/setup/jobs/{id}` (the same stream) and `GET /v1/setup/status` while the engine restarts: the page shows one restart card with the job's step and the load's phase, and the job's true end when the engine is back (OPS-175, VIS-209, VIS-211). Apply is refused while requests run (409 `busy`), while another job runs (409 `job_running`), when the selection does not fit (409 `over_budget`), and when the box lacks something (412 `missing_assets`, `missing_token`, `disk_full`, `no_overlay_hook`).
+
+A failed step says what broke in plain words, from the runner's reason and the command's last lines: a script that lost its execute bit (tandem doctor repairs the mode at once and the step says so), a hold, too little memory, an engine that did not answer in time with its log's last line, a download that stopped (VIS-213). The failed and rolled-back screens list what tandem doctor repaired, offer Retry and Copy diagnostics. `POST /v1/setup/jobs/{id}/retry` starts a new job from the failed one's selection (`retry_of`): the check and tandem doctor run again and a finished download is not repeated, because the plan finds the weights. `GET /v1/setup/jobs/{id}/diagnostics` is the job as text for a bug report: the versions, the steps, tandem doctor's reports, the selection and the last 200 log lines, passed through the secret filter; where the browser does not let a page copy (plain http on a phone), the page shows it to select.
 
 On a new box the fetch step downloads the 27B's K3 drafters, K4 draft head, BF16 drafters and base with the weights, and the plan's `download_gb` counts them (OPS-95). The NVFP4 profile's base is the FP8 checkpoint (30.4 GB). An EXL3 profile's is `base-plain` (OPS-133): the checkpoint's files fetched by range requests without the F8_E4M3 projections, their scales and `lm_head.weight`, which the EXL3 pack replaces, 3.54 GB; a box with the full checkpoint uses that. The review lists each download with its size (`downloads`), the tools' models too. Only a file nothing downloads fails the check with `missing_assets`, before anything changes; for a tool's model the error names the tool, and the fix is to turn it off in the Tools step.
+
+## Removing a model
+
+The weights step lists the weights on the box (`GET /v1/setup/weights`): each profile's folder with its size, the running one marked, a folder two profiles share as one row; the drafters, the draft head and the base checkpoint, which the models share, are listed apart and never removed here (SRV-560, VIS-215). Remove asks first, with the GB it frees and the line that downloads the weights again, then `POST /v1/setup/remove {profiles, confirm: true}` deletes the folder. It refuses the running profile (switch first, or tick "Remove ... after the switch" in the review step: `remove_after` of the apply, done once the new setup answers), a folder a kept profile shares, and any folder that is not a real folder under the home folder or the Hugging Face cache, holds the installation, or holds what something else reads; in the Hugging Face cache the repository's whole folder goes, only when nothing else reads from it. Each removal appends a line to `run/weights-removed.txt`: the time, the profile, its repository at its revision, the folder, the GB and `bash ops/use-profile.sh <profile> --fetch-only`. A download that does not fit is refused before it starts, with the GB too few and the weights that could be removed.
 
 ## Benchmarks and the overlay
 

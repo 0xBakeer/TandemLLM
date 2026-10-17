@@ -29,9 +29,10 @@ describe('planToolCall', () => {
     if (!p.ok || p.kind !== 'action') throw new Error('expected an action');
     let st = setupReducer(emptyState(), { type: 'open', model: M }, M);
     for (const a of p.actions) st = setupReducer(st, a, M);
-    expect(st.selection!.components.narrator).toBe(false);
+    expect(st.selection!.components.laya).toBe(false);
     for (const a of p.undo) st = setupReducer(st, a, M);
-    expect(st.selection!.components).toMatchObject({ conductor: true, narrator: true, laya: true, shadow: true });
+    // the narrator is off by default since 0.11.3 (SRV-534) and stays off
+    expect(st.selection!.components).toMatchObject({ conductor: true, narrator: false, laya: true, shadow: true });
   });
   it('set_field(parallelism, slots, 2) and string numbers from a small model', () => {
     expect(planToolCall({ name: 'set_field', args: { step: 'parallelism', field: 'slots', value: 2 } }, ctx({ step: 'parallelism' }))).toMatchObject({ ok: true, actions: [{ type: 'parallel', key: 'slots', value: 2 }] });

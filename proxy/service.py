@@ -165,6 +165,9 @@ class Service:
         self.metrics = Metrics(registry, self) if registry is not None else None
         self.started = time.time()
         self.harness = None
+        # the monitor's policy: its stall watchdog's ntfy settings carry the push of a new model
+        self.monitor_base = monitor_base
+        self.notifier = None                   # notify.send; a test puts its own here
         if conductor is not None:
             from proxy.harness import Harness
             self.harness = Harness(self, conductor, monitor_base, log=self.log)
@@ -218,6 +221,33 @@ class Service:
             return None
         return self.adapter(b).price({"prompt_tokens": 0, "completion_tokens": int(tokens),
                                       "cached_tokens": 0}, price, rec.ts)
+
+    def new_models(self, bid: str, ids: list[str]) -> None:
+        """A discovery found model ids the backend never listed (config.sync_models stored them
+        disabled): one log line each, and one push through the box's ntfy topic (the stall
+        watchdog's url, token file and CA in the monitor's policy) when it has one. A new id is
+        new once: its row stays, so it is never reported again."""
+        b = self.table.backend_for(bid) or self.cfg.backend(bid) or {}
+        who = b.get("label") or bid
+        for mid in ids:
+            self.log(f"[proxy] {bid}: new model {mid} in /models, disabled until it is turned "
+                     f"on under Backends")
+        cfg = None
+        try:
+            task = self.monitor_base.tasks.get("S4") if self.monitor_base is not None else None
+            cfg = dict(task["notify"]) if task is not None else None
+        except Exception:                                          # noqa: BLE001
+            cfg = None
+        if not cfg or not (cfg.get("url") and cfg.get("token_file")):
+            return
+        if self.notifier is None:
+            from server.conductor.monitor import notify
+            self.notifier = notify.send
+        cfg = dict(cfg, tags="new")
+        said = self.notifier(cfg, "TandemLLM: new model",
+                             f"{who}: new model {', '.join(ids)} in /models (disabled; turn it on "
+                             f"under Backends)")
+        self.log(f"[proxy] {bid}: push of the new model: {said}")
 
     def peer_backends(self) -> list[tuple[str, str]]:
         """The TandemLLM backends, `(id, url)`: the parallel view reads their own lanes."""

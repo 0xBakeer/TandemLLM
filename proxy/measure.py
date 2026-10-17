@@ -52,6 +52,7 @@ class RelayRecord(usage_mod.RequestRecord):
         self.tool_chars = 0            # the calls' argument characters so far
         self.live_kind = None          # "reasoning" | "content" | "tool"
         self.live_tool = None
+        self.system_fingerprint = None  # the answer's `system_fingerprint` (ledger schema 10)
 
     # the engine's split does not exist here
     @property
@@ -151,5 +152,6 @@ class RelayRecord(usage_mod.RequestRecord):
             "decode_tps": r2(self.decode_tps) if decoded else None,
             "prefill_tps": None, "blocks": None, "draft_tokens": None, "draft_accepted": None,
             "cache_source": None,
+            "system_fingerprint": self.system_fingerprint,
         })
         return out

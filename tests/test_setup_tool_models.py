@@ -143,8 +143,11 @@ def test_a_tool_fails_after_the_restart():
         r = apply.Runner(jid, cmd=T.Recorder(), http=http, ops=box.ops, sleep=lambda s: None)
         assert r.main() == 0
         j = apply.read_job(jid)
+        # VIS-211: plain words for the page, the planner's reason in the log
         assert j["state"] == "done" and j["notes"] == [
-            "Shadow reader waits for memory (refused_hold); it loads when memory frees up."], j
+            "Shadow reader loads later, when memory frees up; nothing to do."], j
+        logs = [e["event"]["line"] for e in apply.events(jid) if e["event"]["type"] == "log"]
+        assert "[smoke] Shadow reader: refused (refused_hold)" in logs, logs
         assert j["warnings"] == ["Laya decision models did not load (a decision model failed to "
                                  "load)."], j["warnings"]
         assert 4 <= len(polls) <= apply.ROLE_SETTLE_POLLS + 1, len(polls)

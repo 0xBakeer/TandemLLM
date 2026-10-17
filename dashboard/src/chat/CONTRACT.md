@@ -104,8 +104,11 @@ interface ToolCallPart {
   started_at: string | null; ended_at: string | null;
   permission?: { summary: string; suggested_rule?: { tool: string; match?: string } } | null;   // suggested_rule: v0.2
   pane?: PaneRef | null;
+  harness?: 'verify';                            // SRV-532: a call the harness made itself (source {kind: 'harness'})
 }
 interface ErrorPart { type: 'error'; message: string; retryable: boolean }
+interface VerifyPart { type: 'verify'; state: 'passed' | 'problems' | 'not_run' | 'stale'; text: string;
+                       checked?: string[]; not_checked?: string[] }   // SRV-532: the end of an answer that built an app
 interface ArtifactPart { type: 'artifact'; id: string; title: string; mime: string; version: number }   // v2
 
 interface Attachment {
@@ -123,29 +126,30 @@ interface TurnStats {
   ttft_ms: number | null; decode_tps: number | null; total_ms: number | null;
   prompt_tokens: number; completion_tokens: number; reasoning_tokens: number; cached_tokens: number;
   tokens_per_round: number | null; acceptance: number | null;
-  cache_source?: CacheSource | string;           // v0.2: resident, end, park, spill, disk, none ... (the engine's cache_source)
+  cache_source?: CacheSource | string;           // v0.2: resident, end, park, spill, disk, none ... (the engine's cache_source); `provider` for a relayed model (0.11.3)
   prefill_tps?: number | null;                   // v0.2
-  cost_usd?: number | null;                      // v0.2: cloud backends only
+  cost_usd?: number | null;                      // v0.2: cloud backends only; 0.11.3: the proxy's price of every call (`: tandem-cost`)
 }
 
 // ---- the run
-type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'finishing';
+type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing';   // verifying: SRV-532
 interface Run {
   id: string; conversation_id: string; message_id: string; started_at: string;
   started_by: string | null;                     // a device label when it was not this browser
   phase: RunPhase; now: string;
-  step: number; max_steps: number;               // v0.2: model calls so far, the cap (default 50)
+  step: number; max_steps: number;               // v0.2: model calls so far, the cap (default 100)
   queue_position: number | null;                 // v0.2: place in the engine's line while phase = queued
   tool: { call_id: string; name: string } | null;
   prefill: { done: number; total: number; tps?: number | null; eta_ms?: number | null } | null;
   decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null;
+  ttft_ms?: number | null;                       // 0.11.3: this model call's first token, once it came
   thinking: { used: number; budget: number | null };
   tokens: number;
   tps_history: (number | null)[];                // one-second decode samples, oldest first, at most 120
 }
 
 // ---- the Context panel
-type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'messages' | 'thinking' | 'reserved';
+type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'images' | 'messages' | 'thinking' | 'reserved';  // images: the engine's split (VIS-205)
 interface ContextPart { kind: ContextPartKind; label: string; tokens: number }
 interface ContextReport {
   window: number; used: number;
@@ -196,8 +200,9 @@ interface ChatSettings {
   prompt_id: string | null;                      // the system prompt (a saved prompt), null = default
   policies: Record<string, ToolPolicy>;          // per-tool overrides for this chat
   auto_accept_edits: boolean;                    // v0.2: write tools run without asking
-  max_steps: number;                             // v0.2: default 50
+  max_steps: number;                             // v0.2: default 100
   sandbox_network: 'off' | 'on';                 // v0.2: 'on' = internet without the LAN; see SandboxStatus.network
+  verify?: boolean;                              // SRV-532: check a page or app the run built before it ends (default true)
 }
 type ToolPolicy = 'ask' | 'always' | 'never';
 type ToolSource = { kind: 'builtin' } | { kind: 'package'; id: string } | { kind: 'mcp'; id: string } | { kind: 'user'; id: string };
@@ -230,7 +235,7 @@ interface Capabilities {
     id: string; name: string; weights: string; max_len: number;
     profiles: { id: string; name: string; description: string }[];                 // VIS-203: always []; the picker lists models only
     backend?: 'engine' | 'proxy' | 'cloud';                                         // v0.2
-    capabilities?: { thinking: boolean; effort_levels: string[]; tools: boolean; vision: boolean; structured: boolean };   // v0.2, from the model card
+    capabilities?: { thinking: boolean; effort_levels: string[]; effort_default?: string | null; tools: boolean; vision: boolean; structured: boolean };   // v0.2, from the model card; 0.11.3: a cloud model's levels and default from its provider's model list (DeepSeek: low, high, max; high)
     loaded?: boolean;
   }[];
   efforts: (Effort | 'auto')[];
@@ -355,7 +360,7 @@ replayed, and the snapshot holds their latest value. Text deltas are coalesced t
 type ChatEvent =
   | { type: 'run.started'; run: Run }
   | { type: 'run.phase'; run_id: string; phase: RunPhase; now: string; tool?: Run['tool']; prefill?: Run['prefill']; step?: number; queue_position?: number | null }
-  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_budget?: number | null; prefill?: Run['prefill'] }   // E, at most 4 a second
+  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_budget?: number | null; ttft_ms?: number | null; prefill?: Run['prefill'] }   // E, at most 4 a second
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
   | { type: 'message.created'; message: Message }
@@ -399,6 +404,16 @@ chat in the slot) and the sandbox runtime's stats. The `files` part is what the 
 from the first message a compaction kept. Live rates follow the dashboard's NOW rule: `null` when
 idle; decode rates skip the first 50 tokens. A figure without a value says why in words ("measured
 after the first turn", "not tracked for this model"), never a bare dash.
+
+A model the proxy relays (`model.backend` `cloud` or `proxy`, 0.11.3) has no live row with counts:
+chatd measures its stream itself. Live: tokens per text chunk (one token each on DeepSeek), a tool
+call's arguments at 3.5 characters a token, thinking from `reasoning_content`, the first token's
+wait from the send. After each call: the provider's usage (DeepSeek's `prompt_cache_hit_tokens` as
+the cached tokens, `cache.source` `provider`), tok/s = (completion tokens - 1) over the stream's
+span, and the proxy's price as `cost_usd`. A cloud model's `split` is chatd's estimate from the
+request's characters at the chat's learned tokens per character (`estimated: true`, the skill
+index apart as `skills`); the panel marks those parts "est.". The `reserved` part is what a request
+asks for: the model's output limit, or the window's room when less is left.
 
 ## 5. Rules the UI can rely on
 
@@ -540,3 +555,13 @@ The ask: fewer allow prompts for `cd` and `ls`, and a mode that asks for nothing
 - `tool.started` carries `approved: 'user' | 'rule' | 'auto' | 'yolo' | null`; `ToolCallPart.approved` keeps it and the card shows a small badge for everything but `user` (YOLO in orange).
 - Server (chatd, 2026-10-13): serves exactly this shape: `ChatSettings.permission_mode` (null on chats from before 0.8.2), `approved` on `tool.started` and the tool part (`rule` = a rule, an always policy or auto-accept edits on a tool that would ask; null = the tool's own default allow), `PATCH /defaults {permission_mode}` answering `Capabilities.defaults`. It also sends `tool.auto_approved` (the event log's record of each call a mode allowed), `Run.permission_mode`, `run.mode` and the assistant message's `permission_mode`; the reducer ignores them today. Full server section: chat-ui-brief/community/CONTRACT.md "Permission modes (API)".
 - Bash prompts (chatd, 2026-10-13, the 11-times "always allow cd" bug): `suggested_rule` for bash carries `matches: string[]`, one prefix per part of a chained command that no allow rule covers yet (`cd /w && node a.js > run.log 2>&1; echo $?; cat run.log` -> `["cd","node","echo","cat"]`), and `match` the same joined with ", ". "Always allow" saves all of them (once each). `matches: []` (a command with `$(...)` or backticks) means no rule can allow it: the thread hides the Always button. The button reads "Always allow `cd, node, echo, cat`".
+
+
+## The verify phase (SRV-532, 2026-10-17)
+
+A run that built or changed a web page or app checks it in a browser before it ends (chatd/verify.py is the authority).
+
+- When the model's step would end the run and web files changed since the run's start or its last check, chatd adds a call of its own to that step: `ToolCallPart` with `name: 'render_page'`, `harness: 'verify'`, `source: {kind: 'harness'}`, `input` the target (`{path}` or `{port}`). It goes through `part.added`, `tool.started` and `tool.done` like any call; its output is what the model reads, with the 1280 px screenshot in `output.images` and an image pane. The thread shows it as a `verify` card with a `harness` badge.
+- Meanwhile `run.phase` is `verifying`, `now` "Verifying the app: loading <target> in a browser (check N of 2)", `tool` the call. The model then fixes what the check found or answers; at most two checks a run.
+- A completed run that built or changed an app ends with a `VerifyPart` (`part.added`): `state` passed, problems (the last check's, not fixed), not_run (no check could run: no sandbox, the step limit, the sandbox failed) or stale (files changed after the last check); `text` a lead line, then "Checked: ..." and "Not checked: ..." lines with the items of `checked` and `not_checked`. The model never reads it.
+- `ChatSettings.verify` (default true; absent on an older server = on) turns it off; the composer's tools menu has the switch.

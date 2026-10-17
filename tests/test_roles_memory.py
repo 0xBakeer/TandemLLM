@@ -218,9 +218,19 @@ def test_the_shadow_loads_ahead():
         # a slot the narrator owns is its keeper's
         n = Slot(FakeGenerative("fake-shared"), role="narrator", gate=threading.Lock(),
                  log=lambda x: None)
+        mode = {"mode": "on"}
         app.STATE.update(shadow=types.SimpleNamespace(slot=n),
-                         narrator=types.SimpleNamespace(slot=n))
+                         narrator=types.SimpleNamespace(slot=n, settings=lambda: mode))
         assert app.shadow_preload_once() is None and n.state == "not_loaded"
+        # SRV-534: the narrator role off (the default): its keeper never loads, the shadow does
+        mode["mode"] = "off"
+        assert app.shadow_preload_once() == "loading"
+        for _ in range(200):
+            if n.state == "loaded":
+                break
+            app.time.sleep(0.01)
+        assert n.state == "loaded", n.state
+        n.unload()
         # a refusal is said once, with its reason
         r = Slot(FakeGenerative("fake-refused"), role="shadow", gate=threading.Lock(),
                  log=lambda x: None,

@@ -5,8 +5,9 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
-import type { Summary, Totals, Usage, UsageBucket } from '../api/types';
-import { compact, dateLong, exact, money, ms, tps } from '../lib/format';
+import type { BackendRef, Summary, Totals, Usage, UsageBucket } from '../api/types';
+import { compact, dateLong, exact, fixed, money, ms, tps } from '../lib/format';
+import { compareRows, ENGINE, relayedBackends } from '../lib/relayed';
 import { buildHeatGrid, bucketDayKey, streaks, yearWindow, type HeatGrid, type HeatMetric } from '../lib/heatmap';
 import { setParams } from '../lib/router';
 import { addDays, browserTz, dayKey, diffDays, todayKey } from '../lib/time';
@@ -51,6 +52,8 @@ export class QseUsage extends LightElement {
   @property({ attribute: false }) params: URLSearchParams = new URLSearchParams();
   @state() private usage: Loadable<Usage> = { state: 'loading' };
   @state() private custom: Loadable<Usage> | null = null;
+  /** the engine's own year and each relayed backend's (0.11.3), for the comparison table */
+  @state() private byBackend: { engine: Usage; relayed: { ref: BackendRef; usage: Usage }[] } | null = null;
   @state() private metric: HeatMetric = 'total_tokens';
   private tz = browserTz();
   private lastKey = '';
@@ -110,6 +113,13 @@ export class QseUsage extends LightElement {
     try {
       const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
       this.usage = { state: 'ready', data: u };
+      // the engine against each relayed backend (a cloud model), over the same year and filters
+      const rel = this.backend ? [] : relayedBackends(u);
+      if (rel.length) {
+        const q = { from, to, bucket: 'day' as const, tz: this.tz, model: this.model, client: this.client, user: this.user, internal: this.internal };
+        const [engine, ...others] = await Promise.all([api.usage({ ...q, backend: ENGINE }), ...rel.map((ref) => api.usage({ ...q, backend: ref.id }))]);
+        this.byBackend = { engine, relayed: rel.map((ref, i) => ({ ref, usage: others[i] })) };
+      } else this.byBackend = null;
     } catch (e) {
       const d = describeError(e);
       this.usage = { state: 'error', endpoint: d.endpoint, message: d.message };
@@ -151,6 +161,7 @@ export class QseUsage extends LightElement {
         ${this.renderFilters()}
         ${this.renderHeatmap()}
         ${this.renderCharts()}
+        ${this.renderBackends()}
         ${this.renderTopDays()}
       </div>
     `;
@@ -391,6 +402,34 @@ export class QseUsage extends LightElement {
         )}
       </div>
     `;
+  }
+
+  // ---- the engine against the relayed backends ------------------------------------------
+  private renderBackends(): TemplateResult | typeof nothing {
+    const bb = this.byBackend;
+    if (!bb) return nothing;
+    const rows = compareRows(bb.engine, bb.relayed);
+    return panel(
+      'Engine and relayed backends',
+      html`<div class="table-scroll"><table class="table table-backends" data-testid="backend-compare">
+          <thead><tr><th>Backend</th><th class="num-col">Requests</th><th class="num-col">Prompt</th><th class="num-col">Cached</th><th class="num-col">Output</th><th class="num-col">Decode p50</th><th class="num-col">TTFT p50</th><th class="num-col">Cost</th></tr></thead>
+          <tbody>
+            ${rows.map(
+              (r) => html`<tr data-backend=${r.id}>
+                <td class="cell-wrap">${r.name}${r.kind !== 'engine' ? html` <span class="muted">${r.kind}</span>` : nothing}</td>
+                <td class="num-col num">${exact(r.requests)}</td>
+                <td class="num-col num" title=${exact(r.prompt)}>${compact(r.prompt)}</td>
+                <td class="num-col num" title=${exact(r.cached)}>${compact(r.cached)}</td>
+                <td class="num-col num" title=${exact(r.completion)}>${compact(r.completion)}</td>
+                <td class="num-col num">${r.decodeP50 == null ? '—' : `${fixed(r.decodeP50, 1)} tok/s`}</td>
+                <td class="num-col num">${ms(r.ttftP50)}</td>
+                <td class="num-col num">${r.id === ENGINE ? '—' : money(r.cost)}</td>
+              </tr>`,
+            )}
+          </tbody>
+        </table></div>`,
+      { sub: "the last year, per backend: the engine's own requests and each one the proxy relayed (a cloud model's TTFT holds the network and its queue)", id: 'backends' },
+    );
   }
 
   // ---- top days -------------------------------------------------------------------------

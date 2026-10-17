@@ -330,7 +330,7 @@ export class QseLivePanel extends LightElement {
   }
 
   private meta(r: LiveRequest): TemplateResult {
-    return html`<span class="live-meta clip">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.lane ? html` · <span class="lane-tag" data-lane=${r.lane} title=${laneTitle(r.lane)}>${laneWord(r.lane)}</span>` : nothing}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
+    return html`<span class="live-meta clip">${r.model}${r.temperature != null ? html` · t ${r.temperature}` : nothing}${r.thinking ? ' · thinking' : ''}${r.cache_source && r.cache_source !== 'none' ? ` · ${r.cache_source}` : ''}${r.lane ? html` · <span class="lane-tag" data-lane=${r.lane} title=${laneTitle(r.lane)}>${laneWord(r.lane)}</span>` : nothing}${r.backend ? html` · <span class="tag" data-backend=${r.backend} title="relayed to the backend ${r.backend} (proxy)">${r.backend}</span>` : nothing}${r.endpoint === 'completions' ? ' · completions' : ''}${r.stream ? '' : ' · json'}</span>`;
   }
 
   /** The card's one-line form: the prompt, then the cached share in brackets. */
@@ -382,7 +382,8 @@ export class QseLivePanel extends LightElement {
     const after = w.prefill_warmup_chunks === 0 ? 'from the start' : w.prefill_warmup_chunks === 1 ? 'after the first chunk' : `after ${w.prefill_warmup_chunks} chunks`;
     const fromChunk = `from chunk ${w.prefill_warmup_chunks + 1}`;
     let decode = blank;
-    if (r.phase === 'decode' && r.decode_warmup) decode = r.decode_warmup.reached ? [from, `now over the last ${w.now_window_s} s / average, ${from}`] : [warmingWords(r, w), `the live rate starts at decoded token ${w.decode_warmup_tokens}`];
+    if (r.backend && r.phase !== 'done') decode = ['counted at its end', `relayed to ${r.backend}: the backend's usage counts its tokens when it ends; the Parallel view counts its stream live`];
+    else if (r.phase === 'decode' && r.decode_warmup) decode = r.decode_warmup.reached ? [from, `now over the last ${w.now_window_s} s / average, ${from}`] : [warmingWords(r, w), `the live rate starts at decoded token ${w.decode_warmup_tokens}`];
     else if (r.phase === 'done' && r.decode_tps != null) decode = [r.decode_live_avg_tps != null ? `${from}: ${fixed(r.decode_live_avg_tps, 1)}` : '\u00a0', `decode ${from}: ${tps(r.decode_live_avg_tps)} · decode end to end (timings): ${tps(r.decode_tps)}`];
     const p = r.activity?.prefill;
     const mostly = mostlyCachedWords(r);
@@ -493,7 +494,7 @@ export class QseLivePanel extends LightElement {
                   const open = () => navigate('dev', { request: x.request_id });
                   return html`<tr class="recent-row tone-${t.tone}" data-id=${x.request_id} @click=${open}>
                     <td class="num rc-when">${timeShort(x.ended_at)}</td>
-                    <td class="rc-client">${x.client_kind}${x.lane ? html` <span class="lane-tag" data-lane=${x.lane} title=${laneTitle(x.lane)}>${laneWord(x.lane)}</span>` : nothing}</td>
+                    <td class="rc-client">${x.client_kind}${x.lane ? html` <span class="lane-tag" data-lane=${x.lane} title=${laneTitle(x.lane)}>${laneWord(x.lane)}</span>` : nothing}${x.backend ? html` <span class="tag" data-backend=${x.backend}>${x.backend}</span>` : nothing}</td>
                     <td class="tl-col rc-path">${this.strip(pathSegments(x.path), t.tone === 'bad', x.path.join(' → '))}</td>
                     <td class="num-col rc-tokens">${exact(x.tokens)}<span class="rc-unit"> tok</span></td>
                     <td class="rc-cache">${this.cacheCell(x)}</td>
@@ -518,6 +519,12 @@ export class QseLivePanel extends LightElement {
    * and forwarded; empty for a row from a server before 0.4.0, which sends neither. */
   private cacheCell(x: LiveRecent): TemplateResult {
     if (x.prompt_tokens == null || x.cache_source === undefined) return html`<span class="muted rc-unit">—</span>`;
+    if (x.backend) {
+      // a relayed request: what the backend's own cache served (DeepSeek's cache hits), never one
+      // of the engine's tiers; it read "cold, 105K reused" (2026-10-17)
+      const title = `relayed to ${x.backend}: ${exact(x.cached_tokens ?? 0)} of ${exact(x.prompt_tokens)} prompt tokens served from the backend's cache`;
+      return html`<span class="cache-tag tier-backend" data-backend=${x.backend} title=${title}>${x.backend} cache</span><span class="cache-split muted num" title=${title}>${compact(x.cached_tokens ?? 0)} cached · ${compact(Math.max(0, x.prompt_tokens - (x.cached_tokens ?? 0)))} new</span>`;
+    }
     const tier = cacheTier(x.cache_source);
     const u = reuse(x.prompt_tokens, x.cached_tokens, x.forwarded_tokens);
     const title = `${TIER_LABEL[tier]}: ${exact(u.reused)} of ${exact(x.prompt_tokens)} prompt tokens reused, ${exact(u.forwarded)} forwarded`;

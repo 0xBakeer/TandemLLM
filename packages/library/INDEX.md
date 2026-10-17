@@ -2,7 +2,7 @@
 
 One skill per folder, `<name>/SKILL.md`, opencode SKILL.md format (frontmatter `name`, `description`). The body before `## Reference` is the injected part (cap 350 tokens); the `## Reference` section (cap 600) is injected only when the skill is selected. Tokens are chars/3.9 estimates; measure with the engine tokenizer before install. Retrieval: match the task against `description` (the fit question over the class's candidates), then filter by class fit. The testing package and the five test-kind skills (`testing`, `test-web`, `test-cli`, `test-api`, `test-data`, `test-lib`), `tools-opencode`, `tools-hermes` and `tandem-harness` live one level up and are not repeated here.
 
-Count: 44 skills, plus the four first packages of OPS-39 below (each a folder with `references/`, `exemplars/`, `eval/` and a `manifest.json`; their body cap is the house 350, their references are longer and served on request; see docs/packages.md). Body total 14859 tokens, reference total 18840, all 33699.
+Count: 44 skills, plus the four first packages of OPS-39 below (each a folder with `references/`, `exemplars/`, `eval/` and a `manifest.json`; their body cap is the house 350, their references are longer and served on request; see docs/packages.md). Body total 14863 tokens, reference total 18871, all 33734.
 
 | name | description | body | ref | classes |
 |-|-|-|-|-|
@@ -11,7 +11,7 @@ Count: 44 skills, plus the four first packages of OPS-39 below (each a folder wi
 | web-a11y | Accessibility basics for any web page or app - semantic elements, labels, keyboard focus, contrast, ARIA only when needed, screen-reader names. | 346 | 291 | design_ui, code_edit |
 | dom-events | Vanilla JavaScript in the browser without a framework - DOM queries, event listeners, delegation, rendering state to HTML, and avoiding leaks. | 336 | 371 | code_edit, debug |
 | canvas-2d | Drawing and animating on an HTML canvas with the 2D context - render loop, device pixel ratio, sprites, transforms, text, and keeping 60 fps. | 348 | 367 | drawing, code_edit, debug |
-| threejs-scene | Building a WebGL scene with Three.js - renderer, camera, lights, meshes, controls, resize, animation loop, and performance (draw calls, instancing, disposal). | 340 | 569 | three_d, code_edit, debug |
+| threejs-scene | Building a WebGL scene with Three.js - renderer, camera, lights, meshes, controls, resize, animation loop, and performance (draw calls, instancing, disposal). | 344 | 600 | three_d, code_edit, debug |
 | browser-game | Building a 2D browser game (platformer, shooter, puzzle) - game loop with fixed timestep, keyboard input, tile collisions, camera, HUD, lives and win state. | 343 | 511 | code_edit, debug, drawing |
 | web-audio | Playing and synthesizing sound in the browser with the Web Audio API - AudioContext unlock on a gesture, oscillators, samples, gain envelopes, timing on the audio clock. | 338 | 357 | code_edit, debug |
 | web-forms | HTML forms with client-side validation and submission - input types, required and pattern, custom messages, error display, submit via fetch, and server-side revalidation. | 340 | 472 | code_edit, design_ui |

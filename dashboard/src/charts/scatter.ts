@@ -23,7 +23,8 @@ export interface ScatterPoint {
 }
 
 // the groups are the cache tiers (lib/cache-source.ts) since 0.4.0; the old source names stay
-export const SCATTER_COLORS: Record<string, SeriesColor> = { none: 'cobalt', prefix: 'orange', session: 'aqua', response: 'muted', end: 'aqua', resident: 'cobalt', store: 'violet', disk: 'yellow', cold: 'orange' };
+// `relayed`: a request the proxy relayed to another backend (a cloud model), never an engine tier
+export const SCATTER_COLORS: Record<string, SeriesColor> = { none: 'cobalt', prefix: 'orange', session: 'aqua', response: 'muted', end: 'aqua', resident: 'cobalt', store: 'violet', disk: 'yellow', cold: 'orange', relayed: 'red' };
 
 /** Where a robust linear axis ends: twice the 95th percentile, so the top of an ordinary spread
  * stays on the chart and a lone outlier (a replay's 160,500 tok/s) does not set the scale. */

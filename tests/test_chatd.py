@@ -711,7 +711,8 @@ def test_render_effort_and_thinking_switches():
     off = render.body("m", {"effort": "high", "thinking": False}, branch)
     assert off["chat_template_kwargs"] == {"enable_thinking": False}
     assert "reasoning_effort" not in off
-    assert render.headers("C1") == {"x-session-id": "chat-C1", "X-QSE-Client": "chat-app"}
+    assert render.headers("C1") == {"x-session-id": "chat-C1", "X-QSE-Client": "chat-app",
+                                    "X-Tandem-Cost": "1"}
 
 
 def test_think_tags_and_reasoning_content_become_thinking_parts():
@@ -745,7 +746,7 @@ def test_a_tag_cut_across_chunks_is_still_split():
 
     r = Run.__new__(Run)
     r.svc, r.carry, r.in_tag, r.phase, r.tokens = Svc(), "", False, "writing", 0
-    r.thinking_tokens, r.marks, r.t_first = 0, [], None
+    r.thinking_tokens, r.marks, r.t_first, r.call_first = 0, [], None, None
     r.set_phase = lambda *a, **k: None
     r.trim = False
     for piece in ["<th", "ink>\nabc</thi", "nk>", "\n\n", "tail <", "b>"]:

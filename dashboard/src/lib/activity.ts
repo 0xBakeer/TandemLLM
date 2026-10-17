@@ -5,7 +5,7 @@
 // a word, so colour is never the only signal.
 
 import type { ActivityState, LiveActivity, LiveEngine, LiveRequest, LiveStop, LiveTimelineEntry, LiveWindows, StopReason } from '../api/types';
-import { bytes, exact, fixed, tps } from './format';
+import { bytes, exact, fixed, ms, tps } from './format';
 import { phaseWords, prefillEstimate, prefillStageWord, rateText, stallWords, warmingWords } from './live';
 import type { StreamState } from './sse';
 
@@ -141,6 +141,13 @@ export function nowLine(engine: LiveEngine | null | undefined, rows: LiveRequest
   const prefilling = rows.filter((x) => x.phase === 'prefill').length;
   const rateWord = rate === 0 && r.phase === 'decode' ? stallWords(prefilling, windows?.now_window_s) : sum != null ? `${rateText(rate)} of ${rateText(sum)} tok/s` : rate != null ? tps(rate) : live && r.decode_warmup && !r.decode_warmup.reached ? warmingWords(r, windows!) : null;
   const st = a.state;
+  if (r.backend && r.phase !== 'done') {
+    // a request the proxy relays (a cloud model): the engine counts none of its tokens, the
+    // backend's usage does at the end, and the Parallel view counts its stream live. It read
+    // "warming up (0 of 50 tokens) · 0 content tokens" for a minute of DeepSeek (2026-10-17)
+    const nums = [`relayed to ${r.backend}`, r.ttft_ms != null ? `first token ${ms(r.ttft_ms)}` : 'waiting for the first token', 'tokens counted at its end'];
+    return line(GLYPH[st], TONE[st], a.label, nums, { sinceMs: a.since_ms, client: r.client.kind, requestId: r.request_id, moving: isMoving(st), warning: clientFlag(a) });
+  }
   const n: (string | null | false)[] = [];
   let progress: number | null = null;
   let estimate: number | null = null;

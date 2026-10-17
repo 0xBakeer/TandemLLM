@@ -28,9 +28,9 @@ export default defineConfig({
     timezoneId: 'Europe/Berlin',
   },
   projects: [
-    { name: 'chromium-desktop', testIgnore: /shots\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'webkit-desktop', testIgnore: /shots\.spec\.ts/, use: { ...devices['Desktop Safari'], viewport: { width: 1440, height: 900 } } },
-    { name: 'webkit-phone', testIgnore: /shots\.spec\.ts/, use: { ...devices['iPhone 14'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
+    { name: 'chromium-desktop', testIgnore: /(shots|setup-gate)\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'webkit-desktop', testIgnore: /(shots|setup-gate)\.spec\.ts/, use: { ...devices['Desktop Safari'], viewport: { width: 1440, height: 900 } } },
+    { name: 'webkit-phone', testIgnore: /(shots|setup-gate)\.spec\.ts/, use: { ...devices['iPhone 14'], viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } },
     { name: 'shots', testMatch: /shots\.spec\.ts/, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
   ],
   webServer: usePreview

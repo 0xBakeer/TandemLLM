@@ -104,8 +104,9 @@ cd "$REPO" || exit 1
 # that answers for the engine while it loads (the reverse proxy's fallback)
 STATUS_PY="${STATUS_PY:-python3}"
 status() { "$STATUS_PY" "$HERE/engine_status.py" set "$@" >/dev/null 2>&1 || true; }
+# (OPS-173: one of another tree or release is replaced; it listens where the engine or setup mode does)
 [ -n "${QSE_STATUS_PORT:-}" ] && "$STATUS_PY" "$HERE/engine_status.py" ensure --port "$QSE_STATUS_PORT" \
-    --engine-port "$PORT" 2>&1 | tail -1
+    --engine-port "$PORT" --host "$( [ "$SETUP" = 1 ] && echo "$SETUP_HOST" || echo "${QSE_STATUS_HOST:-$HOST}")" 2>&1 | tail -1
 # The access tokens, mode 600, never in this repository: QSE_METRICS_TOKEN (Prometheus) and, only
 # when an admin password is wanted, QSE_ADMIN_TOKEN (ops/make-secrets.sh [--admin]). With no admin
 # token every admin route is open and the dashboard asks for nothing (docs/server.md "The admin
@@ -129,7 +130,9 @@ if [ "$SETUP" = "1" ]; then
     echo "[start] setup mode: pid $(cat "$PIDFILE"), log $LOG"
     for i in $(seq 1 60); do
         if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-            status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"
+            # no --took-s: setup mode loads no model, and its 2 s would make the next model's
+            # restart screen promise "any moment now" (the typical start is the median of these)
+            status up --engine-port "$PORT"
             echo "[start] setup mode answers on $SETUP_HOST:$PORT after $(( $(date +%s) - T_START )) s:" \
                  "open http://<this box>:$PORT/dashboard/#/setup"
             exit 0
@@ -239,9 +242,11 @@ setsid nohup "$PY" -u server/app.py \
 echo $! > "$PIDFILE"
 ln -sfn "$LOG" "$LOGS/engine.log"
 echo "[start] pid $(cat "$PIDFILE"), log $LOG"
-for i in $(seq 1 60); do
+# every 2 s (it was every 10 s: an install's job waited up to 10 s more for an engine that answered,
+# VIS-211), 600 s in all
+for i in $(seq 1 300); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-        echo "[start] healthy after ${i}0s"
+        echo "[start] healthy after $(( $(date +%s) - T_START ))s"
         status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"   # OPS-67: keeps the model list
         # the weights are on the device now and nothing reads their files
         # again, but their page cache is ~52 GB of the board, counted as available and not given
@@ -264,19 +269,23 @@ for i in $(seq 1 60); do
         fi
         # v3: the narrator's model (the live lines) loads after the decision models (one load at a
         # time), in the start's idle window, through the residency planner; the server's keeper
-        # loads it again whenever it is not loaded
+        # loads it again whenever it is not loaded. 0.11.3: the role is off by default, and the
+        # engine answers 409 role_off without loading it
         if [ -n "${QWEN38_NARRATOR_MODEL:-}" ]; then
             HR=false; [ "${HOLD_RESTART:-0}" = "1" ] && HR=true
-            curl -s -m 10 -X POST -H 'Content-Type: application/json' \
+            NC="$(curl -s -m 10 -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
                 -d "{\"service_start\": true, \"hold_restart\": $HR}" \
-                "http://127.0.0.1:$PORT/v1/conductor/narrator/load" >/dev/null \
-                && echo "[start] narrator: load asked" \
-                || echo "[start] narrator: the load did not answer (conductor off?)"
+                "http://127.0.0.1:$PORT/v1/conductor/narrator/load" || true)"
+            case "$NC" in
+                2*) echo "[start] narrator: load asked" ;;
+                409) echo "[start] narrator: not loaded (the narrator role is off, or the planner refused it; the engine log says which)" ;;
+                *) echo "[start] narrator: the load did not answer (conductor off?)" ;;
+            esac
         fi
         start_chatd
         exit 0
     fi
-    sleep 10
+    sleep 2
 done
 status failed --reason "the engine did not answer /health within 600 s"
 echo "[start] FAILED to become healthy in 600s; tail of $LOG:"; tail -20 "$LOG"; exit 1

@@ -537,8 +537,10 @@ SHIPPED_ROUTER: dict = {
          "description": "The look of a web page or an app: layout, visual style, colours, "
                         "typography, UI and UX.",
          "reading": "a flat web page",
+         # SRV-534 follow-up: a core, so a model fit with `packages: core` (Super VL) gets a
+         # package on a design_ui turn (Laya read a three.js prompt as design_ui, 2026-10-17)
          "policy": {"effort": "high", "packages": BUILD_PACKAGES + ["ui-design", "charts"],
-                    "rules": []}},
+                    "core": ["ui-design"], "rules": []}},
         {"id": "drawing", "label": "Drawing",
          "description": "Draw, paint or animate a picture or a portrait with code: a sketch, "
                         "line art, SVG or canvas art.",
@@ -550,7 +552,7 @@ SHIPPED_ROUTER: dict = {
                     "packages": BUILD_PACKAGES + ["pencil-sketch", "spiral-portrait",
                                                   "one-line-portrait", "creative-coding",
                                                   "charts", "explainer-video"],
-                    "rules": []}},
+                    "core": ["creative-coding"], "rules": []}},
         {"id": "three_d", "label": "3D scene",
          "description": "A 3D scene or model: Three.js, WebGL, voxels, a photo rebuilt in 3D.",
          "reading": "a 3D three.js scene",
@@ -558,10 +560,13 @@ SHIPPED_ROUTER: dict = {
          # picks among the special recipes alone
          # OPS-39: voxel-worlds (the voxel build order, curated modules) and creative-coding
          # join the special recipes the package question picks among
+         # 2026-10-17 (pagoda replays 1-3 on Super VL): three first steps thought 6 to 11
+         # minutes and drafted the files in the thinking; coding's "plan in a few lines, code
+         # in files" goes in beside the 3D skill
          "policy": {"effort": "high",
                     "packages": BUILD_PACKAGES + ["threejs-scene", "photo-to-3d", "voxel-seasons",
-                                                  "voxel-worlds", "creative-coding"],
-                    "core": ["threejs-scene"], "rules": []}},
+                                                  "voxel-worlds", "creative-coding", "coding"],
+                    "core": ["threejs-scene", "coding"], "rules": []}},
         # 2026-10-03 10:12 (a user's essay with "use max effort" fell back to code_edit and its
         # coding packages): prose has a class of its own, medium, no packages
         {"id": "writing", "label": "Writing",
@@ -916,8 +921,10 @@ ROLES: dict = {
                    "any", preemptible=False),
     # P1: a small model inside the engine writes the state lines (server/conductor/narrator.py),
     # since N2 (2026-10-03) Qwen3.5-0.8B summing up each thought; a profile's `ui.narrator`
-    # switches it on, this role's mode and budget (one slice between two rounds) say how
-    "narrator": _role("self", "qwen3.5-0.8b", "generate", 150, "on", "generative",
+    # switches it on, this role's mode and budget (one slice between two rounds) say how.
+    # 0.11.3 (SRV-534): off by default; it does not load, the keeper leaves it and the residency
+    # plan leaves out its claim; `on` here and a profile's `ui.narrator` bring it back
+    "narrator": _role("self", "qwen3.5-0.8b", "generate", 150, "off", "generative",
                       "between_rounds", writes="state_lines"),
     # L1 (2026-10-03): the test judge's Laya (server/conductor/judge.py), a role of its own, so
     # the judge answers whatever the router's decider stage does (routing is Qwen's since router
@@ -928,16 +935,19 @@ ROLES: dict = {
 
 # OPS-41: what may load beside the engine. A role loads when MemAvailable minus its claim stays at
 # or above floor + margin (15 + 6 GiB: the 2026-09-11 wedge and the decider design note), one at a
-# time in `order`, never during a hold. The decider's claim is the MemAvailable it took beside the
-# engine (31.0 -> 22.8 GiB, 2026-10-01), not the 5.1 GB nvidia-smi shows; a role that grows
-# (arbiter's batcher at 64 rows) claims its peak.
+# time in `order`, never during a hold. A claim is the MemAvailable the role took beside the
+# engine, not what nvidia-smi shows; a role that grows (arbiter's batcher at 64 rows) claims its
+# peak. The decider's 8.2 GiB was the arbiter sidecar's (31.0 -> 22.8 GiB, 2026-10-01); Laya inside
+# the engine claims 3.0 (OPS-69, the reference box's residency v2 since 2026-10-06). With 8.2 a new
+# box refused Laya on Super VL at 3 slots: 43.75 GiB available less the engine's 17.46 GiB growth
+# to its peak leaves 26.29, less 8.2 is 18.09 under 21; less 3.0 is 23.29 (2026-10-17)
 RESIDENCY: dict = {
     "floor_gib": 15.0, "margin_gib": 6.0, "settle_s": 5,
     "order": ["decider", "narrator", "librarian", "reader"],
     "claims": {
-        "decider": {"gib": 8.2, "basis": "measured",
-                    "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable "
-                            "31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"},
+        "decider": {"gib": 3.0, "basis": "measured",
+                    "note": "Laya's three checkpoints in the engine's process, measured beside a "
+                            "side slot (OPS-69, 2026-10-06); the arbiter sidecar took 8.2"},
         "narrator": {"gib": 6.0, "basis": "declared",
                      "note": "the narrator's model in BF16: Qwen3.5-0.8B (2.5 GiB declared) or "
                              "2B (5.5), its 4,096-row cache, the step's workspace and graph, the "
@@ -1130,9 +1140,10 @@ for _n in ("coding", "overnight"):
 SHIPPED_PROFILES["hermes"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 SHIPPED_PROFILES["general"]["ui"] = {"states": "on", "states_channel": "reasoning"}
 # v3 (2026-10-04): the voice, live lines while Qwen works, in opencode (coding) and in Open WebUI
-# and the playground (chat, in the reasoning; the router's and the packages' lines left out there)
-SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], narrator="live")
-SHIPPED_PROFILES["chat"]["ui"] = {"states": "on", "states_channel": "reasoning", "narrator": "live",
+# and the playground (chat, in the reasoning; the router's and the packages' lines left out there).
+# 0.11.3 (SRV-534): the narrator is off in every shipped profile; `live` turns the voice back on
+SHIPPED_PROFILES["coding"]["ui"] = dict(SHIPPED_PROFILES["coding"]["ui"], narrator="off")
+SHIPPED_PROFILES["chat"]["ui"] = {"states": "on", "states_channel": "reasoning", "narrator": "off",
                                   "kinds": {"route": False, "package": False}}
 # SR1: the shadow reader keeps coding sessions and asks the router's question in
 # shadow mode on long turns; inert while QWEN38_SHADOW_MODEL is empty

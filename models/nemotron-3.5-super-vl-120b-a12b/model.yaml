@@ -1,7 +1,7 @@
 # NVIDIA Nemotron 3.5 Super VL 120B-A12B in TandemLLM: the setup guide's registry entry (docs/setup.md). Schema 1.
 #
-# NVIDIA's hybrid Mamba2 / mixture-of-experts model (120B, 12B active) served text only (the image tower is not
-# served yet): from NVIDIA's own ModelOpt checkpoint (NVFP4 experts, FP8 Mamba2 / attention / head) read as stored,
+# NVIDIA's hybrid Mamba2 / mixture-of-experts model (120B, 12B active) with its RADIO image tower (ENG-365): from
+# NVIDIA's own ModelOpt checkpoint (NVFP4 experts, FP8 Mamba2 / attention / head) read as stored,
 # or from our EXL3 packs of the BF16 checkpoint (engine/models/nemotron_h, docs/nemotron-h.md), with NVIDIA's
 # LiLiCorr drafter for it. weights_gib: allocated at load (measured 2026-10-16). Window up to 1,048,576 tokens, the
 # checkpoint's own (config.json llm_config.max_position_embeddings, tokenizer model_max_length), slot 0 and the side
@@ -17,10 +17,11 @@ family: Nemotron 3.5
 params: ~120B, ~12B active a token
 recommended: false
 order: 6
-pitch: NVIDIA's 120B hybrid Mamba2 and mixture-of-experts model, from our EXL3 packs or NVIDIA's NVFP4 checkpoint, text only.
+pitch: NVIDIA's 120B hybrid Mamba2 and mixture-of-experts model that reads images too, from our EXL3 packs or NVIDIA's NVFP4 checkpoint.
 architecture: 88 layers, 40 Mamba2, 40 mixture-of-experts (512 experts a layer, 22 a token, one shared, a 1,024-wide
   latent) and 8 attention layers without positional encoding, plus a one-step MTP head; it thinks in a <think> block
-  and calls tools in the XML form. Text only in TandemLLM so far (the image tower is not served).
+  and calls tools in the XML form. Images go through its C-RADIO ViT-H/16 tower and projector (BF16 in every
+  checkpoint), 256 to 3,328 prompt rows an image (1,000 for a 1,280 x 800 screenshot).
 license: The model's license (OpenMDW-1.1) is on its Hugging Face page. TandemLLM itself is AGPL-3.0 or commercial.
 icon: null
 links:
@@ -113,7 +114,7 @@ profiles:
       from an HF job, BF16 ppl 3.84)'
   assets_required:
   - nemotron-super-vl-lilicorr
-  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches: every projection at 4 bits, head 6, the MTP head at 4; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 58.35 GiB at load (59.75 with the MTP head), decode 31.3 tok/s (NVIDIA''s NVFP4 19.6). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
+  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches: every projection at 4 bits, head 6, the MTP head at 4; the RADIO vision tower is in the pack in BF16 and loaded beside it (ENG-365, 1.60 GiB). Measured 2026-10-16: 58.35 GiB at load (59.75 with the MTP head), decode 31.3 tok/s (NVIDIA''s NVFP4 19.6). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
   hf_revision: 437a1fd1920248164b68e72f18f64484782f4b69
   max_window: 1048576
 - id: nemotron-super-vl-exl3-2.0
@@ -137,7 +138,7 @@ profiles:
       from an HF job, BF16 ppl 3.84)'
   assets_required:
   - nemotron-super-vl-lilicorr
-  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt''s 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6; the vision tower is in the pack in BF16 and not loaded. Measured 2026-10-16: 31.24 GiB at load, decode 36.8 tok/s (the 4.0 pack 31.4) at a much larger loss (KL 0.325 against 0.049). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
+  note: 'Converted from the BF16 checkpoint (revision 97e00975) by exllamav3 1.6.2 with our Puzzle/Bolt and Super VL patches at 2 bits with -hq (Bolt''s 2.0 recipe): routed experts at 2 bits, every other projection at 4, head 6, the MTP head at 4 to 6; the RADIO vision tower is in the pack in BF16 and loaded beside it (ENG-365, 1.60 GiB). Measured 2026-10-16: 31.24 GiB at load, decode 36.8 tok/s (the 4.0 pack 31.4) at a much larger loss (KL 0.325 against 0.049). Drafts with NVIDIA''s LiLiCorr drafter for Super VL and the lookup. The Hugging Face repository is public: a download needs no token.'
   hf_revision: c772513fab08034725c057aa6a02591332a4ffbb
   max_window: 1048576
 - id: nemotron-super-vl-nvfp4
@@ -302,6 +303,28 @@ components:
   - laya
   docs: docs/server.md
   note: The class question's answer under the model fit (served_classifier off).
+- id: vision
+  label: Vision
+  group: features
+  what: Lets the model read images you send with a message, and the screenshots its tools take.
+  default: true
+  required: false
+  memory_gib: 1.6
+  memory_max_gib: 2.1
+  elastic: false
+  disk_gb: 0.0
+  depends_on: []
+  conflicts: []
+  knobs:
+    VISION:
+      'on': 'on'
+      'off': 'off'
+  assets: []
+  docs: docs/nemotron-h.md
+  note: The checkpoint's C-RADIO tower and projector ship inside every Super VL checkpoint in BF16 (1.57 GB of
+    tensors); beside the EXL3 4.0 trunk they took 1.60 GiB allocated at load (ENG-365, 2026-10-17). The extra 0.5 GiB
+    is the cache of encoded images (--image-cache-mb 512). Encoding took 0.06 to 0.25 s for 300 to 1,000 rows; the
+    admission bound for the largest image (13,312 patches) is 1.6 GiB of activations.
 - id: response_cache
   label: Response cache
   group: caches

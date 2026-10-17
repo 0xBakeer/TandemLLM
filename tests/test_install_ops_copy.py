@@ -85,12 +85,12 @@ def test_the_copy_list_and_the_calls_agree():
 
 def test_the_docs_name_the_installed_paths():
     ops = open(os.path.join(ROOT, "docs", "operations.md")).read()
-    assert "    * * * * * $HOME/TandemLLM/run/ops/watchdog.sh\n" in ops
+    assert "    * * * * * bash $HOME/TandemLLM/run/ops/watchdog.sh\n" in ops
     for n in copy_list():
         assert f"`{n}`" in ops, n
     text = open(os.path.join(ROOT, "install.sh")).read()
     done = text[text.index("${B}Done.${N}"):]
-    assert "Watchdog:  $RUN/ops/watchdog.sh" in done
+    assert "Watchdog:  bash $RUN/ops/watchdog.sh" in done
     assert "chatd.sh runs from the checkout" in text and "gate.sh is the release gate" in text
 
 
@@ -142,15 +142,24 @@ def test_a_start_runs_roles_sh():
         assert "[roles] none to load" in out, out
     finally:
         _stop(box, env)
-    # the negative control: without run/ops/roles.sh the old message is back
+    # the negative control: start.sh without run/ops/roles.sh has the old message back
     os.rename(os.path.join(ops, "roles.sh"), os.path.join(ops, "roles.sh.away"))
     try:
-        r = I.tandem(box, env, "start")
+        r = subprocess.run(["bash", os.path.join(ops, "start.sh")], capture_output=True, text=True, env=env,
+                           timeout=120, stdin=subprocess.DEVNULL)
         out = r.stdout + r.stderr
         assert "roles.sh: No such file or directory" in out and "[start] a role did not load" in out, out
     finally:
         _stop(box, env)
-        os.rename(os.path.join(ops, "roles.sh.away"), os.path.join(ops, "roles.sh"))
+    # and tandem start puts it back first (OPS-171: tandem doctor copies a missing run/ops script)
+    try:
+        r = I.tandem(box, env, "start")
+        out = r.stdout + r.stderr
+        assert "[doctor] repaired: run/ops/roles.sh was missing: copied from src/ops" in out, out
+        assert "No such file or directory" not in out and os.path.exists(os.path.join(ops, "roles.sh")), out
+    finally:
+        _stop(box, env)
+        os.unlink(os.path.join(ops, "roles.sh.away"))
 
 
 def test_the_watchdog_on_an_installed_box():
@@ -165,13 +174,13 @@ def test_the_watchdog_on_an_installed_box():
         assert I.tandem(box, env, "start").returncode == 0
         I.adopt(box, env)
         # the cron line: no environment of serve.env's, this box's port from run/ops/serve.env
-        r = subprocess.run([wd], capture_output=True, text=True, env=env, timeout=60)
+        r = subprocess.run(["bash", wd], capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0, r.stdout + r.stderr
         assert open(os.path.join(src, "logs", "watchdog.fails")).read().strip() == "0"
         assert not os.path.exists(os.path.join(box["home"], "qwen38-spark-engine"))   # the template's REPO
         # a dead engine: restarted through run/ops (stop.sh, start.sh)
         _stop(box, env)
-        r = subprocess.run([wd], capture_output=True, text=True, env=env, timeout=120)
+        r = subprocess.run(["bash", wd], capture_output=True, text=True, env=env, timeout=120)
         text = open(log).read()
         assert "health check failed (code 000), 1/1" in text and "restarted" in text, text
         assert I.tandem(box, env, "status").returncode == 0

@@ -150,7 +150,9 @@ class Health:
             mdue = self._models_due.get(bid, 0.0)
         if now >= mdue or b["models_mode"] == "list":
             found = r["models"] if r["ok"] else None
-            self.svc.cfg.sync_models(bid, found, b["models"], b["models_mode"])
+            new = self.svc.cfg.sync_models(bid, found, b["models"], b["models_mode"])
+            if new and hasattr(self.svc, "new_models"):
+                self.svc.new_models(bid, new)
             if found is not None:
                 cur["models_at"] = now
                 with self._lock:

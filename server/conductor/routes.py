@@ -798,6 +798,13 @@ def _narrator(cond, method: str, what: str, body: dict):
             for k, v in (("service_start", ss), ("hold_restart", hr)):
                 if v is not None and not isinstance(v, bool):
                     raise ApiError(400, "bad_request", f"{k} is a boolean")
+            if n.settings()["mode"] == "off":
+                # 0.11.3: the role is off by default; ops/start.sh asks whenever the model is set
+                print("[narrator] not loaded: the narrator role is off (roles document, "
+                      "narrator.mode)", flush=True)
+                return 409, {"state": n.slot.state, "error": {
+                    "type": "role_off", "message": "the narrator role is off (the roles "
+                                                   "document's narrator.mode); nothing loads"}}, None
             cond.state["narrator_keep"] = True
             from server import decider_api
             if n.slot.state not in ("loaded", "loading") and \

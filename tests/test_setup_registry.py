@@ -106,9 +106,10 @@ def test_the_seed():
     t = registry.tile(m)
     assert t["best_speed"] == {"tok_s": 84.44, "task": "code", "profile": "exl3-4.5"}, t
     assert t["recommended"] is True
-    # every tool's memory and default is there, and the defaults are the reference box's
+    # every tool's memory and default is there, and the defaults are the reference box's but the
+    # narrator, off by default since 0.11.3 (SRV-534)
     on = {c["id"] for c in m["components"] if c["default"]}
-    assert on == {"drafters", "lookup", "conductor", "narrator", "laya", "shadow", "vision",
+    assert on == {"drafters", "lookup", "conductor", "laya", "shadow", "vision",
                   "prompt_cache", "state_store", "disk_tier", "nvme_spill"}, on
 
 

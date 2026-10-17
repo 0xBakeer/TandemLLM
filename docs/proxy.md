@@ -209,6 +209,12 @@ Not tested yet on real engines: the night pass (`tools/proxy_engines_check.sh --
 
 `GET /v1/models` lists each backend's real models under their own ids (`deepseek-flash`, `Qwen/Qwen3.5-4B`), with `owned_by` set to the backend's id and a `tandem` block (backend, kind, label, upstream id, the provider's name of the model and its largest `max_tokens`, each null when the adapter has none, whether the backend is a cloud API, context length, switches). In the engine's server, `TandemLLM` stays the engine's own. When two backends serve one id, both are listed as `<backend>/<model>` and the bare id is not; the prefixed form is always accepted. A model can get a public id of its own in the GUI.
 
+What a provider's own model list says goes into the card. DeepSeek's `GET /models` (read 2026-10-17) gives each model a `name` (`DeepSeek-V4.1-Flash`, shown as "DeepSeek V4.1 Flash"), `context_window` (1,048,576), `max_output_tokens` (393,216), `input_modalities` (`text`, `image` on deepseek-flash; `text` on deepseek-v4-pro) and `effort` (`supported_levels` low, high, max; `default_level` high). The discovery every 10 minutes stores them per model; the card then carries `capabilities`: `vision` when the input kinds name `image`, `effort_levels`, `effort_default` and `effort_off` (the word that turns thinking off: DeepSeek's `reasoning_effort: none`). The Chat tab offers the provider's levels in its effort chip, sends `reasoning_effort` with one of them, and sends images (uploads and `render_page` screenshots) only to a model that reads them.
+
+A model id a later discovery finds for the first time is stored disabled: it is not listed until it is turned on under Backends. The log says `[proxy] deepseek: new model <id> in /models, disabled until it is turned on under Backends`, and one push goes to the ntfy topic of the monitor's stall watchdog (its `url`, `token_file` and `ca_file`) when one is set. An id is new once; when it leaves the list and comes back, nothing is sent again. On 2026-10-17 `deepseek-v4.1-flash-1017` was in DeepSeek's list for a while at about 01:59 UTC and then gone.
+
+Every relayed answer's `system_fingerprint` (OpenAI's and DeepSeek's name for the backend configuration that wrote it) goes into its ledger row (schema 10) and the request detail on Performance. The model id stays `deepseek-flash` while the snapshot behind it changes; a new fingerprint in the rows shows the change.
+
 A request goes to, in this order: an explicit `<backend>/` prefix, the first enabled routing rule whose glob matches the id, the one backend that serves it, else OpenAI's 404 `model_not_found` (which names the prefixed forms when two backends serve the id).
 
 A backend or a single model may name fallbacks. On a connect error, a 429, 502 or 503, before any byte reached the client, the proxy tries the next backend at once, or the same one again after 1 s, then 2 s (or its `Retry-After`, up to 30 s). At most 2 tries again in all. After the first byte a failure is an `error` frame and `[DONE]`. The ledger row records the backend that answered, `fallback_from`, `retries` and the upstream status.
@@ -229,7 +235,7 @@ Measured or null, never estimated:
 | cost | the model's price when the row is written |
 | proxy overhead | arrival to the upstream send, plus the first frame's delay through the proxy |
 
-Queue, prefill time, blocks, draft acceptance and the cache source come off an engine's loop and are null for a relayed row; the views say "not reported by this backend". The Usage view filters by backend (`engine` is the engine's own rows) and by user, and shows the cost of the priced models.
+Queue, prefill time, blocks, draft acceptance and the cache source come off an engine's loop and are null for a relayed row; the views say "not reported by this backend". The Usage view filters by backend (`engine` is the engine's own rows) and by user, and shows the cost of the priced models. With a relayed backend in the ledger, Usage has a table of the engine and each relayed backend side by side (requests, tokens, decode and TTFT p50, cost), and Performance draws them apart: relayed requests are red dots of their own on a log axis in Recent requests, and a line of their own beside the engine's in the decode and TTFT history. The cache sources table and the engine's history count the engine's own requests only; the Live panel names a relayed request's backend and says its tokens are counted at its end.
 
 ## Every request at once: Performance, Parallel
 
@@ -250,6 +256,8 @@ Without a count a lane shows its frames and "not reported"; its tokens and rate 
 `tools/parallel_load.py` drives the page: N agent-like sessions (a system prompt, two tools, up to three streamed turns each, tool results fed back) over the models you name, for example `--mix deepseek-flash=10,fake-a=18,TandemLLM=2 --duration 90 --budget-usd 0.5 --board`. It reports TTFT, decode rate, cache hit, throughput and cost per model, stops starting turns at the budget, and with `--board` puts the page's per-second series beside the frames its own clients received.
 
 ## Prices and cost
+
+A streamed request with `X-Tandem-Cost: 1` (the Chat tab's chatd sends it) gets the request's cost as one SSE comment just before `data: [DONE]`: `: tandem-cost {"cost_micros": 6140, "backend": "deepseek"}`, every request the harness sent for it summed, the figure its ledger row gets; `cost_micros` is null without a price. SSE readers skip comments; without the header the stream is the backend's, byte for byte.
 
 A price row per model holds USD per million tokens for input, cached input, cache write and output. The cost of a request is `(prompt - cached) x input + cached x cached input + cache write x its price + completion x output`, written into the row when the request ends, so a later price change never rewrites history. A model without a price has a null cost. DeepSeek charges half outside its peak hours (01:00-04:00 and 06:00-10:00 UTC on weekdays); a price row can carry an `offpeak` block, and the DeepSeek adapter picks by the request's UTC hour. Chinese public holidays count as peak here, so their cost reads high.
 

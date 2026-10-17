@@ -545,6 +545,16 @@ def test_every_profile_resolves():
         assert _env(n)["QSE_WEIGHTS"] == n, n
 
 
+def test_super_vl_profiles_read_images_and_the_other_nemotrons_do_not():
+    """ENG-365: the Super VL profiles load the checkpoint's RADIO tower (VISION=on, after _nemotron.env's
+    off); Bolt and Lightning stay text only."""
+    names = [f[:-4] for f in os.listdir(os.path.join(ROOT, "ops/profiles")) if f.startswith("nemotron-")]
+    vl = [n for n in names if n.startswith("nemotron-super-vl-")]
+    assert len(vl) == 3, vl
+    for n in names:
+        assert _env(n)["VISION"] == ("on" if n in vl else "off"), n
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

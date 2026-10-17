@@ -77,3 +77,76 @@ export function doneMessage(job: SetupJob): string {
   const tail = (job.warnings ?? []).join(' ');
   return tail && msg.endsWith(tail) ? msg.slice(0, msg.length - tail.length).trim() : msg;
 }
+
+/** VIS-211: the page dedupes log lines by their id only. The job snapshot of a catch-up and the step
+ *  and done events are the job's state, idempotent: a server before 0.11.3 gave the snapshot the id
+ *  of the log line before it, and a page that dropped it as a repeat held no job and spun over a
+ *  finished install. */
+export function dedupes(ev: SetupJobEvent): boolean {
+  return ev.type === 'log';
+}
+
+/** VIS-211: a state event that arrives while the page holds no job: read the job by id instead of
+ *  dropping it (and every later one with it). */
+export function needsJob(job: SetupJob | null, ev: SetupJobEvent): boolean {
+  return !job && ev.type !== 'log' && ev.type !== 'job';
+}
+
+/** VIS-211: how long without a job in hand before the page says it cannot read the install */
+export const STALE_MS = 30_000;
+
+/** VIS-211: what a finished job set up, as the finished screen's lines (a job before 0.11.3 has no
+ *  summary: its profile alone). */
+export function finishedLines(job: SetupJob, tok: (n: number) => string): { title: string; lines: string[] } {
+  const s = job.summary;
+  const model = s?.model ?? job.model ?? 'The new setup';
+  const lines: string[] = [];
+  lines.push(`Weights: ${s?.profile_label ?? job.profile}`);
+  if (s?.tools?.length) lines.push(`Tools: ${s.tools.join(', ')}`);
+  if (s?.slots != null && s.window != null)
+    lines.push(
+      s.slots > 1 && s.side_window != null
+        ? `${s.slots} parallel chats: ${tok(s.window)} tokens for the first, ${tok(s.side_window)} for each of the other ${s.slots - 1}`
+        : `${s.slots} chat at a time, ${tok(s.window)} tokens`,
+    );
+  if (job.ended_at && job.created_at) lines.push(`Took ${durationText(job.ended_at - job.created_at)}`);
+  if (job.removed?.removed.length) lines.push(`The old weights were removed: ${job.removed.freed_gb.toFixed(1)} GB freed`);
+  return { title: job.kind === 'reset' ? 'The shipped configuration is ready' : `${model} is ready`, lines };
+}
+
+export function durationText(s: number): string {
+  if (s < 90) return `${Math.max(1, Math.round(s))} s`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return r ? `${m} min ${r} s` : `${m} min`;
+}
+
+/** VIS-213: copy `text` to the clipboard: the Clipboard API where the page may use it (https, or a
+ *  secure context), else a hidden text box and execCommand (plain http on a phone); false when
+ *  neither worked (the page then shows the text to select by hand). */
+export async function copyText(text: string, nav: Pick<Navigator, 'clipboard'> | null = typeof navigator === 'undefined' ? null : navigator, doc: Document | null = typeof document === 'undefined' ? null : document): Promise<boolean> {
+  try {
+    if (nav?.clipboard?.writeText) {
+      await nav.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* not allowed here: the fallback */
+  }
+  if (!doc) return false;
+  const ta = doc.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  doc.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = doc.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}

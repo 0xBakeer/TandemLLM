@@ -153,8 +153,8 @@ if [ "$NO_ROLLBACK" != "1" ] && [ -f "$PENDING" ]; then
     SETUP_MARK="$(cat "$PENDING")"; [ -n "$SETUP_MARK" ] || SETUP_MARK="HOST=127.0.0.1"; PREV="setup mode"
 fi
 if [ "$MODE" = "--dry-run" ]; then
-    say "dry run: lock $BOX_LOCK; check MemAvailable; $HERE/stop.sh 120; wait for MemAvailable >= ${MEM_NEED_GB} GB;"
-    say "dry run: ${SETUP_MARK:+rm $PENDING; }echo $NAME > $ACTIVE; $HERE/start.sh; smoke $SMOKE_URL; on failure back to $PREV"
+    say "dry run: lock $BOX_LOCK; check MemAvailable; bash $HERE/stop.sh 120; wait for MemAvailable >= ${MEM_NEED_GB} GB;"
+    say "dry run: ${SETUP_MARK:+rm $PENDING; }echo $NAME > $ACTIVE; bash $HERE/start.sh; smoke $SMOKE_URL; on failure back to $PREV"
     exit 0
 fi
 
@@ -169,7 +169,7 @@ fi
 memavail() { awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo; }
 start_profile() {   # $1 = profile; returns start.sh's status
     echo "$1" > "$ACTIVE"
-    "$HERE/start.sh" < /dev/null 9>&-
+    bash "$HERE/start.sh" < /dev/null 9>&-
 }
 smoke() {   # a /health that names the profile, then one conductor turn through the reverse proxy
     local h; h="$(curl -s -m 10 "http://127.0.0.1:$PORT/health")"
@@ -184,13 +184,13 @@ smoke() {   # a /health that names the profile, then one conductor turn through 
 back_to_setup() {   # the marker and the active-profile file as they were, then setup mode
     printf '%s\n' "$SETUP_MARK" > "$PENDING"
     if [ -n "$HAD_ACTIVE" ]; then echo "$HAD_ACTIVE" > "$ACTIVE"; else rm -f "$ACTIVE"; fi
-    "$HERE/start.sh" < /dev/null 9>&- && say "back in setup mode" || say "setup mode did not start either: see $REPO_DIR/logs/engine.log"
+    bash "$HERE/start.sh" < /dev/null 9>&- && say "back in setup mode" || say "setup mode did not start either: see $REPO_DIR/logs/engine.log"
 }
 HAD_ACTIVE="$(cat "$ACTIVE" 2>/dev/null)"
 
 T0=$(date +%s)
 say "switching $PREV -> $NAME (MemAvailable $(memavail) GB)"
-STATUS_REASON="switching the weights to $NAME" "$HERE/stop.sh" 120 9>&-
+STATUS_REASON="switching the weights to $NAME" bash "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done
 T1=$(date +%s)
 if [ "$(memavail)" -lt "$MEM_NEED_GB" ]; then
@@ -208,11 +208,11 @@ fi
 [ "$NO_ROLLBACK" = "1" ] && { say "FAILED on $NAME; the caller rolls back"; exit 1; }
 if [ -n "$SETUP_MARK" ]; then
     say "FAILED on $NAME; back to setup mode"
-    STATUS_REASON="back to setup mode" "$HERE/stop.sh" 120 9>&-
+    STATUS_REASON="back to setup mode" bash "$HERE/stop.sh" 120 9>&-
     back_to_setup; exit 1
 fi
 say "FAILED on $NAME; rolling back to $PREV"
-STATUS_REASON="rolling back to $PREV" "$HERE/stop.sh" 120 9>&-
+STATUS_REASON="rolling back to $PREV" bash "$HERE/stop.sh" 120 9>&-
 for _ in $(seq 1 60); do [ "$(memavail)" -ge "$MEM_NEED_GB" ] && break; sleep 2; done
 if start_profile "$PREV" && smoke "$PREV"; then say "rolled back: $PREV live"; else say "ROLLBACK FAILED too: see $REPO_DIR/logs/engine.log"; fi
 exit 1

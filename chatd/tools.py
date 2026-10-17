@@ -237,6 +237,18 @@ def _ports_words(ports: list[dict] | None) -> str:
         (f" ({p['command']})" if p.get("command") else "") for p in ports)
 
 
+# what Chromium writes beside the page's console: its own pages, the WebGL fallback, its GL driver
+STATUS_MARK = "HTTP_STATUS "
+CONSOLE_NOISE = "source: chrome://|Automatic fallback to software WebGL|GL Driver Message"
+_CONSOLE_HEAD = re.compile(r"^\[[\d:./]+:[A-Z]+:CONSOLE(?:\((\d+)\)|:(\d+))?\]\s*")
+
+
+def console_line(line: str) -> str:
+    """`[86:86:1016/215118.672506:INFO:CONSOLE:422] "msg", source: url (422)` -> `"msg",
+    source: url (422)`: the page's message, without Chromium's process, thread and clock."""
+    return _CONSOLE_HEAD.sub("", line.strip())
+
+
 def _render(ctx, a):
     w = min(2400, max(320, int(a.get("width") or 1280)))
     h = min(2400, max(240, int(a.get("height") or 800)))
@@ -248,19 +260,41 @@ def _render(ctx, a):
         if ports is not None and port not in {p.get("port") for p in ports}:
             raise ToolError(f"nothing listens on port {port} in the sandbox, on any address; "
                             f"{_ports_words(ports)}")
-        url = f"http://localhost:{port}/{str(a.get('path') or '').lstrip('/')}"
+        path = str(a.get("path") or "")
+        row = next((p for p in ports or [] if p.get("port") == port), None)
+        cwd = ((row or {}).get("cwd") or "").rstrip("/")
+        if cwd and path.startswith(cwd + "/"):
+            # a file's path where the URL's goes: the server serves its working directory (live
+            # 2026-10-17, /workspace/_test.html on a server from /workspace was its 404 page)
+            path = path[len(cwd) + 1:]
+        url = f"http://localhost:{port}/{path.lstrip('/')}"
     else:
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
+        cwd = ""
+    kit = _render_kit(ctx, url, w, a.get("port") and int(a["port"]), cwd)
+    if kit is not None:
+        return kit
     shot = f"/workspace/{SHOTS_DIR}/{ctx.call_id}.png"
-    cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && timeout 60 chromium --headless=new --no-sandbox "
-           f"--disable-gpu --hide-scrollbars --enable-logging=stderr --v=0 "
+    # WebGL through SwiftShader by name (the automatic fallback is deprecated and says so on
+    # every page); the page's console only: Chromium's own pages (chrome://) and its services
+    # (GCM registration, `ERROR:...cc` lines) are not the page's
+    # a server's answer is said when it is no page (404, 500): the screenshot is its error page
+    status = (f"echo \"{STATUS_MARK}$(curl -s -o /dev/null -m 10 -w '%{{http_code}}' "
+              f"{shlex.quote(url)})\"; " if a.get("port") else "")
+    # memory: /dev/shm is Docker's 64 MB (the shared memory goes to /tmp instead), one renderer
+    cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && {status}timeout 60 chromium --headless=new "
+           f"--no-sandbox --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader "
+           f"--disable-dev-shm-usage --renderer-process-limit=1 --no-first-run "
+           f"--disable-background-networking --hide-scrollbars --enable-logging=stderr --v=0 "
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
-           f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught|ERROR' | grep -v -E "
-           f"'dbus|Fontconfig|gpu|GPU|sandbox' | head -40")
+           f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught' | grep -v -E "
+           f"'{CONSOLE_NOISE}' | head -40")
     mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
-    log = ctx.output_text()[mark:]
+    out = ctx.output_text()[mark:].splitlines()
+    code = next((ln[len(STATUS_MARK):].strip() for ln in out if ln.startswith(STATUS_MARK)), "")
+    log = "\n".join(console_line(ln) for ln in out if not ln.startswith(STATUS_MARK))
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):
@@ -271,13 +305,95 @@ def _render(ctx, a):
         raise ToolError("the page did not render: " + (log.strip() or "no screenshot") +
                         (f" ({url}; {_ports_words(_ports(ctx))})" if a.get("port") else "")
                         ) from None
-    errors = [ln for ln in log.splitlines() if ln.strip()]
+    errors = quote_lines(ctx, [ln for ln in log.splitlines() if ln.strip()],
+                         a.get("port") and int(a["port"]), cwd)
     # a new render of the page as it is now, each call (its own file): live (2026-10-13) the
     # model read a correct clock as "still tilted" four times and took the screenshots for stale
     msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
            f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
            f"screenshot {shot}\n")
+    if code.isdigit() and not 200 <= int(code) < 400:
+        msg += (f"the server answered HTTP {code} for {url}: the screenshot is its error page, not "
+                f"the app\n")
     msg += ("console:\n" + "\n".join(errors[:40])) if errors else "no console errors"
+    return Result(msg, images=[("image/png", png)],
+                  pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
+
+
+# a script and line in an error: `http://localhost:5174/js/scene/pond.js:62` (the kit) or
+# `source: http://localhost:5174/js/scene/pond.js (62)` (Chromium's log)
+_AT_LINE = re.compile(r"(?:https?://(?:localhost|127\.0\.0\.1):(\d+)|file://)(/[^\s():\"']+?)"
+                      r"(?::(\d+)(?::\d+)?|\s\((\d+)\))")
+
+
+def quote_lines(ctx, errors: list[str], port: int | None, cwd: str) -> list[str]:
+    """Each error that names a script of this page and a line, followed by that line of the file
+    in the chat's files: live (2026-10-17, pagoda replay 3) "Cannot read properties of undefined
+    (reading 'set')" at pond.js (62) went to the model 13 times, and it edited main.js for 20
+    minutes; line 62 was `petal.position.set(...)` on a geometry."""
+    out = []
+    for e in errors:
+        out.append(e)
+        m = _AT_LINE.search(e)
+        if not m:
+            continue
+        p, path, line = m.group(1), m.group(2), m.group(3) or m.group(4)
+        if p is not None:
+            if port is None or int(p) != port or not cwd:
+                continue
+            path = cwd.rstrip("/") + path
+        try:
+            src = ctx.ws.read(path, limit=512 * 1024).decode("utf-8", "replace").splitlines()
+            text = src[int(line) - 1].strip()
+        except (PathError, OSError, IndexError, ValueError):
+            continue
+        out.append(f"    {ctx.ws.show(ctx.ws.resolve(path))}:{line}: {text[:200]}")
+    return out
+
+
+def kit_ok(ctx) -> bool:
+    """The laya kit in the chat's files (chatd/verify.py `vendor_kit`); False without the source
+    tree (an installed package): render_page then shoots with Chromium's own flags."""
+    from chatd import verify
+    return verify.vendor_kit(ctx.ws)
+
+
+def _render_kit(ctx, url: str, w: int, port: int | None = None, cwd: str = "") -> Result | None:
+    """render_page through the laya kit's page check (Chrome under DevTools, real time): the
+    page's console errors, uncaught exceptions and failed loads, after the page has loaded. Live
+    (2026-10-17, pagoda replay 3) a module the page imports answered 404, the app stayed on its
+    loading screen, and Chromium's own screenshot mode logged nothing: render_page said "no
+    console errors" six times over the same picture. None when the kit is not there or its run
+    gives no report (the caller shoots with Chromium's own flags)."""
+    if not kit_ok(ctx):
+        return None
+    from chatd import verify
+    shots = f"/workspace/{SHOTS_DIR}/{ctx.call_id}"
+    cmd = (f"cd /workspace && python3 {verify.KIT_IN_BOX} page {shlex.quote(url)} --no-laya "
+           f"--widths {w} --shots {shots} --timeout 60")
+    mark = len(ctx.output_text())
+    ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
+    out = ctx.output_text()[mark:]
+    try:
+        rep = json.loads(out[out.index("{"):out.rindex("}") + 1])
+        png = ctx.ws.read(f"{shots}/page-{w}.png")
+    except (ValueError, PathError, OSError):
+        if getattr(ctx, "oom", False):
+            raise ToolError(f"the page did not render: {oom_words()}, the kernel killed Chromium. "
+                            f"A lighter page or a smaller width and height may fit",
+                            oom_data()) from None
+        return None
+    h = 844 if w < 600 else 900
+    shot = f"{shots}/page-{w}.png"
+    msg = (f"rendered {url} at {w}x{h} just now (a fresh render of the current file, "
+           f"{time.strftime('%H:%M:%S')}, image sha256 {hashlib.sha256(png).hexdigest()[:12]}); "
+           f"screenshot {shot}\n")
+    errors = quote_lines(ctx, rep.get("errors") or [], port, cwd)
+    text = (((rep.get("widths") or [{}])[0]).get("text") or "").strip()
+    if text:
+        msg += f'visible text: "{text[:200]}"\n'
+    msg += ("console errors, exceptions and failed loads:\n" + "\n".join(errors[:40])) \
+        if errors else "no console errors and no failed loads"
     return Result(msg, images=[("image/png", png)],
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
 
@@ -371,8 +487,10 @@ def _library_read(ctx, a):
     if st != 200 or not isinstance(obj, dict):
         raise ToolError(f"no skill {name!r} in the library")
     ref = obj.get("reference") or ""
-    return Result(f"# {obj.get('name')}\n\n{obj.get('body') or ''}" +
-                  (f"\n\n## Reference\n\n{ref}" if ref else ""))
+    from chatd.verify import kit_note
+    text = f"# {obj.get('name')}\n\n{obj.get('body') or ''}" + (f"\n\n## Reference\n\n{ref}"
+                                                                if ref else "")
+    return Result(text + kit_note(text, ctx.ws))
 
 
 def _todo_write(ctx, a):

@@ -11,6 +11,7 @@ write_file of 7.8 KB and seven edit_file calls, "KV for this chat —", "residen
   4  a running sandbox's memory is the runtime's figure (usage less the inactive file cache),
      read at most every 5 s, and null when the runtime does not say
   5  the harness's picks and the prompt's split outlive a chatd restart (SRV-455)
+  6  the prompt's images are a part of their own, the engine's count (VIS-205)
 
 CPU only. Run: python -m pytest -q tests/test_chatd_panel.py
 """
@@ -280,6 +281,23 @@ def test_thinking_this_turn_live_and_after_the_turn():
     assert r["used"] == 30_803 + 2193
     r = ctx_mod.report(**common, branch_tokens=10, stats=None, run=None, row=None)
     assert {p["kind"]: p for p in r["parts"]}["thinking"]["label"] == "thinking, this turn"
+
+
+def test_the_images_part_is_the_engines_count_out_of_the_conversations_share():
+    """VIS-205: the prompt's image rows (the usage frame's `tandem.parts.images`: a 1,280 x 800 screenshot is
+    1,000 rows on Super VL) are a part of their own, taken out of the conversation's share."""
+    model = {"id": "m", "max_len": 262144, "max_output": 32768}
+    common = dict(model=model, settings={}, files_tokens=0, facts={}, peek=None, harness=None, stats=None,
+                  run=None)
+    row = {"prompt_tokens": 9_000, "cached_tokens": 0}
+    split = {"system": 1_500, "tools": 2_000, "history": 4_500, "injected": 0, "images": 1_000}
+    r = ctx_mod.report(**common, branch_tokens=9_000, row=row, split=split)
+    parts = {p["kind"]: p for p in r["parts"]}
+    assert parts["images"]["tokens"] == 1_000 and parts["images"]["label"] == "images"
+    assert parts["messages"]["tokens"] == 9_000 - 1_500 - 2_000 - 1_000
+    assert r["used"] == sum(p["tokens"] for p in r["parts"] if p["kind"] != "reserved") == 9_000
+    r = ctx_mod.report(**common, branch_tokens=9_000, row=row, split=None)    # an engine before the split
+    assert {p["kind"]: p for p in r["parts"]}["images"]["tokens"] == 0
 
 
 def test_the_next_request_counts_the_last_calls_prompt_and_answer_once():

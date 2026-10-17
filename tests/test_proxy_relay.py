@@ -383,6 +383,34 @@ def test_responses_passthrough_and_deepseek_usage_and_contract():
     srv.shutdown()
 
 
+def test_cost_comment_before_done_only_when_asked():
+    """`X-Tandem-Cost: 1` (chatd): one `: tandem-cost` comment just before [DONE], the price its
+    ledger row has; DeepSeek's cache split priced at the cached rate. Without the header the
+    stream carries none."""
+    srv, port = fake(models=["deepseek-chat"])
+    env = _env(("f1", port), extra={"TANDEM_PRICE_1": "f1/deepseek-chat=0.27,0.07,1.10"})
+    body = _chat("x FAKE_DEEPSEEK FAKE_CACHED 3 FAKE_REASONING", model="deepseek-chat",
+                 stream=True, stream_options={"include_usage": True})
+    with Proxy(env) as px:
+        px.sync()
+        st, _, plain = px.post("/v1/chat/completions", body)
+        assert st == 200 and b"tandem-cost" not in plain
+        st, _, got = px.post("/v1/chat/completions", body, headers={"X-Tandem-Cost": "1"})
+        assert st == 200
+        events = got.split(b"\n\n")
+        i = next(k for k, e in enumerate(events) if e.startswith(b": tandem-cost "))
+        assert events[i + 1] == b"data: [DONE]" and sum(
+            e.startswith(b": tandem-cost") for e in events) == 1
+        said = json.loads(events[i][len(b": tandem-cost "):])
+        row = px.rows()[-1]
+        assert said == {"cost_micros": row["cost_micros"], "backend": "f1"}
+        assert row["cached_tokens"] == 3 and row["cost_micros"] == round(
+            (row["prompt_tokens"] - 3) * 0.27 + 3 * 0.07 + row["completion_tokens"] * 1.10)
+        # the rest of the stream is the backend's, byte for byte
+        assert got.replace(events[i] + b"\n\n", b"") == plain
+    srv.shutdown()
+
+
 def test_config_api_add_test_lock_delete():
     srv, port = fake(models=["fake-a"], key=KEY_B)
     with Proxy(_env(("f1", port))) as px:

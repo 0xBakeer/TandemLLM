@@ -36,7 +36,7 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/gguf.py",
            "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
-           "engine/models/nemotron_h/ref.py", "engine/models/lfm2_moe/kernels.py",
+           "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py")
 #: the model's name in ops/prices/ and models/, by the served weight profile's name
 MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b",
@@ -164,7 +164,7 @@ class NemotronHServing:
         self.cgraphs: dict = {}
         self.picks = None
         self.tap = None
-        self.mm = None                       # no vision tower: the server's image path is off
+        self.mm = None                       # the request's images (vision.py NhMMContext), set by the server
         self.pos_delta = 0
         self._hidden = None
         self._chain = None
@@ -296,14 +296,15 @@ class NemotronHServing:
 
     @torch.no_grad()
     def forward(self, ids: torch.Tensor, start: int, last_only: bool = True) -> torch.Tensor:
-        """Rows `ids` at positions start..: one token through the decode graph, more through the
-        prefill. Logits [1, 1, vocab] of the last row (fp32)."""
+        """Rows `ids` at positions start..: one token through the decode graph, more (or an image row)
+        through the prefill, with the request's image rows (`mm`). Logits [1, 1, vocab] of the last row
+        (fp32)."""
         self._settle_chain()
         ids = ids.view(-1)
         self._at(start)
         T = ids.numel()
         self._ensure(start + T + CAPTURE_ROWS)
-        if T == 1 and start > 0:
+        if T == 1 and start > 0 and not (self.mm is not None and self.mm.at(start)):
             if self.dg is None:
                 self.dg = DecodeGraph(self.fn, self.st, self.slot)
             n0 = self.dg.captures
@@ -312,7 +313,11 @@ class NemotronHServing:
             self._hidden = self.dg.rb["hidden"].view(1, 1, -1)
             self.stats["decode_steps"] += 1
             return lg.view(1, 1, -1)
-        lg = self.fn.prefill(ids, self.st)
+        # rows past the prompt hold no image: a forced close or a hidden note forwarded after the
+        # prompt (2026-10-17: the conductor closed a looping reasoning on a request with a
+        # screenshot, and the splice refused rows past the prompt; the request failed)
+        mm = self.mm if self.mm is not None and start < self.mm.n else None
+        lg = self.fn.prefill(ids, self.st, mm=mm)
         self._hidden = self.fn.prompt_hidden.unsqueeze(0)
         self.stats["prefill_rows"] += T
         return lg.view(1, 1, -1)
@@ -584,6 +589,12 @@ def serve(a, ctx) -> dict:
     lc_path = (os.environ.get("QSE_NH_LILICORR") or os.path.join(os.path.dirname(os.path.normpath(a.model)),
                                                                    "nemotron-3.5-bolt-lilicorr")) if name == "lilicorr" else None
     srv, info = build(a.model, a.max_len, tok, mark=ctx.mark, log=ctx.log, kv_pool=pool, mtp=head, lilicorr=lc_path)
+    if hasattr(ctx, "vision"):
+        # ENG-365: an Omni checkpoint's RADIO tower and projector (BF16 in every Super VL checkpoint), with
+        # its processor and prompt rows (vision.py); `--vision off` or a checkpoint without one: text only
+        from engine.models.nemotron_h.vision import load_radio_config, load_tower
+        ctx.vision(a.model, lambda vcfg: load_tower(a.model), load_radio_config)
+        ctx.mark("vision")
     drafter = None
     depth = max(1, int(getattr(a, "depth", 3) or 3)) if head and info["mtp_in_checkpoint"] else 0
     lc_head = srv.heads.get("lilicorr")

@@ -1290,10 +1290,13 @@ class Router:
                   else base.get("effort_by_size")}
         if modelfit.FIT["fallback"] == "lean" and conf is None and source in ("fallback", "sticky"):
             # ENG-E10: nobody decided the class (no answer at the accept bar, or a tool turn of
-            # such a session): the profile's default effort and nothing of the default class's
-            # note, so a short chat does not get a coding task's packages and xhigh
-            policy.update(effort=prof["thinking"]["default"], packages=[], core=[], rules=[],
-                          note="", effort_by_size=None)
+            # such a session): the profile's default effort, so a short chat does not think at a
+            # coding task's xhigh. SRV-534: the class's packages, core and rules stay (the
+            # profile's default class on a new session, the session's class after it), and the
+            # adapter's fit filters them as for a decided class: with Laya refused, every Chat-tab
+            # turn on Super VL went out with no package at all. A tool turn keeps the class of
+            # its user message, so the note a run started with stays the same across its steps
+            policy.update(effort=prof["thinking"]["default"], effort_by_size=None)
             row["extra"]["model_fit_lean"] = True
         if modelfit.FIT != modelfit.DEFAULTS:
             row["extra"]["model_fit"] = modelfit.summary()

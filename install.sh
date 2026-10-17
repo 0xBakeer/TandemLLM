@@ -31,7 +31,8 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.11.2 starts chatd with the engine, scopes the sandbox containers to their chatd and fixes the install's scripts and secrets;
+# The engine release. v0.11.3 hardens the Setup Guide (tandem doctor, a check before the restart, scripts through bash, Retry);
+# v0.11.2 starts chatd with the engine, scopes the sandbox containers to their chatd and fixes the install's scripts and secrets;
 # v0.11.1 fixes symlinks in the Chat tab sandbox's folders and prices Bolt's EXL3 packs;
 # v0.11.0 adds Nemotron 3.5 Super VL 120B-A12B (the nemotron-super-vl-* profiles);
 # v0.10.0 adds Nemotron 3.5 Bolt 74B-A9B (the nemotron-bolt-* profiles);
@@ -45,7 +46,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.11.2}"
+TANDEM_REF="${TANDEM_REF:-v0.11.3}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace
@@ -319,9 +320,14 @@ if [ "$UNINSTALL" = 1 ]; then
             die "no terminal to confirm on: re-run with --uninstall --yes"
         fi
     fi
-    if [ -x "$DIR/bin/tandem" ]; then run "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
+    if [ -f "$DIR/bin/tandem" ]; then run bash "$DIR/bin/tandem" stop 120 || warn "the stop reported an error"; fi
     # chatd too, should this tandem predate its stop (OPS-155)
     if [ -f "$SRC/ops/chatd.sh" ]; then run bash "$SRC/ops/chatd.sh" stop || true; fi
+    # the status responder of this install (OPS-175), which outlives an engine stop on purpose
+    SPORT="$(sed -n "s/^QSE_STATUS_PORT=//p" "$RUN/ops/serve.env" 2>/dev/null | tail -1 | tr -dc 0-9)"
+    if [ -n "$SPORT" ] && [ -f "$RUN/ops/engine_status.py" ]; then
+        run env QSE_STATUS_TREE="$SRC" python3 "$RUN/ops/engine_status.py" stop --port "$SPORT" || true
+    fi
     if [ -f "$UNIT" ] && grep -q "$DIR/bin/tandem" "$UNIT" 2>/dev/null; then
         run systemctl --user disable --now tandemllm.service || true
         run rm -f "$UNIT"
@@ -766,6 +772,9 @@ setv QWEN38_MODEL "$(q "$SNAP_BASE")"
 # look for the base and fetch into the same one (OPS-143)
 [ "$HF_HUB_DIR" = "$HOME/.cache/huggingface/hub" ] || setv HF_HUB_CACHE "$(q "$HF_HUB_DIR")"
 setv QSE_SECRETS "$(q "$DIR/state/secrets.env")"
+# the status responder (ops/engine_status.py): it answers for the engine while a Setup Guide install
+# restarts it, so the page shows the restart and the job instead of errors (OPS-175)
+[ "$PORT" -le 65526 ] && setv QSE_STATUS_PORT "$((PORT + 9))"
 if [ -n "$CUDA_HOME_FOUND" ]; then setv CUDA_HOME "$(q "$CUDA_HOME_FOUND")"; fi
 if [ "$SPARK" != 1 ]; then
     # best effort off the Spark: the skinny kernel is sm_121a code; a smaller context below 100 GiB
@@ -835,13 +844,22 @@ else
     fi
 fi
 
-# DIR/bin/tandem: start | stop | restart | status | smoke | logs | env | chat
+# DIR/bin/tandem: start | stop | restart | status | smoke | logs | env | doctor | chat
 write_control() {
     printf '#!/usr/bin/env bash\n# TandemLLM control script, written by install.sh.\nTANDEM_DIR=%q\n' "$DIR"
     cat <<'CTL'
 set -euo pipefail
 RUN="$TANDEM_DIR/run"
 ENV_FILE="$RUN/ops/serve.env"
+# tandem doctor (OPS-171): checks this install and repairs what is safe (file modes, the run/ops
+# copies, stale pid files, the setup marker); before the config loads, so a config that does not
+# load is one of its findings. --check changes nothing.
+doctor() {
+    local py="$TANDEM_DIR/venv/bin/python"
+    [ -x "$py" ] || py=python3
+    (cd "$TANDEM_DIR/src" && PYTHONPATH="$TANDEM_DIR/src" "$py" -m server.setup.doctor "$@")
+}
+if [ "${1:-}" = doctor ]; then shift; doctor "$@"; exit $?; fi
 [ -f "$ENV_FILE" ] || { echo "[tandem] no $ENV_FILE; re-run install.sh" >&2; exit 1; }
 # a command that fails in the config (or a file it sources) names its file and line instead of
 # ending this script silently under set -e (OPS-159)
@@ -889,6 +907,8 @@ memcheck() {
 
 start() {
     if healthy; then echo "[tandem] already healthy on :$PORT"; chat_auto; return 0; fi
+    # what it repairs or finds is said; a finding does not stop the start (start.sh decides)
+    doctor --quiet || echo "[tandem] doctor found something to look at (above); starting anyway" >&2
     memcheck
     local rc=0 t0 limit
     bash "$RUN/ops/start.sh" || rc=$?
@@ -974,7 +994,7 @@ case "${1:-}" in
             logs) tail -n "${3:-100}" -f "$REPO/logs/chatd.log" ;;
             *) echo "usage: $0 chat start | stop | restart | status | logs [n]" >&2; exit 2 ;;
         esac ;;
-    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env | chat start|stop|restart|status|logs" >&2; exit 2 ;;
+    *) echo "usage: $0 start | stop [grace-s] | restart | status | smoke | logs [n] | env | doctor [--check] | chat start|stop|restart|status|logs" >&2; exit 2 ;;
 esac
 CTL
 }
@@ -990,7 +1010,7 @@ if [ "$SYSTEMD" = 1 ]; then
     info "one engine per board: enable it only if nothing else (cron, another unit) starts one here;"
     info "bin/tandem start refuses while any engine is alive, but two supervisors can still race at boot"
     if [ "$DRY" = 1 ]; then
-        note "would write $UNIT (ExecStart=$DIR/bin/tandem start) and enable it"
+        note "would write $UNIT (ExecStart=/bin/bash $DIR/bin/tandem start) and enable it"
     else
         mkdir -p "$(dirname "$UNIT")"
         cat > "$UNIT" <<EOF
@@ -999,14 +1019,15 @@ Description=TandemLLM: Qwen3.8-27B with StairCut, OpenAI-compatible API on :$POR
 After=network-online.target
 
 [Service]
-# bin/tandem start runs the release's ops/start.sh, which starts the server in the background
+# bin/tandem start runs the release's ops/start.sh (through bash, as every call of a script here: a
+# copy that lost its execute bit still runs, OPS-167), which starts the server in the background
 # and returns once /health answers, then chatd (the Chat tab's service); both stay in this unit's
 # cgroup. bin/tandem stop stops chatd first, then the engine, so systemctl restart restarts chatd
 # too; tandem restart leaves chatd and its runs alone.
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$DIR/bin/tandem start
-ExecStop=$DIR/bin/tandem stop 120
+ExecStart=/bin/bash $DIR/bin/tandem start
+ExecStop=/bin/bash $DIR/bin/tandem stop 120
 TimeoutStartSec=2400
 TimeoutStopSec=180
 
@@ -1062,9 +1083,9 @@ else
     if [ "$SYSTEMD" = 1 ] && systemctl --user is-enabled tandemllm.service >/dev/null 2>&1; then
         systemctl --user start tandemllm.service || die "tandemllm.service did not start: journalctl --user -u tandemllm; $SRC/logs/engine.log"
     else
-        "$DIR/bin/tandem" start || die "the engine did not come up; log: $SRC/logs/engine.log"
+        bash "$DIR/bin/tandem" start || die "the engine did not come up; log: $SRC/logs/engine.log"
     fi
-    "$DIR/bin/tandem" smoke || die "the smoke test failed; log: $SRC/logs/engine.log"
+    bash "$DIR/bin/tandem" smoke || die "the smoke test failed; log: $SRC/logs/engine.log"
 fi
 
 API_HOST="$HOST"; [ "$HOST" = 0.0.0.0 ] && API_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"; API_HOST="${API_HOST:-127.0.0.1}"
@@ -1072,9 +1093,9 @@ cat <<EOF
 
 ${B}Done.${N}  TandemLLM $TANDEM_REF in $DIR
 
-  Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat
+  Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | doctor | chat
   Config:    $RUN/ops/serve.env   (your overrides: $RUN/local.env)
-  Watchdog:  $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
+  Watchdog:  bash $RUN/ops/watchdog.sh   (optional, from cron every minute: docs/operations.md)
   Update:    re-run the installer (same --dir); downloads resume, finished steps are skipped
   Remove:    bash install.sh --dir $DIR --uninstall   (the weights stay in the HF cache)
   Dashboard: http://$API_HOST:$PORT/dashboard (no password: anyone who reaches the port can read

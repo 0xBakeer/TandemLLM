@@ -145,6 +145,7 @@
 \texttt{-{}-fake-\allowbreak{}engine} & \texttt{off (a switch)} & the e2e: no weights, no GPU, a deterministic CPU token source (server/fake\_engine.py) behind the real handler, auth, ledger, metrics and logs. \\
 \texttt{-{}-fake-\allowbreak{}tps} & \texttt{200} & with -\kern0pt-fake-engine: tokens a second it writes. \\
 \texttt{-{}-fake-\allowbreak{}prefill-\allowbreak{}tps} & \texttt{0} & with -\kern0pt-fake-engine: the prefill rate of a FAKE\_SLOW\_PREFILL prompt (0 = 2,000 tokens a second). \\
+\texttt{-{}-fake-\allowbreak{}load-\allowbreak{}s} & \texttt{0} & with -\kern0pt-fake-engine: a load of this many seconds before the port opens, writing the load's phases as the real engine does. \\
 \texttt{-{}-structured-\allowbreak{}outputs} & \texttt{on (-{}-no-\allowbreak{}structured-\allowbreak{}outputs turns it off)} & serve response\_format json\_object / json\_schema and structured\_outputs (regex, choice, json) as masks over the target's rows, exact under speculation. \\
 \texttt{-{}-log-\allowbreak{}content} & \texttt{off (a switch)} & let exception messages that quote a request into the log. \\
 \texttt{-{}-log-\allowbreak{}request-\allowbreak{}keys} & \texttt{off (a switch)} & one [body] line per request with the parameter names and the scalar values of the non-content ones (model, stream, max\_tokens, temperature,...); never messages, prompt, tools or stop strings. \\

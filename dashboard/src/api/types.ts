@@ -270,6 +270,9 @@ export interface RequestRow {
   retries?: number | null;
   fallback_from?: string | null;
   upstream_status?: number | null;
+  /** VIS-207: the backend configuration a relayed answer named (its `system_fingerprint`); a
+   *  new value under the same model id is a snapshot the provider swapped in */
+  system_fingerprint?: string | null;
   /** P6: the queue, prefill and decode split and the cached tokens came from the engine's plugin */
   l2?: { join: 'exact' | 'approximate'; preemptions?: number | null; engine_finish?: string | null; corrupted?: boolean | null } | null;
 }
@@ -562,6 +565,8 @@ export interface LiveRequest {
   decode_tps: number | null; // running average since the first token; the final number when done
   decode_tps_now: number | null; // the last ~2 s
   lane?: SideLane | null;
+  /** 1.3: the backend a relayed request went to (proxy/); null for the engine's own */
+  backend?: string | null;
   cache_source: CacheSource | null;
   max_tokens: number | null;
   ended_ms_ago: number | null;
@@ -709,6 +714,8 @@ export interface LiveRecent {
   cached_tokens?: number | null;
   forwarded_tokens?: number | null;
   cache_source?: CacheSource | null;
+  /** 0.11.3: the backend a relayed request went to; its cached tokens are the backend's own */
+  backend?: string | null;
 }
 
 export interface LiveCounts {
@@ -1519,7 +1526,7 @@ export interface SetupPlan {
   dry_run?: boolean;
 }
 
-export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'write_config' | 'switch' | 'smoke' | 'rollback';
+export type SetupJobStepId = 'check' | 'unload_assistant' | 'fetch' | 'preflight' | 'write_config' | 'switch' | 'smoke' | 'rollback';
 /** waiting: the step waits for the engine's requests to finish before anything stops (1.0+) */
 export type SetupJobStepState = 'pending' | 'waiting' | 'running' | 'done' | 'failed' | 'skipped';
 export interface SetupJobStep {
@@ -1552,10 +1559,59 @@ export interface SetupJob {
   warnings?: string[];
   /** VIS-153: tools waiting for memory or not loaded yet */
   notes?: string[];
+  /** VIS-211: the model's id and what the job sets up, for the finished screen (jobs before 0.11.3
+   *  have neither) */
+  model?: string;
+  summary?: SetupJobSummary;
+  /** SRV-560: the old weights the job removed after the switch */
+  removed?: SetupRemoveResult;
+  /** VIS-213: the job this one tries again */
+  retry_of?: string | null;
+  /** OPS-171: tandem doctor's report from the check step (and what it repaired after a failure) */
+  doctor?: { repaired?: string[]; problems?: string[] };
+}
+/** GET /v1/setup/weights (SRV-560): the weights on the box */
+export interface SetupInstalledWeights {
+  weights: {
+    model: string;
+    model_name: string;
+    profile: string;
+    label: string;
+    dir: string;
+    removes: string;
+    gb: number;
+    active: boolean;
+    removable: boolean;
+    shared_with: string[];
+    hf_repo?: string | null;
+    hf_revision?: string | null;
+  }[];
+  assets: { id: string; label: string; model: string; path: string; gb: number; used_by: string[] }[];
+  active: string | null;
+  free_gb: number | null;
+}
+/** POST /v1/setup/remove (SRV-560) */
+export interface SetupRemoveResult {
+  removed: { profile: string; dir: string; gb: number }[];
+  freed_gb: number;
+  log?: string;
+  dry_run?: boolean;
+}
+export interface SetupJobSummary {
+  model: string;
+  profile: string;
+  profile_label: string;
+  /** the optional tools the selection turns on, by label */
+  tools: string[];
+  slots: number | null;
+  window: number | null;
+  side_window: number | null;
 }
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
   selection: SetupSelection;
+  /** SRV-560: profiles whose weights go once the new setup answers (never the new one) */
+  remove_after?: string[];
   /** 1.0+: answer the plan (SetupPlan, dry_run true) and change nothing */
   dry_run?: boolean;
 }

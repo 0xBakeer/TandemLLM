@@ -6,8 +6,9 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
-import type { RequestRow, Usage } from '../api/types';
-import { compact, exact, fixed, ms, NOT_REPORTED, pct, tps, dateTimeShort } from '../lib/format';
+import type { BackendRef, RequestRow, Usage } from '../api/types';
+import { compact, exact, fixed, money, ms, NOT_REPORTED, pct, tps, dateTimeShort } from '../lib/format';
+import { backendName, ENGINE, relayedBackends, scatterGroup } from '../lib/relayed';
 import { backendEngines, backendFigures, liveNumbers, parsePrometheus, histogram, histogramDelta, histogramQuantile, type LiveNumbers, type Scrape } from '../lib/prom';
 import { renderEngines } from './engines';
 import { poll, type Poller } from '../lib/poll';
@@ -31,6 +32,8 @@ export class QsePerformance extends LightElement {
   @state() private metricsError: { endpoint: string; message: string } | null = null;
   @state() private recent: Loadable<RequestRow[]> = { state: 'loading' };
   @state() private history: Loadable<Usage> = { state: 'loading' };
+  /** each relayed backend's history (a cloud model), drawn beside the engine's, never pooled */
+  @state() private relayedHistory: { ref: BackendRef; usage: Usage }[] = [];
   @state() private showReplays = false;
   @state() private selected: RequestRow | null = null;
   private tz = browserTz();
@@ -118,8 +121,12 @@ export class QsePerformance extends LightElement {
     const days = this.range === '24h' ? 2 : this.range === '7d' ? 7 : this.range === '30d' ? 30 : 365;
     const bucket = days <= 31 ? 'hour' : 'day';
     try {
-      const u = await api.usage({ from: addDays(today, -(days - 1)), to: today, bucket, tz: this.tz, model: this.model, client: this.client });
-      if (this.range === '24h') u.buckets = u.buckets.slice(-24);
+      const q = { from: addDays(today, -(days - 1)), to: today, bucket, tz: this.tz, model: this.model, client: this.client } as const;
+      // the engine's own requests; each relayed backend apart (0.11.3)
+      const u = await api.usage({ ...q, backend: ENGINE });
+      const others = await Promise.all(relayedBackends(u).map(async (ref) => ({ ref, usage: await api.usage({ ...q, backend: ref.id }) })));
+      if (this.range === '24h') for (const x of [u, ...others.map((o) => o.usage)]) x.buckets = x.buckets.slice(-24);
+      this.relayedHistory = others.filter((o) => o.usage.totals.requests > 0);
       this.history = { state: 'ready', data: u };
     } catch (e) {
       const d = describeError(e);
@@ -190,19 +197,24 @@ export class QsePerformance extends LightElement {
         id: x.id,
         x: Math.max(1, x.prompt_tokens as number),
         y: x.decode_tps as number,
-        group: cacheTier(x.cache_source),
+        group: scatterGroup(x, cacheTier(x.cache_source)),
         diamond: !x.thinking,
         measured: x.measured_at ?? 'engine',
-        label: `${dateTimeShort(x.ts)} · ${x.client.label ?? x.client.kind}`,
-        detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${TIER_LABEL[cacheTier(x.cache_source)]}`,
+        label: `${dateTimeShort(x.ts)} · ${x.client.label ?? x.client.kind}${x.backend ? ` · ${backendName(x.backend)}` : ''}`,
+        detail: `${tps(x.decode_tps)} · ${exact(x.prompt_tokens)} prompt (${exact(x.cached_tokens)} cached) · ${exact(x.completion_tokens)} out · TTFT ${ms(x.ttft_ms)} · ${x.backend ? `${x.backend_model ?? x.model}${x.cost_micros != null ? `, ${money(x.cost_micros)}` : ''}` : TIER_LABEL[cacheTier(x.cache_source)]}`,
       }));
+      // a cloud model decodes at 200-400 tok/s beside the engine's 30-45: a log axis keeps both
+      const relayed = rows.filter((x) => x.backend);
+      const relayedNames = [...new Set(relayed.map((x) => backendName(x.backend)))];
       const notes = [
         replays.length ? `${replays.length} replay${replays.length === 1 ? '' : 's'} (answered from memory, no decode) ${this.showReplays ? 'listed below' : 'hidden'}` : '',
         laned ? `${laned} side-lane request${laned === 1 ? '' : 's'} not plotted (a short plain decode beside a turn)` : '',
       ].filter(Boolean);
+      if (relayed.length) notes.push(`${relayed.length} relayed to ${relayedNames.join(', ')} (red, log axis)`);
       return html`<qse-scatter
           .points=${pts}
-          .groups=${TIERS.filter((t) => t !== 'response').map((t) => ({ key: t, name: TIER_LABEL[t] }))}
+          .groups=${[...TIERS.filter((t) => t !== 'response').map((t) => ({ key: t, name: TIER_LABEL[t] })), ...(relayed.length ? [{ key: 'relayed', name: `relayed: ${relayedNames.join(', ')}` }] : [])]}
+          .logY=${relayed.length > 0}
           .height=${280}
           @select=${(e: CustomEvent<number>) => (this.selected = r.data.find((x) => x.id === e.detail) ?? null)}
         ></qse-scatter>
@@ -233,7 +245,7 @@ export class QsePerformance extends LightElement {
     const s = this.selected;
     const body = s
       ? html`<div class="req-detail">
-          <div class="req-detail-head"><code>${s.request_id}</code><span class="muted">${dateTimeShort(s.ts)} · ${s.client.label ?? s.client.id} · ${s.endpoint}${s.stream ? ', stream' : ''}</span></div>
+          <div class="req-detail-head"><code>${s.request_id}</code><span class="muted">${dateTimeShort(s.ts)} · ${s.client.label ?? s.client.id} · ${s.endpoint}${s.stream ? ', stream' : ''}${s.backend ? html` · <span class="tag" data-backend=${s.backend.id}>${backendName(s.backend)}</span> ${s.backend_model ?? s.model}` : nothing}</span></div>
           ${s.measured_at === 'proxy'
             ? html`<p class="muted small" data-measured="proxy">Measured at the proxy (${s.backend?.label ?? s.backend?.id}): TTFT ${ms(s.ttft_ms)} holds the network and the backend's queue; the queue, prefill and draft figures below are ${NOT_REPORTED}.</p>`
             : html`<qse-timing-bar .queue=${s.queue_ms} .prefill=${s.prompt_ms} .decode=${s.decode_ms}></qse-timing-bar>`}
@@ -248,7 +260,9 @@ export class QsePerformance extends LightElement {
             <div><dt>acceptance</dt><dd class="num">${s.draft_tokens ? pct((s.draft_accepted ?? 0) / s.draft_tokens) : '—'}</dd></div>
             <div><dt>drafted</dt><dd class="num">${exact(s.draft_tokens)}</dd></div>
             <div><dt>accepted</dt><dd class="num">${exact(s.draft_accepted)}</dd></div>
-            <div><dt>cache</dt><dd>${s.prompt_tokens == null ? '—' : html`<span class="cache-tag tier-${cacheTier(s.cache_source)}">${TIER_LABEL[cacheTier(s.cache_source)]}</span>`}</dd></div>
+            <div><dt>cache</dt><dd>${s.prompt_tokens == null ? '—' : s.backend ? html`<span class="cache-tag tier-backend">the backend's</span>` : html`<span class="cache-tag tier-${cacheTier(s.cache_source)}">${TIER_LABEL[cacheTier(s.cache_source)]}</span>`}</dd></div>
+            ${s.cost_micros != null ? html`<div data-cost><dt>cost</dt><dd class="num">${money(s.cost_micros)}</dd></div>` : nothing}
+            ${s.system_fingerprint ? html`<div data-fingerprint><dt>fingerprint</dt><dd><code title="the backend configuration this answer named (system_fingerprint)">${s.system_fingerprint}</code></dd></div>` : nothing}
             <div><dt>reused</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).reused)}</dd></div>
             <div><dt>forwarded</dt><dd class="num">${exact(reuse(s.prompt_tokens, s.cached_tokens).forwarded)}</dd></div>
             <div><dt>finish</dt><dd>${s.finish_reason ?? '—'}${s.error_type ? html` <span class="err-ink">${s.error_type}</span>` : nothing}</dd></div>
@@ -266,7 +280,10 @@ export class QsePerformance extends LightElement {
       if (r.state === 'loading') return skeleton(2);
       if (r.state === 'error') return errorState(r.endpoint, r.message, () => this.recentPoll?.refresh());
       if (r.state === 'empty') return emptyState('No requests yet');
-      const sum = cacheSummary(r.data, Date.now());
+      // a relayed request's cache is the backend's own (DeepSeek's), never one of the engine's tiers
+      const own = r.data.filter((x) => !x.backend);
+      const relayed = r.data.length - own.length;
+      const sum = cacheSummary(own, Date.now());
       if (!sum.requests) return emptyState('No request in the last hour');
       const total = sum.reused + sum.forwarded;
       return html`<div class="cache-sum-bar" role="img" aria-label="prompt tokens by source">
@@ -284,7 +301,7 @@ export class QsePerformance extends LightElement {
             </tr>`)}
           </tbody>
         </table>
-        <p class="panel-foot">${exact(sum.requests)} requests${r.data.length >= 500 ? ' (of the newest 500)' : ''}; ${sum.reusedShare == null ? '—' : pct(sum.reusedShare)} of their prompt tokens came out of a cache. Reused: resumed without a forward; forwarded: prefilled.</p>`;
+        <p class="panel-foot">${exact(sum.requests)} requests${r.data.length >= 500 ? ' (of the newest 500)' : ''}; ${sum.reusedShare == null ? '—' : pct(sum.reusedShare)} of their prompt tokens came out of a cache. Reused: resumed without a forward; forwarded: prefilled.${relayed ? ` The ${relayed} relayed requests (a cloud model's cache is its provider's) are left out.` : ''}</p>`;
     })();
     return panel('Cache sources, last hour', body, { id: 'cache-sources', sub: 'where each prompt came from: RAM (rows in place, the end anchor, the state store), the NVMe, or cold' });
   }
@@ -313,15 +330,18 @@ export class QsePerformance extends LightElement {
     const u = h.data;
     const b = u.buckets;
     const labels = b.map((x) => (u.bucket === 'hour' ? (b.length > 48 ? x.start.slice(5, 13).replace('T', ' ') : x.start.slice(11, 16)) : x.start.slice(5, 10)));
-    const src = `${u.bucket === 'hour' ? 'hourly' : 'daily'} buckets from the ledger (400 days kept; Prometheus keeps 15)`;
+    const rel = this.relayedHistory.filter((o) => o.usage.buckets.length === b.length);
+    const src = `${u.bucket === 'hour' ? 'hourly' : 'daily'} buckets from the ledger (400 days kept; Prometheus keeps 15); this engine's requests${rel.length ? `, and ${rel.map((o) => backendName(o.ref)).join(', ')} relayed beside them (red)` : ''}`;
+    const relDecode = rel.map((o) => ({ name: `${backendName(o.ref)} p50`, color: 'red' as const, values: o.usage.buckets.map((x) => x.decode_tps_p50) }));
+    const relTtft = rel.map((o) => ({ name: `${backendName(o.ref)} p50`, color: 'red' as const, values: o.usage.buckets.map((x) => x.ttft_ms_p50) }));
     return html`<section class="history" id="history">
       <div class="history-head">
         <div class="panel-titles"><h2 class="panel-title">History</h2><p class="panel-sub">${src}</p></div>
         ${toolbar}
       </div>
       <div class="grid-2">
-        ${panel('Decode speed', html`<qse-ribbon .series=${[{ name: 'p50', color: 'cobalt', values: b.map((x) => x.decode_tps_p50), band: b.map((x) => x.decode_tps_p90), bandName: 'p90' }]} .labels=${labels} .format=${(v: number) => String(Math.round(v))} unit="tok/s" .height=${200}></qse-ribbon>`, { sub: 'tok/s, p50 and p90' })}
-        ${panel('Time to first token', html`<qse-ribbon .series=${[{ name: 'p50', color: 'orange', values: b.map((x) => x.ttft_ms_p50), band: b.map((x) => x.ttft_ms_p90), bandName: 'p90' }]} .labels=${labels} .format=${(v: number) => ms(v)} log .height=${200}></qse-ribbon>`, { sub: 'p50 and p90, log scale' })}
+        ${panel('Decode speed', html`<qse-ribbon .series=${[{ name: rel.length ? 'engine p50' : 'p50', color: 'cobalt', values: b.map((x) => x.decode_tps_p50), band: b.map((x) => x.decode_tps_p90), bandName: rel.length ? 'engine p90' : 'p90' }, ...relDecode]} .labels=${labels} .format=${(v: number) => String(Math.round(v))} unit="tok/s" ?log=${rel.length > 0} .height=${200}></qse-ribbon>`, { sub: rel.length ? 'tok/s, p50 and p90, log scale; a relayed backend measured at the proxy' : 'tok/s, p50 and p90', id: 'history-decode' })}
+        ${panel('Time to first token', html`<qse-ribbon .series=${[{ name: rel.length ? 'engine p50' : 'p50', color: 'orange', values: b.map((x) => x.ttft_ms_p50), band: b.map((x) => x.ttft_ms_p90), bandName: rel.length ? 'engine p90' : 'p90' }, ...relTtft]} .labels=${labels} .format=${(v: number) => ms(v)} log .height=${200}></qse-ribbon>`, { sub: rel.length ? 'p50 and p90, log scale; a relayed backend\'s holds the network and its queue' : 'p50 and p90, log scale', id: 'history-ttft' })}
         ${panel('Prefill speed', html`<qse-ribbon .series=${[{ name: 'p50', color: 'cobalt', values: b.map((x) => x.prefill_tps_p50) }]} .labels=${labels} .format=${(v: number) => compact(v)} unit="tok/s" .height=${180}></qse-ribbon>`, { sub: 'uncached prompt tokens per second, p50' })}
         ${panel('Tokens per block', html`<qse-ribbon .series=${[{ name: 'mean', color: 'violet', values: b.map((x) => x.tokens_per_block_mean) }]} .labels=${labels} .format=${(v: number) => v.toFixed(1)} .height=${180}></qse-ribbon>`, { sub: 'committed tokens per verified block, mean' })}
         ${panel('Draft acceptance', html`<qse-ribbon .series=${[{ name: 'acceptance', color: 'aqua', values: b.map((x) => (x.draft_acceptance == null ? null : x.draft_acceptance * 100)) }]} .labels=${labels} .format=${(v: number) => v.toFixed(0)} unit="%" .height=${180}></qse-ribbon>`, { sub: 'accepted / drafted tokens' })}

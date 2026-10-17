@@ -21,6 +21,28 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  off after it was on stays off); chat's C3 to act by the same rule
                                  on its mode; `sampling` (greedy, loop escape on) when the
                                  document has none. The record lists what changed
+    2026-10-17-coding-narrator-off  SRV-534: the narrator off by default (0.11.3):
+    2026-10-17-chat-narrator-off    `ui.narrator` from "live" (0.3.28's shipped value) to "off"
+                                 when no stored version of the profile set another value
+                                 ("off", "on", "thoughts"; absent is the key's age, no choice)
+    2026-10-17-roles-narrator-off   the same for the roles document's `narrator.mode`, "on" to
+                                 "off" unless a stored version had "off" or "shadow"
+    2026-10-17-residency-decider    the decider's claim 8.2 GiB (the arbiter sidecar's) to the 3.0
+                                 measured with Laya in the engine (OPS-69), unless a stored
+                                 version had another value
+    2026-10-17-router-coding-core   the router's code_edit and debug classes get FX6's core
+                                 ["coding"] when the stored class has no `core` and no stored
+                                 version gave it one: under a model fit with `packages: core`
+                                 (NemotronH, LFM2.5) a coding turn, decided or fallen back,
+                                 got no package at all on a router stored before FX6
+    2026-10-17-router-build-core    the same for design_ui (["ui-design"]) and drawing
+                                 (["creative-coding"]), which had no core: under that fit a turn
+                                 Laya decided as one of them got no package (a three.js prompt
+                                 read as design_ui, 2026-10-17)
+    2026-10-17-router-3d-coding-core  three_d's core gains `coding` (and its packages list it),
+                                 unless a stored version had it in the core: three pagoda
+                                 replays thought 6 to 11 minutes on their first step, drafting
+                                 the files in the thinking
 """
 
 from __future__ import annotations
@@ -83,6 +105,93 @@ def _guard(c3: bool = False):
     return change
 
 
+def _unless_chosen(get, old, new_value, put, what: str):
+    """A change of a value from its old shipped one to the new default, unless a stored version
+    held another value (someone chose); a missing key is no choice. `put(doc, value)` returns the
+    changed document."""
+    def change(doc, past):
+        try:
+            cur = get(doc)
+        except (KeyError, TypeError, AttributeError):
+            return None
+        if cur != old or _ever(past, get) - {old, None}:
+            return None
+        return put(doc, new_value), [f"{what}={new_value}"]
+    change.history = True
+    return change
+
+
+def _ui_narrator(doc, value):
+    return dict(doc, ui=dict(doc["ui"], narrator=value))
+
+
+def _role_narrator(doc, value):
+    return dict(doc, narrator=dict(doc["narrator"], mode=value))
+
+
+def _decider_claim(doc, value):
+    claim = dict(doc["claims"]["decider"], gib=value, basis="measured",
+                 note="Laya's three checkpoints in the engine's process, measured beside a side "
+                      "slot (OPS-69, 2026-10-06); the arbiter sidecar took 8.2")
+    return dict(doc, claims=dict(doc["claims"], decider=claim))
+
+
+def _class_core(cores: dict):
+    """A core on router classes stored without one: `cores` maps a class to its core package,
+    given when the stored class lists that package, has no `core`, and no stored version gave
+    the class a core (a core someone removed stays removed)."""
+    def change(doc: dict, past: list):
+        if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+            return None
+
+        def core_of(d, cid):
+            return next((c.get("policy") or {}).get("core") for c in d["classes"] if c["id"] == cid)
+
+        classes, changes = [], []
+        for c in doc["classes"]:
+            pol = c.get("policy") or {}
+            pkg = cores.get(c.get("id"))
+            if pkg and "core" not in pol and pkg in (pol.get("packages") or []) and \
+                    not (_ever(past, lambda d, i=c["id"]: core_of(d, i) is not None) - {False, None}):
+                c = dict(c, policy=dict(pol, core=[pkg]))
+                changes.append(f"classes.{c['id']}.core=[{pkg}]")
+            classes.append(c)
+        return (dict(doc, classes=classes), changes) if changes else None
+    change.history = True
+    return change
+
+
+def _core_append(cid: str, pkg: str):
+    """`pkg` added to class `cid`'s core (and its packages) of a stored router, unless the core has
+    it or a stored version had it there (someone took it out)."""
+    def change(doc: dict, past: list):
+        if not isinstance(doc, dict) or not isinstance(doc.get("classes"), list):
+            return None
+
+        def had(d):
+            return pkg in (next((c.get("policy") or {}).get("core") or []
+                                for c in d["classes"] if c["id"] == cid))
+        classes, changes = [], []
+        for c in doc["classes"]:
+            pol = c.get("policy") or {}
+            core = list(pol.get("core") or [])
+            if c.get("id") == cid and pkg not in core and True not in _ever(past, had):
+                pkgs = list(pol.get("packages") or [])
+                c = dict(c, policy=dict(pol, core=core + [pkg],
+                                        packages=pkgs + ([pkg] if pkg not in pkgs else [])))
+                changes.append(f"classes.{cid}.core+={pkg}")
+            classes.append(c)
+        return (dict(doc, classes=classes), changes) if changes else None
+    change.history = True
+    return change
+
+
+# SRV-534: FX6's core on the coding classes of a router stored without it
+_coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
+
+_NARRATOR_OFF = _unless_chosen(lambda d: d["ui"]["narrator"], "live", "off", _ui_narrator,
+                               "ui.narrator")
+
 # (id, kind, name, change): `change(doc)`, or `change(doc, past)` when it has `history`; it
 # returns the new document, (the document, [what changed]), or None
 MIGRATIONS = [
@@ -95,6 +204,18 @@ MIGRATIONS = [
     ("2026-10-14-hermes-loop-guard", "profiles", "hermes", _guard()),
     ("2026-10-14-overnight-loop-guard", "profiles", "overnight", _guard()),
     ("2026-10-14-chat-loop-guard", "profiles", "chat", _guard(c3=True)),
+    ("2026-10-17-coding-narrator-off", "profiles", "coding", _NARRATOR_OFF),
+    ("2026-10-17-chat-narrator-off", "profiles", "chat", _NARRATOR_OFF),
+    ("2026-10-17-roles-narrator-off", "roles", None,
+     _unless_chosen(lambda d: d["narrator"]["mode"], "on", "off", _role_narrator,
+                    "narrator.mode")),
+    ("2026-10-17-residency-decider", "residency", None,
+     _unless_chosen(lambda d: d["claims"]["decider"]["gib"], 8.2, 3.0, _decider_claim,
+                    "claims.decider.gib")),
+    ("2026-10-17-router-coding-core", "router", None, _coding_core),
+    ("2026-10-17-router-build-core", "router", None,
+     _class_core({"design_ui": "ui-design", "drawing": "creative-coding"})),
+    ("2026-10-17-router-3d-coding-core", "router", None, _core_append("three_d", "coding")),
 ]
 
 

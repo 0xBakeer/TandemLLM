@@ -597,7 +597,7 @@
    "label": "Narrator",
    "group": "roles",
    "what": "A small model that writes short status lines while the big model thinks, so you can see what it is doing.",
-   "default": true,
+   "default": false,
    "required": false,
    "memory_gib": 3.6,
    "memory_max_gib": null,
@@ -621,7 +621,7 @@
     "qwen3.5-2b"
    ],
    "docs": "docs/server.md",
-   "note": "Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and loads again later."
+   "note": "Qwen3.5-2B, 3.60 GiB in the live memory split. When memory runs short it goes after the shadow reader and loads again later. Off by default since 0.11.3 (SRV-534); turned on, it serves the model, and the lines come with the roles document's narrator mode and a profile's ui.narrator."
   },
   {
    "id": "laya",

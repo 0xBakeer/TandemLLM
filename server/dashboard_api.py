@@ -737,6 +737,8 @@ def _proxy_fields(r: dict, conf: dict) -> dict:
             "retries": r.get("retries"),
             "fallback_from": r.get("fallback_from"),
             "upstream_status": r.get("upstream_status"),
+            # VIS-207 (ledger schema 10): the backend configuration the answer named
+            "system_fingerprint": r.get("system_fingerprint"),
             # P6: the engine's own numbers came from its plugin (ledger schema 4)
             "l2": ({"join": r["l2_join"], "preemptions": r.get("preemptions"),
                     "engine_finish": r.get("engine_finish"),

@@ -792,7 +792,34 @@ def _par_view_keep(served: list | None, view: list | None) -> bool:
     except Exception:                                              # noqa: BLE001
         return False
     STATE["slot0_view"] = list(view)
+    # SRV-528: when, and whether its rows hold the whole prompt (a prefill cancelled part way does
+    # not), for `_slot0_stale`
+    STATE["slot0_seen"] = (time.monotonic(), valid >= len(served))
     return True
+
+
+#: SRV-528: how long slot 0's conversation keeps new conversations on the side slots
+#: (`_par_side_need`'s `prefer_side`) after the last request that continued it
+SLOT0_KEEP_S = float(_S.get("SLOT0_KEEP_S") or 1800.0)
+
+
+def _slot0_stale(now: float | None = None) -> str | None:
+    """SRV-528: why slot 0's resident conversation no longer counts for `prefer_side`: `partial`
+    when the last request that kept it stopped inside its prompt (a prefill cancelled part way),
+    `idle` when no request continued it for SLOT0_KEEP_S; None while it counts. A 1,000,000-token
+    test prompt cancelled after 937,984 rows (2026-10-16 22:01) kept slot 0, the 1,048,576-token
+    window, idle all evening: every new conversation was sent to a 262,144-token side slot beside
+    it. Nothing is dropped: its rows stay until a request needs slot 0, and its own retry still
+    resumes there (`_continues_resident`)."""
+    seen = dict.get(STATE, "slot0_seen")
+    if seen is None:
+        return None
+    t, whole = seen
+    if not whole:
+        return "partial"
+    if (time.monotonic() if now is None else now) - t >= SLOT0_KEEP_S:
+        return "idle"
+    return None
 
 
 #: how long a request waits for slot 0 while only TandemLLM's own work holds it (the shadow reader,
@@ -924,17 +951,24 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             with pool._lk:
                 pool.stats["too_long"] = pool.stats.get("too_long", 0) + 1
             return None
+    # FX16: the side slot that holds this conversation's rows (its last turn ran there and
+    # nothing wrote over them since): the turn resumes at its end there, beside slot 0
+    home = _side_home(pool, ids, need, chunk, conv)
     if why.get("wait"):
+        here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill"))
+        if home is not None and home[1] > here:
+            # SRV-528: a side slot holds more of it than slot 0 does (live 2026-10-17: a chat whose
+            # first prompt matched slot 0's view waited 3.0 s for slot 0 at every turn, then took
+            # the lowest free side slot)
+            why.update(home=home[0], home_share=home[1])
+            return need
         # 0.8.2: it continues slot 0's conversation (view, resident) or reads it back from the
         # NVMe there (spill): slot 0 first, for SIDE_SLOT0_WAIT_S, then a free side slot (the
         # handler); never minutes behind another conversation's run on slot 0
         why["slot0_first"] = True
         return need
-    # FX16: the side slot that holds this conversation's rows (its last turn ran there and
-    # nothing wrote over them since): the turn resumes at its end there, beside slot 0
-    home = _side_home(pool, ids, need, chunk, conv)
     if home is not None:
-        why["home"] = home
+        why["home"] = home[0]
     elif (SIDE_NEW_FIRST == "on" and res is not None
           and not why.get("guest") and not why.get("wait")):
         # FX16: a new conversation beside a resident one a side slot could never hold takes an
@@ -947,7 +981,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # another conversation: the shared part ends before its first user message, or,
             # without the template's marks, more than a chunk short of the resident rows
             other = head < conv if conv is not None else head < valid - chunk
-            if other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
+            stale = (_slot0_stale() if other and valid >= 2 * chunk
+                     and valid + margin + SIDE_MIN_ROOM > longest else None)
+            if stale is not None:
+                why["slot0_stale"] = stale     # SRV-528: nobody's conversation: slot 0 serves it
+            elif other and valid >= 2 * chunk and valid + margin + SIDE_MIN_ROOM > longest:
                 why["prefer_side"] = valid
                 if len(ids) <= SIDE_NEW_SHORT:
                     # FX17: a short new chat waits SIDE_NEW_WAIT_S for a busy side slot before it
@@ -973,6 +1011,9 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
         return _wait_reason(me)[0]
     if why.get("home") is not None and why.get("home_wait") is None:
         return f"waits up to {SIDE_HOME_WAIT_S:g} s for slot {why['home']}, which holds its conversation"
+    if why.get("hop_from") is not None:
+        return (f"moved from slot {why['hop_from']} (busy {why.get('home_wait')} s): re-reading its "
+                f"conversation on the next free slot")
     if why.get("slot0_first") and waited < SIDE_SLOT0_WAIT_S:
         where = ("slot 0 reads its conversation back from the NVMe" if why.get("wait") == "spill"
                  else "slot 0 holds its conversation")
@@ -992,30 +1033,56 @@ def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
     return max(1, min(int(max_new), room))
 
 
-def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) -> int | None:
-    """FX16: the index of the side slot whose resident rows this prompt continues (judged on the
-    client's tokens against the last prompt served there, as `_continues_view` judges slot 0's),
-    when its window holds `need` rows; else None. The slot's rows and end anchor are its
-    resident prefix's (`_build_side_slots`); a request of another conversation served there
-    since cleared them (`ResidentPrefix.begin`), and so the view."""
+def _side_home(pool, ids: list[int], need: int, chunk: int, conv: int | None) -> tuple | None:
+    """FX16: (the index of the side slot that holds this conversation, the tokens of the prompt it
+    holds), when its window holds `need` rows; else None. A slot holds it when the prompt continues
+    the last prompt served there (judged on the client's tokens, as `_continues_view` judges slot
+    0's) or shares at least a chunk of the slot's own rows past the first user message
+    (`res.common`). A request of another conversation served there since cleared them
+    (`ResidentPrefix.begin`), and so the view.
+
+    SRV-528: with or without an end anchor, and the slot with the longest share wins. FX16 named a
+    slot home only when it kept an end anchor and took the first such slot; a turn that kept none
+    (the engine ahead, SRV-530) was routed as a new conversation, to the lowest free side slot
+    `take_side` allowed, and once the carry guard of the slot below expired (CARRY_KEEP_S) a
+    45,778-token conversation moved from slot 2 to slot 1 and was read again in 80.9 s
+    (2026-10-17 00:05). Without an end anchor the turn resumes at the slot's anchors. Among the
+    slots within a chunk of the longest share a free one goes first."""
+    found = []
     for s in pool.side():
         vals = s.values or {}
         res, view = vals.get("resident"), vals.get("slot_view")
-        if res is None or not view or need > s.max_len:
+        if res is None or need > s.max_len:
             continue
         try:
-            if getattr(res, "end", None) is None or int(getattr(res, "valid", 0) or 0) < chunk:
+            if int(getattr(res, "valid", 0) or 0) < chunk:
                 continue
-            vc = _shared_head(ids, view)
-            if not _continues_view(len(view), vc, chunk, conv):
-                al_s = vals.get("end_align")
-                if al_s is not None:
-                    vc = max(vc, al_s.moved_common(view, ids))     # FX16: a moved block
-            if _continues_view(len(view), vc, chunk, conv):
-                return s.index
+            held = 0
+            if view:
+                vc = _shared_head(ids, view)
+                if not _continues_view(len(view), vc, chunk, conv):
+                    al_s = vals.get("end_align")
+                    if al_s is not None:
+                        vc = max(vc, al_s.moved_common(view, ids))     # FX16: a moved block
+                if _continues_view(len(view), vc, chunk, conv):
+                    held = vc
+            if not held:
+                # the slot's own rows (no view kept, or the client's copy parts from it): past the
+                # first user message, or without the template's marks nearly all of them
+                rc = res.common(ids)
+                valid = int(getattr(res, "valid", 0) or 0)
+                if rc >= chunk and (rc >= conv if conv is not None else rc >= valid - chunk):
+                    held = rc
+            if held:
+                found.append((held, s))
         except Exception:                                          # noqa: BLE001
             continue
-    return None
+    if not found:
+        return None
+    top = max(h for h, _ in found)
+    near = [(h, s) for h, s in found if h >= top - chunk]
+    h, s = next(((h, s) for h, s in near if not s.busy), next((h, s) for h, s in found if h == top))
+    return s.index, h
 
 
 def _side_view_keep(slot, served: list | None, view: list | None) -> bool:
@@ -1290,6 +1357,33 @@ def _verify_tree(pool, eng, block, parents, pos, tree=None):
     slots_mod.barrier(meet, pool, turn, i, req, _run_round)
     pool.last_joint[i] = req.joint
     return req.out, req.ms, (req.tree_cut if req.tree_cut is not None else tree)
+
+
+def _end_cut(new: list[int], eos, room: int) -> int:
+    """SRV-530: how many of a verified block's `new` tokens the generation keeps: through its first
+    end token, and at most `room` (the output budget left). The block's rows past that point are
+    not committed.
+
+    The walk accepts rows past the end token whenever the draft has them: the lookup copies what
+    followed the same tool call earlier in the prompt (`</tool_call>`, `<|im_end|>`, `\\n`,
+    `<|im_start|>`), and the target accepts the newline after its end token. Committed, they left
+    the engine one or two rows past the committed tokens. Qwen's pending commit is cut back to the
+    committed tokens (`trim_pending`); a NemotronH state has walked those rows and cannot be, so the
+    end anchor was refused (`ahead`) on 31 of the 54 turns of 2026-10-16, every one a tool call. The
+    commit now stops at the last kept token's row, where Qwen's cut back stopped."""
+    j = next((i for i, t in enumerate(new) if t in eos), None)
+    keep = len(new) if j is None else j + 1
+    return max(1, min(keep, int(room)))
+
+
+def _end_cut_said(rows: int) -> None:
+    """SRV-530: a block's rows past the end were left uncommitted: counted (`end_cut` in the
+    resident prefix's stats) and said in the log."""
+    res = STATE.get("resident")
+    if res is not None:
+        res.stats["end_cut"] = res.stats.get("end_cut", 0) + 1
+    if STATE.get("verbose"):
+        print(f"[spec] the accepted path ran {rows} row(s) past the end: not committed", flush=True)
 
 
 def generate_stream(*args, **kw):
@@ -1601,6 +1695,12 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
                     if fin is not None:
                         # the end token is not taken: the path is kept up to the node before it
                         path, new = path[:fin[0] + 1], new[:fin[0]]
+                    cut = _end_cut(new, eos, max_new - n_out)
+                    if cut < len(new):
+                        # SRV-530: rows past the end token (or the budget) are not committed
+                        if len(path) > cut + 1:
+                            _end_cut_said(len(path) - cut - 1)
+                        path, new = path[:cut + 1], new[:cut]
                     if lpr is not None:
                         lpr.rows(lg[h2d(path, torch.long, prompt.device)], new)
                     eng.commit_tree(path)
@@ -1834,6 +1934,12 @@ def _generate_stream(prompt: torch.Tensor, max_new: int, eos: set[int], think=No
             if fin is not None:
                 # the end token is not taken: the rows are kept up to the one before it
                 keep, new = fin[0] + 1, new[:fin[0]]
+            cut = _end_cut(new, eos, max_new - n_out)
+            if cut < len(new):
+                # SRV-530: rows past the end token (or the budget) are not committed
+                if keep > cut + 1:
+                    _end_cut_said(keep - cut - 1)
+                keep, new = cut + 1, new[:cut]
             if lpr is not None:
                 lpr.rows(lg, new)
             if pen is not None:
@@ -1949,10 +2055,7 @@ def _context_prefill(ids: list[int], at: int, conv_id, on_chunk, images):
             at += len(full) - len(ids)
             ids = full
     if images:
-        from engine.vision import MMContext, expand
-        tower = STATE["vision"]
-        full, spans = expand(ids, images, tower.cfg.image_token_id, tower.cfg.spatial_merge_size)
-        mm = MMContext(full, spans, images, tower, eng.cfg, cache=STATE.get("image_cache"))
+        full, mm = _vision_context(ids, images, eng)
         at += len(full) - len(ids)
         ids, key_ids = full, mm.key_ids
         eng.mm, eng.pos_delta = mm, mm.delta
@@ -2392,8 +2495,9 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
     offset for a continuation's own generation, which wrote its rows after the images.
 
     The loop's invariant at the end of a generation is `kv.length == len(ctx) - 1` -- the last
-    token has been decided and not forwarded -- so what is snapshotted is the prefix that really
-    was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
+    token has been decided and not forwarded -- or `len(ctx)` when the end token was a drafted
+    row the block verified (the commit stops there, `_end_cut`) -- so what is snapshotted is the
+    prefix that really was forwarded, and `generate_stream` publishes that very list rather than one rebuilt here. The next turn's prompt begins with all of it plus the chat template's own glue,
     so it resumes here and pays for the glue and the new message rather than for the conversation.
     """
     eng, drafter = STATE["engine"], STATE["drafter"]
@@ -3875,7 +3979,9 @@ def shadow_preload_once() -> str | None:
         return None
     slot = svc.slot
     narr = STATE.get("narrator")
-    if narr is not None and slot is getattr(narr, "slot", None):
+    # SRV-534: with the narrator role off (the default) its keeper never loads a shared slot
+    if narr is not None and slot is getattr(narr, "slot", None) and \
+            narr.settings()["mode"] != "off":
         return None                             # the narrator's slot: its keeper loads it
     since = slot.failed_for() if hasattr(slot, "failed_for") else None
     retry = since is not None and since >= SHADOW_RETRY_S
@@ -4288,6 +4394,10 @@ def roles_report() -> dict:
     if reg is not None:
         out["roles"]["laya"] = {"models": reg.loaded(), "state": "loaded" if reg.ready()
                                 else "not_loaded"}
+        refused = reg.refused() if hasattr(reg, "refused") else None
+        if refused is not None:
+            # 0.11.3: why Laya is not loaded (the planner's numbers), until a model loads
+            out["roles"]["laya"]["refused"] = refused
     return out
 
 
@@ -4621,20 +4731,29 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
     return ids, "text", False
 
 
+def _vision_context(ids: list[int], images: list, eng, on_encode=None) -> tuple:
+    """`(ids, mm)`: the prompt with each image's placeholder expanded to its rows and the request's
+    image context, as the served tower writes them: its own `context` (Super VL's RADIO tower:
+    `<img>` rows `</img>`, no rotary, engine/models/nemotron_h/vision.py), else engine/vision.py's
+    (the Qwen towers: the placeholder's rows and their three-axis rotary)."""
+    tower = STATE["vision"]
+    own = getattr(tower, "context", None)
+    if own is not None:
+        return own(ids, images, cache=STATE.get("image_cache"), on_encode=on_encode)
+    from engine.vision import MMContext, expand
+    full, spans = expand(ids, images, tower.cfg.image_token_id, tower.cfg.spatial_merge_size)
+    return full, MMContext(full, spans, images, tower, eng.cfg, cache=STATE.get("image_cache"),
+                           on_encode=on_encode)
+
+
 def _mm_prompt(prompt: torch.Tensor, images: list, rec=None):
     """The prompt with each image's one placeholder expanded to its rows, and the
     request's `MMContext`. `rec.encoding` is the live view's "encoding image i of n"."""
-    from engine.vision import MMContext, expand
-    tower = STATE["vision"]
-    ids, spans = expand(prompt.tolist(), images, tower.cfg.image_token_id,
-                        tower.cfg.spatial_merge_size)
-
     def on_encode(i, n):
         if rec is not None:
             rec.encoding = (i, n) if i is not None else None
 
-    mm = MMContext(ids, spans, images, tower, STATE["engine"].cfg,
-                   cache=STATE.get("image_cache"), on_encode=on_encode)
+    ids, mm = _vision_context(prompt.tolist(), images, STATE["engine"], on_encode)
     if STATE.get("verbose"):
         grids = ",".join("x".join(str(g) for g in im.grid) for im in images)
         print(f"[vision] {len(images)} image(s) grids={grids} rows={mm.image_tokens} "
@@ -5919,10 +6038,12 @@ class Handler(BaseHTTPRequestHandler):
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
-                # through the proxy, the status and nothing about the configuration
+                # through the proxy, the status and nothing about the configuration (a page there
+                # reaches the status responder through the same proxy, OPS-175)
                 return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
             return self._json(code, {
                 "status": "draining" if STATE.get("draining") else "ok",
+                "status_port": _status_port(),
                 "model": served_name(), "base_model": STATE.get("model"),
                 "version": STATE.get("version", ""), "weights": weights_profile(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
@@ -7044,6 +7165,7 @@ class Handler(BaseHTTPRequestHandler):
                     # still there), or any side slot
                     home = None
                     par_why["home_wait"] = round(time.monotonic() - t_wait, 1)
+                    par_why["hop_from"] = int(par_why["home"])      # SRV-528
                 if self._client_gone():
                     left = True
                     rec.client_gone_at = time.perf_counter()
@@ -7111,12 +7233,20 @@ class Handler(BaseHTTPRequestHandler):
             INFLIGHT["lane" if micro else "running"] += 1
         if par is not None and not micro and side is None:
             par.took_slot0()
-        if par is not None and not micro and (side is not None or par_why.get("wait")):
+        if par is not None and not micro and par_why.get("hop_from") is not None and \
+                (side is None or side.index != par_why["hop_from"]):
+            # SRV-528: its conversation's slot stayed busy past SIDE_HOME_WAIT_S; the tokens the
+            # slot it took re-read are added at its end (`hop_tokens`)
+            with par._lk:
+                par.stats["hops"] = par.stats.get("hops", 0) + 1
+        if par is not None and not micro and (side is not None or par_why.get("wait")
+                                              or par_why.get("hop_from") is not None):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
             nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
                                                           "res_common", "conv", "need", "guest",
-                                                          "home", "home_wait", "prefer_side",
+                                                          "home", "home_share", "home_wait",
+                                                          "hop_from", "prefer_side", "slot0_stale",
                                                           "new_wait", "spill", "spill_head",
                                                           "slot0_wait")
                             if k in par_why)
@@ -7129,6 +7259,9 @@ class Handler(BaseHTTPRequestHandler):
                             if conv is not None and head >= 1024 and head < conv else "")
                 if par_why.get("home") == side.index:
                     new_conv = " continues its conversation here (home)"
+                elif par_why.get("hop_from") is not None:
+                    new_conv = (f" moved from slot {par_why['hop_from']} (busy "
+                                f"{par_why.get('home_wait')} s): re-reads what this slot lacks")
                 elif par_why.get("slot0_wait") is not None:
                     new_conv = (f" slot 0 still busy after {par_why['slot0_wait']} s, its "
                                 f"conversation ({par_why.get('wait')}) read here")
@@ -7146,6 +7279,9 @@ class Handler(BaseHTTPRequestHandler):
             elif par_why.get("wait") in ("view", "resident", "spill"):
                 print(f"[parallel] {cid} slot 0, continues its conversation "
                       f"({par_why['wait']}): {nums}", flush=True)
+            elif par_why.get("hop_from") is not None:
+                print(f"[parallel] {cid} slot 0, moved from slot {par_why['hop_from']} (busy "
+                      f"{par_why.get('home_wait')} s): carried in or read again: {nums}", flush=True)
         if side is not None:
             # a side slot: this thread sees the slot's engine and drafter through `STATE`, and
             # runs its GPU work in its turns
@@ -8364,6 +8500,12 @@ class Handler(BaseHTTPRequestHandler):
                                 _side_view_keep(side, list(ctx_[:n_]), par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
+                    if par_why.get("hop_from") is not None and \
+                            (side is None or side.index != par_why["hop_from"]):
+                        # SRV-528: what the hop cost, in tokens this slot read again
+                        fw = int((STATE.get("last_prefill") or {}).get("forwarded") or 0)
+                        with par._lk:
+                            par.stats["hop_tokens"] = par.stats.get("hop_tokens", 0) + fw
                     _par_end(par, side, cid)
                 if side is None:
                     with QUEUE:
@@ -9213,6 +9355,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--fake-prefill-tps", type=float, default=0.0,
                     help="with --fake-engine: the prefill rate of a FAKE_SLOW_PREFILL prompt "
                          "(0 = 2,000 tokens a second)")
+    ap.add_argument("--fake-load-s", type=float, default=0.0,
+                    help="with --fake-engine: a load of this many seconds before the port opens, "
+                         "writing the load's phases as the real engine does (the Setup Guide's "
+                         "restart screen and its release gate, OPS-175)")
     ap.add_argument("--structured-outputs", action=argparse.BooleanOptionalAction, default=True,
                     help="serve response_format json_object / json_schema and "
                          "structured_outputs (regex, choice, json) as masks over the target's "
@@ -9520,7 +9666,8 @@ def _load(a) -> None:
     # vision tower with its processor and caches (`_load_vision`, a builder's own tower)
     ctx = types.SimpleNamespace(keys=keys, mark=led.mark, log=lambda line: print(line, flush=True),
                                 kv_pool=lambda: _kv_pool_open(a),
-                                vision=lambda path, tower_of=None: _load_vision(a, path, tower_of))
+                                vision=lambda path, tower_of=None, config_of=None:
+                                _load_vision(a, path, tower_of, config_of))
     m = (_arch_of(a.model).serve_builder() or _build_qwen3_5)(a, ctx)
     eng, tok, drafter = m["engine"], m["tok"], m["drafter"]
     memsplit.PINNED = lambda: memsplit.pinned_of(eng)      # every floor check counts it (SRV-335)
@@ -10078,12 +10225,14 @@ def _gib(b) -> str:
     return "-" if b is None else f"{b / (1 << 30):.2f}"
 
 
-def _load_vision(a, path: str, tower_of=None) -> None:
+def _load_vision(a, path: str, tower_of=None, config_of=None) -> None:
     """The checkpoint's vision tower (bf16, as stored; or `tower_of(vision config)`, the tower a
     model's builder makes in its own weight format, VIS-97), its image processor and the embedding
-    cache -- when the checkpoint has a tower and `--vision on`."""
+    cache -- when the checkpoint has a tower and `--vision on`. `config_of(path)`: a builder's own
+    vision config reader (Super VL's RADIO tower, ENG-365), whose tower brings its own processor
+    (`preprocessor`), warm-up (`warm`) and prompt rows (`context`)."""
     from engine.vision import EmbedCache, VisionTower, load_vision_config
-    vcfg = load_vision_config(path) if getattr(a, "vision", "on") == "on" else None
+    vcfg = (config_of or load_vision_config)(path) if getattr(a, "vision", "on") == "on" else None
     if vcfg is None:
         print("[vision] off" + (" (the checkpoint has no vision tower)"
                                 if getattr(a, "vision", "on") == "on" else ""), flush=True)
@@ -10094,9 +10243,11 @@ def _load_vision(a, path: str, tower_of=None) -> None:
     if tower is None:
         print("[vision] off (the checkpoint has no vision tower)", flush=True)
         return
-    pre = images_mod.Preprocessor(path, vcfg.spatial_merge_size,
-                                  max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
-                                  backend=getattr(a, "image_backend", "torchvision"))
+    own = getattr(tower, "preprocessor", None)
+    pre = (own(int(a.image_max_pixels)) if own is not None else
+           images_mod.Preprocessor(path, vcfg.spatial_merge_size,
+                                   max_pixels=int(a.image_max_pixels), dtype=tower.dtype,
+                                   backend=getattr(a, "image_backend", "torchvision")))
     STATE.update(vision=tower, image_pre=pre,
                  image_cache=EmbedCache(int(a.image_cache_mb * (1 << 20))),
                  image_limits=images_mod.Limits(
@@ -10109,8 +10260,11 @@ def _load_vision(a, path: str, tower_of=None) -> None:
                  image_act_budget=int(a.image_act_gb * (1 << 30)))
     # the kernels' first launch here, not in the first image request: a 4x4-patch image
     with torch.no_grad():
-        m = vcfg.spatial_merge_size * 2
-        tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
+        if hasattr(tower, "warm"):
+            tower.warm()
+        else:
+            m = vcfg.spatial_merge_size * 2
+            tower.encode(torch.zeros(m * m, vcfg.patch_dim), (1, m, m))
     tower.stats.update(images=0, patches=0, ms=0.0)
     print(f"[vision] tower {tower.nbytes / 1e9:.2f} GB, {vcfg.depth} blocks, "
           f"{len(tower.t)} tensors; processor {type(pre.proc).__name__} "
@@ -10322,7 +10476,7 @@ class SetupHandler(Handler):
             w = STATE.get("wren")
             return self._json(503 if STATE.get("draining") else 200, {
                 "status": "draining" if STATE.get("draining") else "ok", "mode": "setup",
-                "version": STATE.get("version", ""),
+                "version": STATE.get("version", ""), "status_port": _status_port(),
                 "uptime_s": round(time.time() - STATE.get("started", time.time()), 1),
                 "assistant": w.state if w is not None else "off"})
         if path == "/v1/models":
@@ -10401,6 +10555,13 @@ def _identity_name() -> str | None:
     except Exception:                                              # noqa: BLE001
         return None
     return (c or {}).get("label") or None
+
+
+def _status_port() -> int | None:
+    """OPS-175: the status responder's port (QSE_STATUS_PORT, exported from serve.env by ops/start.sh),
+    which answers for this server while it restarts; None when there is none."""
+    v = os.environ.get("QSE_STATUS_PORT") or ""
+    return int(v) if v.isdigit() else None
 
 
 def weights_profile() -> dict:

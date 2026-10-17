@@ -157,7 +157,8 @@ describe('setupReducer', () => {
 describe('dependencies', () => {
   const sel = defaults(M).components;
   it('turning the conductor off turns the narrator, Laya and the shadow reader off with a reason', () => {
-    const r = toggleComponent(M, sel, 'conductor', false);
+    // the narrator switched on first: off by default since 0.11.3 (SRV-534)
+    const r = toggleComponent(M, { ...sel, narrator: true }, 'conductor', false);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.components).toMatchObject({ conductor: false, narrator: false, laya: false, shadow: false });

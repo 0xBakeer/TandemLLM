@@ -9,7 +9,7 @@ import { stripEdge, type Edge } from '../lib/phone';
 import { LightElement } from '../ui/base';
 import { icon } from '../ui/bits';
 import type { Attachment, Capabilities, ChatSettings, EffortChoice, ModelInfo, Prompt, SlashCommand, PackageInfo, ToolInfo } from './types';
-import { EFFORTS, effortWord, promptArgs, localId, toolLabel } from './types';
+import { effortsFor, effortWord, nearestEffort, promptArgs, localId, toolLabel } from './types';
 import { modeDesc, modeOf, modeWord, PERMISSION_MODES } from './permission';
 import { chatProvider, providerWord } from './websearch';
 import { attachmentWords } from './context-words';
@@ -282,8 +282,8 @@ export class QseChatComposer extends LightElement {
             ${this.pop === 'model' && caps ? this.renderModelPop(caps, s) : nothing}
           </span>
           <span class="ch-pillwrap">
-            <button type="button" class="ch-pill ch-pill-effort" aria-haspopup="menu" aria-expanded=${this.pop === 'effort'} @click=${() => (this.pop = this.pop === 'effort' ? 'none' : 'effort')} title="thinking effort">${effortPill(s?.thinking === false ? 'no thinking' : effortWord(s?.effort ?? 'high'))}</button>
-            ${this.pop === 'effort' && s ? this.renderEffortPop(s) : nothing}
+            <button type="button" class="ch-pill ch-pill-effort" aria-haspopup="menu" aria-expanded=${this.pop === 'effort'} @click=${() => (this.pop = this.pop === 'effort' ? 'none' : 'effort')} title="thinking effort">${effortPill(s?.thinking === false ? 'no thinking' : effortWord(nearestEffort(s?.effort ?? 'high', model?.backend !== 'engine' ? model?.capabilities?.effort_levels : null)))}</button>
+            ${this.pop === 'effort' && s ? this.renderEffortPop(s, model) : nothing}
           </span>
           <span class="ch-pillwrap">
             <button type="button" class="ch-pill" aria-haspopup="menu" aria-expanded=${this.pop === 'tools'} @click=${() => (this.pop = this.pop === 'tools' ? 'none' : 'tools')} title="tools, skills and MCP servers"><span class="ch-pill-main">${toolsOn} tool${toolsOn === 1 ? '' : 's'}</span>${mcpOn ? html`<span class="ch-pill-sub">${mcpOn} MCP</span>` : nothing}</button>
@@ -319,13 +319,14 @@ export class QseChatComposer extends LightElement {
     </div>`;
   }
 
-  private renderEffortPop(s: ChatSettings): TemplateResult {
+  private renderEffortPop(s: ChatSettings, model?: ModelInfo): TemplateResult {
+    const def = model?.backend !== 'engine' ? model?.capabilities?.effort_default : null;
     return html`<div class="ch-pop" role="menu">
       <div class="ch-pop-group"><div class="ch-pop-title">Thinking</div>
         <label class="switch ch-pop-switch"><input type="checkbox" .checked=${s.thinking} @change=${(e: Event) => this.patch({ thinking: (e.target as HTMLInputElement).checked })} /><span>${s.thinking ? 'on' : 'off'}</span></label>
       </div>
       <div class="ch-pop-group"><div class="ch-pop-title">Effort</div>
-        ${(this.caps?.efforts ?? EFFORTS).map((e) => html`<button type="button" role="menuitemradio" aria-checked=${s.effort === e} class="ch-pop-item ${s.effort === e ? 'is-on' : ''}" ?disabled=${!s.thinking} @click=${() => (this.patch({ effort: e }), (this.pop = 'none'))}><span class="ch-pop-name">${effortWord(e)}</span><span class="ch-pop-desc">${effortDesc(e)}</span></button>`)}
+        ${effortsFor(this.caps, model?.id).map((e) => html`<button type="button" role="menuitemradio" aria-checked=${s.effort === e} class="ch-pop-item ${s.effort === e ? 'is-on' : ''}" ?disabled=${!s.thinking} @click=${() => (this.patch({ effort: e }), (this.pop = 'none'))}><span class="ch-pop-name">${effortWord(e)}</span><span class="ch-pop-desc">${effortDesc(e, def)}</span></button>`)}
       </div>
     </div>`;
   }
@@ -354,6 +355,9 @@ export class QseChatComposer extends LightElement {
       <div class="ch-pop-group"><div class="ch-pop-title">Tools in this chat</div>
         ${builtin.map((t) => html`<label class="ch-pop-check" data-pop-tool=${t.id}><input type="checkbox" .checked=${s.tools.includes(t.id)} @change=${() => toggle(t.id)} /><code>${toolLabel(t.name)}</code>${t.id === 'web_search' ? this.renderSearchWord(s) : html`<span class="ch-pop-desc">${t.description}</span>`}<span class="ch-policy">${s.policies[t.id] ?? t.policy}</span></label>`)}
       </div>
+      <div class="ch-pop-group"><div class="ch-pop-title">Checks</div>
+        <label class="ch-pop-check" data-pop-verify><input type="checkbox" .checked=${s.verify !== false} @change=${() => this.patch({ verify: s.verify === false })} /><code>verify apps</code><span class="ch-pop-desc">a run that builds or changes a page or app loads it in a browser before it ends, and the model reads what the check found</span></label>
+      </div>
       <div class="ch-pop-group"><div class="ch-pop-title">MCP servers</div>
         ${servers.map((id) => html`<label class="ch-pop-check"><input type="checkbox" .checked=${s.mcp.includes(id)} @change=${() => toggleMcp(id)} /><code>${id}</code><span class="ch-pop-desc">${this.tools.filter((t) => t.source.kind === 'mcp' && (t.source as { id: string }).id === id).length} tools</span></label>`)}
         ${this.resources.map((r) => html`<button type="button" class="ch-pop-item" @click=${() => (this.fire('ch-mcp-resource', { serverId: r.server, uri: r.uri }), (this.pop = 'none'))}><span class="ch-pop-name">${icon('file')} ${r.name}</span><span class="ch-pop-desc">attach, from ${r.serverName}</span></button>`)}
@@ -376,7 +380,7 @@ export function modelPatch(m: ModelInfo): Partial<ChatSettings> {
 
 /** "EXL3 4.0, 256k window": the parts a backend reports, none left empty */
 export function modelDesc(m: ModelInfo): string {
-  return [m.weights, m.max_len ? `${Math.round(m.max_len / 1024)}k window` : ''].filter(Boolean).join(', ');
+  return [m.weights, m.max_len ? `${Math.round(m.max_len / 1024)}k window` : '', m.capabilities?.vision ? 'reads images' : ''].filter(Boolean).join(', ');
 }
 
 /** "auto effort" as the value and its word, the word in the quieter ink (VIS-185) */
@@ -385,8 +389,10 @@ function effortPill(word: string): TemplateResult {
   return m ? html`<span class="ch-pill-main">${word.slice(0, m.index)}</span><span class="ch-pill-sub">effort</span>` : html`<span class="ch-pill-main">${word}</span>`;
 }
 
-function effortDesc(e: EffortChoice): string {
-  return e === 'auto' ? 'the harness decides per turn' : e === 'low' ? 'a short think, quick answers' : e === 'medium' ? 'a middle budget' : e === 'high' ? 'long thinking for code and plans' : 'the largest budget, slow';
+export function effortDesc(e: EffortChoice, providerDefault?: string | null): string {
+  if (e === 'auto') return providerDefault ? `the provider's default (${providerDefault})` : 'the harness decides per turn';
+  if (e === 'max') return "the provider's deepest thinking, slowest";
+  return e === 'low' ? 'a short think, quick answers' : e === 'medium' ? 'a middle budget' : e === 'high' ? 'long thinking for code and plans' : 'the largest budget, slow';
 }
 
 function readDataUrl(f: File): Promise<string | null> {

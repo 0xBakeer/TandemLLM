@@ -101,7 +101,16 @@ def test_switching_from_lfm25():
         after = _effective(keys)
         diff = {k for k in keys if before[k] != after[k]}
         assert diff == set(by), (sorted(diff ^ set(by)))
-        assert len(p["changes"]) == len(diff) == 16, len(diff)
+        # the keys by name, not a count: since SRV-534 the narrator is off by default, so leaving
+        # LFM2.5's setup (narrator on) also turns it off, which the list had not named when it said 16
+        assert by["QWEN38_NARRATOR_MODEL"]["current"] == "qwen3.5-2b" and \
+            by["QWEN38_NARRATOR_MODEL"]["next"] == "", by["QWEN38_NARRATOR_MODEL"]
+        assert set(by) == {"QSE_PARALLEL", "MAX_LEN", "QSE_SIDE_MAX_LEN", "QSE_KV_POOL", "QSE_SIDE_GRAPHS",
+                           "QSE_SIDE_SLOT_CONST_GB", "QSE_KV_HARD_FLOOR_GB", "QSE_BARRIER_IDLE_OWNER",
+                           "QWEN38_SUFFIX_STORE", "QWEN38_NARRATOR_MODEL", "QWEN38_NARRATOR_DIR",
+                           "QWEN38_SHADOW_MODEL", "VISION", "RESPONSE_CACHE", "QSE_BACKENDS",
+                           "TEMPERATURE", "TOP_K", "REP_PENALTY"}, sorted(by)
+        assert len(p["changes"]) == len(diff), len(diff)
 
 
 def test_keys_equal_to_the_unset_value():
@@ -132,10 +141,12 @@ def test_the_job_page_lists_the_changes():
         sel = _qwen_sel()
         jid = T._job(sel, previous="lfm25-exl3-2.5")
         job = apply.read_job(jid)
-        assert len(job["changes"]) == 16 and any(c["removed"] for c in job["changes"])
+        # the plan's list, the job's, and the count the check step says are one list
+        want = T._plan(sel)["changes"]
+        assert job["changes"] == want and len(want) == 18 and any(c["removed"] for c in job["changes"])
         apply.Runner(jid, cmd=T.Recorder(), http=T._smoke_ok("exl3-6.0"), ops=box.ops).main()
         check = next(s for s in apply.read_job(jid)["steps"] if s["id"] == "check")
-        assert check["detail"] == "16 settings change", check
+        assert check["detail"] == f"{len(want)} settings change", check
 
 
 if __name__ == "__main__":

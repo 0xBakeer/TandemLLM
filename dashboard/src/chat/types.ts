@@ -105,7 +105,21 @@ export interface Message {
   stats?: TurnStats;
 }
 
-export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart | TodosPart;
+export type Part = TextPart | ThinkingPart | ToolCallPart | ErrorPart | ArtifactPart | TodosPart | VerifyPart;
+
+/** SRV-532: the end of an answer whose run built or changed a page or app: what the harness's
+ *  browser check and the model's own checks covered, and what they did not. `text` is a lead line,
+ *  then "Checked: ..." and "Not checked: ..." lines (copied as it is) */
+export interface VerifyPart {
+  type: 'verify';
+  /** passed; problems: the last check's, not fixed; not_run: no check could run (why in the text);
+   *  stale: files changed after the last check */
+  state: 'passed' | 'problems' | 'not_run' | 'stale';
+  text: string;
+  /** the items of the text's "Checked:" and "Not checked:" lines */
+  checked?: string[];
+  not_checked?: string[];
+}
 
 /** the open todo list as the model read it at the run's start; never drawn */
 export interface TodosPart {
@@ -142,7 +156,7 @@ export interface ToolCallPart {
   id: string;
   /** MCP tools: "mcp__<server>__<tool>" */
   name: string;
-  source?: ToolSource;
+  source?: ToolSource | { kind: 'harness' };
   risk?: ToolRisk;
   /** JSON text, growing while the model writes it */
   input: string;
@@ -156,6 +170,9 @@ export interface ToolCallPart {
   approved?: ToolApproval | null;
   /** a pane that can show this call's work */
   pane?: PaneRef | null;
+  /** SRV-532: a call the harness made itself, not the model (`verify`: the browser check before
+   *  the run ends) */
+  harness?: 'verify';
 }
 /** a tool call that ran without a prompt says who allowed it (the badge on its card) */
 export type ToolApproval = 'user' | 'rule' | 'auto' | 'yolo';
@@ -213,7 +230,7 @@ export interface TurnStats {
 
 // ---- the run ----------------------------------------------------------------------------------
 
-export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'finishing';
+export type RunPhase = 'queued' | 'prefill' | 'thinking' | 'writing' | 'tool' | 'permission' | 'verifying' | 'finishing';
 
 export interface Run {
   id: string;
@@ -235,6 +252,9 @@ export interface Run {
   decode_tps: number | null;
   tokens_per_round: number | null;
   acceptance: number | null;
+  /** this model call's wait for its first token, once it came (a cloud model's: chatd's own
+   *  stamps, the network included) */
+  ttft_ms?: number | null;
   /** used: the run's, every model call; call: this call's, which the budget caps */
   thinking: { used: number; budget: number | null; call?: number };
   /** the completion tokens so far, every model call of the run */
@@ -245,7 +265,7 @@ export interface Run {
 
 // ---- the Context panel ------------------------------------------------------------------------
 
-export type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'messages' | 'thinking' | 'reserved';
+export type ContextPartKind = 'system' | 'tools' | 'skills' | 'files' | 'images' | 'messages' | 'thinking' | 'reserved';
 
 export interface ContextPart {
   kind: ContextPartKind;
@@ -286,8 +306,10 @@ export interface ContextReport {
   };
   /** the chat's skill mode and pins (SRV-361); a pin the library lost is `missing` */
   skills?: { mode: 'auto' | 'manual' | 'model'; pinned: { name: string; tokens: number | null; missing: boolean }[]; blocked: string[] };
-  /** the engine's split of the last prompt (its usage frame); null before the first frame */
-  split?: { system: number; tools: number; history: number; injected: number; images: number } | null;
+  /** the engine's split of the last prompt (its usage frame); null before the first frame. A
+   *  cloud model's is chatd's estimate from the characters: `estimated`, and the skill index
+   *  apart (`skills`) */
+  split?: { system: number; tools: number; history?: number; injected?: number; images: number; skills?: number; estimated?: boolean } | null;
   /** what the harness decided for this chat; never inside the answer text */
   harness: { class: string | null; effort: string | null; packages: { name: string; tokens: number | null }[]; memory?: HarnessMemory | null } | null;
   memory: {
@@ -342,10 +364,34 @@ export interface ConversationUsage {
 
 // ---- settings ---------------------------------------------------------------------------------
 
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh';
+/** `max`: a provider's own top level (DeepSeek's low, high, max), offered for its models only */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 /** 'auto' (the default): the harness decides per turn */
 export type EffortChoice = Effort | 'auto';
 export const EFFORTS: EffortChoice[] = ['auto', 'low', 'medium', 'high', 'xhigh'];
+const EFFORT_RANK: Record<Effort, number> = { low: 1, medium: 2, high: 3, xhigh: 4, max: 5 };
+
+/** the effort choices for a model: a cloud model's own levels from its provider's model list
+ *  (DeepSeek: low, high, max), else the engine's */
+export function effortsFor(caps: Pick<Capabilities, 'models' | 'efforts'> | null | undefined, modelId: string | null | undefined): EffortChoice[] {
+  const m = caps?.models.find((x) => x.id === modelId);
+  const lv = (m?.capabilities?.effort_levels ?? []).filter((x): x is Effort => x in EFFORT_RANK);
+  if (m && m.backend && m.backend !== 'engine' && lv.length) return ['auto', ...lv];
+  return caps?.efforts ?? EFFORTS;
+}
+
+/** the level a request carries for the chat's effort on a model with `levels` (chatd/render.py
+ *  `nearest_effort`): itself, else the nearest by rank, a tie going to high */
+export function nearestEffort(e: EffortChoice, levels: string[] | null | undefined): EffortChoice {
+  const known = (levels ?? []).filter((x): x is Effort => x in EFFORT_RANK);
+  if (e === 'auto' || !known.length || known.includes(e as Effort)) return e;
+  const r = EFFORT_RANK[e as Effort];
+  return known.reduce((a, b) => {
+    const da = Math.abs(EFFORT_RANK[a] - r);
+    const db = Math.abs(EFFORT_RANK[b] - r);
+    return db < da || (db === da && Math.abs(EFFORT_RANK[b] - 3) < Math.abs(EFFORT_RANK[a] - 3)) ? b : a;
+  });
+}
 
 export interface ChatSettings {
   model: string;
@@ -379,6 +425,9 @@ export interface ChatSettings {
   permission_mode?: PermissionMode;
   /** SRV-469: null = the global web search settings; else this chat's own choices */
   web_search?: WebSearchOverride | null;
+  /** SRV-532: a run that built or changed a page or app checks it in a browser before it ends;
+   *  absent on an older server */
+  verify?: boolean;
 }
 /** ask: every tool asks unless its policy says always; auto (the default): what stays in the
  *  sandbox runs (commands, reads, workspace writes), the internet asks; yolo: nothing asks */
@@ -502,7 +551,8 @@ export interface ModelInfo {
   max_len: number;
   profiles: { id: string; name: string; description: string }[];
   backend?: 'engine' | 'proxy' | 'cloud';
-  capabilities?: { thinking: boolean; effort_levels: string[]; tools: boolean; vision: boolean; structured: boolean };
+  /** `effort_default`: a provider's default level (DeepSeek's high), from its model list */
+  capabilities?: { thinking: boolean; effort_levels: string[]; effort_default?: string | null; tools: boolean; vision: boolean; structured: boolean };
   loaded?: boolean;
 }
 
@@ -640,7 +690,7 @@ export interface PaneRef {
 export type ChatEvent =
   | { type: 'run.started'; run: Run }
   | { type: 'run.phase'; run_id: string; phase: RunPhase; now: string; tool?: Run['tool']; prefill?: Run['prefill']; step?: number; queue_position?: number | null }
-  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; prefill?: Run['prefill'] }
+  | { type: 'run.metrics'; run_id: string; decode_tps: number | null; tokens_per_round: number | null; acceptance: number | null; tokens: number; thinking_used: number; thinking_call?: number; thinking_budget?: number | null; ttft_ms?: number | null; prefill?: Run['prefill'] }
   | { type: 'run.done'; run_id: string; message_id: string; stats: TurnStats; status: MessageStatus }
   | { type: 'run.error'; run_id: string; message_id: string; message: string; retryable: boolean }
   | { type: 'message.created'; message: Message }

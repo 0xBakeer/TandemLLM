@@ -333,7 +333,7 @@
    "contract": "generate",
    "timeout_ms": 150,
    "memory_claim_gib": 0.0,
-   "mode": "on",
+   "mode": "off",
    "kind": "generative",
    "window": "between_rounds",
    "preemptible": true,
@@ -877,9 +877,9 @@
   ],
   "claims": {
    "decider": {
-    "gib": 8.2,
+    "gib": 3.0,
     "basis": "measured",
-    "note": "arbiter with Laya's three checkpoints beside the engine: MemAvailable 31.0 -> 22.8 GiB (2026-10-01); nvidia-smi shows 5.1 GB"
+    "note": "Laya's three checkpoints in the engine's process, measured beside a side slot (OPS-69, 2026-10-06); the arbiter sidecar took 8.2"
    },
    "narrator": {
     "gib": 6.0,

@@ -563,8 +563,8 @@ def test_the_residency_planner_over_http():
         assert st == 200, got
         _check(got, "residency-plan")
         assert got["version"] == 0 and got["plan"]["need_gib"] == 21.0, got["plan"]
-        assert [r["role"] for r in got["plan"]["rows"]] == ["decider", "narrator", "reader"], \
-            got["plan"]
+        # SRV-534: the narrator and the reader are off in the roles document: no claim in the plan
+        assert [r["role"] for r in got["plan"]["rows"]] == ["decider"], got["plan"]
         assert got["last_refusal"] is None and got["engine"] is not None
         st, _, doc = _call(port, "GET", "/v1/conductor/residency")
         _check(doc, "document")

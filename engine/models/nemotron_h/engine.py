@@ -19,7 +19,8 @@ step as a CUDA graph.
                      length moved (`commit_dev` is capturable)
   prefill(tokens)    a prompt in chunks of PREFILL_CHUNK on batched kernels (cuBLAS, the chunked SSD
                      form in fp32 torch matmuls, SDPA with a lower-right causal mask, the experts
-                     grouped): the next token agrees with the row path, the bits do not
+                     grouped): the next token agrees with the row path, the bits do not; a prompt's
+                     image rows (Super VL, vision.py) replace their placeholders' embeddings here
 
 `DecodeGraph` captures the decode step once per attention class (kernels.classes) and `VerifyGraph` an
 M-row block.
@@ -599,25 +600,28 @@ class NemotronHEngine(NemotronHRef):
 
     # ------------------------------------------------------------------------- prompt chunks
     @torch.no_grad()
-    def prefill(self, tokens: torch.Tensor, st: NhState, head: str = "last") -> torch.Tensor | None:
+    def prefill(self, tokens: torch.Tensor, st: NhState, head: str = "last", mm=None) -> torch.Tensor | None:
         """A prompt (any length) in chunks of PREFILL_CHUNK: the state advances. Logits of the last row
-        [1, vocab] fp32 (`head="all"`: of every row of the last chunk; "none": None)."""
+        [1, vocab] fp32 (`head="all"`: of every row of the last chunk; "none": None). `mm`: the request's
+        images (vision.py `NhMMContext`), whose rows replace their placeholders' embeddings."""
         tokens = tokens.view(-1).to(self.device)
         out, rows = None, []
         for a in range(0, tokens.numel(), PREFILL_CHUNK):
             chunk = tokens[a:a + PREFILL_CHUNK]
             last = a + PREFILL_CHUNK >= tokens.numel()
-            out = self.forward_chunk(chunk, st, head=head if last else "none")
+            out = self.forward_chunk(chunk, st, head=head if last else "none", mm=mm)
             rows.append(self.prompt_hidden)
         self.prompt_hidden = rows[0] if len(rows) == 1 else torch.cat(rows)
         return out
 
-    def forward_chunk(self, tokens: torch.Tensor, st: NhState, head: str = "last") -> torch.Tensor | None:
+    def forward_chunk(self, tokens: torch.Tensor, st: NhState, head: str = "last", mm=None) -> torch.Tensor | None:
         c = self.cfg
         T, L, eps = tokens.numel(), st.length, c.rms_norm_eps
         if L + T > st.cap:
             raise ValueError(f"{L + T} rows exceed the state's capacity {st.cap}")
         h = self.W["embeddings.weight"].index_select(0, tokens)
+        if mm is not None:
+            h = mm.splice(h, L)                           # the chunk's image rows (no positions to move)
         h, n = self._add_rms(h, None, self.W["layers.0.norm.weight"])
         if st.ring is not None:
             j0 = max(0, T - self.ring_rows)               # the chunk's rows the ring keeps

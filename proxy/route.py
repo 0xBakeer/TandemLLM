@@ -28,6 +28,19 @@ from proxy import config as config_mod
 from proxy.adapters import KINDS, Generic
 
 
+def capabilities(cls, m: dict) -> dict | None:
+    """What a client may ask of a backend's model, from its provider's model list (0.11.3):
+    images when its input kinds name `image`, the provider's effort levels, its default and the
+    word that turns thinking off. None when the list said neither (vLLM, an older discovery)."""
+    mods, eff = m.get("input_modalities"), m.get("effort")
+    if mods is None and eff is None:
+        return None
+    return {"thinking": eff is not None, "effort_levels": list((eff or {}).get("levels") or []),
+            "effort_default": (eff or {}).get("default"),
+            "effort_off": getattr(cls, "effort_off", None) if eff else None,
+            "tools": True, "vision": "image" in (mods or []), "structured": False}
+
+
 class Route:
     __slots__ = ("backend", "model", "public", "fallbacks", "price", "rule")
 
@@ -94,14 +107,18 @@ class Table:
             for m in rows:
                 b = s["backends"][m["backend"]]
                 cls = KINDS.get(b["kind"], Generic)
+                card = {"backend": b["id"], "kind": b["kind"], "label": b["label"],
+                        "upstream_id": m["model"],
+                        # the provider's own words from its model list, else the adapter's table
+                        "name": m.get("name") or cls.names.get(m["model"]), "cloud": cls.cloud,
+                        "context_length": m["context_length"],
+                        "max_output": m.get("max_output") or cls.max_output.get(m["model"]),
+                        "features": m["features"]}
+                caps = capabilities(cls, m)
+                if caps is not None:
+                    card["capabilities"] = caps
                 out.append({"id": pub if bare else f"{b['id']}/{pub}", "object": "model",
-                            "created": created, "owned_by": b["id"],
-                            "tandem": {"backend": b["id"], "kind": b["kind"],
-                                       "label": b["label"], "upstream_id": m["model"],
-                                       "name": cls.names.get(m["model"]), "cloud": cls.cloud,
-                                       "context_length": m["context_length"],
-                                       "max_output": cls.max_output.get(m["model"]),
-                                       "features": m["features"]}})
+                            "created": created, "owned_by": b["id"], "tandem": card})
         return out
 
     def card(self, name: str, created: int) -> dict | None:

@@ -316,7 +316,7 @@ def test_the_systemd_unit_stops_both():
     text = open(os.path.join(ROOT, "install.sh")).read()
     unit = text[text.index('cat > "$UNIT" <<EOF'):]
     unit = unit[:unit.index("\nEOF\n")]
-    assert "ExecStart=$DIR/bin/tandem start" in unit and "ExecStop=$DIR/bin/tandem stop 120" in unit
+    assert "ExecStart=/bin/bash $DIR/bin/tandem start" in unit and "ExecStop=/bin/bash $DIR/bin/tandem stop 120" in unit
     assert "systemctl restart restarts chatd" in unit
     # bin/tandem stop stops chatd (test_tandem_...); --uninstall runs it and chatd.sh stop as well
     un = text[text.index('if [ "$UNINSTALL" = 1 ]; then'):text.index("printf '%sTandemLLM installer%s")]
@@ -326,7 +326,7 @@ def test_the_systemd_unit_stops_both():
 def test_the_install_says_what_it_did():
     text = open(os.path.join(ROOT, "install.sh")).read()
     done = text[text.index("${B}Done.${N}"):]
-    assert "Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | chat" in done
+    assert "Control:   $DIR/bin/tandem start | stop | restart | status | smoke | logs | doctor | chat" in done
     assert re.search(r"Chat: +http://\$API_HOST:\$PORT/dashboard/#/chat +chatd starts and stops with the engine", done)
     assert "($DIR/bin/tandem chat status)" in done and "The sandbox is optional" in done
     assert "the chat answers and uses the file tools; bash $SRC/ops/sandbox/install.sh adds the rest" in done

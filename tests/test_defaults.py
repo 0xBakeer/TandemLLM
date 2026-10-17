@@ -48,6 +48,8 @@ from test_conductor_e2e import ADMIN, LAUNCH, _call, _port, _wait  # noqa: E402
 
 import subprocess  # noqa: E402
 
+from server.conductor import schema  # noqa: E402
+
 FIX = os.path.join(ROOT, "tests", "fixtures", "defaults")
 # what the store fills in a stored document that lacks it, keyed by the document
 FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
@@ -63,10 +65,19 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           "packages": {"packages.tandem-memory", "packages.memory"}}
 # what the shipped documents changed on purpose since that day, keyed by the document: the path
 # and the value they ship. SRV-473: the same-call guard on (the live box: coding v21 by hand,
-# overnight and chat by the migration), chat's C3 acting, chat's description
-CHANGED = {"profiles/coding": {"toolgate.same_call": True},
+# overnight and chat by the migration), chat's C3 acting, chat's description. SRV-534: the
+# narrator off in coding and chat; a core on design_ui and drawing (the
+# migration stores it on the live box too)
+CHANGED = {"router": {"classes.design_ui.policy.core": ["ui-design"],
+                      "classes.drawing.policy.core": ["creative-coding"],
+                      "classes.three_d.policy.core": ["threejs-scene", "coding"],
+                      "classes.three_d.policy.packages": next(
+                          c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]
+                          if c["id"] == "three_d")},
+           "profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off"},
            "profiles/overnight": {"toolgate.same_call": True},
            "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",
+                             "ui.narrator": "off",
                              "description": "Open WebUI and the Playground: class-aware effort, "
                                             "the same-call guard."}}
 
@@ -76,7 +87,8 @@ def _changed(want: dict, kind: str) -> dict:
     for path, val in CHANGED.get(kind, {}).items():
         node, keys = out, path.split(".")
         for k in keys[:-1]:
-            node = node[k]
+            # a list of classes: the one with that id
+            node = next(x for x in node if x.get("id") == k) if isinstance(node, list) else node[k]
         node[keys[-1]] = val
     return out
 

@@ -653,6 +653,43 @@ def test_a_recent_row_says_where_its_prompt_came_from():
     assert by["g"]["cache_source"] is None and by["g"]["prompt_tokens"] is None
 
 
+def test_a_relayed_recent_row_names_its_backend():
+    """0.11.3: a cloud request's row in the Last 20 says which backend answered, and no engine
+    cache tier: its cached tokens are the provider's (DeepSeek's prompt_cache_hit_tokens). It
+    read "cold, 105K reused" beside the engine's own rows (2026-10-17)."""
+    from proxy.measure import RelayRecord
+    c = Clock()
+    reg = _reg(c)
+    rec = RelayRecord("chatcmpl-px-1", "chat", True, t_arrival=c.perf())
+    rec.ts = c.now()
+    rec.model, rec.client_id, rec.client_kind = "deepseek-flash", "anon", "curl"
+    rec.backend, rec.backend_kind = "deepseek", "deepseek"
+    reg.register(rec)
+    rec.stamp_sent()
+    c.tick(1.0)
+    rec.stamp_token(c.perf(), "reasoning")
+    c.tick(2.0)
+    rec.stamp_token(c.perf(), "content")
+    rec.set_usage({"prompt_tokens": 46420, "completion_tokens": 9950, "cached_tokens": 46208,
+                   "reasoning_tokens": 3407})
+    rec.finish_reason = "tool_calls"
+    rec.end()
+    reg.finish(rec)
+    snap = _valid(reg.snapshot())
+    r = next(x for x in snap["recent"] if x["request_id"] == "chatcmpl-px-1")
+    assert r["backend"] == "deepseek" and r["cache_source"] is None
+    assert (r["prompt_tokens"], r["cached_tokens"], r["tokens"]) == (46420, 46208, 9950)
+    own = _rec(c, "e")
+    reg.register(own)
+    own.lock_acquired()
+    own.prompt_tokens, own.cache_source = 10, "end"
+    list(own.track(iter([1, 2])))
+    own.completion_tokens, own.finish_reason = 2, "stop"
+    own.end()
+    reg.finish(own)
+    assert next(x for x in reg.snapshot()["recent"] if x["request_id"] == "e")["backend"] is None
+
+
 def test_the_kill_switch_keeps_the_new_fields_null_at_one_hertz():
     c = Clock()
     reg = _reg(c, hz=4, activity=False)

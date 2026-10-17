@@ -2294,6 +2294,9 @@ a.ccard-license:hover {
   align-items: center;
   gap: 12px;
 }
+.inst-head[hidden] {
+  display: none;
+}
 .inst-badge {
   display: grid;
   place-items: center;
@@ -4054,5 +4057,255 @@ qse-wren-figure::before {
   }
   .wren-mini {
     opacity: 1;
+  }
+}
+
+/* VIS-211: a finished install: what is ready and the way on */
+.inst-done {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, var(--rule-strong));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ok) 7%, var(--bg-2));
+}
+.inst-done-title {
+  font-size: var(--fs-xl, 1.4rem);
+  font-weight: 650;
+  margin: 2px 0 0;
+}
+.inst-done-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  color: var(--ink-2);
+}
+.inst-done-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  width: 100%;
+}
+@media (max-width: 768px) {
+  .inst-done {
+    padding: 16px;
+  }
+  .inst-done-actions .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}
+
+/* VIS-209: the restart card: one screen while the engine restarts under an install */
+.rcard {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid color-mix(in srgb, var(--cobalt) 45%, var(--rule-strong));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--cobalt) 8%, var(--bg-2));
+}
+.rcard-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rcard-title {
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  margin: 0;
+}
+.rcard-step {
+  margin: 2px 0 0;
+}
+.rcard-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.rcard-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--cobalt);
+  transition: width 0.8s ease;
+}
+.rcard-time {
+  margin: 0;
+  color: var(--ink-2);
+}
+.rcard-phases {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.rcard-phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-3);
+}
+.rcard-phase.is-done {
+  color: var(--ink-2);
+}
+.rcard-phase.is-done .rcard-phase-mark {
+  color: var(--ok);
+}
+.rcard-phase.is-current {
+  color: var(--ink);
+  font-weight: 600;
+}
+.rcard-phase-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rcard-bar > span {
+    transition: none;
+  }
+}
+@media (max-width: 768px) {
+  .rcard {
+    padding: 14px;
+  }
+}
+
+/* VIS-213: a failed install's way on */
+.inst-fail {
+  display: grid;
+  gap: 10px;
+}
+.inst-fail-step {
+  margin: 0;
+  font-weight: 600;
+}
+.inst-fixed ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.inst-fixed li {
+  display: flex;
+  gap: 6px;
+  color: var(--ink-2);
+}
+.inst-fixed li svg {
+  color: var(--ok);
+  flex: none;
+}
+.inst-diag-text {
+  width: 100%;
+  font: var(--fs-sm, 0.85rem) / 1.4 var(--mono, ui-monospace, monospace);
+  background: var(--bg-inset);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  padding: 8px;
+}
+@media (max-width: 768px) {
+  .inst-fail-actions .btn {
+    flex: 1 1 100%;
+    justify-content: center;
+    min-height: 44px;
+  }
+}
+
+/* VIS-215: the weights on this box */
+.iw {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.iw-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.iw-title {
+  font-size: var(--fs-md, 1rem);
+  font-weight: 600;
+  margin: 0;
+}
+.iw-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.iw-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.iw-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.iw-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.iw-ask {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+.iw-ask-t {
+  margin: 0;
+  font-weight: 600;
+}
+.iw-ask code {
+  overflow-wrap: anywhere;
+}
+.iw .btn-danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: var(--ink-inverse);
+}
+.iw-done {
+  color: var(--ok);
+  margin: 0;
+}
+.rv-remove-after {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+@media (max-width: 768px) {
+  .iw-row {
+    grid-template-columns: 1fr auto;
+  }
+  .iw-row > .btn,
+  .iw-row > .sbadge {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+  .iw-ask .btn {
+    min-height: 44px;
   }
 }

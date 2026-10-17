@@ -185,6 +185,7 @@ def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True, keep:
 def body(model: str, settings: dict, branch: list[dict], *, system: str | None = None,
          vision: bool = False, blob=None, continue_final: bool = False,
          max_tokens: int | None = None, tools: list[dict] | None = None,
+         levels: list[str] | None = None, effort_off: str | None = None,
          keep_reasoning_from: int = 0, nudge: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
          step_from: tuple[int, int] | None = None) -> dict:
@@ -210,9 +211,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
         out["parallel_tool_calls"] = True
     effort = settings.get("effort") or "auto"
     if not settings.get("thinking", True):
-        out["chat_template_kwargs"] = {"enable_thinking": False}
+        if effort_off:                      # a provider's own off word (DeepSeek: `none`)
+            out["reasoning_effort"] = effort_off
+        else:
+            out["chat_template_kwargs"] = {"enable_thinking": False}
     elif effort != "auto":
-        out["reasoning_effort"] = effort
+        out["reasoning_effort"] = nearest_effort(effort, levels)
     if max_tokens:
         out["max_tokens"] = int(max_tokens)
     if continue_final and msgs and msgs[-1]["role"] == "assistant" and \
@@ -250,6 +254,22 @@ def system_block(*, today: str | None, tools: bool, summary: str | None = None,
     return "\n\n".join(parts) if parts else None
 
 
+EFFORT_RANK = {"low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
+
+
+def nearest_effort(effort: str, levels: list[str] | None) -> str:
+    """The chat's effort as one of the model's levels: itself when the model has it, else the
+    nearest by rank, a tie going to `high` (DeepSeek maps medium and xhigh to high itself; our
+    engine has no `max`, a chat that picked it on DeepSeek gets xhigh on the engine)."""
+    if not levels or effort in levels or effort not in EFFORT_RANK:
+        return effort
+    r = EFFORT_RANK[effort]
+    known = [x for x in levels if x in EFFORT_RANK]
+    if not known:
+        return effort
+    return min(known, key=lambda x: (abs(EFFORT_RANK[x] - r), abs(EFFORT_RANK[x] - 3)))
+
+
 def encode(obj: dict) -> bytes:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -257,5 +277,8 @@ def encode(obj: dict) -> bytes:
 def headers(conversation_id: str) -> dict:
     """The call's headers, also fixed: the session id and the client kind (`chat-app`: the
     conductor maps it to its chat-app profile, SRV-351). Never a profile header: the conductor's
-    other profiles belong to other clients (opencode, Open WebUI, Hermes) and to tests."""
-    return {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app"}
+    other profiles belong to other clients (opencode, Open WebUI, Hermes) and to tests.
+    `X-Tandem-Cost: 1`: a call the proxy relays to a priced model ends with its cost, an SSE
+    comment before [DONE] (proxy/relay.py); our engine's own calls cost nothing and get none."""
+    return {"x-session-id": session_id(conversation_id), "X-QSE-Client": "chat-app",
+            "X-Tandem-Cost": "1"}

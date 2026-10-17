@@ -10,12 +10,18 @@ list of steps in this file and the repository's own scripts. Nothing a client se
 THE STEPS (STEPS below; the argv of every command is built here from the registry's ids and the
 selection's checked numbers, `shell=False`, a minimal environment, a timeout each):
 
-    check             the selection again (the runner checks it itself), the estimate, the disk,
-                      the assets, the HF token, the overlay hook in serve.env, the box lock
+    check             tandem doctor first (OPS-171: modes, run/ops copies, stale pid files, the
+                      marker repaired; its report on the job as `doctor`), then the selection again
+                      (the runner checks it itself), the estimate, the disk, the assets, the HF
+                      token, the overlay hook in serve.env, the box lock
     unload_assistant  Wren unloaded (the server does it before it starts the runner)
     fetch             bash ops/use-profile.sh <profile> --fetch-only    (skipped when the weights and
                       the assets are on disk; OPS-95: it fetches the missing assets too; VIS-153:
                       and the models of the tools the selection turns on, QSE_FETCH_ASSETS)
+    preflight         OPS-169: before anything stops, what the restart needs (`preflight` below):
+                      the scripts parse, the new configuration sources under set -u, the weights
+                      are complete (the hub manifest's sizes), memory, the port and the locks, the
+                      interpreters; a failure ends the job here and the running setup keeps running
     (waiting)         write_config waits until no request runs or waits on the engine (its /health,
                       IDLE_WAIT_S at most; then nothing has changed and the job fails)
     write_config      run/setup.env from the registry's keys and the selection, the old one kept
@@ -94,6 +100,7 @@ PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 STEPS = (("check", "Check the selection, the disk and the box"),
          ("unload_assistant", "Unload Wren"),
          ("fetch", "Download the weights"),
+         ("preflight", "Check the new setup before the restart"),
          ("write_config", "Write the configuration (run/setup.env)"),
          ("switch", "Restart the engine with the new setup"),
          ("smoke", "Check that the new engine answers"),
@@ -402,8 +409,16 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         except OSError:
             free = None
         if free is not None and free < download_gb + DISK_MARGIN_GB:
+            # SRV-560: and what could go to make room
+            from server.setup import remove as remove_mod
+            try:
+                more = remove_mod.removable_text(remove_mod.installed(setup_mode=setup_mode),
+                                                 download_gb + DISK_MARGIN_GB - free)
+            except Exception:                                     # noqa: BLE001
+                more = ""
             error("disk_full", f"The download needs {download_gb:g} GB and {DISK_MARGIN_GB} "
-                  f"GB left after it; the disk has {free:.0f} GB free.")
+                  f"GB left after it; the disk has {free:.0f} GB free, {download_gb + DISK_MARGIN_GB - free:.0f} "
+                  f"GB too few." + (f" {more}" if more else ""))
     if not hook_present():
         error("no_overlay_hook", "ops/serve.env on this box does not read run/setup.env. Add the "
               "setup overlay lines from the repository's ops/serve.env (the end of the file) "
@@ -703,7 +718,20 @@ def events_from(jid: str, offset: int = 0, after: int = 0) -> tuple[list[dict], 
     return out, offset + end
 
 
-def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply") -> dict:
+def job_summary(m: dict, sel: dict) -> dict:
+    """VIS-211: what the install sets up, in the words of the page's finished screen: the model,
+    the weights, the tools that are on, the parallel chats and their windows."""
+    prof = registry.profile(m, sel["profile"]) or {}
+    return {"model": m.get("name") or m["id"], "profile": sel["profile"],
+            "profile_label": prof.get("label") or sel["profile"],
+            "tools": [c["label"] for c in m["components"]
+                      if sel["components"].get(c["id"]) and not c.get("required")],
+            "slots": sel.get("slots"), "window": sel.get("window"),
+            "side_window": sel.get("side_window")}
+
+
+def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
+            retry_of: str | None = None, remove_after: list[str] | None = None) -> dict:
     """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
     reset (reset level 2: the overlay goes and the recommended profile starts)."""
     jid = secrets.token_hex(8)
@@ -715,13 +743,86 @@ def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply
     job = {"id": jid, "kind": kind, "state": "queued", "created_at": now, "ended_at": None,
            "profile": sel["profile"], "steps": steps, "message": None, "changes": p["changes"],
            "rolled_back": False, "failed_step": None, "pid": None,
-           "url": f"http://<this box>:{p['ports']['next']}/dashboard/"}
+           "url": f"http://<this box>:{p['ports']['next']}/dashboard/",
+           "model": m["id"], "summary": job_summary(m, sel), "retry_of": retry_of}
     _write_json(os.path.join(d, "job.json"),
                 {"kind": kind, "model": m["id"], "selection": sel, "setup_mode": setup_mode,
                  "previous": p["profile"]["current"], "ports": p["ports"],
-                 "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model")})
+                 "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model"),
+                 "remove_after": remove_after or []})
     _write_json(os.path.join(d, "state.json"), job)
     return job
+
+
+def job_spec(jid: str) -> dict | None:
+    """The job.json the server wrote (the selection, the kind): a retry starts from it."""
+    try:
+        with open(os.path.join(job_dir(jid), "job.json")) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def diagnostics(jid: str, n_lines: int = 200) -> str | None:
+    """VIS-213: a failed job as text for a bug report: versions, the job, its steps, tandem doctor
+    (the job's report and a fresh check), the selection and the last log lines. Nothing secret:
+    the log was filtered when it was written, and the whole text passes the filter again."""
+    import platform
+    from server.conductor.redact import redact
+    from server.setup import doctor
+    job = read_job(jid)
+    if job is None:
+        return None
+    spec = job_spec(jid) or {}
+    ver = ""
+    try:
+        with open(os.path.join(ROOT, "VERSION")) as fh:
+            ver = fh.read().strip()
+    except OSError:
+        pass
+    commit = ""
+    try:
+        commit = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], capture_output=True,
+                                text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    gpu = ""
+    try:
+        gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=5).stdout.strip().splitlines()[0]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    out = ["TandemLLM Setup Guide diagnostics",
+           f"TandemLLM {ver or '?'}{' (' + commit + ')' if commit else ''}; Python {platform.python_version()}; "
+           f"{platform.platform()}{'; GPU ' + gpu if gpu else ''}",
+           f"job {job['id']} ({job.get('kind')}), {job.get('state')}"
+           + (f", a retry of {job['retry_of']}" if job.get("retry_of") else "")
+           + f"; profile {job.get('profile')}; model {job.get('model') or spec.get('model')}",
+           f"message: {job.get('message') or '-'}", "", "steps:"]
+    for st in job.get("steps") or []:
+        took = f" {st['ended_at'] - st['started_at']:.1f} s" if st.get("started_at") and st.get("ended_at") else ""
+        out.append(f"  {st['id']:<16} {st['state']:<8}{took}  {st.get('detail') or ''}".rstrip())
+    d = job.get("doctor") or {}
+    out += ["", "tandem doctor before the job: "
+            + (f"repaired {len(d.get('repaired') or [])}, to look at {len(d.get('problems') or [])}" if d else "not run")]
+    out += [f"  repaired: {t}" for t in d.get("repaired") or []] + [f"  to look at: {t}" for t in d.get("problems") or []]
+    try:
+        now = doctor.run(ROOT, repair=False, log=False)
+        out += ["tandem doctor now: " + ("nothing to look at" if now["ok"] else f"{len(now['problems'])} to look at")]
+        out += [f"  to look at: {t}" for t in now["problems"]]
+    except Exception as exc:                                      # noqa: BLE001
+        out.append(f"tandem doctor now: did not run ({type(exc).__name__})")
+    sel = spec.get("selection") or {}
+    out += ["", "selection: " + json.dumps({k: sel.get(k) for k in ("profile", "slots", "window", "side_window",
+                                                                    "kv_pool", "components")}, sort_keys=True)]
+    logs = [e["event"].get("line", "") for e in events(jid) if e["event"].get("type") == "log"]
+    out += ["", f"log (the last {min(n_lines, len(logs))} of {len(logs)} lines):"] + logs[-n_lines:]
+    text, _ = redact("\n".join(out) + "\n")
+    for k in ("HF_TOKEN", "QSE_ADMIN_TOKEN"):
+        v = os.environ.get(k)
+        if v:
+            text = text.replace(v, "[redacted]")
+    return text
 
 
 def spawn(jid: str) -> int:
@@ -730,7 +831,7 @@ def spawn(jid: str) -> int:
     env = {k: v for k, v in os.environ.items()
            if k in ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "HF_TOKEN", "HF_HOME",
                     "HF_HUB_CACHE", "HF_TOKEN_PATH", "QSE_OPS_DIR", "BOX_LOCK", "TZ",
-                    "CUDA_HOME")}
+                    "CUDA_HOME", "MEM_NEED_GB")}
     with open(os.path.join(d, "runner.out"), "ab") as out:
         p = subprocess.Popen([sys.executable, "-m", "server.setup.apply", "run", d], cwd=ROOT,
                              env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out,
@@ -828,14 +929,60 @@ class Runner:
 
     def env(self, **extra) -> dict:
         keep = ("PATH", "HOME", "LANG", "LC_ALL", "HF_TOKEN", "HF_HOME", "HF_HUB_CACHE",
-                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME")
+                "HF_TOKEN_PATH", "BOX_LOCK", "TZ", "CUDA_HOME", "MEM_NEED_GB")
         e = {k: v for k, v in os.environ.items() if k in keep}
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
     def run(self, argv: list[str], timeout: float, **env) -> int:
         self.log(f"$ {' '.join(os.path.relpath(a, ROOT) if a.startswith(ROOT) else a for a in argv)}")
-        return self.cmd(argv, timeout=timeout, env=self.env(**env), cwd=ROOT, line=self.log)
+        self.last_lines = []
+
+        def line(text: str) -> None:
+            self.last_lines = (self.last_lines + [text])[-40:]
+            self.log(text)
+        return self.cmd(argv, timeout=timeout, env=self.env(**env), cwd=ROOT, line=line)
+
+    def explain(self, what: str, rc: int, timeout: float) -> str:
+        """VIS-213: a failed command in plain words, from its exit status and its last lines; when
+        the cause is a file mode, tandem doctor repairs it now and the sentence says so."""
+        lines = [ln for ln in getattr(self, "last_lines", []) if ln.strip()]
+        text = "\n".join(lines)
+        last = next((ln for ln in reversed(lines) if not ln.startswith("$ ")), "")
+        if rc == 124:
+            return f"{what}: it did not finish within {timeout / 60:.0f} minutes and was stopped. Press Retry."
+        m = re.search(r"([\w./-]+\.sh): Permission denied", text)
+        if m:
+            from server.setup import doctor
+            try:
+                fixed = doctor.run(ROOT, repair=True, log=False)["repaired"]
+            except Exception:                                     # noqa: BLE001
+                fixed = []
+            self.job.setdefault("doctor", {}).setdefault("repaired", [])
+            self.job["doctor"]["repaired"] += fixed
+            return (f"{what}: the script {os.path.basename(m.group(1))} could not be run (Permission "
+                    f"denied: it lost its execute bit). " + ("tandem doctor has repaired its file mode; "
+                                                             "press Retry." if fixed else
+                                                             "Run tandem doctor on the box, then Retry."))
+        rules = ((r"a hold owns the board", "a hold owns the board (a measurement or maintenance runs); "
+                                            "try again when it ends."),
+                 (r"an engine is already alive|REFUSING: an engine", "another engine is running on this "
+                                                                     "box; stop it, then press Retry."),
+                 (r"MemAvailable [\d.]+ GB < ", "there was not enough free memory to start it; stop other "
+                                                 "programs that use memory, then press Retry."),
+                 (r"FAILED to become healthy|did not answer /health",
+                  "the new engine did not answer in time" + (f" (its log: {last})" if last else "") +
+                  "."),
+                 (r"smoke: /health does not name", "the engine that answered is not the new one."),
+                 (r"smoke: the turn through", "the new engine started but did not answer a short chat."),
+                 (r"download/verify FAILED|did not fetch|REFUSING the download",
+                  f"the download stopped ({last or 'no reason given'}); press Retry to go on, the "
+                  f"finished files are kept."),
+                 (r"Traceback|Error:", f"it failed: {last}."))
+        for pat, words in rules:
+            if re.search(pat, text):
+                return f"{what}: {words} (exit {rc})"
+        return f"{what} (exit {rc})" + (f": {last}" if last else "") + "."
 
     # -- the job
     def main(self) -> int:
@@ -861,6 +1008,9 @@ class Runner:
             if s["state"] == "pending":
                 s["state"] = "skipped"
         self._save()
+        # the job as it ended, the steps that did not run skipped, for a page that follows it live
+        # (it showed them "not started" under a failed job, VIS-213)
+        self._emit({"type": "job", "job": dict(self.job)})
         # VIS-153: the tools that did not load reach a page that follows the job live too
         self._emit({"type": "done", "state": end, "message": self.job["message"],
                     "warnings": self.job.get("warnings") or [], "notes": self.job.get("notes") or []})
@@ -871,9 +1021,27 @@ class Runner:
         self.job.update(failed_step=sid, message=why)
         return False
 
+    def _doctor(self) -> None:
+        """OPS-171: tandem doctor before anything else: what it repaired (file modes, the run/ops
+        copies, stale pid files, the setup marker) and what it found go into the job and its log; a
+        finding does not stop the job (the plan and the preflight decide)."""
+        from server.setup import doctor
+        try:
+            rep = doctor.run(ROOT, repair=True, log=False)
+        except Exception as exc:                                  # noqa: BLE001
+            self.log(f"[doctor] did not run: {type(exc).__name__}: {exc}")
+            return
+        self.job["doctor"] = {"repaired": rep["repaired"], "problems": rep["problems"]}
+        self._save()
+        for t in rep["repaired"]:
+            self.log(f"[doctor] repaired: {t}")
+        for t in rep["problems"]:
+            self.log(f"[doctor] to look at: {t}")
+
     def _steps(self) -> bool:
         spec = self.spec
         self.step("check", "running")
+        self._doctor()
         m = device_mod.windowed(registry.get(spec["model"]))
         if m is None:
             return self._fail("check", f"no model {spec['model']!r} in models/")
@@ -906,11 +1074,14 @@ class Runner:
                           TIMEOUTS["fetch"], **({"QSE_FETCH_ASSETS": " ".join(extra)}
                                                 if extra else {}))
             if rc != 0:
-                return self._fail("fetch", f"the download did not finish (exit {rc}); nothing "
-                                           f"else changed")
+                return self._fail("fetch", self.explain("The download did not finish", rc,
+                                                        TIMEOUTS["fetch"]) + " Nothing else changed.")
             self.step("fetch", "done")
-        # write_config: nothing has changed until the engine is idle
         old_port, new_port = spec["ports"]["current"], spec["ports"]["next"]
+        if not self._preflight_step(m, sel["profile"], render_overlay(m, sel), old_port, new_port,
+                                    secrets=sel["advanced"].get("admin_password") == "generate"):
+            return False
+        # write_config: nothing has changed until the engine is idle
         if not self._wait_idle("write_config", old_port):
             return False
         self.step("write_config", "running")
@@ -946,7 +1117,7 @@ class Runner:
                       SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=smoke_model,
                       QSE_NO_ROLLBACK="1")
         if rc != 0:
-            self._fail("switch", f"the new setup did not start (ops/use-profile.sh exit {rc})")
+            self._fail("switch", self.explain("The new setup did not start", rc, TIMEOUTS["switch"]))
             return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         # smoke
@@ -961,7 +1132,26 @@ class Runner:
             f"; {len(failed)} tool{'s' if len(failed) != 1 else ''} did not load" if failed else ""))
         self.job["message"] = " ".join([f"{sel['profile']} is live on port {new_port}.", *failed])
         self._drop_marker_copy()
+        self._remove_after(sel["profile"])
         return True
+
+    def _remove_after(self, live: str) -> None:
+        """SRV-560: the weights the user chose to remove with this switch, now that the new setup
+        answers: never the live profile's; a refusal is a note, the install is done either way."""
+        want = [p for p in self.spec.get("remove_after") or [] if p != live]
+        if not want:
+            return
+        from server.setup import remove as remove_mod
+        try:
+            r = remove_mod.remove(want, setup_mode=False, root=ROOT)
+        except remove_mod.RemoveError as exc:
+            self.job.setdefault("notes", []).append(f"The old weights were not removed: {exc}")
+            self.log(f"[remove] not removed: {exc}")
+            return
+        self.job["removed"] = r
+        for g in r["removed"]:
+            self.log(f"[remove] {g['profile']}: {g['dir']} removed ({g['gb']:g} GB); the line that "
+                     f"downloads it again is in {r['log']}")
 
     def _roles(self, m: dict, sel: dict, port: int) -> tuple[list[str], list[str]]:
         """VIS-153: the tools the selection turns on that run a model of their own, as the new
@@ -979,12 +1169,17 @@ class Runner:
                 self.sleep(ROLE_POLL_S)
         failed = [f"{want[k]} did not load ({why or 'no reason given'})."
                   for k, (state, why) in st.items() if state == "failed"]
-        notes = [f"{want[k]} waits for memory ({why}); it loads when memory frees up."
-                 for k, (state, why) in st.items() if state == "refused"]
-        notes += [f"{want[k]} is not loaded yet." for k, (state, _) in st.items()
+        # VIS-211: a tool that waits is normal, and the page says so in plain words; the log keeps
+        # the planner's reason
+        notes = [f"{want[k]} loads later, when memory frees up; nothing to do."
+                 for k, (state, _) in st.items() if state == "refused"]
+        notes += [f"{want[k]} is still loading; nothing to do." for k, (state, _) in st.items()
                   if state == "pending"]
-        for line in failed + notes:
+        for line in failed:
             self.log(f"[smoke] {line}")
+        for k, (state, why) in st.items():
+            if state in ("refused", "pending"):
+                self.log(f"[smoke] {want[k]}: {state}" + (f" ({why})" if why else ""))
         return failed, notes
 
     def _role_states(self, port: int, want: dict) -> dict:
@@ -1050,6 +1245,8 @@ class Runner:
                                            f"else changed")
             self.step("fetch", "done")
         old_port, new_port = p["ports"]["current"], p["ports"]["next"]
+        if not self._preflight_step(m, prof, None, old_port, new_port):
+            return False
         if not self._wait_idle("write_config", old_port):
             return False
         self.step("write_config", "running")
@@ -1073,7 +1270,7 @@ class Runner:
                       SMOKE_URL=f"http://127.0.0.1:{new_port}/v1", SMOKE_MODEL=p["smoke_model"],
                       QSE_NO_ROLLBACK="1")
         if rc != 0:
-            self._fail("switch", f"the engine did not start (ops/use-profile.sh exit {rc})")
+            self._fail("switch", self.explain("The engine did not start", rc, TIMEOUTS["switch"]))
             return self._rollback(m, spec, backup, prev, old_port, new_port)
         self.step("switch", "done")
         self.step("smoke", "running")
@@ -1084,6 +1281,24 @@ class Runner:
         self.step("smoke", "done", f"{prof} answers on port {new_port}")
         self.job["message"] = f"The shipped configuration runs, on {prof}."
         self._drop_marker_copy()
+        return True
+
+    # -- the preflight (OPS-169)
+    def _preflight_step(self, m: dict, profile: str, overlay: str | None, old_port: int,
+                        new_port: int, secrets: bool = False) -> bool:
+        self.step("preflight", "running")
+        try:
+            problems = preflight(m, profile, overlay, ops=self.ops, old_port=old_port,
+                                 new_port=new_port, setup_mode=bool(self.spec.get("setup_mode")),
+                                 secrets=secrets, http=self.http)
+        except Exception as exc:                                  # noqa: BLE001
+            problems = [f"the check itself failed ({type(exc).__name__}: {exc})"]
+        for t in problems:
+            self.log(f"[preflight] {t}")
+        if problems:
+            return self._fail("preflight", " ".join(problems) + " Nothing was stopped or changed.")
+        self.step("preflight", "done", "the scripts, the new configuration, the weights, memory and "
+                                       "the port are ready")
         return True
 
     # -- idle, the setup-mode marker
@@ -1191,6 +1406,147 @@ class Runner:
                                             f"see logs/engine.log on the box")
             self.job["rolled_back"] = False
         return False
+
+
+# ---------------------------------------------------------------------- the preflight (OPS-169)
+#: the scripts the switch runs (a missing roles.sh only warns in start.sh; make-secrets.sh only with
+#: a generated password)
+PREFLIGHT_SCRIPTS = ("use-profile.sh", "start.sh", "stop.sh", "engines.sh")
+PREFLIGHT_PY = ("engine_status.py", "fetch_weights.py")
+
+
+def _sources(ops: str, profile: str, overlay: str | None, keys: list[str]) -> tuple[dict, str | None]:
+    """serve.env with `profile` and the overlay text the job will write (None: no overlay), under
+    set -u as start.sh sources it, in a subshell: the keys' values, and the shell's own error."""
+    import tempfile
+    envf = os.path.join(ops, "serve.env")
+    fd, tmp = tempfile.mkstemp(prefix="setup-preflight-", suffix=".env")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(overlay or "")
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.path.expanduser("~"),
+               "ENVF": envf, "QSE_PROFILE_OVERRIDE": profile, "QSE_SETUP_ENV": tmp}
+        script = ('set -u; set -a; . "$ENVF" || exit 3; set +a; for k in "$@"; do '
+                  'if [ -n "${!k+x}" ]; then printf "%s\\t%s\\n" "$k" "${!k}"; fi; done')
+        r = subprocess.run(["bash", "-c", script, "-", *keys], capture_output=True, text=True,
+                           timeout=20, env=env)
+    finally:
+        os.unlink(tmp)
+    out = {}
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition("\t")
+        out[k] = v
+    if r.returncode != 0:
+        return out, (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1].replace(envf, "serve.env")
+    return out, None
+
+
+def _runs(py: str) -> str | None:
+    if not py:
+        return "is not set"
+    if os.sep in py and not os.path.exists(py):
+        return f"({py}) does not exist"
+    try:
+        r = subprocess.run([py, "-c", "import json, os, sys"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"({py}) does not run: {exc}"
+    return None if r.returncode == 0 else f"({py}) does not run: " + \
+        (r.stderr.strip().splitlines() or ["?"])[-1]
+
+
+def _weights_sizes(wdir: str) -> list[str]:
+    """The files of the folder's hub manifest (ops/fetch_weights.py) whose size is not the hub's."""
+    try:
+        with open(os.path.join(wdir, "_hub_manifest.json")) as fh:
+            files = json.load(fh).get("files") or {}
+    except (OSError, ValueError):
+        return []
+    bad = []
+    for name, f in sorted(files.items()):
+        p = os.path.join(wdir, name)
+        if isinstance(f, dict) and f.get("size") and os.path.isfile(p) and os.path.getsize(p) != f["size"]:
+            bad.append(f"{name} has {os.path.getsize(p):,} bytes, the hub lists {f['size']:,}")
+    return bad
+
+
+def preflight(m: dict, profile: str, overlay: str | None, *, ops: str, old_port: int, new_port: int,
+              setup_mode: bool, secrets: bool = False, http=None) -> list[str]:
+    """What the restart needs, checked while the running setup still runs (OPS-169): each problem as a
+    sentence; none: go on. Nothing here changes anything."""
+    out = []
+    # 1. the scripts the switch runs are there and parse
+    for name in PREFLIGHT_SCRIPTS + (("make-secrets.sh",) if secrets else ()) + ("serve.env",):
+        p = os.path.join(ops, name)
+        if not os.path.isfile(p):
+            out.append(f"ops/{name} is missing on this box (run tandem doctor, or the installer again).")
+            continue
+        r = subprocess.run(["bash", "-n", p], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            out.append(f"ops/{name} has an error: {(r.stderr.strip().splitlines() or ['?'])[-1]}")
+    for name in PREFLIGHT_PY:
+        p = os.path.join(ops, name)
+        try:
+            with open(p) as fh:
+                compile(fh.read(), p, "exec")
+        except OSError:
+            out.append(f"ops/{name} is missing on this box.")
+        except SyntaxError as exc:
+            out.append(f"ops/{name} has an error on line {exc.lineno}: {exc.msg}.")
+    # 2. the new configuration sources as start.sh sources it
+    env, err = _sources(ops, profile, overlay, ["QSE_WEIGHTS", "QSE_WEIGHTS_DIR", "PY", "CHATD_PY",
+                                                 "QSE_CHATD", "QSE_MEM_NEED_GIB"])
+    if err:
+        out.append(f"serve.env does not load with the new configuration: {err}.")
+    elif env.get("QSE_WEIGHTS") and not profile.startswith(registry.COMMUNITY_PREFIX) and \
+            env["QSE_WEIGHTS"] != profile:
+        out.append(f"serve.env names the weights {env['QSE_WEIGHTS']} with the new configuration, not "
+                   f"{profile}.")
+    # 3. the weights are complete
+    disk = device_mod.on_disk(m, fresh=True).get(profile, {})
+    if not disk.get("weights"):
+        out.append(f"The weights of {profile} are not complete on this box"
+                   f"{' (' + disk['dir'] + ')' if disk.get('dir') else ''}: run the install again to "
+                   f"finish the download.")
+    else:
+        out += [f"A weight file is cut short: {b}." for b in _weights_sizes(disk.get("dir") or
+                                                                            env.get("QSE_WEIGHTS_DIR", ""))]
+    missing = [registry.asset(m, a)["label"] for a in disk.get("assets_missing", []) if registry.asset(m, a)]
+    if missing:
+        out.append("Files the profile reads are not on this box: " + ", ".join(missing) + ".")
+    # 4. memory: what is free now and what the running engine gives back at its stop
+    mem = device_mod.meminfo()
+    # what ops/use-profile.sh waits for after the stop: MEM_NEED_GB, else the profile's, else 80
+    need = float(os.environ.get("MEM_NEED_GB") or env.get("QSE_MEM_NEED_GIB") or 80)
+    if "MemAvailable" in mem:
+        freed = 0.0
+        if not setup_mode and http is not None:
+            try:
+                mm = (http(f"http://127.0.0.1:{old_port}/health", timeout=5) or {}).get("memory") or {}
+                freed = max([float(mm[k]) for k in ("engine_reserved_gb", "reserved_gb", "rss_gb")
+                             if isinstance(mm.get(k), (int, float))] or [0.0])
+            except Exception:                                     # noqa: BLE001
+                freed = None
+        if freed is not None and mem["MemAvailable"] + freed + 2 < need:
+            out.append(f"Not enough memory for {profile}: it needs {need:g} GiB free to start; "
+                       f"{mem['MemAvailable']:.1f} GiB are free now and the running engine gives back "
+                       f"about {freed:.1f}. Stop other programs that use memory, then try again.")
+    # 5. the port, the box lock, a hold
+    if new_port != old_port and _port_taken(new_port):
+        out.append(f"Port {new_port} is in use by another program on this box.")
+    if _box_lock_held():
+        out.append("The box lock (~/.qwen38-box.flock) is held: a hold or another job owns the board.")
+    pause = os.path.join(ROOT, ".watchdog.off")
+    if os.path.exists(pause) and time.time() - os.stat(pause).st_mtime < 2400:
+        out.append("A hold owns the board (.watchdog.off): the start would refuse.")
+    # 6. the interpreters
+    why = _runs(env.get("PY", ""))
+    if why:
+        out.append(f"The engine's Python {why}.")
+    if (env.get("QSE_CHATD") or "on") != "off":
+        why = _runs(env.get("CHATD_PY") or env.get("PY", ""))
+        if why:
+            out.append(f"chatd's Python {why}.")
+    return out
 
 
 def write_overlay(m: dict, sel: dict, clock=time.time) -> str | None:

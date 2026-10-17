@@ -86,7 +86,7 @@ def test_how_to_open_the_guide():
 def test_the_command_line_is_advanced():
     for name, (_text, _cmds, adv) in _docs().items():
         cmds = [ln for b in (_blocks(adv) or _shells(adv)) for ln in b]
-        assert cmds and cmds[0] == "~/TandemLLM/run/ops/use-profile.sh --list", (name, cmds)
+        assert cmds and cmds[0] == "bash ~/TandemLLM/run/ops/use-profile.sh --list", (name, cmds)
         assert all(not PROFILE.search(c) for c in cmds), (name, cmds)
 
 

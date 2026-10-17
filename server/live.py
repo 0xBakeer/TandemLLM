@@ -354,6 +354,9 @@ class LiveRegistry:
                 "decode_tps": None if rec.cache_source in REPLAY else _r(rec.decode_tps),
                 "tool_names": list(getattr(rec, "tool_names", None) or []),
                 "lane": getattr(rec, "lane", None),
+                # 0.11.3: the backend a relayed request went to (proxy/), null for the engine's
+                # own: its cache is the backend's, never one of the engine's tiers
+                "backend": getattr(rec, "backend", None),
                 "stop": stop, **self._cache_of(rec)}
 
     @staticmethod

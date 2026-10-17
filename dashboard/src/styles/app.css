@@ -215,6 +215,14 @@ textarea {
   color: var(--cobalt);
   border-color: var(--cobalt);
 }
+/* VIS-209: the engine restarts under a Setup Guide job */
+.pill-restarting {
+  color: var(--cobalt-hi);
+  border-color: var(--cobalt);
+}
+.pill-restarting::before {
+  animation: pulse 1.2s ease-in-out infinite;
+}
 .rail {
   grid-area: rail;
   position: sticky;
@@ -3156,6 +3164,8 @@ mark {
 .tier-disk { --tier: var(--series-yellow); }
 .tier-cold { --tier: var(--series-orange); }
 .tier-response { --tier: var(--series-muted); }
+/* a relayed request (a cloud model): the backend's own cache, never an engine tier */
+.tier-backend { --tier: var(--series-red); }
 .recent-table td.rc-cache .cache-split {
   display: block;
   font-size: var(--fs-xs);

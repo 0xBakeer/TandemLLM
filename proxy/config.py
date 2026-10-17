@@ -153,7 +153,11 @@ CREATE TABLE IF NOT EXISTS audit (
 # Columns of schema v1 added in place to a file that lacks them (forward only, additive): a later
 # release adds its own here instead of bumping the version for a nullable column.
 ADDED = (("models", "price_offpeak", "TEXT"),
-         ("backends", "host", "TEXT NOT NULL DEFAULT '{}'"))       # P1.5
+         ("backends", "host", "TEXT NOT NULL DEFAULT '{}'"),       # P1.5
+         # 0.11.3: what a provider's model list says of a model (DeepSeek's GET /models): its
+         # own name, output limit, input kinds (JSON list) and effort levels (JSON object)
+         ("models", "name", "TEXT"), ("models", "max_output", "INTEGER"),
+         ("models", "input_modalities", "TEXT"), ("models", "effort", "TEXT"))
 
 
 def _inflight_col(v) -> int:
@@ -766,22 +770,42 @@ class ConfigDB:
                             json.dumps(p["offpeak"]) if p.get("offpeak") else None, bid, mid))
 
     def sync_models(self, bid: str, found: list[dict] | None, listed: list[str],
-                    mode: str) -> None:
+                    mode: str) -> list[str]:
         """After a discovery (or a list change): the rows of this backend's models. `found` is
-        None when discovery failed: the last list stays."""
+        None when discovery failed: the last list stays. Returns the ids the discovery found that
+        the backend never had a row for. After the backend's first discovery, such a new id (DeepSeek's
+        `deepseek-v4.1-flash-1017`, in its list for minutes on 2026-10-17) is stored disabled:
+        nothing new reaches the picker until it is turned on under Backends."""
         now = _now_ms()
+        new: list[str] = []
         with self._lock:
             c = self._conn
             want = set(listed)
             if mode == "discover" and found is not None:
+                rows = c.execute("SELECT model_id, discovered_at FROM models WHERE "
+                                 "backend_id = ?", (bid,)).fetchall()
+                have = {r[0] for r in rows}
+                seen = any(r[1] is not None for r in rows)    # a discovery came before this one
                 for m in found:
                     want.add(m["id"])
+                    if seen and m["id"] not in have and m["id"] not in listed:
+                        new.append(m["id"])
+                        c.execute("INSERT INTO models(backend_id, model_id, source, present, "
+                                  "enabled) VALUES (?, ?, 'discovered', 1, 0)", (bid, m["id"]))
+                    mods, eff = m.get("input_modalities"), m.get("effort")
                     c.execute("INSERT INTO models(backend_id, model_id, source, present, "
-                              "discovered_at, context_length) VALUES (?, ?, 'discovered', 1, ?, ?) "
+                              "discovered_at, context_length, name, max_output, input_modalities, "
+                              "effort) VALUES (?, ?, 'discovered', 1, ?, ?, ?, ?, ?, ?) "
                               "ON CONFLICT(backend_id, model_id) DO UPDATE SET present = 1, "
                               "discovered_at = excluded.discovered_at, context_length = "
-                              "COALESCE(excluded.context_length, models.context_length)",
-                              (bid, m["id"], now, m.get("context_length")))
+                              "COALESCE(excluded.context_length, models.context_length), name = "
+                              "COALESCE(excluded.name, models.name), max_output = "
+                              "COALESCE(excluded.max_output, models.max_output), input_modalities "
+                              "= COALESCE(excluded.input_modalities, models.input_modalities), "
+                              "effort = COALESCE(excluded.effort, models.effort)",
+                              (bid, m["id"], now, m.get("context_length"), m.get("name"),
+                               m.get("max_output"), json.dumps(mods) if mods is not None else None,
+                               json.dumps(eff) if eff is not None else None))
             for mid in listed:
                 c.execute("INSERT INTO models(backend_id, model_id, source, present) VALUES "
                           "(?, ?, 'list', 1) ON CONFLICT(backend_id, model_id) DO UPDATE SET "
@@ -795,11 +819,13 @@ class ConfigDB:
                                   "model_id = ?", (bid, mid))
             c.commit()
             self._bump()
+        return new
 
     def models(self, bid: str | None = None) -> list[dict]:
         sql = ("SELECT backend_id, model_id, public_id, enabled, present, source, discovered_at, "
                "context_length, price_input, price_cached_input, price_cache_write, "
-               "price_output, currency, price_updated_at, fallback, price_offpeak FROM models")
+               "price_output, currency, price_updated_at, fallback, price_offpeak, name, "
+               "max_output, input_modalities, effort FROM models")
         args: tuple = ()
         if bid is not None:
             sql += " WHERE backend_id = ?"
@@ -812,7 +838,7 @@ class ConfigDB:
                 feats.setdefault((b, m), {})[f] = v
         out = []
         for (b, m, pub, en, present, src, disc, ctx, pi, pci, pcw, po, cur, pat, fb,
-             off) in rows:
+             off, name, mout, mods, eff) in rows:
             price = None
             if pat is not None:
                 price = {"input": pi, "cached_input": pci, "cache_write": pcw, "output": po,
@@ -824,6 +850,10 @@ class ConfigDB:
             out.append({"backend": b, "model": m, "public_id": pub, "enabled": bool(en),
                         "present": bool(present), "source": src, "discovered_at": disc,
                         "context_length": ctx, "price": price,
+                        # 0.11.3: the provider's own words, null until a discovery brought them
+                        "name": name, "max_output": mout,
+                        "input_modalities": json.loads(mods) if mods else None,
+                        "effort": json.loads(eff) if eff else None,
                         "fallback": json.loads(fb) if fb else None, "features": f,
                         "locks": {k: v for k, v in (("price", self.locks.get(("price", b, m))),)
                                   if v}})

@@ -32,6 +32,15 @@ class DeepSeek(Adapter):
     # a larger max_tokens is refused: "the valid range of max_tokens is [1, 393216]" (2026-10-16)
     max_output = dict.fromkeys(names, 393216)
 
+    # `reasoning_effort` (api-docs.deepseek.com, 2026-10-17): none | low | high | max, high by
+    # default; `none` turns thinking off. The model list names the levels per model.
+    effort_off = "none"
+
+    @staticmethod
+    def display_name(name) -> str | None:
+        """"DeepSeek-V4.1-Flash" from the model list reads "DeepSeek V4.1 Flash"."""
+        return name.strip().replace("-", " ") if isinstance(name, str) and name.strip() else None
+
     def __init__(self, backend: dict, log=None):
         super().__init__(backend)
         self.log = log or (lambda msg: None)

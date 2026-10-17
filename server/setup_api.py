@@ -6,6 +6,13 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/models/{id}/current    what the box runs now, as a selection (the wizard's seed)
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
+    GET  /v1/setup/weights                the weights on the box with their sizes, the running one marked,
+                                          the shared assets apart (SRV-560)
+    POST /v1/setup/remove {profiles, confirm, dry_run?}   those profiles' weights removed, never the
+                                          running one's; run/weights-removed.txt says how to get them back
+    GET  /v1/setup/status                 the engine, the running (or newest) setup job and its step n of
+                                          N; the status responder answers it while the engine
+                                          restarts, with the load's progress (OPS-175)
     GET  /v1/setup/community              the community packs of every model and the sync state
     POST /v1/setup/community/sync {}      fetch the community index now (the page opened, Refresh;
                                           server/setup/community.py), then the same answer
@@ -14,6 +21,10 @@ dashboard/src/api/types.ts `Setup*`).
     POST /v1/setup/apply {selection, dry_run?}   202 and a job (dry_run: the plan); 409 while
                                           requests are in flight or a job runs, 409/412 when the
                                           plan has errors (over_budget, missing_token, ...)
+    POST /v1/setup/jobs/{id}/retry {}     a failed or rolled back job again, from its selection: 202
+                                          and the new job (`retry_of`), the finished download kept
+    GET  /v1/setup/jobs/{id}/diagnostics  the job as text for a bug report (versions, steps, tandem
+                                          doctor, the log's tail), nothing secret (VIS-213)
     GET  /v1/setup/jobs/{id}              SSE: the log lines on disk, the job as it is now, then its
                                           events as they come (`id:` the sequence, Last-Event-ID
                                           resumes); ?format=json the job
@@ -35,6 +46,7 @@ chat request's path: server/app.py imports this module the first time a /v1/setu
 
 from __future__ import annotations
 
+import os
 import threading
 from urllib.parse import unquote
 
@@ -176,6 +188,14 @@ def _get(h, app, parts: list[str]) -> None:
         return h._json(200, device(app), extra_headers=NO_STORE)
     if len(parts) == 2 and parts[0] == "jobs":
         return job_route(h, parts[1])
+    if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "diagnostics":
+        return diagnostics_route(h, parts[1])
+    if parts == ["status"]:
+        return h._json(200, setup_status(app), extra_headers=NO_STORE)
+    if parts == ["weights"]:
+        from server.setup import remove
+        return h._json(200, dict(remove.installed(setup_mode=bool(app.STATE.get("setup_mode"))),
+                                 contract_version=CONTRACT), extra_headers=NO_STORE)
     if parts == ["reset"]:
         from server.setup import reset
         return h._json(200, reset.levels(app, busy(app)), extra_headers=NO_STORE)
@@ -184,6 +204,34 @@ def _get(h, app, parts: list[str]) -> None:
         w.touch()
         return h._json(200, w.status(), extra_headers=NO_STORE)
     return _err(h, 404, "not_found", f"no route /v1/setup/{'/'.join(parts)}")
+
+
+def status_module():
+    """ops/engine_status.py of the ops folder this server was started with (stdlib only): the status
+    responder's own reading of the setup job and the load, so the page gets one shape from both."""
+    import importlib.util
+    from server.setup import device as dev
+    p = os.path.join(dev.ops_dir(), "engine_status.py")
+    if not os.path.isfile(p):
+        p = os.path.join(registry.ROOT, "ops", "engine_status.py")
+    spec = importlib.util.spec_from_file_location("tandem_engine_status", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def setup_status(app) -> dict:
+    """GET /v1/setup/status (OPS-175): what the status responder answers while the engine restarts,
+    from the engine itself while it runs: the engine up, the running or newest setup job, no load."""
+    from server.setup import apply
+    es = status_module()
+    up = {"state": "up", "words": "up", "since": int(app.STATE.get("started") or 0) or None,
+          "reason": None, "left_s": None, "version": app.STATE.get("version"),
+          "profile": os.environ.get("QSE_WEIGHTS") or None,
+          "mode": "setup" if app.STATE.get("setup_mode") else "serving"}
+    out = es.setup_status(t=apply.ROOT, engine=up)
+    out["contract_version"] = CONTRACT
+    return out
 
 
 def community_body() -> dict:
@@ -221,6 +269,10 @@ def _post(h, app, parts: list[str], body) -> None:
         return apply_route(h, app, parts[0], body)
     if parts == ["reset"]:
         return reset_route(h, app, body)
+    if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
+        return retry_route(h, app, parts[1])
+    if parts == ["remove"]:
+        return remove_route(h, app, body)
     if parts == ["assistant", "load"]:
         return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
     if parts == ["assistant", "unload"]:
@@ -263,13 +315,16 @@ def apply_route(h, app, which: str, body) -> None:
     if not isinstance(body, dict):
         return _err(h, 422, "invalid_selection", "the body must be a JSON object")
     if which == "apply":
-        extra = sorted(k for k in body if k not in ("selection", "dry_run"))
+        extra = sorted(k for k in body if k not in ("selection", "dry_run", "remove_after"))
         if extra:
             return _err(h, 422, "unknown_field", f"unknown field {extra[0]!r}; apply takes "
-                        f"selection and dry_run", errors=[{"field": k, "reason": "unknown"}
-                                                         for k in extra])
+                        f"selection, dry_run and remove_after", errors=[{"field": k, "reason": "unknown"}
+                                                                        for k in extra])
         if not isinstance(body.get("dry_run", False), bool):
             return _err(h, 422, "invalid_selection", "dry_run: true or false")
+        ra = body.get("remove_after", [])
+        if not isinstance(ra, list) or not all(isinstance(x, str) and apply.profile_ok(x) for x in ra):
+            return _err(h, 422, "invalid_selection", "remove_after: a list of this box's profile ids")
     sel_body = body.get("selection", body if which == "plan" else None)
     m = selection_model(sel_body)
     sel = estimate_mod.check(m, sel_body)
@@ -282,6 +337,87 @@ def apply_route(h, app, which: str, body) -> None:
                    mem_total_gb=mem.get("MemTotal"))
     if which == "plan" or body.get("dry_run"):
         return h._json(200, dict(p, dry_run=which == "apply"), extra_headers=NO_STORE)
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode,
+                   remove_after=[x for x in body.get("remove_after", []) if x != sel["profile"]])
+
+
+def retry_route(h, app, jid: str) -> None:
+    """POST /v1/setup/jobs/{id}/retry (VIS-213): a new job with the failed one's selection (or its
+    reset), `retry_of` the old id. The check and tandem doctor run again; a download that finished
+    is not repeated (the plan finds the weights), one cut short goes on."""
+    from server.setup import apply
+    old = apply.read_job(jid) if apply.JOB_ID.match(jid or "") else None
+    spec = apply.job_spec(jid) if old is not None else None
+    if old is None or spec is None:
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    if old["state"] not in ("failed", "rolled_back"):
+        return _err(h, 409, "not_retryable", f"job {jid} is {old['state']}: only a failed or rolled "
+                                             f"back job is tried again")
+    m = device_mod.windowed(registry.get(spec.get("model")))
+    if m is None:
+        return _err(h, 404, "unknown_model", f"no model {spec.get('model')!r} in models/")
+    setup_mode = bool(app.STATE.get("setup_mode"))
+    if spec.get("kind") == "reset":
+        p = apply.reset_plan(m, setup_mode=setup_mode)
+        sel, kind = p["selection"], "reset"
+    else:
+        sel, kind = estimate_mod.check(m, spec["selection"]), "apply"
+        mem = device_mod.meminfo()
+        p = apply.plan(m, sel, setup_mode=setup_mode,
+                       password_set=bool(getattr(app.STATE.get("auth"), "password_set", False)),
+                       available_gb=round(mem["MemAvailable"], 2) if "MemAvailable" in mem else None,
+                       mem_total_gb=mem.get("MemTotal"))
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=jid,
+                   remove_after=spec.get("remove_after") or [])
+
+
+def remove_route(h, app, body) -> None:
+    """POST /v1/setup/remove {profiles, confirm: true, dry_run?} (SRV-560): the chosen profiles'
+    weights, never the running one; refused while a setup job runs."""
+    from server.setup import apply, remove
+    if not isinstance(body, dict) or sorted(set(body) - {"profiles", "confirm", "dry_run"}):
+        return _err(h, 422, "invalid_request", "remove takes profiles, confirm and dry_run")
+    dry = body.get("dry_run") is True
+    if not dry and body.get("confirm") is not True:
+        return _err(h, 422, "confirm_required", "confirm: true removes the weights (dry_run: true shows "
+                                                "what would go)")
+    run = apply.running_job()
+    if run is not None:
+        return _err(h, 409, "job_running", f"job {run['id']} runs; remove when it is done", job=run["id"])
+    try:
+        with _JOB_LOCK:
+            out = remove.remove(body.get("profiles"), setup_mode=bool(app.STATE.get("setup_mode")),
+                                root=apply.ROOT, dry_run=dry)
+    except remove.RemoveError as exc:
+        return _err(h, exc.status, exc.code, str(exc))
+    if not dry:
+        print(f"[setup] removed {', '.join(g['profile'] for g in out['removed'])}: {out['freed_gb']:g} GB",
+              flush=True)
+    return h._json(200, dict(out, contract_version=CONTRACT), extra_headers=NO_STORE)
+
+
+def diagnostics_route(h, jid: str) -> None:
+    """GET /v1/setup/jobs/{id}/diagnostics (VIS-213): the job as text for a bug report, no secret."""
+    from server.setup import apply
+    text = apply.diagnostics(jid) if apply.JOB_ID.match(jid or "") else None
+    if text is None:
+        return _err(h, 404, "not_found", f"no job {jid!r}")
+    raw = text.encode()
+    h.send_response(200)
+    h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(raw)))
+    h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    h.wfile.write(raw)
+    return None
+
+
+def _launch(h, app, m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
+            retry_of: str | None = None, remove_after: list[str] | None = None) -> None:
+    """A job from a checked plan: refused while requests run (409 busy), when the plan has an
+    error, or while another job runs (409 job_running); else Wren unloaded, the runner spawned,
+    202 and the job."""
+    from server.setup import apply
     if busy(app) and not setup_mode:
         inf = app.INFLIGHT
         return _err(h, 409, "busy", f"{inf.get('running', 0)} request(s) run and "
@@ -298,10 +434,11 @@ def apply_route(h, app, which: str, body) -> None:
             return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
                         job=run["id"])
         wren_of(app).unload("apply")
-        job = apply.new_job(m, sel, p, setup_mode=setup_mode)
+        job = apply.new_job(m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=retry_of,
+                            remove_after=remove_after)
         apply.spawn(job["id"])
-    print(f"[setup] apply job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
-          f"started", flush=True)
+    print(f"[setup] {kind} job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
+          f"started" + (f" (a retry of {retry_of})" if retry_of else ""), flush=True)
     return h._json(202, {"contract_version": CONTRACT, "job": job}, extra_headers=NO_STORE)
 
 
@@ -366,13 +503,13 @@ def job_route(h, jid: str) -> None:
 def _catch_up(h, jid: str, after: int) -> tuple[int, int, bool]:
     """VIS-149: the events after `after` that are on disk now, as the log lines among them and
     then the job as it is now (`id:` the last of them), so a page never gets an older state after
-    a newer one: the steps and the job's first state (seq 1) are in that snapshot. A final job
-    ends with its `done` event. (the sequence followed, the byte offset, the stream ended)"""
+    a newer one: the steps and the job's first state (seq 1) are in that snapshot, with the id of
+    the last of them unless that is a log line's (VIS-211). A final job ends with its `done` event. (the sequence followed, the byte offset, the stream ended)"""
     import json
     from server.setup import apply
     recs, offset = apply.events_from(jid, 0, after)
     done = None
-    last = after
+    last = last_log = after
     for rec in recs:
         ev = rec["event"]
         if ev.get("type") == "done":
@@ -380,13 +517,17 @@ def _catch_up(h, jid: str, after: int) -> tuple[int, int, bool]:
             continue
         last = rec["seq"]
         if ev.get("type") == "log":
+            last_log = last
             h.wfile.write(f"id: {last}\ndata: {json.dumps(ev)}\n\n".encode())
     # read after the events: the snapshot is as new as the last of them (state.json is saved
     # before its event is written) or newer, and a later step event equals it or follows it
     job = apply.read_job(jid)
     if job is None:
         return last, offset, True
-    head = f"id: {last}\n" if last > after else ""
+    # VIS-211: the snapshot takes the id of the step events it stands for, never a log line's: a
+    # page that counted that line's id dropped the snapshot as a repeat, held no job, and showed
+    # "Starting the install" over a finished one
+    head = f"id: {last}\n" if last > last_log else ""
     h.wfile.write(f"{head}data: {json.dumps({'type': 'job', 'job': job})}\n\n".encode())
     if done is not None:
         h.wfile.write(f"id: {done['seq']}\ndata: {json.dumps(done['event'])}\n\n".encode())

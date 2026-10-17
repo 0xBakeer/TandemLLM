@@ -46,6 +46,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -402,7 +403,8 @@ def _get(port, path, method="GET", body=None):
 
 def test_status_models_during_a_hold():
     models = [{"id": "TandemLLM", "object": "model", "owned_by": "tandemllm"}]
-    es, srv, _ = _responder({"state": "starting", "since": 1_791_270_000, "models": models,
+    # a start under way (OPS-173: a start far past the typical one reads "not answering")
+    es, srv, _ = _responder({"state": "starting", "since": int(time.time()) - 10, "models": models,
                              "starts": [{"at": 1, "s": 33}]})
     try:
         port = srv.server_address[1]

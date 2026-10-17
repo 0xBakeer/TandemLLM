@@ -51,15 +51,21 @@ chatd, the Chat tab's service, is its own process ([chat.md](chat.md)): `ops/sta
 
 At boot, two cron lines bring the service up:
 
-    @reboot sleep 90 && $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
-    * * * * * $HOME/<checkout>/ops/watchdog.sh
+    @reboot sleep 90 && bash $HOME/<checkout>/ops/start.sh >> $HOME/<checkout>/logs/boot.log 2>&1
+    * * * * * bash $HOME/<checkout>/ops/watchdog.sh
 
 On a box that `install.sh` set up, the scripts run from `run/ops`, beside the `serve.env` the installer rendered with this box's paths; the checkout's `src/ops/serve.env` is the release's template. The installer copies `start.sh`, `stop.sh`, `engines.sh`, `roles.sh`, `watchdog.sh`, `hold.sh`, `use-profile.sh`, `make-secrets.sh`, `engine_status.py` and `fetch_weights.py` there on every run; `chatd.sh` stays in `src/ops`. The lines are:
 
-    @reboot sleep 90 && $HOME/TandemLLM/bin/tandem start >> $HOME/TandemLLM/src/logs/boot.log 2>&1
-    * * * * * $HOME/TandemLLM/run/ops/watchdog.sh
+    @reboot sleep 90 && bash $HOME/TandemLLM/bin/tandem start >> $HOME/TandemLLM/src/logs/boot.log 2>&1
+    * * * * * bash $HOME/TandemLLM/run/ops/watchdog.sh
+
+Every line runs its script through `bash`, as the scripts call each other: a copy that lost its execute bit (a deploy that did not keep file modes) still runs. `tests/test_no_exec_bit.py` fails on a new direct call (OPS-167).
 
 `bin/tandem` reads `run/ops/serve.env` under `set -e`. A missing `ops/active-profile` is the normal state of a plain install and loads the template's values; a command in the config that fails stops it with the file and the line. Boxes installed before 0.11.2 need one run of the installer to get both, and the scripts above (OPS-159, OPS-161).
+
+## tandem doctor
+
+`bash ~/TandemLLM/bin/tandem doctor` checks an install and repairs what is safe to repair; `--check` only reports, `--json` prints the report (OPS-171). It runs by itself before every `tandem start` and in the check step of every Setup Guide install, which keeps its report on the job. On a checkout it is `python -m server.setup.doctor`. It repairs file modes (against `ops/executables.txt`, the release's executable files), a missing copy in `run/ops`, `bin/tandem`'s mode, stale pid files of the engine and chatd, a hold's pause left behind, a setup marker with an address `start.sh` refuses, and a secrets file readable by others (600). It reports, and never changes: a `run/ops` copy that differs from `src/ops` (run the installer again), a `serve.env` that does not load (the failing line), an interpreter that does not run, a secrets file where the engine does not read it, a fresh hold, and too little disk for a download (`--profile P` or `--need-gb N`). Each run appends to `logs/doctor.log`; the exit status is 0 when nothing is left to look at.
 
 `ops/qwen38-engine.service` is a systemd user unit for the same job. A user unit only survives logout with `loginctl enable-linger`, which needs root. Install one mechanism, never both: two supervisors for one port start the service twice.
 
@@ -99,7 +105,7 @@ Each profile sets its engine's ceiling and peak (`MEM_CEILING_GIB`, `MEM_PEAK_GI
 
 Measurements need the board to themselves, and so does anything that loads a second copy of the model. `ops/hold.sh` makes the safe sequence the easy one:
 
-    flock ~/.qwen38-box.flock ops/hold.sh 30 python tools/verify_spec.py ...
+    flock ~/.qwen38-box.flock bash ops/hold.sh 30 python tools/verify_spec.py ...
 
 It arms a pause file so the watchdog stands back, and keeps it fresh for the whole hold. Then it stops the service and runs the command. Afterwards it restarts the service and waits for `/health`. On every exit path, including a killed command, it removes the pause. The lock file makes two holds wait for each other. A pause file older than 2,400 s is ignored, so a crashed hold cannot leave the service unsupervised for long.
 
@@ -111,7 +117,9 @@ A stop, a hold or a start takes the engine away for minutes, and whatever sits i
 
 - `ops/start.sh`, `ops/stop.sh` and `ops/hold.sh` write `logs/engine-status.json` (`QSE_STATUS_FILE`): the state (`stopping`, `held`, `starting`, `up`, `failed`, `down`), since when, the reason (a hold's: `HOLD_REASON`, or the first line of the file `HOLD_NOTE` names, else its command) and a hold's budget. A start records how long it took; the median of the last five is the next estimate (300 s before any).
 - With `QSE_STATUS_PORT` in serve.env (8009 on the reference box), start.sh and hold.sh keep a small responder on 127.0.0.1 at that port (`engine_status.py ensure`). It answers only what the reverse proxy sends it when the engine does not answer: a page for `/dashboard/` (and any request that accepts HTML), 503 with `Retry-After`, that names the state, the reason, the time and about how long is left, checks `/health` every 5 s and opens the dashboard when the engine is back; and for everything else the OpenAI error shape (503, `Retry-After`, `type: provider_unavailable`, `code: engine_<state>`) with the same facts under `engine`. A file that says `up` while the engine does not answer reads "not answering". An open dashboard shows the same facts in its offline banner. `GET /v1/models` and `/v1/models/{id}` are the exception (0.3.43-test, OPS-67): they answer 200 with the engine's last model list, which `set up` keeps in the status file (a fixed TandemLLM entry when none was recorded), and the state under `tandem_engine`. Open WebUI refreshes its model list from `/v1/models` and dropped TandemLLM from it on a 503, so a chat during a restart said only "Model not found"; now the model stays and the chat gets the 503 with the engine's own sentence. A front proxy that merges several model lists should ask the responder when the engine's list is empty (the reference box's `ai-models-merge` on the Pi does).
-- `python3 ops/engine_status.py show` prints what the responder would say.
+- A responder belongs to one tree (serve.env's `REPO`) and one status file, and says which at `GET /_tandem/status` (OPS-173). `ensure`, which start.sh and hold.sh run, keeps a responder of the same tree, status file, release and address, and replaces any other responder: one of another tree, or of a release without the route, found by its listening socket and its command line. A program that is not a responder is reported and left alone. A responder of an old tree once answered an install's restart with that tree's status from two days before. A reason older than 6 h is not shown, and a start or stop older than twice the typical start plus 10 minutes reads "not answering".
+- While a Setup Guide install restarts the engine, the responder carries the page (OPS-175): `GET /v1/setup/jobs/{id}` as the server sends it (SSE: the log, the job, each new event, done; or JSON) from the tree's `run/setup-jobs`, and `GET /v1/setup/status`: the engine's facts, the running or newest setup job with its step n of N, and the load's progress from `logs/engine.log` (weights, drafters, warm-up, verify graphs, the port). The server answers `/v1/setup/status` in the same shape while it runs, and `/health` names the responder's port (`status_port`). Its read-only routes answer any origin, so a page on the engine's port reaches it directly when no reverse proxy sends it there; it listens on `QSE_STATUS_HOST`, else the engine's `HOST`. install.sh sets `QSE_STATUS_PORT` to the API port + 9 on every install; `install.sh --uninstall` stops it.
+- `python3 ops/engine_status.py show` prints what the responder would say; `stop --port N` stops this tree's responder.
 
 The reverse proxy sends a failed upstream there and keeps a fixed answer for the case where the responder is down too (nginx):
 
@@ -139,7 +147,7 @@ A browser that opened the dashboard before keeps working through a restart witho
 
 The engine loads first and holds most of the board. Anything else that should run beside it (a decision model, a librarian, a reader) loads after it, one at a time, through the residency planner (`server/conductor/residency.py`). A role may load when `MemAvailable`, less what the engine may still take up to its declared peak (`MEM_PEAK_GIB`, 77, less what it holds now, from its `/health`; the whole peak when it does not answer), minus its claim stays at or above the floor plus a margin (15 + 6 GiB by default), never during a hold, and never while another load runs (another role, or the engine itself before `/health` answers). A refusal names its reason (`refused_hold`, `refused_load_in_progress`, `refused_memory`, `refused_unknown_role`) and is journaled in `<conductor root>/residency.jsonl`.
 
-A claim is the role's peak, not its idle size, and it is what the role takes from `MemAvailable`, not what `nvidia-smi` shows: arbiter shows 5.1 GB there and took 8.2 GiB of `MemAvailable` (2026-10-01). The floor, the margin, the settle time, the load order and the claims are the conductor's `residency` document, versioned like the others and edited in the dashboard (Conductor, Profiles, Residency). The System view shows the plan: the engine's own split (`memory.split` of `/v1/dashboard/system`, every part read off the object that holds it, and the load stages), `MemAvailable`, every role with its claim and whether it fits now, and the last refusal.
+A claim is the role's peak, not its idle size, and it is what the role takes from `MemAvailable`, not what `nvidia-smi` shows: arbiter shows 5.1 GB there and took 8.2 GiB of `MemAvailable` (2026-10-01); Laya inside the engine claims 3.0 GiB (OPS-69, the shipped claim since 0.11.3). A role the roles document switches off (the narrator by default since 0.11.3, the reader) is left out of the plan. The floor, the margin, the settle time, the load order and the claims are the conductor's `residency` document, versioned like the others and edited in the dashboard (Conductor, Profiles, Residency). The System view shows the plan: the engine's own split (`memory.split` of `/v1/dashboard/system`, every part read off the object that holds it, and the load stages), `MemAvailable`, every role with its claim and whether it fits now, and the last refusal.
 
 `ops/roles.sh` does the loading. `ROLES_AUTOLOAD` in `serve.env` names the roles `start.sh` brings up after the engine (none today); each role has `ROLE_<NAME>_START`, `ROLE_<NAME>_HEALTH`, `ROLE_<NAME>_RUNTIME` and `ROLE_<NAME>_WAIT`. A role served by vLLM runs BF16 weights with the KV cache unquantised, and its `--gpu-memory-utilization` is the planner's byte math (claim over the board's total, rounded down), never vLLM's default 0.9, which on this board would be the engine's memory too. The script refuses a command that sets another `--dtype`, `--quantization`, a quantised KV cache or its own memory fraction. Roles never load on the Mac. A hold stops the roles before the engine; after a stop, `hold.sh` and the watchdog wait the settle time (5 s by default) before the next 80 GiB load. Nothing unloads on its own when `MemAvailable` falls after a role loaded: the plan shows it.
 
@@ -160,6 +168,15 @@ The placeholder is filled per request (Open WebUI 0.11 or later, `parse_custom_h
     python -c "from engine.settings import SETTINGS; import json; print(json.dumps(SETTINGS.describe(), indent=1))"
 
 Server behaviour (ports, limits, caches, reasoning) is set by command-line flags. `python server/app.py --help` lists them, and `ops/start.sh` builds them from `serve.env`.
+
+## Release checklist
+
+Every release runs these on the box before its tag, and ships only when all pass:
+
+1. `ops/gate.sh <label>`: the CPU and GPU tests, identity, agreement, the rows ([measurement.md](measurement.md)).
+2. `tools/client_smoke.py` and `tools/api_text_check.py` against the candidate.
+3. `bash tools/release_gate_setup.sh` (OPS-177), mandatory: a fresh scratch install of the candidate runs the whole Setup Guide flow beside the live engine without touching it. Run A installs with `install.sh --setup`, applies a profile through the Setup Guide's API while a phone-sized browser (WebKit at 390 px in the `mcr.microsoft.com/playwright:v1.63.0-noble` container) follows the job, checks that the restart card shows while the engine restarts and that the finished screen with Start chatting shows within 10 s of the engine answering, checks the job, `/health` and a chat, and removes a second profile's weights. Run B strips the execute bit from `start.sh`, `stop.sh` and `use-profile.sh` first and must still install. The scratch installs use spare ports (never 8000, 8009 or 8016), no chatd, the CPU fake engine and a few KB of stand-in weights, a HOME of their own, and an interpreter copy the live box's `ops/engines.sh` does not count; every process they start is stopped at the end. The report and the screenshots are in `results/gate-setup/<utc>/`.
+4. A real agent session with its own tool calls.
 
 ## Deploying a new version
 
@@ -183,4 +200,4 @@ On a box that `install.sh` set up, the installer is the deploy: `bash ~/TandemLL
 - An answer stops in the middle. Find the request's log line. `finish=length` hit the token limit, `timeout` the wall clock, `error` an exception (its traceback is in the log), and `abandoned` means the client hung up.
 - An agent turn waits minutes before the first token. Check `cached_tokens` for that request in the usage ledger. On a growing conversation it should be close to the previous turn's prompt. If it is not, read the `resident` block of `/v1/cache/stats`.
 - The server answers 503 or 429 while it looks idle. Read `inflight` in `/health`. A 503 means a full queue, and a 429 a request without a stream that waited longer than the queue timeout (a streamed chat request waits up to the request timeout and gets `: waiting` comments; docs/server.md). A high `waiting` count with nothing running is a bug.
-- The port answers but nothing generates. The watchdog handles three failed checks. By hand: `ops/stop.sh 30 && ops/start.sh`.
+- The port answers but nothing generates. The watchdog handles three failed checks. By hand: `bash ops/stop.sh 30 && bash ops/start.sh`.

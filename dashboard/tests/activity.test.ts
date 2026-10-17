@@ -184,6 +184,10 @@ describe('the Now line, one per engine state', () => {
     expect(c.numbers).toEqual(['closed by the budget', '4,000 thinking tokens']);
     expect(c.tone).toBe('think');
     const f = nowLine(engine('busy'), [req('finishing', { label: 'Finishing: saving the session state', step: 'saving_state', decode: dec({ tokens: 1422 }) })])!;
+    // 0.11.3: a relayed request (a cloud model) has no engine count: never "warming up (0 of 50)"
+    const cloud = nowLine(engine('busy'), [req('writing', { label: 'Writing', decode: dec({ tokens: 0 }) }, { backend: 'deepseek', ttft_ms: 1388.68 })])!;
+    expect(cloud.numbers).toEqual(['relayed to deepseek', 'first token 1.39 s', 'tokens counted at its end']);
+    expect(nowLine(engine('busy'), [req('writing', { label: 'Writing' }, { backend: 'deepseek', ttft_ms: null })])!.numbers[1]).toBe('waiting for the first token');
     expect(f.headline).toBe('Finishing: saving the session state');
     expect(f.glyph).toBe('…');
     expect(f.numbers).toEqual(['1,422 tokens']);

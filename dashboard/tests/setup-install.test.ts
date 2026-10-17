@@ -1,12 +1,12 @@
 // The install page's job stream (VIS-149, VIS-151), its change list (VIS-155) and the tools that
-// did not load (VIS-153): their Gherkin as the test matrix. The server's
+// did not load (VIS-153), the true end of a job (VIS-211): their Gherkin as the test matrix. The server's
 // half (the order it sends the job in) is tests/test_setup_job_stream.py.
 import { describe, expect, it } from 'vitest';
 import type { SetupEnvChange, SetupJob, SetupJobEvent, SetupJobStep, SetupJobStepId } from '../src/api/types';
 import { ResumableStream, type SseEvent } from '../src/lib/sse';
-import { appendLog, applyJobEvent, changeText, doneMessage, isFinal, type JobLog, LOG_KEEP, streamAction, streamFinished } from '../src/setup/job-view';
+import { appendLog, applyJobEvent, changeText, copyText, dedupes, doneMessage, durationText, finishedLines, isFinal, type JobLog, LOG_KEEP, needsJob, streamAction, streamFinished } from '../src/setup/job-view';
 
-const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'write_config', 'switch', 'smoke', 'rollback'];
+const IDS: SetupJobStepId[] = ['check', 'unload_assistant', 'fetch', 'preflight', 'write_config', 'switch', 'smoke', 'rollback'];
 
 function step(id: SetupJobStepId, state: SetupJobStep['state']): SetupJobStep {
   return { id, label: id, state, started_at: null, ended_at: null, detail: null };
@@ -29,7 +29,7 @@ function job(state: SetupJob['state'], states: Partial<Record<SetupJobStepId, Se
   };
 }
 
-const DONE = job('done', { check: 'done', unload_assistant: 'done', fetch: 'done', write_config: 'done', switch: 'done', smoke: 'done', rollback: 'skipped' });
+const DONE = job('done', { check: 'done', unload_assistant: 'done', fetch: 'done', preflight: 'done', write_config: 'done', switch: 'done', smoke: 'done', rollback: 'skipped' });
 
 /** a fetch whose body hands over `chunks` (each one read() of the stream) and then ends */
 function fetchOf(chunks: string[]): typeof fetch {
@@ -292,5 +292,90 @@ describe('VIS-153: selected tools have their weights', () => {
     expect(live?.warnings).toEqual([w]);
     expect(live?.notes).toEqual(['Laya decision models is not loaded yet.']);
     expect(doneMessage(live!)).toBe('exl3-6.0 is live on port 8000.');
+  });
+});
+
+/** the page's loop with its dedupe: `logsOnly` is VIS-211's rule, false the rule before it (every id) */
+function followDeduped(chunks: string[], logsOnly: boolean): Promise<SetupJob | null> {
+  return new Promise((resolve) => {
+    let j: SetupJob | null = null;
+    const seen = new Set<string>();
+    const s: ResumableStream = new ResumableStream({
+      url: () => '/v1/setup/jobs/1e1ecbede39315c9',
+      fetchImpl: fetchOf(chunks),
+      minBackoffMs: 5,
+      maxBackoffMs: 5,
+      onEvent: (ev) => {
+        const d = JSON.parse(ev.data) as SetupJobEvent;
+        if (ev.id && (!logsOnly || dedupes(d))) {
+          if (seen.has(ev.id)) return;
+          seen.add(ev.id);
+        }
+        if (d.type !== 'log') j = applyJobEvent(j, d);
+        if (isFinal(j)) s.close();
+      },
+      onState: (st) => {
+        if (st === 'reconnecting') s.close();
+        else if (st === 'closed') resolve(j);
+      },
+    });
+    s.start();
+  });
+}
+
+describe('VIS-211: the install page shows the job\'s true end', () => {
+  // the catch-up of a server before 0.11.3: the snapshot carried the id of the log line before it
+  const old = [frame(24, { type: 'log', line: '[smoke] ready', ts: 1 }), frame(24, { type: 'job', job: DONE }), frame(31, { type: 'done', state: 'done', message: 'exl3-6.0 is live on port 8000.' })];
+
+  it('a fresh page on a job whose last event is a log line holds the job (and the old rule did not)', async () => {
+    const j = await followDeduped(old, true);
+    expect(j?.state).toBe('done');
+    expect(j?.steps.map((x) => x.state)).toEqual(['done', 'done', 'done', 'done', 'done', 'done', 'done', 'skipped']);
+    // the negative control: deduping every id dropped the snapshot, and with no job the done event too
+    expect(await followDeduped(old, false)).toBeNull();
+  });
+
+  it('a state event with no job in hand asks for the job by id', () => {
+    expect(needsJob(null, { type: 'step', step: step('switch', 'done') })).toBe(true);
+    expect(needsJob(null, { type: 'done', state: 'done', message: null })).toBe(true);
+    expect(needsJob(null, { type: 'log', line: 'x', ts: 1 })).toBe(false);
+    expect(needsJob(null, { type: 'job', job: DONE })).toBe(false);
+    expect(needsJob(DONE, { type: 'done', state: 'done', message: null })).toBe(false);
+  });
+
+  it('the finished screen says what is ready, what it set up and how long it took', () => {
+    const j: SetupJob = {
+      ...DONE,
+      created_at: 1760678000,
+      ended_at: 1760678199,
+      model: 'qwen3.8-27b',
+      summary: { model: 'Qwen3.8-27B', profile: 'exl3-6.0', profile_label: 'EXL3 6.0 bits', tools: ['Laya decision models', 'Shadow reader'], slots: 4, window: 262144, side_window: 65536 },
+    };
+    const f = finishedLines(j, (n) => `${n / 1024}k`);
+    expect(f.title).toBe('Qwen3.8-27B is ready');
+    expect(f.lines).toEqual(['Weights: EXL3 6.0 bits', 'Tools: Laya decision models, Shadow reader', '4 parallel chats: 256k tokens for the first, 64k for each of the other 3', 'Took 3 min 19 s']);
+    // a job before 0.11.3: its profile alone
+    expect(finishedLines({ ...DONE, ended_at: null }, String)).toEqual({ title: 'The new setup is ready', lines: ['Weights: exl3-6.0'] });
+    expect(finishedLines({ ...DONE, kind: 'reset' }, String).title).toBe('The shipped configuration is ready');
+    expect(durationText(42)).toBe('42 s');
+    expect(durationText(240)).toBe('4 min');
+  });
+});
+
+describe('VIS-213: Copy diagnostics', () => {
+  it('the Clipboard API where the page may use it', async () => {
+    let got = '';
+    expect(await copyText('report', { clipboard: { writeText: async (t: string) => void (got = t) } as unknown as Clipboard }, null)).toBe(true);
+    expect(got).toBe('report');
+  });
+  it('plain http on a phone: no Clipboard API and no copy command: false, the page shows the text', async () => {
+    const doc = {
+      createElement: () => ({ value: '', setAttribute() {}, style: {}, select() {}, remove() {} }),
+      body: { appendChild() {} },
+      execCommand: () => false,
+    } as unknown as Document;
+    expect(await copyText('report', { clipboard: undefined as unknown as Clipboard }, doc)).toBe(false);
+    const ok = { ...doc, execCommand: () => true } as unknown as Document;
+    expect(await copyText('report', { clipboard: undefined as unknown as Clipboard }, ok)).toBe(true);
   });
 });
