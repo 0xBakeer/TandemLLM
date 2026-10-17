@@ -51,6 +51,20 @@ from server import static
 
 STATE: dict = {}
 
+#: the ceiling on one request's body, the same budget the standalone server's pre-auth
+#: read enforces (`server/app.py`, night/http-plumbing): the header is the client's, and
+#: it sizes a buffer before any auth would answer.
+MAX_BODY_BYTES = int(os.environ.get("QSE_MAX_BODY_MB", 512)) * (1 << 20)
+
+
+class BodyError(Exception):
+    """The request's framing is unreadable or too big: a 400/413 with this code and message.
+    The body behind it was not read, so the connection closes (handle_one_request)."""
+
+    def __init__(self, code: int, type_: str, message: str):
+        super().__init__(message)
+        self.code, self.type, self.message = code, type_, message
+
 
 def version() -> str:
     """VERSION in a checkout, the distribution's version when installed (proxy/_version.py)."""
@@ -159,9 +173,91 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
+    _body_done = False               # the request in hand has had its body read to the end
+
+    def handle_one_request(self):
+        self._body_done = False
+        BaseHTTPRequestHandler.handle_one_request(self)
+        # a chunked body the handler never read stayed on the wire and the next request on
+        # the keep-alive connection was parsed from the middle of it (the size line as a
+        # request line). A body this handler never touched at all closes the connection,
+        # the same decision the standalone server made.
+        if (not self.close_connection and not self._body_done
+                and "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()):
+            self.close_connection = True
+
     def _read_raw(self) -> bytes:
-        n = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(n) if n else b""
+        """The request's body, consumed whole or not at all -- the port of the server-side
+        `_read_body` (night/http-plumbing). An answer written with the body still unread is
+        a desync one request away: every path out of here has read to the end of the
+        framing, and BodyError (or handle_one_request) closes the connection."""
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            raw = self._read_chunked()           # Transfer-Encoding outranks Content-Length
+        else:
+            try:
+                n = self._content_length()
+            except BodyError:
+                self.close_connection = True     # the promised bytes, if they ever come,
+                raise                            # would be read as the next request
+            raw = self.rfile.read(n)
+        self._body_done = True
+        return raw
+
+    def _content_length(self) -> int:
+        """The promised body size, validated before a single byte of it is read. This header
+        is the client's and it sizes a pre-auth allocation: `4294967296` was once a multi-GB
+        read on a handler thread, and -1 was rfile.read(-1) -- read-until-EOF, a permanently
+        hung thread on a keep-alive connection."""
+        raw = self.headers.get("Content-Length")
+        if raw is None or not raw.strip():
+            return 0                             # an absent header is no body, as before
+        try:
+            n = int(raw)
+        except ValueError:
+            raise BodyError(400, "invalid_request_error",
+                            "Content-Length: not a number") from None
+        if n < 0:
+            raise BodyError(400, "invalid_request_error", "Content-Length: negative")
+        if n > MAX_BODY_BYTES:
+            raise BodyError(413, "too_large",
+                            f"a request body is at most {MAX_BODY_BYTES} bytes")
+        return n
+
+    def _read_chunked(self) -> bytes:
+        """A chunked body, RFC 9112 7.1: size line, that many bytes, CRLF, until the zero
+        chunk, then the trailers to their empty line. A framing error mid-stream leaves the
+        stream at an unknown offset, and only a closed connection says so."""
+        out = bytearray()
+        while True:
+            line = self.rfile.readline(64)
+            try:
+                size = int(line.split(b";", 1)[0].strip(), 16)   # chunk-size, extensions cut
+            except ValueError:
+                raise BodyError(400, "invalid_request_error", "transfer-encoding: bad chunk "
+                                                              "size") from None
+            if size < 0:
+                raise BodyError(400, "invalid_request_error", "transfer-encoding: negative "
+                                                              "chunk size")
+            if size == 0:
+                while True:
+                    t = self.rfile.readline(1024)                # the trailers, to a blank line
+                    if not t or t in (b"\r\n", b"\n"):
+                        break
+                break
+            if len(out) + size > MAX_BODY_BYTES:
+                raise BodyError(413, "too_large", f"a request body is at most "
+                                                  f"{MAX_BODY_BYTES} bytes")
+            chunk = self.rfile.read(size + 2)
+            if len(chunk) != size + 2 or not chunk.endswith(b"\r\n"):
+                raise BodyError(400, "invalid_request_error", "transfer-encoding: truncated "
+                                                              "chunk")
+            out += chunk[:size]
+        return bytes(out)
+
+    def _body_error(self, exc) -> None:
+        """A framing/body refusal: 400 or 413 with the error's own message. The connection
+        closes afterwards: the unread body would be the next request."""
+        self._json(exc.code, {"error": {"type": exc.type, "message": exc.message}})
 
     def _peer(self) -> str:
         return (self.client_address or ("",))[0]
@@ -271,7 +367,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = self.path.split("?")[0].rstrip("/")
         t_arrival = time.perf_counter()
-        raw = self._read_raw()
+        try:
+            raw = self._read_raw()
+        except BodyError as exc:
+            return self._body_error(exc)
         if path.startswith("/v1/collect/"):          # P6: a plugin's batch, its own token
             from proxy import collect_api
             return collect_api.handle(self, STATE["svc"], path, raw)
@@ -314,7 +413,10 @@ class Handler(BaseHTTPRequestHandler):
         if chat_forward.route(self, method, STATE["auth"]):
             return
         path = self.path.split("?")[0].rstrip("/")
-        raw = self._read_raw()
+        try:
+            raw = self._read_raw()
+        except BodyError as exc:
+            return self._body_error(exc)
         try:
             body = json.loads(raw) if raw else None
         except ValueError as exc:
@@ -402,7 +504,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_empty(204, (("Set-Cookie", f"{auth_mod.COOKIE}=; HttpOnly; "
                                                          f"SameSite=Strict; Path=/; Max-Age=0"
                                                          f"{secure}"),))
-        who = self.headers.get("X-Real-IP") or self._peer()
+        who = self._peer()               # the TCP peer, never a header: X-Real-IP is the
+        # client's to write, and a rotating value filed every failure in its own bucket so the
+        # throttle never fired. There is no trusted-proxy opt-in that would make it believable
+        # (the server's --trust-loopback reads only the header's absence), so it is not read
+        # here at all -- the same decision the standalone server made.
         if a.login_blocked(who):
             return self._json(429, {"error": {"type": "too_many",
                                               "message": "too many failed logins; wait a minute"}},
