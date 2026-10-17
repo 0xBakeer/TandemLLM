@@ -93,6 +93,7 @@ LOGIN_ENV = "QSE_DASHBOARD_LOGIN"
 LOGIN_DEFAULT = "off"
 LOGIN_FAILS = 5
 LOGIN_WINDOW_S = 60.0
+LOGIN_MAX_KEYS = 10_000               # a memory bound on `_fails`, not a ban reset
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
@@ -228,10 +229,29 @@ class Auth:
             return len(q) >= LOGIN_FAILS
 
     def login_failed(self, who: str) -> None:
+        now = self.clock()
         with self._lock:
-            self._fails[who].append(self.clock())
-            if len(self._fails) > 10_000:
-                self._fails.clear()
+            self._fails[who].append(now)
+            if len(self._fails) <= LOGIN_MAX_KEYS:
+                return
+            # the old `self._fails.clear()` handed an attacker a free pass: a flood of
+            # one-shot keys (one per rotating peer) wiped every ACTIVE ban at the moment
+            # the table overflowed. Stale keys go first -- the window prunes them away --
+            # then the OLDEST-SEEN keys, one bucket at a time; the cap is a memory bound,
+            # never a reset of who is banned.
+            for key, q in list(self._fails.items()):
+                while q and now - q[0] > LOGIN_WINDOW_S:
+                    q.popleft()
+                if not q:
+                    del self._fails[key]
+            if len(self._fails) > LOGIN_MAX_KEYS:
+                banned = {k for k, q in self._fails.items() if len(q) >= LOGIN_FAILS}
+                oldest = sorted(self._fails, key=lambda k: self._fails[k][0])
+                excess = len(self._fails) - LOGIN_MAX_KEYS
+                drop = [k for k in oldest if k not in banned][:excess]   # spare the active
+                drop += [k for k in oldest if k not in drop][:excess - len(drop)]  # bans;
+                for key in drop:                                         # bounded either way
+                    del self._fails[key]
 
     # ----------------------------------------------------------------- the policy
     def decide(self, route: str, peer: str, headers) -> str:
