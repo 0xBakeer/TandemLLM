@@ -37,6 +37,8 @@ export class QsePerformance extends LightElement {
   private livePoll: Poller | null = null;
   private recentPoll: Poller | null = null;
   private histPoll: Poller | null = null;
+  private recentSeq = 0;
+  private histSeq = 0;
   private lastKey = '';
 
   private get range(): HRange {
@@ -104,24 +106,31 @@ export class QsePerformance extends LightElement {
   }
 
   private async loadRecent(): Promise<void> {
+    // a generation token: two quick filter changes must not let the older response land
+    const seq = ++this.recentSeq;
     try {
       const r = await api.requests({ limit: 500, model: this.model, client: this.client, backend: this.params.get('backend') });
+      if (seq !== this.recentSeq) return;
       this.recent = { state: 'ready', data: r.requests };
     } catch (e) {
+      if (seq !== this.recentSeq) return;
       const d = describeError(e);
       this.recent = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
   }
 
   private async loadHistory(): Promise<void> {
+    const seq = ++this.histSeq;
     const today = todayKey(this.tz);
     const days = this.range === '24h' ? 2 : this.range === '7d' ? 7 : this.range === '30d' ? 30 : 365;
     const bucket = days <= 31 ? 'hour' : 'day';
     try {
       const u = await api.usage({ from: addDays(today, -(days - 1)), to: today, bucket, tz: this.tz, model: this.model, client: this.client });
+      if (seq !== this.histSeq) return;
       if (this.range === '24h') u.buckets = u.buckets.slice(-24);
       this.history = { state: 'ready', data: u };
     } catch (e) {
+      if (seq !== this.histSeq) return;
       const d = describeError(e);
       this.history = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
