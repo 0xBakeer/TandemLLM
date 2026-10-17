@@ -42,11 +42,17 @@ function restoreRing(): void {
     if (!raw) return;
     const v = JSON.parse(raw) as { t: number; pts: RingPoint[] };
     const age = Date.now() / 1000 - v.t;
-    if (!(v.pts?.length) || age > STALE_S + 60) return;
+    // every point is validated, not just the shape: a pre-B1 save whose elements
+    // are null or of the old form would pass a length check and then brick every
+    // render from localStorage — a shape the map in renderBody cannot survive.
+    // !(age >= 0) rejects a legacy save without t: NaN sails past the stale guard.
+    if (!Array.isArray(v.pts)) return;
+    const pts = v.pts.filter((x) => x && typeof x === 'object');
+    if (!pts.length || !(age >= 0) || age > STALE_S + 60) return;
     // null-fill the gap so the ribbon shows the hole rather than pretending continuity
     const missing = Math.min(RING, Math.floor(age / STEP_S));
     const hole: RingPoint = { cpu_temp_c: null, gpu_temp_c: null, gpu_power_w: null, gpu_clk_mhz: null, ram_used_gib: null };
-    ring = [...v.pts, ...Array.from({ length: missing }, () => ({ ...hole }))].slice(-RING);
+    ring = [...pts, ...Array.from({ length: missing }, () => ({ ...hole }))].slice(-RING);
     lastSample = v.t;
   } catch { /* private mode, quota, old shape — start empty */ }
 }
@@ -155,9 +161,7 @@ export class QseHwRail extends LightElement {
   private async runPoll(): Promise<void> {
     try {
       const s = await request<SystemBlock>('/v1/dashboard/system');
-      this.sys = s;
       const host = s.hosts?.[0];
-      const pct = (v: number | null | undefined): number | null => (v == null ? null : Math.round(v * 1000) / 10);
       const gib = (v: number | null | undefined): number | null => (v == null ? null : v / 2 ** 30);
       ring = [...ring, {
         t: Math.floor(Date.now() / 1000),
@@ -171,7 +175,10 @@ export class QseHwRail extends LightElement {
       }].slice(-RING);
       lastSample = Date.now() / 1000;
       saveRing();
-      this.ring = ring;
+      // a remount owns the state; the ring append above still stands — history
+      // is the whole point of the persistence, a dead instance may keep feeding it
+      if (this.isConnected) this.sys = s;
+      if (this.isConnected) this.ring = ring;
     } catch { /* keep the last snapshot */ }
   }
   private toggle(): void {
@@ -215,7 +222,7 @@ export class QseHwRail extends LightElement {
       <div class="hw-chart-label">${label}</div>
       <qse-ribbon .series=${series} .labels=${labels} .format=${format}
         unit=${unit} .height=${84} .xLabelCount=${3} .autoY=${autoY}
-        aria-label=${`${label}, last 2 minutes`}></qse-ribbon>
+        aria-label=${label}></qse-ribbon>
     </div>`;
   }
   private line(name: string, color: RibbonSeries['color'], values: (number | null)[], legendValue?: number | null): RibbonSeries {
@@ -269,6 +276,7 @@ export class QseHwRail extends LightElement {
         ${this.chart('GPU clock MHz', [this.line('MHz', 'aqua', ring.map((p) => p.gpu_clk_mhz))], (v) => `${Math.round(v)}`, ' MHz', true)}
         ${this.chart('Unified Memory GiB', [this.line('used', 'cobalt', ring.map((p) => p.ram_used_gib))], (v) => `${Math.round(v)}`, ' GiB')}
       </div>
-      <div class="hw-rail-foot num">${this.ring.length}/${RING} · ${STEP_S} s sampler · 2 min window</div>`;
+      <div class="hw-rail-foot num">${this.ring.length}/${RING} · ${this.open ? STEP_S : PEEK_S} s sampler · \
+${(this.ring[this.ring.length - 1]?.t ?? 0) - (this.ring[0]?.t ?? 0)} s window</div>`;
   }
 }
