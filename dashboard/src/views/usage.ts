@@ -57,6 +57,7 @@ export class QseUsage extends LightElement {
   @state() private metric: HeatMetric = 'total_tokens';
   private tz = browserTz();
   private lastKey = '';
+  private loadSeq = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   connectedCallback(): void {
@@ -107,11 +108,15 @@ export class QseUsage extends LightElement {
   }
 
   private async load(quiet = false): Promise<void> {
+    // a generation token: a filter change, or the 60 s timer, must not let an older response
+    // land over a newer one (the 60 s tick can overlap a filter-triggered load)
+    const seq = ++this.loadSeq;
     if (!quiet) this.usage = { state: 'loading' };
     const today = todayKey(this.tz);
     const { from, to } = yearWindow(today);
     try {
       const u = await api.usage({ from, to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
+      if (seq !== this.loadSeq) return;
       this.usage = { state: 'ready', data: u };
       // the engine against each relayed backend (a cloud model), over the same year and filters
       const rel = this.backend ? [] : relayedBackends(u);
@@ -121,19 +126,23 @@ export class QseUsage extends LightElement {
         this.byBackend = { engine, relayed: rel.map((ref, i) => ({ ref, usage: others[i] })) };
       } else this.byBackend = null;
     } catch (e) {
+      if (seq !== this.loadSeq) return;
       const d = describeError(e);
       this.usage = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
     if (this.range === 'custom' && this.from && this.to) {
+      if (seq !== this.loadSeq) return; // a newer load owns the view: drop this one entirely
       this.custom = { state: 'loading' };
       try {
         const u = await api.usage({ from: this.from, to: this.to, bucket: 'day', tz: this.tz, model: this.model, client: this.client, backend: this.backend, user: this.user, internal: this.internal });
+        if (seq !== this.loadSeq) return;
         this.custom = { state: 'ready', data: u };
       } catch (e) {
+        if (seq !== this.loadSeq) return;
         const d = describeError(e);
         this.custom = { state: 'error', endpoint: d.endpoint, message: d.message };
       }
-    } else this.custom = null;
+    } else if (seq === this.loadSeq) this.custom = null;
   }
 
   private setRange(r: Range) {
