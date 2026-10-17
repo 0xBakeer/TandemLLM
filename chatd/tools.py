@@ -149,11 +149,13 @@ def _read(ctx, a):
         return Result(f"{path}: a binary file, {st.st_size:,} bytes; not shown")
     lines = data.decode("utf-8", "replace").splitlines()
     off = max(1, int(a.get("offset") or 1))
-    lim = int(a.get("limit") or 2000)
+    lim = max(1, min(2000, int(a.get("limit") or 2000)))  # a negative limit reads nothing
     chunk = lines[off - 1:off - 1 + lim]
     body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(chunk, off))
-    more = f"\n[{len(lines) - (off - 1 + len(chunk))} more lines]" if off - 1 + len(chunk) < \
-        len(lines) else ""
+    # an offset past EOF leaves rest negative: only promise more lines when some remain, or
+    # the model reads on forever
+    rest = len(lines) - (off - 1 + len(chunk))
+    more = f"\n[{rest} more lines]" if rest > 0 else ""
     return Result(body + more)
 
 
