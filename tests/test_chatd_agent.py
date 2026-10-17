@@ -711,6 +711,7 @@ def guarded(avail_gb, release=None):
 def test_the_memory_guard_admits_stops_and_kills_by_the_numbers():
     mem = {"v": 60}
     sb, clock = guarded(mem)
+    # the tests pin 1 GiB (tests/chatd_util.py); the default is 4 (the next test)
     assert sb_mod.LIMIT_BYTES == 1 * sb_mod.GiB and sb_mod.FLOOR_GB == 4.0
     assert sb.max_running == 4 and sb.total_gb == 4.0, "the cap: max_running times 1 GiB"
     sb.max_running = 1
@@ -880,6 +881,48 @@ def test_the_memory_limit_follows_qse_sandbox_mem_gb():
         assert T.oom_words() == "out of memory (2 GiB sandbox limit)"
     finally:
         sb_mod.LIMIT_BYTES = old
+
+
+def test_the_default_limit_is_4_gib_and_an_older_container_takes_it_at_its_start():
+    """2026-10-17: headless Chromium drawing a Three.js app in software went past the 1 GiB
+    default, and render_page said "out of memory (1 GiB sandbox limit), the kernel killed
+    Chromium" on the app it was there to check."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("QSE_SANDBOX_")}
+    out = subprocess.run([sys.executable, "-c", "from chatd import sandbox as m; "
+                          "s = m.Sandboxes('/tmp', engine=None, meminfo_fn=lambda: {}); "
+                          "print(m.LIMIT_BYTES, m.limit_words(), s.total_gb)"],
+                         capture_output=True, text=True, cwd=root, check=True,
+                         env=dict(env, PYTHONPATH=root)).stdout.split()
+    assert out == [str(4 * sb_mod.GiB), "4", "GiB", "16.0"], out
+
+    class Old(FakeEngineAPI):
+        def call(self, method, path, body=None, timeout=60):
+            self.calls.append((method, path, body))
+            if path.endswith("/json"):
+                return 200, {"Id": "old1", "State": {"Running": False},
+                             "Config": {"Labels": {sb_mod.LABEL: "c1",
+                                                   sb_mod.INSTANCE_LABEL: inst}},
+                             "HostConfig": {"Memory": 2 * sb_mod.GiB}}
+            return 204, None
+    api = Old()
+    sb = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=api, meminfo_fn=lambda: {})
+    inst = sb.instance
+    sb._proxy = lambda b: None
+    sb.run = lambda *a, **k: (0, False)
+    sb.ensure("c1")
+    upd = [c for c in api.calls if c[1] == "/containers/old1/update"]
+    assert upd == [("POST", "/containers/old1/update", {"Memory": sb_mod.LIMIT_BYTES,
+                                                       "MemorySwap": sb_mod.LIMIT_BYTES})]
+    assert api.calls.index(upd[0]) < api.calls.index(("POST", "/containers/old1/start", None))
+    # a container made under the current limit is started as it is
+    sb2 = sb_mod.Sandboxes(tempfile.mkdtemp(), engine=FakeEngineAPI(), meminfo_fn=lambda: {})
+    sb2._proxy = lambda b: None
+    sb2.run = lambda *a, **k: (0, False)
+    sb2.ensure("c2")
+    assert not [c for c in sb2.engine.calls if c[1].endswith("/update")]
 
 
 def test_oom_kills_are_read_from_the_cgroup():

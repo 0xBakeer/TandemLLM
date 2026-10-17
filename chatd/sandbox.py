@@ -14,7 +14,7 @@ rather than relying on the runtime:
   chatd's filtering proxy for that chat only (chatd/egress.py), which refuses the LAN and this box;
 - mounts: /workspace (the chat's files, chatd/workspace.py), /home/agent (pip, npm, uv caches) and
   /run/tandem (the proxy's socket, read-only). Nothing of chatd's or the engine's is mounted;
-- limits: 1 GiB memory with no swap (QSE_SANDBOX_MEM_GB), 4 CPUs, 512 pids (a fork bomb stops
+- limits: 4 GiB memory with no swap (QSE_SANDBOX_MEM_GB), 4 CPUs, 512 pids (a fork bomb stops
   there). A process the kernel kills at the limit is reported to the model as "out of memory (1 GiB
   sandbox limit)" (`oom_kills`, the cgroup's memory.events).
 
@@ -80,7 +80,9 @@ from chatd.egress import Proxy
 GiB = 1024 ** 3
 IMAGE = os.environ.get("QSE_SANDBOX_IMAGE", "tandem-sandbox:1")
 SOCKET = os.environ.get("QSE_SANDBOX_SOCKET", "/var/run/docker.sock")
-LIMIT_BYTES = int(float(os.environ.get("QSE_SANDBOX_MEM_GB") or 1) * GiB)
+# 4 GiB: headless Chromium drawing a Three.js app in software (SwiftShader) went past 1 GiB and
+# the kernel killed it, so render_page and the verify phase failed on the apps they check
+LIMIT_BYTES = int(float(os.environ.get("QSE_SANDBOX_MEM_GB") or 4) * GiB)
 CPUS = 4
 PIDS = 512
 DISK_LIMIT = 10 * GiB
@@ -620,6 +622,11 @@ class Sandboxes:
             container = info["Id"]
         elif st == 200:
             container = info["Id"]
+            if ((info.get("HostConfig") or {}).get("Memory") or 0) != LIMIT_BYTES:
+                # made under another limit (an older default, a changed QSE_SANDBOX_MEM_GB): this
+                # start takes the current one
+                self.engine.call("POST", f"/containers/{container}/update",
+                                 {"Memory": LIMIT_BYTES, "MemorySwap": LIMIT_BYTES})
         else:
             raise Unavailable(f"the container engine answered {st}")
         st, info = self.engine.call("POST", f"/containers/{container}/start")

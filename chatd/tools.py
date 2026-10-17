@@ -282,8 +282,10 @@ def _render(ctx, a):
     # a server's answer is said when it is no page (404, 500): the screenshot is its error page
     status = (f"echo \"{STATUS_MARK}$(curl -s -o /dev/null -m 10 -w '%{{http_code}}' "
               f"{shlex.quote(url)})\"; " if a.get("port") else "")
+    # memory: /dev/shm is Docker's 64 MB (the shared memory goes to /tmp instead), one renderer
     cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && {status}timeout 60 chromium --headless=new "
-           f"--no-sandbox --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run "
+           f"--no-sandbox --disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader "
+           f"--disable-dev-shm-usage --renderer-process-limit=1 --no-first-run "
            f"--disable-background-networking --hide-scrollbars --enable-logging=stderr --v=0 "
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
            f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught' | grep -v -E "

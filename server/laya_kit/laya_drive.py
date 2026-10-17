@@ -559,6 +559,10 @@ class Browser:
                  # Linux without unprivileged user namespaces (Ubuntu 23.10+) has no sandbox for
                  # it; Playwright starts Chromium the same way there
                  *(["--no-sandbox"] if sys.platform.startswith("linux") else []),
+                 # a container's /dev/shm is 64 MB: Chrome's shared memory goes to /tmp, one
+                 # renderer (a chat sandbox's memory limit counts every process)
+                 *(["--disable-dev-shm-usage", "--renderer-process-limit=1"]
+                   if sys.platform.startswith("linux") else []),
                  # SRV-195: without these Chrome waits ~25 s for the desktop keyring at its first
                  # network request (a page on http://127.0.0.1 took 25 s to load on the box, a
                  # file:// page 0.2 s); Playwright starts Chromium with the same two
