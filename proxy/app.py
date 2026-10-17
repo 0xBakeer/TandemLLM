@@ -218,6 +218,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"object": "list",
                                     "data": STATE["svc"].models(int(STATE["svc"].started))})
         if path.startswith("/v1/models/"):
+            # the list above asks for a key; a single card was answering without one,
+            # so a configured deployment leaked model ids and card metadata to strangers
+            ok, _ = STATE["svc"].authorize(self)
+            if not ok:
+                return
             name = unquote(path[len("/v1/models/"):])
             card = STATE["svc"].table.card(name, int(STATE["svc"].started))
             if card is None:
