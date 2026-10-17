@@ -70,6 +70,8 @@ PULL_OFF_S = 120.0
 PULL_TIMEOUT_S = 2.0
 BODY_MAX = 8 * 1024 * 1024
 ITEMS_MAX = 20_000                 # items and rows waiting, per proxy
+INSTANCE_TTL_S = 3600.0            # an instance id carries the pid: every engine restart
+                                   # added a row no refresh could ever stale out before
 
 # the item's fields and the ledger columns they fill
 NUMERIC = {"queue_ms": "queue_ms", "prefill_ms": "prompt_ms", "decode_ms": "decode_ms",
@@ -143,6 +145,8 @@ class _Backend:
         self.last_batch = None          # monotonic time of the last batch, pushed or pulled
         self.plugin = self.plugin_version = self.engine = self.engine_version = None
         self.instances: dict = {}       # instance -> {"requests": seq, "steps": seq}
+        self.inst_t: dict = {}          # instance -> last batch seen for it (eviction uses it)
+        self.was_configured = False     # the pull round has seen this id in the config
         self.steps: collections.deque = collections.deque(maxlen=STEPS_KEEP)
         self.recent: collections.deque = collections.deque(maxlen=RECENT_KEEP)   # checks, sums
         self.counts = collections.Counter()
@@ -291,6 +295,7 @@ class Collector:
             if via == "push":
                 b.pull["via"] = "push"
             cur = b.instances.setdefault(inst, {"requests": 0, "steps": 0})
+            b.inst_t[inst] = self.clock()
             dr = batch.get("dropped") if isinstance(batch.get("dropped"), dict) else {}
             for k in ("requests", "steps"):
                 if isinstance(dr.get(k), int):
@@ -414,13 +419,35 @@ class Collector:
         for k, (_rec, t) in list(self.expect.items()):
             if now - t > EXPECT_MAX_S:            # a request that never wrote its row
                 self.expect.pop(k, None)
+        for b in self.backends.values():          # restarts left the old pid's row behind
+            for inst, t in list(b.inst_t.items()):
+                if now - t > INSTANCE_TTL_S:
+                    b.inst_t.pop(inst, None)
+                    b.instances.pop(inst, None)
 
     # ----------------------------------------------------------------- pull (vLLM)
     def _pull_round(self) -> None:
         try:
-            backends = [b for b in self.svc.cfg.backends() if b["kind"] == "vllm" and b["enabled"]]
+            configured = self.svc.cfg.backends()
         except Exception:                                          # noqa: BLE001
             return
+        # a backend deleted from the config had a card here forever. Only a card that this
+        # round actually configured leaves: a card that exists purely because traffic named
+        # it stays counted (ingest of an unknown backend id keeps its counters as before)
+        alive = {b.get("id") for b in configured}
+        with self._lock:
+            for bid in list(self.backends):
+                if bid not in alive and self.backends[bid].was_configured:
+                    self.backends.pop(bid, None)
+                    # the row keys of a gone card go with it, so a late expire has
+                    # nothing to count onto a resurrected card
+                    for store in (self.done, self.items, self.loose, self.expect):
+                        for key in [x for x in store if x[0] == bid]:
+                            store.pop(key, None)
+        for bk in configured:
+            if bk.get("id") in self.backends:
+                self._b(bk["id"]).was_configured = True
+        backends = [b for b in configured if b["kind"] == "vllm" and b["enabled"]]
         now = self.clock()
         for bk in backends:
             with self._lock:
