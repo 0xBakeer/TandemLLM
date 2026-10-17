@@ -32,6 +32,7 @@ import threading
 import time
 
 from chatd import attach as attach_mod
+from chatd import compaction as comp
 from chatd import context as ctx_mod
 from chatd import render
 from chatd import tools as tools_mod
@@ -130,6 +131,9 @@ class Conv:
         self.sandbox_sent: tuple[float, dict | None] = (0.0, None)
         self.peek: tuple[float, dict | None] | None = None
         self.tok_ratio: float | None = None       # tokens per request character, learned
+        # chatd's estimate of the smallest request the engine refused for memory (runs.py): the
+        # context guard compacts under it from then on (compaction.compact_at)
+        self.memory_limit: int | None = None
 
 
 class Slots:
@@ -1303,6 +1307,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                              harness=harness if isinstance(harness, dict) else None,
                              split=split if isinstance(split, dict) else None,
                              session=render.session_id(conv.id))
+        if conv.memory_limit:                       # where the guard compacts this chat now
+            out["compact_at"] = comp.compact_at(out["window"], conv.memory_limit)
         out["skills"] = self.skills_report(settings)
         return out
 

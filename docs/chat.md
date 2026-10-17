@@ -28,7 +28,10 @@ browser  --https-->  engine server :8000  --/v1/chat-app/* (auth checked, byte f
 
 chatd never imports the engine and an engine restart does not touch it: a run that loses the
 engine retries with backoff for 10 minutes, then ends `interrupted` with its text kept, and
-Continue resumes it. Stopping chatd ends its open runs `interrupted` the same way.
+Continue resumes it. Stopping chatd ends its open runs `interrupted` the same way. A call the
+engine refuses for memory (503, "needs ... GiB with every cache given back") is retried once after
+its Retry-After, then the chat is compacted and the smaller prompt sent; from then on the chat
+compacts at 80 % of the refused size, not only of the window.
 
 ## Starting and stopping
 

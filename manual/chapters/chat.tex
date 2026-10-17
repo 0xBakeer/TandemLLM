@@ -15,7 +15,7 @@ chatd starts with the engine (\code{tandem start}, \code{ops/start.sh}) and stop
 
 chatd runs under the install's venv and reads the engine's secrets file (\code{QSE_SECRETS}). When chatd is down the tab says so, with the command to start it, and checks again by itself; the in-browser mock loads only for \code{?chat=mock}.
 
-At most two runs talk to the engine at once (\code{QSE_CHAT_MAX_RUNS}); the others wait as \code{queued}. A run that waits for a permission prompt gives its slot back until the answer comes. A run on a cloud model takes no slot: its calls run at the provider, not on the box. An engine restart does not touch chatd: a run that loses the engine retries for 10 minutes, then ends \code{interrupted} with its text kept, and Continue resumes it.
+At most two runs talk to the engine at once (\code{QSE_CHAT_MAX_RUNS}); the others wait as \code{queued}. A run that waits for a permission prompt gives its slot back until the answer comes. A run on a cloud model takes no slot: its calls run at the provider, not on the box. An engine restart does not touch chatd: a run that loses the engine retries for 10 minutes, then ends \code{interrupted} with its text kept, and Continue resumes it. A call the engine refuses for memory is retried once, then the chat is compacted and the smaller prompt sent; from then on the chat compacts at 80\,\% of the refused size as well as of the window.
 
 \section{The sandbox}\label{sec:chat-sandbox}\index{sandbox}
 

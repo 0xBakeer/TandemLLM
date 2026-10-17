@@ -756,7 +756,10 @@ class AgentMixin:
                               f"in the library; the request went without.")
         body = build()
         est = comp.estimate(body, conv.tok_ratio)
-        if window and est > int(window * comp.COMPACT_SHARE) and run.compacted != run.step:
+        at = comp.compact_at(window, conv.memory_limit)
+        # `compact_next`: the engine refused this call for memory twice (runs.py `_call`)
+        force, run.compact_next = run.compact_next, False
+        if (force or at and est > at) and run.compacted != run.step:
             run.compacted = run.step            # once a step: a long run compacts again later
             if self.compact(conv, run, [m for m in path if m.get("id")]):
                 body = build()
@@ -824,9 +827,12 @@ class AgentMixin:
             msgs.extend(render.message(run_msg, False, self._blob_of, from_step=first))
             b = i
         before = comp.estimate({"messages": msgs}, conv.tok_ratio)
-        if window and before + comp.SUMMARY_TOKENS + 512 > window:
+        # a chat the engine refused for memory: the summary's request stays under the guard's
+        # share of the refused one, or the engine refuses it too
+        cap = comp.compact_at(window, conv.memory_limit) if conv.memory_limit else window
+        if cap and before + comp.SUMMARY_TOKENS + 512 > cap:
             ratio = conv.tok_ratio or comp.DEFAULT_RATIO
-            msgs = comp.shrink(msgs, int((window - comp.SUMMARY_TOKENS - 1024) / ratio))
+            msgs = comp.shrink(msgs, int((cap - comp.SUMMARY_TOKENS - 1024) / ratio))
         msgs.append({"role": "user", "content": comp.INSTRUCTIONS})
         body = {"model": settings.get("model") or info.get("id") or "default", "messages": msgs,
                 "stream": False, "max_tokens": comp.SUMMARY_TOKENS,

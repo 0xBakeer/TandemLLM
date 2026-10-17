@@ -487,6 +487,90 @@ def test_compaction_summarizes_older_turns_and_the_model_gets_the_summary():
         c.close()
 
 
+# ---------------------------------------------------------------------- the engine's memory refusal
+# Live 2026-10-17 ("Voxel Pagoda City Build"): a run compacted at step 43 grew back to 215,247
+# tokens, under 80 % of its 262,144 window, and the engine answered every call with a 503 ("a
+# 215247-token prefill needs 53.3 GiB with every cache given back; the engine's peak is 52.6 GiB")
+# while another chat ran on its other slot. chatd sent the same prompt every 60 s for its 10-minute
+# retry window and the run ended interrupted.
+
+def _memory_run(c, max_steps=14):
+    small_window(c, window=100_000)                     # the window is never the limit here
+    c.svc.learn_ratio = lambda *a: None                 # the fake counts words, not tokens
+    cid = c.new()
+    c.svc.conv(cid).tok_ratio = 0.5
+    ws = c.svc.workspace(cid)
+    ws.write("a.txt", ("alpha line\n" * 60).encode())
+    ws.write("b.txt", ("beta line\n" * 60).encode())
+    c.ok("PATCH", f"/conversations/{cid}/settings", {"max_steps": max_steps})
+    return cid
+
+
+def _prompt_words(b: dict) -> int:
+    return sum(len(str(m.get("content") or "").split()) + 4 for m in b["messages"])
+
+
+def test_a_memory_refusal_compacts_and_the_run_goes_on():
+    c = Chat(retry_s=4)
+    try:
+        cid = _memory_run(c)
+        c.fake.memory = 2500             # each step adds ~380 of the fake's tokens: step 8 is over
+        ev = c.events(cid)
+        c.send(cid, calls(("read_file", {"path": "a.txt"}), ("read_file", {"path": "b.txt"}))
+               + " FAKE_CALLS_ALWAYS")
+        frames = ev.until(is_done, 60)
+        ev.close()
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        # one retry after the Retry-After, then a compaction; the guard compacts before the
+        # refused size from then on, so the engine refuses nothing more
+        assert c.fake.refused == 2, c.fake.refused
+        assert a["stats"]["interrupted"] == "limit" and a["stats"]["steps"] == 14, a["stats"]
+        assert len(s["compactions"]) >= 2 and "@" in s["compactions"][0]["boundary_id"]
+        sent = [b for b in requests(c) if _prompt_words(b) <= 2500]
+        assert len(sent) == len(requests(c)) - 2
+        nows = [json.loads(f[2]).get("now") or "" for f in frames if f[1] == "run.phase"]
+        assert any(n.startswith("The engine has no memory for this chat's context right now (2k "
+                                "tokens, needs 53.3 GiB of 52.6): retry in 1 s, then compact")
+                   for n in nows), nows
+        assert not any(n.startswith("Waiting for the engine") for n in nows)
+        assert c.svc.conv(cid).memory_limit                  # remembered for the chat
+    finally:
+        c.close()
+
+
+def test_a_memory_refusal_right_after_the_compaction_ends_as_before_with_the_reason():
+    c = Chat(retry_s=3)
+    try:
+        cid = _memory_run(c)
+        c.fake.memory = 2500
+        real = c.svc.compact
+
+        def compact(*a, **kw):
+            ok = real(*a, **kw)
+            c.fake.memory = 50          # the other slot's chat took more meanwhile: still no room
+            return ok
+        c.svc.compact = compact
+        ev = c.events(cid)
+        c.send(cid, calls(("read_file", {"path": "a.txt"}), ("read_file", {"path": "b.txt"}))
+               + " FAKE_CALLS_ALWAYS")
+        frames = ev.until(is_done, 60)
+        ev.close()
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        assert a["status"] == "interrupted" and a["stats"]["interrupted"] == "engine", a["stats"]
+        assert len(s["compactions"]) == 1                    # no second compaction, no loop
+        assert c.fake.refused <= 6, c.fake.refused           # the backoff, not a tight loop
+        words = "The engine has no memory for this chat's context right now ("
+        assert words in a["parts"][-1]["message"], a["parts"][-1]
+        nows = [json.loads(f[2]).get("now") or "" for f in frames if f[1] == "run.phase"]
+        assert any(n.startswith(words) and n.endswith(" s") and "compact" not in n
+                   for n in nows), nows
+        assert not any(n.startswith("Waiting for the engine") for n in nows)
+    finally:
+        c.close()
+
+
 def test_a_request_that_cannot_fit_fails_before_the_engine_is_asked():
     c = Chat()
     try:

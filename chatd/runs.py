@@ -37,7 +37,12 @@ stays, the message ends `stopped`, a tool that was running ends `cancelled`.
 RETRY AND CONTINUE. A refused or failed call (connection refused, 429, 5xx, a stream that drops
 without a finish) is retried with backoff 1, 2, 4 ... 60 s for QSE_CHAT_RETRY_S (10 minutes), then
 the run ends `interrupted`. A retry after text came continues the answer with
-`continue_final_message`. A 4xx is not retried: the run fails with the engine's message.
+`continue_final_message`. A 4xx is not retried: the run fails with the engine's message. The
+engine's memory refusal (a 503 "a <n>-token prefill needs ... GiB with every cache given back") is
+retried once after its Retry-After (the chat on the other slot may finish), then the conversation
+is compacted and the smaller request sent; the guard compacts this chat under 80 % of the refused
+request from then on (`Conv.memory_limit`). Refused right after that, the retries go on as above,
+and the Now line says the engine has no memory for the chat's context.
 """
 
 from __future__ import annotations
@@ -57,6 +62,9 @@ BACKOFF_MAX_S = 60.0
 FLUSH_S = 0.05
 WARMUP_TOKENS = 50            # decode rates skip the first 50 tokens (the dashboard's NOW rule)
 _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
+# the engine's memory refusal (engine/cache.py MemoryRefused, a 503 from server/app.py `_busy`)
+_MEMORY = re.compile(r"a (\d+)-token prefill needs ([\d.]+) GiB with every cache given back; "
+                     r"the engine's peak is ([\d.]+) GiB")
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
 # anything else in it is replaced (the part's id is the one the next request sends back)
@@ -74,6 +82,15 @@ def cached_of(u: dict) -> int:
     if isinstance(hit, int) and not isinstance(hit, bool):
         return hit
     return int((u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+
+
+def memory_words(exc: EngineError) -> str | None:
+    """The engine's memory refusal in plain words; None for any other refusal."""
+    m = _MEMORY.search(exc.args[0]) if exc.status == 503 else None
+    if m is None:
+        return None
+    return (f"The engine has no memory for this chat's context right now "
+            f"({int(m.group(1)) // 1000}k tokens, needs {m.group(2)} GiB of {m.group(3)})")
 
 
 class GuardError(Exception):
@@ -158,6 +175,7 @@ class Run:
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
         self.compacted = 0                      # the step a compaction last ran before
+        self.compact_next = False               # the next request compacts first (memory)
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
         # the speculation of the run's finished calls (their usage frames' timings), for the
@@ -329,6 +347,7 @@ class Run:
         """One model call with its retries: completed, failed, interrupted or cancelled."""
         deadline = time.monotonic() + self.svc.retry_window_s
         backoff = 1.0
+        refused = 0                    # the engine's memory refusals of this call, in a row
         if self.resume_same_step:
             self.resume_same_step = False
         else:
@@ -355,11 +374,30 @@ class Run:
                 if not exc.retryable:
                     self.error = exc.args[0]
                     return "failed"
+                memory = memory_words(exc)
+                if memory and refused == 0:
+                    # the chat on the engine's other slot holds memory too: one retry once it may
+                    # be done, then a compaction. Live 2026-10-17 the same 215,247-token prompt
+                    # went every 60 s for the whole retry window and the run ended interrupted
+                    refused = 1
+                    wait = min(exc.retry_after or 30.0, max(1.0, deadline - time.monotonic()))
+                    self.set_phase("queued", f"{memory}: retry in {int(wait)} s, then compact")
+                    self.wake.wait(wait)
+                    continue
+                if memory and refused == 1:
+                    refused = 2
+                    lim = self.conv.memory_limit
+                    self.conv.memory_limit = min(lim, self.request_est) if lim else self.request_est
+                    self.compact_next = True
+                    deadline = time.monotonic() + self.svc.retry_window_s
+                    continue
                 if time.monotonic() + backoff > deadline:
                     self.error = exc.args[0]
+                    if memory:                       # the card under the answer says why
+                        self.notice = f"{memory}. Continue goes on from here."
                     return "interrupted"
-                self.set_phase("queued", f"Waiting for the engine ({exc.args[0]}), retry in "
-                                         f"{int(backoff)} s")
+                self.set_phase("queued", f"{memory}: retry in {int(backoff)} s" if memory else
+                               f"Waiting for the engine ({exc.args[0]}), retry in {int(backoff)} s")
                 self.wake.wait(backoff)
                 backoff = min(BACKOFF_MAX_S, backoff * 2)
                 continue
