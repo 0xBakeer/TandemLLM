@@ -261,7 +261,11 @@ class Run:
     def _slot(self) -> bool:
         """One of the QSE_CHAT_MAX_RUNS slots (the engine serves at most 4; opencode keeps one),
         before each model call: a run that waits for the user's permission gives its slot back
-        (agent.py `_permit`). False when the run is stopped meanwhile."""
+        (agent.py `_permit`). A cloud model's call takes none (`takes_slot`) and gives back the one
+        an earlier call on our engine held. False when the run is stopped meanwhile."""
+        if not self.svc.takes_slot(self):
+            self.svc.slots.release_if(self)
+            return True
         while not self.svc.slots.acquire(self, timeout=1.0):
             if self.stop_mode:
                 return False

@@ -878,6 +878,27 @@ def test_two_runs_at_most_the_third_waits():
         c.close()
 
 
+def test_a_cloud_models_run_takes_no_run_slot():
+    # live (2026-10-17): two chats on the engine held both run slots and a third on DeepSeek
+    # (cloud) waited "for a free run slot"; a cloud call runs at the provider, not on the box
+    srv, port = fake_backend.start(models=["fake-a", "fake-cloud"])
+    srv.fake.cards["fake-cloud"] = {"tandem": {"kind": "deepseek", "cloud": True}}
+    c = Chat(max_runs=2, fake=(srv, port))
+    try:
+        ids = [c.new() for _ in range(3)]
+        c.ok("PATCH", f"/conversations/{ids[2]}/settings", {"model": "fake-cloud"})
+        for cid in ids:
+            c.send(cid, "FAKE_SLOW FAKE_LONG 20 x")
+        c.wait(lambda: c.fake.max_streams == 3, 10)     # the cloud run beside the two
+        for cid in ids:
+            c.wait_idle(cid, 20)
+        assert "free run slot" not in ((c.snap(ids[2])["run"] or {}).get("now") or "")
+        assert not c.svc.slots.holders
+    finally:
+        c.close()
+        srv.shutdown()
+
+
 def test_the_title_call_names_the_chat_and_a_rambling_answer_is_not_a_title():
     c = Chat(titles=True)
     try:
