@@ -237,6 +237,17 @@ def _ports_words(ports: list[dict] | None) -> str:
         (f" ({p['command']})" if p.get("command") else "") for p in ports)
 
 
+# what Chromium writes beside the page's console: its own pages, the WebGL fallback, its GL driver
+CONSOLE_NOISE = "source: chrome://|Automatic fallback to software WebGL|GL Driver Message"
+_CONSOLE_HEAD = re.compile(r"^\[[\d:./]+:[A-Z]+:CONSOLE(?:\((\d+)\)|:(\d+))?\]\s*")
+
+
+def console_line(line: str) -> str:
+    """`[86:86:1016/215118.672506:INFO:CONSOLE:422] "msg", source: url (422)` -> `"msg",
+    source: url (422)`: the page's message, without Chromium's process, thread and clock."""
+    return _CONSOLE_HEAD.sub("", line.strip())
+
+
 def _render(ctx, a):
     w = min(2400, max(320, int(a.get("width") or 1280)))
     h = min(2400, max(240, int(a.get("height") or 800)))
@@ -253,14 +264,18 @@ def _render(ctx, a):
         full = ctx.ws.resolve(str(a.get("path") or "index.html"), must_exist=True)
         url = "file://" + ctx.ws.show(full)
     shot = f"/workspace/{SHOTS_DIR}/{ctx.call_id}.png"
+    # WebGL through SwiftShader by name (the automatic fallback is deprecated and says so on
+    # every page); the page's console only: Chromium's own pages (chrome://) and its services
+    # (GCM registration, `ERROR:...cc` lines) are not the page's
     cmd = (f"mkdir -p /workspace/{SHOTS_DIR} && timeout 60 chromium --headless=new --no-sandbox "
-           f"--disable-gpu --hide-scrollbars --enable-logging=stderr --v=0 "
+           f"--disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run "
+           f"--disable-background-networking --hide-scrollbars --enable-logging=stderr --v=0 "
            f"--window-size={w},{h} --virtual-time-budget=3000 --screenshot={shot} "
-           f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught|ERROR' | grep -v -E "
-           f"'dbus|Fontconfig|gpu|GPU|sandbox' | head -40")
+           f"{shlex.quote(url)} 2>&1 | grep -E 'CONSOLE|Uncaught' | grep -v -E "
+           f"'{CONSOLE_NOISE}' | head -40")
     mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
-    log = ctx.output_text()[mark:]
+    log = "\n".join(console_line(ln) for ln in ctx.output_text()[mark:].splitlines())
     try:
         png = ctx.ws.read(shot)
     except (PathError, OSError):

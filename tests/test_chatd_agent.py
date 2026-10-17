@@ -990,6 +990,61 @@ def test_render_page_on_a_port_dials_localhost_and_says_what_listens():
         assert str(exc).endswith("; nothing listens on any port in the sandbox")
 
 
+def test_render_page_reports_the_page_console_without_chromium_noise():
+    """Live (2026-10-16, the pagoda chat): every render_page result said "console:" over eight
+    lines of Chromium's own pages (chrome://, "Slow network is detected"), GCM registration errors
+    and the deprecated WebGL fallback, and no line of the page's; the model sifted them on each
+    of its renders."""
+    import subprocess
+    ws = Workspace(tempfile.mkdtemp())
+    ws.write("index.html", b"<canvas></canvas>")
+    chromium_log = "\n".join([
+        '[86:86:1016/215118.672506:INFO:CONSOLE:422] "Slow network is detected. See https://www.'
+        'chromestatus.com/feature/5636954674692096 for more details.", source: chrome://resources/'
+        'cr_components/composebox/composebox_input.js (422)',
+        '[86:86:1016/215118.764582:INFO:CONSOLE:0] "Slow network is detected.", source: '
+        'chrome://omnibox-popup.top-chrome/ (0)',
+        '[86:116:1016/215120.901110:ERROR:google_apis/gcm/engine/registration_request.cc:291] '
+        'Registration response error message: PHONE_REGISTRATION_ERROR',
+        '[86:86:1016/215123.040540:INFO:CONSOLE:0] "[]Automatic fallback to software WebGL has been '
+        'deprecated. Please use the --enable-unsafe-swiftshader flag", source: http://localhost:'
+        '8124/ (0)',
+        '[634:634:1016/215214.160964:INFO:CONSOLE:61] "Uncaught TypeError: THREE.MathUtils.'
+        'lerpAngle is not a function", source: http://localhost:8124/js/scene/koi.js (61)',
+        '[634:634:1016/215214.3:INFO:CONSOLE:0] "[.WebGL-0x2400177600]GL Driver Message (OpenGL, '
+        'Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels", source: http://'
+        'localhost:8124/ (0)',
+        '[634:640:1016/215214.2:ERROR:dbus/bus.cc:408] Failed to connect to the bus']) + "\n"
+
+    class Ctx:
+        call_id, oom = "call1", False
+
+        def __init__(self, log):
+            self.ws, self.cmds, self.out, self.log = ws, [], "", log
+
+        def exec(self, cmd, timeout=600, quiet=False):
+            self.cmds.append(cmd)
+            if "chromium" in cmd[-1]:
+                ws.write(".tandem/shots/call1.png", b"\x89PNG fake")
+                # the command's own filter over Chromium's stderr, as bash runs it in the sandbox
+                pipe = cmd[-1].split(" 2>&1 | ", 1)[1]
+                self.out += subprocess.run(["bash", "-c", pipe], input=self.log, text=True,
+                                           capture_output=True).stdout
+            return 0, False
+
+        def output_text(self):
+            return self.out
+    ctx = Ctx(chromium_log)
+    res = T._render(ctx, {"path": "index.html"})
+    assert "--use-angle=swiftshader --enable-unsafe-swiftshader" in ctx.cmds[-1][-1]
+    assert res.content.split("\n", 1)[1] == (
+        'console:\n"Uncaught TypeError: THREE.MathUtils.lerpAngle is not a function", source: '
+        'http://localhost:8124/js/scene/koi.js (61)')
+    # only Chromium's lines: the page logged nothing
+    res = T._render(Ctx(chromium_log.split("[634:634")[0]), {"path": "index.html"})
+    assert res.content.endswith("\nno console errors")
+
+
 def test_the_relay_dials_localhost_on_both_families_and_lists_what_listens():
     """ops/sandbox/relay.py as chatd sends it (python3 -c): a server on ::1 only and one on
     127.0.0.1 only both answer through `connect`; a closed port says what listens instead."""
