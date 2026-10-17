@@ -49,8 +49,10 @@ function restoreRing(): void {
     if (!Array.isArray(v.pts)) return;
     const pts = v.pts.filter((x) => x && typeof x === 'object');
     if (!pts.length || !(age >= 0) || age > STALE_S + 60) return;
-    // null-fill the gap so the ribbon shows the hole rather than pretending continuity
-    const missing = Math.min(RING, Math.floor(age / STEP_S));
+    // null-fill the gap so the ribbon shows the hole rather than pretending continuity;
+    // the holes get only the space the real points leave over — fill-then-slice used to
+    // let a long away-time evict every sample the restore was meant to keep
+    const missing = Math.max(0, Math.min(RING - pts.length, Math.floor(age / STEP_S)));
     const hole: RingPoint = { cpu_temp_c: null, gpu_temp_c: null, gpu_power_w: null, gpu_clk_mhz: null, ram_used_gib: null };
     ring = [...pts, ...Array.from({ length: missing }, () => ({ ...hole }))].slice(-RING);
     lastSample = v.t;
@@ -116,7 +118,9 @@ export class QseHwRail extends LightElement {
   @state() private open = (() => {
     try {
       const v = localStorage.getItem(LS_OPEN);
-      if (v != null) return v === '1';
+      // a desktop 'open' must not reopen the rail as a phone overlay on first load:
+      // the stored state only wins where the rail is a sidebar, not an overlay
+      if (v != null && window.matchMedia('(min-width: 761px)').matches) return v === '1';
     } catch { /* private mode */ }
     return window.matchMedia('(min-width: 1201px)').matches; // desktop default: open
   })();
