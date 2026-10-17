@@ -810,6 +810,39 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         if r is not None:
             conv.tok_ratio = r
 
+    def finish_guard(self, run: Run, outcome: str, exc: Exception) -> None:
+        """The last line for a finish_run that broke halfway (runs.py `_main`). Forces the
+        three facts everything downstream depends on -- the runs row terminal, the assistant
+        message off 'streaming', the conversation released -- then drains the queue. Every
+        step is guarded on its own, because the state that broke finish_run may still be
+        broken; this must never raise, it is the only thing between the run thread and a
+        permanently wedged conversation."""
+        conv = run.conv
+        status = {"completed": "done", "cancelled": "stopped", "interrupted": "interrupted",
+                  "failed": "error"}.get(outcome, "error")
+        self.log(f"[run] {run.id}: finish_run raised {type(exc).__name__}; forcing {outcome}")
+        try:
+            self.store.run("UPDATE runs SET state = ?, ended = ?, error = ? WHERE id = ?",
+                           (outcome, now_ms(), run.error, run.id))
+        except Exception as exc2:                                       # noqa: BLE001
+            self.log(f"[run] {run.id}: the forced runs write failed too: {type(exc2).__name__}")
+        try:
+            # only the rows the run itself left streaming -- the guard must not touch a
+            # message some other run owns
+            self.store.run("UPDATE messages SET status = ? WHERE id = ? "
+                           "AND status = 'streaming'", (status, run.message_id))
+        except Exception as exc2:                                       # noqa: BLE001
+            self.log(f"[run] {run.id}: the forced message write failed: {type(exc2).__name__}")
+        with conv.lock:                                                 # memory: cannot fail
+            run.state = outcome                                         # clears run.active
+            if conv.run is run:
+                conv.run = None                                         # the message gate opens
+            conv.live = None
+        try:
+            self._drain(conv, run.started_by)                           # the queue must not starve
+        except Exception as exc2:                                       # noqa: BLE001
+            self.log(f"[run] {run.id}: the forced drain failed: {type(exc2).__name__}")
+
     def finish_run(self, run: Run, outcome: str) -> None:
         """The run's end: the message's final parts, status and figures; `run.done` (or
         `run.error`); then the queue and the title."""
