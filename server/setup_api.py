@@ -634,7 +634,23 @@ def reset_route(h, app, body) -> None:
                              "message": "The engine restarts with the shipped configuration.",
                              "ok": True, "job_id": job["id"], "job": job},
                        extra_headers=NO_STORE)
-    out = reset.execute(n, app, clear_live=lambda what: clear_live(app, what))
+    # 2026-10-17: check-and-act is the job lock. The two checks above only hold until the
+    # next request is admitted: an apply that passed its own 409-gate (295, under this same
+    # lock) before we got here, and a level 3-5 reset, meant that a download job installed
+    # into directories being deleted -- ENOENT mid-install, half-deleted weight folders,
+    # a freed_gb read over files the job had just written. apply-vs-apply is serialized by
+    # _JOB_LOCK already (setup_api.py:50); only this synchronous path walked around it. The
+    # re-check runs INSIDE the lock, so a job that appeared after the fast check above is
+    # still refused, and an apply arriving while we delete waits at its gate until we are
+    # done. reset.execute takes no lock and spawns no job, so holding this one across the
+    # deleting is safe (the level 2 path above is the same pattern, released before its 202).
+    with _JOB_LOCK:
+        run = apply.running_job()
+        if run is not None:
+            reset.audit({"level": n, "dry_run": False, "freed_gb": 0, "result": "job_running"})
+            return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
+                        job=run["id"])
+        out = reset.execute(n, app, clear_live=lambda what: clear_live(app, what))
     reset.audit({"level": n, "dry_run": False, "freed_gb": out["freed_gb"],
                  "result": "ok" if out["ok"] else f"{len(out['failed'])} failed"})
     print(f"[setup] reset level {n}: {out['freed_gb']:.2f} GiB freed, {len(out['failed'])} "
