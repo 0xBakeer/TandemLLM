@@ -1,0 +1,132 @@
+/* WIP (wip/upstream-import, F5) — the hardware rail: right-edge tab + fixed right drawer,
+   visible on every view. No backdrop-filter anywhere (mobile GPU rule); on phones the drawer
+   is a plain overlay. Desktop-open shifts .content instead of covering it. */
+
+.hw-tab {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: 27; /* WIP fix 2026-10-16: below every view surface (drawers 40-42, dropdowns 50) —
+                  a shell accessory never intercepts a modal's clicks */
+  transform: translateY(-50%);
+  width: 26px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: var(--bg-2);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.hw-tab:hover { color: var(--ink); background: var(--bg-3); }
+/* when open, the tab does not vanish — it rides the rail's left edge and closes it */
+.hw-tab.is-open {
+  right: 300px;
+  z-index: 27;
+}
+@media (max-width: 760px) {
+  .hw-tab.is-open { right: min(320px, 92vw); }
+}
+
+.hw-rail {
+  position: fixed;
+  top: var(--topbar-h); /* WIP fix 2026-10-16: starts under the top bar — the 0.11.0 bar carries
+                           the theme/pill controls at its right edge and a shell drawer may not
+                           cover them (same pattern as the nav .rail) */
+  right: 0;
+  bottom: 0;
+  z-index: 28;
+  width: 300px;
+  overflow-y: auto;
+  padding: 14px 16px 20px;
+  background: var(--bg-2);
+  border-left: 1px solid var(--rule);
+}
+.hw-rail.is-hidden { display: none; }
+@media (min-width: 1201px) {
+  body.hw-rail-open .content { padding-right: 316px; }
+  .hw-rail { box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18); }
+}
+
+.hw-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+  position: sticky; /* the ✕ must survive scrolling the rail */
+  top: -14px;
+  background: var(--bg-2);
+  padding: 14px 0 6px;
+  margin-top: -14px;
+  z-index: 1;
+}
+
+.hw-tiles {
+  display: grid;
+  /* two bubbles per row in a 300px drawer — the width a 18px value needs to stay
+     readable without clipping (three columns at ~92px clipped "215 GB free" to
+     "215 GB…"). minmax(0,..), not 1fr: a no-wrap value's min-content width may
+     not push the column past the drawer (grid items default to min-width:auto)
+     — that widened the rail past its own width and grew a horizontal scrollbar */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.hw-tile {
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 6px 6px; /* 6px sides: the value box is 113 -> 121px — the width the
+                      longest calm values need ('↓ 9.0K ↑ 18.3K' wants 118px) */
+}
+.hw-tile.is-warn .hw-tile-value { color: var(--err); }
+/* the LAN bubble carries two numbers — it stays compact so nowrap still fits */
+.hw-tile-duo .hw-tile-value { font-size: 14px; }
+.hw-tile-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+}
+/* one value line, always: a long rate (↓ 22.3 MB/s ↑ 210 KB/s) may clip, never
+   wrap — a wrapped tile inflates the row and shifts every view below the shell */
+.hw-tile-value {
+  font-size: 18px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hw-rail-sub {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  margin-bottom: 12px;
+}
+
+.hw-chart { margin-bottom: 10px; }
+.hw-chart-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  margin-bottom: 2px;
+}
+
+.hw-sparks qse-ribbon { display: block; }
+
+.hw-rail-empty { color: var(--ink-3); font-size: var(--fs-sm); }
+.hw-rail-foot { color: var(--ink-3); font-size: 10px; margin-top: 8px; }
+
+/* phones (house rule): never open by default (component), plain overlay when forced open */
+@media (max-width: 760px) {
+  .hw-rail { width: min(320px, 92vw); box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35); }
+}
