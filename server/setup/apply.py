@@ -409,8 +409,16 @@ def plan(m: dict, sel: dict, *, setup_mode: bool, password_set: bool,
         except OSError:
             free = None
         if free is not None and free < download_gb + DISK_MARGIN_GB:
+            # SRV-560: and what could go to make room
+            from server.setup import remove as remove_mod
+            try:
+                more = remove_mod.removable_text(remove_mod.installed(setup_mode=setup_mode),
+                                                 download_gb + DISK_MARGIN_GB - free)
+            except Exception:                                     # noqa: BLE001
+                more = ""
             error("disk_full", f"The download needs {download_gb:g} GB and {DISK_MARGIN_GB} "
-                  f"GB left after it; the disk has {free:.0f} GB free.")
+                  f"GB left after it; the disk has {free:.0f} GB free, {download_gb + DISK_MARGIN_GB - free:.0f} "
+                  f"GB too few." + (f" {more}" if more else ""))
     if not hook_present():
         error("no_overlay_hook", "ops/serve.env on this box does not read run/setup.env. Add the "
               "setup overlay lines from the repository's ops/serve.env (the end of the file) "
@@ -723,7 +731,7 @@ def job_summary(m: dict, sel: dict) -> dict:
 
 
 def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
-            retry_of: str | None = None) -> dict:
+            retry_of: str | None = None, remove_after: list[str] | None = None) -> dict:
     """The job's folder and its job.json (what the runner reads), state queued. `kind`: apply, or
     reset (reset level 2: the overlay goes and the recommended profile starts)."""
     jid = secrets.token_hex(8)
@@ -740,7 +748,8 @@ def new_job(m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply
     _write_json(os.path.join(d, "job.json"),
                 {"kind": kind, "model": m["id"], "selection": sel, "setup_mode": setup_mode,
                  "previous": p["profile"]["current"], "ports": p["ports"],
-                 "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model")})
+                 "on_disk": p["profile"]["on_disk"], "smoke_model": p.get("smoke_model"),
+                 "remove_after": remove_after or []})
     _write_json(os.path.join(d, "state.json"), job)
     return job
 
@@ -1120,7 +1129,26 @@ class Runner:
             f"; {len(failed)} tool{'s' if len(failed) != 1 else ''} did not load" if failed else ""))
         self.job["message"] = " ".join([f"{sel['profile']} is live on port {new_port}.", *failed])
         self._drop_marker_copy()
+        self._remove_after(sel["profile"])
         return True
+
+    def _remove_after(self, live: str) -> None:
+        """SRV-560: the weights the user chose to remove with this switch, now that the new setup
+        answers: never the live profile's; a refusal is a note, the install is done either way."""
+        want = [p for p in self.spec.get("remove_after") or [] if p != live]
+        if not want:
+            return
+        from server.setup import remove as remove_mod
+        try:
+            r = remove_mod.remove(want, setup_mode=False, root=ROOT)
+        except remove_mod.RemoveError as exc:
+            self.job.setdefault("notes", []).append(f"The old weights were not removed: {exc}")
+            self.log(f"[remove] not removed: {exc}")
+            return
+        self.job["removed"] = r
+        for g in r["removed"]:
+            self.log(f"[remove] {g['profile']}: {g['dir']} removed ({g['gb']:g} GB); the line that "
+                     f"downloads it again is in {r['log']}")
 
     def _roles(self, m: dict, sel: dict, port: int) -> tuple[list[str], list[str]]:
         """VIS-153: the tools the selection turns on that run a model of their own, as the new

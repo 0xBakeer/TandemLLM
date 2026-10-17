@@ -6,6 +6,10 @@ dashboard/src/api/types.ts `Setup*`).
     GET  /v1/setup/models/{id}/steps      the step schema and the tool definitions Wren is given
     GET  /v1/setup/models/{id}/current    what the box runs now, as a selection (the wizard's seed)
     GET  /v1/setup/device                 the box, read only (memory, GPU, disk, profiles on disk)
+    GET  /v1/setup/weights                the weights on the box with their sizes, the running one marked,
+                                          the shared assets apart (SRV-560)
+    POST /v1/setup/remove {profiles, confirm, dry_run?}   those profiles' weights removed, never the
+                                          running one's; run/weights-removed.txt says how to get them back
     GET  /v1/setup/status                 the engine, the running (or newest) setup job and its step n of
                                           N; the status responder answers it while the engine
                                           restarts, with the load's progress (OPS-175)
@@ -188,6 +192,10 @@ def _get(h, app, parts: list[str]) -> None:
         return diagnostics_route(h, parts[1])
     if parts == ["status"]:
         return h._json(200, setup_status(app), extra_headers=NO_STORE)
+    if parts == ["weights"]:
+        from server.setup import remove
+        return h._json(200, dict(remove.installed(setup_mode=bool(app.STATE.get("setup_mode"))),
+                                 contract_version=CONTRACT), extra_headers=NO_STORE)
     if parts == ["reset"]:
         from server.setup import reset
         return h._json(200, reset.levels(app, busy(app)), extra_headers=NO_STORE)
@@ -263,6 +271,8 @@ def _post(h, app, parts: list[str], body) -> None:
         return reset_route(h, app, body)
     if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "retry":
         return retry_route(h, app, parts[1])
+    if parts == ["remove"]:
+        return remove_route(h, app, body)
     if parts == ["assistant", "load"]:
         return h._json(200, wren_of(app).load(), extra_headers=NO_STORE)
     if parts == ["assistant", "unload"]:
@@ -305,13 +315,16 @@ def apply_route(h, app, which: str, body) -> None:
     if not isinstance(body, dict):
         return _err(h, 422, "invalid_selection", "the body must be a JSON object")
     if which == "apply":
-        extra = sorted(k for k in body if k not in ("selection", "dry_run"))
+        extra = sorted(k for k in body if k not in ("selection", "dry_run", "remove_after"))
         if extra:
             return _err(h, 422, "unknown_field", f"unknown field {extra[0]!r}; apply takes "
-                        f"selection and dry_run", errors=[{"field": k, "reason": "unknown"}
-                                                         for k in extra])
+                        f"selection, dry_run and remove_after", errors=[{"field": k, "reason": "unknown"}
+                                                                        for k in extra])
         if not isinstance(body.get("dry_run", False), bool):
             return _err(h, 422, "invalid_selection", "dry_run: true or false")
+        ra = body.get("remove_after", [])
+        if not isinstance(ra, list) or not all(isinstance(x, str) and apply.profile_ok(x) for x in ra):
+            return _err(h, 422, "invalid_selection", "remove_after: a list of this box's profile ids")
     sel_body = body.get("selection", body if which == "plan" else None)
     m = selection_model(sel_body)
     sel = estimate_mod.check(m, sel_body)
@@ -324,7 +337,8 @@ def apply_route(h, app, which: str, body) -> None:
                    mem_total_gb=mem.get("MemTotal"))
     if which == "plan" or body.get("dry_run"):
         return h._json(200, dict(p, dry_run=which == "apply"), extra_headers=NO_STORE)
-    return _launch(h, app, m, sel, p, setup_mode=setup_mode)
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode,
+                   remove_after=[x for x in body.get("remove_after", []) if x != sel["profile"]])
 
 
 def retry_route(h, app, jid: str) -> None:
@@ -353,7 +367,33 @@ def retry_route(h, app, jid: str) -> None:
                        password_set=bool(getattr(app.STATE.get("auth"), "password_set", False)),
                        available_gb=round(mem["MemAvailable"], 2) if "MemAvailable" in mem else None,
                        mem_total_gb=mem.get("MemTotal"))
-    return _launch(h, app, m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=jid)
+    return _launch(h, app, m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=jid,
+                   remove_after=spec.get("remove_after") or [])
+
+
+def remove_route(h, app, body) -> None:
+    """POST /v1/setup/remove {profiles, confirm: true, dry_run?} (SRV-560): the chosen profiles'
+    weights, never the running one; refused while a setup job runs."""
+    from server.setup import apply, remove
+    if not isinstance(body, dict) or sorted(set(body) - {"profiles", "confirm", "dry_run"}):
+        return _err(h, 422, "invalid_request", "remove takes profiles, confirm and dry_run")
+    dry = body.get("dry_run") is True
+    if not dry and body.get("confirm") is not True:
+        return _err(h, 422, "confirm_required", "confirm: true removes the weights (dry_run: true shows "
+                                                "what would go)")
+    run = apply.running_job()
+    if run is not None:
+        return _err(h, 409, "job_running", f"job {run['id']} runs; remove when it is done", job=run["id"])
+    try:
+        with _JOB_LOCK:
+            out = remove.remove(body.get("profiles"), setup_mode=bool(app.STATE.get("setup_mode")),
+                                root=apply.ROOT, dry_run=dry)
+    except remove.RemoveError as exc:
+        return _err(h, exc.status, exc.code, str(exc))
+    if not dry:
+        print(f"[setup] removed {', '.join(g['profile'] for g in out['removed'])}: {out['freed_gb']:g} GB",
+              flush=True)
+    return h._json(200, dict(out, contract_version=CONTRACT), extra_headers=NO_STORE)
 
 
 def diagnostics_route(h, jid: str) -> None:
@@ -373,7 +413,7 @@ def diagnostics_route(h, jid: str) -> None:
 
 
 def _launch(h, app, m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str = "apply",
-            retry_of: str | None = None) -> None:
+            retry_of: str | None = None, remove_after: list[str] | None = None) -> None:
     """A job from a checked plan: refused while requests run (409 busy), when the plan has an
     error, or while another job runs (409 job_running); else Wren unloaded, the runner spawned,
     202 and the job."""
@@ -394,7 +434,8 @@ def _launch(h, app, m: dict, sel: dict, p: dict, *, setup_mode: bool, kind: str 
             return _err(h, 409, "job_running", f"job {run['id']} runs; one setup job at a time",
                         job=run["id"])
         wren_of(app).unload("apply")
-        job = apply.new_job(m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=retry_of)
+        job = apply.new_job(m, sel, p, setup_mode=setup_mode, kind=kind, retry_of=retry_of,
+                            remove_after=remove_after)
         apply.spawn(job["id"])
     print(f"[setup] {kind} job {job['id']}: {sel['profile']}, {len(p['changes'])} settings, "
           f"started" + (f" (a retry of {retry_of})" if retry_of else ""), flush=True)
