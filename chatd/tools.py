@@ -249,6 +249,34 @@ CONSOLE_NOISE = "source: chrome://|Automatic fallback to software WebGL|GL Drive
 _CONSOLE_HEAD = re.compile(r"^\[[\d:./]+:[A-Z]+:CONSOLE(?:\((\d+)\)|:(\d+))?\]\s*")
 
 
+#: what the check browser can draw with, read in the rendered page (the kit's page check): live
+#: (2026-10-17, chat 01M556JVWDQVDCAMBMVFZCT7XF) a WebGPU ocean with a WebGL2 fallback was only
+#: ever checked on its fallback (every screenshot said "WebGL2") while Safari ran its WebGPU path
+#: and drew black, and render_page said "no console errors". Measured on the box the same day
+#: (Chromium 155, the sandbox image, its limits): with --enable-unsafe-webgpu and SwiftShader's
+#: Vulkan (--enable-features=Vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader)
+#: an adapter comes and draws offscreen, but no canvas presents it (no shared-image backing for a
+#: WebGPU swap chain in headless mode: a clear to red screenshots black), so the check browser
+#: runs without WebGPU and says so
+GRAPHICS_PROBE = ("(async () => { let gpu = 'none'; try { if (navigator.gpu) gpu = "
+                  "(await navigator.gpu.requestAdapter()) ? 'adapter' : 'no adapter'; } "
+                  "catch (e) { gpu = 'error'; } let gl = false; try { gl = "
+                  "!!document.createElement('canvas').getContext('webgl2'); } catch (e) {} "
+                  "return gpu + ' ' + gl; })()")
+NO_WEBGPU = "a page with a WebGPU path was not checked on it"
+
+
+def graphics_words(probe: str | None) -> str:
+    """The graphics APIs line of a render: the probe's answer (`GRAPHICS_PROBE`), or for a render
+    without one (Chromium's screenshot mode, --disable-gpu) what that mode was measured to have."""
+    gpu, _, gl = (probe or "none true").rpartition(" ")
+    if gpu == "adapter":
+        return "WebGPU and " + ("WebGL2" if gl == "true" else "no WebGL2") + \
+            " in the check browser"
+    return ("WebGPU: not available in the check browser (" +
+            ("WebGL2 only" if gl == "true" else "no WebGL2 either") + f"): {NO_WEBGPU}")
+
+
 def console_line(line: str) -> str:
     """`[86:86:1016/215118.672506:INFO:CONSOLE:422] "msg", source: url (422)` -> `"msg",
     source: url (422)`: the page's message, without Chromium's process, thread and clock."""
@@ -321,6 +349,7 @@ def _render(ctx, a):
     if code.isdigit() and not 200 <= int(code) < 400:
         msg += (f"the server answered HTTP {code} for {url}: the screenshot is its error page, not "
                 f"the app\n")
+    msg += graphics_words(None) + "\n"
     msg += ("console:\n" + "\n".join(errors[:40])) if errors else "no console errors"
     return Result(msg, images=[("image/png", png)],
                   pane={"kind": "image", "ref": f"file:{shot}", "title": "screenshot"})
@@ -376,7 +405,8 @@ def _render_kit(ctx, url: str, w: int, port: int | None = None, cwd: str = "") -
     from chatd import verify
     shots = f"/workspace/{SHOTS_DIR}/{ctx.call_id}"
     cmd = (f"cd /workspace && python3 {verify.KIT_IN_BOX} page {shlex.quote(url)} --no-laya "
-           f"--widths {w} --shots {shots} --timeout 60")
+           f"--widths {w} --shots {shots} --timeout 60 "
+           f"--step {shlex.quote('read:' + GRAPHICS_PROBE)}")
     mark = len(ctx.output_text())
     ctx.exec(["bash", "-lc", cmd], timeout=90, quiet=True)
     out = ctx.output_text()[mark:]
@@ -398,6 +428,9 @@ def _render_kit(ctx, url: str, w: int, port: int | None = None, cwd: str = "") -
     text = (((rep.get("widths") or [{}])[0]).get("text") or "").strip()
     if text:
         msg += f'visible text: "{text[:200]}"\n'
+    probe = next((st.get("value") for st in rep.get("steps") or []
+                  if str(st.get("step") or "").startswith("read:") and st.get("ok")), None)
+    msg += graphics_words(probe if isinstance(probe, str) else None) + "\n"
     msg += ("console errors, exceptions and failed loads:\n" + "\n".join(errors[:40])) \
         if errors else "no console errors and no failed loads"
     return Result(msg, images=[("image/png", png)],
