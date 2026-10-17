@@ -1563,10 +1563,39 @@ export interface SetupJob {
    *  have neither) */
   model?: string;
   summary?: SetupJobSummary;
+  /** SRV-560: the old weights the job removed after the switch */
+  removed?: SetupRemoveResult;
   /** VIS-213: the job this one tries again */
   retry_of?: string | null;
   /** OPS-171: tandem doctor's report from the check step (and what it repaired after a failure) */
   doctor?: { repaired?: string[]; problems?: string[] };
+}
+/** GET /v1/setup/weights (SRV-560): the weights on the box */
+export interface SetupInstalledWeights {
+  weights: {
+    model: string;
+    model_name: string;
+    profile: string;
+    label: string;
+    dir: string;
+    removes: string;
+    gb: number;
+    active: boolean;
+    removable: boolean;
+    shared_with: string[];
+    hf_repo?: string | null;
+    hf_revision?: string | null;
+  }[];
+  assets: { id: string; label: string; model: string; path: string; gb: number; used_by: string[] }[];
+  active: string | null;
+  free_gb: number | null;
+}
+/** POST /v1/setup/remove (SRV-560) */
+export interface SetupRemoveResult {
+  removed: { profile: string; dir: string; gb: number }[];
+  freed_gb: number;
+  log?: string;
+  dry_run?: boolean;
 }
 export interface SetupJobSummary {
   model: string;
@@ -1581,6 +1610,8 @@ export interface SetupJobSummary {
 /** POST /v1/setup/apply {selection} -> 202 {job}; 409 while a job runs or requests are in flight. */
 export interface SetupApplyRequest {
   selection: SetupSelection;
+  /** SRV-560: profiles whose weights go once the new setup answers (never the new one) */
+  remove_after?: string[];
   /** 1.0+: answer the plan (SetupPlan, dry_run true) and change nothing */
   dry_run?: boolean;
 }

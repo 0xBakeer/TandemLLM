@@ -4216,3 +4216,93 @@ qse-wren-figure::before {
     min-height: 44px;
   }
 }
+
+/* VIS-215: the weights on this box */
+.iw {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.iw-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.iw-title {
+  font-size: var(--fs-md, 1rem);
+  font-weight: 600;
+  margin: 0;
+}
+.iw-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.iw-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  background: var(--bg-2);
+}
+.iw-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.iw-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.iw-ask {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+.iw-ask-t {
+  margin: 0;
+  font-weight: 600;
+}
+.iw-ask code {
+  overflow-wrap: anywhere;
+}
+.iw .btn-danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: var(--ink-inverse);
+}
+.iw-done {
+  color: var(--ok);
+  margin: 0;
+}
+.rv-remove-after {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 8px;
+}
+@media (max-width: 768px) {
+  .iw-row {
+    grid-template-columns: 1fr auto;
+  }
+  .iw-row > .btn,
+  .iw-row > .sbadge {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+  .iw-ask .btn {
+    min-height: 44px;
+  }
+}

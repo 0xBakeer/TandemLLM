@@ -110,6 +110,7 @@ export function finishedLines(job: SetupJob, tok: (n: number) => string): { titl
         : `${s.slots} chat at a time, ${tok(s.window)} tokens`,
     );
   if (job.ended_at && job.created_at) lines.push(`Took ${durationText(job.ended_at - job.created_at)}`);
+  if (job.removed?.removed.length) lines.push(`The old weights were removed: ${job.removed.freed_gb.toFixed(1)} GB freed`);
   return { title: job.kind === 'reset' ? 'The shipped configuration is ready' : `${model} is ready`, lines };
 }
 

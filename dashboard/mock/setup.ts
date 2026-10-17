@@ -769,6 +769,21 @@ export class MockSetup {
       return MODELS.some((x) => x.id === id) ? json(200, { contract_version: '1.0', model: id, selection: { model: id }, unmatched: [] }) : err(404, 'not_found', `no model ${mc[1]}`);
     }
     if (path === '/v1/setup/device') return json(200, this.device());
+    // SRV-560: the weights on the box (the mock's onDisk) and removing one
+    if (path === '/v1/setup/weights') {
+      const gb: Record<string, number> = { 'exl3-4.0': 16.1, 'exl3-4.5': 18.4, 'exl3-6.0': 23.3, nvfp4: 14, 'exl3-2.5': 10.3, 'exl3-3.0': 12, 'exl3-3.5': 14 };
+      const weights = Object.entries(this.onDisk)
+        .filter(([, on]) => on)
+        .map(([id]) => ({ model: MODEL.id, model_name: MODEL.name, profile: id, label: MODEL.profiles.find((p) => p.id === id)?.label ?? id, dir: `~/exl3-quants/${id}`, removes: `~/exl3-quants/${id}`, gb: gb[id] ?? 10, active: id === o.active, removable: id !== o.active, shared_with: [] }));
+      return json(200, { contract_version: '1.0', weights, assets: [], active: o.active, free_gb: 412 });
+    }
+    if (path === '/v1/setup/remove' && method === 'POST') {
+      const ids = (body.profiles ?? []) as string[];
+      if (ids.includes(o.active)) return err(409, 'active_profile', `${o.active} is the running setup`);
+      if (body.confirm !== true) return err(422, 'confirm_required', 'confirm: true removes the weights');
+      for (const id of ids) this.onDisk[id] = false;
+      return json(200, { contract_version: '1.0', removed: ids.map((id) => ({ profile: id, dir: `~/exl3-quants/${id}`, gb: 18.4 })), freed_gb: 18.4 * ids.length, log: 'run/weights-removed.txt' });
+    }
     const refuse = (e: unknown) => (e instanceof SelectionError ? err(e.status, e.code, e.message) : err(500, 'internal_error', String(e)));
     if (path === '/v1/setup/estimate' && method === 'POST') {
       if (o.estimateDown) return err(500, 'internal_error', 'estimate failed');
@@ -789,7 +804,7 @@ export class MockSetup {
       }
     }
     if (path === '/v1/setup/apply' && method === 'POST') {
-      const extra = Object.keys(body).filter((k) => k !== 'selection' && k !== 'dry_run');
+      const extra = Object.keys(body).filter((k) => k !== 'selection' && k !== 'dry_run' && k !== 'remove_after');
       if (extra.length) return err(422, 'unknown_field', `unknown field '${extra[0]}'; apply takes selection and dry_run`);
       let sel: SetupSelection;
       try {

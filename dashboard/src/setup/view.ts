@@ -27,6 +27,7 @@ import { estimateLoose as localEstimate, overBy, profileOf } from './estimate';
 import { fieldError, isStepId, STEP_IDS, stepIndex } from './fields';
 import { MINI_WREN, reducedMotion } from './figure';
 import './install';
+import './installed';
 import { changeText } from './job-view';
 import './measure-table';
 import './memory-bar';
@@ -60,6 +61,8 @@ export class QseSetup extends LightElement {
   @state() private plan: Loadable<SetupPlan> | null = null;
   @state() private confirmOpen = false;
   @state() private applying = false;
+  /** SRV-560 / VIS-215: the running profile's weights go after the switch (the review's checkbox) */
+  @state() private removeAfter = false;
   @state() private applyError: string | null = null;
   @state() private jobInitial: SetupJob | null = null;
   @state() private previousProfile: string | null = null;
@@ -471,7 +474,8 @@ export class QseSetup extends LightElement {
     this.querySelector<QseWren>('qse-wren')?.sleepForInstall();
     const selection: SetupSelection = sel;
     try {
-      const res = await setupApi.apply({ selection });
+      const old = this.device?.active_profile;
+      const res = await setupApi.apply({ selection, ...(this.removeAfter && old && old !== selection.profile ? { remove_after: [old] } : {}) });
       this.jobInitial = res.job;
       this.confirmOpen = false;
       this.dispatch({ type: 'job', id: res.job.id });
@@ -784,7 +788,8 @@ export class QseSetup extends LightElement {
       </div>
       ${communityProfiles(m).length || m.community
         ? html`<qse-community .model=${m} .sync=${m.community_sync ?? null} .selected=${sel.profile} .device=${dev} .syncing=${this.communitySyncing} .onUse=${(id: string) => this.user('weights', 'profile', { type: 'profile', id })} .onRefresh=${() => void this.syncCommunity()}></qse-community>`
-        : nothing}`;
+        : nothing}
+      <qse-installed-weights @weights-removed=${() => void this.loadDevice()}></qse-installed-weights>`;
   }
 
   /** VIS-175: the weights' Hugging Face repository as owner/name, linked, and who made them */
@@ -1119,6 +1124,10 @@ export class QseSetup extends LightElement {
           ? html`<ul class="rv-downloads" data-review-downloads>${ready.downloads.map((d) => html`<li data-download=${d.id}><span>${d.label}</span> <span class="muted small">${d.for}</span> <span class="num">${d.gb.toFixed(2)} GB</span></li>`)}</ul>`
           : nothing}
         ${ready ? html`<p class="muted small">${ready.restart ? S.reviewRestart : S.reviewNoRestart}</p>` : nothing}
+        ${dev?.active_profile && dev.active_profile !== prof.id && dev.profiles_on_disk?.[dev.active_profile]
+          ? html`<label class="rv-remove-after" data-remove-after><input type="checkbox" .checked=${this.removeAfter} @change=${(e: Event) => (this.removeAfter = (e.target as HTMLInputElement).checked)} />
+              <span>${S.removeAfter(m.profiles.find((p) => p.id === dev.active_profile)?.label ?? dev.active_profile)}</span></label>`
+          : nothing}
       </section>
 
       <section class="rv-card rv-changes">
