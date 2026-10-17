@@ -20,8 +20,9 @@ The test matrix, the Gherkin of OPS-173 and OPS-175:
      and /v1/setup/status's step n of N               test_the_load_progress, test_the_setup_status
   5  the server answers /v1/setup/status in the same shape while it runs
                                                      test_the_server_answers_the_same_shape
-  6  an installed box has a responder: install.sh writes QSE_STATUS_PORT = the API port + 9
-                                                     test_an_install_sets_the_status_port
+  6  an installed box has a responder: install.sh writes QSE_STATUS_PORT = the API port + 9; the
+     dashboard's CSP lets the page ask it                  test_an_install_sets_the_status_port,
+                                                           test_the_page_may_ask_the_responder
 
 Run: python tests/test_status_restart.py   (1's socket lookup and 6 need Linux)
 """
@@ -60,6 +61,14 @@ def _get(url: str, accept: str | None = None, timeout: float = 5):
     req = urllib.request.Request(url, headers={"Accept": accept} if accept else {})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, dict(r.headers), r.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read().decode()
+
+
+def _get_m(url: str, method: str):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method=method), timeout=5) as r:
             return r.status, dict(r.headers), r.read().decode()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers), exc.read().decode()
@@ -249,6 +258,12 @@ def test_the_job_through_the_responder():
         st, _, body = _get(f"http://127.0.0.1:{port}/v1/setup/jobs/0123456789abcdef?after=5", "text/event-stream")
         heads = [f.split("\n")[0] for f in body.strip().split("\n\n")]
         assert len(heads) == 2 and heads[0].startswith('data: {"type": "job"') and heads[1] == "id: 6", heads
+        # a browser's preflight on a read-only route: allowed from any origin; on a chat route: not
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/setup/status", method="OPTIONS")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 204 and r.headers["Access-Control-Allow-Origin"] == "*"
+        st, h, _ = _get_m(f"http://127.0.0.1:{port}/v1/chat/completions", "OPTIONS")
+        assert st == 503 and "Access-Control-Allow-Origin" not in h
         # the identity and /health answer any origin; a chat request does not
         assert _get(f"http://127.0.0.1:{port}/health")[1].get("Access-Control-Allow-Origin") == "*"
         assert "Access-Control-Allow-Origin" not in _get(f"http://127.0.0.1:{port}/v1/chat/completions")[1]
@@ -345,6 +360,22 @@ def test_the_server_answers_the_same_shape():
     r = ES.setup_status(t, engine={"state": "starting"})
     assert set(s) - {"contract_version"} == set(r), (sorted(s), sorted(r))
     assert s["engine"]["state"] == "up" and s["load"] is None and s["job"]["id"] == "0123456789abcdef"
+
+
+def test_the_page_may_ask_the_responder():
+    """The dashboard's CSP lets the page ask the status responder's port (VIS-209), only with one."""
+    from server import static
+    old = os.environ.pop("QSE_STATUS_PORT", None)
+    try:
+        assert "connect-src 'self';" in static.csp_for(b"<html></html>")
+        os.environ["QSE_STATUS_PORT"] = "8009"
+        assert "connect-src 'self' http://*:8009;" in static.csp_for(b"<html></html>")
+        os.environ["QSE_STATUS_PORT"] = "8009; script-src *"
+        assert "script-src *" not in static.csp_for(b"<html></html>")
+    finally:
+        os.environ.pop("QSE_STATUS_PORT", None)
+        if old is not None:
+            os.environ["QSE_STATUS_PORT"] = old
 
 
 def test_an_install_sets_the_status_port():

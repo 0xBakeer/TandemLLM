@@ -35,7 +35,7 @@ describe('VIS-209: one restart status card', () => {
     const t0 = 1760678100_000;
     const m = cardModel(RUNNING, STATUS, t0 + 120_000, t0);
     expect(m.title).toBe('Restarting the engine with Qwen3.8-27B');
-    expect(m.step).toBe('Step 6 of 7: Restart the engine with the new setup');
+    expect(m.step).toBe('Restart the engine with the new setup · install step 6 of 7');
     expect(m.phases.find((p) => p.current)?.id).toBe('warmup');
     expect(m.elapsed).toBe('2 min');
     expect(m.left).toBe('about 2 min left');
@@ -57,7 +57,7 @@ describe('VIS-209: one restart status card', () => {
   it('a rollback says it goes back', () => {
     const j = job({ switch: 'failed', rollback: 'running' });
     expect(cardModel(j, null, 0, 0).title).toBe('Going back to the previous setup');
-    expect(cardModel(j, null, 0, 0).step).toBe('Step 8 of 8: rollback');
+    expect(cardModel(j, null, 0, 0).step).toBe('rollback · install step 8 of 8');
   });
 
   it('which jobs are in their restart', () => {

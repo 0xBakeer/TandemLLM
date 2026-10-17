@@ -106,7 +106,7 @@ export function finishedLines(job: SetupJob, tok: (n: number) => string): { titl
   if (s?.slots != null && s.window != null)
     lines.push(
       s.slots > 1 && s.side_window != null
-        ? `${s.slots} parallel chats: ${tok(s.window)} tokens for the first, ${tok(s.side_window)} for each other`
+        ? `${s.slots} parallel chats: ${tok(s.window)} tokens for the first, ${tok(s.side_window)} for each of the other ${s.slots - 1}`
         : `${s.slots} chat at a time, ${tok(s.window)} tokens`,
     );
   if (job.ended_at && job.created_at) lines.push(`Took ${durationText(job.ended_at - job.created_at)}`);

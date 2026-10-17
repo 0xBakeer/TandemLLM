@@ -93,7 +93,10 @@ export function statusUrls(apiBase: string, loc: { protocol: string; hostname: s
 export async function fetchStatus(urls: string[], fetchImpl: typeof fetch = fetch): Promise<SetupStatus | null> {
   for (const u of urls) {
     try {
-      const r = await fetchImpl(u, { cache: 'no-store', credentials: u.startsWith('http') ? 'omit' : 'same-origin' });
+      // another origin (the responder's own port): a simple request, no preflight; the time in the
+      // query keeps a cache out of it
+      const cross = u.startsWith('http');
+      const r = await fetchImpl(cross ? `${u}?t=${Date.now()}` : u, cross ? { credentials: 'omit', mode: 'cors' } : { cache: 'no-store', credentials: 'same-origin' });
       if (!r.ok) continue;
       const j = (await r.json()) as SetupStatus;
       if (j && typeof j === 'object' && 'job' in j && 'engine' in j) return j;
@@ -131,7 +134,8 @@ export function cardModel(job: SetupJob | null, st: SetupStatus | null, now: num
   const model = job?.summary?.model ?? st?.job?.summary?.model ?? job?.profile ?? st?.job?.profile ?? 'the new setup';
   const steps = (job?.steps ?? []).filter((s) => s.id !== 'rollback' || (s.state !== 'pending' && s.state !== 'skipped'));
   const cur: SetupJobStep | undefined = steps.find((s) => s.state === 'running' || s.state === 'waiting');
-  const step = cur ? `Step ${steps.indexOf(cur) + 1} of ${steps.length}: ${cur.label}` : st?.job?.step ? `Step ${st.job.step.index} of ${st.job.step.total}: ${st.job.step.label}` : null;
+  // the install's own steps, not the guide's (the page's header counts those)
+  const step = cur ? `${cur.label} · install step ${steps.indexOf(cur) + 1} of ${steps.length}` : st?.job?.step ? `${st.job.step.label} · install step ${st.job.step.index} of ${st.job.step.total}` : null;
   const typical = st?.engine?.typical_start_s ?? 300;
   const elapsedS = Math.max(0, (now - since) / 1000);
   const phases = (st?.load?.phases ?? []).map((p) => ({ ...p, current: p.id === st?.load?.current }));

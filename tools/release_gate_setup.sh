@@ -247,6 +247,8 @@ start_setup_mode() {
     cmd env -i "${ENVS[@]}" bash "$DIR/bin/tandem" start || return 1
     check "setup mode answers /health with mode setup" bash -c \
         "curl -s -m 5 http://127.0.0.1:$PORT/health | grep -q '\"mode\": \"setup\"'"
+    check "setup mode's /health names the status responder's port $((PORT + 9))" bash -c \
+        "curl -s -m 5 http://127.0.0.1:$PORT/health | grep -q '\"status_port\": $((PORT + 9))'"
 }
 verify_live() {
     check "the job ended done" test "$1" = done
@@ -268,9 +270,11 @@ if install_box a "$PORT" && start_setup_mode; then
         PW="$HOME/.cache/tandem-gate-pw"
         mkdir -p "$PW" "$OUT/shots"
         cp "$SRC_TREE/dashboard/e2e/setup-gate.spec.ts" "$SRC_TREE/dashboard/playwright.gate.config.ts" "$PW/"
-        [ -d "$PW/node_modules/@playwright/test" ] || cmd docker run --rm --network host -v "$PW:/work" -w /work \
+        # as this user, so every file it writes is this user's (the report, the cache), HOME a scratch
+        DU=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+        [ -d "$PW/node_modules/@playwright/test" ] || cmd docker run --rm "${DU[@]}" --network host -v "$PW:/work" -w /work \
             mcr.microsoft.com/playwright:v1.63.0-noble npm install --no-save --no-audit --no-fund @playwright/test@1.63.0
-        cmd docker run --rm --network host --ipc=host -v "$PW:/work" -v "$OUT/shots:/shots" -w /work \
+        cmd docker run --rm "${DU[@]}" --network host --ipc=host -v "$PW:/work" -v "$OUT/shots:/shots" -w /work \
             -e GATE_URL="http://127.0.0.1:$PORT" -e GATE_SELECTION="$(selection)" -e GATE_SHOTS=/shots \
             mcr.microsoft.com/playwright:v1.63.0-noble npx playwright test -c playwright.gate.config.ts
         PWRC=$?

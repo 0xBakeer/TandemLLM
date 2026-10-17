@@ -564,6 +564,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = _answer
 
     def do_OPTIONS(self):
+        # OPS-175: a page on the engine's port asks the read-only routes from another origin; a
+        # browser may check first (a preflight)
+        path = self.path.split("?")[0]
+        if path in ("/health", "/_tandem/status", "/v1/setup/status") or path.startswith("/v1/setup/jobs/"):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self._answer()
 
     def log_message(self, *a):

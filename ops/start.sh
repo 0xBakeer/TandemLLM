@@ -130,7 +130,9 @@ if [ "$SETUP" = "1" ]; then
     echo "[start] setup mode: pid $(cat "$PIDFILE"), log $LOG"
     for i in $(seq 1 60); do
         if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-            status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"
+            # no --took-s: setup mode loads no model, and its 2 s would make the next model's
+            # restart screen promise "any moment now" (the typical start is the median of these)
+            status up --engine-port "$PORT"
             echo "[start] setup mode answers on $SETUP_HOST:$PORT after $(( $(date +%s) - T_START )) s:" \
                  "open http://<this box>:$PORT/dashboard/#/setup"
             exit 0
@@ -240,9 +242,11 @@ setsid nohup "$PY" -u server/app.py \
 echo $! > "$PIDFILE"
 ln -sfn "$LOG" "$LOGS/engine.log"
 echo "[start] pid $(cat "$PIDFILE"), log $LOG"
-for i in $(seq 1 60); do
+# every 2 s (it was every 10 s: an install's job waited up to 10 s more for an engine that answered,
+# VIS-211), 600 s in all
+for i in $(seq 1 300); do
     if curl -sf -m 3 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-        echo "[start] healthy after ${i}0s"
+        echo "[start] healthy after $(( $(date +%s) - T_START ))s"
         status up --took-s "$(( $(date +%s) - T_START ))" --engine-port "$PORT"   # OPS-67: keeps the model list
         # the weights are on the device now and nothing reads their files
         # again, but their page cache is ~52 GB of the board, counted as available and not given
@@ -281,7 +285,7 @@ for i in $(seq 1 60); do
         start_chatd
         exit 0
     fi
-    sleep 10
+    sleep 2
 done
 status failed --reason "the engine did not answer /health within 600 s"
 echo "[start] FAILED to become healthy in 600s; tail of $LOG:"; tail -20 "$LOG"; exit 1

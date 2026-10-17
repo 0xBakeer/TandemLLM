@@ -2294,6 +2294,9 @@ a.ccard-license:hover {
   align-items: center;
   gap: 12px;
 }
+.inst-head[hidden] {
+  display: none;
+}
 .inst-badge {
   display: grid;
   place-items: center;

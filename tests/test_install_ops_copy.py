@@ -142,15 +142,24 @@ def test_a_start_runs_roles_sh():
         assert "[roles] none to load" in out, out
     finally:
         _stop(box, env)
-    # the negative control: without run/ops/roles.sh the old message is back
+    # the negative control: start.sh without run/ops/roles.sh has the old message back
     os.rename(os.path.join(ops, "roles.sh"), os.path.join(ops, "roles.sh.away"))
     try:
-        r = I.tandem(box, env, "start")
+        r = subprocess.run(["bash", os.path.join(ops, "start.sh")], capture_output=True, text=True, env=env,
+                           timeout=120, stdin=subprocess.DEVNULL)
         out = r.stdout + r.stderr
         assert "roles.sh: No such file or directory" in out and "[start] a role did not load" in out, out
     finally:
         _stop(box, env)
-        os.rename(os.path.join(ops, "roles.sh.away"), os.path.join(ops, "roles.sh"))
+    # and tandem start puts it back first (OPS-171: tandem doctor copies a missing run/ops script)
+    try:
+        r = I.tandem(box, env, "start")
+        out = r.stdout + r.stderr
+        assert "[doctor] repaired: run/ops/roles.sh was missing: copied from src/ops" in out, out
+        assert "No such file or directory" not in out and os.path.exists(os.path.join(ops, "roles.sh")), out
+    finally:
+        _stop(box, env)
+        os.unlink(os.path.join(ops, "roles.sh.away"))
 
 
 def test_the_watchdog_on_an_installed_box():

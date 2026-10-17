@@ -25,13 +25,22 @@ test('an install: the restart card while the engine restarts, then the finished 
       localStorage.setItem('tandem.setup.v1', JSON.stringify({ v: 1, model, step: 'install', selection, visited: ['models', 'install'], chat: [], updatedAt: Date.now(), job: id })),
     [sel.model, { ...cur.selection, ...sel }, job.id],
   );
+  // a new document reads the saved state (the open one keeps its own and would write it back on
+  // the hash change)
+  await page.goto('about:blank');
   await page.goto(`${URL}/dashboard/#/setup/${sel.model}/install`);
+  // the page knows where the status responder is (OPS-175: /health's status_port, kept for the restart)
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('tandem.statusPort')), { timeout: 15_000 }).not.toBeNull();
   // the restart: one card, no raw errors
   const card = page.locator('[data-restart-card]');
   await expect(card).toBeVisible({ timeout: 120_000 });
   await expect(card).toContainText('Restarting the engine with');
   await page.waitForTimeout(3000);
   await page.screenshot({ path: `${SHOTS}/restart-card-390.png`, fullPage: true });
+  // fed by the status responder: the load's phases, not the time alone
+  await expect(card).toHaveAttribute('data-blind', 'no', { timeout: 20_000 });
+  await expect(page.locator('.rcard-phase').first()).toBeVisible();
+  await page.screenshot({ path: `${SHOTS}/restart-card-phases-390.png`, fullPage: true });
   await expect(page.locator('text=Could not load')).toHaveCount(0);
   await expect(page.locator('[data-update]')).toHaveCount(0);
   // the engine answers again: the finished screen within 10 s

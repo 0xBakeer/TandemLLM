@@ -11,7 +11,8 @@ the admin token or the session, so the files themselves are public.
     GET /dashboard/<route>    index.html again (the app routes on the client)
 
 Fixed content types, `X-Content-Type-Options: nosniff`, the CSP of the dashboard design
-(`default-src 'self'; connect-src 'self'; img-src 'self' data:`), and no path outside the
+(`default-src 'self'; connect-src 'self'; img-src 'self' data:`; with QSE_STATUS_PORT the status
+responder's port on any host joins connect-src, OPS-175), and no path outside the
 directory: `..`, an absolute path or a symlink out of it is a 404. With no `dist/` at all, a
 one-paragraph placeholder says how to build it.
 """
@@ -116,7 +117,16 @@ def csp_for(html: bytes) -> str:
     import hashlib
     hashes = [f"'sha256-{base64.b64encode(hashlib.sha256(m).digest()).decode()}'"
               for m in _INLINE.findall(html)]
-    return f"{CSP}; script-src 'self'{''.join(' ' + h for h in hashes)}; {STYLE_SRC}"
+    return f"{policy()}; script-src 'self'{''.join(' ' + h for h in hashes)}; {STYLE_SRC}"
+
+
+def policy() -> str:
+    """The design's policy; with a status responder (QSE_STATUS_PORT, OPS-175) the page may also ask
+    it, on any host at that port, for the restart while this server is away (VIS-209)."""
+    port = os.environ.get("QSE_STATUS_PORT") or ""
+    if not port.isdigit():
+        return CSP
+    return CSP.replace("connect-src 'self'", f"connect-src 'self' http://*:{port}")
 
 
 def _send(handler, code: int, raw: bytes, ctype: str, cache: str | None = None,

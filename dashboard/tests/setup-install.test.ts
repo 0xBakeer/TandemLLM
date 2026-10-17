@@ -353,7 +353,7 @@ describe('VIS-211: the install page shows the job\'s true end', () => {
     };
     const f = finishedLines(j, (n) => `${n / 1024}k`);
     expect(f.title).toBe('Qwen3.8-27B is ready');
-    expect(f.lines).toEqual(['Weights: EXL3 6.0 bits', 'Tools: Laya decision models, Shadow reader', '4 parallel chats: 256k tokens for the first, 64k for each other', 'Took 3 min 19 s']);
+    expect(f.lines).toEqual(['Weights: EXL3 6.0 bits', 'Tools: Laya decision models, Shadow reader', '4 parallel chats: 256k tokens for the first, 64k for each of the other 3', 'Took 3 min 19 s']);
     // a job before 0.11.3: its profile alone
     expect(finishedLines({ ...DONE, ended_at: null }, String)).toEqual({ title: 'The new setup is ready', lines: ['Weights: exl3-6.0'] });
     expect(finishedLines({ ...DONE, kind: 'reset' }, String).title).toBe('The shipped configuration is ready');
