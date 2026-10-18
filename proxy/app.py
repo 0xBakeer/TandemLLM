@@ -234,6 +234,19 @@ class Handler(BaseHTTPRequestHandler):
             if not self._allowed("dashboard"):
                 return
             astate = STATE.get("args") or {}
+            if autodetect.wire_enabled(aenv):
+                # the only write this observer ever makes, and it is opt-in
+                # (TANDEM_AUTODETECT_WIRE=1). scan_cached is shared with handle()
+                # a line below — probes run once per cache window regardless of
+                # the extra call site.
+                try:
+                    d = autodetect.scan_cached(aenv, self_port=astate.get("port"))
+                    wired = autodetect.wire_llms(d, STATE["svc"].cfg,
+                                                 log=lambda m: print(m, flush=True))
+                    if wired:
+                        print(f"[autodetect] auto-wired {wired}", flush=True)
+                except Exception as e:
+                    print(f"[autodetect] wire pass failed (harmless): {e}", flush=True)
             return autodetect.handle(self, "GET", path, self.path, aenv,
                                      self_port=astate.get("port"))
         if path.startswith("/v1/conductor/"):

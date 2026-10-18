@@ -493,7 +493,7 @@ export class QseBackends extends LightElement {
         <a class="bk-card-title" href=${`#/backends?backend=${encodeURIComponent(b.id)}`}>${b.label}</a>
         <span class="pill bk-state is-${st}" data-state=${st}>${st}</span>
       </header>
-      <div class="bk-card-kind"><span class="badge">${KIND_LABEL[b.kind] ?? b.kind}</span>${b.cloud ? html`<span class="badge">cloud</span>` : nothing}${Object.keys(b.locks).length ? html`<span class="badge badge-lock" title="fields set by environment variables">${icon('info')} env</span>` : nothing}</div>
+      <div class="bk-card-kind"><span class="badge">${KIND_LABEL[b.kind] ?? b.kind}</span>${b.cloud ? html`<span class="badge">cloud</span>` : nothing}${b.id.startsWith('auto-') || b.updated_by === 'autodetect' ? html`<span class="badge badge-auto" title="minted by autodetect — delete it and it stays gone">auto</span>` : nothing}${Object.keys(b.locks).length ? html`<span class="badge badge-lock" title="fields set by environment variables">${icon('info')} env</span>` : nothing}</div>
       <div class="bk-card-url mono clip" title=${b.url}>${b.url}</div>
       <dl class="bk-card-facts">
         <div><dt>models</dt><dd class="num">${models}</dd></div>

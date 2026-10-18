@@ -394,6 +394,182 @@ def stats_for(env, port: int, family: str, *, fetch=_get) -> dict:
 # Same shape as proxy/traces: a handle() the app calls for GET /v1/autodetect*.
 
 
+# ------------------------------------------------------------- auto-wire (T12)
+# The ONLY write this observer ever makes, and it is gated to death:
+#   - TANDEM_AUTODETECT_WIRE=1 (default off — no one's box reconfigures itself)
+#   - genuine fingerprint only: a port-hint weak match never mints config
+#   - bind must be loopback or wildcard — the wired URL is 127.0.0.1, so a
+#     wildcard server (docker's 0.0.0.0 default) stays on THIS box, while an
+#     explicit LAN-interface bind names a different network and is refused
+#   - the CHAT route must exist: a minimal POST to /v1/chat/completions with an
+#     empty body never starts a completion (no engine accepts an empty chat
+#     request) but it maps the route: 404 means the server has no chat route
+#     at all — an STT/TTS engine that mimics the OpenAI /v1/models shape
+#     (parakeet) stays visible but is never routed to. GET is NOT usable here:
+#     FastAPI answers 405 on a POST-only route, Express answers 404 — the same
+#     truth with opposite codes. Only POST's 404-vs-not is reliable.
+#   - no existing backend may own the URL (a wired port never doubles)
+#   - at most AUTO_WIRE_MAX auto-* backends exist — a scan loop cannot mint
+#     a fleet
+#   - a backend a HUMAN deleted stays deleted: the port lands in the
+#     persisted 'autodetect_dismissed' setting (a persisted prev-pass diff —
+#     survives restarts) and the AUTO pass never re-mints it. The engine
+#     STAYS in 'Detected nearby' on purpose: re-adding it by hand stays
+#     possible, it just stops happening by itself.
+#   - the pass never raises: a failed wire changes nothing, only logs
+
+AUTO_PREFIX = "auto-"
+AUTO_WIRE_MAX = 5
+WIRE_KIND = {"vllm": "vllm", "sglang": "sglang", "tandemllm": "tandemllm"}
+
+CREATED_KEY = "autodetect_created"        # ports this feature has minted (persisted)
+DISMISSED_KEY = "autodetect_dismissed"    # ports a human deleted (persisted, forever)
+
+
+def wire_enabled(env) -> bool:
+    return str(env.get("TANDEM_AUTODETECT_WIRE", "")).lower() in TRUE
+
+
+def _ports_setting(cfg, key: str) -> set[int]:
+    try:
+        return {int(p) for p in (cfg.setting(key) or []) if str(p).lstrip("-").isdigit()}
+    except Exception:
+        return set()
+
+
+def _auto_port(bid) -> int | None:
+    s = str(bid or "")
+    return int(s[len(AUTO_PREFIX):]) if s.startswith(AUTO_PREFIX) and \
+        s[len(AUTO_PREFIX):].isdigit() else None
+
+
+def reconcile(cfg) -> set[int]:
+    """Dismissals must survive restarts — so 'was ours' is a PERSISTED diff,
+    never process memory: the previous pass records every live auto-* port;
+    one missing from this pass was deleted by a human and joins the dismissed
+    set for good — meaning the AUTO pass never re-mints it. The port STAYS in
+    the scan surface, deliberately: a human who deleted the card can still
+    re-add that engine by hand from 'Detected nearby' whenever they want."""
+    seen = _ports_setting(cfg, CREATED_KEY)          # auto-* ports, previous pass
+    dismissed = _ports_setting(cfg, DISMISSED_KEY)
+    now_present = {p for p in (_auto_port(b["id"]) for b in cfg.backends()) if p}
+    gone = seen - now_present
+    if gone:
+        dismissed |= gone
+        try:
+            cfg.set_setting(DISMISSED_KEY, sorted(dismissed), who="autodetect")
+        except Exception:
+            pass
+    try:
+        cfg.set_setting(CREATED_KEY, sorted(now_present), who="autodetect")
+    except Exception:
+        pass
+    return dismissed
+
+
+def _chat_capable(port: int, *, post=_post,
+                  timeout: float = PROBE_TIMEOUT * 2) -> bool:
+    """Route existence, not completion: '{}' is rejected by every chat engine
+    before any generation (400/401/422 are all 'the route exists'), while a
+    server without a chat route 404s the path under POST too. The timeout is
+    doubled — this one probe may queue behind a busy engine's stream, and a
+    timeout reads as 'unreachable' = skip, never as a wiring mistake."""
+    got = post(f"http://127.0.0.1:{port}/v1/chat/completions", timeout)
+    return got is not None and got[0] != 404
+
+
+def _bind_ok(bind: str) -> bool:
+    """Accept loopback and wildcard binds — a wired URL is always 127.0.0.1,
+    so a wildcard server stays local to THIS box; a chat-capable server on :8000
+    bound 0.0.0.0 (docker's default) is the common real case. An explicit
+    LAN-interface bind stays refused: it names a different network."""
+    return any(t.startswith("127.") or t.startswith("::1") or
+               t in ("0.0.0.0", "::", "*", "?")
+               for t in (bind or "?").split(","))
+
+
+def wire_llms(scan_doc: dict, cfg, *, fetch=_get, post=_post, log=None) -> list[str]:
+    """Scan -> chat-proven loopback engines become discovered-mode backends.
+    Returns the ids created. See the block above for every gate."""
+    created: list[str] = []
+    try:
+        dismissed = reconcile(cfg)                   # persisted dismissals win first
+        have_urls, have_ids = set(), set()
+        auto_n = 0
+        for b in cfg.backends():
+            have_urls.add(str(b.get("url") or "").rstrip("/"))
+            have_ids.add(str(b["id"]))
+            if str(b["id"]).startswith(AUTO_PREFIX):
+                auto_n += 1
+        minted_now: set[int] = set()
+    except Exception:
+        return created
+    for e in scan_doc.get("engines") or []:
+        try:
+            port = int(e["port"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        fam, how = e.get("family"), str(e.get("how") or "")
+        bind = str(e.get("bind") or "")
+        if not fam or fam in ("http", "open") or how.startswith("port-hint"):
+            continue
+        if port in dismissed:
+            continue
+        if not _bind_ok(bind):
+            continue
+        url = f"http://127.0.0.1:{port}/v1"
+        if url.rstrip("/") in have_urls:
+            continue
+        if auto_n >= AUTO_WIRE_MAX:
+            break
+        if not _chat_capable(port, post=post):
+            continue
+        bid = f"{AUTO_PREFIX}{port}"
+        if bid in have_ids:
+            continue
+        try:
+            cfg.create_backend({
+                "id": bid,
+                "kind": WIRE_KIND.get(str(e.get("kind") or fam), "generic"),
+                "label": f"{str(e.get('model') or fam)[:28]} :{port}",
+                "url": url, "enabled": True,
+                "models_mode": "discover", "models": [], "fallback": []},
+                who="autodetect")
+        except Exception:
+            continue
+        auto_n += 1
+        have_ids.add(bid)
+        have_urls.add(url.rstrip("/"))
+        minted_now.add(port)
+        created.append(bid)
+        if log:
+            log(f"[autodetect] wired '{bid}' ({fam} @ {url}); delete it and it stays gone")
+    if minted_now:                                   # register immediately: a
+        try:                                         # delete before the next
+            now = {p for p in (_auto_port(b["id"]) for b in cfg.backends()) if p}
+            cfg.set_setting(CREATED_KEY, sorted(now), who="autodetect")
+        except Exception:
+            pass                                     # pass reconcile closes it
+    return created
+
+
+def handle(req, method: str, path: str, raw: str, env, **scan_kw):
+    from urllib.parse import parse_qs, urlsplit            # request-local import cost: nil
+    if method != "GET":
+        return req._json(405, {"error": {"type": "method", "message": "GET only"}})
+    q = {k: v[0] for k, v in parse_qs(urlsplit(raw).query).items()}
+    if path == "/v1/autodetect":
+        return req._json(200, scan_cached(env, **scan_kw))
+    if path == "/v1/autodetect/stats":
+        try:
+            port = int(q.get("port", ""))
+        except ValueError:
+            return req._json(400, {"error": {"type": "bad", "message": "port must be an int"}})
+        fam = q.get("family", "openai")
+        return req._json(200, {"port": port, "stats": stats_for(env, port, fam, fetch=_get)})
+    return req._json(404, {"error": {"type": "not_found", "message": "no route"}})
+
+
 def handle(req, method: str, path: str, raw: str, env, **scan_kw):
     from urllib.parse import parse_qs, urlsplit            # request-local import cost: nil
     if method != "GET":

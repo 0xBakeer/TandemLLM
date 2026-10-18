@@ -206,6 +206,11 @@ qse-cond-compare {
 .badge-lock {
   border-color: var(--ink-3);
 }
+.badge-auto {
+  border-color: var(--series-aqua);
+  color: var(--ink);
+  background: rgba(25, 158, 112, 0.16);
+}
 
 /* the decision feed */
 .feed {
