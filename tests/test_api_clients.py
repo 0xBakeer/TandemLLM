@@ -18,8 +18,9 @@ a memory question from a client that offered no tools ended with the model's own
   6  SRV-619, SRV-620: tools beside `response_format` (json_schema, json_object) are served, not a
      400: the answer is the bare document (no fences, the thinking in `reasoning_content`) or
      tool calls (one, two, one with `parallel_tool_calls: false`); `tool_choice: none` is the
-     document alone, `required` the calls; the constraint the engine gets holds the answer;
-     streamed and not, raw and under the conductor, curl and the SDK
+     document alone, `required` the calls; the constraint the engine gets holds the answer, and
+     the branch the answer took is recorded; streamed and not, raw and under the conductor, curl
+     and the SDK
 
 Run: python tests/test_api_clients.py
 """
@@ -189,26 +190,36 @@ def serve_schema():
     """The fake engine under the conductor; a one-byte-a-character vocabulary for the masks (the
     fake writes its script, so the constraint is read off the request, not applied)."""
     tu.serve("on")
+    from server import fake_engine as fe
     size = app.STATE["engine"].cfg.vocab_size
-    for key in ("grammar_vocab", "grammar_vocab_calls"):
-        app.STATE[key] = G.Vocab([bytes([i]) if 0 < i < 128 else None for i in range(128)], size)
+    ascii_ = [bytes([i]) if 0 < i < 128 else None for i in range(128)]
+    app.STATE["grammar_vocab"] = G.Vocab(ascii_, size)
+    # the calls vocabulary spells the call markers (single ids in the fake, as in Qwen's)
+    marks = ascii_ + [None] * (fe.CALL_CLOSE + 1 - len(ascii_))
+    marks[fe.CALL_OPEN], marks[fe.CALL_CLOSE] = b"<tool_call>", b"</tool_call>"
+    app.STATE["grammar_vocab_calls"] = G.Vocab(marks, size)
 
 
 def schema_ask(text, headers, stream, **extra):
     """(the client's view, the Constraint the engine was given)."""
-    seen = []
-    real = app.generate_stream
+    seen, branches = [], []
+    real, real_branch = app.generate_stream, G.Grammar.branch
 
     def recording(prompt, *a, **k):
         seen.append(k.get("pen"))
         return real(prompt, *a, **k)
 
-    app.generate_stream = recording
+    def branch(self, *a, **k):
+        branches.append(real_branch(self, *a, **k))
+        return branches[-1]
+
+    app.generate_stream, G.Grammar.branch = recording, branch
     try:
         body = dict({"tools": TOOLS2, "response_format": JS}, **extra)
         out = ask(text, headers, stream, **body)
     finally:
-        app.generate_stream = real
+        app.generate_stream, G.Grammar.branch = real, real_branch
+    out["branches"] = branches
     assert out["head"].startswith("HTTP/1.1 200"), (out["head"], out["raw"][:300])
     cons = None
     for pen in seen:
@@ -243,6 +254,8 @@ def test_6_tools_and_a_schema_answer_the_bare_document():
                     assert "The question has" in out["reasoning"], (where, out["reasoning"][:80])
                 assert cons is not None, (where, "the request was not constrained")
                 assert cons.g.vocab is app.STATE["grammar_vocab_calls"], where
+                assert cons.g.side is not None and out["branches"] == ["document"], \
+                    (where, out["branches"])
                 assert _in(cons, "\n\n" + DOC) and _in(cons, CALL) and _in(cons, CALL + "\n" + CALL)
                 assert not _in(cons, "```json\n" + DOC + "\n```") and \
                     not _in(cons, "Here it is:\n" + DOC) and \
@@ -259,7 +272,7 @@ def test_6b_tools_and_a_schema_still_call():
             assert names_of(out) == ["search"] and finish_of(out) == "tool_calls", \
                 (where, out["raw"][-300:])
             assert "<tool_call>" not in out["content"] and "{" not in out["content"], out["content"]
-            assert _in(cons, "\n\n" + CALL)
+            assert _in(cons, "\n\n" + CALL) and out["branches"] == ["calls"], out["branches"]
             # two calls (FAKE_TWO_CALLS writes one to each tool)
             out, cons = schema_ask("Use a tool twice FAKE_TWO_CALLS", dict(CURL, **hx), stream)
             assert names_of(out) == ["search", "get_weather"], (where, names_of(out))
@@ -279,6 +292,7 @@ def test_6c_tool_choice_none_and_required():
                                    dict(CURL, **hx), stream, tool_choice="none")
             assert out["content"] == DOC and out["calls"] == [], (where, out["content"][:200])
             assert _in(cons, DOC) and not _in(cons, CALL), "none: the document alone"
+            assert cons.g.side is None and out["branches"] == [], "no branch to pick"
             assert cons.g.vocab is app.STATE["grammar_vocab"]
             for tc in ("required", {"type": "function", "function": {"name": "search"}}):
                 out, cons = schema_ask(
