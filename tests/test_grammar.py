@@ -10,8 +10,11 @@
     and every answer that ends is in the language;
   * reasoning is not constrained; the closing tag starts the constraint;
   * through the handler: json_schema, json_object, a choice list and a regex give answers in their
-    languages on both transports; a constraint with tools, a bad schema and a constraint the
-    vocabulary cannot write are 400s that say so; `--no-structured-outputs` refuses as before.
+    languages on both transports; a bad schema and a constraint the vocabulary cannot write are
+    400s that say so; `--no-structured-outputs` refuses as before;
+  * SRV-619, SRV-620: a document with tools under auto is the calls or the document alone (the
+    language, the call markers' own ids, the handler on both transports); tool_choice none is the
+    document, required the calls.
 
 Run: python tests/test_grammar.py
 """
@@ -269,9 +272,10 @@ def test_the_handler_serves_every_constraint_form():
 
 def test_the_handler_refuses_what_it_cannot_serve():
     tools = [{"type": "function", "function": {"name": "f"}}]
-    cases = [({"response_format": {"type": "json_object"}, "tools": tools}, "tools"),
-             ({"response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "x"}}}},
+    cases = [({"response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "x"}}}},
               "response_format"),
+             ({"response_format": {"type": "json_schema", "json_schema": {"schema": {"type": "x"}}},
+               "tools": tools}, "response_format"),
              ({"structured_outputs": {"regex": "(a"}}, "structured_outputs"),
              ({"structured_outputs": {"grammar": "root ::= x"}}, "structured_outputs"),
              ({"structured_outputs": {"choice": ["a"]}, "response_format": {"type": "json_object"}},
@@ -282,6 +286,13 @@ def test_the_handler_refuses_what_it_cannot_serve():
             (extra, head, raw[:200])
     head, raw, _, _ = _ask(response_format={"type": "json_object"}, tools=tools, tool_choice="none")
     assert head.startswith("HTTP/1.1 200"), "tool_choice none takes the tools out of the request"
+    # SRV-619: a model whose calls are not the XML format keeps the 400 with tools
+    C.serve()
+    app.STATE["tool_format"] = "pythonic"
+    head, raw = C.Req("/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}],
+                                              "response_format": {"type": "json_object"},
+                                              "tools": tools}).response()
+    assert head.startswith("HTTP/1.1 400") and json.loads(raw)["error"]["param"] == "tools", raw
     # a constraint the vocabulary cannot write: non-streamed, a 400 that names it; streamed, the
     # stream closes with finish_reason error and the reason
     head, raw, _, _ = _ask(structured_outputs={"regex": "é+"})
@@ -453,6 +464,195 @@ def test_the_handler_forces_the_call():
                         assert a["color"] in ("red", "green"), a
             seen[f"{label}/{'stream' if stream else 'json'}"] = (finish, names)
     return f"{seen}"
+
+
+# ------------------------------------------------------------------ SRV-619: calls or the document
+
+SIG = {"type": "object", "properties": {"signal": {"enum": ["buy", "hold"]},
+                                        "ok": {"type": "boolean"}},
+       "required": ["signal", "ok"], "additionalProperties": False}
+MARK = [{"type": "function", "function": {"name": "pick", "parameters": {
+            "type": "object", "properties": {"color": {"enum": ["red", "green"]}},
+            "required": ["color"]}}},
+        {"type": "function", "function": {"name": "mark", "parameters": {
+            "type": "object", "properties": {"level": {"enum": ["lo", "hi"]}},
+            "required": ["level"]}}}]
+JS = {"type": "json_schema", "json_schema": {"name": "sig", "strict": True, "schema": SIG}}
+
+
+def _union(tools=TOOLS, rf=JS, **extra):
+    a = C.compat.answer_constraint(dict({"messages": [], "tools": tools, "response_format": rf},
+                                        **extra))
+    return a, G.compile_regex(a.pattern)
+
+
+def _in(d, text):
+    return bool(d.accept[d.walk(d.start, text.encode())])
+
+
+def test_the_calls_or_the_document_language():
+    a, d = _union()
+    assert a.kind == "response_format" and a.calls and a.types == {"set": {"n", "tags"}}, a
+    call = ("<tool_call>\n<function=read_file>\n<parameter=path>\n/etc/hosts\n</parameter>\n"
+            "</function>\n</tool_call>")
+    now = "<tool_call>\n<function=now>\n</function>\n</tool_call>"
+    doc = '{"signal": "buy", "ok": true}'
+    ok = [call, "\n\n" + call + "\n" + now, doc, "\n\n" + doc + "\n",
+          '{\n  "signal": "hold",\n  "ok": false\n}']
+    bad = ["```json\n" + doc + "\n```", "Here it is: " + doc, call + "\n" + doc, doc + "\n" + call,
+           '{"signal": "sell", "ok": true}', '{"signal": "buy", "ok": true, "x": 1}',
+           '{"ok": true, "signal": "buy"}', "I will call it.\n" + call, ""]
+    for t in ok:
+        assert _in(d, t), t
+    for t in bad:
+        assert not _in(d, t), t
+    # one copy of the call language for many calls: the automaton is about the two parts' sum
+    parts = (G.compile_regex(G.tool_call_regex(TOOLS, ["read_file", "set", "now"], many=False)[0])
+             .states + G.compile_regex(G.WS + G.schema_regex(SIG) + G.WS).states)
+    assert d.states <= parts + 16, (d.states, parts)
+    _, one = _union(parallel_tool_calls=False)
+    assert _in(one, call) and _in(one, doc) and not _in(one, call + "\n" + now)
+    jo, dj = _union(rf={"type": "json_object"})
+    assert jo.calls and _in(dj, call) and _in(dj, '{"any": [1, {"x": null}]}')
+    assert not _in(dj, "[1, 2]") and not _in(dj, "```json\n{}\n```")
+    return (f"{len(ok)} in (a call, two, the document compact and indented), {len(bad)} out "
+            f"(fences, prose, a call and the document, enum, extra key, order, empty); "
+            f"parallel false: one call; json_object: the same with any object")
+
+
+def test_tool_choice_decides_the_branches():
+    none, dn = _union(tool_choice="none")
+    assert not none.calls and none.types is None and _in(dn, '{"signal": "buy", "ok": true}')
+    assert not _in(dn, "<tool_call>\n<function=now>\n</function>\n</tool_call>")
+    for tc in ("required", {"type": "function", "function": {"name": "now"}}):
+        req, dr = _union(tool_choice=tc)
+        assert req.kind == "tool_choice" and not req.calls
+        assert _in(dr, "<tool_call>\n<function=now>\n</function>\n</tool_call>")
+        assert not _in(dr, '{"signal": "buy", "ok": true}'), tc
+    # the document is still checked: a bad schema is the 400 that names response_format
+    try:
+        _union(rf={"type": "json_schema", "json_schema": {"schema": {"type": "x"}}},
+               tool_choice="required")
+        raise AssertionError("a bad schema beside required must be refused")
+    except C.compat.Refusal as exc:
+        assert exc.param == "response_format", exc.param
+    # the flat tool form is a function too; structured_outputs joins the calls the same way
+    flat, df = _union(tools=[{"name": "now"}])
+    assert flat.calls and _in(df, "<tool_call><function=now></function></tool_call>")
+    so = C.compat.answer_constraint({"messages": [], "tools": TOOLS,
+                                     "structured_outputs": {"choice": ["yes", "no"]}})
+    ds = G.compile_regex(so.pattern)
+    assert so.calls and _in(ds, "yes") and _in(ds, "<tool_call><function=now></function></tool_call>")
+    # the completions endpoint has no tools: the document alone
+    comp = C.compat.answer_constraint({"prompt": "x", "tools": TOOLS, "response_format": JS},
+                                      chat=False)
+    assert not comp.calls
+    try:
+        C.compat.answer_constraint({"messages": [], "tools": TOOLS, "response_format": JS},
+                                   xml_calls=False)
+        raise AssertionError("pythonic calls cannot be a branch")
+    except C.compat.Refusal as exc:
+        assert exc.param == "tools"
+    return ("none: the document; required and named: the calls; a bad schema beside them a 400; "
+            "flat tools, structured_outputs, completions, pythonic")
+
+
+class MarkerTok(C.Tok):
+    """The toy tokenizer with `<tool_call>` and `</tool_call>` as added ids 97 and 98, text in the
+    answer as in Qwen's tokenizer."""
+
+    added_tokens_decoder = {97: "<tool_call>", 98: "</tool_call>"}
+
+    def __len__(self):
+        return 99
+
+    def convert_tokens_to_ids(self, text):
+        return {"<tool_call>": 97, "</tool_call>": 98}.get(text, -1)
+
+    def decode(self, seq, skip_special_tokens=True):
+        return "".join(self.added_tokens_decoder[int(t)] if int(t) in self.added_tokens_decoder
+                       else super(MarkerTok, self).decode([t], skip_special_tokens) for t in seq)
+
+
+def test_the_call_markers_keep_their_own_ids():
+    tok = MarkerTok()
+    plain = G.Vocab.from_tokenizer(tok, 99)
+    calls = G.Vocab.from_tokenizer(tok, 99, markers=G.CALL_MARKERS)
+    assert plain.bytes[97] is None and plain.bytes[98] is None
+    assert calls.bytes[97] == b"<tool_call>" and calls.bytes[98] == b"</tool_call>"
+    assert calls.bytes[C.EOS] is None, "the end token stays special"
+    a, _ = _union(tools=MARK)
+    g = G.Grammar(a.pattern, calls)
+    start = g.mask(g.dfa.start, frozenset({C.EOS}), "cpu")
+    assert start[97] and not start[98] and start[(ord("{") - 32) % 96], "the call or the document"
+    assert not G.Grammar(a.pattern, plain).mask(g.dfa.start, frozenset({C.EOS}), "cpu")[97]
+    # a whole call written with the marker ids walks to an accepting state
+    body = "<function=mark><parameter=level>hi</parameter></function>"
+    ids = [97] + [(ord(c) - 32) % 96 for c in body] + [98]
+    cons = G.Constraint(g, {C.EOS}, "cpu")
+    cons.commit(ids)
+    assert g.dfa.accept[cons.state], "the markers' bytes are the language's"
+    return "plain vocabulary: the markers masked (as before); the calls vocabulary: their own ids"
+
+
+def _answer(stream, **extra):
+    C.serve()
+    body = dict({"messages": [{"role": "user", "content": "hello there"}], "max_tokens": 120,
+                 "stream": stream}, **extra)
+    head, raw = C.Req("/v1/chat/completions", body).response()
+    assert head.startswith("HTTP/1.1 200"), (head, raw[:300])
+    if stream:
+        ev = C._events(raw)
+        content = "".join(c["delta"].get("content") or "" for e in ev for c in e["choices"])
+        names = [d["function"]["name"] for e in ev for c in e["choices"]
+                 for d in (c["delta"].get("tool_calls") or []) if d.get("function", {}).get("name")]
+        finish = [c["finish_reason"] for e in ev for c in e["choices"] if c["finish_reason"]][-1]
+        return content, names, finish
+    c = json.loads(raw)["choices"][0]
+    return (c["message"]["content"] or "",
+            [t["function"]["name"] for t in c["message"].get("tool_calls") or []],
+            c["finish_reason"])
+
+
+def _valid(text):
+    v = json.loads(text)
+    assert text == text.strip() and set(v) == {"signal", "ok"} and v["signal"] in ("buy", "hold") \
+        and isinstance(v["ok"], bool), text
+    return v
+
+
+def test_the_handler_answers_tools_and_a_schema():
+    # the random model: biased to `{` it writes the document, to `<` a call; the space is biased
+    # out (the toy vocabulary has no other whitespace); json_object: `{` first, then `}` (its
+    # strings are free text, where the random model never stops)
+    to_doc, to_call = {"0": -50, "91": 50}, {"0": -50, "28": 50}
+    to_obj = {"0": -50, "91": 30, "93": 60}
+    seen = {}
+    for stream in (False, True):
+        for rf, bias in ((JS, to_doc), ({"type": "json_object"}, to_obj)):
+            content, names, finish = _answer(stream, tools=MARK, response_format=rf,
+                                             logit_bias=bias)
+            assert finish == "stop" and names == [], (rf, stream, finish, names, content)
+            if rf is JS:
+                _valid(content)
+            else:
+                assert isinstance(json.loads(content), dict) and content == content.strip()
+            seen[f"{rf['type']}/{'stream' if stream else 'json'}"] = "document"
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias=to_call, parallel_tool_calls=False)
+        assert finish == "tool_calls" and len(names) == 1 and names[0] in ("pick", "mark"), \
+            (stream, finish, names, content)
+        assert "{" not in content and "<tool_call>" not in content, content
+        # tool_choice none: the document, whatever the bias; required: the calls
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias=to_call, tool_choice="none")
+        assert finish == "stop" and names == [], (finish, names)
+        _valid(content)
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias=to_doc, tool_choice="required")
+        assert finish == "tool_calls" and len(names) == 1, (finish, names, content)
+        seen[f"call/{'stream' if stream else 'json'}"] = "tool_calls"
+    return f"{seen}; tool_choice none: the document, required: the call"
 
 
 if __name__ == "__main__":

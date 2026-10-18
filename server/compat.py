@@ -21,6 +21,8 @@ answer (`tool_constraint`).
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 HONOURED, NEUTRAL, REFUSED = "honoured", "neutral", "refused"
 
 CHAT_FIELDS = {
@@ -368,8 +370,8 @@ def structured_pattern(body: dict) -> str | None:
 
     `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
     engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,
-    `{"json": <schema>}`. One constraint a request; a constraint with tools is refused (a call is
-    not JSON of the schema's shape, and suspending the mask inside a call block is not built).
+    `{"json": <schema>}`. One constraint a request. The document alone: with tools offered,
+    `answer_constraint` joins it with the calls (SRV-619).
     """
     from engine import grammar
     rf = body.get("response_format")
@@ -404,9 +406,6 @@ def structured_pattern(body: dict) -> str | None:
             return None
     except grammar.GrammarError as exc:
         raise Refusal("structured_outputs" if so is not None else "response_format", str(exc))
-    if body.get("tools") and body.get("tool_choice") != "none":
-        raise Refusal("tools", "structured outputs with tools are not supported; send "
-                               "tool_choice none or no tools")
     return pattern
 
 
@@ -433,3 +432,48 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
                                        many=body.get("parallel_tool_calls") is True)
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"tool_choice {mode}: {exc}")
+
+
+class Answer(NamedTuple):
+    """The answer's constraint: its regex, the field it came from (`rec.constrained`), the
+    parameters written as JSON literals per function, and whether a tool-call branch sits beside
+    a document (the vocabulary then keeps the call markers' own ids)."""
+    pattern: str
+    kind: str                       # "response_format" | "tool_choice"
+    types: dict | None
+    calls: bool
+
+
+def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> Answer | None:
+    """The constraint on the answer (after the reasoning), or None.
+
+    `tool_choice` required or named: the calls (`tool_constraint`), a document asked for beside
+    them checked and left out (the turn calls). No tools, or `tool_choice` none: the document
+    (`structured_pattern`). SRV-619: tools under auto with a document: either, as one
+    automaton -- the calls in the model's format (any offered function, more than one unless
+    `parallel_tool_calls` is false) or the document alone, so an agent loop that asks for its
+    final answer as JSON keeps its tools. `xml_calls` false (a model whose calls are not the XML
+    format, `--tool-format pythonic`): the 400 as before.
+    """
+    from engine import grammar
+    doc = structured_pattern(body)
+    forced = tool_constraint(body) if chat else None
+    if forced is not None:
+        return Answer(forced[0], "tool_choice", forced[1] or None, False)
+    if doc is None:
+        return None
+    if not chat or not body.get("tools") or tool_choice(body)[0] == "none":
+        return Answer(doc, "response_format", None, False)
+    if not xml_calls:
+        raise Refusal("tools", "structured outputs with tools need the XML tool-call format; "
+                               "send tool_choice none or no tools")
+    # the flat `{"name": ..., "parameters": ...}` form read as a function tool
+    fns = [t if "function" in t else {"type": "function", "function": t} for t in body["tools"]]
+    names = [t["function"]["name"] for t in fns]
+    try:
+        calls, typed = grammar.tool_call_regex(fns, names,
+                                               many=body.get("parallel_tool_calls") is not False)
+    except grammar.GrammarError as exc:
+        raise Refusal("tools", f"structured outputs with tools: {exc}")
+    return Answer(grammar.calls_or_document(calls, doc), "response_format", typed or None, True)
+

@@ -36,6 +36,8 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   reasoning closes after the call, then the end token, no answer;
                   FAKE_CALL_IN_THINK_OTHER the call names a tool the request does not offer
     FAKE_LOOP     the reasoning repeats one paragraph for about 6,000 tokens
+    FAKE_JSON_ANSWER {...}  the answer is exactly that JSON document, to the end of its line
+                  (SRV-619)
     FAKE_CALL_JSON {"name": ..., "arguments": {...}}   with `tools`: exactly that call (the rest of
                   the line is the JSON), for the tool-call checks' scenarios
     FAKE_ATTR_CALL  with `tools`: a call to the first tool in the attribute style, its
@@ -103,7 +105,6 @@ class FakeTokenizer:
 
     unk_token_id = -1
     eos_token_id = EOS
-
     def convert_tokens_to_ids(self, text):
         return SPECIAL.get(text, -1)
 
@@ -251,6 +252,9 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
         if "FAKE_TWO_CALLS" in user:
             answer += "\n" + (BAD_CALL if "FAKE_SECOND_BAD" in user
                               else _call(tools[-1], user[::-1]))
+    doc = re.search(r"FAKE_JSON_ANSWER (\{.*\})\s*$", user, flags=re.M)
+    if doc is not None:
+        answer = doc.group(1)
     if tools and _json_call(user):
         answer = _json_call(user)
     elif tools and "FAKE_ATTR_CALL" in user:

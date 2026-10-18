@@ -5504,13 +5504,17 @@ def _account(rec: "usage_mod.RequestRecord") -> None:
         led.submit(rec.row(STATE.get("version", ""), STATE.get("code_sha", "")))
 
 
-def _grammar_vocab() -> "grammar_mod.Vocab":
+def _grammar_vocab(calls: bool = False) -> "grammar_mod.Vocab":
     """Every token as bytes, for the constraint masks: built on the first constrained
-    request (half a second over 248k tokens) and kept."""
-    v = STATE.get("grammar_vocab")
+    request (half a second over 248k tokens) and kept. `calls`: SRV-619, the
+    vocabulary of a calls-or-document constraint, the call markers' own ids allowed (built once
+    more, on the first such request)."""
+    key = "grammar_vocab_calls" if calls else "grammar_vocab"
+    v = STATE.get(key)
     if v is None:
-        v = STATE["grammar_vocab"] = grammar_mod.Vocab.from_tokenizer(
-            STATE["tok"], STATE["engine"].cfg.vocab_size)
+        v = STATE[key] = grammar_mod.Vocab.from_tokenizer(
+            STATE["tok"], STATE["engine"].cfg.vocab_size,
+            markers=grammar_mod.CALL_MARKERS if calls else ())
     return v
 
 
@@ -7024,19 +7028,20 @@ class Handler(BaseHTTPRequestHandler):
             compat.check(body, chat, structured=structured)
             # the client's thinking budget, whichever shape it came in (server/thinking.py)
             client = thinking_mod.read(body, _effort_caps())
-            pattern = compat.structured_pattern(body) if structured else None
-            rec.constrained = "response_format" if pattern is not None else None
-            # tool_choice required or named is enforced with the same machinery -- the
-            # answer as calls to the allowed functions, their values typed by the schemas
-            tool_types = None
-            if pattern is None and structured and chat:
-                forced = compat.tool_constraint(body)
-                if forced is not None:
-                    pattern, tool_types = forced
-                    rec.constrained = "tool_choice"
+            # the document a request asks for (response_format, structured_outputs); tool_choice
+            # required or named is enforced with the same machinery -- the answer as calls to the
+            # allowed functions, their values typed by the schemas; SRV-619: tools under
+            # auto beside a document -- the calls or the document, one automaton
+            ac = (compat.answer_constraint(body, chat,
+                                           xml_calls=STATE.get("tool_format") != "pythonic")
+                  if structured else None)
+            pattern = ac.pattern if ac is not None else None
+            rec.constrained = ac.kind if ac is not None else None
+            tool_types = ac.types if ac is not None else None
             # compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
-            gram = grammar_mod.grammar_for(pattern, _grammar_vocab()) if pattern else None
+            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(calls=ac.calls))
+                    if pattern else None)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
         except grammar_mod.GrammarError as exc:

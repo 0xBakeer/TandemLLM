@@ -15,6 +15,11 @@ a memory question from a client that offered no tools ended with the model's own
   4  state lines never in a plain client's `content`: in `reasoning_content`, or none with tags
   5  a request without tools never gets `tool_calls`: the call is read out of the answer and
      dropped, finish `stop`, the journal row names it; streamed and not; with tools it is a call
+  6  SRV-619, SRV-620: tools beside `response_format` (json_schema, json_object) are served, not a
+     400: the answer is the bare document (no fences, the thinking in `reasoning_content`) or
+     tool calls (one, two, one with `parallel_tool_calls: false`); `tool_choice: none` is the
+     document alone, `required` the calls; the constraint the engine gets holds the answer;
+     streamed and not, raw and under the conductor, curl and the SDK
 
 Run: python tests/test_api_clients.py
 """
@@ -29,6 +34,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import test_ui_states as tu  # noqa: E402
+from engine import grammar as G  # noqa: E402
+from server import app  # noqa: E402
 from server.conductor import states  # noqa: E402
 
 CURL = {"User-Agent": "curl/8.5.0"}
@@ -161,6 +168,136 @@ def test_5_no_tools_no_tool_calls():
         "type": "object", "properties": {"query": {"type": "string"}}}}}]
     out = ask("What is my UX1 pet? FAKE_CALL_NOTOOLS", tools=TOOL)
     assert out["calls"] and finish_of(out) == "tool_calls", out["raw"][-300:]
+
+
+# ------------------------------------------------------------------ 6 tools and a schema
+
+WEATHER = {"type": "object", "properties": {"location": {"type": "string"},
+                                            "temperature_celsius": {"type": "number"}},
+           "required": ["location", "temperature_celsius"], "additionalProperties": False}
+JS = {"type": "json_schema", "json_schema": {"name": "weather", "strict": True, "schema": WEATHER}}
+TOOLS2 = [{"type": "function", "function": {"name": n, "parameters": {
+    "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}
+    for n in ("search", "get_weather")]
+DOC = '{"location": "Tokyo", "temperature_celsius": 28}'
+CALL = ("<tool_call>\n<function=search>\n<parameter=query>\nTokyo\n</parameter>\n</function>\n"
+        "</tool_call>")
+PATHS = {"conductor": {}, "raw": {"X-Tandem": "raw"}}
+
+
+def serve_schema():
+    """The fake engine under the conductor; a one-byte-a-character vocabulary for the masks (the
+    fake writes its script, so the constraint is read off the request, not applied)."""
+    tu.serve("on")
+    size = app.STATE["engine"].cfg.vocab_size
+    for key in ("grammar_vocab", "grammar_vocab_calls"):
+        app.STATE[key] = G.Vocab([bytes([i]) if 0 < i < 128 else None for i in range(128)], size)
+
+
+def schema_ask(text, headers, stream, **extra):
+    """(the client's view, the Constraint the engine was given)."""
+    seen = []
+    real = app.generate_stream
+
+    def recording(prompt, *a, **k):
+        seen.append(k.get("pen"))
+        return real(prompt, *a, **k)
+
+    app.generate_stream = recording
+    try:
+        body = dict({"tools": TOOLS2, "response_format": JS}, **extra)
+        out = ask(text, headers, stream, **body)
+    finally:
+        app.generate_stream = real
+    assert out["head"].startswith("HTTP/1.1 200"), (out["head"], out["raw"][:300])
+    cons = None
+    for pen in seen:
+        for p in (pen.procs if isinstance(pen, G.LogitChain) else [pen]):
+            if isinstance(p, G.Constraint):
+                cons = p
+    return out, cons
+
+
+def names_of(out):
+    return [((c.get("function") or {}).get("name")) for c in out["calls"]
+            if (c.get("function") or {}).get("name")]
+
+
+def _in(cons, text):
+    d = cons.g.dfa
+    return bool(d.accept[d.walk(d.start, text.encode())])
+
+
+def test_6_tools_and_a_schema_answer_the_bare_document():
+    serve_schema()
+    for path, hx in PATHS.items():
+        for h in (CURL, SDK):
+            for stream in (True, False):
+                out, cons = schema_ask("Weather in Tokyo as JSON. FAKE_JSON_ANSWER " + DOC,
+                                       dict(h, **hx), stream)
+                where = (path, h["User-Agent"], stream)
+                assert out["content"] == DOC, (where, out["content"][:200])
+                assert out["calls"] == [] and finish_of(out) == "stop", (where, out["raw"][-300:])
+                assert "<think>" not in out["content"] and states.MARKER not in out["content"]
+                if path == "raw":
+                    assert "The question has" in out["reasoning"], (where, out["reasoning"][:80])
+                assert cons is not None, (where, "the request was not constrained")
+                assert cons.g.vocab is app.STATE["grammar_vocab_calls"], where
+                assert _in(cons, "\n\n" + DOC) and _in(cons, CALL) and _in(cons, CALL + "\n" + CALL)
+                assert not _in(cons, "```json\n" + DOC + "\n```") and \
+                    not _in(cons, "Here it is:\n" + DOC) and \
+                    not _in(cons, '{"location": "Tokyo"}'), "fences, prose, a missing key"
+
+
+def test_6b_tools_and_a_schema_still_call():
+    serve_schema()
+    one = 'FAKE_CALL_JSON {"name": "search", "arguments": {"query": "Tokyo"}}'
+    for path, hx in PATHS.items():
+        for stream in (True, False):
+            where = (path, stream)
+            out, cons = schema_ask("Weather in Tokyo as JSON. " + one, dict(CURL, **hx), stream)
+            assert names_of(out) == ["search"] and finish_of(out) == "tool_calls", \
+                (where, out["raw"][-300:])
+            assert "<tool_call>" not in out["content"] and "{" not in out["content"], out["content"]
+            assert _in(cons, "\n\n" + CALL)
+            # two calls (FAKE_TWO_CALLS writes one to each tool)
+            out, cons = schema_ask("Use a tool twice FAKE_TWO_CALLS", dict(CURL, **hx), stream)
+            assert names_of(out) == ["search", "get_weather"], (where, names_of(out))
+            assert finish_of(out) == "tool_calls"
+            out, cons = schema_ask("Use a tool twice FAKE_TWO_CALLS", dict(CURL, **hx), stream,
+                                   parallel_tool_calls=False)
+            assert names_of(out) == ["search"], (where, names_of(out))
+            assert _in(cons, CALL) and not _in(cons, CALL + "\n" + CALL), "one call, the language"
+
+
+def test_6c_tool_choice_none_and_required():
+    serve_schema()
+    for path, hx in PATHS.items():
+        for stream in (True, False):
+            where = (path, stream)
+            out, cons = schema_ask("Weather in Tokyo as JSON. FAKE_JSON_ANSWER " + DOC,
+                                   dict(CURL, **hx), stream, tool_choice="none")
+            assert out["content"] == DOC and out["calls"] == [], (where, out["content"][:200])
+            assert _in(cons, DOC) and not _in(cons, CALL), "none: the document alone"
+            assert cons.g.vocab is app.STATE["grammar_vocab"]
+            for tc in ("required", {"type": "function", "function": {"name": "search"}}):
+                out, cons = schema_ask(
+                    'Weather in Tokyo. FAKE_CALL_JSON {"name": "search", "arguments": '
+                    '{"query": "Tokyo"}}', dict(CURL, **hx), stream, tool_choice=tc)
+                assert names_of(out) == ["search"] and finish_of(out) == "tool_calls", \
+                    (where, tc, out["raw"][-300:])
+                assert _in(cons, CALL) and not _in(cons, DOC), "required/named: the calls alone"
+
+
+def test_6d_json_object_with_tools():
+    serve_schema()
+    for path, hx in PATHS.items():
+        for stream in (True, False):
+            out, cons = schema_ask("Weather in Tokyo as JSON. FAKE_JSON_ANSWER " + DOC,
+                                   dict(SDK, **hx), stream, response_format={"type": "json_object"})
+            assert out["content"] == DOC and json.loads(out["content"])["temperature_celsius"] == 28
+            assert out["calls"] == [] and finish_of(out) == "stop", (path, stream)
+            assert _in(cons, DOC) and _in(cons, CALL) and not _in(cons, "```json\n{}\n```")
 
 
 if __name__ == "__main__":

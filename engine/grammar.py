@@ -304,18 +304,25 @@ class _NFA:
             if (hi if hi is not None else lo) > 1000:
                 raise GrammarError("a repetition count above 1000")
             s = e = self.state()
-            for _ in range(lo):
-                a, b = self.build(inner, depth + 1)
-                self.eps[e].append(a)
-                e = b
             if hi is None:
+                # SRV-619: `X{lo,}` as lo - 1 copies and one loop (`X+` is one copy of X, not
+                # two: a large X -- the tool-call language -- doubled the automaton)
+                for _ in range(max(lo - 1, 0)):
+                    a, b = self.build(inner, depth + 1)
+                    self.eps[e].append(a)
+                    e = b
                 a, b = self.build(inner, depth + 1)
                 self.eps[e].append(a)
                 self.eps[b].append(a)
                 end = self.state()
-                self.eps[e].append(end)
+                if lo == 0:
+                    self.eps[e].append(end)
                 self.eps[b].append(end)
                 return s, end
+            for _ in range(lo):
+                a, b = self.build(inner, depth + 1)
+                self.eps[e].append(a)
+                e = b
             end = self.state()
             for _ in range(hi - lo):
                 self.eps[e].append(end)
@@ -545,9 +552,14 @@ class Vocab:
         self.first_live = np.searchsorted(lens, np.arange(width + 1), side="right")
 
     @classmethod
-    def from_tokenizer(cls, tok, size: int) -> "Vocab":
+    def from_tokenizer(cls, tok, size: int, markers: tuple[str, ...] = ()) -> "Vocab":
+        """`markers`: added tokens that are text in the answer (not the tokenizer's special ids)
+        and keep their text, so a constraint allows the model's own id for them
+        (SRV-619: `<tool_call>` is one id; spelled out byte by byte it is off the
+        model's distribution)."""
         from server.logprobs import _DECODER
         special = set(getattr(tok, "all_special_ids", []) or [])
+        hard = set(special)
         added = getattr(tok, "added_tokens_decoder", None) or {}
         special |= {int(i) for i in added}
         n = len(tok)
@@ -560,6 +572,14 @@ class Vocab:
                 out.append(bytes(_DECODER[c] for c in piece))
             else:
                 out.append(tok.decode([i]).encode("utf-8") or None)
+        for m in markers:
+            i = tok.convert_tokens_to_ids(m)
+            if (not isinstance(i, int) or not 0 <= i < size or i in hard
+                    or i == getattr(tok, "unk_token_id", None)
+                    or tok.decode([i], skip_special_tokens=True) != m):
+                continue
+            out.extend([None] * (i + 1 - len(out)))
+            out[i] = m.encode("utf-8")
         return cls(out, size)
 
     def mask(self, dfa: DFA, state: int) -> np.ndarray:
@@ -798,6 +818,17 @@ def _xml_value(schema: dict) -> tuple[str, bool]:
     return schema_regex(schema), True
 
 
+#: SRV-619: the call markers a tool-call branch writes as the model's own ids
+CALL_MARKERS = ("<tool_call>", "</tool_call>")
+
+
+def calls_or_document(calls: str, document: str) -> str:
+    """SRV-619: the answer as tool calls (`tool_call_regex`) or the document alone (a
+    schema, `json_object`, a regex): one automaton, the branch fixed by the first character
+    after the whitespace."""
+    return f"(?:{calls})|(?:{document})"
+
+
 def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True
                     ) -> tuple[str, dict[str, set[str]]]:
     """The answer as tool calls only, in the model's own XML format: `<tool_call>`, a function of
@@ -829,4 +860,6 @@ def tool_call_regex(tools: list[dict], allowed: list[str], many: bool = True
             body = "".join(members)
         calls.append(rf"<tool_call>{_S}<function={literal(name)}>{body}{_S}</function>{_S}</tool_call>")
     one = "(?:" + "|".join(calls) + ")"
-    return (f"{_S}{one}(?:{_S}{one})*{_S}" if many else f"{_S}{one}{_S}"), typed
+    # SRV-619: one copy of the call language for `many` (the automaton of `one (_S one)*` holds
+    # it twice); the same strings
+    return (f"{_S}(?:{one}{_S})+" if many else f"{_S}{one}{_S}"), typed
