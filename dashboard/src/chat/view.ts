@@ -33,6 +33,7 @@ import { defaultPane, type OpenPane, type Dock, type QseChatPanes } from './pane
 import type { SettingsSection } from './settings';
 import { SECTIONS } from './settings';
 import { clientMsgId, localId, type Attachment, type Capabilities, type ChatSettings, type Conversation, type ConversationSummary, type ConversationUi, type Folder, type PaneRef, type Preset, type PackageInfo, type Prompt, type StampedEvent, type ToolInfo, type WebSearchProvider } from './types';
+import { RunToken } from '../lib/run-token';
 
 const LS = {
   rail: 'qse.chat.rail',
@@ -117,11 +118,14 @@ export class QseChat extends LightElement {
   private recent: StampedEvent[] = [];
   private reprobe: Reprobe | null = null;
   private downClock: ReturnType<typeof setInterval> | null = null;
+  /** mount generations: a boot that finishes after a disconnect owns nothing (deep audit 0.11.3) */
+  private boots = new RunToken();
 
   // ---- lifecycle ------------------------------------------------------------------------------
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.boots.start();
     this.mq768.addEventListener('change', this.onMedia);
     this.mq1180.addEventListener('change', this.onMedia);
     window.addEventListener('keydown', this.onKey);
@@ -131,6 +135,7 @@ export class QseChat extends LightElement {
     void this.boot();
   }
   disconnectedCallback(): void {
+    this.boots.stop();
     this.mq768.removeEventListener('change', this.onMedia);
     this.mq1180.removeEventListener('change', this.onMedia);
     window.removeEventListener('keydown', this.onKey);
@@ -189,16 +194,19 @@ export class QseChat extends LightElement {
   }
 
   private async boot(): Promise<void> {
+    const run = this.boots.current();
     const q = this.query;
     const scenario = q.get('scenario');
     const choice = await pickBackend(q, {
       mock: async () => new (await import('./mock')).MockChatBackend({ scenario }),
       remote: async () => new (await import('./remote')).RemoteChatBackend(),
     });
+    if (!this.boots.live(run)) return;   // left while picking a backend: nothing below may own a resource
     if (!choice.backend) {
       this.down = choice.down;
       this.startReprobe(async () => {
         const d = await probeChat();
+        if (!this.boots.live(run)) return true;   // detached mid-probe: stop, revive nothing
         if (d) {
           this.down = d;
           return false;
@@ -207,6 +215,7 @@ export class QseChat extends LightElement {
         this.backend = new (await import('./remote')).RemoteChatBackend();
         this.backendReason = 'probed';
         await this.loadCaps();
+        if (!this.boots.live(run)) return true;
         if (!this.needSignIn) await this.afterSignIn();
         return true;
       }, true);
@@ -215,6 +224,7 @@ export class QseChat extends LightElement {
     this.backend = choice.backend;
     this.backendReason = choice.reason;
     await this.loadCaps();
+    if (!this.boots.live(run)) return;
     if (this.needSignIn) return;
     await this.afterSignIn();
   }
