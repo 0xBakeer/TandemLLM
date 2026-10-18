@@ -13,6 +13,7 @@ Run: python tests/test_proxy_http1_tls_fd.py
 from __future__ import annotations
 
 import os
+import pytest
 import socket
 import ssl
 import sys
@@ -72,6 +73,7 @@ def test_a_handshake_failure_closes_the_socket_it_was_given():
         ls.close()
 
 
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="counts fds through /proc")
 def test_twenty_failures_leak_no_fd():
     # the real symptom: a misconfigured https backend drains the fd table a request at a
     # time. The count may breathe a little (the loop's own temporaries); it must not walk.

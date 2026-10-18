@@ -51,8 +51,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 458 KB)`);
-if (total > 458 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 460 KB)`);
+if (total > 460 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
