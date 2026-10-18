@@ -426,6 +426,32 @@ def test_a_carry_that_vacates_slot_0_writes_what_the_park_refuses():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_short_conversation_an_nvme_restore_reads_over_goes_to_the_park():
+    """Live 2026-10-18 04:07: worker 1's entry was read back over worker 2's 11,509 rows (shorter
+    than an eviction's length, so not written), and worker 2's next call read 11,527 tokens from
+    0. The restore parks it first; its next call resumes there."""
+    d = tempfile.mkdtemp()
+    try:
+        res = _state(guest_max=8192, park_bytes=1 << 30)
+        sp, _ = _spill(d, res, min_tokens=10_000)          # nothing here is an eviction's length
+        a = WHEAD + tokens(300, seed=60)
+        oa, _ = wturn(a, 6, "chat-a-task-1", stay=True)
+        assert sp.save_resident(res, app.STATE["engine"], None, "evict")
+        res.clear()
+        b = WHEAD + tokens(200, seed=61)
+        ob, _ = wturn(b, 6, "chat-b-task-1", stay=True)
+        a2 = a + oa + tokens(10, seed=62)
+        with torch.no_grad():
+            app._spill_before_replay(a2)                     # A read back over B's rows
+        assert res.owner == "chat-a-task-1" and res.park_owner == "chat-b-task-1"
+        b2 = b + ob + tokens(10, seed=63)
+        out, pre = wturn(b2, 6, "chat-b-task-1", stay=True)
+        assert _tail(pre, b2) <= 10 + 1, pre
+        assert_cold(out, pre, b2, 6)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_the_park_goes_unwritten_wherever_a_write_would_be_unsafe():
     """On a side slot's thread, with `safe`, while the spill's I/O is held, while a guest's rows
     lie over the park's head, and while the park is in use: the park goes (or stays), unwritten."""

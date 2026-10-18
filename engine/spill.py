@@ -1142,6 +1142,15 @@ class SessionSpill:
                 self._keep.discard(e.eid)
             if stop is not None and stop():
                 return None                    # a request came: the rows in place stay as they are
+        elif (res.valid and getattr(res, "park_budget", 0)
+              and (res.owner is None or res.owner != e.man.get("owner"))):
+            # ENG-371: a conversation shorter than an eviction's length goes to the RAM park, as
+            # one another request replaces does, not away: live 2026-10-18 04:07 a worker's
+            # 11,509 rows were read over by the other chat's worker's entry and its next call
+            # read 11,527 tokens from 0. The park keeps the head both share in place
+            keep = _common(res.tokens[:res.valid], e.tokens)
+            if res.valid - keep >= res.chunk:
+                res._park(eng, drafter, keep)
         return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here, stop=stop)
 
     def _unserved(self, m: dict) -> None:
