@@ -4745,7 +4745,7 @@ def _window_above_limits(a, eng) -> None:
     the rows above it, as they do for the side slots, so the caches are not shed and a long prefill
     not refused for slot 0's own window (Super VL at 1,048,576 tokens: +6 GiB)."""
     mem = dict.get(STATE, "mem")
-    if mem is None or not mem.on or eng is None or not hasattr(eng, "cost"):
+    if mem is None or not mem.on or eng is None:
         return
     extra = int(eng.cost().view_bytes_per_token) * max(0, int(a.max_len) - memlimits.LIMITS_WINDOW)
     if extra <= 0:
