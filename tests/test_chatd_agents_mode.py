@@ -130,11 +130,14 @@ def test_the_reads_and_results_are_capped():
         assert r3.splitlines()[0].startswith("  1801\t") and "Showing" not in r3      # its end
         assert len(g) < 12_400 and "characters left out; the whole output is in " \
                "/workspace/.tandem/outputs/" in g
-        # Agents off: as before
+        # Agents off: no longer "as before" — read_file caps one result at 40,000 bytes
+        # (issue #18): 1,834 lines of this file are ~57 KB, so the read stops at the cap
+        # and names the offset to read on from — the capped step stays far under a window.
         c.send(off, "read")
         s = c.wait_idle(off, 30)
         r1 = main_parts(s)[0]["model_content"]
-        assert len(r1.splitlines()) == 1834 and "Showing" not in r1
+        assert r1.endswith("[75 more lines left; this call showed 1759 of them, up to "
+                           "40,000 bytes — read on with offset 1760]")
     finally:
         c.close()
 
