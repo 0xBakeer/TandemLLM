@@ -1145,6 +1145,58 @@
           },
           {
             "type": "object",
+            "description": "SP3: C5: two or more calls in one answer that each change something outside the conversation",
+            "properties": {
+              "rule": {
+                "const": "sequential_mutations"
+              },
+              "mode": {
+                "enum": [
+                  "off",
+                  "shadow",
+                  "act"
+                ]
+              },
+              "kinds": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "send",
+                    "schedule",
+                    "create",
+                    "write",
+                    "delete"
+                  ]
+                },
+                "minItems": 1,
+                "description": "what a tool must change, read off its declaration (signals.tool_effects), for its call to count as a mutation"
+              },
+              "texts": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "the reminder: {names} (the mutating calls, in order), {count}"
+              },
+              "regenerations": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "regenerations a request may spend on it; then the calls go out as they are"
+              }
+            },
+            "required": [
+              "rule",
+              "mode",
+              "kinds",
+              "texts",
+              "regenerations"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
             "description": "SP4: S4: no file changed, no commit and no better checker number for `minutes` -> a note.",
             "properties": {
               "rule": {

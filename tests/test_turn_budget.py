@@ -371,7 +371,7 @@ def test_clean_runs_and_progress_get_no_verify_note():
 def test_policy_and_migration():
     p = policy_mod.load()
     assert p.tasks["S5"].rule == "turn_budget" and p.tasks["S5"].mode == "act"
-    assert p.version == 7
+    assert p.version == 8
     with open(policy_mod.DEFAULT_JSON) as f:
         assert json.load(f) == p.data, "policy.default.json is stale: tools/conductor_policy.py --json"
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -381,7 +381,7 @@ def test_policy_and_migration():
     old["version"] = 4
     old["tasks"]["D1"]["mode"] = "shadow"                  # the box's own edit stays
     new, ch = monitor_migrate.migrate_doc(old)
-    assert ch == ["task S5 added (turn_budget, act)", "version 4 -> 7"], ch
+    assert ch == ["task S5 added (turn_budget, act)", "version 4 -> 8"], ch
     assert new["tasks"]["S5"] == p.data["tasks"]["S5"] and new["tasks"]["D1"]["mode"] == "shadow"
     again, ch2 = monitor_migrate.migrate_doc(new)
     assert ch2 == [] and again == new
@@ -392,7 +392,7 @@ def test_policy_and_migration():
     box["version"], box["tasks"]["S5"]["hard_minutes"] = 6, 25
     new, ch = monitor_migrate.migrate_doc(box)
     assert ch == ["task S5: verify_s, verify_scratch_writes, verify_text added",
-                  "version 6 -> 7"], ch
+                  "version 6 -> 8"], ch
     assert new["tasks"]["S5"]["hard_minutes"] == 25 and new["tasks"]["S5"]["verify_s"] == 90
     assert monitor_migrate.migrate_doc(new)[1] == []
     # a policy-6 document without the keys still runs: the arm stays silent (no text)

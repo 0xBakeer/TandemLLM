@@ -39,7 +39,9 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_JSON_ANSWER {...}  the answer is exactly that JSON document, to the end of its line
                   (SRV-619)
     FAKE_CALL_JSON {"name": ..., "arguments": {...}}   with `tools`: exactly that call (the rest of
-                  the line is the JSON), for the tool-call checks' scenarios
+                  the line is the JSON), for the tool-call checks' scenarios; one such line a
+                  call, in order (SRV-623). After a hidden action, FAKE_AFTER_FIRST writes the
+                  first of them alone, FAKE_AFTER_SAME all of them again
     FAKE_ATTR_CALL  with `tools`: a call to the first tool in the attribute style, its
                   `offset` written as the text "150"
     FAKE_DROP_CLOSER  with FAKE_CALL_JSON: the last parameter's `</parameter>` left out
@@ -210,16 +212,19 @@ def _call(name: str, user: str) -> str:
 BAD_CALL = "<tool_call>\n<function>\n{\"broken\": \n</tool_call>"
 
 
-def _json_call(user: str) -> str | None:
-    m = re.search(r"FAKE_CALL_JSON (\{.*\})\s*$", user, flags=re.M)
-    if m is None:
+def _json_call(user: str, first: bool = False) -> str | None:
+    found = re.findall(r"FAKE_CALL_JSON (\{.*\})\s*$", user, flags=re.M)
+    if not found:
         return None
-    c = json.loads(m.group(1))
-    params = "".join(f"<parameter={k}>\n{v if isinstance(v, str) else json.dumps(v)}\n"
-                     f"</parameter>\n" for k, v in (c.get("arguments") or {}).items())
-    if "FAKE_DROP_CLOSER" in user and params.endswith("</parameter>\n"):
-        params = params[:-len("</parameter>\n")]
-    return f"<tool_call>\n<function={c['name']}>\n{params}</function>\n</tool_call>"
+    out = []
+    for raw in found[:1] if first else found:
+        c = json.loads(raw)
+        params = "".join(f"<parameter={k}>\n{v if isinstance(v, str) else json.dumps(v)}\n"
+                         f"</parameter>\n" for k, v in (c.get("arguments") or {}).items())
+        if "FAKE_DROP_CLOSER" in user and params.endswith("</parameter>\n"):
+            params = params[:-len("</parameter>\n")]
+        out.append(f"<tool_call>\n<function={c['name']}>\n{params}</function>\n</tool_call>")
+    return "\n".join(out)
 
 
 MEMORY_BLOCK = ('<tandem_memory op="add" scope="{scope}" kind="{kind}">\ntitle: {title}\n\n'
@@ -386,6 +391,10 @@ def load(app, a) -> None:
         # what the writer answers after a hidden action: a call when tools were offered
         after = ([EOS] if "FAKE_EMPTY_ALWAYS" in user else
                  tok.encode_text(BAD_CALL if tools and "FAKE_BAD_ALWAYS" in user else
+                                 _json_call(user, first=True) if tools and
+                                 "FAKE_AFTER_FIRST" in user and _json_call(user) else
+                                 _json_call(user) if tools and "FAKE_AFTER_SAME" in user and
+                                 _json_call(user) else
                                  _call(tools[0], user) if tools else answer) + [EOS])
         rate = 10.0 if "FAKE_SLOW" in user else tps
         bs = app.STATE["blocks"] = app.BlockStats()

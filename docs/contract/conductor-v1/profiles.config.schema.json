@@ -659,6 +659,42 @@
           ],
           "additionalProperties": false
         },
+        "C5": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "off",
+                "shadow",
+                "act"
+              ]
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "thresholds": {
+              "type": "object",
+              "properties": {
+                "regenerations": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "regenerations"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "cap",
+            "thresholds"
+          ],
+          "additionalProperties": false
+        },
         "S1": {
           "type": "object",
           "properties": {
@@ -879,6 +915,9 @@
           "type": "boolean"
         },
         "malformed": {
+          "type": "boolean"
+        },
+        "sequence": {
           "type": "boolean"
         },
         "tier1_timeout_ms": {

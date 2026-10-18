@@ -120,7 +120,7 @@ export interface ProfileDoc {
   thinking: { default: Effort; hints: boolean; client_override: true; by_size?: Mode3; tool_turn_effort?: ToolTurnEffort; budgets?: Partial<Record<Exclude<Effort, 'off'>, number>> };
   tasks: Record<string, TaskSetting>;
   caps: { acts_per_request: number; acts_per_session_hour: number };
-  toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; tier1_timeout_ms: number };
+  toolgate: { risk: boolean; project: boolean; same_call: boolean; malformed: boolean; sequence?: boolean; tier1_timeout_ms: number };
   context: { s1_runs: number; s4_minutes: number; notify: boolean };
   hints: { stair_width: boolean; prefix_retention: boolean };
   ui?: UiStates;

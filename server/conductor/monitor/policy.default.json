@@ -1,5 +1,5 @@
 {
- "version": 7,
+ "version": 8,
  "caps": {
   "acts_per_request": 2,
   "acts_per_session_hour": 6,
@@ -173,6 +173,21 @@
     "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first.",
     "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
    ]
+  },
+  "C5": {
+   "rule": "sequential_mutations",
+   "mode": "shadow",
+   "kinds": [
+    "send",
+    "schedule",
+    "create",
+    "write",
+    "delete"
+   ],
+   "texts": [
+    "These {count} calls were not run: {names}. Each one changes something outside this conversation, and a later one may need what an earlier one returns. Take one action at a time: make the first call alone, read its result, then make the next."
+   ],
+   "regenerations": 1
   },
   "C1": {
    "rule": "risk_floor",

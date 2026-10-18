@@ -592,7 +592,7 @@ def test_the_policy_file_has_the_four_checks_and_the_profiles_reach_them():
     from server.conductor import schema
     coding = schema.seed("profiles", "coding")
     assert coding["toolgate"] == {"risk": True, "project": True, "same_call": True,
-                                  "malformed": True, "tier1_timeout_ms": 500}
+                                  "malformed": True, "sequence": True, "tier1_timeout_ms": 500}
     assert schema.seed("profiles", "chat")["toolgate"]["malformed"] is False
 
 

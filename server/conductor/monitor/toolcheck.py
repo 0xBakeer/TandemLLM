@@ -1,5 +1,5 @@
-"""Tier 0 checks on held tool calls (SRV-113): C4 malformed, C3 repeated, C1 risk floors, C2 project
-rules. Registered with `tier0.register` at import, so a task in the policy file names them like any
+"""Tier 0 checks on held tool calls (SRV-113): C4 malformed, C3 repeated, C5 one mutation per turn
+(SRV-623), C1 risk floors, C2 project rules. Registered with `tier0.register` at import, so a task in the policy file names them like any
 other rule, and their parameters (every pattern, list, limit and text) are the policy's.
 
 The checks run when the answer ends (the end token, `Supervisor.check_answer`): one
@@ -30,6 +30,7 @@ import re
 import shlex
 
 from server import toolcall
+from server.conductor import signals
 from server.conductor.monitor.policy import GIVE_UP, PASS, REGENERATE_CALL, REPAIR_CALL, Action
 from server.conductor.monitor.session import args_hash
 from server.conductor.monitor.tier0 import register
@@ -401,6 +402,59 @@ def repeated_call(ev, task, sup):
             .replace("{count}", str(need)).replace("{first_line}", line))
     return Action(REGENERATE_CALL, reason=f"repeated({ev.name} x{task['repeats']})", text=text,
                   detail={"name": ev.name, "count": need, "first_line": line})
+
+
+# ------------------------------------------------------------------ C5: one mutation per turn
+
+def _effects(sup) -> dict:
+    return _memo(sup, "tool:effects", lambda: signals.tool_effects({"tools": sup.req.tools}))
+
+
+def mutation_kinds(sup, task, name: str) -> list[str]:
+    """The task's `kinds` the tool `name` has (signals.tool_effects: read off its declaration)."""
+    return sorted(k for k in _effects(sup).get(name) or () if k in task["kinds"])
+
+
+def can_sequence(sup, task) -> bool:
+    """C5 can fire on this request: an offered tool has one of the task's kinds. Only then are
+    the answer's calls held for C5."""
+    return any(k in task["kinds"] for kinds in _effects(sup).values() for k in kinds)
+
+
+@register("sequential_mutations", "SP3", params={
+    "kinds": {"type": "array", "items": {"enum": list(signals.MUTATIONS)}, "minItems": 1,
+              "description": "what a tool must change, read off its declaration "
+                             "(signals.tool_effects), for its call to count as a mutation"},
+    "texts": dict(_TEXTS, description="the reminder: {names} (the mutating calls, in order), "
+                                      "{count}"),
+    "regenerations": dict(_COUNT, description="regenerations a request may spend on it; then "
+                                              "the calls go out as they are"),
+}, required=("kinds", "texts", "regenerations"))
+def sequential_mutations(ev, task, sup):
+    """C5: two or more calls in one answer that each change something outside the conversation
+    (send, schedule, create, write, delete) -> one at a time: the first, its result, then the
+    next. Reads stay parallel; a read beside one mutation passes. Decided once an answer, at its
+    second mutating call; on a cap or an answer without its end token the calls go out as they
+    are (`detail.release`), never a give-up."""
+    if ev.error is not None or not ev.name or not mutation_kinds(sup, task, ev.name):
+        return None
+    queue = getattr(sup, "answer_items", None) or ()
+    muts = [(i, it["function"]["name"]) for i, it in enumerate(queue)
+            if "function" in it and mutation_kinds(sup, task, it["function"]["name"])]
+    if len(muts) < 2 or muts[1][0] != ev.index:
+        return None
+    names = [n for _, n in muts]
+    detail = {"calls": names, "count": len(names), "release": True,
+              "kinds": {n: mutation_kinds(sup, task, n) for n in dict.fromkeys(names)}}
+    if ev.final:
+        return Action(PASS, reason=f"ended(mutations={len(names)})", detail=detail)
+    done = sup.task_acts.get(task.id, 0)
+    if done >= task["regenerations"]:
+        return Action(PASS, reason=f"fallback(regenerations={done})", detail=detail)
+    text = (_nth(task["texts"], done).replace("{names}", ", ".join(f"`{n}`" for n in names))
+            .replace("{count}", str(len(names))))
+    return Action(REGENERATE_CALL, reason=f"mutations({', '.join(names)})", text=text,
+                  detail=dict(detail, act=done + 1))
 
 
 # ------------------------------------------------------------------ C1: risk floors

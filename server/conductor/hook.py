@@ -296,9 +296,11 @@ class Conductor:
         ("C2", "max_file_lines"): ("C2", "max_lines"),
         ("C3", "repeats"): ("C3", "repeats"),
         ("C4", "repairs"): ("C4", "regenerations"),
+        ("C5", "regenerations"): ("C5", "regenerations"),
     }
     # the tool-gate pack each tool-call task belongs to: a pack that is off turns its task off
-    PACKS = {"C1": "risk", "C2": "project", "C3": "same_call", "C4": "malformed"}
+    PACKS = {"C1": "risk", "C2": "project", "C3": "same_call", "C4": "malformed",
+             "C5": "sequence"}
     # the profile's context section -> the session tasks' parameters (SRV-121). The section is
     # where the Profiles screen sets them; the task rows' S1/S4 thresholds mirror it
     CONTEXT = {"s1_runs": ("S1", "fails"), "s4_minutes": ("S4", "minutes"),

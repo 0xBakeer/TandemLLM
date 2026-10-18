@@ -8,7 +8,7 @@ The test matrix (SRV-621's Gherkin):
 
   1  the shipped profile: derived from general, classify and effort in shadow, packages and
      rules off, memory absent, no transcript, no state lines, no loop escape, `prompt: client`,
-     D1 D1b D2 E1 C3 C4 act and nothing else, valid, not locked; shipped to a box that lacks it
+     D1 D1b D2 E1 C3 C4 C5 act and nothing else, valid, not locked; shipped to a box that lacks it
                                                 test_the_shipped_tools_profile
   2  resolve: an unmapped kind with tools -> tools (source `tools`); without tools, with
      `tool_choice: none` or with no function tool -> the default; mapped kinds keep their
@@ -76,9 +76,9 @@ def test_the_shipped_tools_profile():
     assert t["ui"]["states"] == "off"
     assert t["sampling"] == {"agentic_default": "greedy", "loop_escape": "off"}
     acting = sorted(k for k, v in t["tasks"].items() if v["mode"] == "act")
-    assert acting == sorted(["D1", "D1b", "D2", "E1", "C3", "C4"]), acting
+    assert acting == sorted(["D1", "D1b", "D2", "E1", "C3", "C4", "C5"]), acting
     assert all(v["mode"] in ("act", "off") for v in t["tasks"].values())
-    assert t["toolgate"]["same_call"] and t["toolgate"]["malformed"]
+    assert t["toolgate"]["same_call"] and t["toolgate"]["malformed"] and t["toolgate"]["sequence"]
     assert not t["toolgate"]["risk"] and not t["toolgate"]["project"]
     # derived from general: every key it does not set itself is general's
     parent, own = schema.DERIVED_PROFILES["tools"]

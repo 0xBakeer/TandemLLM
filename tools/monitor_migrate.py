@@ -21,6 +21,7 @@ tools/packages_migrate.py edits 15-23 carry the same rule into the packages.
   python tools/monitor_migrate.py --doc ~/.qwen38-spark-engine/conductor/monitor/0002.json
   python tools/monitor_migrate.py --repo
   python tools/monitor_migrate.py --put http://127.0.0.1:8000 [--tasks S5] [--dry]
+  python tools/monitor_migrate.py --put http://127.0.0.1:8000 --tasks C5    # SRV-623, policy 8
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ TEXT_EDITS = (
 )
 NOTE_7 = ("S5 verify (SRV-195, policy 7): the deliverable exists and the steps since its last change "
           "only built test tools -> one note to check once and report")
+NOTE_8 = "C5 one mutation per turn (SRV-623, policy 8): mutating calls one at a time"
 
 
 def migrate_doc(doc: dict, tasks=("S5",), source: dict | None = None) -> tuple[dict, list[str]]:
@@ -133,7 +135,8 @@ def main(argv=None) -> int:
         if not ch or a.dry:
             return 0
         note = (NOTE_351 if any(c.startswith("text ") for c in ch)
-                else NOTE_7 if any(": verify_" in c for c in ch) else NOTE)
+                else NOTE_7 if any(": verify_" in c for c in ch)
+                else NOTE_8 if any(c.startswith("task C5") for c in ch) else NOTE)
         got = _call("PUT", url, tok, {"doc": new, "note": note, "base_version": cur.get("version")})
         print(f"[monitor_migrate] stored monitor v{got.get('version')} (was v{cur.get('version')})")
     return 0
