@@ -1,9 +1,9 @@
 """The small models under memory pressure (server/rolemem.py) and the memory split with the shared
 KV pool (server/memsplit.py). The matrix:
 
-  1  the KV pool's reclaim order is caches -> roles -> idle side conversations -> slot 0's: the
-     roles level unloads the shadow reader first, then the narrator, and stops once enough came
-     back (no conversation is parked when the roles were enough)
+  1  the KV pool's reclaim order is caches -> roles -> idle side conversations -> slot 0's -> the
+     kept park (ENG-371): the roles level unloads the shadow reader first, then the narrator, and
+     stops once enough came back (no conversation is parked when the roles were enough)
                                                        test_the_pool_reclaims_roles_before_conversations
   2  a role out for memory stays out: `Slot.ensure` says `unloaded_for_memory` and starts no
      load, `Slot.load` refuses, the narrator's keeper and the shadow's preload leave it
@@ -118,7 +118,7 @@ def test_the_pool_reclaims_roles_before_conversations():
             resident=None)
         app._kv_after_load(types.SimpleNamespace())
         names = [n for n, _ in pool.reclaimers]
-        assert names == ["caches", "roles", "idle_side", "idle_slot0"], names
+        assert names == ["caches", "roles", "idle_side", "idle_slot0", "kept_park"], names
         # spy on the levels after the roles: they must not run when the roles were enough
         pool.reclaimers = [(n, (lambda f, n: (lambda w, o: (calls.append(n), f(w, o))[1]))(f, n))
                            for n, f in pool.reclaimers]
@@ -141,7 +141,7 @@ def test_the_pool_reclaims_roles_before_conversations():
             pool.gate("slot1", 8 * GIB)
         except kvpool.PoolFull:
             pass
-        assert calls == ["caches", "roles", "idle_side", "idle_slot0"], calls
+        assert calls == ["caches", "roles", "idle_side", "idle_slot0", "kept_park"], calls
         st = rm.report()["roles"]
         assert st["shadow"]["state"] == st["narrator"]["state"] == "unloaded_for_memory"
         # the admission's reclaim before a wait goes through the roles too (not the caches)
