@@ -61,7 +61,7 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987",
              # SRV-619: the answer constraint's union and the call markers; a mask on the sampled
              # token, never a stored row
-             ("engine/grammar.py", "27b7a9b24ecb3296d647f9ae9df34dce366e3cd1890c4b751dec9ad8d1c59da4"):
+             ("engine/grammar.py", "ddcb9cf828c5e89c80a29c4ff25b20fac4a5d6230bfa4248a70893a94a97778b"):
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749"}
 
 

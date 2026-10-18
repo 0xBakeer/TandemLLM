@@ -62,7 +62,7 @@ def drift(profiles: dict, derived: dict) -> list[str]:
 # prompt and transcript switches; memory stays absent
 DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory")),
            "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui",
-                                 "sampling", "prompt", "transcripts"))}
+                                 "sampling", "prompt", "transcripts", "secret_mask"))}
 
 
 def test_derived_profiles_keep_the_parents_switches():

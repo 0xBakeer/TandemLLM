@@ -74,12 +74,14 @@ CHANGED = {"router": {"classes.design_ui.policy.core": ["ui-design"],
                       "classes.three_d.policy.packages": next(
                           c["policy"]["packages"] for c in schema.SHIPPED_ROUTER["classes"]
                           if c["id"] == "three_d")},
-           "profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off"},
+           # SRV-625: the secret echo mask in coding and chat
+           "profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off",
+                               "secret_mask": "on"},
            "profiles/overnight": {"toolgate.same_call": True},
            # SRV-621: the profile an unmapped client that offers tools gets
            "settings": {"tools_profile": "tools"},
            "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",
-                             "ui.narrator": "off",
+                             "ui.narrator": "off", "secret_mask": "on",
                              "description": "Open WebUI and the Playground: class-aware effort, "
                                             "the same-call guard."}}
 

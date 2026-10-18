@@ -40,6 +40,9 @@ Words in the last user message steer it, for the e2e's error and edge states:
                   (SRV-619)
     FAKE_CALL_JSON {"name": ..., "arguments": {...}}   with `tools`: exactly that call (the rest of
                   the line is the JSON), for the tool-call checks' scenarios
+    FAKE_ANSWER <text>   the answer is that text, to the end of its line (`\\n` a newline); with
+                  FAKE_CALL_JSON on a line of its own, the text and then that call (SRV-625)
+    FAKE_REASONING <text>  with thinking on, the reasoning is that text, to the end of its line
     FAKE_ATTR_CALL  with `tools`: a call to the first tool in the attribute style, its
                   `offset` written as the text "150"
     FAKE_DROP_CLOSER  with FAKE_CALL_JSON: the last parameter's `</parameter>` left out
@@ -284,7 +287,16 @@ def _reply(user: str, tools: list[str], think: bool) -> tuple[str, str]:
     if "FAKE_STRAY_CLOSE" in user:
         # SRV-187: the model closes its reasoning a second time in the answer
         answer = "Next I run it.\n</think>\n\n" + answer
+    said = re.search(r"FAKE_ANSWER (.*)$", user, flags=re.M)
+    if said is not None:
+        # SRV-625: an answer that quotes what the conversation's tool results held
+        answer = said.group(1).replace("\\n", "\n")
+        if tools and _json_call(user):
+            answer += "\n\n" + _json_call(user)
     reasoning = f"The question has {len(user)} characters; answer it plainly.\n" if think else ""
+    thought = re.search(r"FAKE_REASONING (.*)$", user, flags=re.M)
+    if thought is not None and think:
+        reasoning = thought.group(1).replace("\\n", "\n") + "\n"
     if "FAKE_LOOP" in user and think:
         para = ("I am going to try a completely different approach. The pagoda roof needs the "
                 "colour of the summer island, so I compute the difference again from the start "
