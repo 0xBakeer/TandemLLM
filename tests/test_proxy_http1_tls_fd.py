@@ -89,6 +89,54 @@ def test_twenty_failures_leak_no_fd():
         ls.close()
 
 
+class _BoomValueError:
+    """A context whose wrap_socket raises a non-OSError: a bad server_hostname is a
+    ValueError. The fd must still close and the exit still convert to UpstreamError."""
+
+    def __init__(self):
+        self.got = []
+
+    def wrap_socket(self, sock, server_hostname=None):
+        self.got.append(sock)
+        raise ValueError("illegal character or position in hostname")
+
+
+def test_a_non_oserror_from_the_handshake_closes_the_socket_and_converts():
+    ls = _listener()
+    try:
+        p = Pool(f"https://127.0.0.1:{ls.getsockname()[1]}")
+        boom = _BoomValueError()
+        p._ctx = boom  # type: ignore[misc]  (a stand-in context)
+        try:
+            p.get()
+            raise AssertionError("wrap_socket was rigged to raise a ValueError")
+        except UpstreamError as exc:
+            assert "ValueError" in str(exc), exc
+        assert len(boom.got) == 1
+        try:                                # the same close invariant as the OSError door
+            boom.got[0].send(b"x")
+            raise AssertionError("the ValueError exit left the socket open")
+        except OSError:
+            pass
+    finally:
+        ls.close()
+
+
+def test_an_empty_addr_list_names_the_host_as_upstream_error():
+    ls = _listener()
+    try:
+        p = Pool(f"https://127.0.0.1:{ls.getsockname()[1]}")
+        p._addrs = []                         # a resolver that answers with nothing
+        p._addrs_at = 1e18                    # fresh, so get() keeps the empty list
+        try:
+            p.get()
+            raise AssertionError("the addr list was rigged empty")
+        except UpstreamError as exc:
+            assert "no addresses" in str(exc), exc      # not a raw AttributeError
+    finally:
+        ls.close()
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

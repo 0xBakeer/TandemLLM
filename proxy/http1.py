@@ -319,6 +319,10 @@ class Pool:
                     if i == len(addrs) - 1:
                         self._addrs = None              # resolve again next time
                         raise last
+            if sock is None:
+                # an empty addr list never entered the loop: the AttributeError used to
+                # escape get() unconverted instead of naming the host
+                raise UpstreamError(f"no addresses for {self.host}")
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if self.tls:
                 # 2026-10-17: a handshake that raises leaves nothing to close unless we do
@@ -329,13 +333,25 @@ class Pool:
                 # after which the healthy backends fail too.
                 try:
                     sock = self._context().wrap_socket(sock, server_hostname=self.host)
-                except (OSError, ssl.SSLError):
-                    sock.close()
+                except BaseException:
+                    # any raise at all leaves the connected socket owned by no one —
+                    # a non-OSError here (bad server_hostname) used to leak the fd too
+                    try:
+                        sock.close()
+                    except Exception:                                     # noqa: BLE001
+                        pass
                     raise
         except socket.timeout:
             raise Timeout("connect")
+        except (UpstreamError, Timeout):
+            raise                             # already converted on the way up
         except (OSError, ssl.SSLError) as exc:
             raise UpstreamError(f"connect to {self.host_header} failed: {exc}")
+        except Exception as exc:                                   # noqa: BLE001
+            # a non-OSError from wrap_socket (a bad server_hostname is a ValueError) used to
+            # escape raw; callers of get() handle UpstreamError and Timeout and nothing else
+            raise UpstreamError(
+                f"connect to {self.host_header} failed: {type(exc).__name__}: {exc}") from exc
         self.opened += 1
         self.last_connect_ms = (time.perf_counter() - t0) * 1e3
         c = Conn(sock, self)
