@@ -31,6 +31,7 @@ import re
 import socket
 import sys
 import threading
+import time
 import urllib.parse
 
 SOCK = "/run/tandem/proxy.sock"
@@ -57,8 +58,12 @@ def handle(c):
         u.connect(SOCK)
     except OSError:
         msg = b"chatd's proxy is not there; the network is off for this sandbox\n"
-        c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: " +
-                  str(len(msg)).encode() + b"\r\nConnection: close\r\n\r\n" + msg)
+        try:
+            c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: " +
+                      str(len(msg)).encode() + b"\r\nConnection: close\r\n\r\n" + msg)
+        except OSError:
+            pass
+        u.close()          # connect failed, but the socket object still owns an fd
         c.close()
         return
     t = threading.Thread(target=pump, args=(u, c), daemon=True)
@@ -75,8 +80,22 @@ def serve():
     s.bind(("127.0.0.1", 3128))
     s.listen(128)
     while True:
-        c, _ = s.accept()
-        threading.Thread(target=handle, args=(c,), daemon=True).start()
+        # a connect that fails at the fd ceiling leaks one fd per request (before this,
+        # handle returned without closing u); at the ceiling accept() itself then raises
+        # EMFILE -- and an error escaping this loop ends PID-1, the sandbox's whole
+        # network path, until the container is recreated
+        try:
+            c, _ = s.accept()
+        except OSError:
+            time.sleep(0.05)          # at the fd ceiling this repeats; a bare continue spins
+            continue
+        try:
+            threading.Thread(target=handle, args=(c,), daemon=True).start()
+        except RuntimeError:          # can't spawn: don't leak the client fd
+            try:
+                c.close()
+            except OSError:
+                pass
 
 
 def _addr(hexaddr):
