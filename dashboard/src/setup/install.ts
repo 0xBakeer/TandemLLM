@@ -57,7 +57,11 @@ export class QseInstallProgress extends LightElement {
     this.timer = setInterval(() => this.everySecond(), 1000);
     window.addEventListener('qse-signed-in', this.onSignedIn);
   }
+  /** (deep audit 0.11.3): a read still in flight at unmount must not resurrect the stream
+   *  this disconnect just closed, nor anything else a detached page can no longer show */
+  private detached = false;
   disconnectedCallback(): void {
+    this.detached = true;
     publishActive(null);
     window.removeEventListener('qse-signed-in', this.onSignedIn);
     this.stream?.close();
@@ -100,7 +104,7 @@ export class QseInstallProgress extends LightElement {
   /** VIS-211: the job by id (GET ?format=json): a page that lost the thread re-attaches. `reopen`:
    *  the stream starts again from its last id too (the engine is back). */
   private async readJob(reopen = false): Promise<void> {
-    if (!this.jobId || this.reading) return;
+    if (this.detached || !this.jobId || this.reading) return;
     this.reading = true;
     const id = this.jobId;
     try {
@@ -112,7 +116,7 @@ export class QseInstallProgress extends LightElement {
       this.awaySince = null;
       this.final();
       // a final job's stream still brings its log and ends at done
-      if (reopen && this.stream && this.stream.state !== 'open') this.stream.start();
+      if (reopen && !this.detached && this.stream && this.stream.state !== 'open') this.stream.start();
     } catch {
       /* not readable now: the clock decides when to say so */
     } finally {
