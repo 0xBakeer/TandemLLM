@@ -32,7 +32,8 @@ if os.environ.get("QSE_SANDBOX_BOX") != "1":
     os.environ.setdefault("QSE_SANDBOX_SOCKET",
                           os.path.join(tempfile.gettempdir(), "qse-tests-no-sandbox.sock"))
 
-# the tests' sandbox limit is 1 GiB, whatever the default (their messages name it)
+# the tests' sandbox limit is 1 GiB, whatever the default (their messages name it). Both pins are
+# read when chatd/sandbox.py is imported; under pytest tests/conftest.py sets them first
 os.environ.setdefault("QSE_SANDBOX_MEM_GB", "1")
 
 from chatd.http import make_server, serve_in_thread  # noqa: E402

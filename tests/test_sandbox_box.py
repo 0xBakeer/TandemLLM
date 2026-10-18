@@ -23,6 +23,9 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# the tests' 1 GiB limit (tests/chatd_util.py, tests/conftest.py), before chatd/sandbox.py reads
+# it: a direct run imports neither
+os.environ.setdefault("QSE_SANDBOX_MEM_GB", "1")
 
 from chatd import sandbox as sb_mod  # noqa: E402
 from chatd.sandbox import Sandboxes, demux  # noqa: E402
