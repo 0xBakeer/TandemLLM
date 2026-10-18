@@ -6568,6 +6568,10 @@ class Handler(BaseHTTPRequestHandler):
             code, out = decider_api.readyz(STATE["deciders"], STATE)
             return self._json(code, out)
         if path.startswith("/v1/models/"):
+            # the key the list asks for, before any lookup: a 404-vs-401 difference would
+            # name the models to a stranger (proxy/app.py does the same)
+            if STATE.get("proxy") is not None and not STATE["proxy"].authorize(self)[0]:
+                return
             from urllib.parse import unquote
             name = unquote(path[len("/v1/models/"):])
             cond = STATE.get("conductor")
