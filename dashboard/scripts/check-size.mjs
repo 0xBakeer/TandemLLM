@@ -33,6 +33,8 @@
 // 458 KB with each running worker's live figures (SRV-579, VIS-219, 2026-10-17: 457.3 KB from
 // 455.1): its own Now in the Context panel, a row per worker in the Now dock, the rate on its card,
 // and the mock's two workers at once.
+// 462 KB with the shell hardware rail on top (PR #45: 461.0 KB from 457.3, 2026-10-18:
+// six tiles, four ribbons, their two-line legend)
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -51,8 +53,8 @@ const walk = (d, rel = '') => {
   }
 };
 walk(dist);
-console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 458 KB)`);
-if (total > 458 * 1024) {
+console.log(`${(total / 1024).toFixed(1).padStart(7)} KB  total gzip (budget 462 KB)`);
+if (total > 462 * 1024) {
   console.error('over budget');
   process.exit(1);
 }
