@@ -159,6 +159,8 @@ class Collector:
         self.env = os.environ if env is None else env
         self.clock, self.wall = clock, wall
         self._token: str | None = None
+        self._token_lock = threading.Lock()   # not _lock: token_of may write the config,
+                                              # and the collector lock is the hot path
         self._lock = threading.Lock()
         self.backends: dict[str, _Backend] = {}
         self.expect: dict = {}          # (bid, key) -> rec, while the request runs
@@ -189,7 +191,12 @@ class Collector:
 
     def token(self) -> str:
         if self._token is None:
-            self._token = token_of(self.svc.cfg, self.env)
+            # two first requests used to race here: each generated a different token and
+            # each wrote it to the config; whoever lost the write is now refused forever,
+            # because self._token holds the winner and is never re-read
+            with self._token_lock:
+                if self._token is None:
+                    self._token = token_of(self.svc.cfg, self.env)
         return self._token
 
     def _b(self, bid: str) -> _Backend:
