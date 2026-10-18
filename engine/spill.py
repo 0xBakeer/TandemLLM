@@ -782,6 +782,18 @@ class SessionSpill:
         codec = self.codec
         eid = self._eid_for(owner, tokens)
         old = self.entries.get(eid)
+        if eid in self._keep:
+            # ENG-371: the entry a restore reads next is never written over (the conversation's
+            # own park going to the NVMe from inside that restore: live 2026-10-18 05:36 the
+            # restore then failed its read and the turn re-read 10,073 tokens)
+            self._count("refused", "reading")
+            return None
+        if (not resident and old is not None and old.valid > n
+                and _common(old.tokens, tokens) >= n):
+            # ENG-371: a park holds an older, shorter copy of a conversation the entry holds
+            # further (written since from a side slot or a restore): it does not replace it
+            self._count("refused", "older")
+            return None
         want = (int(n * per_row / (max(1.0, self.zratio) if codec else 1.0)) + -(-n // C) * 2 * ALIGN
                 + (len(keep) + (end is not None)) * anc_size)
         if not self._sweep("save", room=max(0, want - (old.bytes if old else 0)), protect=eid):
@@ -1150,7 +1162,11 @@ class SessionSpill:
             # read 11,527 tokens from 0. The park keeps the head both share in place
             keep = _common(res.tokens[:res.valid], e.tokens)
             if res.valid - keep >= res.chunk:
-                res._park(eng, drafter, keep)
+                self._keep.add(e.eid)              # the park's write must not take the entry
+                try:
+                    res._park(eng, drafter, keep)
+                finally:
+                    self._keep.discard(e.eid)
         return self.restore(res, eng, drafter, e, disk=disk, line=line, here=here, stop=stop)
 
     def _unserved(self, m: dict) -> None:

@@ -452,6 +452,41 @@ def test_a_short_conversation_an_nvme_restore_reads_over_goes_to_the_park():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_a_park_never_writes_over_the_entry_a_restore_reads_or_a_newer_one():
+    """Live 2026-10-18 05:36: a conversation's older park went to the NVMe under its own entry,
+    which a restore was about to read (and which held it further); the restore failed its read and
+    the turn re-read 10,073 tokens. A save into the entry being read, or of an older, shorter copy
+    over the entry, is refused."""
+    d = tempfile.mkdtemp()
+    try:
+        res = _state(guest_max=8192, park_bytes=1 << 30)
+        sp, _ = _spill(d, res, min_tokens=10_000)
+        x = WHEAD + tokens(200, seed=64)
+        ox, _ = wturn(x, 6, "chat-x-task-1", stay=True)
+        wturn(WHEAD + tokens(80, seed=65), 6, "chat-y-task-1", stay=True)   # X to the park
+        assert res.park_owner == "chat-x-task-1"
+        # X further along, written from another slot: the newer entry
+        res2 = cache.ResidentPrefix(BIG, CH, end=True, stash_bytes=BIG)
+        saved = dict(app.STATE)
+        app.STATE.update(engine=fresh(), resident=res2)
+        x2 = x + ox + tokens(40, seed=66)
+        wturn(x2, 6, "chat-x-task-1", stay=True)
+        assert sp.save_resident(res2, app.STATE["engine"], None, "switch")
+        app.STATE.clear()
+        app.STATE.update(saved)
+        (e,) = sp.entries.values()
+        n = e.valid
+        assert not res._spill_park(app.STATE["engine"], None)          # older: refused
+        assert next(iter(sp.entries.values())).valid == n
+        sp._keep.add(e.eid)
+        try:
+            assert sp.save_resident(res2, fresh(), None, "switch") is None   # being read: refused
+        finally:
+            sp._keep.discard(e.eid)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_the_park_goes_unwritten_wherever_a_write_would_be_unsafe():
     """On a side slot's thread, with `safe`, while the spill's I/O is held, while a guest's rows
     lie over the park's head, and while the park is in use: the park goes (or stays), unwritten."""

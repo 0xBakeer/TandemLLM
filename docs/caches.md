@@ -229,6 +229,7 @@ An agent's worker (`X-Tandem-Worker: 1` or `X-Tandem-Parent-Session`) is never a
 
 - A request whose conversation slot 0's park holds tries slot 0 first for `QWEN38_SIDE_SLOT0_WAIT_S` (3 s), as one on the NVMe does, before a free side slot reads it again (`[parallel] ... park=N`).
 - A conversation of at least `--session-spill-min-tokens` that another session replaces while the memory policy refuses the park goes to the NVMe (`[spill] save ... reason=evict` or `switch`) instead of being dropped.
+- A park's write never replaces the entry a restore is about to read, nor an entry that holds the same conversation further (written since from a side slot or a restore): `[spill]`'s refused counts say `reading` and `older`.
 - A conversation read over by an NVMe entry's restore (another session's, coming back) goes to the RAM park first when it is too short to be written there, as one another request replaces does.
 - A swap of two conversations on slot 0 grows the park's buffers to the longer one, within `--resident-park-gb` (asked of the memory policy at their whole size), and writes it to the NVMe when that is refused.
 - The memory gate at a request's start does not give back the end anchor that request resumes at: the levels after it (the park, the pin, the roles) go first, and the end stays held until the prefill starts. When the gate would refuse with the end held, it runs once more without it, so the request reads its answer again instead of a 503.
