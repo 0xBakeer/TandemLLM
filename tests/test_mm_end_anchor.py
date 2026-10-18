@@ -37,6 +37,7 @@ Run: python tests/test_mm_end_anchor.py     (needs transformers with qwen3_5 for
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from types import SimpleNamespace
@@ -334,6 +335,48 @@ def test_an_image_key_is_content_for_the_alignment():
 
 # ------------------------------------------------------------------ 8. a side slot's conversation
 
+#: ENG-371's image tests: a resume's logits against a cold prefill's (the rows below the end were
+#: written by the decode's forwards: a few 1e-6 here; a resume on wrong rows is 1e-2 and more off)
+TOL = 1e-4
+
+
+@contextlib.contextmanager
+def prefill_logits():
+    """The logits of every `cache.prefill` in the block (the request's own, as
+    `generate_stream` runs it)."""
+    got, real = [], cache.prefill
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        got.append(out[0].detach().float().clone())
+        return out
+    cache.prefill = spy
+    try:
+        yield got
+    finally:
+        cache.prefill = real
+
+
+def need_or_skip():
+    """`need()`, a real skip under pytest (a returned string counts as a pass there)."""
+    why = need()
+    if why and "pytest" in sys.modules:
+        import pytest
+        pytest.skip(why)
+    return why
+
+
+def assert_cold_mm(lg, mm, images, n, out):
+    """The image request's resume is the cold prefill of its served prompt: logits within TOL,
+    the same greedy tokens."""
+    with prefill_logits() as got:
+        ref = cold(app._mm_collapse(list(mm.key_ids), mm), images, n)
+    d = float((lg - got[-1]).abs().max())
+    assert d <= TOL, f"logits {d:.3g} off the cold prefill's"
+    assert out == ref, (out, ref)
+    return d
+
+
 def _side_turn(p1, n):
     """`serve` with a side slot beside slot 0 (its own engine on the same weights) and a text
     turn on it; the carry record its end leaves."""
@@ -368,8 +411,11 @@ def _carried_image_turn(ids, images, n, carry=True):
     if res.end is not None:
         prompt, mm, _, _, _ = app._mm_end_replay(res, t, prompt, mm, images)
     served = list(mm.key_ids)
-    out = list(app.generate_stream(prompt, n, set(), None, "ses", mm=mm, end_mm=True))
-    return out, dict(app.STATE["last_prefill"]), served, mm
+    with prefill_logits() as got:
+        out = list(app.generate_stream(prompt, n, set(), None, "ses", mm=mm, end_mm=True))
+    pre = dict(app.STATE["last_prefill"])
+    pre["logits"] = got[-1]
+    return out, pre, served, mm
 
 
 def test_a_side_slots_conversation_with_its_first_screenshot_is_carried_into_slot_0():
@@ -378,7 +424,7 @@ def test_a_side_slots_conversation_with_its_first_screenshot_is_carried_into_slo
     turn's are, and it resumes at the side slot's end. Before, a request with images skipped the
     carry and read its prompt again (live 2026-10-17 23:41: a parent's turn with a screenshot
     re-read 14,606 of 19,726 tokens)."""
-    if need():
+    if need_or_skip():
         return need()
     x = TV.image(53, (1, 4, 6))
     for k in range(50):
@@ -392,14 +438,13 @@ def test_a_side_slots_conversation_with_its_first_screenshot_is_carried_into_slo
     out2, pre2, served, mm = _carried_image_turn(copy, [x], 12)
     assert pre2["reused"] == rec["at"] and pre2["forwarded"] == len(served) - rec["at"], pre2
     assert res.stats["side_carries"] == 1 and side.carry is None, res.stats
-    ref = cold(app._mm_collapse(list(mm.key_ids), mm), [x], 12)
-    assert out2 == ref, (out2, ref)
+    d = assert_cold_mm(pre2.pop("logits"), mm, [x], 12, out2)
     # without the carry (0.11.4): slot 0 holds nothing of it, the prompt is read again
     _side_turn(p1, 20)
     _, pre0, _, _ = _carried_image_turn(copy, [x], 12, carry=False)
-    assert pre0["reused"] == 0, pre0
-    return (f"resumed at the side slot's end ({rec['at']} of {len(served)}), 12 greedy tokens "
-            f"equal; without the carry {pre0['forwarded']} forwarded")
+    assert pre0["reused"] == 0, pre0["reused"]
+    return (f"resumed at the side slot's end ({rec['at']} of {len(served)}), logits {d:.1g} off "
+            f"cold; without the carry {pre0['forwarded']} forwarded")
 
 
 def _turn_as(session, ids, n, images=None):
@@ -415,8 +460,10 @@ def _turn_as(session, ids, n, images=None):
     app._spill_before_replay(list(mm.key_ids), mm_ok=True)
     if res.end is not None:
         prompt, mm, _, _, _ = app._mm_end_replay(res, t, prompt, mm, images)
-    out = list(app.generate_stream(prompt, n, set(), None, session, mm=mm, end_mm=True))
+    with prefill_logits() as got:
+        out = list(app.generate_stream(prompt, n, set(), None, session, mm=mm, end_mm=True))
     pre = dict(app.STATE["last_prefill"])
+    pre["logits"] = got[-1]
     app._remember(list(ids), out, session, mm=mm)
     return out, pre, mm
 
@@ -455,14 +502,14 @@ def test_a_parked_end_after_images_serves_its_next_request_with_them():
     each parks the other. A parked end kept after images is offered to a request whose keys hold
     every row up to it, as the end in place is (live 2026-10-18 00:58: a worker's call read
     16,161 tokens again from 0 although its rows were in the park)."""
-    if need():
+    if need_or_skip():
         return need()
     res, e2, out3, pre3, mm3, x = _two_with_images(old_park=False)
-    assert pre3["reused"] == e2 and res.stats["park_end_hits"] >= 1, (pre3, e2, res.stats)
-    assert out3 == cold(app._mm_collapse(list(mm3.key_ids), mm3), [x], 10)
+    assert pre3["reused"] == e2 and res.stats["park_end_hits"] >= 1, (pre3["reused"], e2)
+    d = assert_cold_mm(pre3.pop("logits"), mm3, [x], 10, out3)
     _, e2o, out3o, pre3o, _, _ = _two_with_images(old_park=True)
-    assert pre3o["reused"] < e2o and out3o == out3, (pre3o, e2o)
-    return (f"resumed at the parked end ({e2} of {len(mm3.key_ids)}), 10 greedy tokens equal; "
+    assert pre3o["reused"] < e2o and out3o == out3, (pre3o["reused"], e2o)
+    return (f"resumed at the parked end ({e2} of {len(mm3.key_ids)}), logits {d:.1g} off cold; "
             f"the park as before: {pre3o['reused']}")
 
 
