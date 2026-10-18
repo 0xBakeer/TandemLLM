@@ -1028,10 +1028,17 @@ NOTES: dict = {"index_tokens": 1500, "body_tokens": 600, "pinned_tokens": 300, "
                           "ban_tool_call": True, "prefill": ""}}
 
 
+# SRV-621: the profile a request from a client kind no profile maps gets when it offers
+# function tools and `tool_choice` is not "none" (router.resolve). The settings document's
+# `tools_profile` over this; "" turns the rule off; a name the store does not hold, or a profile
+# with memory, leaves the request to `default_profile`
+TOOLS_PROFILE_DEFAULT = "tools"
+
 # the shipped settings (server/conductor/shipped.py): `general` for a client no
-# profile names -- an OpenAI SDK, curl, a script
+# profile names -- an OpenAI SDK, curl, a script -- and `tools` for one of those that offers tools
 SHIPPED_SETTINGS: dict = copy.deepcopy(SETTINGS)
 SHIPPED_SETTINGS["default_profile"] = "general"
+SHIPPED_SETTINGS["tools_profile"] = TOOLS_PROFILE_DEFAULT
 
 
 def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), caps=(2, 6),
@@ -1180,13 +1187,32 @@ SHIPPED_PROFILES["chat-app"].update(
     # SRV-471: the memory notes, set here and not inherited (absent is off, and the Chat tab ran
     # without them while Open WebUI and opencode had them)
     memory="on")
-del _n
+# SRV-621: a plain API client that offers tools (an SDK agent loop, curl, a benchmark;
+# router.resolve's rule). `general` with nothing added to the prompt: the class and the effort
+# journaled only, no packages, no rules, no memory (the key absent: no card, no off note), no
+# session transcript, no state lines, no loop escape; `prompt: client` drops whatever note,
+# card or moved tool text the plan would add, so the prompt ids are the raw path's. The loop
+# guards and the tool-call checks act; every act is journaled
+SHIPPED_PROFILES["tools"] = copy.deepcopy(SHIPPED_PROFILES["general"])
+SHIPPED_PROFILES["tools"].update(
+    description="API clients that offer tools: the prompt as sent, token for token the raw "
+                "path's; the loop guards and the tool-call checks act, each act journaled.",
+    decisions={"classify": "shadow", "effort": "shadow", "packages": "off", "rules": "off"},
+    toolgate=dict(SHIPPED_PROFILES["general"]["toolgate"], same_call=True, malformed=True),
+    ui={"states": "off", "states_channel": "content"},
+    sampling={"agentic_default": "greedy", "loop_escape": "off"},
+    prompt="client", transcripts="off")
+for _tid, _t in SHIPPED_PROFILES["tools"]["tasks"].items():
+    _t["mode"] = "act" if _tid in ("D1", "D1b", "D2", "E1", "C3", "C4") else "off"
+del _n, _tid, _t
 # A shipped profile derived from another: its parent and the top-level keys it sets itself. Every
 # other top-level key is the parent's (tests/test_conductor_derived.py), so a switch the parent
 # gains cannot miss the derived profile again. `general` is no derived profile: it serves scripts
 # and SDK clients, whose requests stay the release's (memory absent, off)
 DERIVED_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
     "chat-app": ("coding", ("description", "clients", "ui", "memory")),
+    "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui", "sampling",
+                          "prompt", "transcripts")),
 }
 
 
@@ -1398,6 +1424,29 @@ def profile_memory(profile: dict) -> str:
     return profile.get("memory", "off")
 
 
+PROMPT_MODES = ("conductor", "client")
+PROFILE_TRANSCRIPTS = ("settings", "off")
+
+
+def profile_prompt(profile: dict) -> str:
+    """A profile's `prompt` switch (SRV-621): `conductor` when absent (the plan's notes,
+    cards and lines go in); `client`, the prompt the client sent, token for token."""
+    return profile.get("prompt", "conductor")
+
+
+def profile_transcripts(profile: dict) -> str:
+    """A profile's `transcripts` switch (SRV-621): `settings` when absent (the
+    settings document's scope); `off`, no session transcript for its requests."""
+    return profile.get("transcripts", "settings")
+
+
+def tools_profile(settings: dict | None) -> str:
+    """The settings' `tools_profile` (SRV-621), TOOLS_PROFILE_DEFAULT when absent; ""
+    is the rule off."""
+    got = (settings or {}).get("tools_profile")
+    return TOOLS_PROFILE_DEFAULT if got is None else str(got)
+
+
 def notes(settings: dict | None) -> dict:
     """`settings.memory.notes` over the defaults (a settings version stored before has none)."""
     got = (((settings or {}).get("memory") or {}).get("notes") or {})
@@ -1486,6 +1535,9 @@ ROLE_CONTRACT = {
 
 SCHEMAS: dict[str, dict] = {
     "settings": _obj({"default_profile": _ID,
+                      # SRV-621: an unmapped client that offers tools (absent: "tools";
+                      # "": the rule off)
+                      "tools_profile": {"type": "string", "pattern": r"^$|" + ID_RE},
                       "journal": _obj({"retention_days": {"type": "integer", "minimum": 1,
                                                           "maximum": 400},
                                        "digest": {"enum": ["tools", "all", "none"]}}),
@@ -1758,6 +1810,10 @@ SCHEMAS: dict[str, dict] = {
         "library": {"enum": list(MODES3)},
         # 2026-10-05: the memory notes (absent: off; server/conductor/memory.py)
         "memory": {"enum": list(MODES3)},
+        # SRV-621: `client`, nothing of the plan goes into the prompt (absent:
+        # `conductor`); `transcripts: off`, no session transcript (absent: the settings' scope)
+        "prompt": {"enum": list(PROMPT_MODES)},
+        "transcripts": {"enum": list(PROFILE_TRANSCRIPTS)},
         # SRV-475: the sampling of agent turns (server/conductor/loopescape.py; absent: greedy,
         # escape off). `agentic_default`: a turn that offers tools and names no sampling decodes
         # greedy or with the model card's sampling; `loop_escape`: after a repeat or near-repeat
@@ -1979,6 +2035,9 @@ def check(kind: str, doc, *, name: str | None = None, router: dict | None = None
     if kind == "settings":
         if doc["default_profile"] not in set(profiles or PROFILES) | set(PROFILES):
             errs.append(f"$.default_profile: no profile {doc['default_profile']!r}")
+        tp = doc.get("tools_profile")
+        if tp and tp not in set(profiles or PROFILES) | set(PROFILES):
+            errs.append(f"$.tools_profile: no profile {tp!r}")
     if kind == "residency" and len(set(doc["order"])) != len(doc["order"]):
         errs.append("$.order: a role is listed twice")
     if kind == "residency":

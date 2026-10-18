@@ -60,6 +60,10 @@ Words in the last user message steer it, for the e2e's error and edge states:
     FAKE_CLASS <id>   the in-context stage (server/conductor/incontext.py) answers that class
     FAKE_CONTEXT_ERROR  the in-context stage fails
 
+`QSE_FAKE_PROMPTS` in the environment names a file: every prompt the writer is given is appended to
+it as one JSON line, `{"sha256": ..., "tokens": N}` of its ids, so a test compares the engine input
+of two requests (SRV-621: the `tools` profile's prompt against the raw path's).
+
 `FAKE_MEM_GIB` in the environment gives it the engine's memory policy (OPS-47) on an allocator that
 holds that many GiB: 76 with the default limits refuses every prompt with a 503 (the peak is 77 and
 a prefill's workspace is at least 1.15 GiB); 60 serves them.
@@ -319,6 +323,11 @@ def load(app, a) -> None:
                         pstop=None, sampler=None, lpr=None, on_prefill=None, sup=None,
                         compacting=False):
         ctx = [int(t) for t in prompt.tolist()]
+        log = os.environ.get("QSE_FAKE_PROMPTS")
+        if log:
+            with open(log, "a") as f:
+                f.write(json.dumps({"sha256": hashlib.sha256(json.dumps(ctx).encode()).hexdigest(),
+                                    "tokens": len(ctx)}) + "\n")
         text = tok.decode(ctx, skip_special_tokens=False)
         users = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", text, flags=re.S)
         user = users[-1] if users else text

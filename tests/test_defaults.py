@@ -24,8 +24,8 @@ of its own that no version was ever stored in:
   2  the packages: the shipped files are found without an install step (`{repo}/packages`), the
      library answers a search and a read, a read names the request's own address
   3  a client without a header lands where it should: opencode on `coding` (the state lines
-     inline), the Hermes agent's request shape on `hermes` (in the reasoning), anything else on
-     `general`
+     inline), the Hermes agent's request shape on `hermes` (in the reasoning), any other client
+     that offers tools on `tools` (SRV-621), anything else on `general`
   4  the disk tier's settings: on, 50 GB, never under 50 GB free; serve.env and start.sh turn the
      end anchor, its whitespace alignment, the conductor and the disk tier on
 
@@ -76,6 +76,8 @@ CHANGED = {"router": {"classes.design_ui.policy.core": ["ui-design"],
                           if c["id"] == "three_d")},
            "profiles/coding": {"toolgate.same_call": True, "ui.narrator": "off"},
            "profiles/overnight": {"toolgate.same_call": True},
+           # SRV-621: the profile an unmapped client that offers tools gets
+           "settings": {"tools_profile": "tools"},
            "profiles/chat": {"toolgate.same_call": True, "tasks.C3.mode": "act",
                              "ui.narrator": "off",
                              "description": "Open WebUI and the Playground: class-aware effort, "
@@ -221,6 +223,13 @@ def test_a_new_box_serves_the_live_configuration():
         assert h.get("X-Tandem-Profile") == "general", h
         h, _ = _chat(port, "curl/8.5.0", {"messages": [{"role": "user", "content": "say ok"}]})
         assert h.get("X-Tandem-Profile") == "general", h
+        # SRV-621: the same clients with ordinary tools get `tools`
+        plain = [{"type": "function", "function": {"name": "get_weather",
+                                                    "parameters": {"type": "object"}}}]
+        for ua in ("OpenAI/Python 2.24.0", "curl/8.5.0"):
+            h, _ = _chat(port, ua, {"messages": [{"role": "user", "content": "say ok"}],
+                                    "tools": plain})
+            assert h.get("X-Tandem-Profile") == "tools", (ua, h)
         # ---- 4 the disk tier's settings
         st, _, s = _call(port, "GET", "/v1/conductor/settings")
         assert s["doc"]["memory"]["disk_cache"] == {"mode": "on", "budget_gb": 16, "ttl_days": 7,

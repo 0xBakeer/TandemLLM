@@ -2097,6 +2097,10 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
      },
+     "tools_profile": {
+      "type": "string",
+      "pattern": "^$|^[a-z][a-z0-9_-]{0,39}$"
+     },
      "journal": {
       "type": "object",
       "properties": {
@@ -4809,6 +4813,18 @@
        "off",
        "shadow",
        "on"
+      ]
+     },
+     "prompt": {
+      "enum": [
+       "conductor",
+       "client"
+      ]
+     },
+     "transcripts": {
+      "enum": [
+       "settings",
+       "off"
       ]
      },
      "sampling": {

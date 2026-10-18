@@ -7,8 +7,10 @@ schema.py's SHIPPED_ROUTER, SHIPPED_PACKAGES, SHIPPED_SETTINGS and SHIPPED_PROFI
 texts under the repository's packages/). With `--conductor-defaults shipped` (ops/start.sh passes
 it to the :8000 service) the server stores each of them that the conductor's directory has no
 version of yet, as version 1, at its start: a new box gets all of them; a box with its own
-documents gets only what it never had (the `hermes` and `general` profiles on the reference box).
-Nothing that has a version is touched.
+documents gets only what it never had (the `hermes` and `general` profiles on the reference box;
+the `tools` profile, SRV-621, on every box that ran before it). Nothing that has a
+version is touched: a stored settings document without `tools_profile` reads it as `tools`
+(schema.tools_profile), so no migration is needed for the rule.
 """
 
 from __future__ import annotations

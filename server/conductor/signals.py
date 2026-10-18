@@ -117,6 +117,21 @@ def _text(content) -> str:
     return ""
 
 
+def offers_tools(body: dict) -> bool:
+    """SRV-621: the request offers at least one function tool (`{"type": "function",
+    "function": {"name": ...}}`, or a flat `{"name": ...}` as the template reads it) and its
+    `tool_choice` is not "none". router.resolve's tools rule reads it."""
+    if not isinstance(body, dict) or body.get("tool_choice") == "none":
+        return False
+    for t in body.get("tools") or ():
+        if not isinstance(t, dict) or t.get("type", "function") != "function":
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        if isinstance(fn.get("name"), str) and fn["name"].strip():
+            return True
+    return False
+
+
 def tool_caps(body: dict) -> tuple[frozenset, list[str]]:
     """SRV-243: (the capabilities the request's tools give, their names). Nothing with
     `tool_choice: none`. A flat tool (`{"name": ..., "parameters": ...}`) counts as the template

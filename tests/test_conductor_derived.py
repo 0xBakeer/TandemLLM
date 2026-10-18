@@ -58,7 +58,11 @@ def drift(profiles: dict, derived: dict) -> list[str]:
 
 # chat-app's own keys, as SRV-471 decided them: the regression guard does not read them from the
 # schema, so the schema before the fix (no memory key on chat-app) fails here
-DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory"))}
+# SRV-621: `tools` is general with its own decisions, tasks, tool gate, state lines, sampling,
+# prompt and transcript switches; memory stays absent
+DERIVED = {"chat-app": ("coding", ("description", "clients", "ui", "memory")),
+           "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui",
+                                 "sampling", "prompt", "transcripts"))}
 
 
 def test_derived_profiles_keep_the_parents_switches():
@@ -80,6 +84,9 @@ def test_a_switch_the_parent_gains_is_caught():
     profs = copy.deepcopy(schema.SHIPPED_PROFILES)
     del profs["chat-app"]["memory"]                      # the pre-fix document
     assert drift(profs, DERIVED) == ["chat-app.memory: declared but not set"]
+    profs = copy.deepcopy(schema.SHIPPED_PROFILES)
+    profs["general"]["memory"] = "on"                    # general gains a switch later
+    assert drift(profs, DERIVED) == ["tools.memory: '<absent>' != general's 'on'"]
 
 
 def test_the_agent_profiles_ship_the_loop_guard_and_the_escape():

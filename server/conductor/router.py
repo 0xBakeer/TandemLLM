@@ -147,10 +147,26 @@ def is_alias(model: str, raw_model: str) -> bool:
         model.lower() != COMPOSITE.lower()
 
 
+def _tools_profile(store) -> str | None:
+    """SRV-621: the settings' `tools_profile` when the store holds it and it keeps no
+    memory (a keyless LAN client is the box's owner to the memory notes, so the rule never sends
+    one to a profile that reads or writes them); None: the rule does not apply."""
+    try:
+        name = schema.tools_profile(store.peek("settings")[1])
+        if not name or not store.exists("profiles", name):
+            return None
+        return name if schema.profile_memory(store.peek("profiles", name)[1]) == "off" else None
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
 def resolve(store, model: str, raw_model: str, headers, client_kind: str,
-            global_mode: str | None = None) -> Resolution:
+            global_mode: str | None = None, offers_tools: bool = False) -> Resolution:
     """The profile and mode of one request; `ConfigError(400)` for an unknown profile header.
-    `model` and `raw_model` are kept in the signature for the callers; neither picks the profile."""
+    `model` and `raw_model` are kept in the signature for the callers; neither picks the profile.
+    The order: the `X-Tandem-Profile` header, the profile that maps the client kind, then
+    (SRV-621) `settings.tools_profile` for a request that offers function tools
+    (`offers_tools`, signals.offers_tools), then `settings.default_profile`."""
     requested = _header(headers, "X-Tandem-Profile")
     forced = _header(headers, "X-Tandem").lower()
     # One model (the owner, 2026-10-01): `model` is not consulted. `TandemLLM`, the raw engine's old
@@ -167,6 +183,10 @@ def resolve(store, model: str, raw_model: str, headers, client_kind: str,
             if client_kind in store.peek("profiles", n)[1].get("clients", []):
                 name, source = n, "client"
                 break
+        if name is None and offers_tools:
+            tp = _tools_profile(store)
+            if tp is not None:
+                name, source = tp, "tools"
         if name is None:
             name = store.peek("settings")[1]["default_profile"]
     v, doc = store.peek("profiles", name)
@@ -345,6 +365,8 @@ class Plan:
         # SRV-243: what the request's tools can do (signals.tool_caps) and their names
         self.tool_caps: frozenset = frozenset()
         self.tool_names: list[str] = []
+        # SRV-621: the profile's `prompt` is `client` (nothing of the plan goes in)
+        self.prompt_client = False
         self.t0 = time.perf_counter()
 
     # ---------------------------------------------------------------- what app.py calls
@@ -375,7 +397,8 @@ class Plan:
         the plan turned thinking off, the generation prompt's open `<think>` closed. Returns
         (the prompt to prefill, whether it ends inside `<think>`); the same objects when nothing
         changes. A failure here serves the prompt as rendered and says so in the journal row."""
-        if not self.active or self.session is None:
+        if not self.active or self.session is None or self.prompt_client:
+            # SRV-621: `prompt: client` serves the rendered prompt, the raw path's ids
             return prompt, in_think
         if not self.session.notes and self.block is None and not self.thinking_off and \
                 not self.extras:
@@ -892,7 +915,8 @@ class Router:
         if not dry:
             PARENT.set(request_id)                # VIS-60: the router's question names this turn
         res = resolve(self.store, str(model or body.get("model") or self.raw_model()),
-                      self.raw_model(), headers, client_kind, self.global_mode())
+                      self.raw_model(), headers, client_kind, self.global_mode(),
+                      offers_tools=chat and signals.offers_tools(body))
         # `{tandem_url}` in a package's text: the address this request came in on
         self.library.at(packages_mod.request_url(headers))
         plan = Plan(res)
@@ -906,6 +930,8 @@ class Router:
         _, roles = self.store.peek("roles")
         _, settings = self.store.peek("settings")
         plan.active, plan.router_cfg = True, router
+        # SRV-621: `prompt: client`, the prompt goes to the engine as the client sent it
+        plan.prompt_client = schema.profile_prompt(prof) == "client"
         dec = {d: _lower(prof["decisions"].get(d, "off"), res.mode) for d in schema.DECISIONS}
         dec = {d: ("off" if m == "raw" else m) for d, m in dec.items()}
         if caps:
@@ -918,7 +944,8 @@ class Router:
         side = schema.side_requests(router)
         side_cap = (caps or {}).get("side")
         shape = (signals.side_shape(body, side["shapes"])
-                 if side["mode"] == "on" and not sh.compaction and side_cap != "off" else None)
+                 if side["mode"] == "on" and not sh.compaction and side_cap != "off"
+                 and not plan.prompt_client else None)
         if shape is not None:
             return self._side(plan, body, headers, sh, shape, router_v, client_kind, request_id,
                               dry, side_cap)
@@ -939,11 +966,13 @@ class Router:
             self.library.at(session_tokens_mod.with_token(
                 packages_mod.request_url(headers) or packages_mod.URL_DEFAULT,
                 self.session_tokens.token_for(sess.key)))
-        plan.compaction = sh.compaction
+        # a compaction under `prompt: client` is served as sent, as on the raw path
+        plan.compaction = sh.compaction and not plan.prompt_client
         if not dry:
             plan.body = body
-            plan.transcript = transcripts.Transcripts.scope_of(
-                transcripts.settings_of(settings), sh.tools, sh.compaction)
+            plan.transcript = None if schema.profile_transcripts(prof) == "off" else \
+                transcripts.Transcripts.scope_of(transcripts.settings_of(settings), sh.tools,
+                                                 sh.compaction)
         digest_scope = settings["journal"]["digest"]
         keep_text = digest_scope == "all" or (digest_scope == "tools" and sh.tools)
         # SRV-153: the context line, from the session as it stood before this turn
@@ -963,6 +992,8 @@ class Router:
                                         line) if keep_text and sh.user_text else None}
         if line:
             row["extra"]["context_line"] = line
+        if res.source == "tools":
+            row["extra"]["profile_source"] = "tools"        # SRV-621: resolve's rule
         if sess_how is not None:
             # SRV-225: how the session was found: the client's id, a new conversation of its
             # head, one continued, an alias after a compaction
@@ -1335,6 +1366,7 @@ class Router:
         self._identity(plan, sh, row)
         if not dry:
             self._client_cwd(plan, body, sh, sess, row)
+        self._as_sent(plan, row)
         if dry:
             return plan
         self.journal.open_row(row)
@@ -2032,6 +2064,38 @@ class Router:
                                "unless": ("identity", "identity")})
 
     @staticmethod
+    def _as_sent(plan, row) -> None:
+        """SRV-621: under `prompt: client` nothing of the plan reaches the prompt: the
+        turn's note, the extra notes (identity, cards, memory lines), an outcome note, a router
+        budget and a closed think block are dropped and journaled by kind (`extra.prompt`), and
+        the memory notes' part of the turn with them; `apply_prompt` replays no earlier note
+        either. The session monitor's acts are not the plan's and stay."""
+        if not getattr(plan, "prompt_client", False):
+            return
+        dropped = []
+        if plan.block is not None:
+            dropped += sorted({p.get("kind") or "note" for p in plan.block.get("parts") or ()}
+                              or {"note"})
+        for x in plan.extras:
+            dropped += sorted(x.get("kinds") or {"note"})
+        if plan.budget is not None:
+            dropped.append("budget")
+        if plan.thinking_off:
+            dropped.append("thinking_off")
+        if plan.acts:
+            dropped.append("outcome")
+        if getattr(plan, "memory", None) is not None:
+            dropped.append("memory")
+        plan.block, plan.extras, plan.acts, plan.memory = None, [], [], None
+        plan.budget, plan.budget_source, plan.thinking_off = None, "server", False
+        plan.changed = False
+        row["acted"] = 0
+        info = {"mode": "client"}
+        if dropped:
+            info["dropped"] = dropped
+        row["extra"]["prompt"] = info
+
+    @staticmethod
     def _client_cwd(plan, body, sh, sess, row) -> None:
         """FX5: Open WebUI's terminal tools end `run_command`'s description with the terminal's
         live working directory (`\n\nThe current working directory is: <path>`, fetched again for
@@ -2042,7 +2106,8 @@ class Router:
         a note, when the directory differs from the last one noted (the first turn, a `cd`): the
         tool block stays the same for the session, and the note replays where it sat. Off
         (`QWEN38_CLIENT_CWD=off`), shadow or raw: the tools as sent."""
-        if CLIENT_CWD != "note" or plan.res.mode != "on" or sh.compaction:
+        if CLIENT_CWD != "note" or plan.res.mode != "on" or sh.compaction or \
+                getattr(plan, "prompt_client", False):
             return
         plan.decisions["client"] = "on"                  # the replay of an earlier turn's note
         path = None

@@ -1190,6 +1190,18 @@
         "on"
       ]
     },
+    "prompt": {
+      "enum": [
+        "conductor",
+        "client"
+      ]
+    },
+    "transcripts": {
+      "enum": [
+        "settings",
+        "off"
+      ]
+    },
     "sampling": {
       "type": "object",
       "properties": {
