@@ -7040,7 +7040,8 @@ class Handler(BaseHTTPRequestHandler):
             tool_types = ac.types if ac is not None else None
             # compiled before the lock -- a bad constraint is the client's 400, not a
             # queue slot -- and cached, so a client that sends one schema pays for it once
-            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(calls=ac.calls))
+            gram = (grammar_mod.grammar_for(pattern, _grammar_vocab(calls=ac.calls),
+                                            parts=ac.parts)
                     if pattern else None)
         except compat.Refusal as exc:
             return self._json(400, exc.body())
@@ -8168,7 +8169,8 @@ class Handler(BaseHTTPRequestHandler):
                 rkey = cache.ResponseCache.key(
                     mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
-                    tools=tools_key, **({"grammar": gram.pattern} if gram is not None else {}),
+                    tools=tools_key, **({"grammar": ("parts:" if gram.side is not None else "")
+                                         + gram.pattern} if gram is not None else {}),
                     **({"hidden_cap": routed} if routed else {}),
                     **({"conductor": f"{sup.mode}:{sup.policy.version}"} if sup is not None
                        else {}))
@@ -8281,6 +8283,12 @@ class Handler(BaseHTTPRequestHandler):
                     rec.out = (ids, in_think)      # SRV-137: decoded by the transcript writer
                 if exc is not None:
                     rec.error_type = type(exc).__name__
+                if gram is not None and gram.side is not None:
+                    # SRV-619: the branch the model's first answer token picked
+                    br = gram.branch(ids, think.end_id, in_think)
+                    print(f"[structured] {cid} branch={br}", flush=True)
+                    if plan is not None and plan.row is not None:
+                        plan.row.setdefault("extra", {})["structured_branch"] = br
                 if in_think:
                     rec.reasoning_tokens = sum(usage_mod.reasoning_count(
                         x, usage_mod.special_id(tok, "</think>"), think.end_text)

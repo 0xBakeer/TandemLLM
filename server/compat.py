@@ -437,11 +437,13 @@ def tool_constraint(body: dict) -> tuple[str, dict] | None:
 class Answer(NamedTuple):
     """The answer's constraint: its regex, the field it came from (`rec.constrained`), the
     parameters written as JSON literals per function, and whether a tool-call branch sits beside
-    a document (the vocabulary then keeps the call markers' own ids)."""
+    a document (the vocabulary then keeps the call markers' own ids; `parts`, the two apart: the
+    model picks the branch, `engine/grammar.Grammar`)."""
     pattern: str
     kind: str                       # "response_format" | "tool_choice"
     types: dict | None
     calls: bool
+    parts: tuple[str, str] | None = None
 
 
 def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> Answer | None:
@@ -451,7 +453,8 @@ def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> 
     them checked and left out (the turn calls). No tools, or `tool_choice` none: the document
     (`structured_pattern`). SRV-619: tools under auto with a document: either, as one
     automaton -- the calls in the model's format (any offered function, more than one unless
-    `parallel_tool_calls` is false) or the document alone, so an agent loop that asks for its
+    `parallel_tool_calls` is false) or the document alone, the branch the model's own first answer
+    token picks (a call's start: the calls; anything else: the document), so an agent loop that asks for its
     final answer as JSON keeps its tools. `xml_calls` false (a model whose calls are not the XML
     format, `--tool-format pythonic`): the 400 as before.
     """
@@ -475,5 +478,6 @@ def answer_constraint(body: dict, chat: bool = True, xml_calls: bool = True) -> 
                                                many=body.get("parallel_tool_calls") is not False)
     except grammar.GrammarError as exc:
         raise Refusal("tools", f"structured outputs with tools: {exc}")
-    return Answer(grammar.calls_or_document(calls, doc), "response_format", typed or None, True)
+    return Answer(grammar.calls_or_document(calls, doc), "response_format", typed or None, True,
+                  (calls, doc))
 

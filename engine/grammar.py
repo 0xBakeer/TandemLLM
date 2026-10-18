@@ -414,6 +414,49 @@ def compile_regex(pattern: str, max_states: int = 20000) -> DFA:
     return DFA(table, accept)
 
 
+#: SRV-619: a product state's side: both languages alive, only the first (the calls), only the
+#: second (the document), dead
+BOTH, FIRST, SECOND, NEITHER = 0, 1, 2, 3
+
+
+def product_dfa(a: DFA, b: DFA, max_states: int = 40000) -> tuple[DFA, np.ndarray]:
+    """SRV-619: the union of two languages as the product of their automata, and each state's
+    side (`BOTH`, `FIRST`, `SECOND`; the dead state `NEITHER`): the union's states that still
+    hold both, and which one a state committed to."""
+    da, db = a.dead, b.dead
+    index = {(a.start, b.start): 0}
+    order = [(a.start, b.start)]
+    rows = []
+    i = 0
+    while i < len(order):
+        sa, sb = order[i]
+        key = a.table[sa].astype(np.int64) * (db + 1) + b.table[sb]
+        uniq, inv = np.unique(key, return_inverse=True)
+        ids = np.empty(len(uniq), dtype=np.int32)
+        for k, u in enumerate(uniq.tolist()):
+            pair = divmod(u, db + 1)
+            if pair == (da, db):
+                ids[k] = -1
+                continue
+            j = index.get(pair)
+            if j is None:
+                j = index[pair] = len(order)
+                order.append(pair)
+                if len(order) > max_states:
+                    raise GrammarError(f"the constraint needs more than {max_states} states")
+            ids[k] = j
+        rows.append(ids[inv])
+        i += 1
+    n = len(order)
+    dense = np.array(rows, dtype=np.int32).reshape(n, 256)
+    dense[dense == -1] = n
+    table = np.vstack([dense, np.full((1, 256), n, dtype=np.int32)])
+    accept = np.array([bool(a.accept[x] or b.accept[y]) for x, y in order] + [False])
+    side = np.array([BOTH if x != da and y != db else FIRST if x != da else SECOND
+                     for x, y in order] + [NEITHER], dtype=np.int8)
+    return DFA(table, accept), side
+
+
 # ------------------------------------------------------------------------- JSON schema -> regex
 
 WS = r"[ \t\n\r]*"
@@ -582,8 +625,8 @@ class Vocab:
             out[i] = m.encode("utf-8")
         return cls(out, size)
 
-    def mask(self, dfa: DFA, state: int) -> np.ndarray:
-        """Bool [size]: the tokens whose bytes, walked from `state`, never reach the dead state."""
+    def ends(self, dfa: DFA, state: int) -> np.ndarray:
+        """Int [len(ids)]: the state each token's bytes walk to from `state` (`ids` order)."""
         n = len(self.ids)
         cur = np.full(n, state, dtype=np.int32)
         table = dfa.table
@@ -592,8 +635,12 @@ class Vocab:
             if lo >= n:
                 break
             cur[lo:] = table[cur[lo:], self.mat[lo:, j]]
+        return cur
+
+    def mask(self, dfa: DFA, state: int) -> np.ndarray:
+        """Bool [size]: the tokens whose bytes, walked from `state`, never reach the dead state."""
         out = np.zeros(self.size, dtype=bool)
-        out[self.ids] = cur != dfa.dead
+        out[self.ids] = self.ends(dfa, state) != dfa.dead
         return out
 
 
@@ -607,24 +654,64 @@ _MASKS: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 
 
 class Grammar:
-    """A compiled constraint; its per-state masks live in the shared, bounded `_MASKS`."""
+    """A compiled constraint; its per-state masks live in the shared, bounded `_MASKS`.
 
-    def __init__(self, pattern: str, vocab: Vocab):
+    `parts` (SRV-619): (the calls, the document), compiled apart and joined as their product
+    (`pattern` is their union, for the keys). Where both are still alive the model picks the
+    branch: the row's own argmax, before the mask, decides -- a token that keeps both (whitespace)
+    leaves the choice open, one that starts a call commits to the calls, anything else (the
+    document's first character, a fence, prose, the end token) to the document. The token taken
+    then fixes the side (`side`), so the mask stays a function of the prefix and the target's row.
+    """
+
+    def __init__(self, pattern: str, vocab: Vocab, parts: tuple[str, str] | None = None):
         self.pattern, self.vocab = pattern, vocab
-        self.dfa = compile_regex(pattern)
+        if parts is None:
+            self.dfa, self.side = compile_regex(pattern), None
+        else:
+            self.dfa, self.side = product_dfa(compile_regex(parts[0]), compile_regex(parts[1]))
+        self._sides: dict[int, np.ndarray] = {}
 
     def cached(self, state: int, device) -> bool:
-        return (id(self), state, str(device)) in _MASKS
+        return (id(self), state, str(device), "all") in _MASKS
 
-    def mask(self, state: int, eos: frozenset, device) -> "torch.Tensor":
-        """Bool [vocab] on `device`: the tokens legal in `state`, the end tokens iff it accepts."""
+    def open(self, state: int) -> bool:
+        """SRV-619: both branches still alive here (the row decides)."""
+        return self.side is not None and self.side[state] == BOTH
+
+    def _token_sides(self, state: int) -> np.ndarray:
+        """Int8 [size]: the side each token's walk from `state` ends on (`NEITHER`: not legal)."""
+        got = self._sides.get(state)
+        if got is None:
+            got = np.full(self.vocab.size, NEITHER, dtype=np.int8)
+            got[self.vocab.ids] = self.side[self.vocab.ends(self.dfa, state)]
+            self._sides[state] = got
+        return got
+
+    def pick(self, state: int, top: int) -> str:
+        """SRV-619: the mask variant of an open state for a row whose argmax is `top`."""
+        sides = self._token_sides(state)
+        k = int(sides[top]) if 0 <= top < len(sides) else NEITHER
+        return "all" if k == BOTH else "calls" if k == FIRST else "document"
+
+    def mask(self, state: int, eos: frozenset, device, row=None) -> "torch.Tensor":
+        """Bool [vocab] on `device`: the tokens legal in `state`, the end tokens iff it accepts.
+        In an open state (`parts`) the row's argmax picks the branch (`pick`)."""
         import torch
-        key = (id(self), state, str(device))
+        variant = "all"
+        if row is not None and self.open(state):
+            variant = self.pick(state, int(row.argmax()))
+        key = (id(self), state, str(device), variant)
         m = _MASKS.get(key)
         if m is not None:
             _MASKS.move_to_end(key)
         else:
-            arr = self.vocab.mask(self.dfa, state)
+            if variant == "all":
+                arr = self.vocab.mask(self.dfa, state)
+            else:
+                arr = self._token_sides(state) == (FIRST if variant == "calls" else SECOND)
+                if not arr.any():
+                    arr = self.vocab.mask(self.dfa, state)
             ok = bool(self.dfa.accept[state])
             for e in eos:
                 if 0 <= e < arr.shape[0]:
@@ -637,16 +724,34 @@ class Grammar:
                 _MASKS.popitem(last=False)
         return m
 
+    def branch(self, ids, think_end: int | None = None, in_think: bool = False) -> str | None:
+        """SRV-619: the branch an answer took -- "calls", "document", or "open" (nothing
+        committed yet); None for a grammar without `parts`."""
+        if self.side is None:
+            return None
+        state, thinking = self.dfa.start, bool(in_think)
+        for t in ids:
+            t = int(t)
+            if thinking:
+                thinking = t != think_end
+                continue
+            b = self.vocab.bytes[t] if 0 <= t < len(self.vocab.bytes) else None
+            if b:
+                state = self.dfa.walk(state, b)
+        return {FIRST: "calls", SECOND: "document", BOTH: "open"}.get(int(self.side[state]), "none")
 
-_GRAMMARS: dict[str, Grammar] = {}
+
+_GRAMMARS: dict = {}
 
 
-def grammar_for(pattern: str, vocab: Vocab, keep: int = 16) -> Grammar:
+def grammar_for(pattern: str, vocab: Vocab, keep: int = 16,
+                parts: tuple[str, str] | None = None) -> Grammar:
     """The compiled grammar for `pattern`, from a small cache (a client sends one schema many times)."""
-    g = _GRAMMARS.pop(pattern, None)
+    gk = pattern if parts is None else ("parts", pattern)
+    g = _GRAMMARS.pop(gk, None)
     if g is None or g.vocab is not vocab:
-        g = Grammar(pattern, vocab)
-    _GRAMMARS[pattern] = g
+        g = Grammar(pattern, vocab, parts)
+    _GRAMMARS[gk] = g
     while len(_GRAMMARS) > keep:
         old = _GRAMMARS.pop(next(iter(_GRAMMARS)))
         for k in [k for k in _MASKS if k[0] == id(old)]:
@@ -695,10 +800,10 @@ class Constraint:
             self.state, self.thinking = self._step(self.state, self.thinking, int(t))
 
     # --- the rows -------------------------------------------------------------------------------
-    def _row_mask(self, state: int, thinking: bool):
+    def _row_mask(self, state: int, thinking: bool, row=None):
         if thinking or state == self.g.dfa.dead:
             return None
-        return self.g.mask(state, self.eos, self.device)
+        return self.g.mask(state, self.eos, self.device, row)
 
     def _apply(self, rows, masks) -> None:
         import torch
@@ -712,7 +817,7 @@ class Constraint:
             rows[i].masked_fill_(~masks[i], float("-inf"))
 
     def apply_single(self, row) -> None:
-        m = self._row_mask(self.state, self.thinking)
+        m = self._row_mask(self.state, self.thinking, row)
         if m is not None:
             row.masked_fill_(~m, float("-inf"))
 
@@ -720,7 +825,7 @@ class Constraint:
         state, thinking = self.state, self.thinking
         masks = []
         for i in range(lg.shape[0]):
-            masks.append(self._row_mask(state, thinking))
+            masks.append(self._row_mask(state, thinking, lg[i]))
             if i < len(draft):
                 state, thinking = self._step(state, thinking, int(draft[i]))
         self._apply(lg, masks)
@@ -730,7 +835,7 @@ class Constraint:
         at = [(self.state, self.thinking)]
         for j in range(1, lg.shape[0]):
             at.append(self._step(*at[tree.parents[j]], int(tree.tokens[j])))
-        self._apply(lg, [self._row_mask(s, th) for s, th in at])
+        self._apply(lg, [self._row_mask(s, th, lg[j]) for j, (s, th) in enumerate(at)])
 
 
 class LogitChain:

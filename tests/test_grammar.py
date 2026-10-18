@@ -14,7 +14,8 @@
     400s that say so; `--no-structured-outputs` refuses as before;
   * SRV-619, SRV-620: a document with tools under auto is the calls or the document alone (the
     language, the call markers' own ids, the handler on both transports); tool_choice none is the
-    document, required the calls.
+    document, required the calls; the model's own first answer token picks the branch (the
+    product automaton's sides, the row's argmax, exact under speculation).
 
 Run: python tests/test_grammar.py
 """
@@ -595,11 +596,27 @@ def test_the_call_markers_keep_their_own_ids():
     return "plain vocabulary: the markers masked (as before); the calls vocabulary: their own ids"
 
 
+BRANCHES: list = []
+
+
 def _answer(stream, **extra):
     C.serve()
     body = dict({"messages": [{"role": "user", "content": "hello there"}], "max_tokens": 120,
                  "stream": stream}, **extra)
-    head, raw = C.Req("/v1/chat/completions", body).response()
+    real = getattr(G.Grammar, "branch", None)
+
+    def branch(self, *a, **k):
+        BRANCHES.append(real(self, *a, **k))
+        return BRANCHES[-1]
+
+    BRANCHES.clear()
+    if real is not None:
+        G.Grammar.branch = branch
+    try:
+        head, raw = C.Req("/v1/chat/completions", body).response()
+    finally:
+        if real is not None:
+            G.Grammar.branch = real
     assert head.startswith("HTTP/1.1 200"), (head, raw[:300])
     if stream:
         ev = C._events(raw)
@@ -653,6 +670,141 @@ def test_the_handler_answers_tools_and_a_schema():
         assert finish == "tool_calls" and len(names) == 1, (finish, names, content)
         seen[f"call/{'stream' if stream else 'json'}"] = "tool_calls"
     return f"{seen}; tool_choice none: the document, required: the call"
+
+
+# ------------------------------------------------------------------ SRV-619: the model picks the branch
+
+BACKTICK, LT, LBRACE, RBRACE, H = 64, 28, 91, 93, 40          # "`", "<", "{", "}", "H"
+
+
+def test_the_product_knows_its_branches():
+    a, _ = _union(tools=MARK)
+    g = G.Grammar(a.pattern, G.Vocab.from_tokenizer(C.Tok(), 97), a.parts)
+    d, side = g.dfa, g.side
+    assert side[d.start] == G.BOTH and g.open(d.start)
+    for text, want in (("  ", G.BOTH), ("<tool", G.FIRST), ("{", G.SECOND), (' {"sig', G.SECOND),
+                       ("```", G.NEITHER), ("Here", G.NEITHER)):
+        assert side[d.walk(d.start, text.encode())] == want, text
+    # the same language as the union regex: the product changes how the mask is chosen, not what
+    # it allows
+    ref = G.compile_regex(a.pattern)
+    rng = random.Random(7)
+    pieces = ["<tool_call>", "<function=pick>", "<function=mark>", "<parameter=color>",
+              "<parameter=level>", "red", "hi", "</parameter>", "</function>", "</tool_call>",
+              "{", "}", '"signal"', '"buy"', ":", ",", '"ok"', "true", " ", "\n", "x"]
+    for _ in range(3000):
+        t = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 14)))
+        assert _in(ref, t) == bool(d.accept[d.walk(d.start, t.encode())]), t
+    assert g.branch([(ord(c) - 32) % 96 for c in '{"signal": "buy", "ok": true}']) == "document"
+    assert g.branch([(ord(c) - 32) % 96 for c in "<tool_call><function=mark>"]) == "calls"
+    assert g.branch([0, 0]) == "open" and G.Grammar("x", g.vocab).branch([1]) is None
+    return f"{d.states} states; sides at the start, a call, the document; 3,000 strings == the union"
+
+
+def test_the_row_argmax_picks_the_branch():
+    # the live case: the model's own first token is a fence (or prose); among what the union
+    # leaves, the call marker outranks `{`. The document wins; the marker only as the argmax
+    tok = MarkerTok()
+    v = G.Vocab.from_tokenizer(tok, 99, markers=G.CALL_MARKERS)
+    a, _ = _union(tools=MARK)
+    g = G.Grammar(a.pattern, v, a.parts)
+    eos = frozenset({C.EOS})
+    for top, second, want in ((BACKTICK, 97, "document"), (H, 97, "document"),
+                              (C.EOS, 97, "document"), (97, LBRACE, "calls"),
+                              (LT, LBRACE, "calls"), (0, 97, "all")):
+        row = torch.zeros(99)
+        row[second], row[top] = 5.0, 9.0
+        assert g.pick(g.dfa.start, top) == want, (top, want)
+        cons = G.Constraint(g, eos, "cpu")
+        cons.apply_single(row)
+        pick = int(row.argmax())
+        if want == "document":
+            assert pick != 97 and not torch.isfinite(row[97]) and torch.isfinite(row[LBRACE]), top
+        elif want == "calls":
+            assert pick == top and not torch.isfinite(row[LBRACE]), top
+        else:
+            assert pick == 0 and torch.isfinite(row[97]) and torch.isfinite(row[LBRACE])
+    # committed, the side is fixed: after `{` no call; after the marker no document
+    cons = G.Constraint(g, eos, "cpu")
+    cons.commit([LBRACE])
+    row = torch.zeros(99)
+    row[97] = 9.0
+    cons.apply_single(row)
+    assert not torch.isfinite(row[97]), "after `{` the marker is not legal"
+    # a plain grammar ignores the row (tool_choice none / required as before)
+    plain = G.Grammar(G.WS + G.schema_regex(SIG) + G.WS, v)
+    row = torch.zeros(99)
+    row[97] = 9.0
+    G.Constraint(plain, eos, "cpu").apply_single(row)
+    assert not torch.isfinite(row[97]) and torch.isfinite(row[LBRACE])
+    return "fence, prose, the end token -> the document; the marker or `<` -> the calls; ws open"
+
+
+def test_a_picked_branch_is_exact_under_speculation():
+    # the row-dependent mask is a function of the prefix and the target's row: drafts change no
+    # token. The random model biased to a fence first: the document
+    a, _ = _union(tools=MARK)
+    bias = {0: -50.0, BACKTICK: 50.0, LT: 20.0}
+
+    def run(dr=None, tree=False):
+        C.serve(dr, tree=tree)
+        from engine.penalty import PenaltySpec, PenaltyState
+        g = G.Grammar(a.pattern, G.Vocab.from_tokenizer(C.Tok(), 97), a.parts)
+        pen = G.LogitChain([PenaltyState(PenaltySpec(bias=bias), 97, "cpu"),
+                            G.Constraint(g, {C.EOS}, "cpu")])
+        return list(app.generate_stream(torch.tensor(C.PROMPT), 60, {C.EOS}, pen=pen))
+
+    ref = run()
+    text = C.Tok().decode(ref)
+    assert ref[-1] == C.EOS and _valid(text), text
+    free = C._run(n=60)
+    bad = {}
+    for label, dr, tree in (("chain, free drafts", C.Oracle(free), False),
+                            ("chain, constrained drafts", C.Oracle(ref), False),
+                            ("tree, free drafts", C.TreeOracle(free), True),
+                            ("tree, constrained drafts", C.TreeOracle(ref), True)):
+        got = run(dr, tree)
+        if got != ref:
+            bad[label] = got
+    assert not bad, f"differs from the drafter-less run: {bad}"
+    return f"{text!r}: no drafter, chain and tree agree"
+
+
+def test_the_handler_lets_the_model_pick():
+    # the model's first token a fence or prose, `<` ranked above `{`: before, the union took the
+    # call; now the document. `<` first: the call
+    seen = {}
+    for stream in (False, True):
+        tag = "stream" if stream else "json"
+        for label, bias in (("fence", {"0": -50, str(BACKTICK): 50, str(LT): 30}),
+                            ("prose", {"0": -50, str(H): 50, str(LT): 30})):
+            content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                             logit_bias=bias)
+            assert finish == "stop" and names == [], (label, stream, finish, names, content)
+            _valid(content)
+            assert BRANCHES == ["document"], BRANCHES
+            seen[f"{label}/{tag}"] = "document"
+        content, names, finish = _answer(stream, tools=MARK, response_format={"type": "json_object"},
+                                         logit_bias={"0": -50, str(BACKTICK): 50, str(LT): 30,
+                                                     str(RBRACE): 40})
+        assert finish == "stop" and names == [] and json.loads(content) == {}, (content, names)
+        assert BRANCHES == ["document"]
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias={"0": -50, str(LT): 50, str(LBRACE): 30},
+                                         parallel_tool_calls=False)
+        assert finish == "tool_calls" and len(names) == 1 and BRANCHES == ["calls"], \
+            (finish, names, BRANCHES)
+        # tool_choice none and required: one language, no branch to pick
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias={"0": -50, str(LT): 50}, tool_choice="none")
+        assert finish == "stop" and names == [] and BRANCHES == [], (finish, BRANCHES)
+        _valid(content)
+        content, names, finish = _answer(stream, tools=MARK, response_format=JS,
+                                         logit_bias={"0": -50, str(BACKTICK): 50},
+                                         tool_choice="required")
+        assert finish == "tool_calls" and len(names) == 1 and BRANCHES == [], (finish, names)
+        seen[f"call/{tag}"] = "calls"
+    return f"{seen}; json_object: the document; none and required: unchanged"
 
 
 if __name__ == "__main__":
