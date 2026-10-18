@@ -225,6 +225,17 @@ class Handler(BaseHTTPRequestHandler):
                                                   "type": "invalid_request_error",
                                                   "param": "model", "code": "model_not_found"}})
             return self._json(200, card)
+        if path == "/v1/autodetect" or path.startswith("/v1/autodetect/"):
+            from proxy import autodetect                        # off unless TANDEM_AUTODETECT=1
+            aenv = STATE.get("autodetect_env") or os.environ
+            if not autodetect.enabled(aenv):
+                return self._json(404, {"error": {"type": "not_found",
+                                                  "message": f"no route {path}"}})
+            if not self._allowed("dashboard"):
+                return
+            astate = STATE.get("args") or {}
+            return autodetect.handle(self, "GET", path, self.path, aenv,
+                                     self_port=astate.get("port"))
         if path.startswith("/v1/conductor/"):
             return self._conductor("GET")
         if (path == "/v1/library" or path.startswith("/v1/library/")) and \
@@ -575,6 +586,7 @@ def build(args, env=None) -> Service:
                                  queue_timeout=lambda: 0.0)
     STATE.update(version=version(), ledger=led, auth=a, registry=registry, live=live,
                  dashboard_dir=args.dashboard_dir, verbose=args.verbose,
+                 autodetect_env=env,
                  args={k: v for k, v in vars(args).items()})
     cond, base = conductor_of(args, led, env)
     svc = Service(cfg, ledger=led, live=live, auth=a, registry=registry,
