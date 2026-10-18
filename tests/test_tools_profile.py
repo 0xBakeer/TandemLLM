@@ -6,7 +6,7 @@ path's; the loop guards and the tool-call checks act; no packages, no memory, no
 
 The test matrix (SRV-621's Gherkin):
 
-  1  the shipped profile: derived from general, classify and effort in shadow, packages and
+  1  the shipped profile: derived from general, classify and effort off, packages and
      rules off, memory absent, no transcript, no state lines, no loop escape, `prompt: client`,
      D1 D1b D2 E1 C3 C4 act and nothing else, valid, not locked; shipped to a box that lacks it
                                                 test_the_shipped_tools_profile
@@ -70,7 +70,7 @@ def _resolve(st, kind, body=None, headers=None):
 def test_the_shipped_tools_profile():
     t, g = schema.SHIPPED_PROFILES["tools"], schema.SHIPPED_PROFILES["general"]
     assert t["mode"] == "on" and t["clients"] == [] and "locked" not in t
-    assert t["decisions"] == {"classify": "shadow", "effort": "shadow", "packages": "off",
+    assert t["decisions"] == {"classify": "off", "effort": "off", "packages": "off",
                               "rules": "off"}
     assert "memory" not in t and t["transcripts"] == "off" and t["prompt"] == "client"
     assert t["ui"]["states"] == "off"

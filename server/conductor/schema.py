@@ -1188,8 +1188,9 @@ SHIPPED_PROFILES["chat-app"].update(
     # without them while Open WebUI and opencode had them)
     memory="on")
 # SRV-621: a plain API client that offers tools (an SDK agent loop, curl, a benchmark;
-# router.resolve's rule). `general` with nothing added to the prompt: the class and the effort
-# journaled only, no packages, no rules, no memory (the key absent: no card, no off note), no
+# router.resolve's rule). `general` with nothing added to the prompt and nothing asked on the
+# side: no class question (its micro-call cost the bench 1.23x raw's time and moved a near-tie
+# answer off raw's), no effort decision, no packages, no rules, no memory (the key absent: no card, no off note), no
 # session transcript, no state lines, no loop escape; `prompt: client` drops whatever note,
 # card or moved tool text the plan would add, so the prompt ids are the raw path's. The loop
 # guards and the tool-call checks act; every act is journaled
@@ -1197,7 +1198,7 @@ SHIPPED_PROFILES["tools"] = copy.deepcopy(SHIPPED_PROFILES["general"])
 SHIPPED_PROFILES["tools"].update(
     description="API clients that offer tools: the prompt as sent, token for token the raw "
                 "path's; the loop guards and the tool-call checks act, each act journaled.",
-    decisions={"classify": "shadow", "effort": "shadow", "packages": "off", "rules": "off"},
+    decisions={"classify": "off", "effort": "off", "packages": "off", "rules": "off"},
     toolgate=dict(SHIPPED_PROFILES["general"]["toolgate"], same_call=True, malformed=True),
     ui={"states": "off", "states_channel": "content"},
     sampling={"agentic_default": "greedy", "loop_escape": "off"},
