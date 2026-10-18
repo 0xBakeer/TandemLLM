@@ -323,6 +323,56 @@ def test_the_memory_gate_keeps_the_end_the_request_resumes_at():
     assert res.shed_end(False) > 0 and res.end is None and res.end_lost == "memory"
 
 
+def _refused_park(spill_on, d):
+    """A conversation another session replaces while the memory policy refuses the park: with
+    the NVMe spill it is written there (ENG-371), and its next request reads its tail only."""
+    per = sum(t.numel() // t.shape[ax] * t.element_size()
+              for t, ax in cache._kv_views(fresh(), None))
+    res = _state(guest_max=8192, park_bytes=900 * per + 8 * fresh().state.nbytes)
+    if spill_on:
+        _spill(d, res, min_tokens=64)
+    res._park = lambda eng, drafter, keep: None          # the policy said no
+    p1 = PHEAD + tokens(300, seed=107)
+    out, _ = wturn(p1, 8, "chat-p")
+    wturn(WHEAD + tokens(40, seed=108), 6, "chat-p-task-1", stay=True)
+    ids = p1 + out + tokens(15, seed=109)
+    out2, pre = wturn(ids, 6, "chat-p")
+    return ids, out2, pre
+
+
+def test_a_conversation_the_park_refuses_goes_to_the_nvme_not_away():
+    """Live 2026-10-18 02:34: under the memory ceiling the park refused a worker's 27,381 rows,
+    they were dropped, and its next call read them all again."""
+    d = tempfile.mkdtemp()
+    try:
+        ids, out, pre = _refused_park(True, d)
+        assert _tail(pre, ids) <= 15 + 1, pre
+        assert out == cold(ids, 6)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    d = tempfile.mkdtemp()
+    try:
+        ids, _, pre = _refused_park(False, d)            # no spill: dropped, as before
+        assert pre["reused"] == 0, pre
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_carry_that_vacates_slot_0_writes_what_the_park_refuses():
+    """The same at a side slot's carry into slot 0 (`vacate`): live 02:34 `slot 0's conversation
+    dropped`."""
+    d = tempfile.mkdtemp()
+    try:
+        res = _state(guest_max=8192, park_bytes=1 << 30)
+        sp, _ = _spill(d, res, min_tokens=64)
+        res._park = lambda eng, drafter, keep: None
+        wturn(PHEAD + tokens(300, seed=110), 8, "chat-q-task-1", stay=True)
+        assert res.vacate(app.STATE["engine"], None, "chat-r-task-1") == "spilled"
+        assert len(sp.entries) == 1 and res.valid == 0
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_on_a_side_slots_thread_the_park_goes_as_before():
     class Res:
         park_rows, park_base, park_owner, _stash = 300, 40, "chat-p", None

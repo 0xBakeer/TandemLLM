@@ -1379,6 +1379,10 @@ class ResidentPrefix:
         if (self.park_budget and self.valid > keep and not compacting and other
                 and not spilled):
             self._park(eng, drafter, keep)
+            if (self.stats["parks"] == parked and self.spiller is not None
+                    and self.valid >= self.spiller.min_tokens):
+                # ENG-371: the park refused it (the memory policy): the NVMe, not the floor
+                spilled = self._spill(eng, drafter, "evict")
         if (self.keeper is not None and self.valid > keep and not compacting and other
                 and not spilled and self.stats["parks"] == parked):
             try:
@@ -1447,6 +1451,12 @@ class ResidentPrefix:
         parked = self.stats["parks"]
         if self.park_budget and other:
             self._park(eng, drafter, 0)
+        if (self.stats["parks"] == parked and other and self.spiller is not None
+                and self.valid >= self.spiller.min_tokens and self._spill(eng, drafter, "switch")):
+            # ENG-371: the park refused it (live 2026-10-18 02:34: a worker's 27,381 tokens were
+            # dropped under the memory ceiling, its next call read them all again)
+            self.clear()
+            return "spilled"
         how = "parked" if self.stats["parks"] > parked else "dropped"
         self.clear()
         return how
