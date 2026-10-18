@@ -223,6 +223,19 @@ A summary still has to be written, about 2,000 tokens at 40 to 60 tok/s. The ser
 
 `tests/test_compaction_continue.py`: the request's parts and the guard; the continuation's tokens equal a cold run's of the same ids; after images, the end offered to the continuation alone and its offset kept on the NVMe; the preparer leaves the conversation as it was, also when a waiting request stops it.
 
+## Workers, parents and the park (ENG-371)
+
+An agent's worker (`X-Tandem-Worker: 1` or `X-Tandem-Parent-Session`) is never a guest, and its parent's and its own rows are written to the NVMe rather than dropped while they wait; [parallel-requests.md](parallel-requests.md) has the slot rules. Some of the changes reach every client, an OpenAI-style one without the headers too:
+
+- A request whose conversation slot 0's park holds tries slot 0 first for `QWEN38_SIDE_SLOT0_WAIT_S` (3 s), as one on the NVMe does, before a free side slot reads it again (`[parallel] ... park=N`).
+- A conversation of at least `--session-spill-min-tokens` that another session replaces while the memory policy refuses the park goes to the NVMe (`[spill] save ... reason=evict` or `switch`) instead of being dropped.
+- A swap of two conversations on slot 0 grows the park's buffers to the longer one, within `--resident-park-gb` (asked of the memory policy at their whole size), and writes it to the NVMe when that is refused.
+- The memory gate at a request's start does not give back the end anchor that request resumes at: the levels after it (the park, the pin, the roles) go first, and the end stays held until the prefill starts. When the gate would refuse with the end held, it runs once more without it, so the request reads its answer again instead of a 503.
+- A request with images whose conversation ran on a side slot is carried into slot 0 as a text request is (`[parallel] carried slot N's conversation into slot 0`).
+- `activity.prefill.tps_now` in the live row has a value from a prefill's first progress mark, and while a layer-major window runs (SRV-591, docs/contract/dashboard-v1/README.md).
+
+The writes run where they are safe, and otherwise do not run (the park then goes as before): only the memory gate on slot 0's own thread writes a parked conversation, never the KV pool's page reclaim (it runs inside a restore, a park swap or a forward), never while the spill's own I/O is held, never while a guest's rows lie over the park's head, and the park is not given back at all while a park, a swap or a park's write uses it. A side slot's write holds `capture_lock.LOCK`, so no graph capture runs meanwhile. Each write takes time: the gate's write of a parked conversation runs under the memory policy's lock (`Budget.lock`), so another slot's admission waits for it, and a side slot's write holds the capture lock and that slot's turn, about 0.5 s for 15,000 tokens on the Spark's drive (2026-10-18). That wait was accepted against a re-read of the conversation, which takes tens of seconds.
+
 ## Response cache
 
 `--response-cache` answers an identical greedy request (same prompt, same parameters) from memory. Greedy output is a function of its input, so this is memoisation and not an approximation. It is off by default, so a benchmark can never be pointed at a dictionary by accident.

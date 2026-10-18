@@ -75,6 +75,7 @@ from collections import OrderedDict, deque
 
 import torch
 
+from engine import capture_lock
 from engine import kvpool as _kvp
 
 from engine.settings import SETTINGS as _S
@@ -1118,7 +1119,6 @@ class ResidentPrefix:
         self.end: dict | None = None
         self.end_lost: str | None = None   # why the last end anchor went (`_drop_end`)
         self._end_bufs: tuple | None = None
-        self.end_hold = False              # ENG-371: the request at the memory gate resumes here
         # the tokenizer's whitespace-only tokens (the server's, at load): where the client's copy
         # of an answer may differ from the rows next to a hidden span (`replay`)
         self.glue: frozenset = frozenset()
@@ -1146,10 +1146,12 @@ class ResidentPrefix:
         # the session spill (engine/spill.py): a long conversation another one
         # replaces is written to the NVMe before its rows are; None without a disk directory
         self.spiller = None
-        # ENG-371: (res, eng, drafter) -> None, for a prefix with no park and no spill of its own
-        # (a side slot's): another session's rows are about to be cut; the server writes them to
-        # the NVMe first when their session is a parent whose worker runs
+        # ENG-371: (res, eng, drafter, stay) -> None, for a prefix with no park and no spill of its
+        # own (a side slot's): another session's rows are about to be cut, by a worker's request
+        # when `stay`; the server writes them to the NVMe first (server/app.py `_keep_parent`)
         self.keeper = None
+        self._park_busy = 0                # a park, swap or park write runs: `shed_park` waits
+        self.end_hold = False              # ENG-371: the request at the memory gate resumes here
         self.lock = threading.Lock()
 
     # --- lookups ---------------------------------------------------------------------------
@@ -1368,7 +1370,7 @@ class ResidentPrefix:
         if self.valid and c < self.valid:
             self.stats["invalidated"] += 1
         keep = min(start, c)
-        parked = self.stats["parks"]
+        parked, refused = self.stats["parks"], self.stats["refused_park"]
         other = session is None or session != self.owner
         # A conversation longer than the RAM park holds above `keep` goes whole to
         # the disk (engine/spill.py) before this prefill writes a row; it is not parked or pinned
@@ -1379,14 +1381,14 @@ class ResidentPrefix:
         if (self.park_budget and self.valid > keep and not compacting and other
                 and not spilled):
             self._park(eng, drafter, keep)
-            if (self.stats["parks"] == parked and self.spiller is not None
+            if (self.stats["refused_park"] > refused and self.spiller is not None
                     and self.valid >= self.spiller.min_tokens):
-                # ENG-371: the park refused it (the memory policy): the NVMe, not the floor
+                # ENG-371: the memory policy refused the park: the NVMe, not the floor
                 spilled = self._spill(eng, drafter, "evict")
         if (self.keeper is not None and self.valid > keep and not compacting and other
                 and not spilled and self.stats["parks"] == parked):
             try:
-                self.keeper(self, eng, drafter)
+                self.keeper(self, eng, drafter, stay)
             except Exception:                                      # noqa: BLE001
                 pass
         # A parked prompt keeps its rows above `keep`, and its head below `keep` stays in place
@@ -1448,10 +1450,10 @@ class ResidentPrefix:
                 and self._spill(eng, drafter, "switch")):
             self.clear()
             return "spilled"
-        parked = self.stats["parks"]
+        parked, refused = self.stats["parks"], self.stats["refused_park"]
         if self.park_budget and other:
             self._park(eng, drafter, 0)
-        if (self.stats["parks"] == parked and other and self.spiller is not None
+        if (self.stats["refused_park"] > refused and other and self.spiller is not None
                 and self.valid >= self.spiller.min_tokens and self._spill(eng, drafter, "switch")):
             # ENG-371: the park refused it (live 2026-10-18 02:34: a worker's 27,381 tokens were
             # dropped under the memory ceiling, its next call read them all again)
@@ -1748,6 +1750,13 @@ class ResidentPrefix:
 
     # --- the parked session ------------------------------------------------------------------
     def _park(self, eng, drafter, keep: int) -> None:
+        self._park_busy += 1
+        try:
+            self._park_now(eng, drafter, keep)
+        finally:
+            self._park_busy -= 1
+
+    def _park_now(self, eng, drafter, keep: int) -> None:
         """Copy aside the rows of the prompt being replaced, from `keep` (where the new prompt
         parts from it) to its newest anchor that `park_bytes` holds; its newest anchors move with
         them. When every row up to the end anchor fits, the rows go up to it and the end anchor
@@ -1849,6 +1858,13 @@ class ResidentPrefix:
         sp = self.spiller
         if sp is None or SPILL_PARK == "off" or not self.park_rows:
             return False
+        self._park_busy += 1
+        try:
+            return self._spill_park_now(sp, eng, drafter)
+        finally:
+            self._park_busy -= 1
+
+    def _spill_park_now(self, sp, eng, drafter) -> bool:
         top = int(self.park_base + self.park_rows)
         if top < int(sp.cfg.get("drain_min_tokens", 4096)):
             self.stats["park_given_up"] += 1
@@ -1958,6 +1974,13 @@ class ResidentPrefix:
         return e
 
     def unpark(self, eng, drafter) -> bool:
+        self._park_busy += 1
+        try:
+            return self._unpark_now(eng, drafter)
+        finally:
+            self._park_busy -= 1
+
+    def _unpark_now(self, eng, drafter) -> bool:
         """Make the parked prompt the resident one, and park the resident one in its place: the
         two sets of rows are swapped a block at a time, and so are the anchors and the end anchors
         (the one in place is parked with its rows when they fit the park's buffers, as `_park`
@@ -2061,7 +2084,8 @@ class ResidentPrefix:
         size = min(cap_rows, -(-rows // (4 * self.chunk)) * 4 * self.chunk)
         if size < rows or size <= have:
             return have
-        if self.mem is not None and not self.mem.admit("park", (size - have) * per_row):
+        # both buffers are held while the rows are copied over
+        if self.mem is not None and not self.mem.admit("park", size * per_row):
             self.stats["refused_park"] += 1
             return have
         bufs = []
@@ -2150,6 +2174,10 @@ class ResidentPrefix:
         return freed
 
     def shed_park(self, safe: bool = False) -> int:
+        """The parked session's buffers; nothing while a park, a swap or a park's write runs
+        (a KV-pool reclaim inside one of them: the buffers are in use)."""
+        if self._park_busy:
+            return 0
         freed = sum(b.numel() * b.element_size() for b in (self._park_bufs or []))
         freed += len(self.park_anchors) * self._anchor_bytes
         freed += sum(_nbytes(x) for x in (self.park_end or {}).get("pair", ()))
@@ -2316,21 +2344,29 @@ def _layer_marks(live: dict, device):
     event recorded behind the layer just issued (a done mark on the CPU, where a forward has run
     when it returns), then the events asked, without waiting, which layers have run: `k` of them
     at `t_k` (the host issues a few layers ahead of the GPU, so this lags by those). The live
-    view reads the two numbers only (server/activity.py `window_rate`): no thread but this one
-    calls CUDA for it, so none does inside another slot's graph capture."""
+    view reads the two numbers only (server/activity.py `window_rate`). The record and the
+    queries are CUDA calls, possibly on a side slot's thread: they run only while no graph
+    capture holds `capture_lock.LOCK` (engine/capture_lock.py), and the mark is skipped (the
+    event too) when one does, so the rate lags by that layer instead."""
     cuda = str(device).startswith("cuda") and torch.cuda.is_available()
 
     def mark() -> None:
         marks = live["layers"]
         if cuda:
-            ev = torch.cuda.Event()
-            ev.record()
-            marks.append(ev)
+            if not capture_lock.LOCK.acquire(blocking=False):
+                return
+            try:
+                ev = torch.cuda.Event()
+                ev.record()
+                marks.append(ev)
+                k = int(live.get("k") or 0)
+                while k < len(marks) and marks[k].query():
+                    k += 1
+            finally:
+                capture_lock.LOCK.release()
         else:
             marks.append(_Done)
-        k = int(live.get("k") or 0)
-        while k < len(marks) and marks[k].query():
-            k += 1
+            k = len(marks)
         if k > int(live.get("k") or 0):
             live["k"], live["t_k"] = k, time.perf_counter()
     return mark
@@ -2524,6 +2560,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         # decided before any row is written: a guest's stash must hold the rows as they are now
         res.begin(eng, drafter, keys, start, c, kind, session=conv_id, compacting=compacting,
                   scratch=scratch, reach=reach, stay=stay)
+        res.end_hold = False               # ENG-371: held from the server's memory gate to here
         if kind in ("prefix", "disk"):
             # the restore writes over the rows below it. dropped after `begin`, whose
             # eviction writes the conversation to the NVMe with its end anchor first; dropped

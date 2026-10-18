@@ -910,6 +910,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             why["wait"] = "view"
             with pool._lk:
                 pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
+    valid = rc = 0
     if res is not None and not why.get("wait"):
         try:
             valid = int(getattr(res, "valid", 0) or 0)
@@ -940,22 +941,26 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                             pool.stats["spill_waits"] = pool.stats.get("spill_waits", 0) + 1
                     elif got is not None:
                         why["spill_head"] = int(got[1])
-                if not why.get("wait") and not why.get("guest") and res.park_rows:
-                    # ENG-371: slot 0's park holds this conversation past its first user message
-                    bk = res.park_offer(ids, rc, len(ids) - 1)
-                    if bk and (conv is None or bk >= conv):
-                        why.update(wait="park", park=int(bk))
-                if (not why.get("wait") and not why.get("guest") and not stay
-                        and _waiting_parent(session)):
-                    why["wait"] = "parent"            # ENG-371: slot 0 reads its rows back
-                if (not why.get("wait") and stay and session is not None and valid
-                        and getattr(res, "owner", None) == session
-                        and rc >= max(chunk, conv or 0)):
-                    # ENG-371: a worker's own rows on slot 0, its copy parting inside them (a
-                    # write_file's content folded to a stub): it resumes there, below the part
-                    why["wait"] = "own"
         except Exception:                                          # noqa: BLE001
             pass
+    if res is not None and not why.get("wait") and not why.get("guest"):
+        # ENG-371, read outside the engine lock as everything above is: a park the slot's own
+        # thread changes meanwhile costs this one choice (the prefill decides on the rows under
+        # the lock), and no failure here skips the parent's or the worker's check below
+        if getattr(res, "park_rows", 0):
+            try:
+                bk = int(res.park_offer(ids, rc, len(ids) - 1) or 0)
+            except Exception:                                      # noqa: BLE001
+                bk = 0
+            if bk and (conv is None or bk >= conv):
+                why.update(wait="park", park=bk)     # slot 0's park holds this conversation
+        if not why.get("wait") and not stay and _waiting_parent(session):
+            why["wait"] = "parent"                   # slot 0 reads its rows back
+        if (not why.get("wait") and stay and session is not None and valid
+                and getattr(res, "owner", None) == session and rc >= max(chunk, conv or 0)):
+            # a worker's own rows on slot 0, its copy parting inside them (a write_file's
+            # content folded to a stub): it resumes there, below the part
+            why["wait"] = "own"
     if ((stay and why.get("wait") in ("view", "resident", "own", "spill", "park"))
             or (not stay and _waiting_parent(session)
                 and why.get("wait") in ("parent", "spill", "park"))):
@@ -991,7 +996,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     # nothing wrote over them since): the turn resumes at its end there, beside slot 0
     home = _side_home(pool, ids, need, chunk, conv)
     if why.get("wait"):
-        here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill"))
+        here = max(int(why.get(k) or 0) for k in ("view_common", "res_common", "spill", "park"))
         if home is not None and home[1] > here:
             # SRV-528: a side slot holds more of it than slot 0 does (live 2026-10-17: a chat whose
             # first prompt matched slot 0's view waited 3.0 s for slot 0 at every turn, then took
@@ -3315,17 +3320,18 @@ def _comes_back(owner, now: float | None = None) -> bool:
         t is not None and (time.monotonic() if now is None else now) - t < PARENT_KEEP_S)
 
 
-def _keep_parent(res, eng, drafter) -> None:
+def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     """ENG-371 (a side slot's `ResidentPrefix.keeper`): before another session's prefill cuts a
     side slot's rows, a parent's or a worker's go to the NVMe (a side slot has no park and no
-    spill of its own), as a planned stop writes them (`_drain_side_slots`). They come back on slot
-    0 (`_par_side_need`'s `parent` and `spill` waits) and the request prefills its tail. Live
+    spill of its own), as a planned stop writes them (`_drain_side_slots`); so does any client's
+    conversation a worker's request (`stay`, never a guest) cuts. They come back on slot 0
+    (`_par_side_need`'s `parent` and `spill` waits) and the request prefills its tail. Live
     2026-10-17 23:39: a worker's second call took the side slot its parent's 15,066 rows were on,
     and the parent's return re-read 11,039 of 16,159 tokens; 2026-10-18 01:1x one chat's worker
     took the side slot the other chat's worker ran on, whose next call read 6,115 tokens again."""
     sp = dict.get(STATE, "spill")
-    if (sp is None or not _comes_back(res.owner) or res._stash is not None
-            or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
+    if (sp is None or not (stay or _comes_back(res.owner)) or res._stash is not None
+            or res.valid < int(sp.cfg.get("drain_min_tokens", 4096)) or sp._own_io.locked()):
         return
     # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
     # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
@@ -3334,7 +3340,8 @@ def _keep_parent(res, eng, drafter) -> None:
         info = sp.save_resident(res, eng, drafter, "switch")
     slot = slots_mod.current()
     where = f"slot {slot.index}" if slot is not None else "slot 0"
-    who = "parent" if _waiting_parent(res.owner) else "worker"
+    who = ("parent" if _waiting_parent(res.owner) else "worker" if _comes_back(res.owner)
+           else "conversation")
     if info:
         print(f"[spill] {who} {res.owner} on {where}: {info['tokens']} tokens to the NVMe before "
               f"another session's prefill, {info['ms']:.0f} ms", flush=True)
@@ -3343,20 +3350,25 @@ def _keep_parent(res, eng, drafter) -> None:
 
 
 def _shed_park(res, safe: bool = False) -> int:
-    """The memory policy's `park` level. ENG-371: a parked parent whose worker runs is written to
-    the NVMe first (`ResidentPrefix._spill_park`) on slot 0's own thread, where nothing else
-    writes slot 0's rows below the park; on a side slot's thread it goes as before. Live 2026-10-17
-    23:05: the gate gave a parked 15,417-token parent back at the ceiling, unwritten, and its
-    return re-read 11,895 of 17,015 tokens."""
-    if res.park_rows and _comes_back(res.park_owner) and slots_mod.current() is None:
+    """The memory policy's `park` level. ENG-371: a parked parent or worker (`_comes_back`) is
+    written to the NVMe first (`ResidentPrefix._spill_park`) at the memory gate on slot 0's own
+    thread, where nothing else writes slot 0's rows below the park. Live 2026-10-17 23:05: the
+    gate gave a parked 15,417-token parent back at the ceiling, unwritten, and its return re-read
+    11,895 of 17,015 tokens. Nothing is written, and the park goes as before:
+      * with `safe`: a cache's own operation, or the KV pool's page gate, which runs inside a
+        restore, a swap or a forward (a write there waited on the spill's own I/O lock, or wrote
+        half-swapped rows, or would need the guest's rows put back under the running guest);
+      * on a side slot's thread, or while the spill's I/O is held;
+      * while a guest's rows lie over the park's head (the next request puts them back,
+        `settle_guest`; a shedder never does).
+    The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
+    sp, st = res.spiller, res._stash
+    if (not safe and res.park_rows and not res._park_busy and _comes_back(res.park_owner)
+            and slots_mod.current() is None and sp is not None and not sp._own_io.locked()
+            and (st is None or int(st["start"]) >= int(res.park_base))):
         eng, drafter = dict.get(STATE, "engine"), dict.get(STATE, "drafter")
         try:
             with torch.no_grad():
-                if res._stash is not None:
-                    disk = dict.get(STATE, "disk_cache")
-                    if disk is not None:
-                        disk.fence(0)
-                    res.settle_guest(eng)
                 owner, rows = res.park_owner, res.park_base + res.park_rows
                 ok = res._spill_park(eng, drafter)
             print(f"[spill] parked {owner}: {rows} tokens "
@@ -3365,6 +3377,32 @@ def _shed_park(res, safe: bool = False) -> int:
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
     return res.shed_park(safe)
+
+
+def _end_held(res, keys: list[int], n: int, mm_ok: bool) -> bool:
+    """ENG-371: whether a request of `keys` (`n` served rows) resumes at the end anchor in place."""
+    return (res is not None and res.end is not None
+            and res.end_offer(res.common(keys), n - 1, mm_ok=mm_ok) > 0)
+
+
+def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
+    """The memory gate (`Budget.gate`) with the end anchor this request resumes at held
+    (`ResidentPrefix.end_hold`), so the levels after it go first: live 2026-10-18 01:58 the gate
+    gave back the end a worker's call had just been carried into slot 0 with, and the call read
+    7,953 tokens from 0. The hold lasts until the prefill's `begin` (engine/cache.py), so a side
+    slot's gate cannot drop that end in between. When the gate refuses with the end held (its
+    bytes were what the workspace lacked), it runs once more without the hold: the request then
+    reads its answer again rather than a 503 at every retry."""
+    hold = _end_held(res, keys, n, mm_ok)
+    if hold:
+        res.end_hold = True
+    try:
+        mem.gate(n)
+    except cache.MemoryRefused:
+        if not hold:
+            raise
+        res.end_hold = False
+        mem.gate(n)
 
 
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
@@ -7983,21 +8021,14 @@ class Handler(BaseHTTPRequestHandler):
                         obj = STATE.get(name)
                         if obj is not None:
                             obj.drop_session(conv_id)
-                # ENG-371: the end anchor this request resumes at is not the gate's to give back
-                hold = res_ is not None and res_.end is not None and res_.end_offer(
-                    res_.common(list(mm.key_ids) if mm is not None else prompt.tolist()),
-                    n_prompt - 1, mm_ok=mm is not None and MM_END == "on" and comp is None) > 0
-                if hold:
-                    res_.end_hold = True
                 try:
-                    mem.gate(n_prompt)
+                    _gate_holding_end(mem, res_, list(mm.key_ids) if mm is not None
+                                      else prompt.tolist(), n_prompt,
+                                      mm is not None and MM_END == "on" and comp is None)
                 except cache.MemoryRefused as exc:
                     rec.stop_detail = "memory"
                     print(f"[memory] {cid} refused: {exc}", flush=True)
                     return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
-                finally:
-                    if hold:
-                        res_.end_hold = False
             # the reasoning-loop arms compute only for a request the monitor watches
             arms = sup.arms if sup is not None and STATE.get("think_stall", True) else None
             if sup is not None:

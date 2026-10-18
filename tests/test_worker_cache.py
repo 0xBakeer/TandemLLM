@@ -28,10 +28,12 @@ Run: python tests/test_worker_cache.py
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -39,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import test_forward_tree as T  # noqa: E402,F401  (the CPU environment before the engine imports)
 import torch  # noqa: E402
 
-from engine import cache  # noqa: E402
+from engine import cache, capture_lock, kvpool  # noqa: E402
 from server import app  # noqa: E402
 from server import slots as slots_mod  # noqa: E402
 from test_cache import fresh, tokens  # noqa: E402
@@ -50,19 +52,66 @@ WHEAD = tokens(40, seed=60)                  # the worker's system block and too
 PHEAD = tokens(40, seed=61)                  # the chat's
 
 
+#: the largest difference a resume's logits may show against a cold prefill's: the rows below
+#: the end anchor were written by the decode's forwards, not the prefill's grid (about 2e-6 on
+#: this model); a resume on wrong rows is 1e-2 and more off
+TOL = 1e-4
+
+
+@contextlib.contextmanager
+def prefill_logits():
+    """The logits of every `cache.prefill` in the block, in order (the request's own prefill as
+    `generate_stream` runs it)."""
+    got, real = [], cache.prefill
+
+    def spy(*a, **k):
+        out = real(*a, **k)
+        got.append(out[0].detach().float().clone())
+        return out
+    cache.prefill = spy
+    try:
+        yield got
+    finally:
+        cache.prefill = real
+
+
+class Pre(dict):
+    """`STATE["last_prefill"]` and the prefill's logits, printed without them."""
+
+    def __repr__(self):
+        return repr({k: v for k, v in self.items() if k != "logits"})
+
+
 def wturn(ids, n, session, stay=False):
-    """One request as the handler runs it (`turn` of test_end_anchor), `stay` for a worker."""
-    out = list(app.generate_stream(torch.tensor(ids), n, set(), None, session, stay=stay))
-    pre = dict(app.STATE["last_prefill"])
+    """One request as the handler runs it (`turn` of test_end_anchor), `stay` for a worker; the
+    prefill's logits in `pre["logits"]`."""
+    with prefill_logits() as got:
+        out = list(app.generate_stream(torch.tensor(ids), n, set(), None, session, stay=stay))
+    pre = Pre(app.STATE["last_prefill"])
+    pre["logits"] = got[-1]
     app._remember(list(ids), out, session)
     return out, pre
 
 
 def cold(ids, n, **kw):
-    """The same request with nothing cached: the tokens every resume must give."""
+    """The same request with nothing cached: (its tokens, its prefill's logits)."""
+    saved = dict(app.STATE)
     _state(**kw)
-    out, _ = wturn(ids, n, "cold")
-    return out
+    try:
+        out, pre = wturn(ids, n, "cold")
+    finally:
+        app.STATE.clear()
+        app.STATE.update(saved)
+    return out, pre["logits"]
+
+
+def assert_cold(out, pre, ids, n):
+    """The resume is the cold prefill: its logits within TOL, its greedy tokens the same."""
+    ref, lg = cold(ids, n)
+    d = float((pre["logits"] - lg).abs().max())
+    assert d <= TOL, f"logits {d:.3g} off the cold prefill's"
+    assert out == ref, "the greedy tokens differ from the cold prefill's"
+    return d
 
 
 def _tail(pre, ids):
@@ -90,7 +139,7 @@ def test_a_workers_next_call_resumes_at_its_own_end_beside_a_long_chat():
     w1, out1, w2, out2, pre2 = _calls_beside_a_long_chat(stay=True)
     assert pre2["reused"] >= len(w1) + len(out1) - 1, pre2
     assert _tail(pre2, w2) <= len(TOOL) + 1, pre2               # only the new tail is prefilled
-    assert out2 == cold(w2, 8), "the resume gives the cold prefill's tokens"
+    assert_cold(out2, pre2, w2, 8)
     # the old path: a guest, its rows put back under the other chat's after each call
     _, _, w2_, _, pre_old = _calls_beside_a_long_chat(stay=False)
     assert pre_old["reused"] == 0 and _tail(pre_old, w2_) == len(w2_), pre_old
@@ -124,11 +173,12 @@ def _two_chats(stay, d):
     pout = {}
     for k in "ab":
         pout[k], _ = wturn(p[k], 8, f"chat-{k}")
-    tails = {}
+    tails, calls = {}, {}
     for step in range(3):
         for k in "ab":
             app._note_parent(f"chat-{k}")
             out, pre = wturn(w[k], 6, f"chat-{k}-task-1", stay)
+            calls[k] = (w[k], out, pre)
             if step:
                 tails.setdefault(k, []).append((_tail(pre, w[k]), len(w[k])))
             w[k] = w[k] + out + tokens(12, seed=90 + 2 * step + (k == "b"))
@@ -137,25 +187,26 @@ def _two_chats(stay, d):
         ids = p[k] + pout[k] + tokens(15, seed=95 + (k == "b"))
         out, pre = wturn(ids, 6, f"chat-{k}")
         back[k] = (ids, out, pre)
-    return res, tails, back
+    return res, tails, back, calls
 
 
 def test_two_chats_workers_each_keep_their_prefix_and_the_parents_come_back():
     d = tempfile.mkdtemp()
     try:
-        res, tails, back = _two_chats(True, d)
+        res, tails, back, calls = _two_chats(True, d)
         for k in "ab":
             assert all(t <= 12 + 1 for t, _ in tails[k]), (k, tails)   # each call: its tail only
             ids, out, pre = back[k]
             assert _tail(pre, ids) <= 15 + 1, (k, pre)              # the parent: its tail only
         assert res.stats["park_swaps"] >= 4 and res.stats["park_spills"] >= 2, res.stats
-        ids, out, _ = back["b"]
-        assert out == cold(ids, 6), "the parent's return gives the cold prefill's tokens"
+        for k in "ab":
+            assert_cold(*back[k][1:], back[k][0], 6)
+            assert_cold(*calls[k][1:], calls[k][0], 6)        # each worker's last call
     finally:
         shutil.rmtree(d, ignore_errors=True)
     d = tempfile.mkdtemp()
     try:
-        _, tails, _ = _two_chats(False, d)
+        _, tails, _, _ = _two_chats(False, d)
         # the old path: call 1, shorter than a quarter of the parent, was a guest, and call 2
         # read again all of its prompt past the worker head the two workers share
         assert all(t >= n - len(WHEAD) for k in "ab" for t, n in tails[k][:1]), tails
@@ -193,7 +244,7 @@ def test_a_parent_on_a_side_slot_goes_to_the_nvme_before_its_worker_takes_the_sl
     try:
         ids, out, pre = _side_parent(app._keep_parent, d)
         assert _tail(pre, ids) <= 15 + 1, pre
-        assert out == cold(ids, 6), "read back from the NVMe: the cold prefill's tokens"
+        assert_cold(out, pre, ids, 6)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     d = tempfile.mkdtemp()
@@ -267,7 +318,7 @@ def test_a_swap_parks_a_longer_conversation_whole():
     res, a, pa, b, pb, ob2 = _swap_longer(grow=True)
     assert _tail(pa, a) <= 10 + 1, pa                    # A back from the park
     assert _tail(pb, b) <= 10 + 1 and res.stats.get("park_grown"), (pb, res.stats)
-    assert ob2 == cold(b, 6)
+    assert_cold(ob2, pb, b, 6)
     _, _, _, b0, pb0, _ = _swap_longer(grow=False)
     # the old swap dropped B's end and every row above A's buffers: B resumed at a grid line
     assert pb0["kind"] != "end" and _tail(pb0, b0) > 150, pb0
@@ -298,7 +349,7 @@ def test_a_parked_parent_goes_to_the_nvme_before_the_memory_policy_takes_the_par
     try:
         ids, out, pre = _parked_parent(lambda r: app._shed_park(r), d)
         assert _tail(pre, ids) <= 15 + 1, pre
-        assert out == cold(ids, 6)
+        assert_cold(out, pre, ids, 6)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     d = tempfile.mkdtemp()
@@ -331,7 +382,8 @@ def _refused_park(spill_on, d):
     res = _state(guest_max=8192, park_bytes=900 * per + 8 * fresh().state.nbytes)
     if spill_on:
         _spill(d, res, min_tokens=64)
-    res._park = lambda eng, drafter, keep: None          # the policy said no
+    res._park = lambda eng, drafter, keep: res.stats.__setitem__(   # the policy said no
+        "refused_park", res.stats["refused_park"] + 1)
     p1 = PHEAD + tokens(300, seed=107)
     out, _ = wturn(p1, 8, "chat-p")
     wturn(WHEAD + tokens(40, seed=108), 6, "chat-p-task-1", stay=True)
@@ -347,7 +399,7 @@ def test_a_conversation_the_park_refuses_goes_to_the_nvme_not_away():
     try:
         ids, out, pre = _refused_park(True, d)
         assert _tail(pre, ids) <= 15 + 1, pre
-        assert out == cold(ids, 6)
+        assert_cold(out, pre, ids, 6)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     d = tempfile.mkdtemp()
@@ -365,7 +417,8 @@ def test_a_carry_that_vacates_slot_0_writes_what_the_park_refuses():
     try:
         res = _state(guest_max=8192, park_bytes=1 << 30)
         sp, _ = _spill(d, res, min_tokens=64)
-        res._park = lambda eng, drafter, keep: None
+        res._park = lambda eng, drafter, keep: res.stats.__setitem__(
+            "refused_park", res.stats["refused_park"] + 1)
         wturn(PHEAD + tokens(300, seed=110), 8, "chat-q-task-1", stay=True)
         assert res.vacate(app.STATE["engine"], None, "chat-r-task-1") == "spilled"
         assert len(sp.entries) == 1 and res.valid == 0
@@ -373,10 +426,18 @@ def test_a_carry_that_vacates_slot_0_writes_what_the_park_refuses():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def test_on_a_side_slots_thread_the_park_goes_as_before():
+def test_the_park_goes_unwritten_wherever_a_write_would_be_unsafe():
+    """On a side slot's thread, with `safe`, while the spill's I/O is held, while a guest's rows
+    lie over the park's head, and while the park is in use: the park goes (or stays), unwritten."""
+    class Sp:
+        def __init__(self):
+            self._own_io = threading.Lock()
+
     class Res:
-        park_rows, park_base, park_owner, _stash = 300, 40, "chat-p", None
-        spilled = 0
+        park_rows, park_base, park_owner, _stash, _park_busy = 300, 40, "chat-p", None, 0
+
+        def __init__(self):
+            self.spiller, self.spilled = Sp(), 0
 
         def _spill_park(self, eng, drafter):
             self.spilled += 1
@@ -395,10 +456,317 @@ def test_on_a_side_slots_thread_the_park_goes_as_before():
     finally:
         slots_mod.bind(None)
     r = Res()
+    assert app._shed_park(r, True) == 1 and r.spilled == 0          # the KV pool's reclaim
+    r = Res()
+    with r.spiller._own_io:
+        assert app._shed_park(r) == 1 and r.spilled == 0
+    r = Res()
+    r._stash = {"start": 0}                                          # a guest from row 0
+    assert app._shed_park(r) == 1 and r.spilled == 0
+    r = Res()
+    r._stash = {"start": 64}                                         # above the park's head
+    assert app._shed_park(r) == 1 and r.spilled == 1
+    r = Res()
     assert app._shed_park(r) == 1 and r.spilled == 1
 
 
-# ------------------------------------------------------------------ 5: the slot choice
+# ------------------------------------------------------------------ 5: reclaims inside a cache operation
+# The KV pool's page gate (server/app.py `_kv_reclaim_caches`) sheds every level with safe=True from
+# inside `kv.ensure` and `kvpool.ensure_for`: inside a restore, a swap and a forward. The park's
+# shedder must then only give the park back (or nothing, when the park is in use), never write it.
+
+def _budget_state(d):
+    per = sum(t.numel() // t.shape[ax] * t.element_size()
+              for t, ax in cache._kv_views(fresh(), None))
+    mem = cache.Budget(1 << 40, 1 << 41, 0, probe=lambda: (0, 0), empty=lambda: None)
+    res = _state(guest_max=8192, park_bytes=900 * per + 8 * fresh().state.nbytes, mem=mem)
+    mem.register("park", lambda safe=False: app._shed_park(res, safe))   # as `_load_caches`
+    mem.register("stash", res.shed_stash)
+    sp, _ = _spill(d, res, min_tokens=64)
+    app.PARENTS.clear()
+    app.WORKERS.clear()
+    return res, mem, sp
+
+
+def test_a_reclaim_inside_a_restore_does_not_deadlock():
+    """`SessionSpill.restore` holds its own I/O lock and commits pages (`ensure_for`); a park
+    write from the reclaim there waited on that lock on the same thread, for ever."""
+    d = tempfile.mkdtemp()
+    real = kvpool.ensure_for
+    try:
+        res, mem, sp = _budget_state(d)
+        w = WHEAD + tokens(300, seed=1)
+        wout, _ = wturn(w, 6, "chat-w")
+        assert sp.save_resident(res, app.STATE["engine"], None, "evict")
+        res.clear()
+        p = PHEAD + tokens(300, seed=2)
+        wturn(p, 8, "chat-p")
+        app._note_parent("chat-p")
+        wturn(WHEAD + tokens(40, seed=3), 6, "chat-p-task-1", stay=True)
+        assert res.park_owner == "chat-p"
+        calls = []
+
+        def ensure_for(t, rows):
+            if threading.current_thread().name == "restore" and not calls:
+                calls.append(rows)
+                app.STATE["mem"] = mem
+                app._kv_reclaim_caches(1 << 40, "slot0")
+            return real(t, rows)
+        kvpool.ensure_for = ensure_for
+        done = {}
+
+        def run():
+            with torch.no_grad():
+                app._spill_before_replay(w + wout + tokens(10, seed=4))
+            done["ok"] = True
+        th = threading.Thread(target=run, name="restore", daemon=True)
+        th.start()
+        th.join(30)
+        assert not th.is_alive(), "the restore waits on its own I/O lock"
+        assert done.get("ok") and calls, (done, calls)
+    finally:
+        kvpool.ensure_for = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_reclaim_inside_a_guests_forward_leaves_the_rows_under_it():
+    """A reclaim during a guest's generation put the resident's rows back under the running guest
+    (`settle_guest` from the shedder); the resident later resumed on rows 0.037 off."""
+    d = tempfile.mkdtemp()
+    try:
+        res, mem, _ = _budget_state(d)
+        wturn(PHEAD + tokens(200, seed=31), 8, "chat-p")
+        app._note_parent("chat-p")
+        w = WHEAD + tokens(340, seed=32)
+        wo, _ = wturn(w, 8, "chat-p-task-1", stay=True)          # P to the park, W resident
+        eng = app.STATE["engine"]
+        real, n = eng.kv.ensure, {"k": 0}
+
+        def ensure(rows):
+            n["k"] += 1
+            if n["k"] == 6:                                      # inside the guest's decode
+                assert res._stash is not None
+                app.STATE["mem"] = mem
+                app._kv_reclaim_caches(1 << 40, "slot0")
+            return real(rows)
+        eng.kv.ensure = ensure
+        try:
+            wturn(tokens(30, seed=33), 12, "title")              # a guest of W
+        finally:
+            eng.kv.ensure = real
+        assert res.stats["guests"] == 1 and n["k"] >= 6
+        w2 = w + wo + tokens(10, seed=34)
+        out, pre = wturn(w2, 8, "chat-p-task-1", stay=True)
+        assert pre["reused"] >= len(w) + len(wo) - 1, pre
+        assert_cold(out, pre, w2, 8)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_reclaim_inside_a_swap_writes_no_mixed_rows():
+    """A reclaim in `unpark`'s swap loop wrote a half-swapped mix of two conversations into an
+    NVMe entry, its block sums valid; resumed from it, logits 0.17 off."""
+    d = tempfile.mkdtemp()
+    real = kvpool.ensure_for
+    try:
+        res, mem, sp = _budget_state(d)
+        a = WHEAD + tokens(300, seed=11)
+        oa, _ = wturn(a, 6, "chat-a-task-1", stay=True)
+        app._note_parent("chat-a", worker="chat-a-task-1")
+        wturn(WHEAD + tokens(120, seed=12), 6, "chat-b-task-1", stay=True)   # A to the park
+        assert res.park_owner == "chat-a-task-1"
+        n = {"k": 0, "arm": False}
+
+        def ensure_for(t, rows):
+            if n["arm"]:
+                n["k"] += 1
+                if n["k"] == 2:
+                    app.STATE["mem"] = mem
+                    app._kv_reclaim_caches(1 << 40, "slot0")
+            return real(t, rows)
+        kvpool.ensure_for = ensure_for
+        ru = res.unpark
+
+        def unpark(e_, d_):
+            n["arm"] = True
+            try:
+                return ru(e_, d_)
+            finally:
+                n["arm"] = False
+        res.unpark = unpark
+        a2 = a + oa + tokens(10, seed=13)
+        out, pre = wturn(a2, 6, "chat-a-task-1", stay=True)
+        kvpool.ensure_for = real
+        assert n["k"] >= 2, n
+        assert_cold(out, pre, a2, 6)                             # A back from the park whole
+        for e in sp.entries.values():                            # and whatever was written
+            res2, eng2 = cache.ResidentPrefix(1 << 40, res.chunk, end=True), fresh()
+            assert sp.restore(res2, eng2, None, e)
+            tail = list(e.tokens) + tokens(10, seed=21)
+            lg = cache.prefill(eng2, None, tail, "cpu", resident=res2, chunk=res.chunk)[0]
+            lc = cache.prefill(fresh(), None, tail, "cpu", chunk=res.chunk)[0]
+            assert float((lg.float() - lc.float()).abs().max()) <= TOL, e.man.get("owner")
+    finally:
+        kvpool.ensure_for = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_park_shedder_writes_at_the_memory_gate_only():
+    """Through the memory policy: the gate (safe=False, slot 0's thread) writes a parked parent
+    to the NVMe before giving the park back; a safe shed gives it back unwritten."""
+    for safe, written in ((False, 1), (True, 0)):
+        d = tempfile.mkdtemp()
+        try:
+            res, mem, sp = _budget_state(d)
+            wturn(PHEAD + tokens(300, seed=41), 8, "chat-p")
+            app._note_parent("chat-p")
+            wturn(WHEAD + tokens(40, seed=42), 6, "chat-p-task-1", stay=True)
+            assert res.park_owner == "chat-p"
+            assert mem.shed("park", "test", safe=safe) > 0 and not res.park_rows
+            assert len(sp.entries) == written, (safe, sp.entries)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_park_is_not_given_back_while_it_is_in_use():
+    res = _state(park_bytes=1 << 30)
+    wturn(PHEAD + tokens(200, seed=43), 6, "chat-p")
+    wturn(WHEAD + tokens(60, seed=44), 6, "chat-p-task-1", stay=True)
+    assert res.park_rows
+    res._park_busy += 1
+    try:
+        assert res.shed_park(True) == 0 and res.shed_park(False) == 0 and res.park_rows
+    finally:
+        res._park_busy -= 1
+    assert res.shed_park(True) > 0 and not res.park_rows
+
+
+def test_the_gate_holds_the_end_the_request_resumes_at_until_its_prefill():
+    """`_gate_holding_end`: held through the gate and until the prefill's `begin` (a side slot's
+    gate cannot drop it between); a refusal with the end held runs once more without it."""
+    res = _state()
+    ids = WHEAD + tokens(100, seed=45)
+    out, _ = wturn(ids, 6, "chat-a-task-1", stay=True)
+    nxt = ids + out + tokens(8, seed=46)
+    assert app._end_held(res, nxt, len(nxt), False)
+    assert not app._end_held(res, tokens(50, seed=47), 50, False)
+
+    class Mem:
+        def __init__(self, refuse):
+            self.refuse, self.seen = refuse, []
+
+        def gate(self, n):
+            self.seen.append(res.end_hold)
+            if self.refuse and res.end_hold:
+                raise cache.MemoryRefused(2, 1, n)
+    m = Mem(False)
+    app._gate_holding_end(m, res, nxt, len(nxt), False)
+    assert m.seen == [True] and res.end_hold, "held until the prefill"
+    assert res.shed_end(False) == 0 and res.end is not None
+    wturn(nxt, 4, "chat-a-task-1", stay=True)
+    assert not res.end_hold, "the prefill's begin lets it go"
+    m = Mem(True)
+    nxt2 = nxt + tokens(4, seed=48)
+    res.end_hold = False
+    o, _ = wturn(nxt, 4, "chat-a-task-1", stay=True)
+    nxt2 = nxt + o + tokens(4, seed=48)
+    app._gate_holding_end(m, res, nxt2, len(nxt2), False)
+    assert m.seen == [True, False] and not res.end_hold, m.seen
+
+
+def test_a_layer_mark_waits_for_no_capture():
+    """SRV-591's layer marks are CUDA calls on the prefilling thread, a side slot's too: while a
+    graph capture holds `capture_lock.LOCK` (another thread) the mark is skipped."""
+    class Ev:
+        recorded = 0
+
+        def record(self):
+            Ev.recorded += 1
+
+        def query(self):
+            return True
+    live = {"layers": [], "n": 4, "t0": 0.0, "rows": (0, 64)}
+    real_ev, real_ok = torch.cuda.Event, torch.cuda.is_available
+    torch.cuda.Event, torch.cuda.is_available = Ev, (lambda: True)
+    try:
+        mark = cache._layer_marks(live, "cuda")
+        held, go = threading.Event(), threading.Event()
+
+        def capture():
+            with capture_lock.LOCK:
+                held.set()
+                go.wait(10)
+        th = threading.Thread(target=capture)
+        th.start()
+        held.wait(10)
+        mark()
+        assert Ev.recorded == 0 and not live["layers"], "a CUDA call inside the capture"
+        go.set()
+        th.join(10)
+        mark()
+        assert Ev.recorded == 1 and live["k"] == 1
+    finally:
+        torch.cuda.Event, torch.cuda.is_available = real_ev, real_ok
+
+
+def test_a_worker_on_a_side_slot_writes_another_clients_rows_before_it_cuts_them():
+    """Not a guest there (`stay`), a worker's call replaces the side slot's conversation: that
+    one goes to the NVMe first, whoever's it is."""
+    d = tempfile.mkdtemp()
+    try:
+        _state()
+        sp, _ = _spill(d, app.STATE["resident"], min_tokens=64)
+        side = cache.ResidentPrefix(BIG, CH, end=True, stash_bytes=BIG, guest_max=8192,
+                                    guest_frac=1.0)
+        side.keeper = app._keep_parent
+        app.PARENTS.clear()
+        app.WORKERS.clear()
+        app.STATE.update(engine=fresh(), resident=side)
+        wturn(PHEAD + tokens(300, seed=49), 8, "owui-chat")
+        wturn(WHEAD + tokens(40, seed=50), 6, "chat-a-task-1", stay=True)
+        assert [e.man.get("owner") for e in sp.entries.values()] == ["owui-chat"], sp.entries
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_park_takes_nothing_and_nothing_is_written():
+    """A conversation that shares all but a few rows with the next one of another session: the
+    park has nothing to take (fewer rows than a chunk) and that is no refusal to spill for."""
+    d = tempfile.mkdtemp()
+    try:
+        res = _state(guest_max=8192, park_bytes=1 << 30)
+        sp, _ = _spill(d, res, min_tokens=64)
+        p = PHEAD + tokens(300, seed=51)
+        wturn(p, 1, "chat-a")
+        wturn(p[:-3] + tokens(3, seed=52), 4, "chat-b")
+        assert not sp.entries and res.stats["refused_park"] == 0, sp.entries
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_grown_park_asks_the_memory_policy_for_both_buffers():
+    """`_grow_park` holds the old buffers and the new at once while it copies: it asks for the
+    new buffers' whole size, not the growth."""
+    res = _state(park_bytes=1 << 30)
+    wturn(PHEAD + tokens(60, seed=53), 6, "chat-a")
+    wturn(WHEAD + tokens(60, seed=54), 6, "chat-b")
+    assert res.park_rows
+
+    class Rec:
+        asked = []
+
+        def admit(self, level, n):
+            Rec.asked.append((level, n))
+            return True
+    res.mem = Rec()
+    eng = app.STATE["engine"]
+    views = cache._kv_views(eng, None)
+    per = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
+    size = res._grow_park(eng, None, views, 400, res.park_rows)
+    assert size >= 400 and Rec.asked == [("park", size * per)], (size, Rec.asked)
+
+
+# ------------------------------------------------------------------ 6: the slot choice
 
 class FakeRes:
     """Slot 0's resident as `_par_side_need` reads it."""
@@ -414,8 +782,10 @@ class FakeRes:
         return self._park
 
 
-def _need(res, ids, **kw):
-    pool = slots_mod.Pool([slots_mod.Slot(0, 262_144), slots_mod.Slot(1, 262_144)])
+def _need(res, ids, side=None, **kw):
+    pool = slots_mod.Pool([slots_mod.Slot(0, 262_144),
+                           slots_mod.Slot(1, 262_144, values={"resident": side, "slot_view": None}
+                                          if side is not None else None)])
     saved = {k: app.STATE.get(k) for k in ("pool", "resident", "slot0_view", "prefix_chunk",
                                            "spill")}
     app.STATE.update(pool=pool, resident=res, prefix_chunk=CH, spill=None)
@@ -485,6 +855,29 @@ def test_a_worker_whose_copy_parts_inside_its_own_rows_stays_on_slot_0():
     assert app.SIDE_SLOT0_WAIT_S <= why["slot0_wait_s"] <= app.PARENT_WAIT_MAX_S, why
     _, why = _need(own, ids, session="chat-a-task-1", stay=True, parent="chat-a")
     assert why.get("wait") is None, why                # another worker's rows
+
+
+def test_a_side_slot_holding_less_than_slot_0s_park_is_no_home():
+    ids = tokens(11_500, seed=12)
+    side = FakeRes(ids[:5_000])
+    _, why = _need(FakeRes(tokens(12_000, seed=5), park=11_000), ids, side=side)
+    assert why.get("wait") == "park" and why.get("home") is None and why["slot0_first"], why
+    _, why = _need(FakeRes(tokens(12_000, seed=5)), ids, side=side)
+    assert why.get("home") == 1, why                   # no park: the side slot is its home
+
+
+def test_a_park_that_cannot_be_read_skips_no_parent_check():
+    class Broken(FakeRes):
+        def park_offer(self, ids, c, max_len, align=True):
+            raise RuntimeError("the park changed while it was read")
+    app.PARENTS.clear()
+    app._note_parent("chat-a")
+    try:
+        _, why = _need(Broken(tokens(9_000, seed=13), park=1), tokens(9_500, seed=14),
+                       session="chat-a")
+        assert why.get("wait") == "parent", {k: v for k, v in why.items() if k != "ids"}
+    finally:
+        app.PARENTS.clear()
 
 
 def test_a_returning_parent_tries_slot_0_for_as_long_as_a_re_read_would_take():
