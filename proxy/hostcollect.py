@@ -115,6 +115,7 @@ class HostCollector:
     def __init__(self, *, proc: str = "/proc", sys_root: str = "/sys", psutil_mod=_AUTO,
                  nvml_mod=_AUTO, smi: str = "nvidia-smi", lsof: str = "lsof", ss: str = "ss",
                  clock=time.time, fast_period: float = 5.0, scan_period: float = 15.0,
+                 proc_ttl: float = 600.0,
                  paths: list[str] | None = None, home: str | None = None,
                  label: str | None = None):
         self.proc, self.sys_root = proc, sys_root
@@ -123,6 +124,7 @@ class HostCollector:
         self.smi, self.lsof, self.ss = smi, lsof, ss
         self.clock = clock
         self.fast_period, self.scan_period = fast_period, scan_period
+        self.proc_ttl = proc_ttl
         self.paths = list(paths or [])
         self.home = home
         self.label = label or socket.gethostname()
@@ -136,7 +138,7 @@ class HostCollector:
         self._scan_at = 0.0
         self._scan_key: tuple | None = None
         self._prev: dict = {}          # counters of the previous fast sample
-        self._prev_proc: dict = {}     # (pid, starttime) -> (t, cpu seconds)
+        self._prev_proc: dict = {}     # (pid, starttime) -> (t, cpu seconds), kept across views, TTL-pruned
         self._port_pid: dict = {}      # port -> pid, checked first on the next scan
         self.cost = {"samples": 0, "scans": 0, "cpu_ms_total": 0.0, "last_ms": None,
                      "last_scan_ms": None}
@@ -572,9 +574,12 @@ class HostCollector:
             if unified and entry["gpu_memory"] == "measured":
                 entry["note"] = "GPU memory comes out of the same unified pool as the RSS"
             out.append(entry)
-        live = {e["pid"] for e in out if e["pid"]} | {c["pid"] for e in out
-                                                       for c in e["children"]}
-        self._prev_proc = {k: v for k, v in self._prev_proc.items() if k[0] in live}
+        # the CPU baselines are shared across views: a scan drops only the entries older than
+        # the TTL. Pruning them to this view's pids instead (the old `live` set) made two views
+        # with different watch keys — Processes vs GPU — wipe each other's cached children on
+        # every alternating rescan, so each one's cpu% stayed None forever.
+        self._prev_proc = {k: v for k, v in self._prev_proc.items()
+                           if now - v[0] < self.proc_ttl}
         return {"processes": out}
 
     def _pid_of_port(self, port: int) -> tuple[int | None, str | None]:
