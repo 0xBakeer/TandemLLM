@@ -85,7 +85,7 @@ function feats(): Record<string, string> {
 }
 
 function model(backend: string, id: string, price: J | null = null, ctx: number | null = 32768): J {
-  return { backend, model: id, public_id: null, enabled: true, present: true, source: 'discovered', discovered_at: Date.now(), context_length: ctx, price, fallback: null, features: feats(), locks: {} };
+  return { backend, model: id, public_id: null, enabled: true, present: true, source: 'discovered', discovered_at: Date.now(), context_length: ctx, max_output: null, max_output_set: null, max_output_default: backend === 'deepseek' ? 393216 : null, price, fallback: null, features: feats(), locks: {} };
 }
 
 function backend(id: string, kind: Kind, url: string, extra: J = {}): J {
@@ -296,6 +296,8 @@ export class MockBackends {
         const id = rest.slice(1).join('/');
         let m = this.models.find((x) => x.backend === b.id && x.model === id);
         if (method === 'PUT') {
+          const out = body?.max_output;
+          if (out !== undefined && out !== null && !(Number.isInteger(out) && (out as number) >= 1)) return bad('max_output must be an integer from 1, or null', 'max_output');
           if (!m) {
             m = model(String(b.id), id);
             m.source = 'manual';
@@ -304,6 +306,7 @@ export class MockBackends {
           for (const [k, v] of Object.entries(body ?? {})) {
             if (k === 'features') m.features = { ...(m.features as J), ...(v as J) };
             else if (k === 'price') m.price = v ? { ...(v as J), updated_at: Date.now() } : null;
+            else if (k === 'max_output') m.max_output_set = v;
             else m[k] = v;
           }
           return [200, m];

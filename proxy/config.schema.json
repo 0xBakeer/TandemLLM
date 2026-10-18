@@ -344,6 +344,13 @@
           ],
           "minimum": 1
         },
+        "max_output": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
         "price": {
           "type": [
             "object",

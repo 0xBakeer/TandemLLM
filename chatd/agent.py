@@ -839,6 +839,10 @@ class AgentMixin:
             # (DeepSeek refuses a max_tokens above 393,216 in a 1,048,576 window)
             room = window - est - 256
             body["max_tokens"] = max(256, min(room, cap) if cap else room)
+        elif cap:
+            # VIS-227: a relay that lists no window (llama.cpp, Ollama, a manual model) still gets
+            # the operator's output limit
+            body["max_tokens"] = cap
         if run.salvage:                             # a worker's report-only call (chatd/tasks.py)
             body["max_tokens"] = min(int(body.get("max_tokens") or SALVAGE_TOKENS), SALVAGE_TOKENS)
         run.tail = None                             # a tail goes with one call only

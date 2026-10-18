@@ -137,5 +137,73 @@ def test_the_fingerprint_goes_into_the_row():
     srv.shutdown()
 
 
+def _card(px, mid):
+    return {m["id"]: m["tandem"] for m in json.loads(px.get("/v1/models")[2])["data"]}[mid]
+
+
+def _put(px, bid, mid, body):
+    st, _, out = px.request("PUT", f"/v1/config/backends/{bid}/models/{mid}", body)
+    return st, json.loads(out)
+
+
+def test_an_operator_sets_a_relayed_models_output_limit():
+    """VIS-227 (#21): a vLLM relay's model list has no output limit and the adapter's table knows
+    no relayed name; the operator's goes on the card and a later health check keeps it."""
+    srv, port = fake(models=["Qwen/Qwen3.5-9B"])
+    env = {"TANDEM_BACKENDS": "v1", "TANDEM_BACKEND_V1_KIND": "vllm",
+           "TANDEM_BACKEND_V1_URL": f"http://127.0.0.1:{port}/v1"}
+    with Proxy(env) as px:
+        px.sync()
+        assert _card(px, "Qwen/Qwen3.5-9B")["max_output"] is None
+        for bad in (0, -1, 2.5, "8192", True, {}):
+            st, out = _put(px, "v1", "Qwen/Qwen3.5-9B", {"max_output": bad})
+            assert st == 422 and out["error"]["field"] == "max_output", bad
+        st, row = _put(px, "v1", "Qwen/Qwen3.5-9B", {"max_output": 8192})
+        assert st == 200 and row["max_output_set"] == 8192 and row["max_output"] is None
+        assert _card(px, "Qwen/Qwen3.5-9B")["max_output"] == 8192
+        px.svc.health._models_due.clear()
+        px.sync()
+        assert _card(px, "Qwen/Qwen3.5-9B")["max_output"] == 8192
+        st, row = _put(px, "v1", "Qwen/Qwen3.5-9B", {"max_output": None})
+        assert st == 200 and row["max_output_set"] is None
+        assert _card(px, "Qwen/Qwen3.5-9B")["max_output"] is None
+    srv.shutdown()
+
+
+def test_a_discovery_never_overwrites_the_operators_output_limit():
+    srv, port = fake(models=["deepseek-flash"])
+    srv.fake.cards = SERVED
+    with Proxy(_env(port)) as px:
+        px.sync()
+        st, _ = _put(px, "ds", "deepseek-flash", {"max_output": 100000})
+        assert st == 200
+        px.svc.health._models_due.clear()
+        px.sync()
+        row = next(m for m in px.svc.cfg.models("ds") if m["model"] == "deepseek-flash")
+        assert row["max_output"] == 393216 and row["max_output_set"] == 100000
+        assert _card(px, "deepseek-flash")["max_output"] == 100000
+        _put(px, "ds", "deepseek-flash", {"max_output": None})
+        assert _card(px, "deepseek-flash")["max_output"] == 393216      # the provider's again
+    srv.shutdown()
+
+
+def test_the_row_shows_what_the_card_carries_without_the_operators_limit():
+    """A DeepSeek list without max_output_tokens: the card has the adapter table's 393,216, and so
+    does the Backends row's placeholder, not "none"."""
+    srv, port = fake(models=["deepseek-flash"])
+    with Proxy(_env(port)) as px:
+        px.sync()
+
+        def row():
+            b = json.loads(px.get("/v1/config/backends/ds")[2])
+            return next(m for m in b["model_rows"] if m["model"] == "deepseek-flash")
+        assert row()["max_output"] is None and row()["max_output_default"] == 393216
+        assert _card(px, "deepseek-flash")["max_output"] == 393216
+        _put(px, "ds", "deepseek-flash", {"max_output": 100000})
+        assert row()["max_output_default"] == 393216 and row()["max_output_set"] == 100000
+        assert _card(px, "deepseek-flash")["max_output"] == 100000
+    srv.shutdown()
+
+
 if __name__ == "__main__":
     run(globals())

@@ -41,6 +41,12 @@ def capabilities(cls, m: dict) -> dict | None:
             "tools": True, "vision": "image" in (mods or []), "structured": False}
 
 
+def default_max_output(cls, m: dict) -> int | None:
+    """A model's output limit without the operator's (VIS-227): the provider's model list, else
+    the adapter's table. The Backends row shows it where the operator's field is empty."""
+    return m.get("max_output") or cls.max_output.get(m["model"])
+
+
 class Route:
     __slots__ = ("backend", "model", "public", "fallbacks", "price", "rule")
 
@@ -112,7 +118,8 @@ class Table:
                         # the provider's own words from its model list, else the adapter's table
                         "name": m.get("name") or cls.names.get(m["model"]), "cloud": cls.cloud,
                         "context_length": m["context_length"],
-                        "max_output": m.get("max_output") or cls.max_output.get(m["model"]),
+                        # the operator's limit (Backends), else the provider's or the table's
+                        "max_output": m.get("max_output_set") or default_max_output(cls, m),
                         "features": m["features"]}
                 caps = capabilities(cls, m)
                 if caps is not None:

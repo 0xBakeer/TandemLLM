@@ -272,6 +272,10 @@
 .bk-pub {
   width: 140px;
 }
+.bk-out {
+  width: 88px;
+  text-align: right;
+}
 .bk-models tr.is-absent td {
   opacity: 0.6;
 }

@@ -57,6 +57,13 @@ export interface ModelRow {
   source: 'discovered' | 'list' | 'manual' | 'env';
   discovered_at: number | null;
   context_length: number | null;
+  /** the provider's output limit from its model list, null until a discovery brought one */
+  max_output?: number | null;
+  /** VIS-227: the operator's output limit, the card's before the provider's; null for none */
+  max_output_set?: number | null;
+  /** VIS-227: what the card carries while the operator's is empty (the provider's list, else the
+   * adapter's table) */
+  max_output_default?: number | null;
   price: Price | null;
   fallback: string[] | null;
   features: Record<string, FeatureValue>;

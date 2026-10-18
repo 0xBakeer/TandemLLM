@@ -157,7 +157,10 @@ ADDED = (("models", "price_offpeak", "TEXT"),
          # 0.11.3: what a provider's model list says of a model (DeepSeek's GET /models): its
          # own name, output limit, input kinds (JSON list) and effort levels (JSON object)
          ("models", "name", "TEXT"), ("models", "max_output", "INTEGER"),
-         ("models", "input_modalities", "TEXT"), ("models", "effort", "TEXT"))
+         ("models", "input_modalities", "TEXT"), ("models", "effort", "TEXT"),
+         # VIS-227: the operator's output limit, apart from the provider's so a discovery never
+         # overwrites it
+         ("models", "max_output_set", "INTEGER"))
 
 
 def _inflight_col(v) -> int:
@@ -825,7 +828,7 @@ class ConfigDB:
         sql = ("SELECT backend_id, model_id, public_id, enabled, present, source, discovered_at, "
                "context_length, price_input, price_cached_input, price_cache_write, "
                "price_output, currency, price_updated_at, fallback, price_offpeak, name, "
-               "max_output, input_modalities, effort FROM models")
+               "max_output, input_modalities, effort, max_output_set FROM models")
         args: tuple = ()
         if bid is not None:
             sql += " WHERE backend_id = ?"
@@ -838,7 +841,7 @@ class ConfigDB:
                 feats.setdefault((b, m), {})[f] = v
         out = []
         for (b, m, pub, en, present, src, disc, ctx, pi, pci, pcw, po, cur, pat, fb,
-             off, name, mout, mods, eff) in rows:
+             off, name, mout, mods, eff, mset) in rows:
             price = None
             if pat is not None:
                 price = {"input": pi, "cached_input": pci, "cache_write": pcw, "output": po,
@@ -852,6 +855,8 @@ class ConfigDB:
                         "context_length": ctx, "price": price,
                         # 0.11.3: the provider's own words, null until a discovery brought them
                         "name": name, "max_output": mout,
+                        # VIS-227: the operator's output limit, the card's before the provider's
+                        "max_output_set": mset,
                         "input_modalities": json.loads(mods) if mods else None,
                         "effort": json.loads(eff) if eff else None,
                         "fallback": json.loads(fb) if fb else None, "features": f,
@@ -887,6 +892,9 @@ class ConfigDB:
             if "context_length" in patch:
                 c.execute("UPDATE models SET context_length = ? WHERE backend_id = ? AND "
                           "model_id = ?", (patch["context_length"], bid, mid))
+            if "max_output" in patch:
+                c.execute("UPDATE models SET max_output_set = ? WHERE backend_id = ? AND "
+                          "model_id = ?", (patch["max_output"], bid, mid))
             if "price" in patch:
                 self._set_price(bid, mid, patch["price"])
             if "fallback" in patch:
