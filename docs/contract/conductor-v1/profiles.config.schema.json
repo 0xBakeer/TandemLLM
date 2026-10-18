@@ -1202,6 +1202,13 @@
         "off"
       ]
     },
+    "secret_mask": {
+      "enum": [
+        "off",
+        "shadow",
+        "on"
+      ]
+    },
     "sampling": {
       "type": "object",
       "properties": {

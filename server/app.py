@@ -107,6 +107,7 @@ from server.conductor import incontext as incontext_mod  # noqa: E402
 from server.conductor import outcomes as conductor_outcomes  # noqa: E402
 from server.conductor import states as states_mod  # noqa: E402
 from server.conductor import loopescape as loopescape_mod  # noqa: E402
+from server.conductor import redact as redact_mod  # noqa: E402
 from server.conductor.classify import USER_AGENT as CLASSIFY_UA  # noqa: E402
 from server.conductor.store import ConfigError as ConductorConfigError  # noqa: E402
 from server.conductor.router import COMPOSITE as COMPOSITE_NAME  # noqa: E402
@@ -8420,6 +8421,8 @@ class Handler(BaseHTTPRequestHandler):
                 fields = rec.fields()
                 fmt_lp = lp_mod.Formatter(tok) if lp_top is not None else None
                 choices = []
+                # SRV-625: a secret from a tool result is not repeated in the answer
+                sm = _answer_mask(plan, chat, body)
                 for ci, d in enumerate(done):
                     entries = (lp_mod.emitted(d["lpr"].entries, d["ids"], eos)
                                if d["lpr"] is not None else None)
@@ -8429,6 +8432,10 @@ class Handler(BaseHTTPRequestHandler):
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
                                 plan.row["extra"]["stray_close"] = n_stray
+                        if sm is not None:
+                            # the answer and its reasoning, never the calls' arguments
+                            content = sm.text(content, "content")
+                            reasoning = sm.text(reasoning, "reasoning_content")
                         if ui is not None and ui.log and not (plain_lines
                                                                and fmt != "reasoning_content"):
                             # the steps before the generation at the reasoning's head, the rest
@@ -8454,6 +8461,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "logprobs": (fmt_lp.legacy(entries)
                                                      if entries is not None else None),
                                         "text": d["text"]})
+                _answer_mask_done(plan, cid, sm)
                 payload = {"id": cid, "object": "chat.completion" if chat else "text_completion",
                            "created": created, "model": model, "usage": fields["usage"],
                            "choices": choices}
@@ -8509,6 +8517,10 @@ class Handler(BaseHTTPRequestHandler):
             # SRV-187: a bare `</think>` line the model writes in its answer never reaches the
             # client (a conductor plan only: the raw path is the release's, byte for byte)
             stray = [StrayClose() if chat and plan is not None and plan.active else None]
+            # SRV-625: a secret from a tool result of the conversation is not repeated in what the
+            # client sees (the content after the tool-call buffer, the reasoning); None when the
+            # profile's mask is off or no tool result holds one
+            amask = _answer_mask(plan, chat, body)
             # The tool-argument loop guard reads the open call's arguments
             aguard = (argloop_mod.ArgLoopGuard(
                 context_chars=argloop_mod.longest_message_chars(body.get("messages")))
@@ -8533,6 +8545,16 @@ class Handler(BaseHTTPRequestHandler):
 
             def put(data: str) -> None:
                 w.write(((role.pop() if role else "") + data).encode())
+
+            def mask_flush(key: str) -> None:
+                """SRV-625: the field's text ended (a call follows, the reasoning closed, the
+                answer ended): what the mask still holds of it goes out, masked."""
+                if amask is None or not amask.held(key):
+                    return
+                rest = amask.finish(key)
+                if rest:
+                    put(_chunk(cid, model, created, {key: rest},
+                               **(lp_take() if lpr is not None else NO_LP)))
 
             # a chunk carries the log-probabilities of the tokens decided since the last
             # chunk that carried some -- text can lag its tokens (a held character, a stop-string
@@ -8578,17 +8600,32 @@ class Handler(BaseHTTPRequestHandler):
                         # its arguments live as OpenAI deltas through the same feed (the rolex_svg
                         # fix: a whole-file call used to arrive in one lump at the very end).
                         for out_piece in tbuf.feed(pyc.feed(piece) if pyc is not None else piece):
+                            if amask is not None:
+                                if not split.in_think:
+                                    mask_flush("reasoning_content")
+                                out_piece = amask.push(out_piece, "content")
+                                if not out_piece:
+                                    continue
                             if voice is not None:
                                 voice.content(out_piece)       # v3: a plan in the answer
                             put(_chunk(cid, model, created, {"content": out_piece},
                                        **(lp_take() if lpr is not None else NO_LP)))
-                        for d in tbuf.drain_deltas():
+                        deltas = tbuf.drain_deltas()
+                        if deltas:
+                            mask_flush("content")              # the text before the call ended
+                        for d in deltas:
                             put(_chunk(cid, model, created, {"tool_calls": [d]},
                                        **(lp_take() if lpr is not None else NO_LP)))
                         w.flush()
                         continue
                     if chat:
                         key = "reasoning_content" if field == "reasoning" else "content"
+                        if amask is not None:
+                            if key == "content" and not split.in_think:
+                                mask_flush("reasoning_content")
+                            piece = amask.push(piece, key)
+                            if not piece:
+                                continue
                         if voice is not None and key == "content":
                             voice.content(piece)                # v3: a plan in the answer
                         put(_chunk(cid, model, created, {key: piece},
@@ -8848,6 +8885,10 @@ class Handler(BaseHTTPRequestHandler):
                     if refuse_calls and (tbuf.calls or sweep):
                         _refused(plan, cid, tbuf.calls)
                         tbuf.calls, sweep = [], []
+                    if amask is not None:
+                        # the held text is the answer's too; before a call, the text has ended
+                        left = amask.push(left, "content") + (amask.finish("content")
+                                                              if sweep else "")
                     if left:
                         put(_chunk(cid, model, created, {"content": left},
                                    **(lp_take() if lpr is not None else NO_LP)))
@@ -8870,6 +8911,10 @@ class Handler(BaseHTTPRequestHandler):
                 if pstop is not None and pstop.hit:
                     send([("content", GUARD_MARKER)])
                 send(split.finish())
+                if amask is not None:
+                    mask_flush("reasoning_content")      # SRV-625: the answer ended
+                    mask_flush("content")
+                    _answer_mask_done(plan, cid, amask)
                 tell()
                 if sup is not None and sup.gave_up:
                     # GIVE_UP: one visible sentence from the policy, as content, finish stop. An
@@ -9147,6 +9192,34 @@ def _memory_filter(plan, chat: bool, n_choices: int, ui):
             or getattr(plan, "memory", None) is None):
         return None
     return cond.memory.filter(plan.memory, ui)
+
+
+def _answer_mask(plan, chat: bool, body: dict):
+    """SRV-625: the secret echo mask (server/conductor/redact.py AnswerMask) for a chat request
+    whose plan's profile has `secret_mask` on or shadow and whose conversation's tool results hold
+    a secret span; None otherwise (the raw path, and every answer with nothing to mask, stays the
+    release's byte for byte)."""
+    if not chat or plan is None or not plan.active:
+        return None
+    mode = conductor_schema.profile_secret_mask(getattr(plan.res, "doc", None) or {})
+    if mode == "off":
+        return None
+    spans = redact_mod.tool_spans(body.get("messages"))
+    if not spans:
+        return None
+    return redact_mod.AnswerMask(spans, replace=mode == "on")
+
+
+def _answer_mask_done(plan, cid: str, sm) -> None:
+    """The mask's counts per kind on the request's journal row and in one log line; never a
+    value. `extra.secret_mask` when it masked, `extra.secret_mask_shadow` when it only counted."""
+    if sm is None or not sm.counts:
+        return
+    key = "secret_mask" if sm.replace else "secret_mask_shadow"
+    if plan.row is not None:
+        plan.row.setdefault("extra", {})[key] = dict(sm.counts)
+    print(f"[secret_mask] {cid} {'masked' if sm.replace else 'shadow'} "
+          + " ".join(f"{k}={v}" for k, v in sorted(sm.counts.items())), flush=True)
 
 
 def _memory_spans(taken: list[str], ids: list[int], n_prompt: int) -> list:

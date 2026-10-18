@@ -1175,6 +1175,10 @@ for _n in ("chat", "coding", "hermes", "overnight"):
 SHIPPED_PROFILES["chat"]["tasks"]["C3"]["mode"] = "act"
 SHIPPED_PROFILES["chat"]["description"] = ("Open WebUI and the Playground: class-aware effort, the "
                                            "same-call guard.")
+# SRV-625: the secret echo mask (server/conductor/redact.py) in the profiles whose clients read
+# files and show the answer: a key a tool result held is never reproduced verbatim in the answer
+for _n in ("chat", "coding"):
+    SHIPPED_PROFILES[_n]["secret_mask"] = "on"
 # SRV-351 (plan note Chat 7): the Chat tab's agent loop (chatd, client kind `chat-app`) is
 # coding's policy without the state lines: the chat shows the harness's choices from the usage
 # frame, not as text in the answer. Open WebUI's status events go only to QWEN38_STATUS_CLIENTS'
@@ -1201,7 +1205,7 @@ SHIPPED_PROFILES["tools"].update(
     toolgate=dict(SHIPPED_PROFILES["general"]["toolgate"], same_call=True, malformed=True),
     ui={"states": "off", "states_channel": "content"},
     sampling={"agentic_default": "greedy", "loop_escape": "off"},
-    prompt="client", transcripts="off")
+    prompt="client", transcripts="off", secret_mask="on")
 for _tid, _t in SHIPPED_PROFILES["tools"]["tasks"].items():
     _t["mode"] = "act" if _tid in ("D1", "D1b", "D2", "E1", "C3", "C4") else "off"
 del _n, _tid, _t
@@ -1212,7 +1216,7 @@ del _n, _tid, _t
 DERIVED_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
     "chat-app": ("coding", ("description", "clients", "ui", "memory")),
     "tools": ("general", ("description", "decisions", "tasks", "toolgate", "ui", "sampling",
-                          "prompt", "transcripts")),
+                          "prompt", "transcripts", "secret_mask")),
 }
 
 
@@ -1438,6 +1442,12 @@ def profile_transcripts(profile: dict) -> str:
     """A profile's `transcripts` switch (SRV-621): `settings` when absent (the
     settings document's scope); `off`, no session transcript for its requests."""
     return profile.get("transcripts", "settings")
+
+
+def profile_secret_mask(profile: dict) -> str:
+    """A profile's `secret_mask` (SRV-625, server/conductor/redact.py AnswerMask): `off` when
+    absent; `shadow` counts the spans an answer repeats, `on` masks them too."""
+    return profile.get("secret_mask", "off")
 
 
 def tools_profile(settings: dict | None) -> str:
@@ -1814,6 +1824,9 @@ SCHEMAS: dict[str, dict] = {
         # `conductor`); `transcripts: off`, no session transcript (absent: the settings' scope)
         "prompt": {"enum": list(PROMPT_MODES)},
         "transcripts": {"enum": list(PROFILE_TRANSCRIPTS)},
+        # SRV-625: a credential from a tool result of the conversation, repeated in the answer,
+        # is masked (`on`), counted only (`shadow`), or left (absent: off)
+        "secret_mask": {"enum": list(MODES3)},
         # SRV-475: the sampling of agent turns (server/conductor/loopescape.py; absent: greedy,
         # escape off). `agentic_default`: a turn that offers tools and names no sampling decodes
         # greedy or with the model card's sampling; `loop_escape`: after a repeat or near-repeat
