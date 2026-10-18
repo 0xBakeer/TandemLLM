@@ -7,7 +7,7 @@
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { api, describeError } from '../api/client';
+import { api, describeError, request } from '../api/client';
 import { config, WRITER_DEFAULTS, type BackendConfig, type BackendKind, type ConfigOverview, type FeatureValue, type ModelRow, type Price, type ProxyUser, type Rule, type SeedPrices, type TestResult, type WriterConfig, type WriterMode } from '../api/config';
 import { ago, compact, exact, money, ms } from '../lib/format';
 import { setParams } from '../lib/router';
@@ -180,6 +180,16 @@ function draftFor(b: BackendConfig | null, kind: BackendKind, ov: ConfigOverview
   };
 }
 
+/** one entry of GET /v1/autodetect — an engine this box answers on, not wired by us */
+export interface DetectedEngine {
+  port: number; bind: string; kind: string; family: string; how: string;
+  model?: string | null; version?: string | null; label?: string; stats_url?: string;
+}
+
+interface DetectedDoc { scan_ms?: number; engines: DetectedEngine[] }
+interface StatsDoc { stats: Record<string, number> }
+interface RateRow { outTokPerS: number | null; at: number }
+
 @customElement('qse-backends')
 export class QseBackends extends LightElement {
   @property({ attribute: false }) params: URLSearchParams = new URLSearchParams();
@@ -195,16 +205,62 @@ export class QseBackends extends LightElement {
   @state() private seed: SeedPrices | null = null;
   @state() private modelDrafts: Record<string, Partial<ModelRow> & { price?: Price | null }> = {};
   @state() private flash: string | null = null;
+  // the observer surface (GET /v1/autodetect): off unless the server sets
+  // TANDEM_AUTODETECT=1; when off or unreachable it stays out of the way entirely
+  @state() private det: DetectedDoc | null | 'off' = null;
+  @state() private detError: string | null = null;
+  private _rates = new Map<number, RateRow>();
+  private _prevStats = new Map<number, { snap: Record<string, number>; at: number }>();
+  private _detTimer: ReturnType<typeof setTimeout> | null = null;
+  private _detAlive = false;
+
   private timer: ReturnType<typeof setInterval> | null = null;
 
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
     this.timer = setInterval(() => document.visibilityState === 'visible' && !this.editing && void this.load(true), 15_000);
+    this._detAlive = true;
+    void this.refreshDetected();
   }
   disconnectedCallback(): void {
     if (this.timer) clearInterval(this.timer);
+    this._detAlive = false;
+    if (this._detTimer) clearTimeout(this._detTimer);
     super.disconnectedCallback();
+  }
+
+  /** the observer pass: /v1/autodetect, then one bounded stats read per named
+   * engine. 6 s — the server's 5 s scan cache makes each pass cheap. A 404
+   * means the surface is off server-side (opt-in: TANDEM_AUTODETECT=1) and the
+   * loop stops: an observer nobody enabled must not poll forever.
+   * The gen-rate is OUR arithmetic — two snapshots of the engine's own
+   * generation_tokens counter, the window in the tooltip, never a native rate. */
+  private async refreshDetected(): Promise<void> {
+    if (this.det === 'off') return;
+    try {
+      this.det = await request<DetectedDoc>('/v1/autodetect');
+      this.detError = null;
+    } catch (e) {
+      this.det = 'off';
+      this.detError = describeError(e).status === 404 ? null : describeError(e).message;
+      return;
+    }
+    for (const e of (this.det.engines ?? []).filter((x) => x.stats_url).slice(0, 8)) {
+      try {
+        const s = await request<StatsDoc>(`/v1/autodetect/stats?port=${e.port}&family=${encodeURIComponent(e.family)}`);
+        const now = Date.now();
+        const prev = this._prevStats.get(e.port);
+        const gen = s.stats.generation_tokens;
+        if (prev && gen != null && prev.snap.generation_tokens != null && now > prev.at) {
+          const d = gen - prev.snap.generation_tokens;
+          this._rates.set(e.port, { outTokPerS: d >= 0 ? d / ((now - prev.at) / 1000) : null, at: now });
+        }
+        this._prevStats.set(e.port, { snap: s.stats, at: now });
+        this.requestUpdate();
+      } catch { /* a failed stats read just means no rates this pass */ }
+    }
+    if (this._detAlive) this._detTimer = setTimeout(() => void this.refreshDetected(), 6_000);
   }
 
   private get screen(): Screen {
@@ -370,14 +426,63 @@ export class QseBackends extends LightElement {
   // ---- the list -------------------------------------------------------------------------
   private renderList(d: ConfigOverview): TemplateResult {
     const tools = html`<button class="btn btn-primary btn-sm" @click=${() => setParams({ screen: 'setup', backend: null })}>${icon('plus')} Add backend</button>`;
-    if (!d.backends.length) return panel('Backends', emptyState('No backend yet', html`<button class="btn btn-primary" @click=${() => setParams({ screen: 'setup' })}>Open Setup</button>`), { tools });
-    return panel(
-      'Backends',
-      html`<div class="bk-cards" role="list">${d.backends.map((b) => this.renderCard(b))}</div>
+    if (!d.backends.length) return html`
+      ${panel('Backends', emptyState('No backend yet', html`<button class="btn btn-primary" @click=${() => setParams({ screen: 'setup' })}>Open Setup</button>`), { tools })}
+      ${this.renderDetected(d)}`;
+    return html`
+      ${panel(
+        'Backends',
+        html`<div class="bk-cards" role="list">${d.backends.map((b) => this.renderCard(b))}</div>
         ${d.engine?.embedded ? html`<p class="panel-foot">${d.engine.model} is this engine's own model: it is not a backend here and its requests never pass the relay.</p>` : nothing}
         ${this.renderEngineOwn(d)}`,
-      { sub: `${d.backends.length} configured · ${d.config_path}`, tools, id: 'backends' },
+        { sub: `${d.backends.length} configured · ${d.config_path}`, tools, id: 'backends' },
+      )}
+      ${this.renderDetected(d)}`;
+  }
+
+  /** Detected nearby — the observer surface: engines answering on loopback,
+   * named by evidence (metrics name-table, OpenAI shape + tie-breaks, kinds).
+   * Read-only by design: this dashboard never registers, wires, or relays to
+   * what it finds — adoption stays the operator's act (copy the URL, add a
+   * backend by hand). Off unless the server enables TANDEM_AUTODETECT=1;
+   * disabled, the route 404s and this section simply does not exist. */
+  private renderDetected(d: ConfigOverview): TemplateResult | typeof nothing {
+    if (this.det === null || this.det === 'off') return nothing;
+    const taken = new Set(d.backends.map((b) => {
+      const m = /:(\d+)/.exec(b.url);   // same host:port already configured?
+      return m ? Number(m[1]) : null;
+    }).filter((x): x is number => x != null));
+    const rows = (this.det.engines ?? []).map((e) => this.renderDetectedRow(e, taken.has(e.port)));
+    return panel(
+      'Detected nearby',
+      rows.length ? html`<div class="bk-cards" role="list">${rows}</div>` : emptyState('Nothing answering on loopback'),
+      {
+        sub: `observer: read-only — nothing here is wired, relayed or written${this.det.scan_ms != null ? ` · ${this.det.scan_ms} ms scan` : ''}`,
+        tools: html`<button class="btn btn-sm" @click=${() => { this.det = null; void this.refreshDetected(); }}>${icon('refresh')} Refresh</button>`,
+        id: 'detected',
+      },
     );
+  }
+
+  private renderDetectedRow(e: DetectedEngine, configured: boolean): TemplateResult {
+    const url = `http://127.0.0.1:${e.port}`;
+    const rate = this._rates.get(e.port);
+    const name = e.label ?? KIND_LABEL[e.family as BackendKind] ?? e.kind;
+    return html`<article class="bk-card" role="listitem" data-detected=${e.port}>
+      <header class="bk-card-head">
+        <span class="bk-card-title">${name}</span>
+        <span class="pill bk-state is-ok" data-state="ok" title="answering on loopback right now">live</span>
+      </header>
+      <div class="bk-card-url mono clip" title=${url}>${url}</div>
+      <div class="bk-card-kind"><span class="badge">${e.family}</span>${configured ? html`<span class="badge badge-lock" title="a configured backend already points at this port">configured</span>` : nothing}</div>
+      <dl class="bk-card-facts">
+        ${e.version ? html`<div><dt>version</dt><dd class="mono">${e.version}</dd></div>` : nothing}
+        ${e.model ? html`<div><dt>model</dt><dd class="clip" title=${e.model}>${e.model}</dd></div>` : nothing}
+        <div><dt>found by</dt><dd class="clip" title=${e.how}>${e.how}</dd></div>
+        ${rate?.outTokPerS != null ? html`<div><dt>generating</dt><dd class="num" title="computed from two stats snapshots ~6 s apart of the engine's own counters — never a native rate">${Math.round(rate.outTokPerS)} tok/s</dd></div>` : nothing}
+      </dl>
+      ${copyButton(url)}
+    </article>`;
   }
 
   private renderCard(b: BackendConfig): TemplateResult {
