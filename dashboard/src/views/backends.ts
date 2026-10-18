@@ -115,6 +115,28 @@ export function writerPatch(dr: { writer: WriterMode; writer_usd_day: string; wr
   return { patch, error: null };
 }
 
+/** a model row's draft: what the row editor changed; `output` is the output limit's field text */
+export type ModelDraft = Partial<ModelRow> & { price?: Price | null; output?: string };
+
+/** the PUT body of a model row's draft. The output limit is a whole number of tokens from 1, or
+ * empty for none (the provider's list or the adapter's table, else no limit); anything else names
+ * the field. The field is a text input so a typed "16k" arrives here and is refused, where a
+ * number input would hand over "" and clear the limit. */
+export function modelPatch(dr: ModelDraft): { patch: Record<string, unknown>; error: { field: string; message: string } | null } {
+  const patch: Record<string, unknown> = {};
+  if (dr.public_id !== undefined) patch.public_id = dr.public_id;
+  if (dr.enabled !== undefined) patch.enabled = dr.enabled;
+  if (dr.output !== undefined) {
+    const t = dr.output.trim();
+    const n = Number(t);
+    if (t !== '' && (!/^\d+$/.test(t) || !Number.isSafeInteger(n) || n < 1)) return { patch: {}, error: { field: 'max_output', message: 'the output limit: a whole number of tokens from 1, or empty for none' } };
+    patch.max_output = t === '' ? null : n;
+  }
+  if (dr.price !== undefined) patch.price = dr.price ? { input: dr.price.input, cached_input: dr.price.cached_input, cache_write: dr.price.cache_write, output: dr.price.output, currency: 'USD', ...(dr.price.offpeak ? { offpeak: dr.price.offpeak } : {}) } : null;
+  if (dr.features) patch.features = dr.features;
+  return { patch, error: null };
+}
+
 interface Draft {
   id: string;
   kind: BackendKind;
@@ -196,7 +218,7 @@ export class QseBackends extends LightElement {
   @state() private seed: SeedPrices | null = null;
   /** one flight at a time (deep audit 0.11.3): see loadSeed */
   private seedFlight = inflightOnce(() => config.seedPrices());
-  @state() private modelDrafts: Record<string, Partial<ModelRow> & { price?: Price | null }> = {};
+  @state() private modelDrafts: Record<string, ModelDraft> = {};
   @state() private flash: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
@@ -678,7 +700,7 @@ export class QseBackends extends LightElement {
     return panel(
       'Models',
       html`<div class="table-scroll"><table class="table bk-models">
-          <thead><tr><th>model</th><th>public id</th><th class="num-col">context</th><th class="num-col" title="USD per million tokens">input</th><th class="num-col">cached</th><th class="num-col">output</th><th>on</th><th></th></tr></thead>
+          <thead><tr><th>model</th><th>public id</th><th class="num-col">context</th><th class="num-col" title="the largest max_tokens a request gets; empty: the provider's list, else none">max output</th><th class="num-col" title="USD per million tokens">input</th><th class="num-col">cached</th><th class="num-col">output</th><th>on</th><th></th></tr></thead>
           <tbody>${rows.map((m) => this.renderModelRow(b, m, groups))}</tbody>
         </table></div>
         <p class="panel-foot">Prices are USD per million tokens, applied to a row when it is written, so a later change does not rewrite history. ${this.seed?.as_of ? html`The fill button uses the public list prices of ${this.seed.as_of} shipped with this release; nothing is fetched and nothing is applied without a click.` : nothing} The feature switches act on chat completions while the backend’s harness is shadow or on (off relays every byte unchanged); each says what it resolves to, what it costs or loses on this backend, and what its extra requests cost over the last 24 hours.</p>`,
@@ -704,6 +726,7 @@ export class QseBackends extends LightElement {
         <td class="mono cell-wrap">${m.model}${m.present ? nothing : html` <span class="muted small">not listed now</span>`}</td>
         <td><input class="bk-pub mono" .value=${dr?.public_id ?? m.public_id ?? ''} placeholder="(same)" aria-label=${`${m.model} public id`} @input=${(e: Event) => (this.modelDrafts = { ...this.modelDrafts, [key]: { ...dr, public_id: (e.target as HTMLInputElement).value || null } })} /></td>
         <td class="num-col num">${m.context_length ? compact(m.context_length) : '—'}</td>
+        <td class="num-col"><input class="bk-out" type="text" inputmode="numeric" aria-label=${`${m.model} max output`} placeholder=${m.max_output_default ? String(m.max_output_default) : 'none'} .value=${dr?.output ?? (m.max_output_set != null ? String(m.max_output_set) : '')} @input=${(e: Event) => (this.modelDrafts = { ...this.modelDrafts, [key]: { ...dr, output: (e.target as HTMLInputElement).value } })} /></td>
         <td class="num-col">${num('input')}</td>
         <td class="num-col">${num('cached_input')}</td>
         <td class="num-col">${num('output')}</td>
@@ -715,7 +738,7 @@ export class QseBackends extends LightElement {
         </td>
       </tr>
       ${open
-        ? html`<tr class="bk-features-row"><td colspan="8"><div class="bk-features">${groups.map((g) => {
+        ? html`<tr class="bk-features-row"><td colspan="9"><div class="bk-features">${groups.map((g) => {
             const v = (dr?.features?.[g] ?? m.features[g] ?? 'inherit') as FeatureValue;
             const eff = m.effective?.[g];
             const cost = m.harness_cost_day?.[g];
@@ -727,12 +750,11 @@ export class QseBackends extends LightElement {
 
   private async saveModel(b: BackendConfig, m: ModelRow): Promise<void> {
     const key = `${b.id}/${m.model}`;
-    const dr = this.modelDrafts[key] ?? {};
-    const patch: Record<string, unknown> = {};
-    if (dr.public_id !== undefined) patch.public_id = dr.public_id;
-    if (dr.enabled !== undefined) patch.enabled = dr.enabled;
-    if (dr.price !== undefined) patch.price = dr.price ? { input: dr.price.input, cached_input: dr.price.cached_input, cache_write: dr.price.cache_write, output: dr.price.output, currency: 'USD', ...(dr.price.offpeak ? { offpeak: dr.price.offpeak } : {}) } : null;
-    if (dr.features) patch.features = dr.features;
+    const { patch, error } = modelPatch(this.modelDrafts[key] ?? {});
+    if (error) {
+      this.say(`${m.model}: ${error.message}`);
+      return;
+    }
     try {
       await config.model(b.id, m.model, patch);
       const next = { ...this.modelDrafts };

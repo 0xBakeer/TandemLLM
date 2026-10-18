@@ -148,6 +148,26 @@ def test_a_backend_model_gets_max_tokens_only_from_its_output_limit():
         c.close()
 
 
+def test_a_relay_without_a_window_gets_the_operators_output_limit():
+    """VIS-227: a llama.cpp, Ollama or manual model's card has no context length; the output
+    limit an operator set under Backends still goes out as max_tokens."""
+    c = Chat()
+    try:
+        info = {"id": "fake-a", "max_len": 0, "weights": "", "backend": "proxy",
+                "max_output": None, "vision": False, "tools": True, "effort_budgets": {}}
+        c.svc.model_info = lambda model_id: dict(info)
+        cid = c.new()
+        c.send(cid, "hello")
+        c.wait_idle(cid)
+        assert "max_tokens" not in c.last_body()
+        info["max_output"] = 8192
+        c.send(cid, "again")
+        c.wait_idle(cid)
+        assert c.last_body()["max_tokens"] == 8192
+    finally:
+        c.close()
+
+
 def test_a_settings_patch_never_stores_a_profile():
     c = Chat()
     try:

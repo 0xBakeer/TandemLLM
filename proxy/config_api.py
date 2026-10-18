@@ -13,8 +13,9 @@ characters and a 6-hex-digit hash prefix. A user's key is in the answer to its c
     PATCH  /v1/config/backends/{id}                   change fields (`key: null` removes the key)
     DELETE /v1/config/backends/{id}
     POST   /v1/config/backends/{id}/test              test the saved backend, refresh its models
-    PUT    /v1/config/backends/{id}/models/{model}    public id, enabled, price, fallback,
-                                                      features (creates a manual model)
+    PUT    /v1/config/backends/{id}/models/{model}    public id, enabled, price, max_output
+                                                      (null clears), fallback, features
+                                                      (creates a manual model)
     DELETE /v1/config/backends/{id}/models/{model}
     PUT    /v1/config/rules                           {rules: [{id?, pattern, backend, enabled}]}
     POST   /v1/config/users                           {label}: the answer holds the key, once
@@ -72,6 +73,8 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
         except Exception:                                          # noqa: BLE001
             wcfg = None
     if with_models:
+        from proxy import route as route_mod
+        cls = route_mod.KINDS.get(b["kind"], route_mod.Generic)
         rows = svc.cfg.models(b["id"])
         costs = {}
         if getattr(svc, "harness", None) is not None:
@@ -82,6 +85,8 @@ def backend_view(svc, b: dict, with_models: bool = False, cost: dict | None = No
             # requests cost it over the last 24 hours (from the ledger and the journal)
             m["effective"] = harness_mod.switches(b, m)
             m["harness_cost_day"] = costs.get(m["model"], {})
+            # VIS-227: what the card carries while the operator's output limit is empty
+            m["max_output_default"] = route_mod.default_max_output(cls, m)
             # M3: the background memory writer's mode for this model and why
             if wcfg is not None:
                 wm, why = memwriter.resolve(b, svc.price_of(b["id"], m["model"]), wcfg["mode"])

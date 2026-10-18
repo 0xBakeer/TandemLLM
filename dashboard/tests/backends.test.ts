@@ -1,9 +1,10 @@
 // The Backends screen's helpers and the mock proxy (contract 1.3): money, lists, locks, the
 // write-only key, a user's key shown once, the env rule that cannot change.
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { money, NOT_REPORTED } from '../src/lib/format';
-import { listOf, lockOf, writerConfig, writerPatch } from '../src/views/backends';
+import { listOf, lockOf, modelPatch, writerConfig, writerPatch } from '../src/views/backends';
 import { MockBackends } from '../mock/backends';
 import { WRITER_DEFAULTS, type BackendConfig } from '../src/api/config';
 
@@ -106,5 +107,44 @@ describe('the memory writer switches (0.3.36)', () => {
     expect((body as { error: { variable: string } }).error.variable).toBe('TANDEM_BACKEND_DEEPSEEK_WRITER_USD_DAY');
     expect(m.handle('PATCH', '/v1/config/backends/deepseek', { harness: { writer_usd_day: 0.1, writer: 'on' } })[0]).toBe(200);
     expect(m.handle('PATCH', '/v1/config/backends/vllm1', { harness: { writer_runs_day: -3 } })[0]).toBe(422);
+  });
+});
+
+describe("a model row's output limit (VIS-227)", () => {
+  it('sends a whole number, null for an empty field, nothing when untouched', () => {
+    expect(modelPatch({ public_id: 'qwen' })).toEqual({ patch: { public_id: 'qwen' }, error: null });
+    expect(modelPatch({ output: ' 8192 ' }).patch).toEqual({ max_output: 8192 });
+    expect(modelPatch({ output: '' }).patch).toEqual({ max_output: null });
+    expect(modelPatch({ output: '4096', enabled: false, price: null }).patch).toEqual({ enabled: false, max_output: 4096, price: null });
+  });
+  it('refuses anything else and names the field', () => {
+    // the field is text: what was typed arrives as typed
+    for (const bad of ['0', '-5', '2.5', 'many', '1e400', '16k', '8,192', '0x10', '1e3', '99999999999999999999']) {
+      const r = modelPatch({ output: bad, public_id: 'x' });
+      expect(r.error?.field, bad).toBe('max_output');
+      expect(r.patch).toEqual({});
+    }
+  });
+  it("the mock stores it as the operator's, apart from the provider's, and refuses a bad one", () => {
+    const m = new MockBackends();
+    const [st, row] = m.handle('PUT', '/v1/config/backends/vllm1/models/Qwen/Qwen3.5-4B', { max_output: 8192 });
+    expect(st).toBe(200);
+    expect(row).toMatchObject({ max_output_set: 8192, max_output: null });
+    expect(m.handle('PUT', '/v1/config/backends/vllm1/models/Qwen/Qwen3.5-4B', { max_output: null })[1]).toMatchObject({ max_output_set: null });
+    const [bad, body] = m.handle('PUT', '/v1/config/backends/vllm1/models/Qwen/Qwen3.5-4B', { max_output: 0 });
+    expect(bad).toBe(422);
+    expect((body as { error: { field: string } }).error.field).toBe('max_output');
+  });
+  it('the row editor has the field beside the public id and saves through modelPatch', () => {
+    const src = readFileSync(new URL('../src/views/backends.ts', import.meta.url), 'utf8');
+    const row = src.slice(src.indexOf('private renderModelRow'), src.indexOf('private async saveModel'));
+    expect(row.indexOf('public id`}')).toBeLessThan(row.indexOf('max output`}'));
+    expect(row).toContain('output: (e.target as HTMLInputElement).value');
+    expect(row).toContain('m.max_output_set');
+    expect(row).toContain('class="bk-out" type="text" inputmode="numeric"');
+    expect(row).toContain('placeholder=${m.max_output_default ?');
+    expect(row).toContain('colspan="9"');
+    const save = src.slice(src.indexOf('private async saveModel'), src.indexOf('private async saveModel') + 400);
+    expect(save).toContain('modelPatch(this.modelDrafts[key] ?? {})');
   });
 });
