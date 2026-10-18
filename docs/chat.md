@@ -36,6 +36,8 @@ compacts at 80 % of the refused size, not only of the window.
 File texts stay out of the request: a finished `write_file`'s content, and an `edit_file`'s old or
 new text over 2,000 characters, go to the model as a stub (path, lines, bytes, sha256 and the
 `read_file` call that shows it) from the next request on; the store and the thread keep the text.
+A worker's (Agents mode) stay whole until a compaction, which stubs them: the engine holds the
+rows of the call, and a stub inside its last answer made the next call read that answer again.
 A `read_file` or `bash` result over 4,000 characters stays whole until a compaction, which stubs
 it (a read names its `read_file` call; a command keeps its first and last lines), so a request only
 ever changes at its tail between compactions and the engine's prefix cache holds the rest. A

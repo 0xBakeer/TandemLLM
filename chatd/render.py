@@ -18,8 +18,9 @@ same bytes across calls and across a restart (a fresh store read).
                     TOOL_IMAGES_KEPT, then the first ones and the newest; the newest-but-one
                     becomes a line saying a newer one follows (SRV-546)
     file texts      a finished write_file's content and an edit_file's long old or new text as
-                    a stub from the next request on; a long read_file or bash result whole until
-                    a compaction, a stub after it (FOLD_ARG_CHARS, FOLD_RESULT_CHARS)
+                    a stub from the next request on (a worker's: whole until a compaction); a long
+                    read_file or bash result whole until a compaction, a stub after it
+                    (FOLD_ARG_CHARS, FOLD_RESULT_CHARS)
     effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide)
     thinking off    `chat_template_kwargs.enable_thinking: false` (read by our engine, vLLM and
                     SGLang alike)
@@ -140,7 +141,13 @@ def kept_tool_images(branch: list[dict], n: int | None = None) -> set:
 #: assistant message, so only its tail changes and the engine's prefix cache holds the rest. A
 #: read_file or bash result over FOLD_RESULT_CHARS stays whole until a compaction (changed in the
 #: middle of the request, it would make the engine read everything after it again); the request
-#: after a compaction is read anew anyway, and every result that ended before it is a stub there
+#: after a compaction is read anew anyway, and every result that ended before it is a stub there.
+#: A worker's write_file and edit_file arguments stay whole until a compaction too (SRV-593): the
+#: rows past a call's prompt were written by verify blocks, which hold no grid anchor, and the end
+#: anchor serves a copy only when it holds every row, so a stub inside the last answer made the
+#: next call resume at the previous prompt's last grid line and read the whole answer again (681 to
+#: 8,690 tokens a call, live 2026-10-18). A worker is short-lived and starts fresh; the chat keeps
+#: the stub, its context lasts
 FOLD_ARG_CHARS = 2000
 FOLD_RESULT_CHARS = 4000
 FOLD_RESULT_TOOLS = ("read_file", "bash")
@@ -177,12 +184,15 @@ WROTE_STUB = re.compile(r"\[wrote .+: [\d,]+ lines, [\d,]+ bytes, sha256 [0-9a-f
                         r"is on disk, read_file \{.*\} shows it\]", re.S)
 
 
-def call_arguments(c: dict) -> str:
+def call_arguments(c: dict, fold_before: str | None = None, worker: bool = False) -> str:
     """A call's arguments as the model reads them: a finished write_file's content and an
-    edit_file's old or new text over FOLD_ARG_CHARS as a stub; anything else as sent."""
+    edit_file's old or new text over FOLD_ARG_CHARS as a stub; a worker's (`worker`) only when the
+    call ended before `fold_before` (the newest compaction's time, ISO 8601); anything else as
+    sent."""
     raw = c.get("input") or "{}"
     if c.get("name") not in ("write_file", "edit_file") or c.get("status") != "done" or \
-            len(raw) <= FOLD_ARG_CHARS:
+            len(raw) <= FOLD_ARG_CHARS or worker and (
+                fold_before is None or (c.get("ended_at") or "") >= fold_before):
         return raw
     try:
         a = json.loads(raw)
@@ -241,7 +251,7 @@ def result_for(c: dict, fold_before: str | None = None) -> str:
 
 def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
                keep: set | None = None, inline: bool = True, from_step: int = 0,
-               fold_before: str | None = None) -> list[dict]:
+               fold_before: str | None = None, worker: bool = False) -> list[dict]:
     """One assistant message as the model saw it: per step its text, reasoning and tool calls,
     then one `tool` message per call with the result the model read. The images of those results
     (vision models only, the ones in `keep`; None: all) go in the tool message itself with
@@ -249,7 +259,8 @@ def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
     one user turn: a separate user message per screenshot read to the model as the user sending
     again, live 2026-10-13), else in a user message after the results. `from_step`: the steps
     before it were compacted (the summary is in the system block); `fold_before`: the newest
-    compaction's time (`result_for`)."""
+    compaction's time (`result_for`, `call_arguments`); `worker`: a worker's request
+    (`call_arguments`)."""
     out: list[dict] = []
     for group in steps([p for p in m.get("parts") or [] if int(p.get("step") or 1) >= from_step]):
         text = text_of(group)
@@ -263,7 +274,8 @@ def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
         if calls:
             msg["tool_calls"] = [{"id": c["id"], "type": "function",
                                   "function": {"name": c.get("name") or "",
-                                               "arguments": call_arguments(c)}}
+                                               "arguments": call_arguments(c, fold_before,
+                                                                             worker)}}
                                  for c in calls]
         out.append(msg)
         images = []
@@ -305,12 +317,14 @@ def result_text(c: dict) -> str:
 
 
 def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True, keep: set | None = None,
-            inline: bool = True, from_step: int = 0, fold_before: str | None = None) -> list[dict]:
+            inline: bool = True, from_step: int = 0, fold_before: str | None = None,
+            worker: bool = False) -> list[dict]:
     """One branch message as OpenAI messages; [] for what the model does not see (notices)."""
     if m.get("role") == "user":
         return [_user(m, vision, blob)]
     if m.get("role") == "assistant":
-        return _assistant(m, vision, blob, keep_reasoning, keep, inline, from_step, fold_before)
+        return _assistant(m, vision, blob, keep_reasoning, keep, inline, from_step, fold_before,
+                          worker)
     return []
 
 
@@ -320,14 +334,17 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          levels: list[str] | None = None, effort_off: str | None = None,
          keep_reasoning_from: int = 0, tail: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
-         step_from: tuple[int, int] | None = None, fold_before: str | None = None) -> dict:
+         step_from: tuple[int, int] | None = None, fold_before: str | None = None,
+         worker: bool = False) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
     context guard drops it before that); `tail`: a hidden last user line for one call, never
     stored (the empty-turn nudge; a worker's report sent back, or its report at the step cap);
     `inline_images`: tool images in the tool message (our engine) or in a user message after it;
     `step_from`: (a branch index, a step): that assistant message's steps before the step were
     compacted (a long run: the summary is in the system block); `fold_before`: the newest
-    compaction's time, the long results of calls that ended before it are stubs (`result_for`)."""
+    compaction's time, the long results of calls that ended before it are stubs (`result_for`);
+    `worker`: a worker's request, its write_file and edit_file arguments whole until a compaction
+    (`call_arguments`)."""
     msgs: list[dict] = []
     if system:
         msgs.append({"role": "system", "content": system})
@@ -336,7 +353,7 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
         msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from, keep=keep,
                             inline=inline_images,
                             from_step=step_from[1] if step_from and i == step_from[0] else 0,
-                            fold_before=fold_before))
+                            fold_before=fold_before, worker=worker))
     if tail:
         msgs.append({"role": "user", "content": tail})
     out: dict = {"model": model, "messages": msgs, "stream": True,

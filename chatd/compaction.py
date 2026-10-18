@@ -17,8 +17,8 @@ base64 is never counted as text). Then:
    with no compaction, as there was no earlier user turn to summarize. A chat the engine refused
    for memory compacts at 80 % of the refused request as well (`compact_at`; chatd/runs.py).
    The request after a compaction lands under TARGET_SHARE of that limit: the long read_file
-   and bash results of what it keeps become stubs (chatd/render.py), and a long run keeps fewer
-   steps until it fits;
+   and bash results of what it keeps, and a worker's long write_file and edit_file texts, become
+   stubs (chatd/render.py), and a long run keeps fewer steps until it fits;
 2. still too long (one huge turn, nothing before the last two to summarize): the reasoning of
    earlier, finished turns is left out of the request. Templates such as Qwen's drop it anyway;
    others keep it, and 28,000 tokens of thinking then fill a 40,960 window (seen live on

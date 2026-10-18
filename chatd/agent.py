@@ -746,7 +746,8 @@ class AgentMixin:
                  head: dict | None = None, **kw) -> dict:
         """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
         None): the system block with its summary, the messages from its first kept one on, its
-        steps and its stubs. `head`: who asks (`_head`: a worker's block)."""
+        steps and its stubs. `head`: who asks (`_head`: a worker's block; a worker's write_file
+        and edit_file arguments stay whole until a compaction, chatd/render.py `call_arguments`)."""
         b = c[1] if c else 0
         ours = info.get("backend") == "engine"
         if "keep_reasoning_from" in kw:
@@ -758,7 +759,8 @@ class AgentMixin:
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
                            inline_images=ours, step_from=self._step_from(c),
-                           fold_before=c[3] if c else None, levels=info.get("effort_levels"),
+                           fold_before=c[3] if c else None, worker="worker" in (head or {}),
+                           levels=info.get("effort_levels"),
                            effort_off=info.get("effort_off"), **kw)
 
     def peek_body(self, conv, settings: dict, branch: list[dict]) -> dict:

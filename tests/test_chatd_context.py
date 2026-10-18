@@ -21,7 +21,9 @@ the last two turns to summarize.
      grew from 25k to 162k tokens of write_file, edit_file and read_file texts, and its
      compaction kept 138,673 tokens): a finished write's content is a stub from the next request
      on (only the tail changes), long reads stay whole until a compaction and are stubs after
-     it, and a compaction lands under half the limit that set it off
+     it, and a compaction lands under half the limit that set it off. A worker's write and edit
+     texts stay whole until a compaction (SRV-593: a stub inside the last answer made the next
+     call read that answer again)
 
 CPU only. Run: python -m pytest -q tests/test_chatd_context.py
 """
@@ -37,7 +39,7 @@ import zlib
 from chatd_util import Chat
 from test_chatd_agent import calls, requests, small_window
 
-from chatd import compaction as comp, render
+from chatd import compaction as comp, context as ctx_mod, render
 
 
 def png(w: int, h: int, pad: int = 0) -> bytes:
@@ -404,6 +406,52 @@ def test_long_reads_stay_whole_until_a_compaction_and_are_stubs_after_it():
     assert render.WROTE_STUB.fullmatch(stub) and render.WROTE_STUB.fullmatch(
         render.wrote_stub("/workspace/[draft] ocean v2.js", "y"))
     assert not render.WROTE_STUB.fullmatch("[wrote the intro] and more text")
+
+
+def test_a_workers_write_and_edit_stay_whole_until_a_compaction():
+    """SRV-593: a worker's write_file and edit_file arguments are stubs at a compaction only; the
+    chat's are stubs from the next request on, as before; short ones never change."""
+    page = "".join(f"const wave{i} = Math.sin({i} * t) * 0.25;\n" for i in range(150))
+    old, new = page[:2500], page[:2500].replace("0.25", "0.5")
+    short = {"path": "a.txt", "content": "hi"}
+
+    def call(k, name, args, ended):
+        return {"type": "tool_call", "id": f"w{k}", "name": name, "step": k, "status": "done",
+                "input": json.dumps(args), "ended_at": ended, "output": {"content": "ok"}}
+    branch = [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "an ocean"}]},
+              {"id": "a", "role": "assistant", "parts": [
+                  call(1, "write_file", {"path": "ocean.js", "content": page},
+                       "2026-10-18T10:00:00.000Z"),
+                  call(2, "edit_file", {"path": "ocean.js", "old": old, "new": new},
+                       "2026-10-18T10:01:00.000Z"),
+                  call(3, "write_file", short, "2026-10-18T10:02:00.000Z")]}]
+
+    def args(fold, worker):
+        body = render.body("m", {}, branch, system="s", fold_before=fold, worker=worker)
+        return [json.loads(tc["function"]["arguments"]) for m in body["messages"]
+                for tc in m.get("tool_calls") or []]
+    # a worker: whole with no compaction, the request byte for byte the calls as written
+    assert args(None, True) == [{"path": "ocean.js", "content": page},
+                                {"path": "ocean.js", "old": old, "new": new}, short]
+    # a compaction at 10:00:30: the write before it is a stub, the edit after it stays whole
+    w, e, s = args("2026-10-18T10:00:30.000Z", True)
+    assert w["content"] == render.wrote_stub("ocean.js", page) and e == {
+        "path": "ocean.js", "old": old, "new": new} and s == short, (w, e)
+    w, e, s = args("2026-10-18T10:05:00.000Z", True)
+    assert w["content"].startswith("[wrote /workspace/ocean.js: 150 lines, ") and \
+        e["old"].startswith("[the old text of this edit: ") and \
+        e["new"].startswith("[the new text of this edit: ") and s == short, (w, e)
+    # the chat: stubs from the next request on, with or without a compaction
+    for fold in (None, "2026-10-18T10:00:30.000Z"):
+        w, e, s = args(fold, False)
+        assert w["content"] == render.wrote_stub("ocean.js", page) and \
+            e["old"].startswith("[the old text of this edit: ") and s == short, (fold, w, e)
+    # the Context panel counts what the request carries
+    whole = ctx_mod.file_tokens(branch, worker=True)
+    assert whole > ctx_mod.file_tokens(branch) and whole == sum(
+        ctx_mod.estimate_tokens(t) for t in (page, old, new, "hi"))
+    assert ctx_mod.file_tokens(branch, fold_before="2026-10-18T10:05:00.000Z", worker=True) == \
+        ctx_mod.file_tokens(branch)
 
 
 def _ocean_run(c, window: int, max_steps: int = 10):

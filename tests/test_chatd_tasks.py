@@ -39,6 +39,11 @@ tests/test_chatd_agent.py.
  15  two running workers' figures stay apart by task_id: each its own row, its own task.metrics and
      its own item in `context.workers` (chatd runs one today; SRV-589 runs two)
                                                   test_two_workers_figures_stay_apart
+ 16  a worker's write_file and edit_file arguments stay whole (SRV-593): each of its requests
+     starts with the one before, byte for byte; the chat's own write is a stub from the next
+     request on                                   test_a_workers_requests_keep_their_prefix_after_a_write
+ 17  a worker's compaction stubs the writes it keeps, as it does long reads
+                                                  test_a_workers_compaction_stubs_its_writes
 
 Run: PYTHONPATH=.:tests python3 tests/test_chatd_tasks.py
 """
@@ -704,6 +709,108 @@ def test_two_workers_figures_stay_apart():
     assert TasksMixin.running_workers(svc, parent) == [workers[0]]
     workers[0].state = "done"
     assert TasksMixin.running_workers(svc, parent) == []
+
+
+def _page(name: str, n: int = 150) -> str:
+    return "".join(f"const {name}{i} = Math.sin({i} * t) * 0.25;\n" for i in range(n))
+
+
+def _prefix_kept(prev: dict, cur: dict) -> bool:
+    """`cur` starts with `prev`, byte for byte: its head and every message `prev` had."""
+    n = len(prev["messages"])
+    return (render.encode(cur["messages"][:n]) == render.encode(prev["messages"]) and
+            render.encode(cur.get("tools") or []) == render.encode(prev.get("tools") or []))
+
+
+def _write_args(body: dict) -> list[dict]:
+    return [json.loads(tc["function"]["arguments"]) for m in body["messages"]
+            for tc in m.get("tool_calls") or [] if tc["function"]["name"] in ("write_file",
+                                                                              "edit_file")]
+
+
+def test_a_workers_requests_keep_their_prefix_after_a_write():
+    c = Chat()
+    try:
+        page = _page("wave")
+        old, new = page[:2500], page[:2500].replace("0.25", "0.5")
+        assert len(page) > render.FOLD_ARG_CHARS and len(old) > render.FOLD_ARG_CHARS
+
+        def worker(b, k, n):
+            if k == 0:
+                return {"calls": [{"name": "write_file", "arguments": {
+                    "path": "ocean.js", "content": page}}]}
+            if k == 1:
+                return {"calls": [{"name": "edit_file", "arguments": {
+                    "path": "ocean.js", "old": old, "new": new}}]}
+            if k == 2:
+                return {"calls": [{"name": "read_file", "arguments": {
+                    "path": "ocean.js", "offset": 1, "limit": 3}}]}
+            return {"content": REPORT.replace("hello.txt", "ocean.js")}
+        c.fake.script = Script(worker=worker)
+        cid = agents_chat(c)
+        c.send(cid, "write the ocean")
+        s = c.wait_idle(cid, 40)
+        assert task_part(s)["status"] == "done"
+        reqs = [b for _, b in worker_calls(c)]
+        assert len(reqs) == 4, len(reqs)
+        for prev, cur in zip(reqs, reqs[1:]):
+            assert _prefix_kept(prev, cur)
+        # the calls go back as the model wrote them
+        assert _write_args(reqs[-1]) == [{"path": "ocean.js", "content": page},
+                                         {"path": "ocean.js", "old": old, "new": new}]
+        assert "0.5" in c.svc.workspace(cid).read("ocean.js").decode()
+        # the chat's own write is a stub from the next request on, as before
+        c.ok("PATCH", f"/conversations/{cid}/settings", {"agents": False})
+        c.fake.script.main = lambda b, k: {"calls": [{"name": "write_file", "arguments": {
+            "path": "sky.js", "content": page}}]} if k == 0 else {"content": "ok"}
+        c.send(cid, "write the sky")
+        c.wait_idle(cid, 30)
+        first, second = [b for _, b in main_calls(c, cid)][-2:]
+        assert _write_args(second)[-1]["content"] == render.wrote_stub("sky.js", page)
+    finally:
+        c.close()
+
+
+def test_a_workers_compaction_stubs_its_writes():
+    c = Chat()
+    try:
+        small_window(c, window=12_000)
+        c.svc.learn_ratio = lambda *a: None                 # the fake counts words, not tokens
+        pages = [_page(f"w{k}_", 60) for k in range(12)]
+        assert all(len(p) > render.FOLD_ARG_CHARS for p in pages)
+        wrote: list[int] = []
+
+        def worker(b, k, n):                 # by its own count: a compaction drops results
+            if len(wrote) < len(pages):
+                wrote.append(len(wrote))
+                return {"calls": [{"name": "write_file", "arguments": {
+                    "path": f"p{wrote[-1]}.js", "content": pages[wrote[-1]]}}]}
+            return {"content": REPORT}
+        c.fake.script = Script(worker=worker)
+        cid = agents_chat(c)
+        c.svc.conv(cid).tok_ratio = 0.5
+        c.send(cid, "write them all")
+        s = c.wait_idle(cid, 60)
+        assert task_part(s)["status"] == "done"
+        rows = c.svc.store.all("SELECT boundary_id FROM compactions")
+        assert len(rows) == 1, [dict(r) for r in rows]
+        reqs = [b for _, b in worker_calls(c)]
+        assert len(reqs) == len(pages) + 1
+        first = next(i for i, b in enumerate(reqs)
+                     if "Summary of the earlier part" in b["messages"][0]["content"])
+        # up to the compaction every request starts with the one before, the writes whole
+        for prev, cur in zip(reqs[:first - 1], reqs[1:first]):
+            assert _prefix_kept(prev, cur)
+        assert [a["content"] for a in _write_args(reqs[first - 1])] == pages[:first - 1]
+        # after it: the writes it kept are stubs, the ones since stay whole, and from there
+        # every request starts with the one before again
+        kept = _write_args(reqs[first])
+        assert kept and all(render.WROTE_STUB.fullmatch(a["content"]) for a in kept), kept
+        for prev, cur in zip(reqs[first:], reqs[first + 1:]):
+            assert _prefix_kept(prev, cur)
+        assert [a["content"] for a in _write_args(reqs[-1])[len(kept):]] == pages[first:]
+    finally:
+        c.close()
 
 
 if __name__ == "__main__":

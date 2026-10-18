@@ -1398,7 +1398,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                           attach_mod.LINE_TOKENS)
         cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
         step_from = (cp[2][0], cp[2][1]) if cp and cp[2] else None
-        files += ctx_mod.file_tokens(branch, cp[1] if cp else 0, step_from, cp[3] if cp else None)
+        files += ctx_mod.file_tokens(branch, cp[1] if cp else 0, step_from, cp[3] if cp else None,
+                                     worker=conv.parent_id is not None)
         # the run in flight counts from its own calls, whoever asks (a snapshot too)
         on = run or (conv.run if conv.run is not None and conv.run.active else None)
         tokens = _branch_tokens(branch, on, step_from)
