@@ -56,8 +56,8 @@ export class QsePerformance extends LightElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.livePoll = poll(() => this.scrape(), 5000);
-    this.recentPoll = poll(() => this.loadRecent(), 30_000);
-    this.histPoll = poll(() => this.loadHistory(), 60_000);
+    this.recentPoll = poll(() => this.loadRecent(), 30_000);   // zero-arg fn: supersede by params, not by generation
+    this.histPoll = poll((isCurrent) => this.loadHistory(isCurrent), 60_000);
     this.livePoll.start();
     this.recentPoll.start();
     this.histPoll.start();
@@ -107,28 +107,41 @@ export class QsePerformance extends LightElement {
   }
 
   private async loadRecent(): Promise<void> {
+    const model = this.model, client = this.client, backend = this.params.get('backend'); // before the await
+    // the 5 s scrape refreshes this poll too, so a generation check would drop every
+    // response as soon as one request runs longer than 5 s and the table never fills;
+    // the response belongs to the view iff it answers the params on screen
+    const answersShownParams = () =>
+      this.model === model && this.client === client && this.params.get('backend') === backend;
     try {
-      const r = await api.requests({ limit: 500, model: this.model, client: this.client, backend: this.params.get('backend') });
+      const r = await api.requests({ limit: 500, model, client, backend });
+      if (!answersShownParams()) return; // params moved on while this request was out
       this.recent = { state: 'ready', data: r.requests };
     } catch (e) {
+      if (!answersShownParams()) return;
       const d = describeError(e);
       this.recent = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
   }
 
-  private async loadHistory(): Promise<void> {
+  private async loadHistory(isCurrent: () => boolean): Promise<void> {
     const today = todayKey(this.tz);
-    const days = this.range === '24h' ? 2 : this.range === '7d' ? 7 : this.range === '30d' ? 30 : 365;
+    const range = this.range; // captured before the await: post-await reads of this.range would see a newer selection
+    const days = range === '24h' ? 2 : range === '7d' ? 7 : range === '30d' ? 30 : 365;
     const bucket = days <= 31 ? 'hour' : 'day';
+    const model = this.model, client = this.client;
     try {
-      const q = { from: addDays(today, -(days - 1)), to: today, bucket, tz: this.tz, model: this.model, client: this.client } as const;
+      const q = { from: addDays(today, -(days - 1)), to: today, bucket, tz: this.tz, model, client } as const;
       // the engine's own requests; each relayed backend apart (0.11.3)
       const u = await api.usage({ ...q, backend: ENGINE });
+      if (!isCurrent()) return; // a newer refresh (params changed) owns the view now
       const others = await Promise.all(relayedBackends(u).map(async (ref) => ({ ref, usage: await api.usage({ ...q, backend: ref.id }) })));
-      if (this.range === '24h') for (const x of [u, ...others.map((o) => o.usage)]) x.buckets = x.buckets.slice(-24);
+      if (!isCurrent()) return;
+      if (range === '24h') for (const x of [u, ...others.map((o) => o.usage)]) x.buckets = x.buckets.slice(-24);
       this.relayedHistory = others.filter((o) => o.usage.totals.requests > 0);
       this.history = { state: 'ready', data: u };
     } catch (e) {
+      if (!isCurrent()) return;
       const d = describeError(e);
       this.history = { state: 'error', endpoint: d.endpoint, message: d.message };
     }
