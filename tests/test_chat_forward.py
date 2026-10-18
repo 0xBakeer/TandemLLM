@@ -4,8 +4,9 @@ The forward runs here inside a small stdlib handler with the engine's own `Auth`
 and a `_session` that stands in for the engine's login, in front of a real chatd on a free port.
 The matrix: no password; password with the session cookie; with the bearer token; with neither
 (401, and nothing reaches chatd); trusted-local; the probe that always passes; a forged forward
-header; a cross-site write; chatd down (502). Then the SSE latency through the forward and a
-WebSocket splice of 10 MB each way.
+header; a cross-site write; chatd down (502). Then the SSE latency through the forward, a
+WebSocket splice of 10 MB each way, an idle WebSocket past the handler's timeout, a body that
+stalls past it (408), and the cap on the sign-in body.
 
 CPU only. Run: python -m pytest -q tests/test_chat_forward.py
 """
@@ -29,14 +30,16 @@ from server import chat_forward
 ADMIN = "a" * 40
 
 
-def _engine(auth, chatd_port: int | None):
-    """A stand-in for server/app.py's Handler: the chat route first, as do_GET/do_POST do."""
+def _engine(auth, chatd_port: int | None, idle_timeout: float | None = None):
+    """A stand-in for server/app.py's Handler: the chat route first, as do_GET/do_POST do.
+    `idle_timeout`: the handler's socket timeout, as the proxy's Handler.timeout."""
     os.environ["QSE_CHAT_FORWARD_KEY"] = KEY
     os.environ["QSE_CHAT_URL"] = f"http://127.0.0.1:{chatd_port or 1}"
     seen = {"session": []}
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = idle_timeout
         _status = None
 
         def log_message(self, *a):
@@ -200,12 +203,12 @@ def test_sse_through_the_forward_is_unbuffered():
         c.close()
 
 
-def test_a_websocket_is_spliced_both_ways_byte_for_byte():
-    """chatd's 101 goes back, then 10 MB each way arrive unchanged (an echo upstream)."""
+def _echo_upstream() -> tuple[socket.socket, dict]:
+    """A chatd stand-in that answers 101 and echoes every byte; its listening socket and the
+    request head it got."""
     up = socket.socket()
     up.bind(("127.0.0.1", 0))
     up.listen(1)
-    port = up.getsockname()[1]
     got_head = {}
 
     def upstream():
@@ -223,17 +226,28 @@ def test_a_websocket_is_spliced_both_ways_byte_for_byte():
             s.sendall(d)
         s.close()
     threading.Thread(target=upstream, daemon=True).start()
-    srv, _ = _engine(auth_mod.Auth(None), port)
+    return up, got_head
+
+
+def _upgrade(port: int) -> tuple[socket.socket, bytes]:
+    cl = socket.create_connection(("127.0.0.1", port))
+    cl.sendall(b"GET /v1/chat-app/conversations/c1/terminals/shell/ws HTTP/1.1\r\n"
+               b"Host: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13"
+               b"\r\n\r\n")
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += cl.recv(4096)
+    assert head.startswith(b"HTTP/1.1 101"), head
+    return cl, head
+
+
+def test_a_websocket_is_spliced_both_ways_byte_for_byte():
+    """chatd's 101 goes back, then 10 MB each way arrive unchanged (an echo upstream)."""
+    up, got_head = _echo_upstream()
+    srv, _ = _engine(auth_mod.Auth(None), up.getsockname()[1])
     try:
-        cl = socket.create_connection(("127.0.0.1", srv.server_address[1]))
-        cl.sendall(b"GET /v1/chat-app/conversations/c1/terminals/shell/ws HTTP/1.1\r\n"
-                   b"Host: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                   b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13"
-                   b"\r\n\r\n")
-        head = b""
-        while b"\r\n\r\n" not in head:
-            head += cl.recv(4096)
-        assert head.startswith(b"HTTP/1.1 101"), head
+        cl, head = _upgrade(srv.server_address[1])
         assert b"X-Tandem-Forward: " + KEY.encode() in got_head["raw"]
         assert b"Upgrade: websocket" in got_head["raw"]
         payload = os.urandom(10 * 1024 * 1024)
@@ -254,6 +268,102 @@ def test_a_websocket_is_spliced_both_ways_byte_for_byte():
     finally:
         srv.shutdown()
         up.close()
+
+
+def test_an_idle_websocket_outlives_the_handler_timeout():
+    """An open terminal sends nothing while idle and chatd never pings: the splice lifts the
+    front server's idle timeout, so the socket is still spliced long after it."""
+    up, _ = _echo_upstream()
+    srv, _ = _engine(auth_mod.Auth(None), up.getsockname()[1], idle_timeout=0.3)
+    try:
+        cl, _ = _upgrade(srv.server_address[1])
+        time.sleep(1.2)
+        cl.settimeout(5)
+        cl.sendall(b"still here")
+        got = b""
+        while len(got) < 10:
+            d = cl.recv(64)
+            assert d, "the idle WebSocket was closed"
+            got += d
+        assert got == b"still here"
+        cl.close()
+    finally:
+        srv.shutdown()
+        up.close()
+
+
+def test_a_client_that_stalls_inside_its_body_gets_a_408_and_the_connection_closes():
+    """The front server's request timeout fires inside the forward's body loop: that is the
+    client's doing, not chatd's (no 502), and the unread rest of the body must not be parsed as
+    the next request."""
+    up = socket.socket()
+    up.bind(("127.0.0.1", 0))
+    up.listen(1)
+
+    def drain():
+        s, _ = up.accept()
+        while s.recv(65536):
+            pass
+        s.close()
+    threading.Thread(target=drain, daemon=True).start()
+    srv, _ = _engine(auth_mod.Auth(None), up.getsockname()[1], idle_timeout=0.3)
+    errors = []
+    srv.handle_error = lambda request, addr: errors.append(addr)
+    try:
+        t0 = time.monotonic()
+        out = _raw(srv.server_address[1], b"POST /v1/chat-app/conversations HTTP/1.1\r\n"
+                                         b"Host: x\r\nContent-Length: 100000\r\n\r\n"
+                                         + b"a" * 1000)
+        assert out.startswith(b"HTTP/1.1 408") and b"request_timeout" in out, out[:200]
+        assert time.monotonic() - t0 < 5
+        assert errors == [], "the next readline must not run on the unread body"
+    finally:
+        srv.shutdown()
+        up.close()
+
+
+def _raw(port: int, head: bytes) -> bytes:
+    cl = socket.create_connection(("127.0.0.1", port), timeout=10)
+    cl.sendall(head)
+    out = b""
+    while True:
+        d = cl.recv(65536)
+        if not d:
+            break
+        out += d
+        if b"\r\n\r\n" in out:
+            h, _, body = out.partition(b"\r\n\r\n")
+            n = [int(ln.split(b":")[1]) for ln in h.lower().split(b"\r\n")
+                 if ln.startswith(b"content-length:")]
+            if n and len(body) >= n[0]:
+                break
+    cl.close()
+    return out
+
+
+def test_the_sign_in_body_is_bounded():
+    """`POST /session` reads its body before any sign-in: a length past the cap is 413 and is
+    never read, a length that is not a number is 400; the login is not called."""
+    srv, seen = _engine(auth_mod.Auth(ADMIN, login=True), 1)
+    p = srv.server_address[1]
+    try:
+        # the bodies are never sent: a refusal answers at once, without waiting for them
+        # (and an unread body in the server's buffer would reset the connection)
+        for n in (chat_forward.SESSION_BODY_MAX + 1, 1 << 30):
+            t0 = time.monotonic()
+            out = _raw(p, b"POST /v1/chat-app/session HTTP/1.1\r\nHost: x\r\n"
+                          b"Content-Length: %d\r\n\r\n" % n)
+            assert out.startswith(b"HTTP/1.1 413") and b"too_large" in out, out[:200]
+            assert time.monotonic() - t0 < 5
+        for bad in (b"-5", b"abc"):
+            out = _raw(p, b"POST /v1/chat-app/session HTTP/1.1\r\nHost: x\r\n"
+                          b"Content-Length: " + bad + b"\r\n\r\n")
+            assert out.startswith(b"HTTP/1.1 400"), (bad, out[:200])
+        assert seen["session"] == []
+        st, _ = _req(p, "POST", "/v1/chat-app/session", {"password": "pw"}, headers=PROXIED)
+        assert st == 204 and seen["session"] == [("POST", {"token": "pw"})]
+    finally:
+        srv.shutdown()
 
 
 def test_the_front_serves_the_dashboard_and_forwards_both_ways():

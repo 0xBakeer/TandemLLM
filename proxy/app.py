@@ -50,6 +50,14 @@ from server import metrics as metrics_mod
 from server import static
 
 STATE: dict = {}
+# SRV-605: the request phase has a timeout, the answer has none. A client that connects and sends
+# nothing, stops halfway through its request, or keeps a connection idle between requests gives
+# the thread back after this many seconds (`--idle-timeout`, TANDEM_IDLE_TIMEOUT_S; 0 for none).
+# Handler.handle_one_request arms it on the client's socket before each request line and
+# send_response lifts it as the answer starts, so a stream (a relayed answer, the live view, the
+# logs, a chatd SSE, the chat WebSocket; chat_forward lifts it before chatd's head) is never cut
+# by it, however long its upstream is quiet or the client is slow to read.
+IDLE_TIMEOUT_S = 60.0
 
 
 def version() -> str:
@@ -134,6 +142,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         if STATE.get("verbose"):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def handle_one_request(self):
+        self.connection.settimeout(self.timeout)          # the request phase (IDLE_TIMEOUT_S)
+        super().handle_one_request()
+
+    def send_response(self, code, message=None):
+        self.connection.settimeout(None)                  # the answer: no timeout
+        super().send_response(code, message)
 
     # ----------------------------------------------------------------- helpers
     def _json(self, code: int, payload, extra_headers: tuple = ()) -> None:
@@ -562,6 +578,7 @@ def build(args, env=None) -> Service:
     from proxy import config as config_mod
     from server import ledger as ledger_mod
     env = os.environ if env is None else env
+    Handler.timeout = getattr(args, "idle_timeout", IDLE_TIMEOUT_S) or None
     cfg = config_mod.ConfigDB(args.config_db, env=env,
                               use_keychain=not getattr(args, "no_keychain", False)).open()
     cfg.apply_env()

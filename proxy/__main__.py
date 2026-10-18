@@ -59,6 +59,20 @@ def load_env_file(path: str, env=None) -> list[str]:
     return got
 
 
+def _at_least_0(var: str, unit: str):
+    """argparse's `type` for a number >= 0 that may come from the variable `var`."""
+    def conv(raw: str) -> float:
+        try:
+            v = float(raw)
+        except ValueError:
+            v = -1.0
+        if not v >= 0 or v == float("inf"):
+            raise argparse.ArgumentTypeError(f"{raw!r} is not a number of {unit} >= 0 (the "
+                                             f"option or {var})")
+        return v
+    return conv
+
+
 def parser() -> argparse.ArgumentParser:
     env = os.environ
     ap = argparse.ArgumentParser(prog="python -m proxy", description=__doc__.split("\n")[0])
@@ -91,6 +105,12 @@ def parser() -> argparse.ArgumentParser:
                     help="the conductor's documents (profiles, router, packages) for the harness "
                          "in front of the backends (P4); 'off' relays every backend as P1 does; "
                          "TANDEM_CONDUCTOR")
+    # a string default goes through `type` too: a bad variable is a usage error, not a traceback
+    ap.add_argument("--idle-timeout", type=_at_least_0("TANDEM_IDLE_TIMEOUT_S", "seconds"),
+                    default=env.get("TANDEM_IDLE_TIMEOUT_S", "60"),
+                    help="seconds a client may take to send its request, or stay idle between "
+                         "requests, before the connection is closed (an answer has no timeout); "
+                         "0 for none; TANDEM_IDLE_TIMEOUT_S")
     ap.add_argument("--conductor-defaults", default="shipped", choices=("shipped", "builtin"),
                     help="what a new conductor directory starts with")
     ap.add_argument("--verbose", action="store_true")

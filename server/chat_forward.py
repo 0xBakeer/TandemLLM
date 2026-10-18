@@ -36,6 +36,7 @@ PREFIX = "/v1/chat-app"
 OPEN_GETS = (PREFIX + "/capabilities", PREFIX + "/session")
 CONNECT_TIMEOUT_S = 3.0
 CHUNK = 65536
+SESSION_BODY_MAX = 4096          # `POST /session {password}`, read here before any sign-in
 # never passed on: hop-by-hop headers, and what only this side may say
 _DROP = {"connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "trailer",
          "transfer-encoding", "upgrade", "host", "x-tandem-forward", "x-tandem-principal",
@@ -102,7 +103,18 @@ def route(handler, method: str, auth, *, peer: str | None = None) -> bool:
         if method == "DELETE":
             handler._session("DELETE")
             return True
-        n = int(handler.headers.get("Content-Length") or 0)
+        raw = (handler.headers.get("Content-Length") or "0").strip()
+        if not (raw.isascii() and raw.isdigit()):
+            handler.close_connection = True
+            _json(handler, 400, "bad_request", "Content-Length is not a length")
+            return True
+        n = int(raw)
+        if n > SESSION_BODY_MAX:
+            # the body is not read: the connection cannot be reused
+            handler.close_connection = True
+            _json(handler, 413, "too_large", f"a sign-in body is at most {SESSION_BODY_MAX} "
+                                             "bytes")
+            return True
         try:
             body = json.loads(handler.rfile.read(n) or b"{}") if n else {}
         except ValueError:
@@ -162,8 +174,15 @@ def forward(handler, method: str, extra: list[tuple[str, str]],
                 break
             sock.sendall(chunk)
             left -= len(chunk)
+    except TimeoutError:
+        # the client stalled inside its body (a front server's request timeout): not chatd's
+        # doing, and the rest of the body would be read as the next request
+        sock.close()
+        handler.close_connection = True
+        return _json(handler, 408, "request_timeout", "the request body stopped arriving")
     except OSError:
         sock.close()
+        handler.close_connection = True                  # the body is left unread
         return _json(handler, 502, "chat_unavailable", "the chat service closed the connection")
     try:
         _relay(handler, sock, upgrade)
@@ -197,6 +216,8 @@ def _relay(handler, sock: socket.socket, upgrade: bool) -> None:
     sized = b"\ncontent-length:" in b"\n" + hdrs
     out = handler.wfile
     try:
+        # the answer starts: a front server's request timeout (proxy/app.py) never cuts a stream
+        handler.connection.settimeout(None)
         out.write(head)
         out.flush()
         if status == 101 and upgrade:
@@ -216,7 +237,14 @@ def _relay(handler, sock: socket.socket, upgrade: bool) -> None:
 
 
 def _splice(handler, sock: socket.socket) -> None:
-    """A WebSocket: the browser's bytes to chatd on a thread, chatd's to the browser here."""
+    """A WebSocket: the browser's bytes to chatd on a thread, chatd's to the browser here.
+    The front server's idle timeout (Handler.timeout) is lifted first: an open terminal sends
+    nothing while idle and chatd never pings, so the timeout would close it."""
+    try:
+        handler.connection.settimeout(None)
+    except OSError:
+        return
+
     def up():
         try:
             while True:
