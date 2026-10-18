@@ -218,6 +218,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"object": "list",
                                     "data": STATE["svc"].models(int(STATE["svc"].started))})
         if path.startswith("/v1/models/"):
+            # the list right above is keyed; the card of a model is the same private
+            # routing slice (backend ids, labels, upstream ids, prices), so it is keyed too
+            ok, _ = STATE["svc"].authorize(self)
+            if not ok:
+                return
             name = unquote(path[len("/v1/models/"):])
             card = STATE["svc"].table.card(name, int(STATE["svc"].started))
             if card is None:
