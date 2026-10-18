@@ -7210,8 +7210,10 @@ class Handler(BaseHTTPRequestHandler):
         # request keeps the sampler it had (greedy unless the client asked). Under an active plan
         # only: raw requests (benchmarks) and side requests are never looked at.
         regen = STATE.get("regenerate")
+        # SRV-621: under `prompt: client` the request keeps its sampler too
         if (regen is not None and chat and plan is not None and plan.active
-                and plan.side is None and not getattr(plan, "compaction", False)):
+                and plan.side is None and not getattr(plan, "compaction", False)
+                and not getattr(plan, "prompt_client", False)):
             try:
                 rd = rec.regen = regen.decide(body, self.headers)
             except Exception:                                      # noqa: BLE001
@@ -7275,6 +7277,7 @@ class Handler(BaseHTTPRequestHandler):
                 if left_out and plan.row is not None:
                     plan.row["extra"]["images_left_out"] = left_out
                 if (plan.active and plan.row is not None and body.get("no_repeat_ngram_size")
+                        and not getattr(plan, "prompt_client", False)
                         and pen_spec.no_repeat != base.no_repeat
                         and (plan.row.get("class_id") in conductor_schema.CODE_CLASSES
                              or bool(body.get("tools")))):
@@ -7307,6 +7310,7 @@ class Handler(BaseHTTPRequestHandler):
                         plan.row["extra"]["skills_canonical"] = n_canon
         if (plan is not None and plan.active and plan.side is None
                 and not getattr(plan, "compaction", False)
+                and not getattr(plan, "prompt_client", False)
                 and STATE.get("prepared") is not None):
             STATE["prepared"].seen(conv_id, rec.client_kind)   # the preparer's client kinds
         # SRV-137: keep a reference to the output for the session transcript (never on raw)

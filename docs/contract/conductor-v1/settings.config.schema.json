@@ -7,6 +7,10 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,39}$"
     },
+    "tools_profile": {
+      "type": "string",
+      "pattern": "^$|^[a-z][a-z0-9_-]{0,39}$"
+    },
     "journal": {
       "type": "object",
       "properties": {

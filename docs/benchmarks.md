@@ -14,6 +14,8 @@ The numbers below are from bench 2.8.1.
 
 A benchmark of the model runs the plain engine. The `X-Tandem: raw` header serves it: no turn class, no notes, no effort change, the session monitor off ([server.md](server.md#tandemllm-and-the-conductor)). Run the default path, without the header, only when the conductor itself is under test. The two runs then differ in the conductor alone, and the decision journal shows what it added to each turn.
 
+Without a header the bench, a client kind no profile maps that offers tools, gets the `tools` profile (SRV-621): the raw path's prompt ids, with the loop guards and the tool-call checks acting (D1, D1b, D2, E1, C3, C4). An answer that differs from the raw run's comes from a journaled monitor act. `--header X-Tandem-Profile=tools` names the profile; `--header X-Tandem-Profile=general` runs the profile the default path served before.
+
 ```bash
 # the model alone
 tool-eval-bench run --short --base-url http://<host>:8000/v1 --model TandemLLM \
@@ -34,8 +36,8 @@ tool-eval-bench run --short --base-url http://<host>:8000/v1 --model TandemLLM \
 | weight pack | `/health` `weights.name`, the setup guide's model profile, `ops/use-profile.sh` | the logits: answers on a near tie can differ between packs |
 | thinking | the bench's `--no-think` | on by default; off was faster and scored lower in the runs below |
 | default effort | `--reasoning-effort` (`REASONING_EFFORT` in `ops/serve.env`, `medium`; the setup guide's thinking effort) | the raw path's effort sentence and how long the model thinks; a client's own word wins, `--backend-kwargs '{"reasoning_effort": "high"}'` |
-| profile | `X-Tandem-Profile`, else the profile mapped to the client kind, else `default_profile` | the conductor run only: classes, packages, effort, memory |
-| memory | the profile's `memory` block | the conductor run only: a keyless client on a single-user box gets the owner's notes; the `general` profile has memory off |
+| profile | `X-Tandem-Profile`, else the profile mapped to the client kind, else `tools_profile` for an unmapped client that offers tools (the bench: `tools`), else `default_profile` | the conductor run only: classes, packages, effort, memory; `tools` adds none of them to the prompt |
+| memory | the profile's `memory` block | the conductor run only: a keyless client on a single-user box gets the owner's notes; `general` and `tools` have memory off |
 | reasoning format | `reasoning_format` in the request, `--reasoning-format` | where the thinking goes; see below |
 | response cache | `--response-cache` | a rerun of an identical request within the hour replays its greedy answer: timings change, answers do not |
 
