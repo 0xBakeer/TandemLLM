@@ -482,7 +482,7 @@ def test_the_park_goes_unwritten_wherever_a_write_would_be_unsafe():
     finally:
         slots_mod.bind(None)
     r = Res()
-    assert app._shed_park(r, True) == 1 and r.spilled == 0          # the KV pool's reclaim
+    assert app._shed_park(r, True) == 0 and r.park_rows and r.spilled == 0   # waited for: kept
     r = Res()
     with r.spiller._own_io:
         assert app._shed_park(r) == 1 and r.spilled == 0
@@ -639,17 +639,21 @@ def test_a_reclaim_inside_a_swap_writes_no_mixed_rows():
 
 def test_the_park_shedder_writes_at_the_memory_gate_only():
     """Through the memory policy: the gate (safe=False, slot 0's thread) writes a parked parent
-    to the NVMe before giving the park back; a safe shed gives it back unwritten."""
-    for safe, written in ((False, 1), (True, 0)):
+    to the NVMe before giving the park back; a safe shed keeps it (live 2026-10-18 04:43 a pin's
+    admission dropped a worker's parked rows), and gives another's park back unwritten."""
+    for safe, parent, freed, written in ((False, True, True, 1), (True, True, False, 0),
+                                          (True, False, True, 0)):
         d = tempfile.mkdtemp()
         try:
             res, mem, sp = _budget_state(d)
             wturn(PHEAD + tokens(300, seed=41), 8, "chat-p")
-            app._note_parent("chat-p")
+            if parent:
+                app._note_parent("chat-p")
             wturn(WHEAD + tokens(40, seed=42), 6, "chat-p-task-1", stay=True)
             assert res.park_owner == "chat-p"
-            assert mem.shed("park", "test", safe=safe) > 0 and not res.park_rows
-            assert len(sp.entries) == written, (safe, sp.entries)
+            # a safe shed (a pin's admission, the KV pool's reclaim) keeps a waited-for park
+            assert (mem.shed("park", "test", safe=safe) > 0) == freed, (safe, parent)
+            assert bool(res.park_rows) != freed and len(sp.entries) == written, (safe, parent)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

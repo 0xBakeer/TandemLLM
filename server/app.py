@@ -3361,7 +3361,8 @@ def _shed_park(res, safe: bool = False) -> int:
       * on a side slot's thread, or while the spill's I/O is held;
       * while a guest's rows lie over the park's head (the next request puts them back,
         `settle_guest`; a shedder never does).
-    The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
+    A parked parent or worker is not given back by a `safe` shed at all; the next gate writes
+    it before it goes. The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
     sp, st = res.spiller, res._stash
     if (not safe and res.park_rows and not res._park_busy and _comes_back(res.park_owner)
             and slots_mod.current() is None and sp is not None and not sp._own_io.locked()
@@ -3376,6 +3377,11 @@ def _shed_park(res, safe: bool = False) -> int:
                   f"park", flush=True)
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
+    if safe and res.park_rows and _comes_back(res.park_owner):
+        # it is waited for: a pin's admission or the KV pool's reclaim does not drop it unwritten
+        # (live 2026-10-18 04:43: a pin's admission dropped a worker's parked 11,465 rows, and
+        # its next call read them all again); the next gate writes it before it goes
+        return 0
     return res.shed_park(safe)
 
 
