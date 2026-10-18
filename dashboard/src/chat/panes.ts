@@ -63,6 +63,8 @@ export class QseChatPanes extends LightElement {
   private portConv: string | null = null;
   private portTimer: ReturnType<typeof setInterval> | null = null;
   private waitTimer: ReturnType<typeof setTimeout> | null = null;
+  /** the conversation these screens/files/artifacts belong to; a switch drops them all */
+  private lastConv: string | null = null;
   @state() private files = new Map<string, SandboxFile[]>();
   @state() private file: FileView | null = null;
   @state() private previewWidth: 'fit' | 'phone' | 'desktop' = 'fit';
@@ -204,16 +206,23 @@ export class QseChatPanes extends LightElement {
 
   private async startServer(ref: string, dir: string, command: string): Promise<void> {
     if (!this.backend || !this.convId) return;
+    const conv = this.convId;
     this.starting = new Map(this.starting).set(ref, `Starting ${command} in ${dir}...`);
     try {
-      const r = await this.backend.serve(this.convId, dir);
+      const r = await this.backend.serve(conv, dir);
+      if (conv !== this.convId) return;
       this.starting = new Map(this.starting).set(ref, `Started ${r.command} in ${r.dir}; its output goes to ${r.log}. This pane opens the server when it listens.`);
     } catch (e) {
+      if (conv !== this.convId) return;
       this.starting = new Map(this.starting).set(ref, (e as Error).message);
     }
   }
 
   updated(changed: Map<string, unknown>): void {
+    if (this.convId !== this.lastConv) {
+      this.lastConv = this.convId;
+      this.dropConversation();
+    }
     if (changed.has('active') || changed.has('panes')) this.showActiveTab();
     if (!changed.has('tabEdge')) this.measureTabs();
     const p = this.panes.find((x) => x.id === this.active);
@@ -241,25 +250,52 @@ export class QseChatPanes extends LightElement {
     return this.conv?.sandbox?.cwd || '/work/sync';
   }
 
+  /** conversation switch (deep audit 0.11.3): nothing here carries over — a terminal session is
+   *  bound to the old convId, and the file lists, artifacts and reports are per conversation */
+  private dropConversation(): void {
+    for (const id of foreignScreens(this.screens, this.convId ?? '')) {
+      const e = this.screens.get(id)!;
+      this.screens.delete(id);
+      e.session?.close();
+      e.term?.dispose();
+      this.querySelector(`.ch-term-screen[data-pane="${id}"]`)?.querySelector('.xterm')?.remove();
+    }
+    this.files = new Map();
+    this.artifacts = new Map();
+    this.reports = new Map();
+    this.starting = new Map();
+    this.file = null;
+    this.editText = '';
+    this.editNote = null;
+  }
+
   private async loadArtifact(ref: string): Promise<void> {
+    const conv = this.convId!;
     try {
-      const a = await this.backend!.artifact(this.convId!, ref);
+      const a = await this.backend!.artifact(conv, ref);
+      if (conv !== this.convId) return;   // a switch during the fetch: the answer is another chat's
       this.artifacts = new Map(this.artifacts).set(ref, a);
     } catch (e) {
+      if (conv !== this.convId) return;
       this.artifacts = new Map(this.artifacts).set(ref, { kind: 'error', content: (e as Error).message, mime: 'text/plain', title: 'not found' });
     }
   }
   private async loadDir(path: string): Promise<void> {
-    const list = await this.backend!.sandboxFiles(this.convId!, path).catch(() => []);
+    const conv = this.convId!;
+    const list = await this.backend!.sandboxFiles(conv, path).catch(() => []);
+    if (conv !== this.convId) return;
     this.files = new Map(this.files).set(path, list);
   }
   private async openFile(path: string): Promise<void> {
+    const conv = this.convId!;
     try {
-      const f = await this.backend!.readFile(this.convId!, path);
+      const f = await this.backend!.readFile(conv, path);
+      if (conv !== this.convId) return;
       this.file = { path, ...f, content: f.content ?? '' };
       this.editText = f.content ?? '';
       if (f.kind && (MEDIA_KINDS.has(f.kind as PaneKind) || f.kind === 'image')) void loadMediaView();
     } catch (e) {
+      if (conv !== this.convId) return;
       this.file = { path, content: (e as Error).message, mime: 'text/plain', bytes: 0 };
       this.editText = '';
     }
@@ -269,7 +305,7 @@ export class QseChatPanes extends LightElement {
   private ensureTerminal(p: OpenPane): void {
     if (this.screens.has(p.id)) return;
     const readOnly = !!p.ref && p.ref !== 'shell';
-    const entry: TermEntry = { session: null, term: null, pending: [], readOnly, loading: false };
+    const entry: TermEntry = { session: null, term: null, pending: [], readOnly, loading: false, conv: this.convId! };
     this.screens.set(p.id, entry);
     entry.session = this.backend!.terminal(this.convId!, p.ref || 'shell', (data) => {
       if (entry.term) entry.term.write(data);
@@ -606,6 +642,16 @@ interface TermEntry {
   pending: (string | Uint8Array)[];
   readOnly: boolean;
   loading: boolean;
+  /** the conversation this session was opened against; a switch drops it (foreignScreens) */
+  conv: string;
+}
+
+/** pane ids of screens a given conversation has no right to hold: a terminal session is
+ *  created against one conversation's sandbox, and reusing the old one when the pane id
+ *  matches (the ids are per pane kind, so they always do) would type chat B's keystrokes
+ *  into chat A's shell (deep audit 0.11.3) */
+export function foreignScreens(screens: Map<string, { conv: string }>, convId: string): string[] {
+  return [...screens.entries()].filter(([, e]) => e.conv !== convId).map(([id]) => id);
 }
 
 /** Chat 8: the keys a phone keyboard lacks */
