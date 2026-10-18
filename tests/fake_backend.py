@@ -73,7 +73,9 @@ request's path, headers and body; `GET /fake/stats` the counts and the most stre
 once. `refuse=<status>` (in a test) makes every completion answer that status. `memory=<n>` (in a
 test) answers a completion of more than n prompt tokens with our engine's memory refusal: a 503
 "a <n>-token prefill needs ... GiB with every cache given back", Retry-After 1 (`fake.refused`
-counts them). `--key` makes every route need `Authorization: Bearer <key>`.
+counts them). `window=<n>` (in a test) answers a completion of more than n prompt tokens with our
+engine's 400 for a prompt past the context window (`fake.windowed` counts them). `--key` makes
+every route need `Authorization: Bearer <key>`.
 """
 
 from __future__ import annotations
@@ -145,6 +147,8 @@ class Fake:
         self.refuse = refuse            # a status every completion answers (a backend that is down)
         self.memory: int | None = None  # the prompt tokens over which the engine has no memory
         self.refused = 0
+        self.window: int | None = None  # the prompt tokens over which the request is too long
+        self.windowed = 0
         self.key = key
         self.tps = float(tps)
         self.dialect = dialect
@@ -311,6 +315,17 @@ def make_handler(fake: Fake):
                                    f"given back; the engine's peak is 52.6 GiB; retry when the "
                                    f"engine is idle", "type": "server_busy", "code": 503}},
                         (("Retry-After", "1"),))
+            if fake.window is not None and p.endswith("/completions"):
+                n_prompt = sum(_words((m or {}).get("content")) + 4
+                               for m in body.get("messages") or [])
+                if n_prompt > fake.window:
+                    # server/app.py's `room <= 0` refusal
+                    with fake.lock:
+                        fake.windowed += 1
+                    return self._json(400, {"error": {
+                        "message": f"prompt is {n_prompt} tokens and the context is "
+                                   f"{fake.window}; nothing is left to generate",
+                        "type": "invalid_request_error", "param": "messages"}})
             for word, code in (("FAKE_429", 429), ("FAKE_503", 503), ("FAKE_500", 500)):
                 if word + "_ONCE" in text:
                     with fake.lock:

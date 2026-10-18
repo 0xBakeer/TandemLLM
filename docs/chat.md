@@ -31,7 +31,10 @@ engine retries with backoff for 10 minutes, then ends `interrupted` with its tex
 Continue resumes it. Stopping chatd ends its open runs `interrupted` the same way. A call the
 engine refuses for memory (503, "needs ... GiB with every cache given back") is retried once after
 its Retry-After, then the chat is compacted and the smaller prompt sent; from then on the chat
-compacts at 80 % of the refused size, not only of the window.
+compacts at 80 % of the refused size, not only of the window. A 400 that says the request is over
+the model's context window (a tool result grew it past the guard's estimate) compacts the chat
+and sends the call once more when the compaction made it smaller; when it cut nothing, or the
+smaller call is refused too, the run fails with the engine's message.
 
 File texts stay out of the request: a finished `write_file`'s content, and an `edit_file`'s old or
 new text over 2,000 characters, go to the model as a stub (path, lines, bytes, sha256 and the

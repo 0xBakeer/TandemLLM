@@ -571,6 +571,122 @@ def test_a_memory_refusal_right_after_the_compaction_ends_as_before_with_the_rea
         c.close()
 
 
+# ---------------------------------------------------------------------- over the window (#18)
+# A tool result can grow the request past the window after the guard's estimate: a relay answered
+# "request: 266,500 tokens (input 262,025 + requested output 4,475)" on a 262,144-token model and
+# the run failed. The 400 compacts and the call goes once more.
+
+def test_over_window_reads_the_engines_and_the_backends_words():
+    from chatd.engine import EngineError
+    from chatd.runs import over_window
+    yes = ["prompt is 262200 tokens and the context is 262144; nothing is left to generate",
+           "This model's maximum context length is 131072 tokens. However, you requested 140000 "
+           "tokens (135000 in the messages, 5000 in the completion).",
+           "The model's maximum context is 262,144 tokens. Increase the engine's context length, "
+           "or lower the request size. request: 266,500 tokens (input 262,025 + requested output "
+           "4,475)",
+           "the request exceeds the available context size, try increasing it",
+           "The input (270000 tokens) is longer than the model's context length (262144 tokens)."]
+    for m in yes:
+        assert over_window(EngineError(400, m, False)), m
+    assert not over_window(EngineError(400, "fake 400", False))
+    assert not over_window(EngineError(400, "'messages' is a required property", False))
+    assert not over_window(EngineError(503, yes[0], True))      # only the 400 is this case
+
+
+def test_an_over_window_400_compacts_and_the_run_goes_on():
+    c = Chat()
+    try:
+        cid = _memory_run(c)                     # the guard's window (100,000) is never the limit
+        c.fake.window = 2500                     # each step adds ~380 of the fake's tokens
+        ev = c.events(cid)
+        c.send(cid, calls(("read_file", {"path": "a.txt"}), ("read_file", {"path": "b.txt"}))
+               + " FAKE_CALLS_ALWAYS")
+        frames = ev.until(is_done, 60)
+        ev.close()
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        assert c.fake.windowed >= 1
+        assert a["stats"]["interrupted"] == "limit" and a["stats"]["steps"] == 14, a["stats"]
+        assert len(s["compactions"]) >= c.fake.windowed, (s["compactions"], c.fake.windowed)
+        # each refused call went once more, compacted and under the window
+        sent = requests(c)
+        over = [i for i, b in enumerate(sent) if _prompt_words(b) > 2500]
+        assert len(over) == c.fake.windowed
+        assert all(i + 1 < len(sent) and _prompt_words(sent[i + 1]) <= 2500 for i in over), over
+        nows = [json.loads(f[2]).get("now") or "" for f in frames if f[1] == "run.phase"]
+        assert "The request is over the model's context window: compacting, then one retry" \
+            in nows, nows
+    finally:
+        c.close()
+
+
+def test_an_over_window_400_that_compaction_cannot_cut_fails_at_once():
+    """#18's shape: one user turn, nothing before it to summarize. The same body would get the
+    same 400, so it is not sent again."""
+    c = Chat()
+    try:
+        cid = _memory_run(c)
+        c.fake.window = 30                       # the user message alone is over it
+        ev = c.events(cid)
+        c.send(cid, "word " * 100)
+        frames = ev.until(is_done, 30)
+        ev.close()
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        assert c.fake.windowed == 1, c.fake.windowed
+        assert s["compactions"] == []
+        assert a["status"] == "error", a
+        assert "nothing is left to generate" in a["parts"][-1]["message"], a["parts"][-1]
+        assert sum(1 for f in frames if is_done(f)) == 1
+    finally:
+        c.close()
+
+
+def test_a_second_over_window_400_after_a_compaction_fails_the_run_once():
+    c = Chat()
+    try:
+        cid = _memory_run(c)
+        c.fake.window = 2500
+        real = c.svc.compact
+
+        def compact(*a, **kw):
+            ok = real(*a, **kw)
+            c.fake.window = 50                   # still over after the cut
+            return ok
+        c.svc.compact = compact
+        ev = c.events(cid)
+        c.send(cid, calls(("read_file", {"path": "a.txt"}), ("read_file", {"path": "b.txt"}))
+               + " FAKE_CALLS_ALWAYS")
+        frames = ev.until(is_done, 60)
+        ev.close()
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        assert c.fake.windowed == 2, c.fake.windowed               # one retry, no loop
+        assert len(s["compactions"]) == 1
+        assert a["status"] == "error", a
+        assert "and the context is 50;" in a["parts"][-1]["message"], a["parts"][-1]
+        assert sum(1 for f in frames if is_done(f)) == 1
+    finally:
+        c.close()
+
+
+def test_another_400_is_not_retried():
+    c = Chat()
+    try:
+        cid = _memory_run(c)
+        n = len(requests(c))
+        c.fake.refuse = 400
+        c.send(cid, "hello")
+        s = c.wait_idle(cid, 10)
+        a = s["messages"][-1]
+        assert a["status"] == "error" and a["parts"][-1]["message"] == "fake 400", a
+        assert len(requests(c)) == n + 1
+        assert s["compactions"] == []
+    finally:
+        c.close()
+
+
 def test_a_request_that_cannot_fit_fails_before_the_engine_is_asked():
     c = Chat()
     try:

@@ -821,11 +821,14 @@ class AgentMixin:
         body = build()
         est = comp.estimate(body, conv.tok_ratio)
         at = comp.compact_at(window, conv.memory_limit)
-        # `compact_next`: the engine refused this call for memory twice (runs.py `_call`)
+        # `compact_next`: the engine refused this call for memory twice, or as over the window
+        # (runs.py `_call`)
         force, run.compact_next = run.compact_next, False
+        run.compact_cut = False
         if (force or at and est > at) and run.compacted != run.step:
             run.compacted = run.step            # once a step: a long run compacts again later
             if self.compact(conv, run, [m for m in path if m.get("id")], tools=tools):
+                run.compact_cut = True
                 body = build()
                 est = comp.estimate(body, conv.tok_ratio)
         if window and est + comp.MIN_ANSWER > window:

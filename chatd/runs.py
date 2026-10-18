@@ -42,7 +42,11 @@ engine's memory refusal (a 503 "a <n>-token prefill needs ... GiB with every cac
 retried once after its Retry-After (the chat on the other slot may finish), then the conversation
 is compacted and the smaller request sent; the guard compacts this chat under 80 % of the refused
 request from then on (`Conv.memory_limit`). Refused right after that, the retries go on as above,
-and the Now line says the engine has no memory for the chat's context.
+and the Now line says the engine has no memory for the chat's context. A 400 that says the request
+is over the model's context window (a tool result can grow the prompt past the guard's estimate,
+GitHub issue #18) compacts the conversation and sends the call once more when the compaction made
+it smaller; when it cut nothing, or the smaller call is refused too, the run fails with the
+engine's message.
 
 WORKERS (VIS-E15). A worker is a run like any other on a task conversation (chatd/tasks.py): its
 `parent` is the run whose task call started it, it runs in that run's slot (`slot_owner`), its
@@ -69,6 +73,13 @@ _WAITING = re.compile(r"waiting.*?position\s+(\d+)", re.I)
 # the engine's memory refusal (engine/cache.py MemoryRefused, a 503 from server/app.py `_busy`)
 _MEMORY = re.compile(r"a (\d+)-token prefill needs ([\d.]+) GiB with every cache given back; "
                      r"the engine's peak is ([\d.]+) GiB")
+# a request past the model's context window: our engine's 400 (server/app.py: "prompt is <n> tokens
+# and the context is <m>; nothing is left to generate"), an OpenAI-style backend's or relay's
+# ("maximum context length is <n> tokens", vLLM, DeepSeek; "maximum context is <n> tokens"),
+# llama.cpp's and SGLang's
+_WINDOW = re.compile(r"prompt is \d+ tokens and the context is \d+|maximum context (?:length )?is "
+                     r"[\d,]+ tokens|exceeds the available context size|longer than the model's "
+                     r"context length", re.I)
 # a call id names files (the sandbox home's req-<id>.json, outputs/<id>.txt, shots/<id>.png) and
 # goes into the screenshot's command line; one the backend passed through from the model with
 # anything else in it is replaced (the part's id is the one the next request sends back)
@@ -95,6 +106,11 @@ def memory_words(exc: EngineError) -> str | None:
         return None
     return (f"The engine has no memory for this chat's context right now "
             f"({int(m.group(1)) // 1000}k tokens, needs {m.group(2)} GiB of {m.group(3)})")
+
+
+def over_window(exc: EngineError) -> bool:
+    """The refusal is a 400 for a request over the model's context window."""
+    return exc.status == 400 and _WINDOW.search(exc.args[0]) is not None
 
 
 class GuardError(Exception):
@@ -179,7 +195,8 @@ class Run:
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
         self.compacted = 0                      # the step a compaction last ran before
-        self.compact_next = False               # the next request compacts first (memory)
+        self.compact_next = False               # the next request compacts first (memory, window)
+        self.compact_cut = False                # the last request_for compacted the chat
         self.resume_same_step = False          # Continue of a cut text goes on in its own step
         self.acc = {"completion": 0, "reasoning": 0}
         # the speculation of the run's finished calls (their usage frames' timings), for the
@@ -415,6 +432,9 @@ class Run:
         deadline = time.monotonic() + self.svc.retry_window_s
         backoff = 1.0
         refused = 0                    # the engine's memory refusals of this call, in a row
+        # after an over-window 400: (the engine's message, the refused request's estimate); the
+        # estimate None once the smaller request went
+        over = None
         if self.resume_same_step:
             self.resume_same_step = False
         else:
@@ -430,6 +450,13 @@ class Run:
             except GuardError as exc:
                 self.error = str(exc)
                 return "failed"
+            if over is not None and over[1] is not None:
+                if not (self.compact_cut and self.request_est < over[1]):
+                    # nothing to cut (one user turn, the big result in the last step kept: #18's
+                    # shape): the same body would get the same 400
+                    self.error = over[0]
+                    return "failed"
+                over = (over[0], None)               # the smaller request goes once
             self.set_phase("queued", "Sending to the engine")
             try:
                 self.t_sent = time.monotonic()
@@ -437,6 +464,15 @@ class Run:
                 self.call = self.svc.engine.stream(body, headers)
             except EngineError as exc:
                 self.call = None
+                if over is None and over_window(exc):
+                    # the prompt grew past the window after the guard's estimate: compact (even
+                    # when the guard compacted this step already) and send it once more, when the
+                    # compaction cut it
+                    over = (exc.args[0], self.request_est)
+                    self.compact_next, self.compacted = True, 0
+                    self.set_phase("queued", "The request is over the model's context window: "
+                                             "compacting, then one retry")
+                    continue
                 if not exc.retryable:
                     self.error = exc.args[0]
                     return "failed"
