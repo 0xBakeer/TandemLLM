@@ -504,7 +504,7 @@ class Budget:
         return freed
 
     # --- the request's start ---------------------------------------------------------------
-    def gate(self, n: int) -> dict:
+    def gate(self, n: int, count: bool = True) -> dict:
         """Before a prefill of an `n`-token prompt: back under the ceiling, room for the
         workspace under the peak, or `MemoryRefused`. Called with the engine lock held and
         before the response has started, so a refusal is still an HTTP status."""
@@ -559,14 +559,27 @@ class Budget:
                 self._event("stale_admit", n=int(n), allocated=alloc, reserved=res, ws=ws)
                 g["stale"] = True
             elif res + ws > self.peak:
-                self.stats["refused"] += 1
-                self.refused_in_a_row += 1
-                self._event("refused", n=int(n), need=res + ws, peak=self.peak,
-                            allocated=alloc, reserved=res, in_a_row=self.refused_in_a_row)
-                raise MemoryRefused(res + ws, self.peak, n)
+                exc = MemoryRefused(res + ws, self.peak, n)
+                exc.detail = dict(allocated=alloc, reserved=res)
+                if count:
+                    self._count_refused(exc)
+                raise exc
             self.refused_in_a_row = 0
             self.ws_now = ws
             return g
+
+    def refused(self, exc: "MemoryRefused") -> None:
+        """Count a refusal of `gate`: its own, or the caller's when it ran the gate with
+        `count=False` and the request is refused after all (ENG-371: a gate run once more and
+        admitted is no refusal)."""
+        with self.lock:
+            self._count_refused(exc)
+
+    def _count_refused(self, exc: "MemoryRefused") -> None:
+        self.stats["refused"] += 1
+        self.refused_in_a_row += 1
+        self._event("refused", n=exc.n, need=exc.need, peak=exc.peak,
+                    in_a_row=self.refused_in_a_row, **getattr(exc, "detail", {}))
 
     def admit(self, level: str, nbytes: int) -> bool:
         """May a cache allocate `nbytes` more? Under `ceiling - slack` allocated and, while a
@@ -2015,16 +2028,22 @@ class ResidentPrefix:
         if end_b is not None:
             above = sorted(b for b in self.anchors if base < b <= self.valid)
             rb = self.valid - base
-            self.end = None                # it moves to the park below, its buffers too
         else:
-            self._drop_end()
             above = sorted(b for b in self.anchors if base < b <= min(self.valid, base + cap))
             rb = (above[-1] - base) if above and other else 0
             if rb < self.chunk:
                 rb = 0
+        # SRV-307: every view's pages before a row moves, so a PoolFull leaves both prompts
+        # whole (ENG-371: one between two views left the rows in place half swapped, and a
+        # later resume on them was 0.19 off a cold prefill)
+        for t, ax in views:
+            _kvp.ensure_for(t, base + max(ra, rb))
+        if end_b is not None:
+            self.end = None                # it moves to the park below, its buffers too
+        else:
+            self._drop_end()
         step = 4 * self.chunk
         for (t, ax), buf in zip(views, self._park_bufs):
-            _kvp.ensure_for(t, base + max(ra, rb))     # SRV-307
             both = min(ra, rb)
             for j in range(0, both, step):
                 w = min(step, both - j)

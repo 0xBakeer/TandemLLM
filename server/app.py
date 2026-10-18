@@ -3320,6 +3320,10 @@ def _comes_back(owner, now: float | None = None) -> bool:
         t is not None and (time.monotonic() if now is None else now) - t < PARENT_KEEP_S)
 
 
+#: how long a side slot's write of the rows it is about to cut waits for slot 0's spill I/O
+KEEP_IO_WAIT_S = 10.0
+
+
 def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     """ENG-371 (a side slot's `ResidentPrefix.keeper`): before another session's prefill cuts a
     side slot's rows, a parent's or a worker's go to the NVMe (a side slot has no park and no
@@ -3331,8 +3335,16 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
     took the side slot the other chat's worker ran on, whose next call read 6,115 tokens again."""
     sp = dict.get(STATE, "spill")
     if (sp is None or not (stay or _comes_back(res.owner)) or res._stash is not None
-            or res.valid < int(sp.cfg.get("drain_min_tokens", 4096)) or sp._own_io.locked()):
+            or res.valid < int(sp.cfg.get("drain_min_tokens", 4096))):
         return
+    if sp._own_io.locked():
+        # slot 0's save or restore holds the spill's own I/O: the write waits for it (this side
+        # thread holds no lock it needs), at most KEEP_IO_WAIT_S, then the rows go unwritten
+        if not sp._own_io.acquire(timeout=KEEP_IO_WAIT_S):
+            print(f"[spill] {res.owner}: not written, the spill stayed busy "
+                  f"{KEEP_IO_WAIT_S:g} s", flush=True)
+            return
+        sp._own_io.release()
     # a side slot's thread, outside the engine lock: no CUDA call inside slot 0's graph capture
     # (engine/capture_lock.py; live 2026-10-18 01:16 this save broke a verify graph's capture on
     # slot 0, and its request ended in an error)
@@ -3369,6 +3381,8 @@ def _shed_park(res, safe: bool = False) -> int:
     refused gate runs once more (`_gate_holding_end`); slot 0's next gate writes it before it
     goes. The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
     sp, st = res.spiller, res._stash
+    # `_park_busy` is read without a lock on a side slot's thread: a stale read costs a park
+    # kept or written once more, never rows (`shed_park` checks it again where it frees them)
     if (not safe and res.park_rows and not res._park_busy and _comes_back(res.park_owner)
             and slots_mod.current() is None and sp is not None and not sp._own_io.locked()
             and (st is None or int(st["start"]) >= int(res.park_base))):
@@ -3408,15 +3422,19 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
     slot's gate cannot drop that end in between. When the gate refuses with the end held (its
     bytes were what the workspace lacked), or with a waited-for park kept (`_shed_park`), it runs
     once more without either: the request then reads its answer again, or the parked one does
-    later, rather than a 503 at every retry."""
+    later, rather than a 503 at every retry; only a refusal of the last pass counts. The hold is
+    set or cleared at every gate, and the handler clears it in its `finally` (a request that
+    passes the gate and prefills nothing: A1's give-up, a prepared summary, a response-cache hit,
+    a client that left), so a hold never outlives its request."""
     hold = _end_held(res, keys, n, mm_ok)
-    if hold:
-        res.end_hold = True
+    if res is not None:
+        res.end_hold = hold                  # never a hold another request left behind
     _PARK_LET_GO.kept = False
     try:
-        mem.gate(n)
-    except cache.MemoryRefused:
+        mem.gate(n, count=False)             # a refusal counts once, at the outcome
+    except cache.MemoryRefused as exc:
         if not hold and not _PARK_LET_GO.kept:
+            mem.refused(exc)
             raise
         if hold:
             res.end_hold = False
@@ -4393,6 +4411,36 @@ def _kv_reclaim_caches(want: int, owner) -> int:
     return got
 
 
+def _kv_reclaim_kept_park(want: int, owner) -> int:
+    """ENG-371, the pool's last reclaim, after every other: slot 0's park that `_shed_park` keeps
+    for a parent or a worker (it is waited for and could not be written where the earlier
+    levels asked), given back unwritten, so the page gate inside a forward or a restore never
+    refuses for it, and the sandbox's release (`_memory_release`) always gets it. Nothing while
+    the park is in use (`_park_busy`, read without a lock: a stale read costs a re-read, never
+    wrong rows, as the busy park is not touched)."""
+    res = dict.get(STATE, "resident")
+    if res is None or not res.park_rows or res._park_busy:
+        return 0
+    _PARK_LET_GO.on = True
+    try:
+        n = int(res.shed_park(True) or 0)
+    finally:
+        _PARK_LET_GO.on = False
+    if n:
+        print(f"[memory] the park went unwritten for the KV pool ({owner}): {_gib(n)} GiB",
+              flush=True)
+    return n
+
+
+def _add_kv_reclaimers(pool) -> None:
+    """The KV pool's reclaim order, cheapest first; ENG-371's kept park last."""
+    pool.add_reclaimer("caches", _kv_reclaim_caches)
+    pool.add_reclaimer("roles", _kv_reclaim_roles)
+    pool.add_reclaimer("idle_side", _kv_reclaim_side)
+    pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    pool.add_reclaimer("kept_park", _kv_reclaim_kept_park)
+
+
 def _kv_reclaim_roles(want: int, owner) -> int:
     """Pool reclaim, level 2 (server/rolemem.py): the small models, shadow reader first, then the
     narrator (then Laya, only with QSE_ROLE_UNLOAD_LAYA=on), before any conversation is parked or
@@ -4502,10 +4550,17 @@ def _memory_release(want: int, why: str = "sandbox") -> dict:
     if want > 0 and _lock_when_idle():
         try:
             n = _kv_reclaim_caches(want, "release")
+            if n:
+                got, levels["caches"] = got + n, n
+            mem = dict.get(STATE, "mem")
+            if mem is not None and got < want:
+                # ENG-371: the park a safe shed keeps for a parent or a worker; idle and under the
+                # lock its write is safe: to the NVMe, then given back (the sandbox wins)
+                p = int(mem.shed("park", "release", safe=False) or 0)
+                if p:
+                    got, levels["park"] = got + p, p
         finally:
             LOCK.release()
-        if n:
-            got, levels["caches"] = got + n, n
     pool = kvpool.POOL
     rm = dict.get(STATE, "role_mem")
     if rm is not None and got < want:
@@ -4678,10 +4733,7 @@ def _kv_after_load(a) -> None:
         mem.peak -= static
         print(f"[kv-pool] memory policy: ceiling and peak -{_gib(static)} GiB (slot 0's window is "
               f"the pool's now): {_gib(mem.ceiling)} / {_gib(mem.peak)} GiB", flush=True)
-    pool.add_reclaimer("caches", _kv_reclaim_caches)
-    pool.add_reclaimer("roles", _kv_reclaim_roles)
-    pool.add_reclaimer("idle_side", _kv_reclaim_side)
-    pool.add_reclaimer("idle_slot0", _kv_reclaim_slot0)
+    _add_kv_reclaimers(pool)
     print(f"[kv-pool] on: slot 0 window {eng.kv.max_len:,} rows reserved as "
           f"{_gib(static)} GiB of addresses, page {pages.bufs[0].page >> 20} MiB, hard floor "
           f"{_gib(pool.hard_floor)} GiB, margin {pool.margin_rows} rows", flush=True)
@@ -8900,6 +8952,11 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["mem"].done()
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()
+                # ENG-371: the memory gate's hold of an end anchor ends with its request, whether
+                # or not it prefilled (A1's give-up, a prepared summary, a cache hit, a client gone)
+                res_h = STATE.get("resident")
+                if res_h is not None:
+                    res_h.end_hold = False
                 # SRV-307: the pages past what this slot keeps go back to the pool, before the
                 # slot is given to the next request
                 kv_trim_current()

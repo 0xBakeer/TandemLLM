@@ -723,7 +723,10 @@ def test_the_gate_holds_the_end_the_request_resumes_at_until_its_prefill():
         def __init__(self, refuse):
             self.refuse, self.seen = refuse, []
 
-        def gate(self, n):
+        def refused(self, exc):
+            pass
+
+        def gate(self, n, count=True):
             self.seen.append(res.end_hold)
             if self.refuse and res.end_hold:
                 raise cache.MemoryRefused(2, 1, n)
@@ -756,7 +759,10 @@ def test_a_gate_refused_with_a_waited_for_park_kept_runs_once_more_and_may_take_
         def __init__(self):
             self.passes = 0
 
-        def gate(self, n):
+        def refused(self, exc):
+            pass
+
+        def gate(self, n, count=True):
             self.passes += 1
             if not app._shed_park(res, False):
                 raise cache.MemoryRefused(2, 1, n)
@@ -860,6 +866,236 @@ def test_a_grown_park_asks_the_memory_policy_for_both_buffers():
     per = sum(t.numel() // t.shape[ax] * t.element_size() for t, ax in views)
     size = res._grow_park(eng, None, views, 400, res.park_rows)
     assert size >= 400 and Rec.asked == [("park", size * per)], (size, Rec.asked)
+
+
+# ------------------------------------------------------------------ 5b: the second review
+
+def test_the_sandbox_release_writes_and_frees_a_parked_parent():
+    """The sandbox has priority over what the engine holds idle: `POST /v1/cache/release`
+    (`_memory_release`) frees the park a safe shed keeps for a parent, writing it to the NVMe
+    first. Before, it freed nothing and the sandbox was short."""
+    for waited in (True, False):
+        d = tempfile.mkdtemp()
+        try:
+            res, mem, sp = _budget_state(d)
+            app.STATE["mem"] = mem
+            wturn(PHEAD + tokens(300, seed=71), 8, "chat-p")
+            if waited:
+                app._note_parent("chat-p")
+            wturn(WHEAD + tokens(40, seed=72), 6, "chat-p-task-1", stay=True)
+            assert res.park_rows
+            out = app._memory_release(1 << 40, "sandbox")
+            assert not res.park_rows and out["released_bytes"] > 0, out
+            assert len(sp.entries) == (1 if waited else 0), (waited, sp.entries)
+        finally:
+            app.PARENTS.clear()
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def test_the_kv_pool_frees_a_kept_park_before_it_refuses():
+    """The page gate inside a forward or a restore (its reclaimers in order) frees a waited-for
+    park unwritten, last, rather than raise PoolFull mid-generation; a park in use stays."""
+    res = _state(park_bytes=1 << 30)
+    wturn(PHEAD + tokens(200, seed=73), 6, "chat-p")
+    app.PARENTS.clear()
+    app._note_parent("chat-p")
+    wturn(WHEAD + tokens(60, seed=74), 6, "chat-p-task-1", stay=True)
+    assert res.park_rows
+    pool = kvpool.KVPool(hard_floor=1 << 30,
+                         meminfo=lambda: (2 << 30) if not res.park_rows else (1 << 29))
+    app._add_kv_reclaimers(pool)
+    assert [n for n, _ in pool.reclaimers][-1] == "kept_park"
+    res._park_busy += 1
+    try:
+        assert app._kv_reclaim_kept_park(1 << 30, "slot0") == 0 and res.park_rows
+    finally:
+        res._park_busy -= 1
+    pool.gate("slot0", 1 << 20)                          # no PoolFull: the kept park went
+    assert not res.park_rows
+    app.PARENTS.clear()
+
+
+def test_a_pool_full_inside_a_swap_moves_no_row():
+    """A PoolFull from the second view's page commit inside `unpark`'s swap left the rows in
+    place half swapped, and a later resume on them was 0.19 off a cold prefill: every view's
+    pages are committed before a row moves."""
+    d = tempfile.mkdtemp()
+    real = kvpool.ensure_for
+    try:
+        per = sum(t.numel() // t.shape[ax] * t.element_size()
+                  for t, ax in cache._kv_views(fresh(), None))
+        res = _state(guest_max=8192, park_bytes=900 * per + 8 * fresh().state.nbytes)
+        _spill(d, res, min_tokens=64)
+        app.PARENTS.clear()
+        a = WHEAD + tokens(300, seed=11)
+        oa, _ = wturn(a, 6, "chat-a")
+        b = WHEAD + tokens(120, seed=12)
+        ob, _ = wturn(b, 6, "chat-b")
+        n = {"k": 0, "arm": False}
+
+        def ensure_for(t, rows):
+            if n["arm"]:
+                n["k"] += 1
+                if n["k"] == 2:
+                    raise kvpool.PoolFull("KV pool: under the hard floor after every reclaim")
+            return real(t, rows)
+        kvpool.ensure_for = ensure_for
+        ru = res.unpark
+
+        def unpark(e_, d_):
+            n["arm"] = True
+            try:
+                return ru(e_, d_)
+            finally:
+                n["arm"] = False
+        res.unpark = unpark
+        try:
+            wturn(a + oa + tokens(10, seed=13), 6, "chat-a")
+        except kvpool.PoolFull:
+            pass
+        kvpool.ensure_for = real
+        res.unpark = ru
+        assert n["k"] >= 2 and res.owner == "chat-b" and res.park_owner == "chat-a"
+        b2 = b + ob + tokens(10, seed=14)
+        out, pre = wturn(b2, 6, "chat-b")
+        assert_cold(out, pre, b2, 6)
+    finally:
+        kvpool.ensure_for = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_reclaim_inside_a_swap_of_a_park_nobody_waits_for():
+    """The same swap with the park nobody waits for: the reclaim leaves it alone while it is in
+    use (`_park_busy`), and the swap ends whole."""
+    d = tempfile.mkdtemp()
+    real = kvpool.ensure_for
+    try:
+        res, mem, sp = _budget_state(d)
+        a = WHEAD + tokens(300, seed=11)
+        oa, _ = wturn(a, 6, "chat-a-task-1")
+        wturn(WHEAD + tokens(120, seed=12), 6, "chat-b-task-1")
+        n = {"k": 0, "arm": False}
+
+        def ensure_for(t, rows):
+            if n["arm"]:
+                n["k"] += 1
+                if n["k"] == 2:
+                    app.STATE["mem"] = mem
+                    app._kv_reclaim_caches(1 << 40, "slot0")
+            return real(t, rows)
+        kvpool.ensure_for = ensure_for
+        ru = res.unpark
+
+        def unpark(e_, d_):
+            n["arm"] = True
+            try:
+                return ru(e_, d_)
+            finally:
+                n["arm"] = False
+        res.unpark = unpark
+        a2 = a + oa + tokens(10, seed=13)
+        out, pre = wturn(a2, 6, "chat-a-task-1")
+        kvpool.ensure_for = real
+        assert n["k"] >= 2 and res.park_owner == "chat-b-task-1" and res.park_rows, n
+        assert_cold(out, pre, a2, 6)
+    finally:
+        kvpool.ensure_for = real
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_a_hold_left_by_a_request_that_prefilled_nothing_blocks_no_other():
+    """A request that passes the gate and prefills nothing (A1's give-up, a prepared summary, a
+    cache hit, a client gone) left `end_hold` set, and every other request then got a 503:
+    every gate sets the hold to its own request's, and the handler's `finally` clears it."""
+    res = _state()
+    ids = WHEAD + tokens(100, seed=81)
+    out, _ = wturn(ids, 6, "chat-a-task-1", stay=True)
+    nxt = ids + out + tokens(8, seed=82)
+
+    class Pass:
+        def gate(self, n, count=True):
+            pass
+
+        def refused(self, exc):
+            pass
+
+    class NeedsEnd(Pass):                  # over the peak by less than the end anchor's bytes
+        def gate(self, n, count=True):
+            if not res.shed_end(False):
+                raise cache.MemoryRefused(2, 1, n)
+    app._gate_holding_end(Pass(), res, nxt, len(nxt), False)      # no prefill follows
+    assert res.end_hold
+    other = tokens(50, seed=83)
+    app._gate_holding_end(NeedsEnd(), res, other, len(other), False)   # admitted
+    assert not res.end_hold and res.end is None
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "server", "app.py")).read()
+    assert "res_h.end_hold = False" in src.split("kv_trim_current()\n                if (plan")[0]
+
+
+def test_a_refusal_counts_once_at_the_outcome():
+    """A gate run once more and admitted is no refusal (Budget stats); a final refusal is one."""
+    mem = cache.Budget(1 << 20, 1 << 20, 0, probe=lambda: (0, 0), empty=lambda: None)
+    try:
+        mem.gate(1 << 30, count=False)
+    except cache.MemoryRefused as exc:
+        assert mem.stats["refused"] == 0
+        mem.refused(exc)
+    assert mem.stats["refused"] == 1
+
+    class Mem:
+        def __init__(self, refuse_twice):
+            self.twice, self.passes, self.counted = refuse_twice, 0, 0
+
+        def gate(self, n, count=True):
+            self.passes += 1
+            if self.passes == 1 or self.twice:
+                if count:
+                    self.counted += 1
+                raise cache.MemoryRefused(2, 1, n)
+
+        def refused(self, exc):
+            self.counted += 1
+    res = _state()
+    ids = WHEAD + tokens(100, seed=84)
+    out, _ = wturn(ids, 6, "chat-a-task-1", stay=True)
+    nxt = ids + out + tokens(8, seed=85)
+    m = Mem(False)
+    app._gate_holding_end(m, res, nxt, len(nxt), False)
+    assert m.passes == 2 and m.counted == 0, (m.passes, m.counted)
+    m = Mem(True)
+    try:
+        app._gate_holding_end(m, res, nxt, len(nxt), False)
+    except cache.MemoryRefused:
+        pass
+    assert m.passes == 2 and m.counted == 1, (m.passes, m.counted)
+    m = Mem(True)
+    try:
+        app._gate_holding_end(m, res, tokens(40, seed=86), 40, False)   # nothing held
+    except cache.MemoryRefused:
+        pass
+    assert m.passes == 1 and m.counted == 1, (m.passes, m.counted)
+
+
+def test_a_side_slots_write_waits_for_slot_0s_spill_io():
+    """`_keep_parent` skipped the write while slot 0's save or restore held the spill's own
+    I/O, and the conversation it cut went unwritten: it waits for the lock now."""
+    d = tempfile.mkdtemp()
+    try:
+        _state()
+        sp, _ = _spill(d, app.STATE["resident"], min_tokens=64)
+        side = cache.ResidentPrefix(BIG, CH, end=True, stash_bytes=BIG, guest_frac=1.0)
+        side.keeper = app._keep_parent
+        app.PARENTS.clear()
+        app.WORKERS.clear()
+        app.STATE.update(engine=fresh(), resident=side)
+        wturn(PHEAD + tokens(300, seed=87), 8, "owui-chat")
+        sp._own_io.acquire()
+        threading.Timer(0.5, sp._own_io.release).start()      # slot 0's I/O ends meanwhile
+        wturn(WHEAD + tokens(40, seed=88), 6, "chat-a-task-1", stay=True)
+        assert [e.man.get("owner") for e in sp.entries.values()] == ["owui-chat"], sp.entries
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # ------------------------------------------------------------------ 6: the slot choice
