@@ -423,10 +423,14 @@ class Journal:
 
     def rows(self, *, since_ms: int = 0, limit: int = 100, session: str | None = None,
              before_ms: int | None = None, kind: str | None = "route",
-             request_ids=None) -> list[dict]:
+             request_ids=None, sessions: list[str] | None = None,
+             texts: bool = True) -> list[dict]:
         """Newest first: the rings (running and recent) merged with the file. `kind`: route (the
         router's turns), side (a client's side requests, S1), router (both), monitor, or None for
-        all; `request_ids`: only these requests' rows."""
+        all; `request_ids`: only these requests' rows; `sessions`: a batch of session keys (the
+        sessions page reads one window for a page of them) — a page's "-" is the null group;
+        `texts`: attach the hidden texts of the monitor rows (False when the caller only
+        aggregates and never shows one — a week of monitor rows is the bulk of the bytes)."""
         want = set(request_ids) if request_ids is not None else None
         kinds = ROUTER_KINDS if kind == "router" else (kind,)
         with self._lock:
@@ -435,6 +439,7 @@ class Journal:
                    ([dict(r) for r in self.events_ring] if kind in ("monitor", None) else [])
         ring = [r for r in ring if r["ts_ms"] >= since_ms and
                 (session is None or r.get("session_key") == session) and
+                (sessions is None or (r.get("session_key") or "-") in set(sessions)) and
                 (before_ms is None or r["ts_ms"] < before_ms) and
                 (want is None or r.get("request_id") in want)]
         seen = {r["id"] for r in ring}
@@ -448,6 +453,15 @@ class Journal:
             if session is not None:
                 q += " AND session_key = ?"
                 args.append(session)
+            if sessions is not None:
+                keys = [k for k in sessions if k != "-"]
+                ors = []
+                if keys:
+                    ors.append(f"session_key IN ({', '.join('?' * len(keys))})")
+                    args += keys
+                if "-" in sessions:
+                    ors.append("(session_key IS NULL OR session_key = '-')")
+                q += " AND (" + (" OR ".join(ors) if ors else "0") + ")"
             if before_ms is not None:
                 q += " AND ts_ms < ?"
                 args.append(before_ms)
@@ -466,8 +480,35 @@ class Journal:
         out = ring + [r for r in disk if r["id"] not in seen]
         out.sort(key=lambda r: r["ts_ms"], reverse=True)
         out = out[:limit]
-        self._texts(out)
+        if texts:
+            self._texts(out)
         return [self._shape(r) for r in out]
+
+    def recent_sessions(self, *, since_ms: int = 0, limit: int = 200) -> list[str]:
+        """The keys of the sessions with a row of the week, newest first — the sessions page's
+        first stage: a GROUP BY of two columns, not the 300k rows a global `rows` read would
+        materialise to say the same (the 2026-10-16 audit). The rings first, so a session whose
+        newest row is still unwritten counts at its newest."""
+        last: dict[str, int] = {}
+        with self._lock:
+            live = list(self.ring.values()) + list(self.events_ring)
+        for r in live:
+            if r["ts_ms"] >= since_ms and r.get("kind", "route") in ("route", "monitor"):
+                k = r.get("session_key") or "-"
+                last[k] = max(last.get(k, 0), r["ts_ms"])
+        if self.path:
+            try:
+                conn = self._connect()
+                for k, ts in conn.execute(
+                        "SELECT session_key, MAX(ts_ms) FROM conductor_events "
+                        "WHERE ts_ms >= ? AND kind IN ('route', 'monitor') "
+                        "GROUP BY session_key", (since_ms,)):
+                    k = k or "-"
+                    last[k] = max(last.get(k, 0), ts)
+                conn.close()
+            except sqlite3.Error:
+                pass
+        return [k for k, _ in sorted(last.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
 
     def with_events(self, rows: list[dict], events: list[dict] | None = None) -> list[dict]:
         """Router rows with the monitor's events of the same request attached (`events`);
