@@ -1118,6 +1118,7 @@ class ResidentPrefix:
         self.end: dict | None = None
         self.end_lost: str | None = None   # why the last end anchor went (`_drop_end`)
         self._end_bufs: tuple | None = None
+        self.end_hold = False              # ENG-371: the request at the memory gate resumes here
         # the tokenizer's whitespace-only tokens (the server's, at load): where the client's copy
         # of an answer may differ from the rows next to a hidden span (`replay`)
         self.glue: frozenset = frozenset()
@@ -2110,8 +2111,11 @@ class ResidentPrefix:
 
     def shed_end(self, safe: bool = False) -> int:
         """The end anchor and its buffers: the next turn then resumes at the anchors in place.
-        `safe` gives back only buffers that hold no end anchor."""
-        if self._end_bufs is None or (safe and self.end is not None):
+        `safe` gives back only buffers that hold no end anchor, and so does `end_hold` (ENG-371):
+        the request at the memory gate resumes at this end. Live 2026-10-18 01:58 the gate gave
+        back the end a worker's call had just been carried into slot 0 with, and the call read
+        its 7,953 tokens from 0; the levels after it (the park, the pin, the roles) go first."""
+        if self._end_bufs is None or ((safe or self.end_hold) and self.end is not None):
             return 0
         self._drop_end("memory")
         freed = sum(_nbytes(x) for x in self._end_bufs)

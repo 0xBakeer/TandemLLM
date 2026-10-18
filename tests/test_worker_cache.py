@@ -309,6 +309,20 @@ def test_a_parked_parent_goes_to_the_nvme_before_the_memory_policy_takes_the_par
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_memory_gate_keeps_the_end_the_request_resumes_at():
+    """Live 2026-10-18 01:58: the gate gave back the end a worker's call had just been carried
+    into slot 0 with, and the call read its 7,953 tokens from 0. With `end_hold` the end stays and
+    the levels after it go."""
+    res = _state()
+    ids = WHEAD + tokens(100, seed=106)
+    out, _ = wturn(ids, 6, "chat-a-task-1", stay=True)
+    assert res.end is not None
+    res.end_hold = True
+    assert res.shed_end(False) == 0 and res.end is not None
+    res.end_hold = False
+    assert res.shed_end(False) > 0 and res.end is None and res.end_lost == "memory"
+
+
 def test_on_a_side_slots_thread_the_park_goes_as_before():
     class Res:
         park_rows, park_base, park_owner, _stash = 300, 40, "chat-p", None
@@ -416,6 +430,9 @@ def test_a_worker_whose_copy_parts_inside_its_own_rows_stays_on_slot_0():
     assert why.get("wait") is None, why                # not a worker: as before
     _, why = _need(own, ids, session="chat-b-task-1", stay=True, parent="chat-b")
     assert why.get("wait") == "own" and why.get("slot0_first"), why
+    # it waits for slot 0 up to the time a re-read of its prompt would take (live 02:02: 3.1 s,
+    # then the side slot read 15,170 tokens from 0)
+    assert app.SIDE_SLOT0_WAIT_S <= why["slot0_wait_s"] <= app.PARENT_WAIT_MAX_S, why
     _, why = _need(own, ids, session="chat-a-task-1", stay=True, parent="chat-a")
     assert why.get("wait") is None, why                # another worker's rows
 

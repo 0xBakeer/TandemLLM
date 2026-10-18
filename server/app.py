@@ -867,7 +867,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     holds tries slot 0 first, as one on the NVMe does; so does a parent whose worker ran
     (`session` in PARENTS: its rows went to slot 0's park or the NVMe, which only slot 0 reads
     back, unless a side slot still holds them, `_side_home`), and it waits for slot 0 up to the
-    time reading its prompt again would take (`slot0_wait_s`, PARENT_WAIT_MAX_S at most). Live
+    time reading its prompt again would take (`slot0_wait_s`, PARENT_WAIT_MAX_S at most), as a
+    worker's call that continues slot 0's rows (or its park or NVMe entry) does. Live
     2026-10-18 01:00: two parents' returns, their rows on the NVMe, took the side slot after
     `prefer_side` and read 11,119 and 11,010 tokens again: the client's copy, without the
     router's notes, matched no entry there."""
@@ -955,7 +956,11 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                     why["wait"] = "own"
         except Exception:                                          # noqa: BLE001
             pass
-    if not stay and _waiting_parent(session) and why.get("wait") in ("parent", "spill", "park"):
+    if ((stay and why.get("wait") in ("view", "resident", "own", "spill", "park"))
+            or (not stay and _waiting_parent(session)
+                and why.get("wait") in ("parent", "spill", "park"))):
+        # ENG-371: a worker's next call too (live 2026-10-18 02:02: its rows on slot 0, slot 0
+        # busy for 3.1 s, the side slot read its 15,170 tokens from 0)
         rate = _peek_rate() or PARENT_REREAD_TOK_S
         why["slot0_wait_s"] = round(min(PARENT_WAIT_MAX_S,
                                         max(SIDE_SLOT0_WAIT_S, len(ids) / rate)), 1)
@@ -7978,12 +7983,21 @@ class Handler(BaseHTTPRequestHandler):
                         obj = STATE.get(name)
                         if obj is not None:
                             obj.drop_session(conv_id)
+                # ENG-371: the end anchor this request resumes at is not the gate's to give back
+                hold = res_ is not None and res_.end is not None and res_.end_offer(
+                    res_.common(list(mm.key_ids) if mm is not None else prompt.tolist()),
+                    n_prompt - 1, mm_ok=mm is not None and MM_END == "on" and comp is None) > 0
+                if hold:
+                    res_.end_hold = True
                 try:
                     mem.gate(n_prompt)
                 except cache.MemoryRefused as exc:
                     rec.stop_detail = "memory"
                     print(f"[memory] {cid} refused: {exc}", flush=True)
                     return self._busy(503, f"{exc}; retry when the engine is idle", retry=30)
+                finally:
+                    if hold:
+                        res_.end_hold = False
             # the reasoning-loop arms compute only for a request the monitor watches
             arms = sup.arms if sup is not None and STATE.get("think_stall", True) else None
             if sup is not None:
