@@ -29,6 +29,7 @@ import secrets
 import shutil
 import sys
 import threading
+import traceback
 import time
 
 from chatd import attach as attach_mod
@@ -83,6 +84,8 @@ EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
 TITLE_NEW = "New chat"
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 TRASH_KEEP_MS = 7 * 86_400_000
+_STATUS_BY_OUTCOME = {"completed": "done", "cancelled": "stopped",
+                      "interrupted": "interrupted", "failed": "error"}
 DELTA_KEEP_MS = 7 * 86_400_000
 CAPS_TTL_S = 30.0
 PERSIST_S = 1.0
@@ -954,12 +957,15 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         broken; this must never raise, it is the only thing between the run thread and a
         permanently wedged conversation."""
         conv = run.conv
-        status = {"completed": "done", "cancelled": "stopped", "interrupted": "interrupted",
-                  "failed": "error"}.get(outcome, "error")
-        self.log(f"[run] {run.id}: finish_run raised {type(exc).__name__}; forcing {outcome}")
+        status = _STATUS_BY_OUTCOME.get(outcome, "error")
+        # the reason finish_run broke is the whole story of a wedged chat — a name only
+        # hides it; keep the tail, it is a crash path and crashes want stacks
+        self.log(f"[run] {run.id}: finish_run raised {type(exc).__name__}; forcing "
+                 f"{outcome}\n{traceback.format_exc(limit=8)}")
         try:
-            self.store.run("UPDATE runs SET state = ?, ended = ?, error = ? WHERE id = ?",
-                           (outcome, now_ms(), run.error, run.id))
+            self.store.run("UPDATE runs SET state = ?, ended = ?, error = ?, step = ? "
+                           "WHERE id = ?",
+                           (outcome, now_ms(), run.error, run.step, run.id))
         except Exception as exc2:                                       # noqa: BLE001
             self.log(f"[run] {run.id}: the forced runs write failed too: {type(exc2).__name__}")
         try:
@@ -973,7 +979,31 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.state = outcome                                         # clears run.active
             if conv.run is run:
                 conv.run = None                                         # the message gate opens
+            live = conv.live
+            if live is not None and live["id"] == run.message_id:
+                live["status"] = status                                 # what finish_run would have
+                                                                        # finalized
+                # finish_run cancels open tool cards before persisting; skipping that
+                # here left an 'asking' permission card with no run to answer it —
+                # unresolved forever
+                for p in live["parts"]:
+                    if (p.get("type") == "tool_call"
+                            and p.get("status") in ("running", "asking")):
+                        p["status"], p["ended_at"] = "cancelled", iso(now_ms())
+                        p["permission"] = None
+                try:
+                    self._persist_live(conv)                            # the cancelled state sticks
+                except Exception as exc2:                               # noqa: BLE001
+                    self.log(f"[run] {run.id}: forced persist failed: {type(exc2).__name__}")
             conv.live = None
+        try:
+            # the client deserves a frame at the moment of the flip, not a diff on refetch
+            self.emit(conv, {"type": "run.error", "run_id": run.id,
+                             "message_id": run.message_id,
+                             "message": run.error or f"forced: {outcome}", "retryable": True},
+                      run_id=run.id)
+        except Exception as exc2:                                       # noqa: BLE001
+            self.log(f"[run] {run.id}: the forced run.error failed: {type(exc2).__name__}")
         try:
             self._drain(conv, run.started_by)                           # the queue must not starve
         except Exception as exc2:                                       # noqa: BLE001
@@ -988,8 +1018,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 self.snaps.take(self.root_cid(conv.id), self.workspace(conv.id), run.id, "after")
             except OSError:
                 pass
-        status = {"completed": "done", "cancelled": "stopped", "interrupted": "interrupted",
-                  "failed": "error"}[outcome]
+        status = _STATUS_BY_OUTCOME.get(outcome, "error")
         finish = run.finish_reason or {"done": "stop", "stopped": "stopped",
                                        "interrupted": "error", "error": "error"}[status]
         if status == "stopped":
