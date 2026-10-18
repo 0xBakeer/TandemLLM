@@ -368,6 +368,7 @@ def _chat(answer, stream):
     try:
         return Req("/v1/chat/completions",
                    {"messages": [{"role": "user", "content": "tidy up"}], "stream": stream,
+                    "reasoning_format": "tags",                                 # SRV-617
                     "tools": [{"type": "function", "function": {"name": "delete_file"}}]}
                    ).response()
     finally:
@@ -437,7 +438,9 @@ def _stream_chat(engine, think=True, fmt="tags", steps=None, **extra):
     serve()
     app.STATE["tok"] = ThinkTok()
     app.STATE["reasoning_format"] = fmt
+    # SRV-617: named, since an unnamed raw client gets `reasoning_content` over the server's tags
     body = dict({"messages": [{"role": "user", "content": "q"}], "stream": True,
+                 "reasoning_format": fmt,
                  "chat_template_kwargs": {"enable_thinking": think}}, **extra)
     req = Req("/v1/chat/completions", body)
     held = []
@@ -628,7 +631,8 @@ def test_the_forced_close_and_the_budget_keep_the_tag_first():
         app.STATE["reasoning_format"] = fmt
         req = Req("/v1/chat/completions", {"messages": [{"role": "user", "content": "q"}],
                                            "stream": True, "max_tokens": 20,
-                                           "max_reasoning_tokens": 3})
+                                           "max_reasoning_tokens": 3,
+                                           "reasoning_format": fmt})            # SRV-617
         held, real = [], app.generate_stream
 
         def recorded(*a, **k):
@@ -680,6 +684,7 @@ def test_the_non_streamed_answer_is_unchanged():
             app.generate_stream = _script("Hmm.</think>\n\nYes.")
             head, body = Req("/v1/chat/completions",
                              {"messages": [{"role": "user", "content": "q"}],
+                              "reasoning_format": "tags",                       # SRV-617
                               "chat_template_kwargs": {"enable_thinking": think}}).response()
             assert json.loads(body)["choices"][0]["message"]["content"] == want, body
     finally:
@@ -709,6 +714,7 @@ def _both_ways(text, think, fmt="tags", **extra):
     try:
         head, body = Req("/v1/chat/completions",
                          dict({"messages": [{"role": "user", "content": "q"}],
+                               "reasoning_format": fmt,                         # SRV-617
                                "chat_template_kwargs": {"enable_thinking": think}},
                               **extra)).response()
     finally:

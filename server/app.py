@@ -7248,10 +7248,15 @@ class Handler(BaseHTTPRequestHandler):
         if rec.sampling is None and sampler.on:
             rec.sampling = "client"
         # SRV-193: a client kind's own format (Open WebUI: reasoning_content) when it names none,
-        # under a conductor plan only (the raw path keeps the release's shape, byte for byte); its
-        # reasoning ends with the template's blank lines as content, so each round's block is timed
+        # under a conductor plan; its reasoning ends with the template's blank lines as content,
+        # so each round's block is timed. SRV-617: on the raw path too for a plain API caller
+        # (SDK, curl, an unnamed client such as a benchmark), which reads `message.content` as
+        # the answer; every other kind on the raw path keeps the release's shape, byte for byte
         fmt_boundary = ""
-        if plan is not None and plan.active and not json_answer:
+        # SRV-245: stop strings read the answer alone under a plan; SRV-617: and for a plain
+        # client on the raw path whose reasoning moved out of `content`
+        answer_side = plan is not None and plan.active
+        if not json_answer and (answer_side or rec.client_kind in compat.PLAIN_CLIENTS):
             by_client = compat.answer_format(body, fmt, False, rec.client_kind,
                                              STATE.get("client_reasoning"))
             if by_client != fmt:
@@ -7259,7 +7264,8 @@ class Handler(BaseHTTPRequestHandler):
                 # first content); an API client's answer starts with its first character (SRV-245)
                 fmt, fmt_boundary = by_client, ("\n\n" if rec.client_kind == "open-webui"
                                                 else "")
-                if plan.row is not None:
+                answer_side = True
+                if plan is not None and plan.row is not None:
                     plan.row["extra"]["reasoning_format"] = fmt
         if STATE.get("conductor") is not None:
             if plan is not None:
@@ -8334,8 +8340,8 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         finish = "stop" if (ids and ids[-1] in eos) else (
                             "timeout" if deadline.hit else "length")
-                    if plan is not None and plan.active:
-                        text, cut = answer_stops(text, stops, in_think)     # SRV-245
+                    if answer_side:
+                        text, cut = answer_stops(text, stops, in_think)     # SRV-245, SRV-617
                     else:
                         text, cut = _apply_stops(text, stops)
                     if cut:
@@ -8472,8 +8478,9 @@ class Handler(BaseHTTPRequestHandler):
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
             # SRV-245: under a conductor plan the stop strings read the answer alone (`AnswerStops`,
-            # after the split); the raw path matches them on the text as the release did
-            astop = AnswerStops(stops) if plan is not None and plan.active and stops else None
+            # after the split), and so they do for a plain client on the raw path (SRV-617); every
+            # other raw request matches them on the text as the release did
+            astop = AnswerStops(stops) if answer_side and stops else None
             if astop is not None:
                 stopper = astop.stopper            # one `hit` for the loop and the logs
 

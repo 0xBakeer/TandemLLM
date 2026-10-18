@@ -71,8 +71,9 @@ def _ask(end, mode: str = "on", tasks=E1, stream=True, think_on=True, fmt="tags"
     app.STATE["cfg_eos"] = end
     app.STATE["reasoning_format"] = fmt
     mon = app.STATE["monitor"] = monitor(mode, tasks)
+    # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
     body = dict({"messages": [{"role": "user", "content": "go"}], "stream": stream,
-                 "max_tokens": max_tokens, "tools": TOOLS,
+                 "max_tokens": max_tokens, "tools": TOOLS, "reasoning_format": fmt,
                  "chat_template_kwargs": {"enable_thinking": think_on}}, **extra)
     if budget is not None:
         # the server's own --think-budget: ThinkBudget's streamed phrase. A client's budget

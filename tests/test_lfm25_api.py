@@ -46,8 +46,10 @@ def ask(text: str, stream: bool, fmt: str = "reasoning_content", tool_format: st
     if tool_format:
         app.STATE["tool_format"] = tool_format
     app.STATE["reasoning_format"] = fmt
+    # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
     body = {"messages": [{"role": "user", "content": text}], "stream": stream, "tools": TOOLS,
-            "max_tokens": 2000, "chat_template_kwargs": {"enable_thinking": think}}
+            "max_tokens": 2000, "reasoning_format": fmt,
+            "chat_template_kwargs": {"enable_thinking": think}}
     head, raw = Req(body).response()
     out = {"content": "", "reasoning": "", "calls": {}, "finish": None, "raw": raw, "order": []}
     if not stream:

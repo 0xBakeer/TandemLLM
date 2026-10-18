@@ -323,6 +323,10 @@ def _stop(proc) -> str:
     return proc.stdout.read()
 
 
+#: SRV-617: the release's tags, named (an unnamed raw client's default is `reasoning_content`)
+TAGS = {"reasoning_format": "tags"}
+
+
 def _chat_msgs(text):
     return {"messages": [{"role": "system", "content": "You are opencode."},
                          {"role": "user", "content": text}], "max_tokens": 400}
@@ -421,7 +425,8 @@ def test_conductor_on_over_the_wire():
         _wait(port, proc)
         for stream in (True, False):
             for word in ("FAKE_EMPTY_THINK", "FAKE_EMPTY_ANSWER"):
-                head, got = _post(port, dict(_chat_msgs(f"use the tool {word}"),
+                # SRV-617: the tags named, as an unnamed raw client gets `reasoning_content`
+                head, got = _post(port, dict(_chat_msgs(f"use the tool {word}"), **TAGS,
                                              tools=OPENCODE_TOOLS), stream=stream)
                 assert head["X-Tandem"] == "on"
                 if stream:
@@ -439,18 +444,18 @@ def test_conductor_on_over_the_wire():
         # two failures: the GIVE_UP sentence
         for stream in (True, False):
             _, got = _post(port, dict(_chat_msgs("use the tool FAKE_EMPTY_ANSWER FAKE_EMPTY_ALWAYS"),
-                                      tools=OPENCODE_TOOLS), stream=stream)
+                                      **TAGS, tools=OPENCODE_TOOLS), stream=stream)
             content, finish = ((_wire(got)["content"], _wire(got)["finish"]) if stream else
                                (got["choices"][0]["message"]["content"],
                                 got["choices"][0]["finish_reason"]))
             assert content.endswith(GIVE_UP) and finish == "stop", (stream, content, finish)
         # nothing to do: a text answer, no tools, tool_choice none
-        _, got = _post(port, dict(_chat_msgs("Name three rivers."), tools=OPENCODE_TOOLS))
+        _, got = _post(port, dict(_chat_msgs("Name three rivers."), **TAGS, tools=OPENCODE_TOOLS))
         assert got["choices"][0]["finish_reason"] == "stop"
         assert got["choices"][0]["message"]["content"].split("</think>")[-1].strip()
-        for body in (_chat_msgs("FAKE_EMPTY_ANSWER"),
-                     dict(_chat_msgs("use the tool FAKE_EMPTY_ANSWER"), tools=OPENCODE_TOOLS,
-                          tool_choice="none")):
+        for body in (dict(_chat_msgs("FAKE_EMPTY_ANSWER"), **TAGS),
+                     dict(_chat_msgs("use the tool FAKE_EMPTY_ANSWER"), **TAGS,
+                          tools=OPENCODE_TOOLS, tool_choice="none")):
             _, got = _post(port, body)
             c = got["choices"][0]
             assert c["finish_reason"] == "stop" and not c["message"].get("tool_calls"), c
@@ -505,16 +510,19 @@ def test_conductor_the_openai_sdk_takes_a_continued_turn():
             model="qwen38-spark-engine", stream=True, tools=OPENCODE_TOOLS, max_tokens=400,
             messages=[{"role": "user", "content": "use the tool FAKE_EMPTY_THINK"}],
             stream_options={"include_usage": True})
-        name, args, finish, content = "", "", None, ""
+        name, args, finish, content, reasoning = "", "", None, "", ""
         for ch in stream:
             for c in ch.choices:
                 content += c.delta.content or ""
+                reasoning += getattr(c.delta, "reasoning_content", None) or ""
                 for tc in c.delta.tool_calls or []:
                     name += (tc.function.name or "") if tc.function else ""
                     args += (tc.function.arguments or "") if tc.function else ""
                 finish = c.finish_reason or finish
         assert finish == "tool_calls" and name == "bash" and json.loads(args), (finish, name, args)
-        assert content.count("</think>") == 1 and "Considering" not in content, content
+        # SRV-617: a plain API client's thinking is in `reasoning_content`, no tag in `content`
+        assert "</think>" not in content + reasoning and reasoning, (content, reasoning)
+        assert "Considering" not in content + reasoning, content
         _stop(proc)
     finally:
         if proc.poll() is None:

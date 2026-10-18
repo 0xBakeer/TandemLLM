@@ -436,7 +436,8 @@ def _reasoning_count(ids):
 def test_over_the_handler_raw_hermes_closes_with_the_phrase_and_answers():
     """No monitor (raw): ThinkBudget's phrase streams, then `</think>` and the answer. A reserve
     of 20 out of 160, after the phrase's P tokens, lowers the effort word's 8,192."""
-    b = hermes("medium", 160, stream=False)
+    # SRV-617: the tags named (this body reads as an unnamed client, not as `hermes`)
+    b = hermes("medium", 160, stream=False, reasoning_format="tags")
     raw, calls, log = _handler(b, reserve=20)
     got = json.loads(raw)
     cap = 160 - 20 - P
@@ -454,7 +455,8 @@ def test_over_the_handler_raw_hermes_closes_with_the_phrase_and_answers():
 
 
 def test_over_the_handler_hermes_streamed_gets_an_answer():
-    b = hermes("medium", 160, stream_options={"include_usage": True})
+    b = hermes("medium", 160, stream_options={"include_usage": True},
+               reasoning_format="tags")                                         # SRV-617
     raw, calls, _ = _handler(b, reserve=20)
     ds = _deltas(raw)
     text = "".join(d.get("content") or "" for d in ds)

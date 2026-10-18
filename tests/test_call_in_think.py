@@ -36,8 +36,9 @@ TOOLS = [{"type": "function", "function": {
 def ask(text: str, stream: bool = True, fmt: str = "tags") -> dict:
     """One chat request with thinking on: what the client holds."""
     app.STATE["reasoning_format"] = fmt
+    # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
     body = {"messages": [{"role": "user", "content": text}], "stream": stream,
-            "tools": TOOLS, "max_tokens": 2000}
+            "tools": TOOLS, "max_tokens": 2000, "reasoning_format": fmt}
     head, raw = Req(body).response()
     out = {"content": "", "reasoning": "", "calls": {}, "finish": None, "raw": raw}
     if not stream:

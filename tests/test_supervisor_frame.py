@@ -330,8 +330,9 @@ def _chat(fmt: str, stream: bool, mode: str = "on", tasks=None, **extra):
     app.STATE["tok"] = MonTok()
     app.STATE["reasoning_format"] = fmt
     mon = app.STATE["monitor"] = monitor(mode, backstop(6) if tasks is None else tasks)
+    # SRV-617: the format named, as an unnamed raw client otherwise gets `reasoning_content`
     body = dict({"messages": [{"role": "user", "content": "hi"}], "stream": stream,
-                 "max_tokens": 30}, **extra)
+                 "max_tokens": 30, "reasoning_format": fmt}, **extra)
     with quiet():
         head, raw = Req("/v1/chat/completions", body).response()
     return mon, head, raw

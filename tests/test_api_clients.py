@@ -7,7 +7,8 @@ a memory question from a client that offered no tools ended with the model's own
 (a GET on the memory search) handed over with finish `tool_calls`.
 
   1  the default under a conductor profile: every client kind gets `reasoning_content` (Hermes
-     keeps `tags`); `reasoning_format: tags` keeps the tags; the raw model keeps the server's
+     keeps `tags`); `reasoning_format: tags` keeps the tags; on the raw model a plain API client
+     (SDK, curl, an unnamed one) gets `reasoning_content` too, every other kind the server's (SRV-617)
   2  a stop string applies to the answer: one the reasoning holds does not cut it, and a blank
      line does not match the template's blank lines after `</think>`; streamed and not
   3  the answer does not start with the blank lines after the reasoning
@@ -62,11 +63,43 @@ def test_1_sdk_and_curl_get_reasoning_content():
             assert "The question has" in out["reasoning"], out["reasoning"][:80]
     tags = ask("Say hello in one short sentence.", CURL, reasoning_format="tags")
     assert tags["content"].startswith("<think>\n") and "</think>" in tags["content"]
-    # the raw model: the server's format, as the release
-    raw = tu._go({"model": "TandemLLM", "stream": False, "max_tokens": 200,
-                  "messages": [{"role": "user", "content": "Say hello."}]},
-                 dict(CURL, **{"X-Tandem": "raw"}))
-    assert raw["reasoning"] == "" and "reasoning_content" not in raw["raw"], raw["raw"][:200]
+
+def raw(headers, stream=False, **extra):
+    return tu._go({"model": "TandemLLM", "stream": stream, "max_tokens": 200,
+                   "messages": [{"role": "user", "content": "Say hello."}], **extra},
+                  dict(headers, **{"X-Tandem": "raw"}))
+
+
+def test_1b_raw_path_plain_clients_get_reasoning_content():
+    """SRV-617: a benchmark or an SDK on the raw path read `content` as the answer; the
+    thinking goes to `reasoning_content` there too. Every other kind keeps the release's tags."""
+    tu.serve("on")
+    for h in (CURL, SDK, {"User-Agent": "python-httpx/0.28.1"}):
+        for stream in (False, True):
+            out = raw(h, stream)
+            assert "<think>" not in out["content"] and "</think>" not in out["content"], out
+            assert "The question has" in out["reasoning"], out["raw"][:200]
+    # a client that names a format keeps it
+    tags = raw(CURL, reasoning_format="tags")
+    assert tags["content"].startswith("<think>") and tags["reasoning"] == "", tags["raw"][:200]
+    # Open WebUI folds the tags itself, and the server's own calls parse them: the release's shape
+    for h in ({"User-Agent": "Python/3.11 aiohttp/3.9.5"}, {"User-Agent": "tandem-conductor/1"}):
+        out = raw(h)
+        assert out["content"].startswith("<think>") and out["reasoning"] == "", out["raw"][:200]
+
+
+def test_1c_raw_path_stops_read_the_answer():
+    """SRV-617: a plain client on the raw path gets SRV-245's stop rule with its format: a stop
+    string the reasoning holds does not cut the response, and a blank line is not the template's"""
+    tu.serve("on")
+    for stream in (False, True):
+        for stop in (["question"], ["\n\n"]):
+            out = tu._go({"model": "TandemLLM", "stream": stream, "max_tokens": 2000, "stop": stop,
+                          "messages": [{"role": "user",
+                                        "content": "Write two short paragraphs about cats."}]},
+                         dict(CURL, **{"X-Tandem": "raw"}))
+            assert len(out["content"]) > 20 and "<think>" not in out["content"], (stop, out)
+            assert finish_of(out) == "stop", (stop, finish_of(out))
 
 
 # ------------------------------------------------------------------ 2-3 stops and the answer
