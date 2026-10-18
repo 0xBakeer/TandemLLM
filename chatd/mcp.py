@@ -615,6 +615,8 @@ class Mcp:
                 "command": d.get("command"), "args": json.dumps(d.get("args") or []),
                 "timeout_s": float(d.get("timeout_s") or 30), "env_enc": None,
                 "headers_enc": None}
+        t = None
+        s = None
         try:
             if d["transport"] == "http":
                 t = HttpTransport(d["url"], {k: v for k, v in (d.get("headers") or {}).items()
@@ -636,7 +638,15 @@ class Mcp:
                                            (x.get("description") or "")[:300]} for x in tools],
                     "message": f"handshake ok: protocol {info.get('protocolVersion')}, "
                                f"{len(tools)} tool{'s' if len(tools) != 1 else ''}"}
-        except McpError as exc:
+        except (McpError, OSError) as exc:
+            # a stdio draft spawned a server into the chat's sandbox: a failed test that
+            # never closes the transport leaks that server, its socket and the reader
+            # thread's busy-pin on the sandbox forever (the pin holds off its idle-stop).
+            # session() closes on the same failure (SRV-359); test() must too.
+            if s is not None:
+                s.close()
+            elif t is not None:
+                t.close()
             return {"ok": False, "tools": [], "message": str(exc)[:300]}
 
     # ---- the tools for the model
