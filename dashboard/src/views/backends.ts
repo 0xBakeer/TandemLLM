@@ -10,6 +10,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { api, describeError } from '../api/client';
 import { config, WRITER_DEFAULTS, type BackendConfig, type BackendKind, type ConfigOverview, type FeatureValue, type ModelRow, type Price, type ProxyUser, type Rule, type SeedPrices, type TestResult, type WriterConfig, type WriterMode } from '../api/config';
 import { ago, compact, exact, money, ms } from '../lib/format';
+import { inflightOnce } from '../lib/inflight';
 import { setParams } from '../lib/router';
 import { LightElement, type Loadable } from '../ui/base';
 import { copyButton, emptyState, errorState, icon, panel, skeleton } from '../ui/bits';
@@ -193,6 +194,8 @@ export class QseBackends extends LightElement {
   @state() private newKey: { label: string; key: string } | null = null;
   @state() private rules: Rule[] | null = null;
   @state() private seed: SeedPrices | null = null;
+  /** one flight at a time (deep audit 0.11.3): see loadSeed */
+  private seedFlight = inflightOnce(() => config.seedPrices());
   @state() private modelDrafts: Record<string, Partial<ModelRow> & { price?: Price | null }> = {};
   @state() private flash: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -652,8 +655,12 @@ export class QseBackends extends LightElement {
 
   private async loadSeed(): Promise<void> {
     if (this.seed) return;
+    // (deep audit 0.11.3) renderModels calls this from render: every re-render during the
+    // first fetch used to pass the null check and fire the same GET again -- several
+    // flights, and whichever answer came last wrote the @state. One flight now: a
+    // re-render shares it.
     try {
-      this.seed = await config.seedPrices();
+      this.seed = await this.seedFlight();
     } catch {
       this.seed = { as_of: '', note: '', providers: {} };
     }
