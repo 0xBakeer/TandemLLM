@@ -89,7 +89,7 @@ TandemLLM's own calls to itself (the router's question to the engine, `client_ki
 
 ## Building and testing
 
-The app is written in TypeScript with Lit components and built by Vite. Its charts are hand-drawn SVG, and it loads nothing from a CDN. `dashboard/dist/` is committed, and the server serves it from there.
+The app is written in TypeScript with Lit components and built by Vite. Its charts are hand-drawn SVG, and it loads nothing from a CDN. `dashboard/dist/` is committed, and the server serves it from there. The `dashboard-dist` workflow (`.github/workflows/dashboard-dist.yml`) builds it from source on every pull request and push to main that touches `dashboard/` and fails when the result differs from the committed `dist/`, so a dashboard change comes with its rebuilt `dist/`.
 
 ```bash
 cd dashboard
