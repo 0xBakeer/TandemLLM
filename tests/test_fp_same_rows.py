@@ -79,8 +79,13 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
     return f"v2 code {code[:16]} on the bytes, {same[:16]} with SAME_ROWS (0.7.2's)"
 
 
+#: SRV-619: engine/grammar.py changed after 0.9 without changing a stored row (a mask on the sampled
+#: token); it is in no model's manifest, so fp4 is untouched, and v2's engine walk reads its 0.9 bytes
+AFTER_09 = {k: v for k, v in mf.SAME_ROWS.items() if k[0] == "engine/grammar.py"}
+
+
 def test_the_27bs_code_fingerprints_are_0_9s():
-    v2 = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC)
+    v2 = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=AFTER_09)
     v3 = mf.fingerprint(ROOT, M27, {})
     assert v2.startswith(V2_09), v2
     assert v3.startswith(FP4_09["27b"]), v3

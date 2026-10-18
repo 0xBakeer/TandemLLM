@@ -58,7 +58,11 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
              "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
              ("tools/fn_prefill_kernels.py", "653b447087545778f29eb856e12681d0d1229847ada9ec7291477aeda8c54106"):
-             "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987"}
+             "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987",
+             # SRV-619: the answer constraint's union and the call markers; a mask on the sampled
+             # token, never a stored row
+             ("engine/grammar.py", "27b7a9b24ecb3296d647f9ae9df34dce366e3cd1890c4b751dec9ad8d1c59da4"):
+             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749"}
 
 
 def adoption() -> str:
