@@ -70,8 +70,10 @@ METRIC_FAMILIES = (
 # intersection of what each engine actually exports (vLLM/SGLang <v0.10 and ≥v0.10
 # naming both; the parse is a plain prefix walk, first hit per key wins).
 STATS_KEYS = {
-    "requests_running": ("num_requests_running", "requests_running", "running_requests"),
-    "requests_waiting": ("num_requests_waiting", "requests_waiting", "waiting_requests", "queue_size"),
+    "requests_running": ("num_requests_running", "requests_running", "running_requests",
+                         "num_running_reqs"),          # sglang (0.3.0 fork's live table)
+    "requests_waiting": ("num_requests_waiting", "requests_waiting", "waiting_requests",
+                         "queue_size", "num_queue_reqs"),
     "prompt_tokens": ("prompt_tokens_total", "prompt_tokens"),
     "generation_tokens": ("generation_tokens_total", "generation_tokens"),
 }
