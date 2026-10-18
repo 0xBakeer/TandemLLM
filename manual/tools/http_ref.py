@@ -207,6 +207,8 @@ HEADERS = [
     ("X-Tandem-User", "in", "engine", "a proxy's user name for the memory notes, honoured from loopback or QWEN38_MEMORY_PROXIES"),
     ("X-Tandem-Relay-Id", "in", "engine", "a proxy's id for a relayed request, for the live counts; a relayed request without X-Tandem-User touches no memory"),
     ("X-Tandem-Parent", "in", "engine", "the request a call of TandemLLM to itself serves; the row becomes client kind internal"),
+    ("X-Tandem-Worker", "in", "engine", "1 on an agent's worker request: its session comes back, so it is never a guest, and its rows go to the NVMe rather than away while it waits"),
+    ("X-Tandem-Parent-Session", "in", "engine", "a worker's parent session (the chat's): for 600 s after the worker's last request the parent's rows go to the NVMe rather than away, and its return tries slot 0 first"),
     ("X-Tandem-Regenerate", "in", "engine", "1 serves the request as a regenerate (sampled, a fresh seed); 0 turns the detection off for it"),
     ("X-Tandem-Images-Left-Out", "out", "engine", "how many earlier images were left out of the prompt"),
     ("X-Tandem-Forward", "out", "engine", "to chatd on a /v1/chat-app request: the forward key, the only proof chatd accepts"),

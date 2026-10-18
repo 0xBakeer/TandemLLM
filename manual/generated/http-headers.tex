@@ -8,6 +8,8 @@
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}User} & in, engine & a proxy's user name for the memory notes, honoured from loopback or QWEN38\_MEMORY\_PROXIES \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Relay-\allowbreak{}Id} & in, engine & a proxy's id for a relayed request, for the live counts; a relayed request without X-Tandem-User touches no memory \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Parent} & in, engine & the request a call of TandemLLM to itself serves; the row becomes client kind internal \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Worker} & in, engine & 1 on an agent's worker request: its session comes back, so it is never a guest, and its rows go to the NVMe rather than away while it waits \\
+\texttt{X-\allowbreak{}Tandem-\allowbreak{}Parent-\allowbreak{}Session} & in, engine & a worker's parent session (the chat's): for 600 s after the worker's last request the parent's rows go to the NVMe rather than away, and its return tries slot 0 first \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Regenerate} & in, engine & 1 serves the request as a regenerate (sampled, a fresh seed); 0 turns the detection off for it \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Images-\allowbreak{}Left-\allowbreak{}Out} & out, engine & how many earlier images were left out of the prompt \\
 \texttt{X-\allowbreak{}Tandem-\allowbreak{}Forward} & out, engine & to chatd on a \texttt{/\allowbreak{}v1/\allowbreak{}chat-\allowbreak{}app} request: the forward key, the only proof chatd accepts \\

@@ -38,9 +38,18 @@
 0.11.1 & 10-16 & chatd's access to the sandbox's folders follows no symlink; StairCut price files for Bolt's EXL3 2.5 to 6.0; each weight pack's maker in the setup guide; the install through the setup guide \\
 0.11.2 & 10-16 & chatd starts with the engine and the Chat tab says when it is down; install script and secrets fixes; sandbox containers scoped to their chatd; the preview opens the running app; Context panel figures; no horizontal overflow on a phone; a model picker with one row a model; Setup Guide steppers for chats and windows; Super VL window up to 1,048,576 \\
 0.11.3 & 10-17 & Setup Guide hardening: \code{tandem doctor}, a check before the restart, Retry and Copy diagnostics, the restart card, removing weights; Super VL reads images; a cloud model's figures and cost; slot affinity \\
+0.11.4 & 10-18 & Agents mode in the Chat tab: a main agent with workers, the Task card, workers in the Context panel; a worker's and its parent's cache rows kept; file texts out of a chat's requests; a memory refusal compacts; cloud runs take no run slot \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.11.4, Agents mode}\label{sec:changelog-0114}
+
+0.11.4 adds Agents mode to the Chat tab (Section~\ref{sec:chat-agents}). With the chat setting \code{agents} on, the main agent plans and reads, and gives every file write and every multi-step build or fix to a worker through the \code{task} tool. A worker is a full run on a hidden conversation of its own that sees the task, its brief and the user's request, and nothing else of the chat; its report comes back with chatd's check of what it changed and ran. A Task card shows each worker's run, report and transcript, and the Context panel shows each running worker apart, with its live prefill and decode figures. Stop, a queued message and Continue reach the worker. Agents mode is off by default.
+
+The engine keeps a worker's rows and its parent's while they take turns. A request with \code{X-Tandem-Worker} or \code{X-Tandem-Parent-Session} is never a guest; for 600~s after a worker's last request its parent's rows go to the NVMe rather than away, a returning parent tries slot~0 first, and the park and the NVMe spill keep a conversation they used to drop. A request with images resumes at the end anchor (\code{QWEN38_MM_END}), and the live row has a prefill rate from its first mark. These restores copy rows the engine computed before and compute none; the tests hold every resume's logits to a cold prefill's within $10^{-4}$. The identity gate was not run against 0.11.3.
+
+In a chat's own requests, a written file's text goes to the model as a stub from the next request on, a long read stays whole until a compaction, and a compaction cuts to under half the limit that set it off. A memory refusal compacts the chat and the run goes on, and a run on a cloud model takes no run slot. To upgrade, run the installer again, then \code{tandem restart} and \code{tandem chat restart}; chatd's store moves to v8 in place.
 
 \section{0.11.3, the Setup Guide hardened}\label{sec:changelog-0113}
 
