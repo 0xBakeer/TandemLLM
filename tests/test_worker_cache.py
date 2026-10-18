@@ -478,8 +478,11 @@ def test_the_park_goes_unwritten_wherever_a_write_would_be_unsafe():
     r = Res()
     slots_mod.bind(slots_mod.Slot(1, 1024))
     try:
+        assert app._shed_park(r) == 0 and r.park_rows and r.spilled == 0  # waited for: kept
+        app._PARK_LET_GO.on = True                                        # a refused gate's retry
         assert app._shed_park(r) == 1 and r.spilled == 0
     finally:
+        app._PARK_LET_GO.on = False
         slots_mod.bind(None)
     r = Res()
     assert app._shed_park(r, True) == 0 and r.park_rows and r.spilled == 0   # waited for: kept
@@ -702,6 +705,34 @@ def test_the_gate_holds_the_end_the_request_resumes_at_until_its_prefill():
     nxt2 = nxt + o + tokens(4, seed=48)
     app._gate_holding_end(m, res, nxt2, len(nxt2), False)
     assert m.seen == [True, False] and not res.end_hold, m.seen
+
+
+def test_a_gate_refused_with_a_waited_for_park_kept_runs_once_more_and_may_take_it():
+    """A side slot's gate keeps slot 0's parked parent (it cannot write it there); when that gate
+    would refuse, it runs once more and the park may go, so no request gets a 503 for it."""
+    res = _state(park_bytes=1 << 30)
+    wturn(PHEAD + tokens(200, seed=55), 6, "chat-p")
+    app.PARENTS.clear()
+    app._note_parent("chat-p")
+    wturn(WHEAD + tokens(60, seed=56), 6, "chat-p-task-1", stay=True)
+    assert res.park_owner == "chat-p"
+
+    class Mem:
+        def __init__(self):
+            self.passes = 0
+
+        def gate(self, n):
+            self.passes += 1
+            if not app._shed_park(res, False):
+                raise cache.MemoryRefused(2, 1, n)
+    slots_mod.bind(slots_mod.Slot(1, 1024))
+    try:
+        m = Mem()
+        app._gate_holding_end(m, None, [], 10, False)
+        assert m.passes == 2 and not res.park_rows, (m.passes, res.park_rows)
+    finally:
+        slots_mod.bind(None)
+        app.PARENTS.clear()
 
 
 def test_a_layer_mark_waits_for_no_capture():

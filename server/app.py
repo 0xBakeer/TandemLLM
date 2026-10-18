@@ -3349,6 +3349,10 @@ def _keep_parent(res, eng, drafter, stay: bool = False) -> None:
         print(f"[spill] {who} {res.owner} on {where}: not written, its rows go", flush=True)
 
 
+#: ENG-371: this thread's gate retry lets a waited-for park go (`on`); a shed kept one (`kept`)
+_PARK_LET_GO = threading.local()
+
+
 def _shed_park(res, safe: bool = False) -> int:
     """The memory policy's `park` level. ENG-371: a parked parent or worker (`_comes_back`) is
     written to the NVMe first (`ResidentPrefix._spill_park`) at the memory gate on slot 0's own
@@ -3361,8 +3365,9 @@ def _shed_park(res, safe: bool = False) -> int:
       * on a side slot's thread, or while the spill's I/O is held;
       * while a guest's rows lie over the park's head (the next request puts them back,
         `settle_guest`; a shedder never does).
-    A parked parent or worker is not given back by a `safe` shed at all; the next gate writes
-    it before it goes. The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
+    A parked parent or worker is not given back at all where it could not be written, unless a
+    refused gate runs once more (`_gate_holding_end`); slot 0's next gate writes it before it
+    goes. The write runs inside the gate, under `Budget.lock` (docs/caches.md)."""
     sp, st = res.spiller, res._stash
     if (not safe and res.park_rows and not res._park_busy and _comes_back(res.park_owner)
             and slots_mod.current() is None and sp is not None and not sp._own_io.locked()
@@ -3377,10 +3382,14 @@ def _shed_park(res, safe: bool = False) -> int:
                   f"park", flush=True)
         except Exception:                                          # noqa: BLE001
             logbuf.print_exc()
-    if safe and res.park_rows and _comes_back(res.park_owner):
-        # it is waited for: a pin's admission or the KV pool's reclaim does not drop it unwritten
-        # (live 2026-10-18 04:43: a pin's admission dropped a worker's parked 11,465 rows, and
-        # its next call read them all again); the next gate writes it before it goes
+    if (res.park_rows and _comes_back(res.park_owner) and not getattr(_PARK_LET_GO, "on", False)
+            and (safe or slots_mod.current() is not None)):
+        # it is waited for and could not be written here: a pin's admission, the KV pool's
+        # reclaim or a side slot's gate does not drop it unwritten (live 2026-10-18 04:43: a pin's
+        # admission dropped a worker's parked 11,465 rows; 05:02 a side slot's gate a parent's,
+        # and each read them again); slot 0's next gate writes it before it goes. A gate that
+        # refuses with it kept runs once more and may take it (`_gate_holding_end`)
+        _PARK_LET_GO.kept = True
         return 0
     return res.shed_park(safe)
 
@@ -3397,18 +3406,25 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
     gave back the end a worker's call had just been carried into slot 0 with, and the call read
     7,953 tokens from 0. The hold lasts until the prefill's `begin` (engine/cache.py), so a side
     slot's gate cannot drop that end in between. When the gate refuses with the end held (its
-    bytes were what the workspace lacked), it runs once more without the hold: the request then
-    reads its answer again rather than a 503 at every retry."""
+    bytes were what the workspace lacked), or with a waited-for park kept (`_shed_park`), it runs
+    once more without either: the request then reads its answer again, or the parked one does
+    later, rather than a 503 at every retry."""
     hold = _end_held(res, keys, n, mm_ok)
     if hold:
         res.end_hold = True
+    _PARK_LET_GO.kept = False
     try:
         mem.gate(n)
     except cache.MemoryRefused:
-        if not hold:
+        if not hold and not _PARK_LET_GO.kept:
             raise
-        res.end_hold = False
-        mem.gate(n)
+        if hold:
+            res.end_hold = False
+        _PARK_LET_GO.on = True               # and a waited-for park may go unwritten
+        try:
+            mem.gate(n)
+        finally:
+            _PARK_LET_GO.on = False
 
 
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
