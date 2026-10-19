@@ -17,6 +17,7 @@ may follow one. CPU only; the real container case is tests/test_sandbox_box.py.
    10  Workspace write, read, delete, list: a folder swapped for a symlink right after the check
        (the first file access) does not redirect the access
    11  a FIFO in the workspace does not block take, grep or read
+   12  a text file over the budget that cannot be placed is one line; the send does not fail
 
 Every case fails on chatd before the fix and passes after it.
 
@@ -127,6 +128,28 @@ def test_a_message_whose_attachment_cannot_be_placed_is_sent_and_says_why():
     finally:
         c.close()
         shutil.rmtree(outside)
+
+
+def test_a_text_file_over_the_budget_that_cannot_be_placed_is_sent_as_one_line():
+    c = Chat()
+    try:
+        cid = c.new()
+        ws = os.path.join(c.data, "workspaces", cid)
+        os.makedirs(ws, exist_ok=True)
+        open(os.path.join(ws, "uploads"), "w").close()                  # a file, not a folder
+        att = upload(c, "big.txt", "text/plain", ("x" * 99 + "\n").encode() * 2_000)
+        assert att["tokens"] > 32_000, att
+        st, out, _ = c.call("POST", f"/conversations/{cid}/messages",
+                            {"client_msg_id": "u1", "text": "read this",
+                             "attachments": [att["id"]]})
+        assert st in (200, 202), (st, out)
+        s = c.wait_idle(cid)
+        a = s["messages"][0]["attachments"][0]
+        assert "path" not in a and a["unplaced"] and a["inline"] is False, a
+        sent = c.last_body()["messages"][-1]["content"]
+        assert "```" not in sent and "It could not be saved to /workspace/uploads/" in sent, sent
+    finally:
+        c.close()
 
 
 def test_a_name_too_long_for_the_file_system_does_not_fail_the_send():
