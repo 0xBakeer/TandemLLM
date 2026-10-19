@@ -135,6 +135,8 @@ class Smoke:
                                     max_retries=0, default_headers=self.headers or None)
         self.model = model or self.client.models.list().data[0].id
         self.results: list[dict] = []
+        self.last_profile: str | None = None       # X-Tandem-Profile of the last streamed answer
+        self.last_mode: str | None = None          # its X-Tandem: on, shadow or raw
 
     def check(self, name, ok, **seen):
         self.results.append({"check": name, "pass": bool(ok), **seen})
@@ -156,7 +158,11 @@ class Smoke:
         content, reasoning, finish, usage, problems = "", "", None, None, []
         calls: dict[int, dict] = {}
         usage_chunks = 0
-        for ch in self.client.chat.completions.create(model=self.model, stream=True, **kw):
+        raw = self.client.chat.completions.with_raw_response.create(model=self.model, stream=True,
+                                                                    **kw)
+        self.last_profile = raw.headers.get("x-tandem-profile")
+        self.last_mode = raw.headers.get("x-tandem")
+        for ch in raw.parse():
             if ch.usage is not None:
                 usage, usage_chunks = ch.usage, usage_chunks + 1
             for cc in ch.choices:
@@ -375,8 +381,15 @@ def main() -> int:
                        max_tokens=4096, extra_body=OFF)
         expect_calls("sdk: write_file call, streamed", res, WEATHER, ["write_file"])
         chunks = [c[4] for c in res[2]]
-        s.check("sdk: a long string argument streams in many chunks", chunks and max(chunks) > 5,
-                chunks=chunks)
+        if s.last_profile == "tools" and s.last_mode == "on":
+            # the tools profile's tool-call checks act, so SP3 holds a call until it has seen it
+            # and sends it whole, one delta a call (docs/server.md, Tool-call checks)
+            s.check("sdk: a held call goes out whole, one delta (tools profile)", chunks == [1],
+                    chunks=chunks, profile=s.last_profile, mode=s.last_mode)
+        else:
+            s.check("sdk: a long string argument streams in many chunks",
+                    chunks and max(chunks) > 5, chunks=chunks, profile=s.last_profile,
+                    mode=s.last_mode)
 
     @add("sdk: tool round trip with typed arguments in the history")
     def _():
@@ -437,7 +450,7 @@ def main() -> int:
 
     @add("owui agent: 12k prompt, penalties, tools, streamed")
     def _():
-        content, _, calls, fin, usage, prob = s.stream(
+        content, reasoning, calls, fin, usage, prob = s.stream(
             messages=[{"role": "system", "content": "You are a helpful agent.\n" + filler(11700)},
                       {"role": "user", "content": "What is 12 times 12? One line."}],
             stream_options={"include_usage": True}, max_tokens=32768,
@@ -447,11 +460,14 @@ def main() -> int:
             extra_body={"no_repeat_ngram_size": 4, "max_reasoning_tokens": 1536,
                         "reasoning_effort": "low", "repetition_penalty": 1.05})
         # served is the check (rc6 answered this shape with an error); the penalties may well steer
-        # the digits of the answer (measured: "₁₄₄"), which is the penalty's business
+        # the digits of the answer (measured: "₁₄₄"), which is the penalty's business. On the raw
+        # path the answer can end inside the reasoning: 0.11.4 and 0.12.0 both write 9 tokens and
+        # no </think> (2026-10-19); the open block was the content until SRV-617 moved a plain
+        # client's thinking to reasoning_content
         s.check("owui agent: 12k prompt + penalties + no_repeat + tools: served",
                 fin in ("stop", "tool_calls") and usage is not None and not prob
-                and (content.split("</think>")[-1].strip() or calls), finish=fin,
-                tail=content[-80:],
+                and (content.split("</think>")[-1].strip() or calls or reasoning.strip()),
+                finish=fin, tail=content[-80:], reasoning_tail=reasoning[-80:],
                 prompt=getattr(usage, "prompt_tokens", None))
 
     @add("long prompts")
