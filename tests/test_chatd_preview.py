@@ -18,6 +18,7 @@ from chatd_util import Chat, run_all
 from test_chatd_agent import RelayBoxes
 
 from chatd import preview as PV, sandbox as sb_mod, tools as T
+from chatd.terminals import port_target
 from chatd.workspace import Workspace
 
 _spec = importlib.util.spec_from_file_location("relay", sb_mod.RELAY)
@@ -135,6 +136,28 @@ def test_the_port_proxy_lets_the_opaque_preview_read_its_modules_and_adds_the_sh
             low = {k.lower() for k in hdrs}
             assert not low & {"origin", "referer", "sec-fetch-site", "sec-fetch-mode"}, (path, low)
         assert any("sec-fetch-dest" in {k.lower() for k in hd} for _, hd in seen)
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_the_port_proxy_forwards_the_path_as_the_client_sent_it():
+    """A dev server answers /docs with a redirect to /docs/ (a loop when the slash is cut), and a
+    decoded %20 or %0d%0a in the request line breaks it or adds a header."""
+    c = chat()
+    app, seen = server({"/docs/": (200, "text/plain", b"docs", {})})
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        for rest in ("/docs/?q=1", "/my%20file.png", "/a%0d%0aX-Evil:%201"):
+            c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}{rest}")
+        assert [p for p, _ in seen] == ["/docs/?q=1", "/my%20file.png",
+                                        "/a%0d%0aX-Evil:%201"], seen
+        assert not any("x-evil" in {k.lower() for k in hd} for _, hd in seen), seen
+        assert port_target(f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}") == "/"
+        assert port_target(f"/conversations/{cid}/sandbox/ports/{port}/a b") is None
+        assert port_target(f"/conversations/{cid}/sandbox/ports/{port}/a\r\nX: 1") is None
     finally:
         app.shutdown()
         c.close()
