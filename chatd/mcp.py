@@ -45,8 +45,10 @@ from chatd.tools import Result, Tool, ToolError
 PROTOCOL = "2025-06-18"
 CLIENT = {"name": "tandemllm-chatd", "version": "0.1"}
 DEFAULT_TIMEOUT_S = 120.0
-EXEC_FIRST_FRAME_S = 30.0    # a hijacked exec stream answers its 101 at once; 30 s of
-                             # silence after that is a server that never got going
+INIT_GRACE_S = 60.0            # session() gives a server min(60, timeout_s) to answer
+                               # initialize — a cold uvx/npx may spend it all starting
+EXEC_FIRST_FRAME_S = INIT_GRACE_S   # the hijacked exec stream is the same cold server:
+                                    # its first frame gets the same grace, no less
 MAX_BODY = 64 << 20       # one JSON answer over this is refused BY NAME, never truncated
                          # into a json.loads failure: a screenshot result is a few MB,
                          # the cap has to clear the work, not just the hostility
@@ -307,9 +309,13 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
         def closer():
             # a dropped or restarted server: closing the socket alone leaves its process
             # running in the sandbox (and forever), so end the exec itself; it dies, the
-            # engine closes the stream, the reader reaps the slot
-            sandboxes.end_exec(exec_id)
-            sock.close()
+            # engine closes the stream, the reader reaps the slot. The close is a finally:
+            # an OSError out of end_exec (the socket is already gone in this path) must
+            # not skip it and leak the fd.
+            try:
+                sandboxes.end_exec(exec_id)
+            finally:
+                sock.close()
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),
                 closer)
     return open_pipe
@@ -603,7 +609,7 @@ class Mcp:
         s = Session(self._transport(r, cid), on_list_changed=lambda: self.refresh(sid, cid),
                     log=self.svc.log)
         try:
-            s.initialize(timeout=min(60.0, r["timeout_s"] or DEFAULT_TIMEOUT_S))
+            s.initialize(timeout=min(INIT_GRACE_S, r["timeout_s"] or DEFAULT_TIMEOUT_S))
         except McpError as exc:
             s.close()
             self._status(sid, "failed", str(exc))

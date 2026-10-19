@@ -31,6 +31,7 @@ class FakeSandboxes:
         self.ended: list[str] = []
         self.box_ = FakeBox()
         self.peer: socket.socket | None = None
+        self.sock: socket.socket | None = None
 
     def ensure(self, cid):
         pass
@@ -41,6 +42,7 @@ class FakeSandboxes:
     def open_exec(self, cid, cmd, *, tty=False, stdin=False, env=None, workdir="/workspace"):
         a, b = socket.socketpair()
         self.peer = b
+        self.sock = a
         return "exec-1", a, b""
 
     def end_exec(self, exec_id):
@@ -74,6 +76,22 @@ def test_session_close_goes_through_the_closer():
     s = mcp_mod.Session(t)
     s.close()
     assert sb.ended == ["exec-1"]
+
+
+def test_a_failing_end_exec_still_closes_the_socket():
+    class Raising(FakeSandboxes):
+        def end_exec(self, exec_id):
+            FakeSandboxes.end_exec(self, exec_id)
+            raise OSError("engine gone mid-kill")
+    sb = Raising()
+    _write, _start, closer = mcp_mod.exec_pipe(sb, "c1", "server", [], {})(lambda line: None)
+    raised = False
+    try:
+        closer()
+    except OSError:
+        raised = True
+    assert raised, "the closer swallowed the OSError instead of re-raising"
+    assert sb.sock.fileno() == -1, "a failing end_exec still skipped sock.close()"
 
 
 if __name__ == "__main__":

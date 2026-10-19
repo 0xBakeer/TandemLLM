@@ -32,6 +32,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 import urllib.parse
 
 CHUNK = 65536
@@ -248,15 +249,26 @@ class Proxy:
 
 def _splice(a: socket.socket, b: socket.socket,
             idle: float = SPLICE_IDLE_TIMEOUT_S) -> None:
-    """Pump both ways until either side ends; a side that has heard nothing for `idle`
-    is treated as ended, so a half-open tunnel dies instead of standing forever."""
+    """Pump both ways until either side ends. The idle clock is SHARED by the two pumps:
+    traffic in either direction feeds it, so a download — a client that sends nothing for
+    minutes while upstream streams a pip/Hugging Face/git/SSE transfer — is not read as an
+    idle tunnel. Only a tunnel both directions have stopped speaking through for `idle`
+    dies, which is the half-open case this exists for."""
+    last = [time.monotonic()]                # one shared cell: both pumps feed it
+
     def pump(src, dst):
         try:
-            src.settimeout(idle)                 # a TimeoutError out of recv ends it here
             while True:
-                d = src.recv(CHUNK)
+                src.settimeout(min(1.0, idle))   # poll: the other pump may be the live side
+                try:
+                    d = src.recv(CHUNK)
+                except TimeoutError:
+                    if time.monotonic() - last[0] > idle:
+                        break
+                    continue
                 if not d:
                     break
+                last[0] = time.monotonic()
                 dst.sendall(d)
         except OSError:
             pass
