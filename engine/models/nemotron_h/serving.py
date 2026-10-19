@@ -37,7 +37,7 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py", "engine/models/lfm2_moe/kernels.py",
-           "engine/models/lfm2_moe/pack.py", "engine/settings.py")
+           "engine/models/lfm2_moe/pack.py", "engine/settings.py", "engine/vision.py")
 #: the model's name in ops/prices/ and models/, by the served weight profile's name
 MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b",
              "nemotron-super-vl-": "nemotron-3.5-super-vl-120b-a12b"}
