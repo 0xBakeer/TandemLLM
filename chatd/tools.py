@@ -155,7 +155,7 @@ def _read(ctx, a):
         return Result(f"{path}: a binary file, {st.st_size:,} bytes; not shown")
     lines = data.decode("utf-8", "replace").splitlines()
     off = max(1, int(a.get("offset") or 1))
-    lim = max(1, min(2000, int(a.get("limit") or 2000)))  # a negative limit reads nothing
+    lim = max(1, min(2000, int(a.get("limit") or 2000)))  # 1 to 2,000 lines: 0 or less reads one
     if getattr(ctx, "agents", False):
         return _read_capped(lines, off, min(lim, AGENTS_READ_LINES))
     chunk = lines[off - 1:off - 1 + lim]
