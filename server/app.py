@@ -908,8 +908,10 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
                    parent: str | None = None, session: str | None = None) -> int | None:
     """The window a side slot needs for this request, or None when it must wait for slot 0: a side
-    lane job (served at slot 0's safe points), a request with images (side slots are text only),
-    or one no side slot is long enough for. A request that continues slot 0's resident
+    lane job (served at slot 0's safe points), a request with images while SIDE_IMAGES is off (or
+    with a tower that builds its own context, `_mm_keys`), or one no side slot is long enough for.
+    SRV-629: a request with images is routed on its expanded key ids and its window counts their
+    rows (`why["n_images"]`, `why["n_rows"]`). A request that continues slot 0's resident
     conversation (it resumes there in place; on a side slot it prefills what the disk tier does not
     hold) gets its window too, with `why["slot0_first"]`: the handler tries slot 0 first, for
     SIDE_SLOT0_WAIT_S (0.8.2). Host work only: the ids are rendered on the CPU, before any lock.
@@ -1099,7 +1101,8 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
             # SRV-546: a conversation with images runs on slot 0 only (side slots read no images):
             # a new chat that takes slot 0 from it sends it to the NVMe, as one too long for a side
             # slot (live 2026-10-17 10:38: a 7,293-token chat took slot 0 beside a free side slot
-            # and the 140,191-token pagoda run went to the NVMe)
+            # and the 140,191-token pagoda run went to the NVMe). SRV-629: kept with SIDE_IMAGES
+            # on: its next turn may take a side slot, but reads its prompt there again
             bound = (valid + margin + SIDE_MIN_ROOM > longest
                      or bool(res.end is not None and res.end.get("mm")))
             # ENG-371: a worker beside its own parent: the parent stays on slot 0
@@ -1127,7 +1130,10 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
         return _wait_reason(me)[0]
     if side_need is None:
         if why.get("images"):
-            return "it has images, which only slot 0 reads; waits for slot 0"
+            if SIDE_IMAGES != "on":
+                return "it has images, which only slot 0 reads; waits for slot 0"
+            # SRV-629: a tower with its own context (Super VL) is read on slot 0 only
+            return "this model's images are read on slot 0 only; waits for slot 0"
         if why.get("wait") == "too_long" or why.get("too_long"):
             longest = max((s.max_len for s in pool.side()), default=0)
             return f"too long for a side slot ({longest:,} tokens); waits for slot 0"
@@ -1149,6 +1155,20 @@ def _queue_why(pool, why: dict, side_need, waited: float, me: dict) -> str:
     if all(s.busy for s in pool.slots):
         return f"all {pool.n} slots are busy"
     return _wait_reason(me)[0]
+
+
+def _par_nums(why: dict) -> str:
+    """The numbers of the `[parallel]` line: what the slot was chosen on (SRV-197), and for a
+    request with images their count and the expanded rows (SRV-629)."""
+    nums = " ".join(f"{k}={why[k]}" for k in ("view", "view_common", "valid", "res_common",
+                                              "conv", "need", "guest", "park", "slot0_wait_s",
+                                              "home", "home_share", "home_wait", "hop_from",
+                                              "prefer_side", "slot0_stale", "new_wait", "spill",
+                                              "spill_head", "slot0_wait")
+                    if k in why)
+    if "n_images" in why:
+        nums = f"images={why['n_images']} rows={why.get('n_rows')} {nums}".rstrip()
+    return nums
 
 
 def _side_room(slot, n_ids: int, margin: int, max_new: int) -> int:
@@ -7787,14 +7807,7 @@ class Handler(BaseHTTPRequestHandler):
                                               or par_why.get("hop_from") is not None):
             # SRV-197: which slot, and the numbers it was chosen on (the cache share of an agent's
             # turns hangs on it: a side slot has no resident rows to resume)
-            nums = " ".join(f"{k}={par_why[k]}" for k in ("view", "view_common", "valid",
-                                                          "res_common", "conv", "need", "guest",
-                                                          "park", "slot0_wait_s", "home",
-                                                          "home_share", "home_wait",
-                                                          "hop_from", "prefer_side", "slot0_stale",
-                                                          "new_wait", "spill", "spill_head",
-                                                          "slot0_wait")
-                            if k in par_why)
+            nums = _par_nums(par_why)
             if side is not None:
                 # A request that shares only the client's head with slot 0's
                 # conversation is a new conversation, and says so

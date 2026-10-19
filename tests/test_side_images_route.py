@@ -11,6 +11,10 @@ engine decodes an image request as slot 0's does; this file checks the choice:
      not its one placeholder (8 screenshots: about 7,700 rows); `_mm_keys` is the context's
      `key_ids`, on the host
   2  `SIDE_IMAGES` off: slot 0 only, as 0.12.0; on: a side slot when it fits
+  3  every routing test on the key ids, as the caches compare them: slot 0's rows and view, a
+     side slot's home, the park and the NVMe with an end kept after images, the carry's choice;
+     a request with images is never a guest of slot 0
+  4  the Lanes view's queued line and the `[parallel]` line for both flag values
 
 Run: python tests/test_side_images_route.py
 """
@@ -391,6 +395,36 @@ def test_a_side_slots_shorter_end_is_not_carried_over_slot_0s_end_after_images()
     finally:
         pool.slots[1].carry = None
         _restore(saved)
+
+
+
+# ------------------------------------------------------------------ 4. what the Lanes view and the log say
+def test_the_queued_line_and_the_parallel_line_for_both_flag_values():
+    r1 = _session(1, HEAD, 1_500) + [7, 8, 9]
+    ids = with_shots(_session(4, HEAD, 900), 2) + [7, 8, 9]
+    me = {"rank": 0, "t": 0.0, "side": None, "own": False, "rec": None}
+    pool, saved = _setup(FakeResident(r1), view=r1)
+    try:
+        with flag("off"):
+            need, why = need_img(ids, [shot(1), shot(2)], max_new=4_000)
+            assert A._queue_why(pool, why, need, 0.0, me) == \
+                "it has images, which only slot 0 reads; waits for slot 0"
+            assert "images=" not in A._par_nums(why)
+        with flag("on"):
+            need, why = need_img(ids, [shot(1), shot(2)], max_new=4_000)
+            line = A._queue_why(pool, why, need, 0.0, me)
+            assert "images" not in line, line
+            nums = A._par_nums(why)
+            assert nums.startswith(f"images=2 rows={len(ids) - 2 + 2 * 1_134} "), nums
+            assert f"need={need}" in nums, nums
+        own = tower(own=lambda ids, images, cache=None, on_encode=None: (list(ids), None))
+        with flag("on", own):
+            need, why = need_img(ids, [shot(1), shot(2)], max_new=4_000)
+            assert need is None and A._queue_why(pool, why, need, 0.0, me) == \
+                "this model's images are read on slot 0 only; waits for slot 0"
+    finally:
+        _restore(saved)
+    return nums
 
 
 if __name__ == "__main__":
