@@ -708,6 +708,231 @@ if HAVE_TRITON:
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
 
+    @triton.jit
+    def _iq2xs_gemm(X, s_x, D, QS, SC, GR, KS, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+        # IQ2_XS: 256 a block; 32 u16 — low 9 bits index the 512-entry 8-elem grid, top 7 bits the
+        # even-parity sign table; a 4-bit scale a 16-elem group. w = d*(0.5+s)*0.25*grid*sign.
+        # The whole block is decoded to [BN, 256] and dotted once — the hot path's contract.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 32)
+        j8 = tl.arange(0, 8)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            lo = tl.load(QS + b[:, None] * 64 + 2 * e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            hi = tl.load(QS + b[:, None] * 64 + 2 * e[None, :] + 1, mask=cm[:, None], other=0).to(tl.int32)
+            u = lo | (hi << 8)                                                            # [BN,32]
+            ge = tl.load(GR + (u & 511))                                                        # [BN,32] i64
+            gr = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.float32)              # [BN,32,8]
+            ks = tl.load(KS + (u >> 9)).to(tl.int32)                                      # [BN,32]
+            neg = ((ks[:, :, None] >> j8[None, None, :]) & 1) == 1                          # [BN,32,8]
+            scb = tl.load(SC + b[:, None] * 8 + (e // 4)[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            sc4 = (scb >> (4 * ((e // 2) % 2))[None, :]) & 0xF                              # [BN,32] group scale a entry pair
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)                           # [BN]
+            db = (d[:, None] * (0.5 + sc4.to(tl.float32)) * 0.25)[:, :, None]               # [BN,32,1]
+            w = tl.reshape(tl.where(neg, -1.0, 1.0) * gr * db, (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+    @triton.jit
+    def _iq3xxs_gemm(X, s_x, D, QS, SC, GR, KS, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+        # IQ3_XXS: 256 a block; 64 qs bytes index the 256-entry 4-elem grid; eight u32 sc words,
+        # each four 7-bit sign indices and a 4-bit scale. w = d*(0.5+s)*0.5*grid*sign.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 64)
+        l4 = tl.arange(0, 4)
+        e4 = tl.arange(0, 4)
+        g8 = tl.arange(0, 8)
+        j8 = tl.arange(0, 8)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            idx = tl.load(QS + b[:, None] * 64 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            ge = tl.load(GR + idx).to(tl.int64)                                                   # [BN,64] i32
+            gr = ((ge[:, :, None] >> (8 * e4[None, None, :])) & 0xFF).to(tl.float32)              # [BN,64,4]
+            scw = tl.load(SC + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0)       # [BN,8] u32
+            si = (scw[:, :, None] >> (7 * l4[None, None, :])) & 0x7F                          # [BN,8,4]
+            ks = tl.load(KS + si).to(tl.int32)
+            neg = ((ks[:, :, :, None] >> j8[None, None, None, :]) & 1) == 1                   # [BN,8,4,8]
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
+            db = (d[:, None] * (0.5 + ((scw >> 28) & 0xF).to(tl.float32)) * 0.5)[:, :, None]  # [BN,8,1]
+            w = tl.reshape(tl.where(neg, -1.0, 1.0), (BN, 8, 32))
+            w = (w * tl.reshape(gr, (BN, 8, 32)) * db)
+            w = tl.reshape(w, (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+    @triton.jit
+    def _iq3s_gemm(X, s_x, D, QS, QH, SG, SC, GR, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+        # IQ3_S: 256 a block; 64 qs bytes | one qh bit each index the 512-entry 4-elem grid; 32 sg
+        # bytes sign each weight; eight 4-bit group scales. w = d*(1+2s)*grid*sign.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 64)
+        g8 = tl.arange(0, 8)
+        e4 = tl.arange(0, 4)
+        j8 = tl.arange(0, 8)
+        b32 = tl.arange(0, 32)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            lo = tl.load(QS + b[:, None] * 64 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            hmb = tl.load(QH + b[:, None] * 8 + (e // 8)[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            idx = lo | (((hmb >> (e % 8)[None, :]) & 1) << 8)                                 # [BN,64]
+            ge = tl.load(GR + idx).to(tl.int64)                                                   # [BN,64] i32
+            gr = ((ge[:, :, None] >> (8 * e4[None, None, :])) & 0xFF).to(tl.float32)              # [BN,64,4]
+            sgb = tl.load(SG + b[:, None] * 32 + b32[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            neg = ((sgb[:, :, None] >> j8[None, None, :]) & 1) == 1                           # [BN,32,8]
+            scb = tl.load(SC + b[:, None] * 4 + (g8 // 2)[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            sc4 = (scb >> (4 * (g8 % 2))[None, :]) & 0xF                                      # [BN,8]
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
+            db = (d[:, None] * (1.0 + 2.0 * sc4.to(tl.float32)))[:, :, None]                  # [BN,8,1]
+            w = tl.reshape(tl.where(neg, -1.0, 1.0), (BN, 8, 32))
+            w = (w * tl.reshape(gr, (BN, 8, 32)) * db)
+            w = tl.reshape(w, (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+    @triton.jit
+    def _iq2s_gemm(X, s_x, D, QS, QH, SG, SC, GR, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+        # IQ2_S: 256 a block; 32 qs bytes | two qh bits each index the 1024-entry 8-elem grid; 32 sg
+        # bytes sign each weight; a 4-bit scale a 16-elem group. w = d*(0.5+s)*0.25*grid*sign.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 32)
+        j8 = tl.arange(0, 8)
+        g8 = tl.arange(0, 8)
+        c4 = tl.arange(0, 4)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            lo = tl.load(QS + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            qhb = tl.load(QH + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            hbv = (qhb[:, :, None] >> (2 * c4[None, None, :])) & 3                            # [BN,8,4]
+            idx = lo | (tl.reshape(hbv, (BN, 32)) << 8)                                       # [BN,32]
+            ge = tl.load(GR + idx)                                                              # [BN,32] i64
+            gr = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.float32)              # [BN,32,8]
+            sgb = tl.load(SG + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            neg = ((sgb[:, :, None] >> j8[None, None, :]) & 1) == 1                           # [BN,32,8]
+            scb = tl.load(SC + b[:, None] * 8 + (e // 4)[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            sc4 = (scb >> (4 * ((e // 2) % 2))[None, :]) & 0xF                                # [BN,32]
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
+            db = (d[:, None] * (0.5 + sc4.to(tl.float32)) * 0.25)[:, :, None]                 # [BN,32,1]
+            w = tl.reshape(tl.where(neg, -1.0, 1.0) * gr * db, (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+    @triton.jit
+    def _iq1s_gemm(X, s_x, D, QS, QH, GR, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
+                   F32: tl.constexpr):
+        # IQ1_S: 256 a block; 32 qs bytes | 3 bits of the group's u16 qh word index the 2048-entry
+        # 8-elem grid; qh bits 12..14 the group scale, bit 15 the constant delta's sign.
+        # w = d*(2*sc+1) * (grid +- DELTA).
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 32)
+        j8 = tl.arange(0, 8)
+        g8 = tl.arange(0, 8)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            lo = tl.load(QS + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            qw = tl.load(QH + b[:, None] * 8 + (e // 4)[None, :], mask=cm[:, None], other=0)    # [BN,32]
+            idx = lo | (((qw >> (3 * (e % 4))[None, :]) & 7) << 8)                            # [BN,32]
+            ge = tl.load(GR + idx)                                                              # [BN,32] i64
+            gr = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.float32) - 1.0        # [BN,32,8]
+            qw8 = tl.load(QH + b[:, None] * 8 + g8[None, :], mask=cm[:, None], other=0)       # [BN,8]
+            delta = tl.where((qw8 & 0x8000) == 0, DELTA, -DELTA)[:, :, None]                  # [BN,8,1]
+            d = tl.load(D + b, mask=cm, other=0.0).to(tl.float32)
+            dl = (d[:, None] * (2.0 * ((qw8 >> 12) & 7).to(tl.float32) + 1.0))[:, :, None]    # [BN,8,1]
+            w = tl.reshape(gr, (BN, 8, 32)) + delta
+            w = tl.reshape(w * dl, (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+    @triton.jit
+    def _iq1m_gemm(X, s_x, QS, QH, DL, GR, Y, s_y, M, N, NB, DELTA: tl.constexpr, BN: tl.constexpr,
+                   F32: tl.constexpr):
+        # IQ1_M: 256 a block; 32 qs bytes | a qh nibble's low three bits index the 2048-entry grid,
+        # its high bit flips DELTA; the 16 scales folded into DL fp16 at init. w = dl*(grid+-DELTA).
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        brow = cols * NB
+        t = tl.arange(0, 256)
+        e = tl.arange(0, 32)
+        j8 = tl.arange(0, 8)
+        s16 = tl.arange(0, 16)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            b = brow + kb
+            lo = tl.load(QS + b[:, None] * 32 + e[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            hmb = tl.load(QH + b[:, None] * 16 + (e // 2)[None, :], mask=cm[:, None], other=0).to(tl.int32)
+            hb = (hmb >> (4 * (e % 2))[None, :]) & 0xF                                        # [BN,32]
+            idx = lo | ((hb & 7) << 8)
+            ge = tl.load(GR + idx)                                                              # [BN,32] i64
+            gr = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.float32) - 1.0        # [BN,32,8]
+            delta = tl.where((hb & 8) == 0, DELTA, -DELTA)[:, :, None]                        # [BN,32,1]
+            dl = tl.load(DL + b[:, None] * 16 + s16[None, :], mask=cm[:, None], other=0.0).to(tl.float32)
+            w = tl.reshape(gr + delta, (BN, 16, 16))
+            w = tl.reshape(w * dl[:, :, None], (BN, 256)).to(tl.bfloat16)
+            x = tl.load(X + rows[:, None] * s_x + kb * 256 + t[None, :],
+                        mask=rows[:, None] < M, other=0.0)
+            acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
+
+
 class _Packed:
     """Shared bits of the packed GGUF linears: `matmul` on the fused kernel up to ROWS_MAX rows, the
     bf16 twin on cuBLAS beyond — Q8Linear's contract. `raw` stays on the host for `dequant`."""
@@ -1011,11 +1236,186 @@ class IQ4XSLinear(_Packed):
         _iq4xs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.qs, self.dl,
                                                                  self.lut, out, out.stride(0), M, self.N,
                                                                  self.K // 256, BN=32, F32=f32,
-                                                                 num_warps=2, num_stages=3)
+                                                                 num_warps=2, num_stages=1)
 
+
+class IQ2XSLinear(_Packed):
+    """Packed IQ2_XS [N, K]: d fp16 [N, K/256], qs [N, nb, 64] (u16 grid|sign-index pairs),
+    sc [N, nb, 8] (group nibbles); the 512-entry grid and the sign table live on-device."""
+
+    tid = 17
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        from tools.iq2_linear import KSIGNS
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 74)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:66])).to(device)
+        self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
+        self.gr = torch.from_numpy((GR.IQ2_XS_GRID.astype(np.int64) << (8 * np.arange(8))).sum(1)).to(device)
+        self.ks = torch.from_numpy(np.ascontiguousarray(KSIGNS.astype(np.int32))).to(device)
+        self.nbytes = N * nb * 74
+
+    def _kernel(self, x2, out, M, f32):
+        _iq2xs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 16))](x2, x2.stride(0), self.d, self.qs,
+                                                                 self.sc, self.gr, self.ks, out,
+                                                                 out.stride(0), M, self.N,
+                                                                 self.K // 256, BN=16, F32=f32,
+                                                                 num_warps=4, num_stages=1)
+
+
+class IQ3XXSLinear(_Packed):
+    """Packed IQ3_XXS [N, K]: d fp16 [N, nb], qs [N, nb, 64] (u8 grid indices into the
+    256-entry 4-elem grid), sc u32 [N, nb, 8] (sign indices + group scale)."""
+
+    tid = 18
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        from tools.iq2_linear import KSIGNS
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 98)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:66])).to(device)
+        self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 66:98]).view(np.uint32).astype(np.int32)).to(device)
+        self.gr = torch.from_numpy((GR.IQ3_XXS_GRID.astype(np.int32) << (8 * np.arange(4))).sum(1)).to(device)
+        self.ks = torch.from_numpy(np.ascontiguousarray(KSIGNS.astype(np.int32))).to(device)
+        self.nbytes = N * nb * 98
+
+    def _kernel(self, x2, out, M, f32):
+        _iq3xxs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.d, self.qs,
+                                                                  self.sc, self.gr, self.ks, out,
+                                                                  out.stride(0), M, self.N,
+                                                                  self.K // 256, BN=32, F32=f32,
+                                                                  num_warps=4, num_stages=1)
+
+
+class IQ3SLinear(_Packed):
+    """Packed IQ3_S [N, K]: d fp16 [N, nb], qs [N, nb, 64] + qh [N, nb, 8] (9-bit grid indices into
+    the 512-entry 4-elem grid), sg [N, nb, 32] (per-weight sign bits), sc [N, nb, 4] nibbles."""
+
+    tid = 21
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 110)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:66])).to(device)
+        self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
+        self.sg = torch.from_numpy(np.ascontiguousarray(b[..., 74:106])).to(device)
+        self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 106:110])).to(device)
+        self.gr = torch.from_numpy((GR.IQ3_S_GRID.astype(np.int32) << (8 * np.arange(4))).sum(1)).to(device)
+        self.nbytes = N * nb * 110
+
+    def _kernel(self, x2, out, M, f32):
+        _iq3s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.d, self.qs,
+                                                                self.qh, self.sg, self.sc, self.gr,
+                                                                out, out.stride(0), M, self.N,
+                                                                self.K // 256, BN=32, F32=f32,
+                                                                num_warps=4, num_stages=1)
+
+
+class IQ2SLinear(_Packed):
+    """Packed IQ2_S [N, K]: d fp16 [N, nb], qs [N, nb, 32] + qh [N, nb, 8] (10-bit grid indices
+    into the 1024-entry 8-elem grid), sg [N, nb, 32] sign bits, sc [N, nb, 8] nibbles."""
+
+    tid = 22
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 82)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:34])).to(device)
+        self.sg = torch.from_numpy(np.ascontiguousarray(b[..., 34:66])).to(device)
+        self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 66:74])).to(device)
+        self.sc = torch.from_numpy(np.ascontiguousarray(b[..., 74:82])).to(device)
+        self.gr = torch.from_numpy((GR.IQ2_S_GRID.astype(np.int64) << (8 * np.arange(8))).sum(1)).to(device)
+        self.nbytes = N * nb * 82
+
+    def _kernel(self, x2, out, M, f32):
+        _iq2s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.d, self.qs,
+                                                                self.qh, self.sg, self.sc, self.gr,
+                                                                out, out.stride(0), M, self.N,
+                                                                self.K // 256, BN=32, F32=f32,
+                                                                num_warps=4, num_stages=1)
+
+
+class IQ1SLinear(_Packed):
+    """Packed IQ1_S [N, K]: d fp16 [N, nb], qs [N, nb, 32] + qh words [N, nb, 8] carrying grid
+    hi-bits, group scale and delta sign; the 2048-entry grid on-device."""
+
+    tid = 19
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 50)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 2:34])).to(device)
+        self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 34:50]).view(np.uint16).astype(np.int32)).to(device)
+        self.gr = torch.from_numpy(((GR.IQ1_GRID.astype(np.int64) + 1) << (8 * np.arange(8))).sum(1)).to(device)
+        self.nbytes = N * nb * 50
+        self._delta = float(GR.IQ1_DELTA)
+
+    def _kernel(self, x2, out, M, f32):
+        _iq1s_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 16))](x2, x2.stride(0), self.d, self.qs,
+                                                                self.qh, self.gr, out,
+                                                                out.stride(0), M, self.N,
+                                                                self.K // 256, DELTA=self._delta,
+                                                                BN=16, F32=f32,
+                                                                num_warps=4, num_stages=1)
+
+
+class IQ1MLinear(_Packed):
+    """Packed IQ1_M [N, K]: qs [N, nb, 32] + qh [N, nb, 16] (grid hi-bits + delta bits), and the
+    nibble-assembled fp16 d folded with the 3-bit scales into dl fp16 [N, nb, 16] at init."""
+
+    tid = 29
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 56)
+        self._raw = b.copy()
+        scw = b[..., 48:56].reshape(-1, 8).view(np.uint16).reshape(-1, 4)
+        dn = (scw >> np.uint16(12)) & np.uint16(0xF)                                          # [nb*N, 4]
+        d = ((dn[:, 0] | (dn[:, 1] << 4) | (dn[:, 2] << 8) | (dn[:, 3] << 12)).astype(np.uint16)
+             .view(np.float16).astype(np.float32))
+        sl = ((scw.reshape(-1, 4, 1) >> np.array([0, 3, 6, 9], np.uint16)[None, None, :])
+              & np.uint16(7)).reshape(-1, 16)
+        dl = (d[:, None] * (2 * sl.astype(np.float32) + 1)).reshape(N, nb, 16)
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.dl = torch.from_numpy(np.ascontiguousarray(dl.astype(np.float16))).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 0:32])).to(device)
+        self.qh = torch.from_numpy(np.ascontiguousarray(b[..., 32:48])).to(device)
+        self.gr = torch.from_numpy(((GR.IQ1_GRID.astype(np.int64) + 1) << (8 * np.arange(8))).sum(1)).to(device)
+        self.nbytes = N * nb * 56
+        self._delta = float(GR.IQ1_DELTA)
+
+    def _kernel(self, x2, out, M, f32):
+        _iq1m_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 16))](x2, x2.stride(0), self.qs, self.qh,
+                                                                self.dl, self.gr, out,
+                                                                out.stride(0), M, self.N,
+                                                                self.K // 256, DELTA=self._delta,
+                                                                BN=16, F32=f32,
+                                                                num_warps=2, num_stages=1)
 
 #: 2-D tensors of these types load as packed GPU linears (Tier A); every other `TYPES` entry
 #: dequantises to a dense tensor at load (Tier B).
 PACKED_LINEAR = {2: Q40Linear, 3: Q41Linear, 6: Q50Linear, 7: Q51Linear,
                  10: Q2KLinear, 11: Q3KLinear, 12: Q4KLinear, 13: Q5KLinear, 14: Q6KLinear,
-                 20: IQ4NLLinear, 23: IQ4XSLinear}
+                 17: IQ2XSLinear, 18: IQ3XXSLinear, 19: IQ1SLinear, 20: IQ4NLLinear,
+                 21: IQ3SLinear, 22: IQ2SLinear, 23: IQ4XSLinear, 29: IQ1MLinear}

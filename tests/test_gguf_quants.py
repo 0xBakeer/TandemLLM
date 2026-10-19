@@ -20,7 +20,9 @@ KERNELS = Q.HAVE_TRITON and (torch.cuda.is_available() or os.environ.get("TRITON
 # type id -> (bytes a block, block size, fp16 fields to pin sane) for the packed formats
 PACKS = {2: (18, 32, [(0, 2)]), 3: (20, 32, [(0, 4)]), 6: (22, 32, [(0, 2)]), 7: (24, 32, [(0, 4)]),
          10: (84, 256, [(80, 84)]), 11: (110, 256, [(108, 110)]), 12: (144, 256, [(0, 4)]),
-         13: (176, 256, [(0, 4)]), 14: (210, 256, [(208, 210)]), 20: (18, 32, [(0, 2)]), 23: (136, 256, [(0, 2)])}
+         13: (176, 256, [(0, 4)]), 14: (210, 256, [(208, 210)]), 17: (74, 256, [(0, 2)]),
+         18: (98, 256, [(0, 2)]), 19: (50, 256, [(0, 2)]), 20: (18, 32, [(0, 2)]), 21: (110, 256, [(0, 2)]),
+         22: (82, 256, [(0, 2)]), 23: (136, 256, [(0, 2)]), 29: (56, 256, [(48, 56)])}
 _HALF = np.frombuffer(np.float16(0.5).tobytes(), np.uint8)
 
 
@@ -29,7 +31,7 @@ def random_blocks(tid: int, n: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed + tid)
     b = rng.integers(0, 256, size=(n, ts), dtype=np.uint8)
     for s, e in fix:
-        b[:, s:e] = np.tile(_HALF, (e - s) // 2)
+        b[:, s:e] = np.tile(_HALF, (e - s) // 2) if tid != 29 else np.uint8(0x30)
     return b
 
 
