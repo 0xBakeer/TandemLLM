@@ -650,6 +650,32 @@ if HAVE_TRITON:
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
+    @triton.jit
+    def _iq4nl_gemm(X, s_x, D, LUT, Q, Y, s_y, M, N, K, BN: tl.constexpr, SB: tl.constexpr, F32: tl.constexpr):
+        # IQ4_NL: Q4_0's layout (16 nibble bytes + fp16 d a 32-weight block) but the codes index a
+        # fixed 16-entry value table instead of q-8. Same contract as _q40_gemm.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        t = tl.arange(0, 32)
+        nb = K // 32
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, nb, SB):
+            for j in tl.static_range(SB):
+                b = kb + j
+                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                            mask=cm[:, None], other=0)
+                nib = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
+                v = tl.load(LUT + nib)
+                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                w = (v * d[:, None]).to(tl.bfloat16)
+                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
 
 class _Packed:
     """Shared bits of the packed GGUF linears: `matmul` on the fused kernel up to ROWS_MAX rows, the
@@ -904,7 +930,32 @@ class Q5KLinear(_Packed):
                                                                F32=f32, num_warps=2, num_stages=3)
 
 
+class IQ4NLLinear(_Packed):
+    """Packed IQ4_NL [N, K]: d fp16 [N, K/32], nibble bytes [N, K/32, 16] indexing a fixed
+    16-entry nonlinear value table (kept on-device as fp32)."""
+
+    tid = 20
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 32
+        b = np.ascontiguousarray(raw).reshape(N, nb, 18)
+        self._raw = b.copy()
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.d = torch.from_numpy(np.ascontiguousarray(_f16(b[..., 0:2])).astype(np.float16).reshape(N, nb)).to(device)
+        self.q = torch.from_numpy(np.ascontiguousarray(b[..., 2:18])).to(device)
+        self.lut = torch.from_numpy(np.ascontiguousarray(GR.IQ4_NL_VALUES.astype(np.float32))).to(device)
+        self.nbytes = N * nb * 18
+
+    def _kernel(self, x2, out, M, f32):
+        _iq4nl_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.d, self.lut,
+                                                                 self.q, out, out.stride(0), M, self.N,
+                                                                 self.K, BN=32, SB=4, F32=f32,
+                                                                 num_warps=2, num_stages=3)
+
+
 #: 2-D tensors of these types load as packed GPU linears (Tier A); every other `TYPES` entry
 #: dequantises to a dense tensor at load (Tier B).
 PACKED_LINEAR = {2: Q40Linear, 3: Q41Linear, 6: Q50Linear, 7: Q51Linear,
-                 10: Q2KLinear, 11: Q3KLinear, 12: Q4KLinear, 13: Q5KLinear, 14: Q6KLinear}
+                 10: Q2KLinear, 11: Q3KLinear, 12: Q4KLinear, 13: Q5KLinear, 14: Q6KLinear,
+                 20: IQ4NLLinear}
