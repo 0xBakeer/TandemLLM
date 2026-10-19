@@ -93,13 +93,39 @@ def _state(eng):
 
 
 def test_forward_tree_multi_equals_each_engines_own_verify():
+    _joint_rounds()
+
+
+def test_forward_tree_multi_keeps_each_engines_rotary_offset():
+    """SRV-629: a request with images on a side slot verifies beside a text request on slot 0.
+    Every row after its prompt reads the rotary at index + `pos_delta` (engine/vision.py: 8
+    screenshots, about -1,080), slot 0's at its index: the joint round gives each engine the
+    bits its own verify gives it, and the offset is not lost (its logits are not the text
+    rows')."""
+    _joint_rounds(delta1=-1080, rows1=1100)
+
+
+def _joint_rounds(delta1: int = 0, rows1: int = 9):
     cfg = tiny_config()
     w = FakeWeights(cfg, seed=3)
-    alone = [_engine(cfg, w), _engine(cfg, w)]
-    joint = [_engine(cfg, w), _engine(cfg, w)]
+    L = 256 if rows1 + 64 <= 256 else rows1 + 128
+    alone = [_engine(cfg, w, L), _engine(cfg, w, L)]
+    joint = [_engine(cfg, w, L), _engine(cfg, w, L)]
     n0 = [_prefill(e, 11, 14) for e in (alone[0], joint[0])][0]
-    n1 = [_prefill(e, 12, 9) for e in (alone[1], joint[1])][0]
+    n1 = [_prefill(e, 12, rows1) for e in (alone[1], joint[1])][0]
     pos = [len(n0), len(n1)]
+    if delta1:
+        # not vacuous: the same block after the same rows, with and without the offset
+        flat, off = _engine(cfg, w, L), _engine(cfg, w, L)
+        for e in (flat, off):
+            _prefill(e, 12, len(n1))
+        off.pos_delta = delta1
+        t = _tree(99, 4, 2, 7)
+        with torch.no_grad():
+            a = flat.forward_tree(torch.tensor(t.tokens), t.parents, start=pos[1])
+            b = off.forward_tree(torch.tensor(t.tokens), t.parents, start=pos[1])
+        assert not torch.equal(a, b), "the offset changed no logit"
+        alone[1].pos_delta = joint[1].pos_delta = delta1
     shapes = [((5, 3), (3, 2)), ((7, 0), (2, 4)), ((1, 1), (6, 3))]
     for rnd, ((m0, s0), (m1, s1)) in enumerate(shapes):
         trees = [_tree(100 + rnd, m0, s0, 5), _tree(200 + rnd, m1, s1, 7)]
