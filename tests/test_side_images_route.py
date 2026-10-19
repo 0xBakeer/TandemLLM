@@ -358,6 +358,41 @@ def test_the_view_is_kept_in_key_space():
     assert A._keyed(full[:5], mm) == full[:5] and A._keyed(full, None) == full
 
 
+
+def test_a_side_slots_shorter_end_is_not_carried_over_slot_0s_end_after_images():
+    """`_carry_candidate`: slot 0's own end kept after images counts for a prompt with images
+    (its keys), as its prefill offers it; a side slot's shorter record of the conversation is
+    not carried over it."""
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    k2 = keys_of(p2, ims2)
+
+    class Res(FakeResident):
+        def best(self, c, m):
+            return 0
+
+        def end_offer(self, c, m, mm_ok=False):
+            return len(k1) - 1 if mm_ok else 0
+
+        def pin_offer(self, ids, c, m):
+            return 0
+
+        def park_offer(self, ids, c, m, align=True, mm_ok=False):
+            return 0
+    pool, saved = _setup(Res(rows))
+    try:
+        side = pool.slots[1]
+        side.carry = {"gen": side.gen, "at": 4_000, "tokens": k2[:4_000], "n_prompt": 4_000,
+                      "hidden": []}
+        assert A._carry_candidate(pool, Res(rows), k2, 262_144) is None
+        # a text prompt is not offered that end: the record beats what slot 0 offers it
+        text = [t if t < V.KEY_BASE else 5 for t in k2]
+        side.carry["tokens"] = text[:4_000]
+        assert A._carry_candidate(pool, Res(rows), text, 262_144) == (side, side.carry)
+    finally:
+        pool.slots[1].carry = None
+        _restore(saved)
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):

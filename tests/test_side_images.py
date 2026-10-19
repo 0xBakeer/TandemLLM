@@ -185,6 +185,45 @@ def test_generate_stream_on_a_side_slot_with_images_is_slot_0s_answer():
     return f"12 greedy tokens identical, {len(mm1.key_ids)} rows read on slot 1 (delta {mm1.delta})"
 
 
+
+def test_an_end_kept_after_images_on_a_side_slot_is_carried_into_slot_0_with_its_offset():
+    """A side slot with a resident prefix keeps its image request's end; the conversation's next
+    turn takes slot 0 and the end is carried in (FX10). The carry record kept no `delta` or `mm`,
+    so slot 0 took it as a text end: offered to any request, and a compaction would continue
+    it at the text rotary (server/compaction.py)."""
+    if need_or_skip():
+        return need_or_skip()
+    from engine import cache
+    x = TV.image(71, (1, 4, 6))
+    for k in range(30):
+        res0, pool, side, eng0, seng = _side_pool()
+        side.values["resident"] = cache.ResidentPrefix(MA.BIG, MA.CH, end=True,
+                                                       stash_bytes=MA.BIG)
+        p1 = MA.with_image(MA.text(30, 11 + 1000 * k)) + MA.text(5, 12)
+        s = pool.take_side(256, owner="ses")
+        S.bind(s)
+        try:
+            prompt, mm1 = app._mm_prompt(torch.tensor(p1), [x])
+            out1 = list(app.generate_stream(prompt, 16, set(), None, "ses", mm=mm1, end_mm=True))
+            app._remember(list(p1), out1, "ses", mm=mm1)
+        finally:
+            S.bind(None)
+            pool.release_side(s)
+        if not {IMG, VS, VE} & set(out1):
+            break
+    rec = side.carry
+    assert rec is not None and rec["at"] == len(mm1.key_ids) + len(out1) - 1, rec
+    assert rec["mm"] is True and rec["delta"] == mm1.delta != 0, rec
+    copy = p1 + out1 + MA.text(6, 13)
+    out2, pre2, served, mm2 = MA._carried_image_turn(copy, [x], 12)
+    assert res0.stats["side_carries"] == 1 and side.carry is None, res0.stats
+    assert res0.end["mm"] is True and res0.end["delta"] == mm1.delta, res0.end
+    assert pre2["reused"] == rec["at"], pre2
+    d = MA.assert_cold_mm(pre2.pop("logits"), mm2, [x], 12, out2)
+    return (f"carried {rec['at']} rows with delta {rec['delta']}, resumed there, logits {d:.1g} "
+            f"off cold")
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in list(globals().items()):

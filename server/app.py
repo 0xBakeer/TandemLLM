@@ -2902,6 +2902,10 @@ def _side_note_end(res, why: str, conv_id) -> None:
                                     (res.end.get("served_hidden") or ())],
                   "mark": res.end.get("mark"), "owner": conv_id, "resident": True,
                   "regions": [tuple(x) for x in (al.regions(res) if al is not None else ())]}
+    if res.end.get("mm") or res.end.get("delta"):
+        # SRV-629: an end kept after images keeps its rotary offset and its mark on slot 0, where
+        # it is offered only to a request with these images and a compaction reads its offset
+        slot.carry.update(delta=int(res.end.get("delta") or 0), mm=bool(res.end.get("mm")))
 
 
 def _carry_live(slot, rec) -> bool:
@@ -2945,8 +2949,12 @@ def _carry_candidate(pool, res, ids: list[int], max_len: int):
     if best is None:
         return None
     c0 = res.common(ids) if res.valid else 0
-    here = max(res.best(c0, max_len), res.end_offer(c0, max_len),
-               res.pin_offer(ids, c0, max_len), res.park_offer(ids, c0, max_len))
+    # SRV-629: a prompt with images (its keys past the vocabulary) counts slot 0's end and park
+    # kept after images, as its prefill does (`end_mm`)
+    from engine.vision import KEY_BASE
+    kw = {"mm_ok": True} if ids and int(max(ids)) >= KEY_BASE else {}
+    here = max(res.best(c0, max_len), res.end_offer(c0, max_len, **kw),
+               res.pin_offer(ids, c0, max_len), res.park_offer(ids, c0, max_len, **kw))
     return best if int(best[1]["at"]) > here + chunk else None
 
 
@@ -3020,7 +3028,8 @@ def _carry_from_side(ids: list[int], session=None) -> dict | None:
             res.adopt(rec["tokens"], e, 0, rec.get("owner"), count="side_carries")
             if drafter is not None and hasattr(drafter, "state_resume"):
                 drafter.state_resume(e)    # again, over the rows carried in (`cache.drafter_resume`)
-            pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"]})
+            pair = res.adopt_end(eng, {"at": e, "hidden": rec["hidden"], "mark": rec["mark"],
+                                       "delta": rec.get("delta"), "mm": rec.get("mm")})
             if pair is not None:
                 # FX16: with a resident prefix on the side slot the state at the end is its end
                 # anchor's pair (a guest served there since wrote the live state); else the live
