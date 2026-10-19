@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import socket
 import struct
 import threading
@@ -36,6 +37,19 @@ from chatd.sandbox import Unavailable, demux, relay_cmd
 RING = 1024 * 1024
 IDLE_CLOSE_S = 30 * 60
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_PORT_PATH = re.compile(r"/sandbox/ports/\d+")
+
+
+def port_target(raw: str) -> str | None:
+    """The request target for the app on a sandbox port: what follows /sandbox/ports/<n> as the
+    client sent it, still encoded, its trailing slash and query kept (a decoded %0d%0a would add a
+    header); None when it names no port or holds a space or a line break."""
+    m = _PORT_PATH.search(raw)
+    if m is None:
+        return None
+    rest = raw[m.end():]
+    path = rest if rest.startswith("/") else "/" + rest
+    return None if any(ch in path for ch in " \r\n") else path
 
 
 # ---------------------------------------------------------------------- RFC 6455, the server side
@@ -318,8 +332,10 @@ class TerminalsMixin:
         if box.state != "running":
             raise self._api_error(503, "sandbox_stopped", "the sandbox is not running; start it "
                                                           "or ask the agent to start the server")
-        q = handler.path.split("?", 1)
-        path = (rest or "/") + (f"?{q[1]}" if len(q) > 1 else "")
+        path = port_target(handler.path)
+        if path is None:
+            raise self._api_error(400, "bad_request", "the path holds a space or a line break, "
+                                                     "or names no port")
         if (handler.headers.get("Upgrade") or "").lower() == "websocket":
             return self._proxy_ws(handler, cid, port, path)
         n = int(handler.headers.get("Content-Length") or 0)
