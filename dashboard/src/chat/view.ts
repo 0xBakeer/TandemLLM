@@ -240,6 +240,7 @@ export class QseChat extends LightElement {
   }
 
   private async afterSignIn(): Promise<void> {
+    const run = this.boots.current();
     const b = this.backend!;
     void b.tools().then((t) => (this.tools = t)).catch(() => undefined);
     void b.packages().then((p) => (this.packages = p)).catch(() => undefined);
@@ -250,6 +251,7 @@ export class QseChat extends LightElement {
     this.globalSub?.close();
     this.globalSub = b.subscribeGlobal((ev) => void this.onGlobal(ev));
     await this.loadList();
+    if (!this.boots.live(run)) return;   // left while the list loaded: open no chat stream
     await this.openFromRoute();
   }
 
@@ -315,13 +317,14 @@ export class QseChat extends LightElement {
   }
 
   private async open(id: string): Promise<void> {
+    const run = this.boots.current();
     this.detach();
     this.wantId = id;
     this.loading = true;
     this.convError = null;
     try {
       const c = await this.backend!.getConversation(id);
-      if (this.wantId !== id) return;
+      if (!this.boots.live(run) || this.wantId !== id) return;   // left mid-load: no navigate, no stream
       this.conv = c;
       this.agentsNote = null;
       lsSet(LS.last, id);

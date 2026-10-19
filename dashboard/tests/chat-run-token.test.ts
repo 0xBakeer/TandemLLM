@@ -52,6 +52,24 @@ describe('the chat view wires the token at every owning await', () => {
     expect([...boot.matchAll(/if \(!this\.boots\.live\(run\)\) return/g)].length).toBeGreaterThanOrEqual(2);
   });
 
+  it('a chat that loads after the view is gone opens no stream and navigates nowhere', () => {
+    const open = src.slice(src.indexOf('private async open('), src.indexOf('// ---- the stream'));
+    const load = open.indexOf('await this.backend!.getConversation(id)');
+    expect(load).toBeGreaterThan(-1);
+    expect(open.slice(0, load)).toContain('const run = this.boots.current();');
+    const after = open.slice(load);
+    const check = after.search(/if \(!this\.boots\.live\(run\)[^\n]*\) return/);
+    expect(check).toBeGreaterThan(-1);
+    for (const call of ['navigate(', 'this.attachTo(']) expect(after.indexOf(call)).toBeGreaterThan(check);
+    // afterSignIn hands open() a token taken after its own await, so it re-checks first
+    const signIn = src.slice(src.indexOf('private async afterSignIn'), src.indexOf('private async loadList'));
+    expect(signIn).toContain('const run = this.boots.current();');
+    const list = signIn.indexOf('await this.loadList();');
+    const guard = signIn.indexOf('if (!this.boots.live(run)) return;');
+    expect(guard).toBeGreaterThan(list);
+    expect(signIn.indexOf('await this.openFromRoute()')).toBeGreaterThan(guard);
+  });
+
   it('the down-reprobe dies with its mount too', () => {
     const closure = src.slice(src.indexOf('private startReprobe'), src.indexOf('private stopReprobe'));
     expect(closure).not.toContain('live(run)');   // the check below is in boot's closure, not here
