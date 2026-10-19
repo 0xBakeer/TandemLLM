@@ -110,6 +110,28 @@ def test_two_attachments_share_one_budget_and_names_never_clash():
         c.close()
 
 
+def test_an_edit_measures_the_budget_on_the_branch_it_goes_on():
+    c = Chat()
+    try:
+        real = c.svc.model_info
+        c.svc.model_info = lambda mid: {**real(mid), "max_len": 65_536}
+        cid = c.new()
+        c.send(cid, "hi")
+        first = c.wait_idle(cid)["messages"][-1]["id"]
+        c.send(cid, "word " * 30_000)                       # the head's branch: ~30,000 tokens
+        c.wait_idle(cid)
+        att = upload(c, "notes.txt", "text/plain", ("x" * 99 + "\n").encode() * 480)
+        assert 8_848 < att["tokens"] < 16_356, att          # over the head's budget, not the edit's
+        c.ok("POST", f"/conversations/{cid}/messages",
+             {"client_msg_id": "e1", "text": "read this", "parent_id": first,
+              "attachments": [att["id"]]})
+        s = c.wait_idle(cid)
+        assert s["messages"][-2]["attachments"][0]["inline"] is True, s["messages"][-2]
+        assert "```notes.txt\n" in c.last_body()["messages"][-1]["content"]
+    finally:
+        c.close()
+
+
 def test_an_attachment_from_before_renders_as_it_did():
     data = b"line one\nline two"
     old = {"id": "a", "name": "notes.txt", "kind": "text", "tokens": 5}
