@@ -173,6 +173,16 @@ def test_the_admission_reserves_the_expanded_rows():
 
 
 # ------------------------------------------------------------------ 2. the flag
+def test_side_images_is_on_by_default():
+    """Live 2026-10-19 on the DGX Spark (the 27B, EXL3 6.0, `--parallel 2`): an image request on
+    slot 1 beside a text run on slot 0 wrote slot 0's 300 tokens, and two image requests decoded
+    in joint rounds; QWEN38_SIDE_IMAGES=off restores 0.12.0."""
+    from engine.settings import KNOBS
+    assert KNOBS["SIDE_IMAGES"][0] == "on"
+    if "QWEN38_SIDE_IMAGES" not in os.environ:
+        assert A.SIDE_IMAGES == "on"
+
+
 def test_flag_off_keeps_images_on_slot_0():
     r1 = _session(1, HEAD, 1_500) + [7, 8, 9]
     ids = with_shots(_session(4, HEAD, 900), 2) + [7, 8, 9]

@@ -143,7 +143,7 @@ ENG-365. Every Super VL checkpoint carries the Omni model's image tower in BF16:
 | rows | written over the placeholders' embeddings in the prompt chunk that holds them; no positional encoding, so no position moves and every text row is computed as without the image |
 | memory | 1.57 GB of tensors, 1.60 GiB allocated beside the EXL3 4.0 trunk; the image cache 512 MB (`--image-cache-mb`); the admission bound for the largest image 1.6 GiB of activations |
 
-The caches key an image's rows on its content (`key_ids` from the digest of the patches), as on the Qwen models: the same image resumes, another one under the same placeholder does not. A request with images runs on slot 0, as on the 27B. Video, the sound tower and RADIO's summary output are not served. Bolt's EXL3 packs hold the same kind of tower and stay text only (not checked).
+The caches key an image's rows on its content (`key_ids` from the digest of the patches), as on the Qwen models: the same image resumes, another one under the same placeholder does not. A request with images runs on slot 0: the tower builds its own context, which the side slots do not read yet (the 27B's images take a side slot since SRV-629). Video, the sound tower and RADIO's summary output are not served. Bolt's EXL3 packs hold the same kind of tower and stay text only (not checked).
 
 Checked against the checkpoint's own processor and modeling code (`tools/nh_vision_check.py`, DGX Spark, 2026-10-17, three synthetic pictures: shapes 640 x 480, a scene 1,024 x 768, a dark app screen with text 1,280 x 800):
 

@@ -760,7 +760,7 @@ SIDE_STASH_GB = float(_S.get("SIDE_STASH_GB") or 1.0)
 #: on its expanded key ids (`_mm_keys`); `off`: slot 0 only, as 0.12.0. Live 2026-10-19: two
 #: Chat-tab agent runs with 3 to 8 screenshots a request ran all 31 requests on slot 0 (56.6 min
 #: of wall time for 18.9 min of decoding) while slot 1 stayed idle
-SIDE_IMAGES = (_S.get("SIDE_IMAGES") or "off").strip().lower()
+SIDE_IMAGES = (_S.get("SIDE_IMAGES") or "on").strip().lower()
 
 
 def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:

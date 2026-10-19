@@ -176,7 +176,7 @@ KNOBS: dict[str, tuple] = {
     'SIDE_SLOT0_WAIT_S': ('3', 'server/app.py'),
     # SRV-629: a request with images may take a side slot (`on`), routed on its expanded key ids;
     # `off`: slot 0 only, as 0.12.0
-    'SIDE_IMAGES': ('off', 'server/app.py'),
+    'SIDE_IMAGES': ('on', 'server/app.py'),
     # SRV-528: how long slot 0's conversation keeps new conversations on the side slots after the
     # last request that continued it (a cancelled prefill's rows: not at all)
     'SLOT0_KEEP_S': ('1800', 'server/app.py'),
