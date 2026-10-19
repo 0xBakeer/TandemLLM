@@ -66,7 +66,10 @@ def test_packed_linears():
         return "skipped: no triton/gpu"
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
-        for N, K in ((128, 512), (256, 1024)):
+        shapes = [(128, 512), (256, 1024)]
+        if qk == 32:
+            shapes.append((64, 96))          # K/32 = 3 blocks: exercises the SB-loop tail guard
+        for N, K in shapes:
             raw = random_blocks(tid, N * (K // qk)).reshape(-1)
             lin = cls(raw, N, K, device=DEV)
             w32 = lin.dequant().to(DEV)

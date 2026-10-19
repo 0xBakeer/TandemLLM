@@ -421,13 +421,14 @@ if HAVE_TRITON:
         for kb in range(0, nb, SB):
             for j in tl.static_range(SB):
                 b = kb + j
-                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
-                            mask=cm[:, None], other=0)
-                code = ((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF).to(tl.float32) - 8.0
-                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                w = (code * d[:, None]).to(tl.bfloat16)
-                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+                if b < nb:
+                    q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                                mask=cm[:, None], other=0)
+                    code = ((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF).to(tl.float32) - 8.0
+                    d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    w = (code * d[:, None]).to(tl.bfloat16)
+                    x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
@@ -502,14 +503,15 @@ if HAVE_TRITON:
         for kb in range(0, nb, SB):
             for j in tl.static_range(SB):
                 b = kb + j
-                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
-                            mask=cm[:, None], other=0)
-                code = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
-                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                m = tl.load(M_ + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                w = (code.to(tl.float32) * d[:, None] + m[:, None]).to(tl.bfloat16)
-                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+                if b < nb:
+                    q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                                mask=cm[:, None], other=0)
+                    code = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
+                    d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    m = tl.load(M_ + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    w = (code.to(tl.float32) * d[:, None] + m[:, None]).to(tl.bfloat16)
+                    x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
@@ -527,15 +529,16 @@ if HAVE_TRITON:
         for kb in range(0, nb, SB):
             for j in tl.static_range(SB):
                 b = kb + j
-                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
-                            mask=cm[:, None], other=0)
-                hb = tl.load(QH + cols[:, None] * nb + b, mask=cm[:, None], other=0)
-                code = (((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF)
-                        | (((hb >> t[None, :]) & 1) << 4)).to(tl.float32) - 16.0
-                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                w = (code * d[:, None]).to(tl.bfloat16)
-                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+                if b < nb:
+                    q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                                mask=cm[:, None], other=0)
+                    hb = tl.load(QH + cols[:, None] * nb + b, mask=cm[:, None], other=0)
+                    code = (((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF)
+                            | (((hb >> t[None, :]) & 1) << 4)).to(tl.float32) - 16.0
+                    d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    w = (code * d[:, None]).to(tl.bfloat16)
+                    x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
@@ -553,15 +556,16 @@ if HAVE_TRITON:
         for kb in range(0, nb, SB):
             for j in tl.static_range(SB):
                 b = kb + j
-                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
-                            mask=cm[:, None], other=0)
-                hb = tl.load(QH + cols[:, None] * nb + b, mask=cm[:, None], other=0)
-                code = ((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF) | (((hb >> t[None, :]) & 1) << 4)
-                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                m = tl.load(M_ + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                w = (code.to(tl.float32) * d[:, None] + m[:, None]).to(tl.bfloat16)
-                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+                if b < nb:
+                    q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                                mask=cm[:, None], other=0)
+                    hb = tl.load(QH + cols[:, None] * nb + b, mask=cm[:, None], other=0)
+                    code = ((q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF) | (((hb >> t[None, :]) & 1) << 4)
+                    d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    m = tl.load(M_ + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    w = (code.to(tl.float32) * d[:, None] + m[:, None]).to(tl.bfloat16)
+                    x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
@@ -665,14 +669,15 @@ if HAVE_TRITON:
         for kb in range(0, nb, SB):
             for j in tl.static_range(SB):
                 b = kb + j
-                q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
-                            mask=cm[:, None], other=0)
-                nib = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
-                v = tl.load(LUT + nib)
-                d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
-                w = (v * d[:, None]).to(tl.bfloat16)
-                x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
-                acc += tl.dot(x, tl.trans(w))
+                if b < nb:
+                    q = tl.load(Q + cols[:, None] * (nb * 16) + b * 16 + (t & 15)[None, :],
+                                mask=cm[:, None], other=0)
+                    nib = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
+                    v = tl.load(LUT + nib)
+                    d = tl.load(D + cols * nb + b, mask=cm, other=0.0).to(tl.float32)
+                    w = (v * d[:, None]).to(tl.bfloat16)
+                    x = tl.load(X + rows[:, None] * s_x + b * 32 + t[None, :], mask=rows[:, None] < M, other=0.0)
+                    acc += tl.dot(x, tl.trans(w))
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
