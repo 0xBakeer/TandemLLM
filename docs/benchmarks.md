@@ -51,6 +51,8 @@ A plain API client gets the thinking in `reasoning_content` and the answer alone
 
 ## Results on a DGX Spark
 
+[tool-eval-bench.md](tool-eval-bench.md) has the latest results: every thinking setting on the raw path, four conductor profiles and hard mode.
+
 Qwen3.8-27B in the EXL3 6.0 pack, TandemLLM 0.11.4, default effort `xhigh`, seed 42, temperature 0, timeout 600 s, one scenario at a time. The bench ran on another machine on the LAN. Each row is one run (n = 1).
 
 Core 15:
