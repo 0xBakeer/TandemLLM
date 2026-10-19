@@ -43,6 +43,10 @@ migration never runs twice: a switch the owner removes after it ran stays remove
                                  unless a stored version had it in the core: three pagoda
                                  replays thought 6 to 11 minutes on their first step, drafting
                                  the files in the thinking
+    2026-10-19-<name>-c5         SRV-623: C5 (one mutation per turn) in a stored profile that has
+                                 neither the task nor `toolgate.sequence` (both absent: no one
+                                 chose): shadow in coding, chat-app, hermes and chat, act in
+                                 tools, as shipped
 """
 
 from __future__ import annotations
@@ -186,6 +190,20 @@ def _core_append(cid: str, pkg: str):
     return change
 
 
+def _c5(mode: str):
+    """SRV-623: C5 and its pack, as the shipped profile has them, when the stored profile has
+    neither (a profile stored before C5 existed)."""
+    def change(doc: dict):
+        if not isinstance(doc, dict) or not isinstance(doc.get("tasks"), dict) or \
+                "C5" in doc["tasks"] or "sequence" in (doc.get("toolgate") or {}):
+            return None
+        task = {"mode": mode, "cap": 1, "thresholds": {"regenerations": 1}}
+        return (dict(doc, tasks=dict(doc["tasks"], C5=task),
+                     toolgate=dict(doc.get("toolgate") or {}, sequence=True)),
+                [f"tasks.C5.mode={mode}", "toolgate.sequence=true"])
+    return change
+
+
 # SRV-534: FX6's core on the coding classes of a router stored without it
 _coding_core = _class_core({"code_edit": "coding", "debug": "coding"})
 
@@ -216,6 +234,11 @@ MIGRATIONS = [
     ("2026-10-17-router-build-core", "router", None,
      _class_core({"design_ui": "ui-design", "drawing": "creative-coding"})),
     ("2026-10-17-router-3d-coding-core", "router", None, _core_append("three_d", "coding")),
+    ("2026-10-19-coding-c5", "profiles", "coding", _c5("shadow")),
+    ("2026-10-19-chat-app-c5", "profiles", "chat-app", _c5("shadow")),
+    ("2026-10-19-hermes-c5", "profiles", "hermes", _c5("shadow")),
+    ("2026-10-19-chat-c5", "profiles", "chat", _c5("shadow")),
+    ("2026-10-19-tools-c5", "profiles", "tools", _c5("act")),
 ]
 
 

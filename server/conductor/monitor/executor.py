@@ -280,6 +280,8 @@ class Supervisor:
         self.last_action: dict | None = None
         self.shadows = 0                    # shadow decisions that were not a pass
         self._repairs: dict = {}
+        # SP3: the items of the answer being checked (C5 reads the whole set at one call)
+        self.answer_items: list = []
         self._passes: dict = {}             # (task, tier, mode) -> checks that found nothing
         self._budget: Action | None = None
         self._last: tuple | None = None
@@ -316,13 +318,15 @@ class Supervisor:
     def _may_act(self, task) -> bool:
         """A tool-call task that can act on this request. C3 (`repeated_call`) can only fire
         when the turn's history already ends with the repeated call (SRV-473): on every other
-        request it cannot act, so it holds nothing and the calls stream live as before."""
-        if task.rule != "repeated_call":
+        request it cannot act, so it holds nothing and the calls stream live as before. C5
+        (`sequential_mutations`, SRV-623) only when an offered tool mutates."""
+        if task.rule not in ("repeated_call", "sequential_mutations"):
             return True
         got = self.memo.get(("may_act", task.id))
         if got is None:
-            from server.conductor.monitor.toolcheck import can_repeat
-            got = self.memo[("may_act", task.id)] = bool(can_repeat(self, task))
+            from server.conductor.monitor.toolcheck import can_repeat, can_sequence
+            can = can_repeat if task.rule == "repeated_call" else can_sequence
+            got = self.memo[("may_act", task.id)] = bool(can(self, task))
         return got
 
     def _tool_meta(self) -> tuple:
@@ -563,7 +567,7 @@ class Supervisor:
         schemas = self._tool_meta()[2]
         findings: list[tuple] = []
         wrote = len(self.events)
-        queue = list(items)
+        queue = self.answer_items = list(items)
         i = 0
         while i < len(queue):
             it = queue[i]
@@ -621,6 +625,9 @@ class Supervisor:
         found = [{"task": t.id, "rule": t.rule, "decision": a.kind, "reason": a.reason,
                   "call": e.name or None, "detail": a.detail} for t, a, e in findings]
         texts = list(dict.fromkeys(a.text for _, a, _ in findings if a.text))
+        # C5's findings are about order, not about a call that cannot run: past a cap they go
+        # out as they are (journaled), never a give-up
+        release = all(a.detail.get("release") for _, a, _ in findings)
         give_up = final or any(a.kind == GIVE_UP for _, a, _ in findings)
         if not give_up:
             act = Action(REGENERATE_CALL, reason="; ".join(a.reason for _, a, _ in findings),
@@ -641,6 +648,11 @@ class Supervisor:
                 self._write("SP3", task, act, "act", hidden=act.hidden, pos=pos)
                 self.checked = False                 # the next answer is checked again
                 return act
+            if release:
+                self._write("SP3", task, Action(PASS, reason=f"released({cap})", task=task.id,
+                                                detail={"findings": found, "cap": cap}),
+                            "act", cap=cap)
+                return None
             give_up = cap
         act = Action(GIVE_UP, reason=first.reason, task=task.id,
                      detail={"findings": found,

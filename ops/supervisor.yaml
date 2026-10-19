@@ -8,7 +8,7 @@
 # With --conductor shadow every task is at most shadow. Under a conductor profile this file is
 # version 0 of the `monitor` document (the Conductor view's Monitor screen edits later versions),
 # and the profile sets each task's mode, the tool-gate packs and the thresholds on top.
-version: 7
+version: 8
 
 caps:
   acts_per_request: 2
@@ -150,6 +150,19 @@ tasks:
     escape_texts:
       - "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first."
       - "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
+  # C5 (SRV-623): one mutation per turn. Two or more calls in one answer to tools that change
+  # something outside the conversation (send, schedule, create, write, delete; read off each
+  # tool's declaration, server/conductor/signals.py tool_effects) are written again one at a
+  # time: the first, its result, then the next. Reads stay parallel; a read beside one mutation
+  # passes. One regeneration a request; past it, or past a cap, the calls go out as they are.
+  # Policy 8.
+  C5:
+    rule: sequential_mutations
+    mode: shadow
+    kinds: [send, schedule, create, write, delete]
+    texts:
+      - "These {count} calls were not run: {names}. Each one changes something outside this conversation, and a later one may need what an earlier one returns. Take one action at a time: make the first call alone, read its result, then make the next."
+    regenerations: 1
   # C1: the risk floors (arbiter's guard_policy as a list). Shadow in wave 1: journaled only.
   C1:
     rule: risk_floor

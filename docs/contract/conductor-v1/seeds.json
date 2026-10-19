@@ -427,7 +427,7 @@
   }
  },
  "monitor": {
-  "version": 7,
+  "version": 8,
   "caps": {
    "acts_per_request": 2,
    "acts_per_session_hour": 6,
@@ -601,6 +601,21 @@
      "You ran `{name}` {count} times in a row and got the same result each time. Running it again will not change that. Try another approach: read what the result says, change the arguments or the tool, or fix the cause first.",
      "`{name}` still returns the same result. Take a different step now, or tell the user what blocks you."
     ]
+   },
+   "C5": {
+    "rule": "sequential_mutations",
+    "mode": "shadow",
+    "kinds": [
+     "send",
+     "schedule",
+     "create",
+     "write",
+     "delete"
+    ],
+    "texts": [
+     "These {count} calls were not run: {names}. Each one changes something outside this conversation, and a later one may need what an earlier one returns. Take one action at a time: make the first call alone, read its result, then make the next."
+    ],
+    "regenerations": 1
    },
    "C1": {
     "rule": "risk_floor",
@@ -1028,6 +1043,13 @@
       "repairs": 2
      }
     },
+    "C5": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "regenerations": 1
+     }
+    },
     "S1": {
      "mode": "off",
      "cap": 2,
@@ -1069,6 +1091,7 @@
     "project": false,
     "same_call": false,
     "malformed": false,
+    "sequence": false,
     "tier1_timeout_ms": 500
    },
    "context": {
@@ -1186,6 +1209,13 @@
       "repairs": 2
      }
     },
+    "C5": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "regenerations": 1
+     }
+    },
     "S1": {
      "mode": "off",
      "cap": 2,
@@ -1227,6 +1257,7 @@
     "project": false,
     "same_call": false,
     "malformed": false,
+    "sequence": false,
     "tier1_timeout_ms": 500
    },
    "context": {
@@ -1347,6 +1378,13 @@
       "repairs": 2
      }
     },
+    "C5": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "regenerations": 1
+     }
+    },
     "S1": {
      "mode": "off",
      "cap": 2,
@@ -1388,6 +1426,7 @@
     "project": false,
     "same_call": false,
     "malformed": false,
+    "sequence": false,
     "tier1_timeout_ms": 500
    },
    "context": {
@@ -1507,6 +1546,13 @@
       "repairs": 2
      }
     },
+    "C5": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "regenerations": 1
+     }
+    },
     "S1": {
      "mode": "off",
      "cap": 2,
@@ -1548,6 +1594,7 @@
     "project": true,
     "same_call": true,
     "malformed": true,
+    "sequence": true,
     "tier1_timeout_ms": 500
    },
    "context": {
@@ -1665,6 +1712,13 @@
       "repairs": 2
      }
     },
+    "C5": {
+     "mode": "off",
+     "cap": 1,
+     "thresholds": {
+      "regenerations": 1
+     }
+    },
     "S1": {
      "mode": "act",
      "cap": 2,
@@ -1706,6 +1760,7 @@
     "project": true,
     "same_call": true,
     "malformed": true,
+    "sequence": true,
     "tier1_timeout_ms": 500
    },
    "context": {
@@ -2029,6 +2084,19 @@
     "thresholds": {
      "repairs": {
       "default": 2,
+      "unit": "count"
+     }
+    }
+   },
+   "C5": {
+    "label": "one mutation per turn",
+    "family": "tool calls",
+    "tier": "0",
+    "role": null,
+    "why": "tool-eval-bench TC-51 (2026-10-18): the event and its invitation in one turn; the email said the invite was sent before the event existed",
+    "thresholds": {
+     "regenerations": {
+      "default": 1,
       "unit": "count"
      }
     }
@@ -4284,6 +4352,42 @@
         ],
         "additionalProperties": false
        },
+       "C5": {
+        "type": "object",
+        "properties": {
+         "mode": {
+          "enum": [
+           "off",
+           "shadow",
+           "act"
+          ]
+         },
+         "cap": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+         },
+         "thresholds": {
+          "type": "object",
+          "properties": {
+           "regenerations": {
+            "type": "number",
+            "minimum": 0
+           }
+          },
+          "required": [
+           "regenerations"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "required": [
+         "mode",
+         "cap",
+         "thresholds"
+        ],
+        "additionalProperties": false
+       },
        "S1": {
         "type": "object",
         "properties": {
@@ -4504,6 +4608,9 @@
         "type": "boolean"
        },
        "malformed": {
+        "type": "boolean"
+       },
+       "sequence": {
         "type": "boolean"
        },
        "tier1_timeout_ms": {
@@ -6046,6 +6153,58 @@
           "root",
           "home",
           "text"
+         ],
+         "additionalProperties": false
+        },
+        {
+         "type": "object",
+         "description": "SP3: C5: two or more calls in one answer that each change something outside the conversation",
+         "properties": {
+          "rule": {
+           "const": "sequential_mutations"
+          },
+          "mode": {
+           "enum": [
+            "off",
+            "shadow",
+            "act"
+           ]
+          },
+          "kinds": {
+           "type": "array",
+           "items": {
+            "enum": [
+             "send",
+             "schedule",
+             "create",
+             "write",
+             "delete"
+            ]
+           },
+           "minItems": 1,
+           "description": "what a tool must change, read off its declaration (signals.tool_effects), for its call to count as a mutation"
+          },
+          "texts": {
+           "type": "array",
+           "items": {
+            "type": "string",
+            "minLength": 1
+           },
+           "minItems": 1,
+           "description": "the reminder: {names} (the mutating calls, in order), {count}"
+          },
+          "regenerations": {
+           "type": "integer",
+           "minimum": 0,
+           "description": "regenerations a request may spend on it; then the calls go out as they are"
+          }
+         },
+         "required": [
+          "rule",
+          "mode",
+          "kinds",
+          "texts",
+          "regenerations"
          ],
          "additionalProperties": false
         },

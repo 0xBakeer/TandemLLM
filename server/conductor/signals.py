@@ -163,6 +163,104 @@ def tool_caps(body: dict) -> tuple[frozenset, list[str]]:
     return frozenset(caps), names
 
 
+# SRV-623 (C5): what a tool changes outside the conversation, read off its declaration the way
+# tool_caps reads it: the parameter names, the operation its name opens with (its description's
+# first word when the name states none), an MCP-style `annotations` hint. Never what anybody wrote
+# to the model. `send`: a recipient and a message parameter (an email's `to` and `body`, a chat's
+# `channel` and `text`); `schedule`: a time and a subject parameter (an event's `title` and
+# `date`, a reminder's `message` and `datetime`); `write`: tool_caps' write (a path and a body);
+# `create`, `delete`: the operation's verb. A name that opens with a read verb is a read whatever
+# its parameters, as is `readOnlyHint: true`; `destructiveHint: true` is a delete. A shell
+# (`command`) is none of them: opencode reads through `bash`, often several calls at once.
+MUTATIONS = ("send", "schedule", "create", "write", "delete")
+RECIPIENT_ARGS = ("to", "recipient", "recipients", "cc", "bcc", "channel", "channel_id",
+                  "chat_id", "phone", "phone_number")
+MESSAGE_ARGS = ("body", "message", "text", "content")
+TIME_ARGS = ("date", "time", "datetime", "start", "start_time", "start_date", "starts_at", "due",
+             "due_date", "when", "remind_at", "scheduled_at", "send_at")
+SUBJECT_ARGS = ("title", "summary", "subject", "message", "text")
+READ_VERBS = ("get", "list", "search", "find", "read", "fetch", "lookup", "look", "query",
+              "check", "view", "show", "describe", "count", "browse", "inspect", "retrieve",
+              "download", "translate", "calculate", "compute", "convert", "summarize", "preview",
+              "validate", "estimate")
+VERB_EFFECTS = {
+    **{v: "send" for v in ("send", "email", "mail", "notify", "reply", "forward", "post",
+                           "publish", "share")},
+    **{v: "schedule" for v in ("schedule", "book", "reserve", "remind")},
+    **{v: "write" for v in ("write", "edit", "patch", "save", "append")},
+    **{v: "create" for v in ("create", "add", "insert", "new", "make", "set", "update", "modify",
+                             "change", "put", "move", "rename", "assign", "invite", "submit",
+                             "upload", "register", "approve", "merge", "pay", "transfer",
+                             "order", "buy", "enable", "disable")},
+    **{v: "delete" for v in ("delete", "remove", "rm", "destroy", "drop", "cancel", "purge",
+                             "erase", "unlink", "archive", "revoke", "clear")},
+}
+_WORD = re.compile(r"[A-Za-z]+")
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _verb(word: str) -> str | None:
+    """A known operation verb as `word` states it ("Sends" and "creates" read as their stem)."""
+    w = word.lower()
+    for cand in (w, w[:-1] if w.endswith("s") else None, w[:-2] if w.endswith("es") else None):
+        if cand and (cand in VERB_EFFECTS or cand in READ_VERBS):
+            return cand
+    return None
+
+
+def _operation(fn: dict, name: str) -> str | None:
+    """The verb a tool's declaration opens with: its name's first word (after an MCP server
+    prefix, split at `_ - .` and camelCase), else its description's first word."""
+    base = _MCP.sub("", name)
+    first = re.split(r"[_\-. ]+", _CAMEL.sub("_", base).strip("_-. "))[0] if base else ""
+    got = _verb(first) if first else None
+    if got is None and isinstance(fn.get("description"), str):
+        m = _WORD.search(fn["description"])
+        got = _verb(m.group(0)) if m else None
+    return got
+
+
+def tool_effects(body: dict) -> dict[str, frozenset]:
+    """SRV-623: per offered tool, the MUTATIONS its declaration says it makes (empty: a read or
+    nothing known). Nothing with `tool_choice: none`; a flat tool counts as the template reads
+    it."""
+    if not isinstance(body, dict) or body.get("tool_choice") == "none":
+        return {}
+    out: dict[str, frozenset] = {}
+    for t in body.get("tools") or ():
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        hints = fn.get("annotations") if isinstance(fn.get("annotations"), dict) else \
+            t.get("annotations") if isinstance(t.get("annotations"), dict) else {}
+        verb = _operation(fn, name)
+        kinds: set = set()
+        if hints.get("readOnlyHint") is True:
+            out[name] = frozenset()
+            continue
+        if hints.get("destructiveHint") is True:
+            kinds.add("delete")
+        elif verb in READ_VERBS:
+            out[name] = frozenset()
+            continue
+        props = (fn.get("parameters") or {}).get("properties") if isinstance(
+            fn.get("parameters"), dict) else None
+        keys = set(props) if isinstance(props, dict) else set()
+        if keys & set(RECIPIENT_ARGS) and keys & set(MESSAGE_ARGS):
+            kinds.add("send")
+        if keys & set(TIME_ARGS) and keys & set(SUBJECT_ARGS):
+            kinds.add("schedule")
+        if keys & set(WRITE_PATH_ARGS) and keys & set(WRITE_BODY_ARGS):
+            kinds.add("write")
+        if verb in VERB_EFFECTS:
+            kinds.add(VERB_EFFECTS[verb])
+        out[name] = frozenset(kinds)
+    return out
+
+
 def _images(content) -> int:
     if not isinstance(content, list):
         return 0

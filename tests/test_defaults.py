@@ -57,10 +57,14 @@ FILLED = {"router": {"structural.side_requests", "classifier.probe_stage"},
           # The shadow reader's block (the deploy stores it on the live box too)
           # SRV-471: the memory switch (the live box set it on in both, coding v20 and chat v5)
           # SRV-475: the sampling section (the migration stores it on the live box too)
+          # SRV-623: C5 and its pack (the migration stores them in coding and chat; absent in
+          # overnight reads as off, its shipped value)
           "profiles/coding": {"thinking.by_size", "thinking.client_word", "shadow", "memory",
-                              "sampling"},
-          "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word", "sampling"},
-          "profiles/chat": {"thinking.by_size", "ui", "memory", "sampling"},
+                              "sampling", "tasks.C5", "toolgate.sequence"},
+          "profiles/overnight": {"thinking.by_size", "ui", "thinking.client_word", "sampling",
+                                 "tasks.C5", "toolgate.sequence"},
+          "profiles/chat": {"thinking.by_size", "ui", "memory", "sampling", "tasks.C5",
+                            "toolgate.sequence"},
           # 2026-10-05: the memory card and skill (the deploy stores them on the live box too)
           "packages": {"packages.tandem-memory", "packages.memory"}}
 # what the shipped documents changed on purpose since that day, keyed by the document: the path

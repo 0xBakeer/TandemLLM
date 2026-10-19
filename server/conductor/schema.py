@@ -195,6 +195,10 @@ TASKS: dict[str, dict] = {
     "C4": {"label": "malformed call", "family": "tool calls", "tier": "0", "role": None,
            "thresholds": {"repairs": (2, "count")},
            "why": "opencode refused 19 calls on 2026-09-26; a cut write reached it as broken JSON"},
+    "C5": {"label": "one mutation per turn", "family": "tool calls", "tier": "0", "role": None,
+           "thresholds": {"regenerations": (1, "count")},
+           "why": "tool-eval-bench TC-51 (2026-10-18): the event and its invitation in one turn; "
+                  "the email said the invite was sent before the event existed"},
     "S1": {"label": "gate progress", "family": "session", "tier": "0", "role": None,
            "thresholds": {"fails": (3, "count")},
            "why": "gate (a) failed 15.6, 12.2, 3.5, 12.3, 3.5 without progress (2026-09-30)"},
@@ -210,6 +214,11 @@ TASKS: dict[str, dict] = {
     "HINT": {"label": "speed hints", "family": "speed", "tier": "0", "role": None,
              "thresholds": {}, "why": "not gated: no SPD measurement yet"},
 }
+
+
+# tasks a stored profile may lack (added after profiles were stored): absent, the task keeps the
+# monitor document's mode, and its tool-gate pack, absent too, keeps it off (hook.monitor_policy)
+OPTIONAL_TASKS = ("C5",)
 
 
 def _tasks(act=(), shadow=()) -> dict:
@@ -1052,9 +1061,9 @@ def _profile(desc, mode, clients, default_class, decisions, act=(), shadow=(), c
             "tasks": _tasks(act, shadow),
             "caps": {"acts_per_request": caps[0], "acts_per_session_hour": caps[1]},
             # the tool-gate packs: off, a pack's task (C1 risk, C2 project, C3 same_call,
-            # C4 malformed) does not run whatever its mode says
+            # C4 malformed, C5 sequence) does not run whatever its mode says
             "toolgate": {"risk": packs, "project": packs, "same_call": packs,
-                         "malformed": packs, "tier1_timeout_ms": 500},
+                         "malformed": packs, "sequence": packs, "tier1_timeout_ms": 500},
             # S1's fails, S4's minutes and NOTIFY (hook.Conductor.CONTEXT); NOTIFY is on only
             # in the overnight profile (the owner, 2026-09-30: allowed, off by default)
             "context": {"s1_runs": 3, "s4_minutes": 20, "notify": notify},
@@ -1179,6 +1188,11 @@ SHIPPED_PROFILES["chat"]["description"] = ("Open WebUI and the Playground: class
 # files and show the answer: a key a tool result held is never reproduced verbatim in the answer
 for _n in ("chat", "coding"):
     SHIPPED_PROFILES[_n]["secret_mask"] = "on"
+# SRV-623: C5, one mutation per turn (`toolgate.sequence`), journals in the agent profiles: shadow
+# until a week of rows shows no false positive there. chat-app takes coding's below
+for _n in ("coding", "hermes", "chat"):
+    SHIPPED_PROFILES[_n]["toolgate"]["sequence"] = True
+    SHIPPED_PROFILES[_n]["tasks"]["C5"]["mode"] = "shadow"
 # SRV-351 (plan note Chat 7): the Chat tab's agent loop (chatd, client kind `chat-app`) is
 # coding's policy without the state lines: the chat shows the harness's choices from the usage
 # frame, not as text in the answer. Open WebUI's status events go only to QWEN38_STATUS_CLIENTS'
@@ -1197,18 +1211,19 @@ SHIPPED_PROFILES["chat-app"].update(
 # answer off raw's), no effort decision, no packages, no rules, no memory (the key absent: no card, no off note), no
 # session transcript, no state lines, no loop escape; `prompt: client` drops whatever note,
 # card or moved tool text the plan would add, so the prompt ids are the raw path's. The loop
-# guards and the tool-call checks act; every act is journaled
+# guards and the tool-call checks act, C5 too (SRV-623); every act is journaled
 SHIPPED_PROFILES["tools"] = copy.deepcopy(SHIPPED_PROFILES["general"])
 SHIPPED_PROFILES["tools"].update(
     description="API clients that offer tools: the prompt as sent, token for token the raw "
                 "path's; the loop guards and the tool-call checks act, each act journaled.",
     decisions={"classify": "off", "effort": "off", "packages": "off", "rules": "off"},
-    toolgate=dict(SHIPPED_PROFILES["general"]["toolgate"], same_call=True, malformed=True),
+    toolgate=dict(SHIPPED_PROFILES["general"]["toolgate"], same_call=True, malformed=True,
+                  sequence=True),
     ui={"states": "off", "states_channel": "content"},
     sampling={"agentic_default": "greedy", "loop_escape": "off"},
     prompt="client", transcripts="off", secret_mask="on")
 for _tid, _t in SHIPPED_PROFILES["tools"]["tasks"].items():
-    _t["mode"] = "act" if _tid in ("D1", "D1b", "D2", "E1", "C3", "C4") else "off"
+    _t["mode"] = "act" if _tid in ("D1", "D1b", "D2", "E1", "C3", "C4", "C5") else "off"
 del _n, _tid, _t
 # A shipped profile derived from another: its parent and the top-level keys it sets itself. Every
 # other top-level key is the parent's (tests/test_conductor_derived.py), so a switch the parent
@@ -1778,13 +1793,17 @@ SCHEMAS: dict[str, dict] = {
                                   "cap": {"type": "integer", "minimum": 0, "maximum": 10},
                                   "thresholds": _obj({k: {"type": "number", "minimum": 0}
                                                       for k in meta["thresholds"]})})
-                       for tid, meta in TASKS.items()}),
+                       for tid, meta in TASKS.items()},
+                      required=[t for t in TASKS if t not in OPTIONAL_TASKS]),
         "caps": _obj({"acts_per_request": {"type": "integer", "minimum": 0, "maximum": 10},
                       "acts_per_session_hour": {"type": "integer", "minimum": 0,
                                                 "maximum": 100}}),
+        # `sequence` (C5, SRV-623) absent in a profile stored before it: off
         "toolgate": _obj({"risk": {"type": "boolean"}, "project": {"type": "boolean"},
                           "same_call": {"type": "boolean"}, "malformed": {"type": "boolean"},
-                          "tier1_timeout_ms": _MS}),
+                          "sequence": {"type": "boolean"}, "tier1_timeout_ms": _MS},
+                         required=("risk", "project", "same_call", "malformed",
+                                   "tier1_timeout_ms")),
         "context": _obj({"s1_runs": {"type": "integer", "minimum": 1, "maximum": 20},
                          "s4_minutes": {"type": "integer", "minimum": 1, "maximum": 600},
                          "notify": {"type": "boolean"}}),
