@@ -16,6 +16,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { ApiError, describeError } from '../api/client';
 import type { CommunitySync, SetupDevice, SetupEstimate, SetupField, SetupJob, SetupModel, SetupModelsList, SetupPlan, SetupProfile, SetupSelection, SetupStepId, SetupToolCall, SetupValue } from '../api/types';
 import { poll, type Poller } from '../lib/poll';
+import { rememberJob } from '../lib/restart';
 import { LightElement, type Loadable } from '../ui/base';
 import { emptyState as emptyPanel, errorState, icon, skeleton } from '../ui/bits';
 import { setupApi } from './api';
@@ -490,7 +491,12 @@ export class QseSetup extends LightElement {
       // the user may have left while apply was in flight: a response that lands elsewhere must
       // not push its job's hash and drag them back into a setup wizard they abandoned
       this.confirmOpen = false;     // a Back press during apply must not leave the modal up,
-      if (!this.isConnected || this.path[0] !== selection.model || this.wiz.step !== 'review') return;   // even when the answer owns nothing
+      if (!this.isConnected || this.path[0] !== selection.model || this.wiz.step !== 'review') {   // even when the answer owns nothing
+        // the job runs on the box all the same: the shell still learns of it (knownJob(), the
+        // restart pill and the setup page when the engine goes away), and nothing here reopens it
+        rememberJob(res.job);
+        return;
+      }
       this.jobInitial = res.job;
       this.dispatch({ type: 'job', id: res.job.id });
     } catch (e) {
