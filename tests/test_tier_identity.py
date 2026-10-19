@@ -246,6 +246,22 @@ def test_nemotron_hs_gguf_and_its_loader_are_in_the_fingerprint():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_the_shared_vision_code_nemotron_hs_image_rows_import_is_in_the_fingerprint():
+    """Super VL's tower (nemotron_h/vision.py) takes its attention, image context and embed cache from
+    engine/vision.py: a change there changes image rows, so every engine module it imports counts."""
+    import ast
+    from engine.models.nemotron_h import serving
+    names = {os.path.relpath(p, ROOT) for p in mf.files(ROOT, serving.manifest())}
+    with open(os.path.join(ROOT, "engine/models/nemotron_h/vision.py")) as f:
+        tree = ast.parse(f.read())
+    used = {n.module.replace(".", "/") + ".py" for n in ast.walk(tree)
+            if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("engine.")}
+    assert "engine/vision.py" in used
+    for f in sorted(used):
+        assert f in names, f"{f} is not in NemotronH's manifest"
+    return ", ".join(sorted(used))
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
