@@ -244,3 +244,80 @@ harness bug; the same-file A/B still showed it changes bits and is slower).
   issue as our G=2 masked lanes at ~1.5 pairs/expert.
 - Bonsai llama.cpp GB10 commit (tangled.org): GB10-specific MMQ config
   table + prefetch - sm_121a gets its own tuning tables, same as ours.
+
+
+## Quant-coverage test matrix (2026-10-19, RTX 4080 sm_89)
+
+Support surface audited per arch:
+
+| Arch | Loader | Quant types accepted |
+|---|---|---|
+| `qwen3_5` (Qwen3.8-27B) | safetensors + pack swap-ins | FP8 e4m3 (+128x128 scale), NVFP4 (load_nvfp4_mlp), EXL3 (load_exl3), BF16, FP8Head — **mixed in one checkpoint** |
+| `lfm2_moe` | EXL3 pack + bf16 tensors | EXL3 any kb (2..8, frac via kb*10) + bf16 norms/embeds/conv — every pack is already mixed (body bpw + 6-bit head + bf16) |
+| `qwen4_exp` (FlashNext) | EXL3 pack + Int8Rows | EXL3 + int8 mixer rows (FN_MIX) |
+| `nemotron_h` | GGUF (nvidia Bolt releases) | IQ2_XXS->IQ2Linear/IQ2Bank, NVFP4->NVFP4Linear, Q8_0->Q8Linear, F32/F16/BF16->bf16; **all other GGML types refused by name** |
+
+Test results on sm_89:
+
+- **lfm25-exl3-2.5**: full engine, self-check PASS 24/24, ~160 tok/s warm (baseline)
+- **lfm25-exl3-3.0**: full engine, loaded + generation OK, 92.8 tok/s cold (mtp drafter acc 21%)
+- **lfm25-exl3-4.0**: full engine, loaded + generation OK, 58 tok/s cold, mtp acc 97% / mean-len 5.64
+- **nemotron-bolt-iq2 GGUF** (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF, arch `nemotron_h_moe`,
+  mix: Q8_0 x114 + NVFP4 x80 + IQ2_XXS x160 + F32 x489):
+  kernel-level coverage — Q8Linear rel=3.1e-3, IQ2Linear rel=2.8e-3, NVFP4Linear matches after per-tensor
+  scale (tiny QAD scale ~1.3e-4), IQ2Bank expert decode OK. Full-engine run needs >16GB VRAM (22GB file,
+  loader is all-GPU) — out of reach on this box.
+- **Bug found+fixed**: `iq2_linear.NVFP4Linear.matmul` gated skinny on `M<=SKINNY_MAX` only — on sm_89 it
+  tried compiling the sm_121a inline extension and crashed. Now gated on `use_skinny(M)` (arch-aware).
+
+### Gaps (infeasible on this box / unsupported)
+
+- **OrcaCyber-Nano-1.0** (orcarouter): GGUF, Qwen-family arch — `config_from_gguf` only takes
+  `nemotron_h`/`nemotron_h_moe`; refused by name. Also HF auto-gated. Supporting it = new GGUF arch
+  adapter + likely new GGML types (its "Mix" files probably carry Q4_K/Q6_K families the reader rejects).
+- **Qwen3.8-27B packs** (exl3-*, nvfp4): need the ~30GB FP8 base checkpoint; won't fit RAM/VRAM.
+- **flashnext-***: 85GB packs. **super-vl-***: 75-97GB. **nemotron-bolt-exl3-***: 23.5GB+.
+- **lfm25-bf16** (47.9GB), **lfm25-exl3-6.0** (18.6GB): exceed 16GB VRAM — loader is all-GPU.
+- ~~GGUF types the reader refuses~~ — closed by the gguf_quants work below: every type the reader
+  now accepts either runs a packed kernel or dequantizes at load. Still open: packed IQ-family and
+  TQ/MXFP4 kernels (Tier B only today), and a Qwen-family GGUF arch adapter for files like
+  OrcaCyber (the loader remains `nemotron_h`-scoped by design).
+
+## GGUF/ggml quant coverage (2026-10-19 session)
+
+tools/gguf_quants.py + tools/gguf_grids.py add the full ggml type table to the nemotron_h GGUF path.
+Two tiers, mirroring how the codebase already treats formats:
+
+- Tier A - packed + fused Triton kernels (PACKED_LINEAR): Q4_0, Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q4_K,
+  Q5_K, Q6_K - plus the pre-existing Q8_0 (Q8Linear), IQ2_XXS (IQ2Linear/IQ2Bank), NVFP4
+  (NVFP4Linear) in tools/iq2_linear.py. All follow the Q8Linear contract: .shape,
+  matmul(x, out=None, f32=False), bitwise row-invariant for M<=32, F.linear twin fallback above.
+  Super-block scales are folded to fp16 once at init (6-bit Q4_K/Q5_K pack -> ds/dm fp16 [N,nb,8],
+  Q2_K 4-bit pairs -> ds/dm fp16 [N,nb,16], Q3_K/Q6_K int6/int8 -> dl fp16 [N,nb,16]).
+- Tier B - load-time dequant to bf16/fp32 via _dense -> gguf_quants.dequant: every other type in
+  TYPES (Q8_1, Q8_K, IQ1_S, IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0,
+  MXFP4, BF16, I8-I64, F64). The reader BLOCKS table now lists all of them, so mixed-type and
+  mixed-block-size files (QK=32 and QK=256 tensors in one GGUF) parse and dispatch per-tensor.
+
+Correctness (RTX 4080, sm_89): every dequantizer bit-exact vs gguf-py 0.19.0 on identical random
+blocks (23/23; Q8_1 and Q8_K have no gguf-py reference - ours follow the ggml source). Packed
+kernels: matmul rel ~1.7-3.1e-3 vs fp32 twins (bf16 rounding noise), bitwise row-invariance,
+twins oracle-exact.
+
+Decode GEMV M=1, W [8192 x 4096], packed kernel vs bf16 twin (bytes 11-27MB vs 67MB):
+Q4_0 1.5x, Q4_1 1.3x, Q5_0 1.1x, Q5_1 1.15x, Q2_K 1.8x, Q3_K 2.2x, Q4_K 2.9x, Q5_K 2.6x,
+Q6_K 1.6x. The K formats win bigger because the 256-element super-block amortizes launch and
+index overhead - consistent with llama.cpp putting its effort where the K-quants are.
+
+### ggml-layout lessons applied (llama.cpp/ggml + gguf-py + Marlin lineage)
+
+- The K-quant scale packing is a pure byte-shuffle; fold d/dmin*sc into fp16 once at load rather
+  than decoding 6-bit fields per call - the kernel then reads one scalar per sub-block.
+- Per-element scale gathers were the bottleneck, not the code bytes: Q2_K/Q3_K/Q6_K have two
+  scales per 32-element sub-block, and replacing the [BN,32] fp16 gather with two scalar loads
+  plus a t<16 select gave Q2_K 4.4x, Q3_K 2.9x, Q6_K 2.6x over the naive version - the same
+  lesson as Marlin-style precomputed scale layouts (keep per-lane index math out of the loop).
+- Ada/Triton launch sweet spot is again num_warps 1-2, num_stages 1-2 (measured per kernel; more
+  stages hurt - consistent with the _moe_gtrellis result and Triton issue #4906).
+- tools/gguf_grids.py lattice grids are generated programmatically from gguf-py grid constants
+  (grid_hex/grid_map/grid_shape verbatim export) - no transcription, ggml MIT attribution kept.

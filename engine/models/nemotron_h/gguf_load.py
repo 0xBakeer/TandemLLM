@@ -202,6 +202,9 @@ def _dense(g: GGUFFile, name: str, device, want) -> torch.Tensor:
         return x.reshape(t.shape).to(device=device, dtype=want)
     if t.type_name == "Q8_0":
         return Q.dequant_q8_0(np.array(raw), N, K).reshape(t.shape).to(device=device, dtype=want)
+    from tools import gguf_quants as GQ
+    if t.type in GQ.TYPES:
+        return GQ.dequant(t.type, np.array(raw), t.shape).to(device=device, dtype=want)
     raise ValueError(f"{name}: {t.type_name} has no reader here")
 
 
@@ -253,6 +256,11 @@ def load_gguf(path: str, device="cuda", mtp: bool = True, log=print, config_dir:
             sc = g.tensors.get(stored[:-len(".weight")] + ".scale")
             scale = float(np.array(g.raw(sc.name)).view(np.float32)[0]) if sc is not None else 1.0
             W[canon] = Q.NVFP4Linear(np.array(g.raw(stored)), t.shape[0], t.shape[1], scale=scale, device=device)
+            packed += 1
+            continue
+        from tools import gguf_quants as GQ
+        if t.type in GQ.PACKED_LINEAR and len(t.shape) == 2 and t.shape[1] % GQ.TYPES[t.type][0] == 0:
+            W[canon] = GQ.PACKED_LINEAR[t.type](np.array(g.raw(stored)), t.shape[0], t.shape[1], device=device)
             packed += 1
             continue
         want = torch.float32 if canon.endswith(F32_NAMES) else torch.bfloat16
