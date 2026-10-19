@@ -52,6 +52,7 @@ E1 & \code{empty_turn} & an end token inside the reasoning, or an empty answer t
 E2 & \code{claim_check} & a coding turn that ends claiming the work is done without the tool evidence (below) & shadow \\
 C4 & \code{malformed_call} & a tool-call block that does not parse; repairs it when the fix is not a guess, else has the model write it again & act \\
 C3 & \code{repeated_call} & the same call a third time after identical results; asks for something different & act \\
+C5 & \code{sequential_mutations} & an answer with two or more calls that change something outside the conversation (send, schedule, create, write, delete, read off each tool's declaration); has the model write them again one at a time, each after the last one's result & shadow; act in \code{tools} \\
 C1 & \code{risk_floor} & \code{rm -rf} outside the project root, \code{git push}, a write outside the root, a download piped into a shell & shadow \\
 C2 & \code{project_rules} & what text alone can decide of the project's \code{AGENTS.md}: a numbered copy of a file, a path under \code{/tmp/}, a written file over 400 lines & shadow \\
 S1 & \code{gate_stagnation} & a checker gate that failed 3 times in a row without getting closer; one hidden note & act \\

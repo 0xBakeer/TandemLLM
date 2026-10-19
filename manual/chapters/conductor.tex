@@ -31,7 +31,7 @@ The configuration lives in versioned JSON documents under the conductor's direct
 
 \section{Profiles}\label{sec:profiles}\index{profile}
 
-A request resolves to a profile: the \code{X-Tandem-Profile} header, else the profile mapped to the client, else the default (\code{general}). The client is known by its requests (headers, tools, its fixed system texts), never by a word list.
+A request resolves to a profile: the \code{X-Tandem-Profile} header, else the profile mapped to the client, else \code{tools} when no profile maps the client and the request offers a function tool with \code{tool_choice} other than \code{none} (an OpenAI SDK, curl, a benchmark; \code{settings.tools_profile} names it, and an empty name turns the rule off), else the default (\code{general}). The journal names the rule that picked it (\code{extra.profile_source}). The client is known by its requests (headers, tools, its fixed system texts), never by a word list.
 
 \begin{table}[htbp]
 \centering\small
@@ -46,6 +46,7 @@ A request resolves to a profile: the \code{X-Tandem-Profile} header, else the pr
 \code{coding} & opencode & every routing decision, packages and skills, the loop guards, the empty-turn continue, the tool-call checks, turn snapshots, the library in shadow, the status lines as titled reasoning parts, the voice, the shadow reader when its model is set \\
 \code{hermes} & the Hermes agent & coding's routing, tasks and packages, the status lines in the reasoning \\
 \code{overnight} & unattended opencode runs, by header & coding plus the session tasks acting, raised caps, a push notification when the client has gone \\
+\code{tools} & API clients that offer tools & nothing in the prompt: the client's prompt, token for token the raw path's; the loop guards, the tool-call checks and C5 act; the secret echo mask \\
 \code{general} & any other client & class-aware effort and packages, the status lines in the reasoning \\
 \bottomrule
 \end{tabularx}
@@ -151,4 +152,4 @@ The notes give the model \code{{tandem_url}}: the request's own address plus \co
 
 \section{What is journaled}\index{journal}
 
-The router's decisions and the monitor's go to one journal, the table \code{conductor_events} in the usage ledger's file, kept 30 days: the class, the confidence of every stage, the effort and its source, the note's text and its token count, every act with its hidden text (stored once by its hash in \code{conductor_texts}). \code{GET /v1/conductor/sessions/<key>/export?format=md} lists what the model saw that the client did not. With the conductor on, every request with tools is also written as a transcript block under \code{~/.qwen38-spark-engine/memory/sessions/}, mode 0600, kept 30 days, with secrets redacted first: a private key, a bearer or basic header, a service token, a JWT, credentials in a URL, a password assigned to a string all become \code{[redacted:<kind>]}.
+The router's decisions and the monitor's go to one journal, the table \code{conductor_events} in the usage ledger's file, kept 30 days: the class, the confidence of every stage, the effort and its source, the note's text and its token count, every act with its hidden text (stored once by its hash in \code{conductor_texts}). \code{GET /v1/conductor/sessions/<key>/export?format=md} lists what the model saw that the client did not. With the conductor on, every request with tools is also written as a transcript block under \code{~/.qwen38-spark-engine/memory/sessions/}, mode 0600, kept 30 days, with secrets redacted first: a private key, a bearer or basic header, a service token, a JWT, credentials in a URL, a password assigned to a string all become \code{[redacted:<kind>]}. The answer has a twin of that rule, the secret echo mask (profile key \code{secret_mask}, SRV-625): a secret span a tool result in the conversation held is masked where the answer repeats it verbatim, \code{sk-abc123} as \code{sk-[redacted]}. The answer is never read for shapes, call arguments are untouched, and the mask is on in \code{tools}, \code{coding}, \code{chat-app} and \code{chat}.

@@ -39,9 +39,16 @@
 0.11.2 & 10-16 & chatd starts with the engine and the Chat tab says when it is down; install script and secrets fixes; sandbox containers scoped to their chatd; the preview opens the running app; Context panel figures; no horizontal overflow on a phone; a model picker with one row a model; Setup Guide steppers for chats and windows; Super VL window up to 1,048,576 \\
 0.11.3 & 10-17 & Setup Guide hardening: \code{tandem doctor}, a check before the restart, Retry and Copy diagnostics, the restart card, removing weights; Super VL reads images; a cloud model's figures and cost; slot affinity \\
 0.11.4 & 10-18 & Agents mode in the Chat tab: a main agent with workers, the Task card, workers in the Context panel; a worker's and its parent's cache rows kept; file texts out of a chat's requests; a memory refusal compacts; cloud runs take no run slot \\
+0.12.0 & 10-19 & the \code{tools} profile for API clients that offer tools; structured outputs with tools; C5, one mutation per turn; the secret echo mask; the raw path's thinking in \code{reasoning_content} for plain API clients; tool-eval-bench results \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.12.0, tool clients}\label{sec:changelog-0120}
+
+0.12.0 serves API clients that offer tools through a profile of their own. An OpenAI SDK, curl or an unnamed client that sends tools and names no profile gets \code{tools} (Section~\ref{sec:profiles}): the prompt as the client sent it, token for token the raw path's, with the loop guards and the tool-call checks acting. A request with tools can ask for a JSON answer, and the model's first answer token picks a tool call or the document. An answer that makes two or more changes outside the conversation in one turn is written again one call at a time (C5), and a key the model read in a tool result is masked where the answer repeats it. On the raw path a plain API client gets the thinking in \code{reasoning_content}.
+
+On tool-eval-bench's 69 scenarios, on one DGX Spark with Qwen3.8-27B in the EXL3 6.0 pack, the raw path scored 92 with thinking off and 95 to 97 with it on, and the \code{tools} profile 95. Two runs of the same prompt scored 95 and 97, so rows within 2 points are the same. Profiles that add packages took twice the time and scored no higher. In the bench's hard mode, 28 scenarios, the conductor scored 91 against 84 for raw, one run a side. \code{docs/tool-eval-bench.md} has every row and its command. No change touches the decoding of a request without tools and without a JSON format; the served text against 0.11.4 was not measured.
 
 \section{0.11.4, Agents mode}\label{sec:changelog-0114}
 

@@ -63,7 +63,7 @@
 \texttt{PATCH} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}} & change fields (\texttt{key:\allowbreak{} null} removes the key) \\
 \texttt{DELETE} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}} &  \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}/\allowbreak{}test} & test the saved backend, refresh its models \\
-\texttt{PUT} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}/\allowbreak{}models/\allowbreak{}\{model\}} & public id, enabled, price, fallback, features (creates a manual model) \\
+\texttt{PUT} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}/\allowbreak{}models/\allowbreak{}\{model\}} & public id, enabled, price, max\_output (null clears), fallback, features (creates a manual model) \\
 \texttt{DELETE} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}backends/\allowbreak{}\{id\}/\allowbreak{}models/\allowbreak{}\{model\}} &  \\
 \texttt{PUT} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}rules} & \texttt{\{rules:\allowbreak{} [\{id?,\allowbreak{} pattern,\allowbreak{} backend,\allowbreak{} enabled\}}]\} \\
 \texttt{POST} & \texttt{/\allowbreak{}v1/\allowbreak{}config/\allowbreak{}users} & \texttt{\{label\}}: the answer holds the key, once \\
