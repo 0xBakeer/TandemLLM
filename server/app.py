@@ -755,6 +755,13 @@ SIDE_SLOT0_WAIT_S = float(_S.get("SIDE_SLOT0_WAIT_S") or 3.0)
 SIDE_RESIDENT_GB = float(_S.get("SIDE_RESIDENT_GB") or 0.5)
 SIDE_STASH_GB = float(_S.get("SIDE_STASH_GB") or 1.0)
 
+#: SRV-629: `on`: a request with images may take a side slot (each slot is its own engine over the
+#: same weights, with its own `mm` and rotary offset; the tower runs in the slot's prefill), routed
+#: on its expanded key ids (`_mm_keys`); `off`: slot 0 only, as 0.12.0. Live 2026-10-19: two
+#: Chat-tab agent runs with 3 to 8 screenshots a request ran all 31 requests on slot 0 (56.6 min
+#: of wall time for 18.9 min of decoding) while slot 1 stayed idle
+SIDE_IMAGES = (_S.get("SIDE_IMAGES") or "off").strip().lower()
+
 
 def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
     """FX5: a request of `n` rendered tokens that shares `rc` with slot 0's resident rows is a
@@ -850,6 +857,45 @@ def _holder_name() -> str:
         who.get("rank"), "a request")
 
 
+def _mm_keys(ids: list[int], images: list) -> list[int] | None:
+    """SRV-629: the rendered ids with each image's one placeholder expanded to its rows, each row
+    its image's key id (engine/vision.py `key_id`): the prompt as the caches compare it
+    (`MMContext.key_ids`), on the host, before any lock and without the tower. None when the
+    expansion fails (the handler answers it as a 400 under the lock) or the tower builds its own
+    context (Super VL's RADIO tower: no side slot reads its images yet, they stay on slot 0)."""
+    tower = STATE.get("vision")
+    if tower is None or getattr(tower, "context", None) is not None:
+        return None
+    from engine.vision import expand, key_id
+    try:
+        full, spans = expand(list(ids), images, tower.cfg.image_token_id,
+                             tower.cfg.spatial_merge_size)
+    except Exception:                                              # noqa: BLE001
+        return None
+    for sp_ in spans:
+        full[sp_.start:sp_.start + sp_.n] = [key_id(images[sp_.image].digest)] * sp_.n
+    return full
+
+
+def _mm_rows(n_text: int, images: list) -> int:
+    """SRV-629: the rows a prompt of `n_text` rendered tokens with `images` takes once each
+    image's placeholder is expanded (`_vision_context`); `n_text` when that cannot be told."""
+    tower = STATE.get("vision")
+    if not images or tower is None:
+        return int(n_text)
+    try:
+        ph = int(tower.cfg.image_token_id)
+        own = getattr(tower, "context", None)
+        if own is not None:
+            full, _ = own([ph] * len(images), images)
+        else:
+            from engine.vision import expand
+            full, _ = expand([ph] * len(images), images, ph, tower.cfg.spatial_merge_size)
+        return int(n_text) + len(full) - len(images)
+    except Exception:                                              # noqa: BLE001
+        return int(n_text)
+
+
 def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                    why: dict | None = None, stay: bool = False,
                    parent: str | None = None, session: str | None = None) -> int | None:
@@ -877,7 +923,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     pool = dict.get(STATE, "pool")
     if pool is None or pool.n < 2:
         return None
-    if images:
+    if images and SIDE_IMAGES != "on":
         why["images"] = True              # the Lanes view's reason (`_queue_why`)
         return None
     # a side lane job is served at slot 0's safe points, unless it is a guest of slot 0's
@@ -889,6 +935,16 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     except Exception:                                              # noqa: BLE001
         return None                       # the render fails again under the lock, as a 400
     why["ids"] = ids
+    rows = len(ids)
+    if images:
+        # SRV-629: the window holds the expanded rows, not one placeholder an image (8
+        # screenshots: about 7,700 rows)
+        keys = _mm_keys(ids, images)
+        if keys is None:
+            why["images"] = True
+            return None
+        rows = len(keys)
+        why.update(n_images=len(images), n_rows=rows)
     res = dict.get(STATE, "resident")
     chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
     # Past the client's head, or it is a new conversation (`_continues_resident`)
@@ -975,13 +1031,13 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
     margin = SIDE_MARGIN + (PLAN_MARGIN if plan is not None and getattr(plan, "active", False)
                             else 0)
     why["margin"] = margin
-    need = len(ids) + int(max_new) + margin
+    need = rows + int(max_new) + margin
     why["need"] = need
     if not any(need <= s.max_len for s in pool.side()):
         # the whole output limit does not fit beside the prompt: a side slot with at least
         # SIDE_MIN_ROOM rows of output left takes the request with its limit cut to that room
         # (`_side_room`, applied once the slot is known); else the request waits for slot 0
-        least = len(ids) + margin + SIDE_MIN_ROOM
+        least = rows + margin + SIDE_MIN_ROOM
         if SIDE_MIN_ROOM > 0 and any(least <= s.max_len for s in pool.side()):
             why["need"], why["clip"] = least, True
             need = least
@@ -6268,7 +6324,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._reader_gone()
 
     def _par_admit(self, pool, cid: str, prompt, rec=None, say=None, max_new: int = 0,
-                   stream: bool = False) -> bool:
+                   stream: bool = False, rows: int | None = None) -> bool:
         """Parallel requests: admission by bytes (server/slots.py `Admission`). The request's own
         worst case -- its prefill's workspace (engine/cache.py `Budget.workspace`) and, with the
         shared KV pool (SRV-307), the KV pages its prompt and `max_new` may still commit on its
@@ -6290,12 +6346,16 @@ class Handler(BaseHTTPRequestHandler):
         state `waiting_memory` (the dashboard counts it, `rec.wait_reason` is "memory"), its line
         says so every `MEM_LINE_EVERY_S`, a streamed request waits as long as a request may run
         (`--request-timeout`), and a non-streamed one gets, after `--queue-timeout`, a 503 with
-        `Retry-After` and the code `memory_wait_timeout`."""
+        `Retry-After` and the code `memory_wait_timeout`.
+
+        SRV-629: `rows`, the prompt's rows once its images are expanded (`_mm_rows`), where the
+        text prompt has one placeholder an image: the workspace and the KV pages are reserved for
+        what the prefill writes."""
         self._mem_wait = False
         adm = pool.admission
         if adm is None:
             return True
-        n = int(prompt.numel())
+        n = max(int(prompt.numel()), int(rows or 0))
         mem = dict.get(STATE, "mem")
         ws = mem.workspace(n) if mem is not None else max(
             cache.WORKSPACE_FLOOR, n * cache.WORKSPACE_PER_TOKEN)
@@ -7727,7 +7787,8 @@ class Handler(BaseHTTPRequestHandler):
                 clip = ""
                 if par_why.get("clip"):
                     # FX16: the slot's window leaves this request less than its output limit
-                    room = _side_room(side, len(par_why.get("ids") or ()),
+                    room = _side_room(side, int(par_why.get("n_rows")
+                                                or len(par_why.get("ids") or ())),
                                       int(par_why.get("margin") or 0), max_new)
                     if room < max_new:
                         clip = f" max_tokens {max_new} -> {room} (the slot's window)"
@@ -7767,10 +7828,9 @@ class Handler(BaseHTTPRequestHandler):
                 # never "a prefill needs at least one token" as a 500
                 return self._json(400, compat.Refusal(
                     "messages" if chat else "prompt", "the prompt is empty").body())
-            if par is not None and not micro and not self._par_admit(par, cid, prompt, rec=rec,
-                                                                       say=mem_wait,
-                                                                       max_new=max_new,
-                                                                       stream=stream):
+            if par is not None and not micro and not self._par_admit(
+                    par, cid, prompt, rec=rec, say=mem_wait, max_new=max_new, stream=stream,
+                    rows=_mm_rows(int(prompt.numel()), images) if images else None):
                 return
             clean_ids = None
             plan_hidden = 0                        # SRV-165: the router's tokens in the prompt
