@@ -83,16 +83,71 @@ def test_packed_linears():
 
 
 def test_row_invariance():
+    """Every call width M = 1..33 (decode's 1 to the ROWS_MAX+1 verify block) gives a row bitwise
+    identical to the M=1 row — the packed linears plus iq2_linear's IQ2/Q8 linears."""
     if not KERNELS:
         return "skipped: no triton/gpu"
+    from tools.iq2_linear import IQ2Linear, Q8Linear
+    for tid, cls in sorted(Q.PACKED_LINEAR.items()):
+        ts, qk, _ = PACKS[tid]
+        shapes = [(128, 512)]
+        if qk == 32:
+            shapes.append((64, 96))          # 3 blocks a row: exercises the K tail
+        for N, K in shapes:
+            lin = cls(random_blocks(tid, N * (K // qk)).reshape(-1), N, K, device=DEV)
+            x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
+            one = lin.matmul(x[:1])
+            for M in range(2, 34):
+                assert torch.equal(one, lin.matmul(x[:M])[:1]), (tid, N, K, M)
+    # iq2_linear's production linears hold the same contract (IQ2_XXS needs K % 256 == 0)
+    rng = np.random.default_rng(1)
+    for cls, ts, qk, shapes in ((IQ2Linear, 66, 256, [(128, 512)]), (Q8Linear, 34, 32, [(128, 512), (64, 96)])):
+        for N, K in shapes:
+            b = rng.integers(0, 256, (N * (K // qk), ts), dtype=np.uint8)
+            b[:, 0:2] = _HALF
+            lin = cls(b.reshape(-1), N, K, device=DEV)
+            x = torch.randn(33, K, device=DEV, dtype=torch.bfloat16)
+            one = lin.matmul(x[:1])
+            for M in range(2, 34):
+                assert torch.equal(one, lin.matmul(x[:M])[:1]), (cls.__name__, N, K, M)
+
+
+def test_dequant_gpu_close():
+    """`dequant_gpu` decodes on-device from the packed tensors (folded scales are fp16), so it is
+    within ~1 bf16 ulp of the fp32 `dq_*` twin — the whole weight and a partial row slice."""
+    if not (KERNELS and DEV == "cuda"):
+        return "skipped: no gpu"
     for tid, cls in sorted(Q.PACKED_LINEAR.items()):
         ts, qk, _ = PACKS[tid]
         N, K = 128, 512
         lin = cls(random_blocks(tid, N * (K // qk)).reshape(-1), N, K, device=DEV)
-        x = torch.randn(1, K, device=DEV, dtype=torch.bfloat16)
-        one = lin.matmul(x)
-        many = lin.matmul(x.repeat(8, 1))
-        assert torch.equal(one, many[:1]), tid
+        for got, ref in ((lin.dequant_gpu(), lin.dequant()), (lin.dequant_gpu(5, 37), lin.dequant()[5:37])):
+            err = (got.cpu().float() - ref).abs()
+            tol = 2**-7 * ref.abs() + 2**-7 * ref.abs().max() * 2**-8
+            assert (err <= tol).all(), (tid, err.max().item())
+
+
+def test_prefill_path():
+    """M > ROWS_MAX + 1 takes the chunked GPU dequant + cuBLAS path; a forced tiny chunk budget
+    exercises several N slices with a ragged tail."""
+    if not (KERNELS and DEV == "cuda"):
+        return "skipped: no gpu"
+    for tid, cls in sorted(Q.PACKED_LINEAR.items()):
+        ts, qk, _ = PACKS[tid]
+        N, K = 128, 512
+        lin = cls(random_blocks(tid, N * (K // qk)).reshape(-1), N, K, device=DEV)
+        w32 = lin.dequant().to(DEV)
+        x = torch.randn(70, K, device=DEV, dtype=torch.bfloat16)
+        ref = torch.nn.functional.linear(x.float(), w32)
+        rel = ((lin.matmul(x).float() - ref).norm() / (ref.norm() + 1e-9)).item()
+        assert rel < 0.01, (tid, rel)
+        old = Q.PREFILL_W_BYTES
+        try:
+            Q.PREFILL_W_BYTES = 2 * K * 30        # 30 rows a slice: 4 full + a ragged 8
+            rel = ((lin.matmul(x).float() - ref).norm() / (ref.norm() + 1e-9)).item()
+        finally:
+            Q.PREFILL_W_BYTES = old
+        assert rel < 0.01, (tid, rel)
 
 
 def test_twins_match_oracle():

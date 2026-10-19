@@ -346,3 +346,99 @@ Kernel recipe (extends the `_iq2_gemm` pattern in `tools/iq2_linear.py`):
 Verified on the RTX 4080: `tests/test_gguf_quants.py` — packed-vs-twin matmul, bitwise row
 invariance, twin-vs-oracle, and full-table dequant parity all pass for 17 PACKED_LINEAR entries.
 
+
+## Optimization pass — packed GGUF kernels vs the RTX 4080 roofline
+
+### Measurement
+`roofline.py` (kept outside the tree at /home/user/tandem-opt): weight-stream GB/s of every packed
+linear against a fixed reference of 620 GB/s, the best cuBLAS bf16 GEMV measured on this card (spec
+716.8 GB/s). Each config rotates through enough independent weight copies to exceed 4x the 64 MB L2,
+so the numbers are DRAM numbers rather than cache-warm ones (earlier same-weight microbenchmarks were
+partly L2-resident). Widths M = 1 (decode), 9, 33 (ROWS_MAX + 1, the widest verify block).
+
+### Diagnosis
+- Only Q8_0 was near the roofline (80-89%). The others sat at 8-58%. Q8 shares the grid shape with the
+  slow kernels, so the limiter was per-weight decode ALU work, not parallelism: int->float converts
+  (quarter-rate on Ada), per-element scale multiplies, duplicate byte loads, global LUT gathers.
+- IQ2Linear (IQ2_XXS, the Bolt production format) ran at 7-15% at M=1 and ~2% at M=9/33 because it
+  reduces each row with CUDA-core `tl.sum`.
+- Two correctness/perf bugs: the packed classes fell back to a numpy CPU dequant of the whole matrix
+  for every prompt chunk (109 ms for one 4096x4096 Q4_K call at M=512), and a 33-row verify block
+  (ROWS_MAX + 1) took the cuBLAS twin instead of the decode kernel, so decode and verify could produce
+  different bits. The same cliff was in IQ2Linear / Q8Linear.
+
+### Techniques applied, and where each came from
+- **Scale after the dot.** Decode only the integer codes, dot them, then scale the [16, BN] partial
+  per (sub)block, and fold mins/zero-points in through per-block sums of x. From llama.cpp's MMVQ/MMQ
+  design (PR #2067, Johannes Gaessler, which quantizes x to q8_1 with a precomputed sum for exactly
+  this) and from our own `_q8_gemm`.
+- **Magic-number int->bf16.** OR the code into the mantissa of 128.0 and subtract, instead of I2F.
+  From FasterTransformer, via Kim et al. 2022, "Who Says Elephants Can't Run" (arXiv 2211.10017);
+  vLLM Marlin `dequant.h`; exllamav2 discussion #207; AWQ `dequantize.cuh`.
+- **Word loads.** Load the packed bytes once as int32 words and unpack the planes with shifts. From
+  llama.cpp PR #2067 (q8_1 sized so int8 pointers cast to int32).
+- **Register LUTs.** The IQ4 codebooks via `tl.gather` instead of global gathers. From FLUTE (Guo et
+  al., EMNLP Findings 2024, arXiv 2407.10960): LUT vectorization/duplication to avoid memory-bound
+  lookups.
+- **IQ lattice decode.** One load per grid entry, and the parity sign bit by popcount instead of the
+  ksigns table. From llama.cpp PR #19624 (dfriehs, IQ2_XXS/XS/IQ3_XXS) and discussion #5152 (Peter
+  Reid, IQ2_XS sign vectorization).
+- **Per-shape configs, never per-M.** llama.cpp tunes MMVQ warps per arch and batch (PR #5394, PR
+  #25479, PR #26079 with per-HW MMVQ->MMQ crossovers incl. Ada). We tune per (format, N, K) only,
+  because a config that depends on M would break bitwise decode/verify equality.
+- **Batch invariance as the constraint.** Thinking Machines, "Defeating Nondeterminism in LLM
+  Inference" (2025): fixed reduction strategy per token, fixed split size rather than split count.
+  LLM-42 (arXiv 2601.17768) notes the cost: batch-invariant GEMMs give up split-K. gemlite's GEMV
+  RevSplit-K (mobiusml/dropbox) gets K-parallelism through atomics, which is non-deterministic, so we
+  did not use it.
+- **Bounded prefill workspace.** The prompt-chunk path now dequantizes on the GPU in N-chunks capped at
+  256 MiB. Follows vllm-gguf-plugin PR #89 (estridell), which bounds the dequant+matmul fallback the
+  same way.
+
+### Results
+
+Clean interleaved A/B (`ab_final.py`: the pre-change snapshot vs production in one process, the GPU
+held busy for 0.4 s before every cell, old/new alternating per rep, 40 reps each). M = 1, three
+shapes; % of 620 GB/s after the change:
+
+| format | speedup at M=1 (4kx4k / 14kx4k / 4kx14k) | % of 620 after |
+|---|---|---|
+| IQ2_XXS (IQ2Linear, Ada) | 1.01 / 1.30 / 1.27; **3.5-4.7x at M=9** | 15-21% (was 4% at M=9) |
+| Q4_1 | 1.18 / 1.37 / 1.03 | 22-50% |
+| Q5_1 | 1.22 / 1.22 / 1.15 | 22-50% |
+| Q5_0 | 1.04 / 1.22 / 1.01 | 23-47% |
+| IQ4_NL | 1.19 / 1.16 / 1.13 | 19-49% |
+| Q4_0 | 1.09 / 1.02 / 1.02 | 21-50% |
+| Q6_K | 1.12 / 1.06 / 1.50 | 38-60% |
+| Q2_K | 1.09 / 1.32 / 1.06 | 25-38% |
+| Q3_K | 1.03 / 1.17 / 1.02 | 33-58% |
+| Q4_K | 1.04-1.08 / 1.02 / 1.03 | 56-68% |
+| IQ3_S | 1.18 / 1.00 / 1.00 | 16-21% |
+| IQ3_XXS | 1.00 / 1.08 / 1.08 | 15-19% |
+| IQ1_M | 1.00 / 1.00 / 1.07 | 9-12% |
+| Q5_K, IQ4_XS, IQ2_XS, IQ2_S, IQ1_S | 1.00 (unchanged) | 8-76% |
+| Q8_0 (reference) | 1.00 | 79-89% |
+
+Prefill (one 4096x4096 call at M=512): **109 ms -> 0.35-0.43 ms** for every packed format (cuBLAS bf16
+0.28 ms). The dequant reads the class's device tensors; no host bytes, no standing VRAM.
+
+Verify-width fix: every packed linear, plus IQ2Linear and Q8Linear, now runs its row-invariant kernel
+up to 33 rows. `test_row_invariance` checks every M = 1..33 bitwise against M = 1.
+
+What didn't pay, measured (and kept out):
+- Scale-after-dot on the K-quants and IQ lattice formats: the per-sub-block multiply after each MMA
+  adds a serial dependency, and 16-element sub-blocks (Q2_K/Q3_K) doubled the iterations. 0.6-0.9x.
+- Register `tl.gather` LUTs for IQ4: slower than plain L1-resident loads on Ada.
+- Launch configs picked on noisy runs: three entries (Q5_K and Q6_K at 14336x4096, Q5_0 at 4096x4096)
+  were 0.67-0.97x under the clean A/B and were removed.
+
+Profiling (Nsight Compute counters are blocked in this WSL container: ERR_NVGPUCTRPERM). An ablation
+stood in for it (loads kept with the decode math stripped, then decode kept with the loads made
+L2-resident). Results: Q4_K/Q5_K/Q8 already sit at their load floor; IQ lattice formats are
+decode/L1-gather bound (loads are 25-50% of runtime); the Q4_0 family is load-stream bound well below
+DRAM speed, because of its 16-byte-per-row block layout. That points at an init-time repack of the
+device layout (FLUTE-style restructuring), the clear next lever for the 32-block formats.
+
+Measurement lesson for this card: an idle 4080 drops its memory clock to 405 MHz (11.2 GHz loaded).
+Without a sustained warm-up the first cell after a pause reads 5-20x slow, and that confounded both
+the baseline and early A/Bs. Heat the GPU before every timed cell.
