@@ -262,6 +262,98 @@ def test_the_shared_vision_code_nemotron_hs_image_rows_import_is_in_the_fingerpr
     return ", ".join(sorted(used))
 
 
+# ------------------------------------------------------------------ 4. what NemotronH's files import (ENG-379)
+
+def _engine_imports(read, start) -> dict:
+    """Every engine/ module the files in `start` import, at the top or inside a function, and what those
+    import in turn: module -> the first file found importing it. `read(rel)` is a file's text."""
+    import ast
+    seen, todo, via = set(), list(start), {}
+    while todo:
+        rel = todo.pop()
+        if rel in seen:
+            continue
+        seen.add(rel)
+        for n in ast.walk(ast.parse(read(rel))):
+            if isinstance(n, ast.Import):
+                names = [a.name for a in n.names]
+            elif isinstance(n, ast.ImportFrom) and not n.level and n.module:
+                names = [n.module] + [f"{n.module}.{a.name}" for a in n.names]
+            else:
+                continue
+            for name in (x for x in names if x.split(".")[0] == "engine"):
+                f = os.path.join(*name.split("."))
+                hit = next((c for c in (f + ".py", os.path.join(f, "__init__.py"))
+                            if os.path.isfile(os.path.join(ROOT, c))), None)
+                if hit is not None:
+                    via.setdefault(hit, rel)
+                    todo.append(hit)
+    return {m: via[m] for m in seen if m in via}
+
+
+def _read(rel: str) -> str:
+    with open(os.path.join(ROOT, rel)) as f:
+        return f.read()
+
+
+def test_every_engine_module_nemotron_h_imports_is_listed_or_left_out_with_its_reason():
+    """kvpool.py (inside new_state), capture_lock.py and config.py were imported by NemotronH's files and
+    in neither list: a change to one that changed rows would have kept the old rows. Each import is now
+    in MODULES or in LEFT_OUT with why it computes no row, and a new one fails here."""
+    from engine.models.nemotron_h import serving
+    found = _engine_imports(_read, serving.MODULES)
+    stray = sorted(f"{m} (imported by {by})" for m, by in found.items()
+                   if m not in serving.MODULES and m not in serving.LEFT_OUT)
+    assert not stray, f"neither in MODULES nor in LEFT_OUT: {stray}"
+    assert not set(serving.MODULES) & set(serving.LEFT_OUT)
+    assert all(len(why) > 4 for why in serving.LEFT_OUT.values()), "each one says why"
+    stale = sorted(set(serving.LEFT_OUT) - set(found))
+    assert not stale, f"left out but imported by none: {stale}"
+    assert {"engine/kvpool.py", "engine/capture_lock.py", "engine/config.py"} <= set(serving.LEFT_OUT)
+    eng = "engine/models/nemotron_h/engine.py"
+
+    def with_new_import(rel):
+        return _read(rel) + "\n\ndef _later():\n    from engine import loader\n" if rel == eng else _read(rel)
+    assert _engine_imports(with_new_import, serving.MODULES).get("engine/loader.py") == eng, \
+        "an import inside a function counts"
+    return f"{len(found)} engine/ modules imported, {len(serving.LEFT_OUT)} of them left out"
+
+
+def test_nemotron_hs_manifest_is_pinned_and_a_left_out_module_moves_no_fingerprint():
+    from engine.models.nemotron_h import serving
+    assert serving.MODULES == (
+        "engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/config.py",
+        "engine/models/nemotron_h/engine.py", "engine/models/nemotron_h/gguf.py",
+        "engine/models/nemotron_h/gguf_load.py", "engine/models/nemotron_h/kernels.py",
+        "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
+        "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py",
+        "engine/models/lfm2_moe/kernels.py", "engine/models/lfm2_moe/pack.py", "engine/settings.py",
+        "engine/vision.py"), serving.MODULES
+    m = serving.manifest()
+    with tempfile.TemporaryDirectory() as d:
+        for sub in ("engine", "tools"):
+            shutil.copytree(os.path.join(ROOT, sub), os.path.join(d, sub),
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so", "*.cu",
+                                                          "*.safetensors", "*.bin"))
+        fp = mf.fingerprint(d, m, {})
+        for rel in serving.LEFT_OUT:
+            with open(os.path.join(d, rel), "a") as f:
+                f.write("\n# one more line\n")
+            assert mf.fingerprint(d, m, {}) == fp, f"{rel} moved NemotronH's fingerprint"
+        for rel in serving.MODULES:
+            if rel == dc.SETTINGS_FILE:        # counts by its knobs' defaults, not its bytes
+                continue
+            with open(os.path.join(d, rel), "rb") as f:
+                was = f.read()
+            with open(os.path.join(d, rel), "ab") as f:
+                f.write(b"\n# one more line\n")
+            assert mf.fingerprint(d, m, {}) != fp, f"{rel} did not move NemotronH's fingerprint"
+            with open(os.path.join(d, rel), "wb") as f:
+                f.write(was)
+        assert mf.fingerprint(d, m, {}) == fp
+    return f"{len(serving.LEFT_OUT)} left out keep it, {len(serving.MODULES) - 1} listed move it"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]

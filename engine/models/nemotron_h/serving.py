@@ -38,6 +38,21 @@ MODULES = ("engine/models/nemotron_h/__init__.py", "engine/models/nemotron_h/con
            "engine/models/nemotron_h/load.py", "engine/models/nemotron_h/pack.py",
            "engine/models/nemotron_h/ref.py", "engine/models/nemotron_h/vision.py", "engine/models/lfm2_moe/kernels.py",
            "engine/models/lfm2_moe/pack.py", "engine/settings.py", "engine/vision.py")
+#: the engine/ modules those files import (top level or inside a function) that compute no row, and why;
+#: a change to one keeps the tier files. tests/test_tier_identity.py holds every such import to MODULES or
+#: here (ENG-379)
+LEFT_OUT = {
+    "engine/__init__.py": "empty",
+    "engine/capture_lock.py": "a lock held around graph capture (engine.py); no arithmetic",
+    "engine/kvpool.py": "where K and V live, not what they hold: a paged buffer's tensor has the shape, dtype and "
+                        "contiguous strides of the torch.zeros it replaces (new_state), and a page is zeroed when it is "
+                        "mapped, so every kernel reads the same values at the same offsets",
+    "engine/config.py": "resolve_snapshot only (config.py, lfm2_moe/config.py): the folder that holds config.json; the "
+                        "weights in it count by content in the extra (server/diskcache.py fingerprint_extra)",
+    "engine/models/lfm2_moe/__init__.py": "a docstring",
+    "engine/models/lfm2_moe/config.py": "LFM2.5's config, read by lfm2_moe/pack.py's PackIndex; NemotronH takes only "
+                                        "that file's constants, safetensors_header and TensorInfo (pack.py)",
+}
 #: the model's name in ops/prices/ and models/, by the served weight profile's name
 MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-": "nemotron-3.5-lightning-30b-a3b",
              "nemotron-super-vl-": "nemotron-3.5-super-vl-120b-a12b"}
