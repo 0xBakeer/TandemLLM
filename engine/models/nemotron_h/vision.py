@@ -160,8 +160,8 @@ def target_patches(w: int, h: int, cfg: RadioConfig, budget: int) -> tuple[int, 
     ch = round(h / ps + 0.5)
     cw = round(w / ps + 0.5)
     factor = min(math.sqrt(budget / (ch * cw)), 1.0)
-    th = math.floor(factor * ch)
-    tw = math.floor(factor * cw)
+    th = max(math.floor(factor * ch), 1)      # a side the reference floors to 0 (a very long, thin
+    tw = max(math.floor(factor * cw), 1)      # image) divides by zero below or resizes to 0 pixels
     if budget > cfg.min_patches and th * tw < cfg.min_patches:
         up = math.sqrt(cfg.min_patches / (th * tw))
         th = math.ceil(up * th)
