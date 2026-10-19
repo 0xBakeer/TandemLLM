@@ -784,6 +784,14 @@ def _guest_of_slot0(res, n: int, rc: int, chunk: int) -> bool:
         return False
 
 
+def _keyed(ctx: list | None, mm) -> list | None:
+    """SRV-629: a request's context as the caches hold it: the image rows as their key ids
+    (`_remember`'s `committed`)."""
+    if ctx is None or mm is None or len(ctx) < int(mm.n):
+        return ctx
+    return list(mm.key_ids) + list(ctx[int(mm.n):])
+
+
 def _par_view_keep(served: list | None, view: list | None) -> bool:
     """At the end of a request on slot 0: remember `view` (its rendered ids) as the conversation
     slot 0 holds when the resident rows hold its served prompt (`served`, notes included): a
@@ -934,17 +942,23 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         ids = build_prompt(body, client, count="ids", left_out=left_out)
     except Exception:                                              # noqa: BLE001
         return None                       # the render fails again under the lock, as a 400
-    why["ids"] = ids
     rows = len(ids)
     if images:
         # SRV-629: the window holds the expanded rows, not one placeholder an image (8
-        # screenshots: about 7,700 rows)
+        # screenshots: about 7,700 rows), and every test below runs on the key ids, as the caches
+        # compare them: the resident rows, the views, the park and the NVMe hold an image's rows
+        # as its key, so the rendered ids part from them at the first image
         keys = _mm_keys(ids, images)
         if keys is None:
             why["images"] = True
             return None
+        ids = keys
         rows = len(keys)
         why.update(n_images=len(images), n_rows=rows)
+    why["ids"] = ids
+    # SRV-629: an end kept after images (slot 0's park, an NVMe entry) is offered to a request
+    # with images, as its own restore asks (`_spill_before_replay(..., mm_ok=True)`)
+    mm_kw = {"mm_ok": True} if images else {}
     res = dict.get(STATE, "resident")
     chunk = int(getattr(res, "chunk", 0) or STATE.get("prefix_chunk") or 1024)
     # Past the client's head, or it is a new conversation (`_continues_resident`)
@@ -978,14 +992,17 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
                 with pool._lk:
                     pool.stats["resident_waits"] = pool.stats.get("resident_waits", 0) + 1
             else:
-                if SIDE_GUESTS == "on" and not stay and _guest_of_slot0(res, len(ids), rc, chunk):
+                if (SIDE_GUESTS == "on" and not stay and not images
+                        and _guest_of_slot0(res, len(ids), rc, chunk)):
+                    # SRV-629: never a request with images: a guest on slot 0 is served over the
+                    # resident rows with the stash, which no image request ever was
                     why["guest"] = valid  # FX5: an idle side slot first (the handler's `_take`)
                 # rc-0.8.0: a conversation on the NVMe (a side slot's, written at a planned stop)
                 # comes back through slot 0, whose prefill reads the spill; a side slot has none
                 sp = STATE.get("spill")
                 if not why.get("guest") and sp is not None and sp.entries:
                     with cache_peek.quiet(sp):
-                        got = sp.candidate(res, ids, len(ids) - 1)
+                        got = sp.candidate(res, ids, len(ids) - 1, **mm_kw)
                     # 0.8.2: only an entry that holds this conversation past its first user
                     # message (`conv`) is its conversation. A line at the client's head is not:
                     # a new Open WebUI chat matched another chat's entry at 8,192 tokens, its
@@ -1006,7 +1023,7 @@ def _par_side_need(body, client, left_out, max_new, plan, images, lane_kind,
         # the lock), and no failure here skips the parent's or the worker's check below
         if getattr(res, "park_rows", 0):
             try:
-                bk = int(res.park_offer(ids, rc, len(ids) - 1) or 0)
+                bk = int(res.park_offer(ids, rc, len(ids) - 1, **mm_kw) or 0)
             except Exception:                                      # noqa: BLE001
                 bk = 0
             if bk and (conv is None or bk >= conv):
@@ -7820,6 +7837,7 @@ class Handler(BaseHTTPRequestHandler):
         # (`_generate_stream` publishes a new list) records its conversation as slot 0's
         ctx_found = STATE.get("last_ctx") if par is not None and side is None else None
         deadline = Deadline(float(STATE.get("request_timeout", 0.0)))
+        mm_end = None                      # SRV-629: the served images' context, for the view keep
         try:
             prompt, _, in_think = build_prompt(body, client, left_out=left_out)
             if int(prompt.numel()) == 0:
@@ -8080,6 +8098,7 @@ class Handler(BaseHTTPRequestHandler):
                             _say_reread(cid, res_, list(mm.key_ids), plan)
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()      # served as rendered, as before SRV-546
+            mm_end = mm
             eos = eos_ids(body)
             n_prompt = int(prompt.numel())
             # the tokens SP4 added are hidden: `prompt_tokens` is what the client sent
@@ -9111,7 +9130,9 @@ class Handler(BaseHTTPRequestHandler):
                             ctx_ = STATE.get("last_ctx")
                             n_ = int(STATE.get("last_prompt_n") or 0)
                             if ctx_ is not None and ctx_ is not ctx_found and n_:
-                                _par_view_keep(list(ctx_[:n_]), par_why.get("ids"))
+                                # SRV-629: with images, the rows and the view in key space
+                                _par_view_keep(_keyed(list(ctx_[:n_]), mm_end),
+                                               par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
                     elif side is not None and not micro and not getattr(side, "no_carry", False):
@@ -9120,7 +9141,8 @@ class Handler(BaseHTTPRequestHandler):
                             ctx_ = STATE.get("last_ctx")
                             n_ = int(STATE.get("last_prompt_n") or 0)
                             if ctx_ is not None and n_:
-                                _side_view_keep(side, list(ctx_[:n_]), par_why.get("ids"))
+                                _side_view_keep(side, _keyed(list(ctx_[:n_]), mm_end),
+                                                par_why.get("ids"))
                         except Exception:                          # noqa: BLE001
                             logbuf.print_exc()
                     if par_why.get("hop_from") is not None and \

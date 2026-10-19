@@ -196,6 +196,168 @@ def test_flag_on_gives_a_new_chat_with_images_a_side_slot():
     return f"need {need}"
 
 
+
+# ------------------------------------------------------------------ 3. key space
+GEN = [888_000 + i for i in range(900)]
+
+
+def keys_of(ids, ims):
+    with flag("on"):
+        return A._mm_keys(ids, ims)
+
+
+def _image_chat():
+    """An agent's turn with two screenshots, the rows its slot holds after it (the served prompt
+    as the caches key it, then the generation), and its next turn with a third screenshot."""
+    ims = [shot(1), shot(2)]
+    p1 = with_shots(_session(1, HEAD, 1_500), 1) + [50, 51] + with_shots([], 1) + [7, 8, 9]
+    k1 = keys_of(p1, ims)
+    rows = k1 + GEN
+    p2 = p1[:-1] + [6] + GEN[:300] + with_shots([60], 1) + [7, 8, 9]
+    return ims, p1, k1, rows, p2, ims + [shot(3)]
+
+
+def test_a_turn_with_screenshots_continues_slot_0s_rows_in_key_space():
+    """The rows hold each image as its key id; the rendered ids part from them at the first
+    placeholder (8,500 here), so a text test calls the next turn a new conversation and sends it
+    to the side slot, which reads all of it again. In key space it continues slot 0's."""
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    first = p1.index(IMG)
+    assert FakeResident(rows).common(p2) == first, "the rendered ids part at the image"
+    for view in (k1, None):
+        pool, saved = _setup(FakeResident(rows), view=view)
+        try:
+            with flag("on"):
+                need, why = need_img(p2, ims2, max_new=4_000)
+            assert need is not None and why.get("slot0_first"), why
+            if view is not None:
+                assert why["wait"] == "view" and why["view_common"] == len(k1) - 1, why
+            else:
+                assert why["wait"] == "resident" and why["res_common"] == len(k1) - 1, why
+        finally:
+            _restore(saved)
+    return f"shares {len(k1) - 1} keys (the rendered ids: {first})"
+
+
+def test_another_screenshot_in_the_same_place_is_another_conversation():
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    other = [shot(9), ims[1], shot(3)]
+    pool, saved = _setup(FakeResident(rows), view=k1)
+    try:
+        with flag("on"):
+            need, why = need_img(p2, other, max_new=4_000)
+        assert need is not None and not why.get("wait") and not why.get("slot0_first"), why
+        assert why["view_common"] == p1.index(IMG), why       # the keys part at that image
+    finally:
+        _restore(saved)
+
+
+class SideRes(FakeResident):
+    def __init__(self, tokens):
+        super().__init__(tokens)
+        self.end = {"at": self.valid}
+
+
+def test_a_side_slots_image_conversation_is_its_home():
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    r0 = _session(2, HEAD, 1_500) + [7, 8, 9]
+    pool, saved = _setup(FakeResident(r0), view=r0)
+    try:
+        vals = {k: None for k in S.OVERLAY}
+        vals.update(max_len=65_536, resident=SideRes(rows), slot_view=list(k1))
+        pool.slots[1].values = vals
+        with flag("on"):
+            need, why = need_img(p2, ims2, max_new=4_000)
+            assert need is not None and why.get("home") == 1, why
+            # its rows alone, no view kept: the slot's own rows in key space
+            vals["slot_view"] = None
+            need, why = need_img(p2, ims2, max_new=4_000)
+            assert why.get("home") == 1, why
+            # the same text with another first screenshot: not its home
+            need, why = need_img(p2, [shot(9), ims[1], shot(3)], max_new=4_000)
+            assert "home" not in why, why
+    finally:
+        pool.slots[1].values = None
+        _restore(saved)
+
+
+def test_the_park_and_the_nvme_are_asked_for_an_end_after_images():
+    """A request with images may resume at an end kept after images (`mm_ok`), as the handler's
+    own restore asks (`_spill_before_replay(..., mm_ok=True)`); a text request may not."""
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    asked = []
+
+    class Res(FakeResident):
+        park_rows = 1
+
+        def park_offer(self, ids, c, max_len, align=True, mm_ok=False):
+            asked.append(("park", mm_ok, list(ids[:len(k1) - 1]) == k1[:-1]))
+            return len(k1) if mm_ok else 0
+
+    class Spill:
+        entries = {"e": 1}
+        stats: dict = {}
+
+        def candidate(self, res, keys, max_len, replay=False, mm_ok=False, miss=None):
+            asked.append(("spill", mm_ok, list(keys[:len(k1) - 1]) == k1[:-1]))
+            return None
+    r0 = _session(2, HEAD, 1_500) + [7, 8, 9]
+    pool, saved = _setup(Res(r0), view=r0)
+    A.STATE["spill"] = Spill()
+    try:
+        with flag("on"):
+            need, why = need_img(p2, ims2, max_new=4_000)
+        assert asked == [("spill", True, True), ("park", True, True)], asked
+        assert why["wait"] == "park" and why["park"] == len(k1) and why.get("slot0_first"), why
+    finally:
+        A.STATE.pop("spill", None)
+        _restore(saved)
+
+
+def test_a_request_with_images_is_never_a_guest_of_slot_0():
+    """A short unrelated request is served on slot 0 over the resident rows with the stash when
+    no side slot is free (FX5); no request with images ever was."""
+    r0 = _session(2, HEAD, 1_500) + [7, 8, 9]
+
+    class Res(FakeResident):
+        guest_max = 8_192
+    pool, saved = _setup(Res(r0), view=r0)
+    try:
+        short = [400_000 + i for i in range(30)]
+        with flag("on"):
+            _, why = need_img(short, [])
+            assert why.get("guest"), why
+            _, why = need_img(with_shots(short, 1), [shot(1)])
+            assert not why.get("guest"), why
+    finally:
+        _restore(saved)
+
+
+def test_the_view_is_kept_in_key_space():
+    """At a request's end the rows it left are compared with its served prompt: for one with
+    images, the image rows as their keys (`_keyed`), else the placeholders never match the rows
+    and no view is kept."""
+    ims, p1, k1, rows, p2, ims2 = _image_chat()
+    full, spans = V.expand(p1, ims, IMG, MERGE)
+    mm = types.SimpleNamespace(n=len(full), key_ids=k1)
+    ctx = full + GEN
+    pool, saved = _setup(FakeResident(rows))
+    try:
+        assert not A._par_view_keep(ctx[:len(full)], k1)
+        assert A._par_view_keep(A._keyed(ctx[:len(full)], mm), k1)
+        assert A.STATE["slot0_view"] == k1
+        side = pool.slots[1]
+        side.values = {k: None for k in S.OVERLAY}
+        side.values.update(resident=SideRes(rows))
+        assert A._side_view_keep(side, A._keyed(ctx[:len(full)], mm), k1)
+        assert side.values["slot_view"] == k1
+    finally:
+        pool.slots[1].values = None
+        A.STATE.pop("slot0_seen", None)
+        _restore(saved)
+    assert A._keyed(full[:5], mm) == full[:5] and A._keyed(full, None) == full
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in list(globals().items()):
