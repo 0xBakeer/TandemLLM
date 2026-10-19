@@ -772,7 +772,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             row = self._row(cid)
             parent = body.get("parent_id") or row["head_id"]
             atts = self._attachments(cid, body.get("attachments") or [])
-            self._place(conv, row, atts)
+            self._place(conv, row, parent, atts)
             um = self._insert_message(cid, parent, "user", [{"type": "text", "text": text}],
                                       "done", client_msg_id=cmid, attachments=atts or None)
             self._title_from(conv, row, text)
@@ -1712,7 +1712,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         except (ApiError, OSError, KeyError):
             return None
 
-    def _place(self, conv: Conv, row, atts: list[dict]) -> None:
+    def _place(self, conv: Conv, row, parent: str | None, atts: list[dict]) -> None:
         """SRV-487, when a message is sent: each attachment is saved in the chat's workspace under
         uploads/ (`path`; `unplaced`, why not, when it cannot be: the message is sent all the
         same), and a text file goes into the prompt whole only while the message's
@@ -1723,7 +1723,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             return
         settings = {**DEFAULT_SETTINGS, **json.loads(row["settings"])}
         window = int(self.model_info(settings.get("model")).get("max_len") or 0)
-        branch, _ = self._branch(conv, row["head_id"])
+        branch, _ = self._branch(conv, parent)          # an edit goes on the parent's branch
         left = attach_mod.budget(window, _branch_tokens(branch))
         ws_dir = self.workspace(conv.id).root
         for a in atts:
