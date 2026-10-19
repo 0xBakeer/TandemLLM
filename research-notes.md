@@ -321,3 +321,28 @@ index overhead - consistent with llama.cpp putting its effort where the K-quants
   stages hurt - consistent with the _moe_gtrellis result and Triton issue #4906).
 - tools/gguf_grids.py lattice grids are generated programmatically from gguf-py grid constants
   (grid_hex/grid_map/grid_shape verbatim export) - no transcription, ggml MIT attribution kept.
+
+## Update — full IQ lattice family fused (packed Tier A complete)
+
+`tools/gguf_quants.py` now fuses **every IQ format**: IQ1_S, IQ1_M, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S
+join IQ2_XXS (`tools/iq2_linear.py`), IQ4_NL and IQ4_XS. Tier A = 18 packed formats (also Q4_0,
+Q4_1, Q5_0, Q5_1, Q8_0, Q2_K..Q6_K, NVFP4); Tier B dequant-on-load covers the rest of the ggml
+table (Q8_1, Q8_K, TQ1_0, TQ2_0, MXFP4, integer scalars). Every dequantiser stays bit-exact vs
+gguf-py 0.19.0.
+
+Kernel recipe (extends the `_iq2_gemm` pattern in `tools/iq2_linear.py`):
+
+- Decode a whole 256-weight block to a `[BN, 256]` tile and `tl.dot` once per block — 8-16x fewer
+  dots than per-group steps, which was the dominant cost.
+- Pack lattice-grid entries as one `int64` (8-elem grids) or `int32` (4-elem) load each
+  (`GRID8` idiom), not 8 scalar gathers. IQ1 grids pack `magnitude + 1` since they are {-1,0,1}.
+- Per-element scales fold to fp16 tables at init (IQ1_M's nibble-assembled `d * (2*sc+1)`
+  becomes a `[N, nb, 16]` fp16 LUT; IQ4_NL/XS use their nonlinear LUTs directly).
+- Ada launch configs re-swept: BN16/w4/s1 for the 16-group formats, BN32/w4/s1 for the
+  8-group ones; measured M=1 GEMV at 4096x4096 lands ~0.7-0.9x of the bf16 twin — ALU-bound
+  lattice decode vs the pure-bandwidth twin, while streaming 3-5x fewer bytes.
+- Bitwise row invariance preserved: fp32 accumulate, fixed `[16, BN]` tiles, K in order.
+
+Verified on the RTX 4080: `tests/test_gguf_quants.py` — packed-vs-twin matmul, bitwise row
+invariance, twin-vs-oracle, and full-table dequant parity all pass for 17 PACKED_LINEAR entries.
+
