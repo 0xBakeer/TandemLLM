@@ -18,6 +18,7 @@ GGUF reads to the same names as the safetensors checkpoint (engine/models/nemotr
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import struct
@@ -128,6 +129,8 @@ class GGUFFile:
                 infos.append((name, dims, ty, off))
             pos = f.tell()
         align = int(meta.get("general.alignment", 32))
+        if align <= 0 or align & (align - 1):
+            raise ValueError(f"{path}: general.alignment {align} is not a power of two")
         start = (pos + align - 1) // align * align
         size = os.path.getsize(path)
         tensors = {}
@@ -135,7 +138,7 @@ class GGUFFile:
             if ty not in BLOCKS and not accept_all:
                 raise ValueError(f"{path}: tensor {name} is {TYPE_NAMES.get(ty, f'type {ty}')}; this engine decodes "
                                  f"{', '.join(v[0] for v in BLOCKS.values())}")
-            n = int(np.prod(dims))
+            n = math.prod(dims)                 # Python ints: np.prod wraps at 64 bits
             per, nb = BLOCKS.get(ty, (1, 0))[1:] if ty in BLOCKS else (1, 0)
             if ty in BLOCKS and n % per:
                 raise ValueError(f"{name}: {n} values are not whole {TYPE_NAMES[ty]} blocks of {per}")
