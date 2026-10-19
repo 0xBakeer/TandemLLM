@@ -11,6 +11,8 @@ The test matrix, the Gherkin of SRV-560:
                                                               test_remove_a_profile_that_does_not_run
   3  the running profile is refused (409 active_profile); no confirm (422); an unknown profile (404);
      while a job runs (409)                                    test_what_is_refused
+     and a job that starts while remove waits for the job lock (409, nothing removed)
+                                test_a_job_that_starts_while_remove_waits_for_the_lock_is_refused
   4  never HOME, a folder outside HOME and the HF cache, a link, the checkout, a folder another
      profile or asset reads                                    test_the_paths_it_never_removes
   5  remove after switching away: the old weights go in the same job, the job says so
@@ -102,6 +104,32 @@ def test_what_is_refused():
         _app(setup_mode=True)
         code, b = T._api("POST", "/v1/setup/remove", {"profiles": ["exl3-6.0"], "confirm": True})
         assert code == 200 and not os.path.exists(os.path.join(box.home, "exl3-quants", "6.0")), b
+
+
+def test_a_job_that_starts_while_remove_waits_for_the_lock_is_refused():
+    with T.Box(on_disk=("exl3-4.5", "exl3-6.0")) as box:
+        _app()
+        from server import setup_api
+        d = os.path.join(box.home, "exl3-quants", "4.5")
+        real = setup_api._JOB_LOCK
+
+        class Racing:                     # an apply takes the lock first and spawns its job
+            def __enter__(self):
+                jid = T._job(T._sel(profile="exl3-4.5"))
+                st = apply.read_job(jid)
+                st.update(state="running", pid=os.getpid(), **apply._proc_identity(os.getpid()))
+                apply._write_json(os.path.join(apply.job_dir(jid), "state.json"), st)
+                return real.__enter__()
+
+            def __exit__(self, *exc):
+                return real.__exit__(*exc)
+        setup_api._JOB_LOCK = Racing()
+        try:
+            code, b = T._api("POST", "/v1/setup/remove", {"profiles": ["exl3-4.5"], "confirm": True})
+        finally:
+            setup_api._JOB_LOCK = real
+        assert code == 409 and b["error"]["code"] == "job_running", b
+        assert os.path.isdir(d)
 
 
 def test_the_paths_it_never_removes():
