@@ -177,6 +177,45 @@ def test_gguf_reads_and_serves_near_its_twin():
     return f"self-check {res['rows']} rows bit for bit; vs the bf16 twin rel {rel:.3f}"
 
 
+def header_gguf(path: str, dims: tuple, ty: int = 0, alignment: int | None = None, data: int = 64) -> None:
+    """A GGUF of one tensor written by hand (no gguf-py): the header, the table and `data` bytes."""
+    import struct
+
+    def s(x: str) -> bytes:
+        return struct.pack("<Q", len(x)) + x.encode()
+    kv = [] if alignment is None else [s("general.alignment") + struct.pack("<II", 4, alignment)]
+    b = b"GGUF" + struct.pack("<IQQ", 3, 1, len(kv)) + b"".join(kv)
+    b += s("t") + struct.pack(f"<I{len(dims)}Q", len(dims), *dims) + struct.pack("<IQ", ty, 0)
+    with open(path, "wb") as f:
+        f.write(b + bytes(-len(b) % 32 + data))
+
+
+def test_a_header_whose_sizes_wrap_or_whose_alignment_is_not_a_power_of_two_is_refused():
+    from engine.models.nemotron_h.gguf import GGUFFile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "h.gguf")
+        header_gguf(p, (4, 4))
+        assert GGUFFile.open(p).tensors["t"].nbytes == 64
+        # np.prod over these wraps to 0 and to 2 values: under the file's size, so they passed as not truncated
+        for dims in ((2 ** 32, 2 ** 32), (3, 6148914691236517206)):
+            header_gguf(p, dims)
+            try:
+                GGUFFile.open(p)
+            except ValueError as e:
+                assert "truncated" in str(e), e
+            else:
+                raise AssertionError(f"{dims} opened")
+        for a in (0, 24):
+            header_gguf(p, (4, 4), alignment=a)
+            try:
+                GGUFFile.open(p)
+            except ValueError as e:
+                assert "general.alignment" in str(e), e
+            else:
+                raise AssertionError(f"alignment {a} opened")
+    return "2**32 x 2**32 and 3 x 6148914691236517206 truncated; alignment 0 and 24 refused"
+
+
 if __name__ == "__main__":
     fails = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
