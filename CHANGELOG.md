@@ -12,6 +12,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Chat tab
 
 - The Chat view starts nothing when it closes during a sign-in (VIS-235). A sign-in that finished after the view was gone started the 10 s list poll, the global stream and the route's chat, and nothing stopped them. Its sign-in handler now takes the view's mount token before its first wait and checks it after each one, as the view's own start does since #85 (VIS-217). When the chat server stops answering as the view closes, no reprobe starts either.
+- The port preview keeps an app's redirects inside the preview (SRV-631). An app on port 3000 that answered `Location: /login`, or `Location: http://127.0.0.1:3000/login`, sent the browser out of `/sandbox/ports/3000/`. chatd now puts the preview's prefix in front of a `Location` or `Content-Location` that is an absolute path or names the app's own address and port. External URLs, other ports and relative values pass as the app sent them.
 
 ## 0.12.0, 2026-10-19
 

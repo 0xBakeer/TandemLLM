@@ -16,8 +16,9 @@ from its stdout. Each answer carries the preview CSP (CONTRACT section 5) and, f
 opaque origin, `Access-Control-Allow-Origin: null`; an HTML answer's absolute `/` URLs, a script's
 absolute imports and a style sheet's `url(/...)` are rewritten to the port's prefix (a dev server
 started without `--base`), and a page gets the preview's shim (chatd/preview.py). The server sees
-a local client: no Origin, Referer or Sec-Fetch-Site/Mode. A WebSocket (hot reload) goes through
-the same relay.
+a local client: no Origin, Referer or Sec-Fetch-Site/Mode. A redirect to an absolute path or to
+the app's own address (`Location: /login`, `http://127.0.0.1:<port>/login`) is rewritten to the
+prefix the client used (SRV-631). A WebSocket (hot reload) goes through the same relay.
 """
 
 from __future__ import annotations
@@ -50,6 +51,13 @@ def port_target(raw: str) -> str | None:
     rest = raw[m.end():]
     path = rest if rest.startswith("/") else "/" + rest
     return None if any(ch in path for ch in " \r\n") else path
+
+
+def port_prefix(raw: str) -> str | None:
+    """The port's prefix as the client sent it: the path up to and including /sandbox/ports/<n>,
+    with /v1/chat-app when the client used it; None when it names no port."""
+    m = _PORT_PATH.search(raw)
+    return raw[:m.end()] if m else None
 
 
 # ---------------------------------------------------------------------- RFC 6455, the server side
@@ -324,9 +332,9 @@ class TerminalsMixin:
                 self._terms().pop(key, None)
 
     # ------------------------------------------------------------------ the port preview
-    def proxy_port(self, handler, cid: str, port: int, rest: str) -> None:
+    def proxy_port(self, handler, cid: str, port: int) -> None:
         from chatd.panes import PREVIEW_CSP
-        from chatd.preview import cors, rewrite_css, rewrite_page, rewrite_script
+        from chatd.preview import cors, rewrite_css, rewrite_location, rewrite_page, rewrite_script
         self.conv(cid)
         box = self.sandboxes.box(cid)
         if box.state != "running":
@@ -380,6 +388,8 @@ class TerminalsMixin:
             if kl == "content-type":
                 ctype = v.strip()
                 continue
+            if kl in ("location", "content-location"):
+                v = rewrite_location(v, port_prefix(handler.path), port)
             keep.append((k.strip(), v.strip()))
         if b"transfer-encoding: chunked" in hdrs.lower():
             payload = _dechunk(payload)

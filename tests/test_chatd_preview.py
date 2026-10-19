@@ -15,10 +15,10 @@ import threading
 import time
 
 from chatd_util import Chat, run_all
-from test_chatd_agent import RelayBoxes
+from test_chatd_agent import RelayBoxes, app_server, ws_open, ws_recv, ws_send
 
 from chatd import preview as PV, sandbox as sb_mod, tools as T
-from chatd.terminals import port_target
+from chatd.terminals import port_prefix, port_target
 from chatd.workspace import Workspace
 
 _spec = importlib.util.spec_from_file_location("relay", sb_mod.RELAY)
@@ -158,6 +158,88 @@ def test_the_port_proxy_forwards_the_path_as_the_client_sent_it():
         assert port_target(f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}") == "/"
         assert port_target(f"/conversations/{cid}/sandbox/ports/{port}/a b") is None
         assert port_target(f"/conversations/{cid}/sandbox/ports/{port}/a\r\nX: 1") is None
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_the_port_proxy_keeps_an_apps_redirects_inside_the_preview():
+    """SRV-631: an app's `Location: /login` sent the browser to /login on chatd's origin, out of
+    the preview, and one built from the Host the proxy sends (127.0.0.1:<port>) was unreachable.
+    Both now go to the prefix the client used; an external URL, another port and a relative value
+    pass as the app sent them."""
+    c = chat()
+    pages: dict = {}
+    app, seen = server(pages)
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        base = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}"
+        cases = [
+            (302, "Location", "/login", f"{base}/login"),
+            (302, "Location", f"http://127.0.0.1:{port}/login?next=%2Fa#top",
+             f"{base}/login?next=%2Fa#top"),
+            (302, "location", f"http://localhost:{port}/x", f"{base}/x"),
+            (302, "Location", f"http://[::1]:{port}/x", f"{base}/x"),
+            (302, "Location", f"//127.0.0.1:{port}", f"{base}/"),
+            (201, "Content-Location", "/items/7", f"{base}/items/7"),
+            (302, "Location", "https://example.org/cb", "https://example.org/cb"),
+            (302, "Location", "http://127.0.0.1:5173/x", "http://127.0.0.1:5173/x"),
+            (302, "Location", "login", "login"),
+            (302, "Location", "../x", "../x"),
+            (302, "Location", f"{base}/login", f"{base}/login"),
+        ] + [(st, "Location", "/a", f"{base}/a") for st in (301, 303, 307, 308)]
+        for i, (st, name, value, want) in enumerate(cases):
+            pages[f"/r{i}"] = (st, "text/plain", b"", {name: value})
+        pages["/plain"] = (200, "text/plain", b"ok", {})
+        for i, (st, name, value, want) in enumerate(cases):
+            got, _, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/r{i}")
+            hl = {k.lower(): v for k, v in h.items()}
+            assert got == st and hl[name.lower()] == want, (value, got, h)
+        got, _, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/plain")
+        assert got == 200 and not {"location", "content-location"} & {k.lower() for k in h}
+        # the prefix is the one the client sent, without /v1/chat-app when it left it out
+        short = f"/conversations/{cid}/sandbox/ports/{port}"
+        assert port_prefix(short + "/a/b?q=/sandbox/ports/1") == short
+        assert port_prefix(base + "?x=1") == base and port_prefix(f"/conversations/{cid}") is None
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_the_location_rewrite_alone():
+    pre, port = "/v1/chat-app/conversations/c1/sandbox/ports/3000", 3000
+    fix = lambda v: PV.rewrite_location(v, pre, port)               # noqa: E731
+    assert fix(" /login ") == pre + "/login"
+    assert fix("/") == pre + "/"
+    assert fix("/\\evil.example/x") == pre + "/\\evil.example/x", "a backslash host stays a path"
+    assert fix("HTTP://LOCALHOST:3000/x") == pre + "/x"
+    assert fix("http://127.0.0.1:3000?q=1") == pre + "/?q=1"
+    assert fix(pre) == pre and fix(pre + "?q=1") == pre + "?q=1"
+    assert fix("/v1/chat-app/conversations/c1/sandbox/ports/30001") == pre + \
+        "/v1/chat-app/conversations/c1/sandbox/ports/30001", "another port's prefix is a path"
+    for same in ("", "//example.org/x", "http://127.0.0.1/x", "http://127.0.0.1:abc/x",
+                 "https://localhost:3000/x", "http://localhost.example:3000/x", "#top", "?a=1",
+                 "mailto:a@b"):
+        assert fix(same) == same, same
+    assert PV.rewrite_location("http://localhost/x", "/p", 80) == "/p/x", "the default port"
+
+
+def test_the_port_proxys_websocket_is_untouched_by_the_rewrite():
+    """SRV-631 changed the HTTP answer's headers only: an upgrade under the prefix still reaches
+    the app's socket and echoes."""
+    c = chat()
+    app = app_server()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        sock = ws_open(c.port, f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}/hmr?t=1")
+        ws_send(sock, b"ping", op=1)
+        assert ws_recv(sock) == b"echo:ping"
+        sock.close()
+        c.wait(lambda: c.svc.sandboxes.relays == 0, 10)
     finally:
         app.shutdown()
         c.close()

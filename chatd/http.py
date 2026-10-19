@@ -600,8 +600,8 @@ class Handler(BaseHTTPRequestHandler):
     def r_artifact(self, cid, ref):
         self._json(200, self.svc.artifact(cid, ref))
 
-    def r_port(self, cid, port, rest):
-        self.svc.proxy_port(self, cid, int(port), rest or "/")
+    def r_port(self, cid, port, _rest):
+        self.svc.proxy_port(self, cid, int(port))   # the path the app gets: port_target(self.path)
 
     def r_sandbox_ports(self, cid):
         self._json(200, self.svc.sandbox_ports(cid))
