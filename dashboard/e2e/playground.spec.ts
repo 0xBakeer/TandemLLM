@@ -69,7 +69,7 @@ test.describe('playground', () => {
     await open(page, '#/usage');
     await page.getByRole('link', { name: 'Playground' }).click();
     await expect(page.locator('qse-playground')).toBeVisible();
-    await expect(page.locator('.rail-tab.is-on')).toHaveText(/Playground/);
+    await expect(page.locator('.rail a.rail-tab.is-on')).toHaveText(/Playground/);
     await page.reload();
     await expect(page.locator('qse-playground')).toBeVisible();
     expect(page.url()).toContain('#/playground');

@@ -64,7 +64,7 @@ test('setup mode: no /v1/dashboard request, the pill says setup, no offline bann
 test('setup mode ends (the box serves a model): the other views open again', async ({ page, request }) => {
   await setupMock(request, { setupMode: true });
   await page.goto('./#/setup');
-  await expect(page.locator('.rail .rail-tab.is-off')).toHaveCount(7);
+  await expect(page.locator('.rail .rail-tab.is-off')).toHaveCount(8);
   await setupMock(request, { setupMode: false });
   await expect(page.locator('.rail .rail-tab.is-off')).toHaveCount(0, { timeout: 15_000 });
   await expect(page.locator('[data-setup-mode]')).toHaveCount(0);
