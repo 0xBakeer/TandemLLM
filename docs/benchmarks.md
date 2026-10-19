@@ -76,3 +76,21 @@ The first core row ran on main after SRV-617. The other rows ran on 0.11.4: the 
 TC-03 asks the model to tell Sarah the meeting moved. The conductor classes the turn as message writing, adds the write-message package, and the model drafts the email instead of looking up the contact and sending it (SRV-615). On the raw path TC-03 sits near a tie: one run of the core 15 missed it, the next passed. On every path the structured-output scenarios TC-65 to TC-69 end partial or failed, and TC-68, schema violation resistance, fails.
 
 The first request of each scenario pays the prefill of the tool prompt, about 4,400 tokens; on the Spark the first token arrives after about 7 s, which the responsiveness score counts. Later turns reuse the prefix.
+
+### 2026-10-19: structured outputs with tools, the `tools` profile, C5 and the secret mask
+
+The settings above hold. The conductor rows ran with no header, so the bench, an unnamed client that offers tools, got the `tools` profile (SRV-621). Both arms ran on the same build, and no answer in the full-suite rows was a response-cache replay.
+
+Full suite, 69 scenarios:
+
+| path | score | deployability | responsiveness | time | not passed |
+|-|-|-|-|-|-|
+| raw, thinking on | 95 | 83 | 54 | 13.3 min | TC-23, TC-49, TC-58, TC-62, TC-67 partial; TC-68 |
+| conductor, `tools` profile | 96 | 83 | 53 | 12.2 min | TC-23, TC-49, TC-62, TC-67 partial; TC-68 |
+
+With `--variant-seed 7` and a held-out pack of 12 scenarios of our own, kept outside the repository, raw scored 96 and the conductor 97. The pack passed 12 of 12 on both paths. Those two runs replayed the answers of unchanged requests from the cache, so their times are not given.
+
+- TC-65, TC-66 and TC-69 pass on both paths: the schema now reaches the engine alongside the tools, and the model's first answer token picks a call or the document (SRV-619).
+- TC-58 passes on the conductor only: the server masks the key the file held in the answer (SRV-625).
+- TC-51 passed on both paths in this run; C5 (SRV-623) journaled no act in it.
+- The graders of TC-23 and TC-49 read "doesn't provide historical data" and "no email will be sent" as failures (OPS-193). TC-67 adds one calculator call the grader counts as unrelated. TC-68 asks for a value the model declines to invent.
