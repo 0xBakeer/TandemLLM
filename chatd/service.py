@@ -1745,8 +1745,9 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             if a["inline"]:
                 left -= tokens
             else:
+                where = f"at {a['path']}" if a.get("path") else f"not saved: {a.get('unplaced')}"
                 self.log(f"[attach] {a['id']} {tokens} tokens over the budget: one line, the file "
-                         f"at {a['path']}")
+                         f"{where}")
 
     # ================================================================== the stream
     def attach(self, cid: str, after: int | None) -> tuple[Subscriber | None, list]:
