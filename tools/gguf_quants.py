@@ -676,6 +676,32 @@ if HAVE_TRITON:
         out = acc if F32 else acc.to(tl.bfloat16)
         tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
 
+    @triton.jit
+    def _iq4xs_gemm(X, s_x, QS, DL, LUT, Y, s_y, M, N, NB, BN: tl.constexpr, F32: tl.constexpr):
+        # IQ4_XS: 256 a super-block, Q4_K's nibble layout but the codes index the IQ4_NL value
+        # table and each 32-elem sub-block has a signed 6-bit scale folded into DL fp16 [N, nb, 8]
+        # at load (d * ((sl & 0xF | sh_2bit << 4) - 32)). Same contract as _q40_gemm.
+        pm = tl.program_id(0)
+        pn = tl.program_id(1)
+        rows = pm * 16 + tl.arange(0, 16)
+        cols = pn * BN + tl.arange(0, BN)
+        cm = cols < N
+        t = tl.arange(0, 32)
+        acc = tl.zeros([16, BN], dtype=tl.float32)
+        for kb in range(0, NB):
+            for s in tl.static_range(8):
+                q = tl.load(QS + (cols[:, None] * NB + kb) * 128 + s * 16 + (t & 15)[None, :],
+                            mask=cm[:, None], other=0)
+                nib = (q >> ((t // 16) * 4).to(tl.int32)[None, :]) & 0xF
+                v = tl.load(LUT + nib)
+                dl = tl.load(DL + (cols * NB + kb) * 8 + s, mask=cm, other=0.0).to(tl.float32)
+                w = (v * dl[:, None]).to(tl.bfloat16)
+                x = tl.load(X + rows[:, None] * s_x + kb * 256 + s * 32 + t[None, :],
+                            mask=rows[:, None] < M, other=0.0)
+                acc += tl.dot(x, tl.trans(w))
+        out = acc if F32 else acc.to(tl.bfloat16)
+        tl.store(Y + rows[:, None] * s_y + cols[None, :], out, mask=(rows[:, None] < M) & cm[None, :])
+
 
 class _Packed:
     """Shared bits of the packed GGUF linears: `matmul` on the fused kernel up to ROWS_MAX rows, the
@@ -954,8 +980,37 @@ class IQ4NLLinear(_Packed):
                                                                  num_warps=2, num_stages=3)
 
 
+class IQ4XSLinear(_Packed):
+    """Packed IQ4_XS [N, K]: dl = d*sc fp16 [N, K/256, 8] folded at init (sc = the 6-bit field
+    (4-bit lo, 2-bit hi) minus 32); qs [N, K/256, 128] index the IQ4_NL value table on-device."""
+
+    tid = 23
+
+    def __init__(self, raw: np.ndarray, N: int, K: int, device="cuda"):
+        from tools import gguf_grids as GR
+        nb = K // 256
+        b = np.ascontiguousarray(raw).reshape(N, nb, 136)
+        self._raw = b.copy()
+        d = _f16(b[..., 0:2]).astype(np.float32)
+        sh = b[..., 2:4].reshape(-1, 2).view(np.uint16) >> (2 * np.arange(8, dtype=np.uint16))[None, :]
+        sl = (b[..., 4:8].reshape(-1, 4, 1) >> np.array([0, 4], np.uint8)[None, None, :]).reshape(-1, 8)
+        sc = ((sl & np.uint8(0x0F)) | ((sh & np.uint16(3)).astype(np.uint8) << np.uint8(4))).astype(np.int8) - np.int8(32)
+        dl = d.reshape(-1, 1) * sc.astype(np.float32)
+        self.N, self.K, self.shape = N, K, (N, K)
+        self.dl = torch.from_numpy(np.ascontiguousarray(dl.reshape(N, nb, 8).astype(np.float16))).to(device)
+        self.qs = torch.from_numpy(np.ascontiguousarray(b[..., 8:136])).to(device)
+        self.lut = torch.from_numpy(np.ascontiguousarray(GR.IQ4_NL_VALUES.astype(np.float32))).to(device)
+        self.nbytes = N * nb * 136
+
+    def _kernel(self, x2, out, M, f32):
+        _iq4xs_gemm[(triton.cdiv(M, 16), triton.cdiv(self.N, 32))](x2, x2.stride(0), self.qs, self.dl,
+                                                                 self.lut, out, out.stride(0), M, self.N,
+                                                                 self.K // 256, BN=32, F32=f32,
+                                                                 num_warps=2, num_stages=3)
+
+
 #: 2-D tensors of these types load as packed GPU linears (Tier A); every other `TYPES` entry
 #: dequantises to a dense tensor at load (Tier B).
 PACKED_LINEAR = {2: Q40Linear, 3: Q41Linear, 6: Q50Linear, 7: Q51Linear,
                  10: Q2KLinear, 11: Q3KLinear, 12: Q4KLinear, 13: Q5KLinear, 14: Q6KLinear,
-                 20: IQ4NLLinear}
+                 20: IQ4NLLinear, 23: IQ4XSLinear}
