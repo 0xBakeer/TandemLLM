@@ -61,17 +61,17 @@ LIST=()
 for r in "${ROWS[@]}"; do
   while IFS= read -r line; do [ -n "$line" ] && LIST+=("$line"); done < <(expand "$r")
 done
-OUT=${OUT:-results/teb-$(date +%Y%m%d-%H%M)}
-mkdir -p "$OUT"
-OUT=$(cd "$OUT" && pwd)
-HEALTH=${HEALTH:-"curl -s -m 10 ${BASE%/v1}/health"}
 COMMON=(--base-url "$BASE" --model TandemLLM --backend tandemllm --seed 42 --temperature 0
         --timeout 600 --no-live --parallel 1)
-
 if [ $DRY = 1 ]; then
   for row in "${LIST[@]}"; do echo "${row%%:*}: $BENCH run ${COMMON[*]} --label ${row%%:*} ${row#*:}"; done
   exit 0
 fi
+OUT=${OUT:-results/teb-$(date +%Y%m%d-%H%M)}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+HEALTH=${HEALTH:-"curl -s -m 10 ${BASE%/v1}/health"}
+
 
 health() { bash -c "$HEALTH" > "$1" 2>/dev/null; }
 field() {   # field FILE PY-EXPR: one value of a saved /health
