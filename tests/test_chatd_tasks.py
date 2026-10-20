@@ -759,20 +759,22 @@ def test_a_workers_requests_keep_their_prefix_after_a_write():
         assert _write_args(reqs[-1]) == [{"path": "ocean.js", "content": page},
                                          {"path": "ocean.js", "old": old, "new": new}]
         assert "0.5" in c.svc.workspace(cid).read("ocean.js").decode()
-        # the chat's own write is a stub from the next request on, as before
+        # the chat's own write stays whole in the next request too, which starts with the first
         c.ok("PATCH", f"/conversations/{cid}/settings", {"agents": False})
         c.fake.script.main = lambda b, k: {"calls": [{"name": "write_file", "arguments": {
             "path": "sky.js", "content": page}}]} if k == 0 else {"content": "ok"}
         c.send(cid, "write the sky")
         c.wait_idle(cid, 30)
         first, second = [b for _, b in main_calls(c, cid)][-2:]
-        assert _write_args(second)[-1]["content"] == render.wrote_stub("sky.js", page)
+        assert _write_args(second)[-1]["content"] == page and _prefix_kept(first, second)
     finally:
         c.close()
 
 
-def test_a_workers_compaction_stubs_its_writes():
+def test_a_workers_compaction_keeps_its_newest_writes_whole():
     c = Chat()
+    share = render.FILES_WINDOW_SHARE
+    render.FILES_WINDOW_SHARE = 10.0        # the window's own marks off: the compaction folds
     try:
         small_window(c, window=12_000)
         c.svc.learn_ratio = lambda *a: None                 # the fake counts words, not tokens
@@ -802,14 +804,20 @@ def test_a_workers_compaction_stubs_its_writes():
         for prev, cur in zip(reqs[:first - 1], reqs[1:first]):
             assert _prefix_kept(prev, cur)
         assert [a["content"] for a in _write_args(reqs[first - 1])] == pages[:first - 1]
-        # after it: the writes it kept are stubs, the ones since stay whole, and from there
-        # every request starts with the one before again
+        # after it: the writes it kept stay whole under the keep mark (chatd/render.py
+        # `files_marks`), the older ones leave with a note in their result; from there every
+        # request starts with the one before again
         kept = _write_args(reqs[first])
-        assert kept and all(render.WROTE_STUB.fullmatch(a["content"]) for a in kept), kept
+        _, keep = render.files_marks(12_000)
+        whole = [a for a in kept if "content" in a]
+        assert kept and whole and sum(len(a["content"]) for a in whole) <= keep, kept
+        assert all("content" not in a for a in kept[:len(kept) - len(whole)]), kept
+        assert [a["content"] for a in whole] == pages[first - len(whole):first], whole
         for prev, cur in zip(reqs[first:], reqs[first + 1:]):
             assert _prefix_kept(prev, cur)
-        assert [a["content"] for a in _write_args(reqs[-1])[len(kept):]] == pages[first:]
+        assert [a.get("content") for a in _write_args(reqs[-1])[len(kept):]] == pages[first:]
     finally:
+        render.FILES_WINDOW_SHARE = share
         c.close()
 
 

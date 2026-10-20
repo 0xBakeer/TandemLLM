@@ -770,8 +770,7 @@ class AgentMixin:
                  head: dict | None = None, **kw) -> dict:
         """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
         None): the system block with its summary, the messages from its first kept one on, its
-        steps and its stubs. `head`: who asks (`_head`: a worker's block; a worker's write_file
-        and edit_file arguments stay whole until a compaction, chatd/render.py `call_arguments`)."""
+        steps and its stubs. `head`: who asks (`_head`: a worker's block)."""
         b = c[1] if c else 0
         ours = info.get("backend") == "engine"
         if "keep_reasoning_from" in kw:
@@ -783,7 +782,7 @@ class AgentMixin:
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
                            inline_images=ours, step_from=self._step_from(c),
-                           fold_before=c[3] if c else None, worker="worker" in (head or {}),
+                           fold_before=c[3] if c else None, window=int(info.get("max_len") or 0),
                            levels=info.get("effort_levels"),
                            effort_off=info.get("effort_off"), **kw)
 
@@ -964,15 +963,18 @@ class AgentMixin:
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
         fold = prior[3] if prior else None
         end = b if sb is None else sb[0]
+        gone = render.all_folded(path[start:end + 1])     # file texts: on disk, not summarized
         for k in range(start, end):
             msgs.extend(render.message(path[k], False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == k else 0))
+                                       from_step=done[1] if done and done[0] == k else 0,
+                                       folded=gone))
         if sb is not None:
             i, keep_step = sb
             run_msg = dict(path[i], parts=[p for p in path[i].get("parts") or []
                                            if int(p.get("step") or 1) < keep_step])
             msgs.extend(render.message(run_msg, False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == i else 0))
+                                       from_step=done[1] if done and done[0] == i else 0,
+                                       folded=gone))
         asked = comp.estimate({"messages": msgs}, ratio)
         # a chat the engine refused for memory: the summary's request stays under the guard's
         # share of the refused one, or the engine refuses it too

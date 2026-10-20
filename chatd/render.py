@@ -17,10 +17,11 @@ same bytes across calls and across a restart (a fresh store read).
     tool images     in the tool message that returned them, append-only: all up to
                     TOOL_IMAGES_KEPT, then the first ones and the newest; the newest-but-one
                     becomes a line saying a newer one follows (SRV-546)
-    file texts      a finished write_file's content and an edit_file's long old or new text as
-                    a stub from the next request on (a worker's: whole until a compaction); a long
-                    read_file or bash result whole until a compaction, a stub after it
-                    (FOLD_ARG_CHARS, FOLD_RESULT_CHARS)
+    file texts      a write_file's content and an edit_file's long old and new text whole while
+                    the run's whole texts stay under FILES_HIGH_CHARS; past it (or at a
+                    compaction) the oldest leave the call and their tool result says so, the
+                    newest FILES_KEEP_CHARS stay (`folded_calls`); a long read_file or bash result
+                    whole until a compaction, a stub after it (FOLD_ARG_CHARS, FOLD_RESULT_CHARS)
     effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide)
     thinking off    `chat_template_kwargs.enable_thinking: false` (read by our engine, vLLM and
                     SGLang alike)
@@ -132,28 +133,46 @@ def kept_tool_images(branch: list[dict], n: int | None = None) -> set:
     return set(ids[:n - 1]) | {ids[-1]}
 
 
-#: the file texts a request leaves out: the files are on disk, so the request keeps what was done
-#: (the path, the size, a hash) and not the text. Live (2026-10-17, chat 01M556JVWDQVDCAMBMVFZCT7XF,
-#: a WebGPU ocean) a run's request grew from 25k to 162k tokens in 50 minutes of write_file,
-#: edit_file and read_file calls, and its compaction kept 138,673 tokens: the shader and JS texts of
-#: the three steps it kept. A finished write_file's content, and an edit_file's old or new text
-#: over FOLD_ARG_CHARS, are a stub from the next request on: that call is in the request's newest
-#: assistant message, so only its tail changes and the engine's prefix cache holds the rest. A
-#: read_file or bash result over FOLD_RESULT_CHARS stays whole until a compaction (changed in the
+#: the file texts a request leaves out: the files are on disk, so the request can keep what was
+#: done (the path, the size, a hash) and not the text. Live (2026-10-17, chat
+#: 01M556JVWDQVDCAMBMVFZCT7XF, a WebGPU ocean) a run's request grew from 25k to 162k tokens in 50
+#: minutes of write_file, edit_file and read_file calls, and its compaction kept 138,673 tokens of
+#: shader and JS texts.
+#: A read_file or bash result over FOLD_RESULT_CHARS stays whole until a compaction (changed in the
 #: middle of the request, it would make the engine read everything after it again); the request
 #: after a compaction is read anew anyway, and every result that ended before it is a stub there.
-#: A worker's write_file and edit_file arguments stay whole until a compaction too (SRV-593): the
-#: rows past a call's prompt were written by verify blocks, which hold no grid anchor, and the end
-#: anchor serves a copy only when it holds every row, so a stub inside the last answer made the
-#: next call resume at the previous prompt's last grid line and read the whole answer again (681 to
-#: 8,690 tokens a call, live 2026-10-18). A worker is short-lived and starts fresh; the chat keeps
-#: the stub, its context lasts
+#:
+#: SRV-659: a write_file's content and an edit_file's old and new text over FOLD_ARG_CHARS stay
+#: whole, and leave the request only at a fold point (`folded_calls`): when the whole texts of the
+#: rendered calls pass FILES_HIGH_CHARS, the oldest leave until FILES_KEEP_CHARS remain, and at a
+#: compaction the calls before it are cut down to FILES_KEEP_CHARS the same way. Between two fold
+#: points the request only appends, so the engine's prefix cache and its end anchor hold it. A
+#: folded call keeps its path and loses the text argument; its tool result says the text was
+#: written as sent and how to read the file. Until 0.13 the chat's calls showed a stub in place of
+#: the content from the next request on (live 2026-10-20, chat 01M5DEZ7BKRZJH3T2JJ2AG4H2W): the
+#: model read its own call as a description, wrote effects.js three times (correct on disk all
+#: along), then copied the stub as the content of new files, and the stub at the request's tail
+#: kept the engine's end alignment from serving the turn (36,316 tokens read again)
 FOLD_ARG_CHARS = 2000
 FOLD_RESULT_CHARS = 4000
 FOLD_RESULT_TOOLS = ("read_file", "bash")
+FILES_HIGH_CHARS = 160_000
+FILES_KEEP_CHARS = 48_000
+#: a small window's marks: the whole texts at most this share of the window (4 characters a token,
+#: fixed, so the marks do not move with the learned ratio), kept down to KEEP_SHARE of the high one
+FILES_WINDOW_SHARE = 0.15
+FILES_KEEP_SHARE = 0.3
 BASH_HEAD_CHARS, BASH_TAIL_CHARS = 300, 600
 _READ_LINE = re.compile(r"^\s*(\d+)\t", re.M)
 _SAVED = re.compile(r"the whole output is in (\S+) \.\.\.\]")
+
+
+def files_marks(window: int | None) -> tuple[int, int]:
+    """(high, keep) character marks of `folded_calls` for a model of `window` tokens."""
+    high = FILES_HIGH_CHARS
+    if window:
+        high = min(high, int(window * 4 * FILES_WINDOW_SHARE))
+    return high, min(FILES_KEEP_CHARS, int(high * FILES_KEEP_SHARE))
 
 
 def _sha(text: str) -> str:
@@ -174,6 +193,8 @@ def _read_call(path: str, **span) -> str:
 
 
 def wrote_stub(path: str, text: str) -> str:
+    """The stub a request showed in place of a write's content until 0.13 (`WROTE_STUB`: the
+    write guard still knows it, a model may copy it from an older conversation)."""
     return (f"[wrote {_where(path)}: {_lines(text):,} lines, {len(text.encode()):,} bytes, "
             f"sha256 {_sha(text)}; the file is on disk, {_read_call(path)} shows it]")
 
@@ -182,42 +203,119 @@ def wrote_stub(path: str, text: str) -> str:
 #: path, brackets and spaces too
 WROTE_STUB = re.compile(r"\[wrote .+: [\d,]+ lines, [\d,]+ bytes, sha256 [0-9a-f]{8}; the file "
                         r"is on disk, read_file \{.*\} shows it\]", re.S)
+#: a write_file whose content is the note a folded call's result carries (`folded_note`)
+FOLDED_NOTE = re.compile(r"\[(the content|the old and new text) of this call \(", re.S)
+_FOLD_KEYS = {"write_file": ("content",), "edit_file": ("old", "new")}
 
 
-def call_arguments(c: dict, fold_before: str | None = None, worker: bool = False) -> str:
-    """A call's arguments as the model reads them: a finished write_file's content and an
-    edit_file's old or new text over FOLD_ARG_CHARS as a stub; a worker's (`worker`) only when the
-    call ended before `fold_before` (the newest compaction's time, ISO 8601); anything else as
-    sent."""
-    raw = c.get("input") or "{}"
-    if c.get("name") not in ("write_file", "edit_file") or c.get("status") != "done" or \
-            len(raw) <= FOLD_ARG_CHARS or worker and (
-                fold_before is None or (c.get("ended_at") or "") >= fold_before):
-        return raw
+def _fold_texts(c: dict) -> dict | None:
+    """The text arguments of a finished write_file or edit_file call that a fold point may take
+    out of the request (each over FOLD_ARG_CHARS), by key; None for any other call."""
+    keys = _FOLD_KEYS.get(c.get("name"))
+    raw = c.get("input") or ""
+    if not keys or c.get("status") != "done" or len(raw) <= FOLD_ARG_CHARS:
+        return None
     try:
         a = json.loads(raw)
     except ValueError:
-        return raw
+        return None
     if not isinstance(a, dict):
-        return raw
-    path = str(a.get("path") or "")
-    folded = False
-    for k in ("content",) if c["name"] == "write_file" else ("old", "new"):
-        text = a.get(k)
-        if not isinstance(text, str) or len(text) <= FOLD_ARG_CHARS:
+        return None
+    out = {k: a[k] for k in keys if isinstance(a.get(k), str) and len(a[k]) > FOLD_ARG_CHARS}
+    return out or None
+
+
+def all_folded(branch: list[dict]) -> set:
+    """Every write and edit call whose texts a fold may take out: a compaction's summary request
+    leaves them all out (the summary says what was done, the files are on disk)."""
+    return {p.get("id") for m in branch if m.get("role") == "assistant"
+            for p in m.get("parts") or [] if p.get("type") == "tool_call" and _fold_texts(p)}
+
+
+def folded_calls(branch: list[dict], fold_before: str | None = None,
+                 step_from: tuple[int, int] | None = None, window: int | None = None) -> set:
+    """The ids of the write_file and edit_file calls whose text arguments the request leaves out.
+
+    The calls are walked in order, each with the length of its long texts (`_fold_texts`); while
+    the whole ones add up to FILES_HIGH_CHARS or less nothing leaves, past it the oldest leave
+    until FILES_KEEP_CHARS remain. A compaction (`fold_before`, ISO 8601) is a fold point too:
+    when the walk passes its time, the calls that ended before it are cut down to
+    FILES_KEEP_CHARS. The set changes only at a fold point, so between two of them the request
+    only appends (the engine's prefix cache holds it), and it is a function of the branch alone:
+    the same conversation folds the same calls on every render. `step_from`: (message index,
+    step) of a long run's in-run compaction, whose earlier steps the request does not carry;
+    `window`: the model's, a small one lowers the marks (`files_marks`)."""
+    high, keep = files_marks(window)
+    whole: list[tuple[str, int]] = []
+    total, out, passed = 0, set(), fold_before is None
+
+    def cut(limit: int) -> None:
+        nonlocal total
+        while whole and total > limit:
+            cid, n = whole.pop(0)
+            out.add(cid)
+            total -= n
+    for i, m in enumerate(branch):
+        if m.get("role") != "assistant":
             continue
-        a[k] = wrote_stub(path, text) if k == "content" else (
-            f"[the {k} text of this edit: {_lines(text):,} lines, {len(text.encode()):,} bytes, "
-            f"sha256 {_sha(text)}; the edit is done, {_read_call(path)} shows the file]")
-        folded = True
-    return json.dumps(a, ensure_ascii=False) if folded else raw
+        for p in m.get("parts") or []:
+            if p.get("type") != "tool_call":
+                continue
+            if step_from and i == step_from[0] and int(p.get("step") or 1) < step_from[1]:
+                continue
+            if not passed and (p.get("ended_at") or "") >= fold_before:
+                passed = True
+                cut(keep)
+            texts = _fold_texts(p)
+            if texts is None:
+                continue
+            whole.append((p.get("id"), sum(len(t) for t in texts.values())))
+            total += whole[-1][1]
+            if total > high:
+                cut(keep)
+    if not passed:
+        cut(keep)
+    return out
 
 
-def result_for(c: dict, fold_before: str | None = None) -> str:
+def call_arguments(c: dict, folded: bool = False) -> str:
+    """A call's arguments as the model reads them: as sent, or for a folded call (`folded_calls`)
+    without its long text arguments (the path stays; `folded_note` goes in its result)."""
+    raw = c.get("input") or "{}"
+    texts = _fold_texts(c) if folded else None
+    if not texts:
+        return raw
+    a = json.loads(raw)
+    return json.dumps({k: v for k, v in a.items() if k not in texts}, ensure_ascii=False)
+
+
+def folded_note(c: dict) -> str:
+    """The line a folded call's tool result ends with: what left the request, that it was
+    applied as sent, and the call that shows the file now."""
+    texts = _fold_texts(c) or {}
+    try:
+        path = str(json.loads(c.get("input") or "{}").get("path") or "")
+    except (ValueError, AttributeError):
+        path = ""
+    if c.get("name") == "write_file":
+        t = texts.get("content", "")
+        what = (f"the content of this call ({_lines(t):,} lines, {len(t.encode()):,} bytes, "
+                f"sha256 {_sha(t)}) is left out of this conversation to save room; the file was "
+                f"written with it as sent")
+    else:
+        sizes = " and ".join(f"{len(texts[k].encode()):,}" for k in ("old", "new") if k in texts)
+        what = (f"the old and new text of this call ({sizes} bytes) are left out of this "
+                f"conversation to save room; the edit was applied as sent")
+    return f"\n[{what}. {_read_call(path)} shows the file as it is now]"
+
+
+def result_for(c: dict, fold_before: str | None = None, folded: bool = False) -> str:
     """What the model reads for one call (`result_text`); a read_file or bash result over
     FOLD_RESULT_CHARS of a call that ended before `fold_before` (the newest compaction's time,
-    ISO 8601) as a stub."""
+    ISO 8601) as a stub; a folded write or edit (`folded_calls`) with its `folded_note`."""
     text = result_text(c)
+    if folded and _fold_texts(c):
+        return text + folded_note(c)
     if fold_before is None or c.get("name") not in FOLD_RESULT_TOOLS or \
             len(text) <= FOLD_RESULT_CHARS or (c.get("ended_at") or "") >= fold_before:
         return text
@@ -251,7 +349,7 @@ def result_for(c: dict, fold_before: str | None = None) -> str:
 
 def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
                keep: set | None = None, inline: bool = True, from_step: int = 0,
-               fold_before: str | None = None, worker: bool = False) -> list[dict]:
+               fold_before: str | None = None, folded: set | None = None) -> list[dict]:
     """One assistant message as the model saw it: per step its text, reasoning and tool calls,
     then one `tool` message per call with the result the model read. The images of those results
     (vision models only, the ones in `keep`; None: all) go in the tool message itself with
@@ -259,8 +357,8 @@ def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
     one user turn: a separate user message per screenshot read to the model as the user sending
     again, live 2026-10-13), else in a user message after the results. `from_step`: the steps
     before it were compacted (the summary is in the system block); `fold_before`: the newest
-    compaction's time (`result_for`, `call_arguments`); `worker`: a worker's request
-    (`call_arguments`)."""
+    compaction's time (`result_for`); `folded`: the ids of the write and edit calls whose
+    texts the request leaves out (`folded_calls`)."""
     out: list[dict] = []
     for group in steps([p for p in m.get("parts") or [] if int(p.get("step") or 1) >= from_step]):
         text = text_of(group)
@@ -274,13 +372,13 @@ def _assistant(m: dict, vision: bool, blob=None, keep_reasoning: bool = True,
         if calls:
             msg["tool_calls"] = [{"id": c["id"], "type": "function",
                                   "function": {"name": c.get("name") or "",
-                                               "arguments": call_arguments(c, fold_before,
-                                                                             worker)}}
+                                               "arguments": call_arguments(
+                                                   c, c.get("id") in (folded or ()))}}
                                  for c in calls]
         out.append(msg)
         images = []
         for c in calls:
-            text, own = result_for(c, fold_before), []
+            text, own = result_for(c, fold_before, c.get("id") in (folded or ())), []
             for a in ((c.get("output") or {}).get("images") or []) if vision else []:
                 if keep is not None and a.get("id") not in keep:
                     text += LEFT_OUT
@@ -318,13 +416,13 @@ def result_text(c: dict) -> str:
 
 def message(m: dict, vision: bool, blob=None, keep_reasoning: bool = True, keep: set | None = None,
             inline: bool = True, from_step: int = 0, fold_before: str | None = None,
-            worker: bool = False) -> list[dict]:
+            folded: set | None = None) -> list[dict]:
     """One branch message as OpenAI messages; [] for what the model does not see (notices)."""
     if m.get("role") == "user":
         return [_user(m, vision, blob)]
     if m.get("role") == "assistant":
         return _assistant(m, vision, blob, keep_reasoning, keep, inline, from_step, fold_before,
-                          worker)
+                          folded)
     return []
 
 
@@ -335,25 +433,25 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          keep_reasoning_from: int = 0, tail: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
          step_from: tuple[int, int] | None = None, fold_before: str | None = None,
-         worker: bool = False) -> dict:
+         window: int | None = None) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
     context guard drops it before that); `tail`: a hidden last user line for one call, never
     stored (the empty-turn nudge; a worker's report sent back, or its report at the step cap);
     `inline_images`: tool images in the tool message (our engine) or in a user message after it;
     `step_from`: (a branch index, a step): that assistant message's steps before the step were
     compacted (a long run: the summary is in the system block); `fold_before`: the newest
-    compaction's time, the long results of calls that ended before it are stubs (`result_for`);
-    `worker`: a worker's request, its write_file and edit_file arguments whole until a compaction
-    (`call_arguments`)."""
+    compaction's time, the long results of calls that ended before it are stubs (`result_for`)
+    and a fold point of the write and edit texts (`folded_calls`, with the model's `window`)."""
     msgs: list[dict] = []
     if system:
         msgs.append({"role": "system", "content": system})
     keep = kept_tool_images(branch)
+    folded = folded_calls(branch, fold_before, step_from, window)
     for i, m in enumerate(branch):
         msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from, keep=keep,
                             inline=inline_images,
                             from_step=step_from[1] if step_from and i == step_from[0] else 0,
-                            fold_before=fold_before, worker=worker))
+                            fold_before=fold_before, folded=folded))
     if tail:
         msgs.append({"role": "user", "content": tail})
     out: dict = {"model": model, "messages": msgs, "stream": True,
