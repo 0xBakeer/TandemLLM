@@ -3,6 +3,56 @@
  "generator": "server.setup.community 1",
  "entries": [
   {
+   "model": "nemotron-3.5-super-vl-120b-a12b",
+   "id": "nemotron-super-vl-exl3-3.5bpw",
+   "path": "models/nemotron-3.5-super-vl-120b-a12b/community/nemotron-super-vl-exl3-3.5bpw.json",
+   "sha256": "36c3923d8864c00c26f4e2b91a36516634dd58d5446de49a84c90209ba083d30",
+   "entry": {
+    "schema": 1,
+    "id": "nemotron-super-vl-exl3-3.5bpw",
+    "name": "Nemotron 3.5 Super VL 120B A12B EXL3 3.5bpw HQ",
+    "base_model": "nemotron-3.5-super-vl-120b-a12b",
+    "finetune_of": null,
+    "author": {
+     "github": "styles01",
+     "social": {
+      "huggingface": "aitamedia"
+     }
+    },
+    "hf": {
+     "repo": "aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw",
+     "revision": "358667cf420fc2869dff43d9ff64bafe31aef03b"
+    },
+    "format": "exl3",
+    "bpw": 3.58,
+    "size_gb": 57.8,
+    "load": "standalone",
+    "modalities": {
+     "text": true,
+     "image": false,
+     "audio": false,
+     "video": false
+    },
+    "modalities_in_pack": [
+     "text",
+     "image"
+    ],
+    "drafters": "none",
+    "license": "OpenMDW-1.1",
+    "license_url": "https://openmdw.ai/license/1-1/",
+    "description": "TensorFold/exllamav3 EXL3 HQ quantization of NVIDIA's Nemotron 3.5 Super VL 120B A12B (88-layer hybrid mamba-attention-MoE with MTP; text arch remapped from the omni checkpoint). Encoded -b 3.5 --hq (3.5bpw experts, 5bpw attention+dense, 16bpw head and embeddings). The pack also holds the fp16 vision tower; TandemLLM serves it as text only for now (ENG-271).",
+    "tags": [
+     "exl3",
+     "hybrid-mamba",
+     "mtp",
+     "120b-a12b",
+     "dgx-spark"
+    ],
+    "added": "2026-10-17",
+    "status": "submitted"
+   }
+  },
+  {
    "model": "qwen3.8-27b",
    "id": "thinkingcap-27b-kearuga-exl3-4.00",
    "path": "models/qwen3.8-27b/community/thinkingcap-27b-kearuga-exl3-4.00.json",
