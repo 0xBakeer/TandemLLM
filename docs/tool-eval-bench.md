@@ -75,3 +75,30 @@ Run-to-run noise is about 2 points. The raw `high` and `xhigh` rows send the sam
 - On the full suite the conductor without packages scores the same as raw.
 - In hard mode the conductor scored 91 against 84 for raw. It passed TC-88, TC-91 and TC-97, where raw failed TC-88 and got partial on the other two. That is one run a side, and we have not tested which part of the conductor makes the difference.
 - TC-68, schema violation resistance, fails in every row: the scenario wants a value that the prompt leaves out, and the model declines to invent it. The graders of TC-23 and TC-49 read "doesn't provide historical data" and "no email will be sent" as failures (OPS-193).
+
+## 2026-10-20: the round-3 build on 0.12.2
+
+Qwen3.8-27B in the EXL3 6.0 pack, the 0.12.2 code with the response cache keyed on the effort level (SRV-645), the grammar mask fix (SRV-647) and the deliverable keep-out (SRV-615). Bench f2e368b, the settings above, `tools/teb_batch.sh` (OPS-209), each row one run (n = 1). The rows with packages ran with SRV-615 acting (`tool_fit.deliverable: on`); it ships in shadow. A hard-mode row's one cache hit was the bench's one-token start probe, no scenario.
+
+| row | flags | score | deployability | responsiveness | time | not passed |
+|-|-|-|-|-|-|-|
+| raw, `xhigh` | raw, effort `xhigh` | 95 | 83 | 55 | 12.7 min | TC-23, TC-49, TC-58 partial; TC-51, TC-68 failed |
+| raw, `xhigh`, again | the same | 96 | 84 | 57 | 11.7 min | TC-23, TC-49, TC-58 partial; TC-68 failed |
+| conductor, `tools` | `--header X-Tandem-Profile=tools` | 96 | 84 | 55 | 12.7 min | TC-23, TC-49, TC-67 partial; TC-68 failed |
+| raw, variant seed 7 | raw `xhigh`, `--variant-seed 7` | 96 | 84 | 56 | 12.1 min | TC-23, TC-49, TC-58 partial; TC-68 failed |
+| conductor, variant seed 7 | `tools`, `--variant-seed 7` | 96 | 83 | 53 | 12.8 min | TC-23, TC-49, TC-62 partial; TC-68 failed |
+| conductor, `chat` | `--header X-Tandem-Profile=chat` | 91 | 71 | 23 | 27.6 min | TC-40, TC-62, TC-63 partial; TC-31, TC-43, TC-47, TC-51, TC-68 failed |
+| conductor, `bench-pk` | `--header X-Tandem-Profile=bench-pk` | 90 | 73 | 32 | 23.1 min | TC-14, TC-35, TC-50, TC-63 partial; TC-18, TC-31, TC-42, TC-43, TC-68 failed |
+
+A held-out pack of 12 scenarios passed 12 of 12 on both paths. Hard mode, 28 scenarios:
+
+| row | flags | score | deployability | responsiveness | time | not passed |
+|-|-|-|-|-|-|-|
+| raw, `xhigh` | raw, `--hardmode-only` | 86 | 76 | 54 | 7.3 min | TC-85, TC-90, TC-91, TC-94 partial; TC-74, TC-92 failed |
+| conductor, no header | `--hardmode-only` | 86 | 78 | 58 | 7.0 min | TC-85, TC-89, TC-90, TC-91, TC-94, TC-97 partial; TC-92 failed |
+| conductor, `tools` | `--header X-Tandem-Profile=tools --hardmode-only` | 82 | 73 | 52 | 8.0 min | TC-85, TC-89, TC-90, TC-91, TC-94, TC-97 partial; TC-88, TC-92 failed |
+| conductor, `tools`, again | the same | 82 | 73 | 52 | 13.0 min | TC-85, TC-90, TC-91, TC-94 partial; TC-88, TC-89, TC-92 failed |
+
+- TC-03 passed in the `chat` and `bench-pk` rows, where it failed on 0.12.0: the package question picked write-message at 0.995 as before, and the keep-out question answered `tool` at 0.87, so the model looked up Sarah and sent the email. Both rows lost other scenarios (`chat` TC-47 and TC-51, `bench-pk` TC-18 and TC-42) and scored 91 and 90 against 91 and 94. The cause is not tested, so SRV-615 ships in shadow.
+- The raw and `tools` rows are within the 2-point noise of 0.12.0's.
+- In hard mode a scenario without tools runs under the default profile when no profile is pinned; pinned to `tools` the row failed TC-88 both times, unpinned it passed. One scenario, the cause not tested; the batch's conductor rows pin no profile.
