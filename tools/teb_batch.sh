@@ -63,6 +63,7 @@ for r in "${ROWS[@]}"; do
 done
 OUT=${OUT:-results/teb-$(date +%Y%m%d-%H%M)}
 mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
 HEALTH=${HEALTH:-"curl -s -m 10 ${BASE%/v1}/health"}
 COMMON=(--base-url "$BASE" --model TandemLLM --backend tandemllm --seed 42 --temperature 0
         --timeout 600 --no-live --parallel 1)
@@ -110,8 +111,9 @@ for row in "${LIST[@]}"; do
   health "$OUT/$label.health.before.json"
   date -u +%FT%TZ > "$OUT/$label.start"
   printf '%s\n' "$flags" > "$OUT/$label.flags"
-  $BENCH run "${COMMON[@]}" --label "$label" --json-file "$OUT/$label.json" \
-    --output-dir "$OUT/reports" "${args[@]}" > "$OUT/$label.log" 2>&1
+  # from the results folder: the bench keeps its history (data/benchmarks.sqlite) where it runs
+  ( cd "$OUT" && $BENCH run "${COMMON[@]}" --label "$label" --json-file "$OUT/$label.json" \
+    --output-dir "$OUT/reports" "${args[@]}" ) > "$OUT/$label.log" 2>&1
   echo "exit $?" >> "$OUT/$label.log"
   date -u +%FT%TZ > "$OUT/$label.end"
   health "$OUT/$label.health.after.json"
