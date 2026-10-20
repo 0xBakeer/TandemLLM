@@ -21,7 +21,7 @@ from engine.methods.manifest import Manifest
 from engine.methods.mtp_drafter import MTPTreeDrafter
 from engine.methods.staircut import PriceModel, StairCut
 from engine.models.adapter import Capabilities
-from engine.models.flashnext.serving import FlashNextServing
+from engine.models.flashnext.serving import _KV, FlashNextServing
 from engine.models.qwen3_5_moe.engine import Qwen35MoeEngine
 from engine.settings import SETTINGS as _S
 
@@ -49,6 +49,15 @@ class Qwen35MoeServing(FlashNextServing):
 
     caps = Capabilities(caches=True, side_slots=False, anchor_grid=4096, shadow=False, side_lane=False)
 
+    def __init__(self, fn, max_len: int):
+        super().__init__(fn, max_len)
+        self.kv = _TapKV(self)
+        self.dflash2 = None                 # the DFlash2 head, when the drafter is DFlash2's
+
+    def restart(self) -> None:
+        super().restart()
+        self.st.tap_from, self.st.tap_gen = 0, getattr(self.st, "tap_gen", 0) + 1
+
     def price_class(self, n: int) -> int:
         """The draft prices' context class at length `n`: 0 up to 4,096, then 4,096 x 2^k (a verify's
         attention grows with the context)."""
@@ -63,6 +72,22 @@ class Qwen35MoeServing(FlashNextServing):
         return manifest()
 
 
+class _TapKV(_KV):
+    """`kv` with the taps' bookkeeping: a length set by a restore (the caches) leaves the taps below it
+    another sequence's, so the block drafter's context starts there."""
+
+    @property
+    def length(self) -> int:
+        return _KV.length.fget(self)
+
+    @length.setter
+    def length(self, v: int) -> None:
+        _KV.length.fset(self, v)
+        if int(v):
+            st = self._s.st
+            st.tap_from, st.tap_gen = int(v), getattr(st, "tap_gen", 0) + 1
+
+
 def profile_of(pack: str) -> str:
     return os.environ.get("QSE_WEIGHTS") or "ornith-1.5-122b-" + os.path.basename(os.path.normpath(pack))
 
@@ -72,22 +97,77 @@ def prices(pack: str, log=print) -> PriceModel:
                            log=log)
 
 
+#: the DFlash2 gate's floor: the mean run of drafted tokens the trunk's greedy keeps (a draft wired wrong keeps none)
+DFLASH2_GATE = 1.0
+#: the lookup's shortest match beside a block drafter (as NemotronH's beside LiLiCorr)
+LOOK_MIN_ORDER_BLOCK = 6
+
+
 def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 3, mark=lambda stage: None, log=print,
-          corpus: str | None = None, kv_pool=None):
+          corpus: str | None = None, kv_pool=None, dflash2: str | None = None):
     """The pack's weights, the engine in the loop's interface, and with `spec` the MTP tree drafter over
     the pack's MTP layer (the hot draft head of FN_DRAFT_HOT ids when the vocabulary is the 27B's), the
     lookup with Q35M_LOOKUP, gated by the load-time self-check of the expert kernels (a failed check
     serves plain decode). Returns (serving, drafter or None, info)."""
     from engine.models.qwen3_5_moe.load import load as q_load
-    idx, W, banks, timing = q_load(pack, "cuda", mtp=spec, log=log)
+    idx, W, banks, timing = q_load(pack, "cuda", mtp=spec and not dflash2, log=log)
     mark("weights")
     eng_ = Qwen35MoeEngine(idx.cfg, W, banks, device="cuda", max_len=max_len)
+    d2 = None
+    if spec and dflash2:
+        from engine.models.qwen3_5_moe import dflash2 as D2
+        try:
+            dc = D2.config_of(dflash2)
+            eng_.set_taps(dc["target_layer_ids"], dc["window"])
+            d2 = {"path": dflash2}
+        except Exception as e:                              # noqa: BLE001  (the lookup drafts alone)
+            d2 = {"ok": False, "why": f"DFlash2 config: {type(e).__name__}: {e}"}
     if kv_pool is not None:
         kv_pool()
     eng = Qwen35MoeServing(eng_, max_len)
     mark("engine")
-    spec = spec and timing.get("mtp", False)
     drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
+    if spec and dflash2:
+        hot = 0
+        text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
+                                       tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        prompt = tok(text, add_special_tokens=False)["input_ids"]
+        check = eng_.self_check(prompt, log=log)
+        head = None
+        if check["ok"] and "path" in d2:
+            from engine.drafters.lilicorr import gate
+            from engine.models.qwen3_5_moe import dflash2 as D2
+            try:
+                head = D2.build_head(eng, dflash2, log=log)
+                g = gate(eng_, head, eng_.new_state(min(max_len, len(prompt) + 128)), prompt)
+                ok = g["mean_run"] >= DFLASH2_GATE
+                d2 = {"ok": ok, "gate": g, **({} if ok else {"why": f"DFlash2 gate: mean run {g['mean_run']}"})}
+                log(f"[dflash2] gate {'PASS' if ok else 'FAIL'}: mean run {g['mean_run']} of {head.depth} "
+                    f"over {g['positions']} positions")
+            except Exception as e:                          # noqa: BLE001
+                d2 = {"ok": False, "why": f"DFlash2 failed to load: {type(e).__name__}: {e}"}
+            if not d2["ok"]:
+                head = None
+        if check["ok"]:
+            from engine.drafters.ngram import NgramDrafter
+            from engine.methods.mtp_drafter import NoHead
+            from engine.tokfp import fingerprint
+            ngram = None
+            if _S.get("Q35M_LOOKUP") == "1":
+                ngram = NgramDrafter(corpus_path=corpus or "", tokenizer_sha=fingerprint(pack),
+                                     min_order=3 if head is None else LOOK_MIN_ORDER_BLOCK, max_depth=16,
+                                     min_corpus_order=8)
+            if head is None:
+                log(f"[server] {d2.get('why', 'DFlash2 off')}: the lookup drafts alone")
+            eng.dflash2 = head
+            drafter = MTPTreeDrafter(eng, head if head is not None else NoHead(),
+                                     StairCut(prices(pack, log), siblings=False), ngram)
+            drafter.capture_all()
+        mark("drafters")
+        info = {"pack": pack, "load": timing, "self_check": check, "draft_head": "dflash2" if head else None,
+                "dflash2": d2, "depth": head.depth if head is not None else 0}
+        return eng, drafter, info
+    spec = spec and timing.get("mtp", False)
     if spec:
         if hot and idx.cfg.vocab_size == 248_320:
             eng_.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
@@ -116,6 +196,13 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 3, mark=
     return eng, drafter, info
 
 
+def re_dflash2(model: str) -> str:
+    """The DFlash2 checkpoint beside a pack: <models>/<model name before -exl3>-dflash2."""
+    d = os.path.normpath(model)
+    base = os.path.basename(d).split("-exl3")[0]
+    return os.path.join(os.path.dirname(d), base + "-dflash2")
+
+
 def serve(a, ctx) -> dict:
     """A Qwen3.5 MoE EXL3 pack for the server (`--model <pack>`, the registry's `serve`): the engine and
     its MTP drafter in the server loop's interface; the pack's EXL3 vision tower when it has one."""
@@ -129,8 +216,14 @@ def serve(a, ctx) -> dict:
     tok = AutoTokenizer.from_pretrained(a.model)
     depth = a.depth if a.depth >= 2 else 3
     pool = ctx.kv_pool if getattr(a, "kv_pool", "off") == "on" and hasattr(ctx, "kv_pool") else None
+    # `--draft-head dflash2`: the DFlash2 checkpoint of QSE_ORN_DFLASH2 (the profile's), else <model>-dflash2
+    d2 = None
+    if spec and str(getattr(a, "draft_head", None) or "") == "dflash2":
+        d2 = os.environ.get("QSE_ORN_DFLASH2") or re_dflash2(a.model)
     eng, drafter, info = build(a.model, a.max_len, tok, spec=spec, depth=depth, mark=ctx.mark, log=ctx.log,
-                               corpus=a.corpus, kv_pool=pool)
+                               corpus=a.corpus, kv_pool=pool, dflash2=d2)
+    if d2:
+        depth = info["depth"]
 
     def tower_of(vcfg):
         from engine.models.flashnext.vision import load_tower
@@ -142,14 +235,17 @@ def serve(a, ctx) -> dict:
         a.depth = depth
         if drafter.ngram is not None:
             a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
+    what = ("DFlash2 block of " + str(depth) if d2 and info.get("draft_head") == "dflash2" else
+            "lookup alone" if d2 else "MTP chain, depth " + str(a.depth))
     describe = (f"Qwen3.5 MoE {a.model}: load {info['load'].get('total_s')} s, drafter "
-                f"{'MTP chain + StairCut, depth ' + str(a.depth) if drafter is not None else 'none'}"
+                f"{what + ' + StairCut' if drafter is not None else 'none'}"
                 f"{' + lookup' if getattr(drafter, 'ngram', None) is not None else ''}, "
                 f"max_len {a.max_len:,},")
     return {"engine": eng, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
                         "weights_info": {"format": "exl3", "weights": a.model,
-                                         "drafters": "mtp (the pack's own layer)" if drafter is not None else None,
+                                         "drafters": (what if drafter is not None else None),
+                                         "dflash2": info.get("dflash2"),
                                          "draft_head": info["draft_head"], "load_s": info["load"].get("total_s"),
                                          "self_check": info["self_check"]}}}

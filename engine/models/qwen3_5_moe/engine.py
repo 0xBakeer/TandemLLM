@@ -26,6 +26,7 @@ and greedy speculation writes the plain greedy text (the self-check of the exper
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 from engine.models.flashnext.engine import (CAPTURE_ROWS, DENSE_MAX, CommitGraph, DecodeGraph,  # noqa: F401
@@ -37,9 +38,68 @@ from engine.models.qwen3_5_moe.ref import Qwen35MoeRef
 
 class Qwen35MoeEngine(FlashNextEngine):
 
+    #: the tapped layers (`set_taps`) and the ring's rows
+    taps: tuple = ()
+    ring_rows = 0
+
     def __init__(self, cfg, W: dict, banks: dict, device="cuda", max_len: int = 8192):
         super().__init__(cfg, W, {}, banks, device=device, max_len=max_len)
         self._zd: dict = {}
+        self._tapcol: dict = {}
+
+    # ------------------------------------------------------------------------- taps (a block drafter's context)
+    def set_taps(self, layers, window: int) -> None:
+        """Keep the residual rows entering `layers` (a block drafter's context, DFlash2): every state
+        gets a ring of `window` + CAPTURE_ROWS rows by position; a decode step writes its row, a commit
+        its path's rows, a prompt chunk its last rows. Before any row buffers or graphs exist."""
+        if self._rb:
+            raise RuntimeError("set_taps after the row buffers exist: their graphs would not write the taps")
+        layers = tuple(int(x) for x in layers)
+        if any(not 1 <= li < self.cfg.num_hidden_layers for li in layers):
+            raise ValueError(f"taps {layers}: layers 1..{self.cfg.num_hidden_layers - 1}")
+        self.taps = layers
+        self._tapcol = {li: k for k, li in enumerate(layers)}
+        self.ring_rows = int(window) + CAPTURE_ROWS
+
+    def new_state(self, cap: int | None = None, paged: bool = False):
+        st = super().new_state(cap, paged)
+        st.ring = (torch.zeros(self.ring_rows, len(self.taps), self.cfg.hidden_size, dtype=self.dtype,
+                               device=self.device) if self.taps else None)
+        st.tap_from, st.tap_gen = 0, 0
+        return st
+
+    def reset(self, st) -> None:
+        super().reset(st)
+        st.tap_from, st.tap_gen = 0, getattr(st, "tap_gen", 0) + 1
+
+    def _rows_buffers(self, M: int, key=None) -> dict:
+        rb = super()._rows_buffers(M, key)
+        if self.taps and "taps" not in rb:
+            rb["taps"] = torch.zeros(M, len(self.taps), self.cfg.hidden_size, dtype=self.dtype, device=self.device)
+        return rb
+
+    def stage(self, token: int, st) -> None:
+        """Host work of one decode step: the token, its position, slot and attention control, and its
+        row in the taps ring (`pidx`, the indexer's field, which this family does not use)."""
+        rb = self._rows_buffers(1)
+        rb["copied"].synchronize()
+        h, L = rb["h"], st.length
+        h["tok"].numpy()[0] = token
+        h["pos"].numpy()[0] = L + st.delta
+        h["slot"].numpy()[0] = L
+        h["anc"].numpy()[0, 0] = L
+        self._stage_qsa(h, L, 0, np.array([L]), h["anc"].numpy(), 1, st.delta)
+        if self.taps:
+            h["pidx"].numpy()[0] = L % self.ring_rows
+        rb["dbuf"].copy_(rb["hbuf"], non_blocking=True)
+        rb["copied"].record()
+
+    def commit_dev(self, st, key) -> None:
+        super().commit_dev(st, key)
+        if self.taps and st.ring is not None:
+            d = self._commit_bufs(key)["d"]
+            src = self._rb[key[0]]["taps"].index_select(0, d["idx"])
+            st.ring.index_copy_(0, d["dst"] % self.ring_rows, src)
 
     # the reference's pieces this family uses (FlashNextEngine's base is Flash-Next's reference)
     norm = Qwen35MoeRef.norm
@@ -83,6 +143,15 @@ class Qwen35MoeEngine(FlashNextEngine):
         n = K.hc_norm(h, self._site_norm(0), H, eps)
         for li in range(c.num_hidden_layers):
             p = self.pre(li)
+            k = self._tapcol.get(li)
+            if k is not None:
+                if step:
+                    self._cur["taps"][:, k].copy_(h)
+                elif st.ring is not None:
+                    R = self.ring_rows
+                    j0 = max(0, M - R)
+                    rdst = torch.arange(st.length + j0, st.length + M, device=h.device) % R
+                    st.ring[:, k].index_copy_(0, rdst, h[j0:])
             if c.is_linear(li):
                 out = self._gdn1(n, li, st) if step else (self._gdn_pre(n, li, st) if pre else self.gdn(n, li, st))
             else:
@@ -123,6 +192,8 @@ class Qwen35MoeEngine(FlashNextEngine):
             exl3_matmul(n, self.W["lm_head.weight"], out=rb["logits"])
         torch.argmax(rb["logits"], dim=-1, out=rb["next"])
         rb["next_h"].copy_(rb["next"], non_blocking=True)
+        if write and self.taps and st.ring is not None:
+            st.ring.index_copy_(0, rb["d"]["pidx"], rb["taps"])
         if self.fold:
             self._pend_n.zero_()
         self.rec["stack"] = self.stack
