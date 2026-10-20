@@ -12,6 +12,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - LFM2.5 adopts the saved conversations of 0.9.x to 0.11.1 again (ENG-381). 0.11.2 changed two of its modules without changing a stored row (ENG-363: which joint decode graphs stay, and how the split attention sizes its partials) and gave them no equivalence entry, so 0.11.2 to 0.12.1 adopted none of the older files. The entries are in. On the DGX Spark the split attention at 1 to 32 rows, alone and with shared buffers, equalled 0.11.1's byte for byte (`tools/lfm_attn_rows_check.py`).
 
+### Dashboard
+
+- The dashboard's build uses source-map-js 1.2.2 (OPS-205, GHSA-68fv-2mgg-jv7q). It is a build-time dependency under Vite; the served bundle is unchanged.
+
 ## 0.12.1, 2026-10-20
 
 0.12.1 serves the first community pack on Nemotron 3.5 Super VL: styles01's EXL3 pack at 3.5 bits a weight, text only, with LiLiCorr and the lookup from our 4.0 profile. A request with images now takes a side slot, the Chat tab's port preview keeps an app's redirects, and eleven pull requests from three contributors fix chatd, the Setup Guide, the GGUF reader and the image path. Every profile writes the same text as in 0.12.0; a request with images can run on a side slot, where it writes the tokens slot 0 writes. The NemotronH profiles' fingerprint changes (ENG-327, ENG-365, ENG-377), so the saved conversations of Bolt, Lightning and Super VL from 0.12.0 are not reused: their first request reads the prompt again. The 27B's and the other models' carry over.
