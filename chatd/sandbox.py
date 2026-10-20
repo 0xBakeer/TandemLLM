@@ -67,6 +67,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import select
 import shutil
 import socket
 import secrets
@@ -234,6 +235,9 @@ def _proc_starttime(pid: int) -> int | None:
         return None
 
 
+FRAME_CAP = 64 << 20
+
+
 def demux(sock: socket.socket, first: bytes, on_data) -> None:
     """A non-TTY attach stream: 8-byte frames [stream, 0, 0, 0, size(4, big-endian)]."""
     buf = first
@@ -242,7 +246,7 @@ def demux(sock: socket.socket, first: bytes, on_data) -> None:
             stream, size = buf[0], struct.unpack(">I", buf[4:8])[0]
             # a corrupt or hostile stream can announce a ~4GB frame and then drip bytes:
             # one frame over 64 MiB is junk, drop the connection rather than buffer it
-            if size > 64 << 20:
+            if size > FRAME_CAP:
                 raise OSError(f"an exec frame claims {size:,} bytes (over the 64 MiB cap)")
             if len(buf) < 8 + size:
                 break
@@ -255,6 +259,80 @@ def demux(sock: socket.socket, first: bytes, on_data) -> None:
         if not d:
             return
         buf += d
+
+
+class ClientGone(Exception):
+    """The client a reader watches closed its connection."""
+
+
+class ExecReader:
+    """A non-TTY attach stream's stdout read as it arrives (#86): `read(wait)` gives the next
+    stdout bytes, b"" once the exec's stream ended (`ended`), and raises TimeoutError when nothing
+    came within `wait` seconds (None: no limit). With `watch` (the client's socket, its request
+    already read) it raises ClientGone when that socket reaches its end while it waits, so a
+    reader never outlives the client it serves. stderr frames are dropped; the buffer holds at
+    most one frame (FRAME_CAP)."""
+
+    def __init__(self, sock: socket.socket, first: bytes = b"", watch: socket.socket | None = None):
+        self.sock, self.buf, self.ended = sock, bytearray(first), False
+        self.watch = watch
+        self.poll = select.poll()
+        self.poll.register(sock, select.POLLIN)
+        if watch is not None:
+            self.poll.register(watch, select.POLLIN)
+
+    def _frame(self) -> bytes | None:
+        while len(self.buf) >= 8:
+            stream, size = self.buf[0], int.from_bytes(self.buf[4:8], "big")
+            if size > FRAME_CAP:
+                raise OSError(f"an exec frame claims {size:,} bytes (over the 64 MiB cap)")
+            if len(self.buf) < 8 + size:
+                return None
+            data = bytes(self.buf[8:8 + size])
+            del self.buf[:8 + size]
+            if stream == 1 and data:
+                return data
+        return None
+
+    def _client_gone(self) -> bool:
+        try:
+            peek = self.watch.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except (BlockingIOError, InterruptedError):
+            return False
+        except OSError:
+            return True
+        if peek:                         # a pipelined request: nothing more to learn here
+            self.poll.unregister(self.watch)
+            self.watch = None
+            return False
+        return True
+
+    def read(self, wait: float | None = None) -> bytes:
+        deadline = None if wait is None else time.monotonic() + wait
+        while True:
+            data = self._frame()
+            if data is not None:
+                return data
+            if self.ended:
+                return b""
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                raise TimeoutError("the exec sent nothing in time")
+            events = self.poll.poll(None if left is None else max(1, int(left * 1000)))
+            for fd, ev in events:
+                if self.watch is not None and fd == self.watch.fileno():
+                    if self._client_gone():
+                        raise ClientGone()
+                elif fd == self.sock.fileno():
+                    try:
+                        d = self.sock.recv(65536)
+                    except OSError:
+                        d = b""
+                    if d:
+                        self.buf += d
+                    else:
+                        self.ended = True
+                        self.poll.unregister(self.sock)
 
 
 class Box:

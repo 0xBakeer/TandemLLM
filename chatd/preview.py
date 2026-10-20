@@ -44,6 +44,9 @@ BUNDLERS = ("vite", "next", "react-scripts", "@sveltejs/kit", "astro", "nuxt", "
 SCRIPT_EXTS = (".ts", ".tsx", ".jsx", ".vue", ".svelte", ".mts")
 REPORT_WAIT_S = 15.0
 PAGE_LIMIT = 512 * 1024
+#: a port lookup or probe (relay.py ports / probe): its longest run and its largest output
+RELAY_OUT_S = 60.0
+RELAY_OUT_LIMIT = 4 * 1024 * 1024
 
 _MODULE = re.compile(rb"<script\b([^>]*)>(.*?)</script>", re.I | re.S)
 _SRC = re.compile(rb"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
@@ -327,20 +330,33 @@ class PreviewMixin:
 
     # ------------------------------------------------------------------ what listens
     def _relay_out(self, cid: str, *args: str) -> bytes:
-        from chatd.sandbox import demux, relay_cmd
+        """What `relay.py <args>` (ports, probe) writes, within RELAY_OUT_S and RELAY_OUT_LIMIT
+        (#86); past either the exec is ended and OSError says why."""
+        from chatd.sandbox import ExecReader, relay_cmd
         box = self.sandboxes.box(cid)
-        _, sock, first = self.sandboxes.open_exec(cid, relay_cmd(*args))
-        box.busy += 1
+        exec_id, sock, first = self.sandboxes.open_exec(cid, relay_cmd(*args))
+        with box.lock:
+            box.busy += 1
+        reader = ExecReader(sock, first)
         try:
-            chunks: list[bytes] = []
-            demux(sock, first, lambda s, d: chunks.append(d) if s == 1 else None)
+            out = bytearray()
+            deadline = time.monotonic() + RELAY_OUT_S
+            while True:
+                d = reader.read(max(0.0, deadline - time.monotonic()))
+                if not d:
+                    return bytes(out)
+                out += d
+                if len(out) > RELAY_OUT_LIMIT:
+                    raise OSError(f"relay.py {args[0]} wrote over {RELAY_OUT_LIMIT >> 20} MiB")
         finally:
-            box.busy -= 1
+            if not reader.ended:
+                self.sandboxes.end_exec(exec_id)
+            with box.lock:
+                box.busy -= 1
             try:
                 sock.close()
             except OSError:
                 pass
-        return b"".join(chunks)
 
     def listening(self, cid: str, http: bool = False) -> list[dict] | None:
         """What listens in the chat's sandbox ([] when it is not running; None when it could not

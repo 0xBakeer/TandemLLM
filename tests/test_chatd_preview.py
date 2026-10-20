@@ -1,6 +1,7 @@
 """The preview's target and what loads in it (SRV-511, chatd/preview.py): the port proxy's CORS and
 shim, a page's own directory on the view route, the target a `port:N` or a bundler project's
-index.html resolves to, the dev server the pane starts, and what `present` tells the model."""
+index.html resolves to, the dev server the pane starts, and what `present` tells the model. The
+port proxy streams an answer as it arrives and holds nothing unbounded (SRV-633, #86)."""
 
 from __future__ import annotations
 
@@ -14,11 +15,11 @@ import tempfile
 import threading
 import time
 
-from chatd_util import Chat, run_all
+from chatd_util import KEY, Chat, run_all
 from test_chatd_agent import RelayBoxes, app_server, ws_open, ws_recv, ws_send
 
-from chatd import preview as PV, sandbox as sb_mod, tools as T
-from chatd.terminals import port_prefix, port_target
+from chatd import preview as PV, sandbox as sb_mod, terminals as TM, tools as T
+from chatd.terminals import Dechunk, port_prefix, port_target
 from chatd.workspace import Workspace
 
 _spec = importlib.util.spec_from_file_location("relay", sb_mod.RELAY)
@@ -522,6 +523,369 @@ console.log(JSON.stringify(got));
         ["ws", "wss://tandem.example" + prefix + "/?token=T", "vite-hmr"],
         ["ws", "ws://localhost:9999/", None],
         ["img", p + "/textures/b.png"], ["attr", "src", p + "/c.png"], ["attr", "href", "/about"]]
+
+
+# ---------------------------------------------------------------------- streaming (SRV-633, #86)
+class LiveRelays(PortBoxes):
+    """PortBoxes whose `relay.py connect` stand-ins run until the app closes or `end_exec` ends
+    them, each with its own id, so a test sees which relay chatd ended and which still runs."""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.live: dict[str, tuple] = {}
+        self.ended: list[str] = []
+        self.n = 0
+
+    def open_exec(self, cid, cmd, *, tty=False, stdin=False, env=None, workdir="/workspace"):
+        if cmd[-2:-1] != ["connect"]:
+            return super().open_exec(cid, cmd, tty=tty, stdin=stdin, env=env, workdir=workdir)
+        a, b = socket.socketpair()
+        srv = socket.create_connection(("127.0.0.1", int(cmd[-1])))
+        self.n += 1
+        eid = f"exec-relay-{self.n}"
+        self.live[eid] = (b, srv)
+
+        def up():
+            try:
+                while True:
+                    d = b.recv(65536)
+                    if not d:
+                        break
+                    srv.sendall(d)
+            except OSError:
+                pass
+
+        def down():
+            try:
+                while True:
+                    d = srv.recv(65536)
+                    if not d:
+                        break
+                    b.sendall(bytes([1, 0, 0, 0]) + len(d).to_bytes(4, "big") + d)
+            except OSError:
+                pass
+            self._end(eid)
+        threading.Thread(target=up, daemon=True).start()
+        threading.Thread(target=down, daemon=True).start()
+        return eid, a, b""
+
+    def _end(self, eid):
+        socks = self.live.pop(eid, None)
+        for s in socks or ():
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            s.close()
+
+    def exit_code(self, exec_id):
+        return exec_id in self.live, 0, None
+
+    def end_exec(self, exec_id):
+        if exec_id in self.live:
+            self.ended.append(exec_id)
+        self._end(exec_id)
+
+
+def stream_chat():
+    c = Chat()
+    c.svc.sandboxes = LiveRelays(c.data)
+    c.svc.sandboxes.on_change = c.svc._sandbox_changed
+    c.svc.sandboxes.network_mode = c.svc._network_mode
+    return c
+
+
+def stream_app():
+    """A dev server with the answers a preview app streams or holds: /events (SSE, one event every
+    0.3 s; ?n=N ends after N, else until the client goes), /poll?s=S (a long-poll held S seconds),
+    /page?kb=K (an HTML page of K KiB with an absolute script URL), /chunked.js (a module sent in
+    chunks), /hang (never answers), /stall (Content-Length 1000, 10 bytes, then nothing).
+    `state` counts the event streams still open."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlsplit
+    state = {"open": 0}
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            u = urlsplit(self.path)
+            q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path == "/events":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                state["open"] += 1
+                try:
+                    i = 0
+                    while "n" not in q or i < int(q["n"]):
+                        self.wfile.write(f"data: {i} {time.monotonic():.3f}\n\n".encode())
+                        self.wfile.flush()
+                        i += 1
+                        time.sleep(0.3)
+                except OSError:
+                    pass
+                finally:
+                    state["open"] -= 1
+                self.close_connection = True
+            elif u.path == "/poll":
+                time.sleep(float(q.get("s", 1)))
+                body = b'{"event":"done"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif u.path == "/page":
+                body = (b'<html><head><title>t</title></head><body><script src="/app.js"></script>'
+                        + b"x" * (int(q.get("kb", 1)) * 1024) + b"</body></html>")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for i in range(0, len(body), 3000):
+                    part = body[i:i + 3000]
+                    self.wfile.write(b"%x;ext=1\r\n" % len(part) + part + b"\r\n")
+                self.wfile.write(b"0\r\nX-Trailer: 1\r\n\r\n")
+            elif u.path == "/chunked.js":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                for part in (b'import a fr', b'om "/src/a.js";\n', b"export default a;"):
+                    self.wfile.write(b"%x\r\n" % len(part) + part + b"\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+                self.wfile.write(b"0\r\n\r\n")
+            elif u.path == "/hang":
+                time.sleep(30)
+            elif u.path == "/stall":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b"0123456789")
+                self.wfile.flush()
+                time.sleep(30)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, state
+
+
+def raw_get(c, path, timeout=10.0):
+    """A GET to chatd on a raw socket, as a browser's EventSource sends it: (socket, file)."""
+    s = socket.create_connection(("127.0.0.1", c.port), timeout=timeout)
+    s.sendall((f"GET /v1/chat-app{path} HTTP/1.1\r\nHost: x\r\nX-Tandem-Forward: {KEY}\r\n"
+               "Accept: text/event-stream\r\nOrigin: null\r\n\r\n").encode())
+    return s, s.makefile("rb")
+
+
+def read_head(f) -> tuple[int, dict]:
+    status = int(f.readline().split()[1])
+    h = {}
+    while True:
+        line = f.readline().decode("latin-1").strip()
+        if not line:
+            return status, h
+        k, _, v = line.partition(":")
+        h[k.strip().lower()] = v.strip()
+
+
+def until(pred, timeout=5.0):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_the_port_proxy_streams_server_sent_events_as_they_come():
+    """#86: the proxy sent nothing until the app closed; an EventSource in the preview never saw
+    an event. Each event now reaches the client when the app writes it."""
+    c = stream_chat()
+    app, _ = stream_app()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        t0 = time.monotonic()
+        s, f = raw_get(c, f"/conversations/{cid}/sandbox/ports/{port}/events?n=5")
+        st, h = read_head(f)
+        assert st == 200 and h["content-type"] == "text/event-stream", (st, h)
+        assert "content-length" not in h and h["connection"] == "close"
+        assert "connect-src" in h["content-security-policy"]
+        assert h["access-control-allow-origin"] == "null"
+        got = []
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            if line.startswith(b"data: "):
+                got.append(time.monotonic() - t0)
+        s.close()
+        assert len(got) == 5, got
+        assert got[0] < 0.25, f"the first event came at {got[0]:.2f} s, not at once"
+        assert got[-1] - got[0] > 0.9, f"the events came together: {got}"
+        assert until(lambda: c.svc.sandboxes.box(cid).busy == 0)
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_a_client_that_leaves_mid_stream_ends_the_relay_and_frees_the_sandbox():
+    """#86: a browser that left was not noticed; the thread held the relay and box.busy forever,
+    so the guard's idle stop never picked the sandbox."""
+    c = stream_chat()
+    app, state = stream_app()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        boxes = c.svc.sandboxes
+        s, f = raw_get(c, f"/conversations/{cid}/sandbox/ports/{port}/events")
+        assert read_head(f)[0] == 200
+        n = 0
+        while n < 2:
+            n += f.readline().startswith(b"data: ")
+        assert boxes.box(cid).busy == 1 and len(boxes.live) == 1
+        s.close()
+        f.close()
+        assert until(lambda: boxes.box(cid).busy == 0, 3), "busy stays above 0"
+        assert boxes.ended == ["exec-relay-1"] and not boxes.live, (boxes.ended, boxes.live)
+        assert until(lambda: state["open"] == 0, 3), "the app still streams to nobody"
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_a_long_poll_answers_when_the_app_does_and_a_client_that_leaves_ends_it():
+    c = stream_chat()
+    app, _ = stream_app()
+    port = app.server_address[1]
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        boxes = c.svc.sandboxes
+        t0 = time.monotonic()
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/poll?s=1.2")
+        assert st == 200 and body == {"event": "done"} and h["Content-Length"] == "16"
+        assert 1.1 < time.monotonic() - t0 < 5
+        # the client leaves while the app holds the request: noticed before the app answers
+        s, f = raw_get(c, f"/conversations/{cid}/sandbox/ports/{port}/poll?s=20")
+        assert until(lambda: boxes.box(cid).busy == 1)
+        time.sleep(0.3)
+        s.close()
+        f.close()
+        assert until(lambda: boxes.box(cid).busy == 0, 3)
+        assert boxes.ended == ["exec-relay-2"], boxes.ended
+    finally:
+        app.shutdown()
+        c.close()
+
+
+def test_a_page_is_rewritten_under_the_cap_and_passes_unrewritten_over_it():
+    """A page, script or style sheet is read whole for its rewrite up to REWRITE_LIMIT; a bigger
+    one passes as the app sent it, so chatd never holds more than the cap."""
+    c = stream_chat()
+    app, _ = stream_app()
+    port = app.server_address[1]
+    cap = TM.REWRITE_LIMIT
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        base = f"/v1/chat-app/conversations/{cid}/sandbox/ports/{port}"
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/page?kb=64")
+        assert st == 200 and "X-Tandem-Rewrite" not in h
+        assert body.startswith(b"<html><head><script>") and f'src="{base}/app.js"'.encode() in body
+        assert int(h["Content-Length"]) == len(body) and body.endswith(b"x</body></html>")
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/chunked.js")
+        assert body == f'import a from "{base}/src/a.js";\nexport default a;'.encode(), body
+        TM.REWRITE_LIMIT = 16 * 1024
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/page?kb=64")
+        assert st == 200 and h["X-Tandem-Rewrite"].startswith("skipped")
+        assert body.startswith(b'<html><head><title>t</title></head><body><script src="/app.js">')
+        page = (b'<html><head><title>t</title></head><body><script src="/app.js"></script>'
+                + b"x" * 64 * 1024 + b"</body></html>")
+        assert body == page and "Content-Length" not in h, "byte for byte as the app sent it"
+        assert until(lambda: c.svc.sandboxes.box(cid).busy == 0)
+    finally:
+        TM.REWRITE_LIMIT = cap
+        app.shutdown()
+        c.close()
+
+
+def test_an_app_that_stalls_gets_a_504_or_a_short_body_and_the_relay_ends():
+    c = stream_chat()
+    app, _ = stream_app()
+    port = app.server_address[1]
+    wait, idle = TM.HEAD_WAIT_S, TM.READ_IDLE_S
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        boxes = c.svc.sandboxes
+        TM.HEAD_WAIT_S, TM.READ_IDLE_S = 0.6, 0.6
+        t0 = time.monotonic()
+        st, body, h = c.call("GET", f"/conversations/{cid}/sandbox/ports/{port}/hang")
+        assert st == 504 and b"did not answer within 0.6 s" in body, (st, body)
+        assert time.monotonic() - t0 < 3 and h["Content-Security-Policy"]
+        assert until(lambda: boxes.box(cid).busy == 0) and boxes.ended == ["exec-relay-1"]
+        s, f = raw_get(c, f"/conversations/{cid}/sandbox/ports/{port}/stall")
+        st, h = read_head(f)
+        assert st == 200 and h["content-length"] == "1000"
+        assert f.read() == b"0123456789", "a sized body that stalls closes short"
+        s.close()
+        assert until(lambda: boxes.box(cid).busy == 0) and boxes.ended[-1] == "exec-relay-2"
+    finally:
+        TM.HEAD_WAIT_S, TM.READ_IDLE_S = wait, idle
+        app.shutdown()
+        c.close()
+
+
+def test_a_port_lookup_that_does_not_end_is_ended():
+    """`relay.py ports` and `probe` have a deadline (RELAY_OUT_S): past it the exec ends and the
+    lookup answers None, as an unreadable one does."""
+    c = chat()
+    held = []
+
+    def open_exec(cid, cmd, **kw):
+        a, b = socket.socketpair()
+        held.append(b)
+        return "exec-ports-hang", a, b""
+    ended = []
+    c.svc.sandboxes.open_exec = open_exec
+    c.svc.sandboxes.end_exec = ended.append
+    limit = PV.RELAY_OUT_S
+    try:
+        cid = c.new()
+        c.ok("POST", f"/conversations/{cid}/sandbox/start")
+        PV.RELAY_OUT_S = 0.3
+        assert c.svc.listening(cid) is None
+        assert ended == ["exec-ports-hang"] and c.svc.sandboxes.box(cid).busy == 0
+    finally:
+        PV.RELAY_OUT_S = limit
+        c.close()
+
+
+def test_a_chunked_body_is_decoded_as_it_arrives():
+    raw = b"4;x=y\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\nT: 1\r\n\r\n"
+    d, out = Dechunk(), b""
+    for i in range(len(raw)):
+        out += d.feed(raw[i:i + 1])
+    assert out == b"Wikipedia in\r\n\r\nchunks." and d.done
+    d = Dechunk()
+    assert d.feed(raw) == b"Wikipedia in\r\n\r\nchunks." and d.done
+    for bad in (b"-1\r\n", b"0x4\r\n", b"zz\r\n", b"1" * 5000):
+        try:
+            Dechunk().feed(bad)
+            raise AssertionError(bad)
+        except ValueError:
+            pass
 
 
 if __name__ == "__main__":
