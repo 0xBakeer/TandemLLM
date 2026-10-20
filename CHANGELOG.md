@@ -23,6 +23,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Chat tab
 
 - `grep` given one file's path searches that file, whole and line by line, where it answered "is not a directory"; a folder's files over 2 MiB are named as not searched instead of being counted as no match (SRV-649). The tool's description is unchanged, so no chat reads its prompt again.
+- `read_file` reaches every line of a file over 4 MiB (SRV-651). It decoded the first 4 MiB of any file and paged inside them as if the file ended there: the window's last page promised nothing more and an offset past it came back empty. A large file is now read 4 MiB at a time from the line `offset` names, whole lines numbered as in the file, and the marker names the bytes after the page and the offset to read on from; a line longer than 4 MiB says so. Files up to 4 MiB read as before, and the schema is unchanged.
 
 ## 0.12.2, 2026-10-20
 

@@ -41,6 +41,10 @@ compaction line, 2,000 tokens at least, never past the window less twice the ans
 never more than 64,000 characters a result (12,000 in Agents mode). `read_file` cuts at whole lines
 and says where to go on ("[truncated at 64,000 characters: lines 1-30 of 317 shown, 639,237 more
 bytes; read on with offset=31]"); a line longer than one read goes on with its `column` argument.
+A file over 4 MiB is read 4 MiB at a time from the line `offset` names, numbered as in the file,
+and the marker names the bytes after the page ("[lines 80000-80002 shown of a 6,749,998-byte
+file, 749,845 more bytes after them; read on with offset=80003]"), so no part of it is out of
+reach (SRV-651).
 `grep` takes a folder or one file: a file named by its path is searched whole, and a folder's
 files over 2 MiB are named as not searched instead of counted as no match (SRV-649).
 Other results keep their first and last quarter and the whole output under `.tandem/outputs/`. A

@@ -46,6 +46,9 @@ MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
 AGENTS_LIMIT_CHARS = 12_000
 AGENTS_EDGE_CHARS = 4_000
 AGENTS_READ_LINES = 200
+#: what read_file decodes of a file at once, from the line it starts at: a larger file is paged
+#: through by `offset` (whole lines, the marker says how many bytes are left), never cut unsaid
+READ_WINDOW = 4 * 1024 * 1024
 UI_LIMIT_CHARS = 30_000
 BASH_TIMEOUT_S = 600
 OUTPUTS_DIR = ".tandem/outputs"
@@ -147,8 +150,11 @@ def _read(ctx, a):
     st = ctx.ws.stat(path)
     if stat.S_ISDIR(st.st_mode):
         raise ToolError(f"{path} is a directory; use glob to list it")
-    data = ctx.ws.read(path, limit=4 * 1024 * 1024)
-    if path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+    image = path.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+    if st.st_size > READ_WINDOW and not image:
+        return _read_large(ctx, path, a)
+    data = ctx.ws.read(path, limit=READ_WINDOW)
+    if image:
         mime = "image/" + path.lower().rsplit(".", 1)[1].replace("jpg", "jpeg")
         return Result(f"{path}: an image, {st.st_size:,} bytes", images=[(mime, data)])
     if b"\0" in data[:4096]:
@@ -180,25 +186,111 @@ def _read(ctx, a):
     return Result(body + more)
 
 
-def _page(lines: list[str], off: int, lim: int, col: int, cap: int) -> tuple[list, int, tuple]:
+def _page(lines: list[str], off: int, lim: int, col: int, cap: int,
+          first: int = 1) -> tuple[list, int, tuple]:
     """Whole numbered lines from line `off` (from its character `col`), at most `lim` lines and
     `cap` characters: (the rows, the last line shown whole, None); a first line longer than `cap`
     comes in part: (its row, off - 1, (the line, the column to read on from, the bytes left of
-    it))."""
+    it)). `first`: the file's line number of `lines[0]` (a window of a large file); the rows and
+    the cut name the file's numbers, `off` and the line returned count in `lines`."""
     out, n = [], 0
     for i in range(off, min(len(lines), off - 1 + lim) + 1):
         text = lines[i - 1][col - 1:] if i == off else lines[i - 1]
-        row = f"{i:6d}\t{text}"
+        no = i + first - 1
+        row = f"{no:6d}\t{text}"
         if n + len(row) + 1 > cap:
             if out:
                 break
             take = max(1, cap - 8)
             start = col if i == off else 1
-            return [f"{i:6d}\t{text[:take]}"], off - 1, (i, start + take,
-                                                         len(text[take:].encode()))
+            return [f"{no:6d}\t{text[:take]}"], off - 1, (no, start + take,
+                                                          len(text[take:].encode()))
         out.append(row)
         n += len(row) + 1
     return out, off - 1 + len(out), None
+
+
+def _line_start(fh, line: int, size: int) -> int | None:
+    """The byte offset where line `line` (1-based, lines end with a newline) starts, or None past
+    the end; counted a mebibyte at a time."""
+    if line <= 1:
+        return 0 if size > 0 else None
+    need, pos = line - 1, 0
+    fh.seek(0)
+    while True:
+        chunk = fh.read(1 << 20)
+        if not chunk:
+            return None
+        c = chunk.count(b"\n")
+        if c >= need:
+            idx = -1
+            for _ in range(need):
+                idx = chunk.index(b"\n", idx + 1)
+            start = pos + idx + 1
+            return start if start < size else None
+        need -= c
+        pos += len(chunk)
+
+
+def _read_large(ctx, path: str, a: dict) -> Result:
+    """read_file of a file over READ_WINDOW: READ_WINDOW bytes from the line `offset` starts at,
+    whole lines only, numbered as in the file. The marker names the bytes left and the offset to
+    read on from, so no part of the file is left out unsaid (read_file read the first 4 MiB of
+    any file and paged inside them as if the file ended there)."""
+    fh, st = ctx.ws.open(path)
+    size = st.st_size
+    off = max(1, int(a.get("offset") or 1))
+    col = max(1, int(a.get("column") or 1))
+    lim = max(1, min(2000, int(a.get("limit") or 2000)))
+    with fh:
+        if b"\0" in fh.read(4096):
+            return Result(f"{path}: a binary file, {size:,} bytes; not shown")
+        start = _line_start(fh, off, size)
+        if start is None:
+            return Result("")
+        fh.seek(start)
+        data = fh.read(READ_WINDOW)
+    end_byte = start + len(data)
+    whole = True                       # the window ends at a line's end (or the file's)
+    if end_byte < size:
+        nl = data.rfind(b"\n")
+        if nl >= 0:
+            data = data[:nl + 1]
+        else:
+            whole = False              # one line longer than the window
+    lines = data.decode("utf-8", "replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    cap = getattr(ctx, "cap", None)
+    agents = getattr(ctx, "agents", False)
+    if agents:
+        lim = min(lim, AGENTS_READ_LINES)
+        cap = min(cap or AGENTS_LIMIT_CHARS, AGENTS_LIMIT_CHARS)
+    else:
+        cap = min(cap or MODEL_LIMIT_CHARS, MODEL_LIMIT_CHARS)
+    rows, end, cut = _page(lines, 1, lim, col, cap, first=off)
+    body = "\n".join(rows)
+    if cut:
+        if not whole and len(lines) == 1:
+            return Result(body + f"\n[line {off} goes on past the {READ_WINDOW >> 20} MiB "
+                                 f"read_file reads at once: more than {size - end_byte:,} bytes "
+                                 f"of it are not shown; read on with offset={off}, "
+                                 f"column={cut[1]} up to that point, or read it with bash]")
+        return Result(body + _goes_on(cut))
+    last = off - 1 + end                               # the file's number of the last line shown
+    shown = sum(len(ln.encode()) + 1 for ln in lines[:end])
+    after = max(0, size - start - shown)
+    if after == 0:
+        return Result(body)
+    if agents:
+        return Result(body + f"\nShowing lines {off}-{last} of a {size:,}-byte file, "
+                             f"{after:,} bytes after them. Read a range with offset and limit, "
+                             f"or give the reading to a worker.")
+    if end < lim and end < len(lines):
+        return Result(body + f"\n[truncated at {cap:,} characters: lines {off}-{last} shown, "
+                             f"{after:,} more bytes of {size:,}; read on with offset={last + 1}]")
+    return Result(body + f"\n[lines {off}-{last} shown of a {size:,}-byte file, {after:,} more "
+                         f"bytes after them; read on with offset={last + 1}]")
 
 
 def _goes_on(cut: tuple) -> str:
