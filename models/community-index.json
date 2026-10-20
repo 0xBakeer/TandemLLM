@@ -6,7 +6,7 @@
    "model": "nemotron-3.5-super-vl-120b-a12b",
    "id": "nemotron-super-vl-exl3-3.5bpw",
    "path": "models/nemotron-3.5-super-vl-120b-a12b/community/nemotron-super-vl-exl3-3.5bpw.json",
-   "sha256": "f791a3130a4570b7ce1efa3c8dfc9b6343a395fa54fc3cab6a83f4c8fe90cc83",
+   "sha256": "2c86b67c05be71c812893064e8ada99c1e0b7f49ebabbf870cbf97c8f7c617f8",
    "entry": {
     "schema": 1,
     "id": "nemotron-super-vl-exl3-3.5bpw",
@@ -50,7 +50,7 @@
     "added": "2026-10-17",
     "status": "verified",
     "verified": {
-     "build": "0.12.0",
+     "build": "0.12.1",
      "device": "dgx-spark",
      "date": "2026-10-20",
      "tok_s": {

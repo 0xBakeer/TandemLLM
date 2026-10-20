@@ -47,6 +47,9 @@ ENG-377: a pack on the Nemotron 3.5 Super VL base (PR #63)
  14  the file check: the pack's real config and index (the tower absent) pass; a wrong model type,
      layer count or quantization, a missing shard, images listed without the tower each fail naming
      the file or key                                        test_the_nemotron_file_check
+ 15  the Super VL pack's card is its runs: verified build, date, tok/s and tokens a round equal
+     measurements/0.12.1-summary.json, every drafted text the plain run's
+                                                            test_the_nemotron_card_is_the_raw_data
 
 Run: python tests/test_community_weights.py
 """
@@ -678,6 +681,22 @@ def test_a_nemotron_pack():
         # the served card is Super VL's, named after the pack, vision off
         card = model_card.find(NH_PID)
         assert card["model"] == NH and card["label"] == c["name"] and card["capabilities"]["vision"] is False, card
+
+
+def test_the_nemotron_card_is_the_raw_data():
+    with open(os.path.join(ROOT, "models", NH, "measurements", "0.12.1-summary.json")) as fh:
+        meas = json.load(fh)
+    run = meas["profiles"][NH_PID]
+    plain, drafted = run["plain_runs"][0]["classes"], run["runs"][0]["classes"]
+    with open(NH_ENTRY) as fh:
+        v = json.load(fh)["verified"]
+    assert (v["build"], v["device"], v["date"]) == (meas["build"], meas["device"], run["date"]), v
+    assert v["tok_s"] == {**{k: round(drafted[k]["tok_s"], 1) for k in ("prose", "code", "chat")},
+                          "plain": round(plain["prose"]["tok_s"], 1)}, v
+    assert v["tokens_per_round"] == {k: drafted[k]["tok_round"] for k in ("prose", "code", "chat")}, v
+    assert all(run["same_text"].values()) and all(c["same_text_as_plain"] for c in drafted.values()), run
+    assert run["agreement"]["top1_agree"] == 510 and run["agreement"]["positions"] == 512, run["agreement"]
+    assert run["load"]["weights_gib"] == 53.58 and "53.58 GiB" in v["notes"], run["load"]
 
 
 def _nh_pack(d: str, raw: dict | None = None, keys: tuple = (), shards: int = 2) -> None:

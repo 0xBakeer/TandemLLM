@@ -146,7 +146,7 @@ The first one, aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw at 3
 
 The reader takes it as stored: the prefixes map to the same canonical names, every trellis rate is one the kernels decode (3.5 / 4 / 5 / 6), the channel factors are `suh` / `svh`. The original Super VL head is untied, and the flat config's tie flag is the remap's: a stored head is read and the tie dropped (`PackIndex.stored_head`, an audit note); without a stored head the embedding stays the head. Anything else the layer table does not expect stops the load by name.
 
-Checked on the DGX Spark, 2026-10-20, 0.12.0 tree:
+Checked on the DGX Spark, 2026-10-20, on the 0.12.1 code before its version bump (`measurements/0.12.1-summary.json` has the runs):
 
 - Against the converter's own forward (exllamav3 1.6.0 on the same pack, `flash_attn_nc`, teacher-forced on the engine's greedy tokens; `nh_check.py engine`, 8 prompts x 64 tokens, thinking on): top-1 510 of 512 (99.6 %); both differences are near ties (the reference's margin 0.22 and 0.00 logits); mean |diff| 0.23 logits (0.0047 of the row's largest), mean |diff| over the reference's top 10 0.27, KL 0.0019 nats; max |diff| 6.1 on a token of rank 21,810. Every position with a margin of 0.25 logits or more agrees (494 of 494).
 - The MTP head (`nh_check.py mtp`, depth 3, 4 prompts x 128 tokens): equal to the trunk's greedy token at depth 1 / 2 / 3 in 92.6 / 84.4 / 73.6 % of positions, mean accepted run 2.45 of 3.
