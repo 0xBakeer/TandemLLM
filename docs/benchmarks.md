@@ -49,6 +49,23 @@ A plain API client gets the thinking in `reasoning_content` and the answer alone
 --backend-kwargs '{"reasoning_format": "reasoning_content"}'
 ```
 
+## A batch
+
+`tools/teb_batch.sh` runs rows one at a time against one server and keeps what each ran under; `tools/teb_summary.py` prints the table (OPS-209).
+
+```bash
+bash tools/teb_batch.sh --base-url http://<host>:8000/v1 --out results/teb-1020 \
+  --health "ssh <host> curl -s http://127.0.0.1:8000/health" \
+  --restart "ssh <host> tandem restart" standard
+python3 tools/teb_summary.py results/teb-1020 --md --misses
+```
+
+- Every row: `--seed 42 --temperature 0 --timeout 600 --no-live --parallel 1`. The batch stops when `/health` reports no slot.
+- `standard` is four rows: raw at `xhigh` (`--header X-Tandem=raw --backend-kwargs '{"reasoning_effort":"xhigh"}'`), the conductor's `tools` profile (`--header X-Tandem-Profile=tools`), and both again with `--hardmode-only`. `pack` adds `--variant-seed 7` on both paths and, with `--pack DIR`, a held-out scenario pack on both. A row of your own is `label:flags`.
+- The conductor rows name the profile. Without the header the server resolves an unnamed client by what it offers, and a scenario that offers no tools then runs under another profile than the rest of the row.
+- `batch.knobs` holds the bench's version, the server's version and pack, its slots, `max_len`, the default `max_tokens`, sampling, the prefix and response cache settings, and the output of `--knobs CMD` (the effort default and the slots from `serve.env`, for example).
+- Each row keeps its result JSON, log, flags, start and end times and `/health` before and after. A row during which the response cache's hits grew replayed answers of an earlier request; the summary marks it, and its times are not the engine's. `--restart` before the batch empties the cache.
+
 ## Results on a DGX Spark
 
 [tool-eval-bench.md](tool-eval-bench.md) has the latest results: every thinking setting on the raw path, four conductor profiles and hard mode.

@@ -46,7 +46,7 @@ tool-eval-bench run --base-url http://<host>:8000/v1 --model TandemLLM --backend
 |-|-|
 | raw, off | `--header X-Tandem=raw --no-think` |
 | raw, an effort | `--header X-Tandem=raw --backend-kwargs '{"reasoning_effort": "low"}'` (`medium`, `high`, `xhigh`) |
-| conductor, `tools` | none: an unnamed client that offers tools gets `tools` |
+| conductor, `tools` | none: an unnamed client that offers tools gets `tools` (rows from 2026-10-20 on name it: `--header X-Tandem-Profile=tools`) |
 | conductor, another profile | `--header X-Tandem-Profile=<profile>` |
 | hard mode | add `--hardmode-only` |
 

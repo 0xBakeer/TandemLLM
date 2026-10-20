@@ -8,6 +8,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - The response cache keys on the effort level a request resolved to, the client's word and the router's level (SRV-645). `high` and `xhigh` render the same prompt and, at a 16,384-token limit, the same thinking cap after the answer reserve, so a raw `xhigh` tool-eval-bench run replayed 190 answers of the `high` run before it. The same request at the same level still replays.
 
+### Tools
+
+- `tools/teb_batch.sh` runs tool-eval-bench rows one at a time against one server and keeps what each ran under: the bench's and the server's versions, the pack, the slots, the cache settings, `/health` before and after, the response cache's hits during the row; `tools/teb_summary.py` prints the table and each miss with the grader's reason (OPS-209). The conductor rows name `X-Tandem-Profile=tools`: an unnamed client is resolved by what it offers, so a scenario without tools ran under another profile. [docs/benchmarks.md](docs/benchmarks.md#a-batch) has the commands.
+
 ## 0.12.2, 2026-10-20
 
 0.12.2 fixes two Chat-tab bugs that users reported and the adoption of LFM2.5's older saved conversations. A run that reads a large file now ends with an answer instead of a request over the window (#18), and the port preview shows an app's Server-Sent Events and long-polls as they arrive (#86). No model, card or profile changed, and every profile writes the same text as in 0.12.1. `read_file`'s schema changes, so each chat's first request after the update reads its prompt again. A box that comes from 0.9.x to 0.11.1 adopts its LFM2.5 conversations again; a box that ran 0.11.2 to 0.12.1 already lost them.
