@@ -59,16 +59,15 @@ def test_the_table_names_each_miss_and_the_replayed_rows():
     assert "cond-tools     TC-49 partial  intent" in md
 
 
-def test_a_dry_run_lists_the_standard_rows_with_their_profiles():
+def test_a_dry_run_lists_the_standard_rows():
     got = subprocess.run(["bash", os.path.join(ROOT, "tools", "teb_batch.sh"), "--dry-run",
                           "--base-url", "http://box:8000/v1", "standard"],
                          capture_output=True, text=True, check=True).stdout.splitlines()
-    assert [ln.split(":")[0] for ln in got] == ["raw-xhigh", "cond-tools", "hard-raw",
-                                                "hard-cond"]
+    assert [ln.split(":")[0] for ln in got] == ["raw-xhigh", "cond", "hard-raw", "hard-cond"]
     for ln in got:
         assert "--seed 42 --temperature 0 --timeout 600 --no-live --parallel 1" in ln
         assert "--base-url http://box:8000/v1" in ln
     assert "--header X-Tandem=raw --backend-kwargs '{\"reasoning_effort\":\"xhigh\"}'" in got[0]
-    # the conductor rows name their profile: an unnamed client is resolved by what it offers
-    assert got[1].endswith("--header X-Tandem-Profile=tools")
-    assert got[3].endswith("--header X-Tandem-Profile=tools --hardmode-only")
+    # the conductor rows pin no profile: the server resolves each request by what it offers
+    assert "X-Tandem" not in got[1] and "X-Tandem" not in got[3]
+    assert got[3].endswith("--hardmode-only")

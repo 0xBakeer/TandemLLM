@@ -61,8 +61,8 @@ python3 tools/teb_summary.py results/teb-1020 --md --misses
 ```
 
 - Every row: `--seed 42 --temperature 0 --timeout 600 --no-live --parallel 1`. The batch stops when `/health` reports no slot.
-- `standard` is four rows: raw at `xhigh` (`--header X-Tandem=raw --backend-kwargs '{"reasoning_effort":"xhigh"}'`), the conductor's `tools` profile (`--header X-Tandem-Profile=tools`), and both again with `--hardmode-only`. `pack` adds `--variant-seed 7` on both paths and, with `--pack DIR`, a held-out scenario pack on both. A row of your own is `label:flags`.
-- The conductor rows name the profile. Without the header the server resolves an unnamed client by what it offers, and a scenario that offers no tools then runs under another profile than the rest of the row.
+- `standard` is four rows: raw at `xhigh` (`--header X-Tandem=raw --backend-kwargs '{"reasoning_effort":"xhigh"}'`), the conductor with no header, and both again with `--hardmode-only`. `pack` adds `--variant-seed 7` on both paths and, with `--pack DIR`, a held-out scenario pack on both. A row of your own is `label:flags`.
+- The conductor rows pin no profile. The server resolves each request by what it offers: `tools` when it offers tools, the default profile when it offers none, as any client meets it. A hard-mode scenario without tools then runs under the default profile. Pinned to `tools` on 2026-10-20, hard mode scored 82 twice and failed TC-88 both times; unpinned it scored 86 and passed TC-88 (n = 1 each; one scenario, the cause not tested). Pin a profile in a row of your own with `--header X-Tandem-Profile=<name>`.
 - `batch.knobs` holds the bench's version, the server's version and pack, its slots, `max_len`, the default `max_tokens`, sampling, the prefix and response cache settings, and the output of `--knobs CMD` (the effort default and the slots from `serve.env`, for example).
 - Each row keeps its result JSON, log, flags, start and end times and `/health` before and after. A row during which the response cache's hits grew replayed answers of an earlier request; the summary marks it, and its times are not the engine's. `--restart` before the batch empties the cache.
 

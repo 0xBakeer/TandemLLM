@@ -21,8 +21,9 @@
 # A ROW is "label:flags", the flags as the bench takes them, for example
 #   "raw-high:--header X-Tandem=raw --backend-kwargs '{\"reasoning_effort\":\"high\"}'"
 # `standard` is the full suite on both paths and hard mode on both; `pack` adds the variant seed 7
-# and a held-out pack on both paths. The conductor rows name their profile: an unnamed client is
-# resolved by what it offers, and a scenario without tools would get another profile.
+# and a held-out pack on both paths. The conductor rows send no profile header: the server resolves
+# the bench by what each request offers (`tools` with tools, the default profile without), as a
+# client would meet it. A row of your own can pin one with --header X-Tandem-Profile=<name>.
 #
 # Every row: --seed 42 --temperature 0 --timeout 600 --no-live --parallel 1. The batch refuses to
 # start when the server's slots (`parallel.max_running`) are fewer than --parallel.
@@ -44,15 +45,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 RAW="--header X-Tandem=raw --backend-kwargs '{\"reasoning_effort\":\"xhigh\"}'"
-TOOLS='--header X-Tandem-Profile=tools'
+COND=''
 expand() {
   case "$1" in
-    standard) printf '%s\n' "raw-xhigh:$RAW" "cond-tools:$TOOLS" \
-                "hard-raw:$RAW --hardmode-only" "hard-cond:$TOOLS --hardmode-only" ;;
-    pack) printf '%s\n' "raw-v7:$RAW --variant-seed 7" "cond-v7:$TOOLS --variant-seed 7"
+    standard) printf '%s\n' "raw-xhigh:$RAW" "cond:$COND" \
+                "hard-raw:$RAW --hardmode-only" "hard-cond:$COND --hardmode-only" ;;
+    pack) printf '%s\n' "raw-v7:$RAW --variant-seed 7" "cond-v7:$COND --variant-seed 7"
           [ -n "$PACK" ] && printf '%s\n' \
             "pack-raw:$RAW --pack-only --scenario-pack $PACK" \
-            "pack-cond:$TOOLS --pack-only --scenario-pack $PACK" ;;
+            "pack-cond:$COND --pack-only --scenario-pack $PACK" ;;
     *) printf '%s\n' "$1" ;;
   esac
 }

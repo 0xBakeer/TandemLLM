@@ -10,7 +10,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ### Tools
 
-- `tools/teb_batch.sh` runs tool-eval-bench rows one at a time against one server and keeps what each ran under: the bench's and the server's versions, the pack, the slots, the cache settings, `/health` before and after, the response cache's hits during the row; `tools/teb_summary.py` prints the table and each miss with the grader's reason (OPS-209). The conductor rows name `X-Tandem-Profile=tools`: an unnamed client is resolved by what it offers, so a scenario without tools ran under another profile. [docs/benchmarks.md](docs/benchmarks.md#a-batch) has the commands.
+- `tools/teb_batch.sh` runs tool-eval-bench rows one at a time against one server and keeps what each ran under: the bench's and the server's versions, the pack, the slots, the cache settings, `/health` before and after, the response cache's hits during the row; `tools/teb_summary.py` prints the table and each miss with the grader's reason (OPS-209). The conductor rows send no profile header, so each request is resolved by what it offers, as a client meets it. [docs/benchmarks.md](docs/benchmarks.md#a-batch) has the commands.
 
 ### Conductor
 
