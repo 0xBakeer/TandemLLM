@@ -499,6 +499,36 @@ def _first_call(body: dict) -> str | None:
     return next((tc["id"] for m in body["messages"] for tc in m.get("tool_calls") or []), None)
 
 
+def test_a_long_command_folds_like_a_write_and_keeps_its_output():
+    """A heredoc that writes a file is a write in a bash call (the reef run wrote its first page in
+    six of them): past the high mark its command leaves the call too, its output and exit code
+    stay, and a failed command folds as well (it ran); a refused write does not (nothing was
+    written, the note would say it was)."""
+    page = "".join(f"const reef{i} = Math.cos({i} * t);\n" for i in range(160))
+    cmd = f"cat > /workspace/reef.js <<'EOF'\n{page}EOF\nnode --check /workspace/reef.js"
+
+    def call(k, name, args, status="done", out="ok"):
+        return {"type": "tool_call", "id": f"c{k}", "name": name, "step": k, "status": status,
+                "input": json.dumps(args), "ended_at": f"2026-10-20T21:0{k}:00.000Z",
+                "output": {"content": out, "exit_code": 1 if status == "failed" else 0}}
+    parts = [call(1, "bash", {"command": cmd}, "failed", "SyntaxError\n[exit code 1]"),
+             call(2, "write_file", {"path": "a.js", "content": page}, "failed", "refused"),
+             call(3, "write_file", {"path": "b.js", "content": page})]
+    branch = [{"id": "u", "role": "user", "parts": [{"type": "text", "text": "a reef"}]},
+              {"id": "a", "role": "assistant", "parts": parts}]
+    assert render.folded_calls(branch, "2026-10-20T21:02:30.000Z", window=20_000) == {"c1"}
+    body = render.body("m", {}, branch, system="s", fold_before="2026-10-20T21:02:30.000Z",
+                       window=20_000)
+    args = [json.loads(tc["function"]["arguments"]) for m in body["messages"]
+            for tc in m.get("tool_calls") or []]
+    assert args[0] == {} and args[1]["content"] == page and args[2]["content"] == page, args
+    tool = [m["content"] for m in body["messages"] if m["role"] == "tool"]
+    assert tool[0] == ("SyntaxError\n[exit code 1]\n[the command of this call (163 lines, "
+                       f"{len(cmd.encode()):,} bytes) is left out of this conversation to save "
+                       "room; it ran as sent, its output is above]"), tool[0]
+    assert tool[1] == "refused"
+
+
 def _ocean_run(c, window: int, max_steps: int = 10):
     """The live case's shape: one user message, then steps that each read two long shader files
     and write one back."""

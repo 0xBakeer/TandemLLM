@@ -205,15 +205,19 @@ WROTE_STUB = re.compile(r"\[wrote .+: [\d,]+ lines, [\d,]+ bytes, sha256 [0-9a-f
                         r"is on disk, read_file \{.*\} shows it\]", re.S)
 #: a write_file whose content is the note a folded call's result carries (`folded_note`)
 FOLDED_NOTE = re.compile(r"\[(the content|the old and new text) of this call \(", re.S)
-_FOLD_KEYS = {"write_file": ("content",), "edit_file": ("old", "new")}
+#: the text arguments a fold point may take out of a call: a write's content, an edit's texts, and a
+#: command over FOLD_ARG_CHARS (a heredoc that writes a file: the owner's reef run wrote its first
+#: page in six bash heredocs of 3-6 KB each)
+_FOLD_KEYS = {"write_file": ("content",), "edit_file": ("old", "new"), "bash": ("command",)}
 
 
 def _fold_texts(c: dict) -> dict | None:
-    """The text arguments of a finished write_file or edit_file call that a fold point may take
-    out of the request (each over FOLD_ARG_CHARS), by key; None for any other call."""
+    """The text arguments of a finished write_file, edit_file or bash call that a fold point may
+    take out of the request (each over FOLD_ARG_CHARS), by key; None for any other call."""
     keys = _FOLD_KEYS.get(c.get("name"))
     raw = c.get("input") or ""
-    if not keys or c.get("status") != "done" or len(raw) <= FOLD_ARG_CHARS:
+    ran = c.get("status") == "done" or c.get("name") == "bash" and c.get("status") == "failed"
+    if not keys or not ran or len(raw) <= FOLD_ARG_CHARS:
         return None
     try:
         a = json.loads(raw)
@@ -234,7 +238,8 @@ def all_folded(branch: list[dict]) -> set:
 
 def folded_calls(branch: list[dict], fold_before: str | None = None,
                  step_from: tuple[int, int] | None = None, window: int | None = None) -> set:
-    """The ids of the write_file and edit_file calls whose text arguments the request leaves out.
+    """The ids of the write_file, edit_file and bash calls whose text arguments the request leaves
+    out.
 
     The calls are walked in order, each with the length of its long texts (`_fold_texts`); while
     the whole ones add up to FILES_HIGH_CHARS or less nothing leaves, past it the oldest leave
@@ -302,6 +307,10 @@ def folded_note(c: dict) -> str:
         what = (f"the content of this call ({_lines(t):,} lines, {len(t.encode()):,} bytes, "
                 f"sha256 {_sha(t)}) is left out of this conversation to save room; the file was "
                 f"written with it as sent")
+    elif c.get("name") == "bash":
+        t = texts.get("command", "")
+        return (f"\n[the command of this call ({_lines(t):,} lines, {len(t.encode()):,} bytes) is "
+                f"left out of this conversation to save room; it ran as sent, its output is above]")
     else:
         sizes = " and ".join(f"{len(texts[k].encode()):,}" for k in ("old", "new") if k in texts)
         what = (f"the old and new text of this call ({sizes} bytes) are left out of this "
@@ -312,10 +321,14 @@ def folded_note(c: dict) -> str:
 def result_for(c: dict, fold_before: str | None = None, folded: bool = False) -> str:
     """What the model reads for one call (`result_text`); a read_file or bash result over
     FOLD_RESULT_CHARS of a call that ended before `fold_before` (the newest compaction's time,
-    ISO 8601) as a stub; a folded write or edit (`folded_calls`) with its `folded_note`."""
+    ISO 8601) as a stub; a folded write, edit or command (`folded_calls`) with its
+    `folded_note`."""
+    note = folded_note(c) if folded and _fold_texts(c) else ""
+    return _result(c, fold_before) + note
+
+
+def _result(c: dict, fold_before: str | None) -> str:
     text = result_text(c)
-    if folded and _fold_texts(c):
-        return text + folded_note(c)
     if fold_before is None or c.get("name") not in FOLD_RESULT_TOOLS or \
             len(text) <= FOLD_RESULT_CHARS or (c.get("ended_at") or "") >= fold_before:
         return text
