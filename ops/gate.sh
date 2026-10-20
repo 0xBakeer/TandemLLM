@@ -160,15 +160,14 @@ say "start $(date '+%Y-%m-%dT%H:%M:%S%z') label=$LABEL code=${CODE:0:16} flags='
 # 1 -- the suite, on the CPU, nothing of serve.env in its environment
 if [ $SKIP_SUITE = 0 ]; then
   step 1 "suite (CPU, clean environment)"
-  ok=0; bad=0; failed=""
-  for t in tests/test_*.py; do
-    if env -i HOME="$HOME" PATH="$PATH" PYTHONPATH="$D:$HOME/pylibs" CUDA_VISIBLE_DEVICES="" \
-         TZ=Europe/Berlin timeout 900 "$PY" -u "$t" > "$OUT/suite-$(basename "$t" .py).log" 2>&1
-    then ok=$((ok+1)); else bad=$((bad+1)); failed="$failed $t"; fi
-  done
-  stub '```'; stub "\$ CUDA_VISIBLE_DEVICES=\"\" python tests/<file>, every tests/test_*.py (env -i)"
-  stub "files=$((ok+bad)) ok=$ok fail=$bad${failed:+ --$failed}"; stub '```'
-  say "suite files=$((ok+bad)) ok=$ok fail=$bad$failed"
+  # SRV-661: each file in its own clean process through tests/script_suite.py, which counts the
+  # tests it ran: a file that exits 0 having run none fails (sixteen did, and passed, until 0.13)
+  SUM=$(env -i HOME="$HOME" PATH="$PATH" SUITE_PYTHONPATH="$HOME/pylibs" \
+        "$PY" -u tests/script_suite.py --all --out "$OUT/suite" --timeout 900 2>&1 | tee "$OUT/suite.log" | tail -1)
+  bad=0; case "$SUM" in *" fail=0 "*) ;; *) bad=1 ;; esac
+  stub '```'; stub "\$ python tests/script_suite.py --all  (every tests/test_*.py, env -i, CUDA off)"
+  stub "$SUM"; stub '```'
+  say "suite $SUM"
   verdict "1 suite" $bad; [ $bad = 0 ] || abort "1 suite"
 fi
 

@@ -63,3 +63,8 @@ def test_a_folder_grep_names_the_large_files_it_did_not_search():
     out = T._grep(_Ctx(ws), {"pattern": "row 089999 "}).content
     assert out.startswith("no matches\n[not searched: 1 file(s) over 2 MiB: /workspace/big.log ("), out
     assert out.endswith("; grep one of them by its path to search it whole]"), out
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

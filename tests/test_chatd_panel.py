@@ -351,3 +351,8 @@ def test_a_running_sandboxs_figures_go_out_with_the_context():
     conv.sandbox_sent = (0.0, None)
     svc_mod.Service._send_context(svc, conv)
     assert events[-1]["type"] == "context.changed"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

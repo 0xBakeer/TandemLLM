@@ -58,3 +58,8 @@ def test_cost_and_state_have_no_flash_next_parts():
     assert secs["mtp.h_last"].shape == (1, c.hidden_size)
     assert [v[0] for v in srv.state.views()] == [f"{x}.{li}" for li in c.attention_layers for x in "kv"]
     assert srv.price_class(100) == 0 and srv.price_class(5000) == 8192
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

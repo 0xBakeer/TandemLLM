@@ -35,3 +35,8 @@ def test_a_failed_draft_test_closes_the_transport():
                                            "command": "x", "conversation_id": cid})
     assert r["ok"] is False and "closed the connection" in r["message"], r
     assert closed.wait(2), "the failed draft test never closed its transport"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

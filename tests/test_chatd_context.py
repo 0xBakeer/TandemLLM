@@ -613,3 +613,8 @@ def test_a_run_whose_kept_steps_have_no_stubs_keeps_fewer_steps():
         assert comp.estimate(reqs[first], 0.5) <= at * comp.TARGET_SHARE
     finally:
         c.close()
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

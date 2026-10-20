@@ -71,3 +71,8 @@ def test_a_dry_run_lists_the_standard_rows():
     # the conductor rows pin no profile: the server resolves each request by what it offers
     assert "X-Tandem" not in got[1] and "X-Tandem" not in got[3]
     assert got[3].endswith("--hardmode-only")
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

@@ -4,7 +4,7 @@ Thank you for helping. Bug reports, measurements from other boards and pull requ
 
 ## Before a pull request
 
-- Run the CPU test suite: every `tests/test_*.py` is a standalone script (`python tests/test_cache.py`), and all of them must pass. The GPU tests in `tests/gpu/` need a DGX Spark.
+- Run the CPU test suite: every `tests/test_*.py` is a standalone script (`python tests/test_cache.py`), and all of them must pass: `python tests/script_suite.py --all` runs each one and fails a file that ran no test. A pytest-style module ends with `from scriptmode import run; run(globals())` under `if __name__ == "__main__":`. The GPU tests in `tests/gpu/` need a DGX Spark.
 - Run the dashboard tests if you touched `dashboard/`: `npm ci && npm test` in that folder.
 - A change must not change the text the engine writes. [docs/exactness.md](docs/exactness.md) lists the checks, and a speed claim needs the method in [docs/measurement.md](docs/measurement.md).
 
