@@ -6289,6 +6289,10 @@ class Handler(BaseHTTPRequestHandler):
     _body_done = False               # the request in hand has had its body read to the end
 
     def handle_one_request(self):
+        self.connection.settimeout(self.timeout)   # a chat forward
+        # (chat_forward._relay) lifts the timeout to None while it streams and nothing
+        # put it back: a stalled body on the next request of that keep-alive connection
+        # was waited on forever. Re-arm here, as proxy/app.py does.
         self._body_done = False
         BaseHTTPRequestHandler.handle_one_request(self)
         # 2026-10-17: a chunked body the handler never read stayed on the wire and the next
