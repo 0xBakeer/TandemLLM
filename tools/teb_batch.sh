@@ -96,7 +96,8 @@ SLOTS=$(field "$OUT/batch.health.json" "(d.get('parallel') or {}).get('max_runni
   echo "default_max_tokens $(field "$OUT/batch.health.json" "d.get('default_max_tokens')")"
   echo "sampling $(field "$OUT/batch.health.json" "json.dumps(d.get('sampling'), sort_keys=True)")"
   echo "prefix_cache $(field "$OUT/batch.health.json" "(d.get('cache') or {}).get('prefix_cache')")"
-  echo "response_cache $(field "$OUT/batch.health.json" "json.dumps({k: v for k, v in ((d.get('cache') or {}).get('response_cache') or {}).items() if k in ('budget', 'ttl_s')})")"
+  # no brace with a comma in these expressions: bash 3.2 expands it inside "$(...)"
+  echo "response_cache $(field "$OUT/batch.health.json" "json.dumps(dict((k, v) for k, v in ((d.get('cache') or dict()).get('response_cache') or dict()).items() if k in ('budget', 'ttl_s')))")"
   if [ -n "$KNOBS" ]; then echo "knobs:"; bash -c "$KNOBS" 2>&1 | sed 's/^/  /'; fi
 } > "$OUT/batch.knobs"
 cat "$OUT/batch.knobs"
