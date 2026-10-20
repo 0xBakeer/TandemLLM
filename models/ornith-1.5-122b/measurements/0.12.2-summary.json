@@ -216,7 +216,7 @@
   }
  },
  "engine_check": {
-  "pack": "/home/bakeer/models/ornith-1.5-122b-exl3-4.0",
+  "pack": "~/models/ornith-1.5-122b-exl3-4.0",
   "load_s": 65.1,
   "allocated_gib": 61.16,
   "prefill_vs_ref": {
