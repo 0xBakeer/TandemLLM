@@ -8272,8 +8272,15 @@ class Handler(BaseHTTPRequestHandler):
                 tools_key = hashlib.sha256(json.dumps(
                     [body.get("tools"), body.get("tool_choice")], sort_keys=True).encode()
                     ).hexdigest()[:16] if body.get("tools") else ""
+                # The effort level the request resolved to, the client's word and the router's
+                # level: two levels can render one prompt and one cap (`high` and `xhigh` at a
+                # 16,384-token limit), and a run at one level must not replay the other's answers
+                effort_key = (client.effort or "",
+                              str(((plan.row or {}).get("effort") if plan is not None else None)
+                                  or ""))
                 rkey = cache.ResponseCache.key(
-                    mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget, stops=tuple(stops),
+                    mm.key_ids if mm is not None else prompt_ids, max_new=max_new, budget=budget,
+                    effort=effort_key, stops=tuple(stops),
                     eos=tuple(sorted(eos)), tree=bool(STATE.get("tree")), pen=pen_spec.key(),
                     tools=tools_key, **({"grammar": ("parts:" if gram.side is not None else "")
                                          + gram.pattern} if gram is not None else {}),
