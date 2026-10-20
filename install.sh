@@ -31,7 +31,9 @@ set -euo pipefail
 # Pinned versions
 # ---------------------------------------------------------------------------------------------
 
-# The engine release. v0.12.0 gives API clients that offer tools the tools profile, structured outputs with tools,
+# The engine release. v0.12.1 serves the first community pack on Nemotron 3.5 Super VL and takes a request with
+# images on a side slot;
+# v0.12.0 gives API clients that offer tools the tools profile, structured outputs with tools,
 # one mutation per turn and the secret echo mask;
 # v0.11.4 adds Agents mode to the Chat tab and keeps a worker's and its parent's cache rows;
 # v0.11.3 hardens the Setup Guide (tandem doctor, a check before the restart, scripts through bash, Retry);
@@ -49,7 +51,7 @@ set -euo pipefail
 # engines. The raw path (X-Tandem: raw) decodes as in v0.3.0; v0.2.0-staircut is the StairCut paper's
 # version (merge c111fa7).
 # Any tag, branch or commit of the repository works here (TANDEM_REF=main for the newest code).
-TANDEM_REF="${TANDEM_REF:-v0.12.0}"
+TANDEM_REF="${TANDEM_REF:-v0.12.1}"
 TANDEM_REPO="${TANDEM_REPO:-https://github.com/0xBakeer/TandemLLM.git}"
 
 # The weights. The base checkpoint gives every tensor the NVFP4 overlays do not replace

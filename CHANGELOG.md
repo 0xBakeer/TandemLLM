@@ -2,7 +2,18 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.12.1, 2026-10-20
+
+0.12.1 serves the first community pack on Nemotron 3.5 Super VL: styles01's EXL3 pack at 3.5 bits a weight, text only, with LiLiCorr and the lookup from our 4.0 profile. A request with images now takes a side slot, the Chat tab's port preview keeps an app's redirects, and eleven pull requests from three contributors fix chatd, the Setup Guide, the GGUF reader and the image path. Every profile writes the same text as in 0.12.0; a request with images can run on a side slot, where it writes the tokens slot 0 writes. The NemotronH profiles' fingerprint changes (ENG-327, ENG-365, ENG-377), so the saved conversations of Bolt, Lightning and Super VL from 0.12.0 are not reused: their first request reads the prompt again. The 27B's and the other models' carry over.
+
+### Nemotron 3.5 Super VL: a community pack
+
+- Super VL is a community base (ENG-377). A pack on it is served as `community/<id>` with our EXL3 profile nearest in size, `nemotron-super-vl-exl3-4.0` for 3.5 bits: its limits, its sampler, NVIDIA's LiLiCorr drafter and the lookup, with the pack in place of the weights. `python -m server.setup.community check-pack community/<id>` checks a pack's files: a NemotronH config with 88 layers, EXL3, every shard, and the image tower when the entry lists images. [docs/community-weights.md](docs/community-weights.md#bases) has the rules.
+- The first pack is `aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw` at 358667cf (57.8 GB) by styles01 (pull request #63): routed experts at 3.5 bits, every other projection at 5, an fp16 head. It holds no image tower, so it serves text. `ops/use-profile.sh community/nemotron-super-vl-exl3-3.5bpw` downloads and starts it.
+- NemotronH reads a stored head under a tied config. The pack's config, remapped from the Omni wrapper, says `tie_word_embeddings: true` and the pack stores `lm_head`; the loader now reads that head and notes it in the audit, where it refused the pack before. Without a stored head the embedding stays the head.
+- Measured on the DGX Spark, 2026-10-20, one request at a time, 512 greedy tokens, thinking off, one run each: plain 25.9 tok/s; with LiLiCorr and the lookup, prose 33.2, code 53.9, chat 37.4, edit 99.0 and copy 112.3 tok/s (2.97, 5.38, 3.41, 15.5 and 16.0 tokens a block). Every drafted text is the plain run's. A cold 7,507-token prompt reads at 529 tok/s. The weights take 53.58 GiB at load, and the served profile (262,144 tokens, 3 slots) starts and answers in 110 s.
+- Against exllamav3 1.6.0's own forward on the same pack, 8 prompts of 64 tokens: the top token agrees at 510 of 512 positions (99.6 %), both differences near ties, KL 0.0019. Images, requests at once and repeat runs were not measured.
+- Plain decoding runs at 25.9 tok/s here and at 31.1 on our 4.0 pack (0.11.0). From the headers, a decode token reads 7.95 GB of this pack and 6.74 GB of ours. `models/nemotron-3.5-super-vl-120b-a12b/measurements/0.12.1-summary.json` has the runs and the card's numbers, and [docs/nemotron-h.md](docs/nemotron-h.md) the layout and the profile of a decode step.
 
 ### Parallel requests
 
@@ -17,6 +28,22 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Setup Guide
 
 - The dashboard keeps track of an install that Finish started when the user left the guide before the answer arrived (#34). Since #34 such an answer opens no install page, and the dashboard lost the job too: its engine restart showed as the engine being offline. The dashboard now keeps the job's id, as the install page does, so the restart shows as one and the dashboard moves to the guide while the engine is away. Nothing opens when the answer arrives.
+
+### Contributions
+
+- joeynyc, pull requests #78 to #85. chatd sends a text attachment it could not save instead of failing the send (SEC-1, #78), and measures the inline budget on the branch a message goes on, so an edit of an earlier turn gets its own room (SRV-487, #79). The port preview forwards the path as the client sent it, with its trailing slash and its escapes, and refuses one with a space or a line break (SRV-511, #80). The Setup Guide's remove checks for a running job under the job lock (SRV-560, #81). NemotronH's fingerprint counts `engine/vision.py` (ENG-365, #82), and an image 16 by 40,000 pixels gets a patch grid of at least one cell a side instead of a 400 (ENG-365, #83). The GGUF reader refuses tensor sizes that overflow 64 bits and an alignment that is not a power of 2 (ENG-327, #84). The Chat view opens no stream after it is gone (VIS-217, #85); the dashboard bundle was rebuilt for it (VIS-233).
+- AgentSparko, pull requests #34 and #43. The Setup Guide clears its timers when it closes, drops a model's answer that arrives after a newer pick, and a Finish answer that lands after the user left opens no install page (#34, issues #4 and #5). chatd's sandbox reader closes its stream on every exit, an MCP server's body is capped at 4 MiB and each SSE line at 1 MiB, `read_file` reads 1 to 2,000 lines and promises no more lines past the end, and a negative limit on the conductor's journal routes reads 1 row instead of all (#43).
+- James Aita (styles01), pull request #63: the Super VL community pack above.
+
+### Engine
+
+- NemotronH's manifest names each `engine/` module its files import: a listed one counts in the fingerprint, and `LEFT_OUT` gives the reason for each of the others (kvpool, capture_lock, config, the lfm2_moe package). `tests/test_tier_identity.py` fails on an import in neither list. The fingerprint does not change for it (ENG-379).
+
+### Docs
+
+- [SECURITY.md](SECURITY.md) says how to report a vulnerability in private and what is in scope. [docs/threat-model.md](docs/threat-model.md) says where untrusted input enters a running install and which parts matter most.
+
+Upgrade: run the 0.12.1 installer again (`--setup --force-setup` on a box installed with `--setup`, then `ops/use-profile.sh` with your profile; the same `--dir` otherwise), then restart chatd: `tandem chat restart`.
 
 ## 0.12.0, 2026-10-19
 

@@ -40,9 +40,16 @@
 0.11.3 & 10-17 & Setup Guide hardening: \code{tandem doctor}, a check before the restart, Retry and Copy diagnostics, the restart card, removing weights; Super VL reads images; a cloud model's figures and cost; slot affinity \\
 0.11.4 & 10-18 & Agents mode in the Chat tab: a main agent with workers, the Task card, workers in the Context panel; a worker's and its parent's cache rows kept; file texts out of a chat's requests; a memory refusal compacts; cloud runs take no run slot \\
 0.12.0 & 10-19 & the \code{tools} profile for API clients that offer tools; structured outputs with tools; C5, one mutation per turn; the secret echo mask; the raw path's thinking in \code{reasoning_content} for plain API clients; tool-eval-bench results \\
+0.12.1 & 10-20 & the first community pack on Super VL, styles01's EXL3 3.5 bpw, text only; a request with images on a side slot; redirects kept in the port preview; eleven outside pull requests; \code{SECURITY.md} and a threat model \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.12.1, a community pack on Super VL}\label{sec:changelog-0121}
+
+0.12.1 serves the first community pack on Nemotron 3.5 Super VL, styles01's EXL3 pack at 3.5 bits a weight (pull request \#63, Section~\ref{sec:community-supervl}). It is served with our 4.0 profile's limits, LiLiCorr and the lookup, text only, since the pack holds no image tower. NemotronH now reads a stored head when the config says the head is tied, as this pack's remapped config does. On a DGX Spark, one request, 512 greedy tokens, thinking off, one run each: 25.9~tok/s plain, and 33.2 prose, 53.9 code, 37.4 chat with LiLiCorr and the lookup; the top token agrees with exllamav3's own forward on the pack at 510 of 512 positions.
+
+A request with images now takes a side slot (Section~\ref{sec:parallel-requests}); \code{QWEN38_SIDE_IMAGES=off} keeps it on slot 0. The Chat tab's port preview keeps an app's redirects inside the preview. Pull requests \#78 to \#85 by joeynyc and \#34 and \#43 by AgentSparko fix chatd's attachments and port proxy, the Setup Guide's remove and its timers, the GGUF reader's size checks and a long thin image's patch grid. Every profile writes the same text as in 0.12.0. The NemotronH profiles' fingerprint changes, so the saved conversations of Bolt, Lightning and Super VL from 0.12.0 read their prompt again; the other models' carry over.
 
 \section{0.12.0, tool clients}\label{sec:changelog-0120}
 
