@@ -395,5 +395,52 @@ def test_the_front_serves_the_dashboard_and_forwards_both_ways():
         fk[0].shutdown()
 
 
+def test_a_browser_that_leaves_while_chatd_holds_the_answer_closes_the_forward():
+    """#86: a long-poll or a quiet event stream through the port preview. The forward waited in
+    recv for chatd and noticed a browser that left only on its next write, so chatd (and the
+    relay in the sandbox) kept serving nobody. The browser's end now closes the socket to chatd."""
+    up = socket.socket()
+    up.bind(("127.0.0.1", 0))
+    up.listen(4)
+    seen = {}
+
+    def upstream(stream: bool):
+        s, _ = up.accept()
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += s.recv(4096)
+        if stream:                       # a stream that has said one thing and is quiet now
+            s.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: 0\n\n")
+        s.settimeout(10)
+        try:
+            seen[stream] = s.recv(1) == b"" and time.monotonic()
+        except OSError:
+            seen[stream] = None
+        s.close()
+    srv, _ = _engine(auth_mod.Auth(None), up.getsockname()[1])
+    try:
+        for stream in (False, True):
+            threading.Thread(target=upstream, args=(stream,), daemon=True).start()
+            cl = socket.create_connection(("127.0.0.1", srv.server_address[1]))
+            cl.sendall(b"GET /v1/chat-app/conversations/c1/sandbox/ports/3000/poll HTTP/1.1\r\n"
+                       b"Host: x\r\n\r\n")
+            if stream:
+                cl.settimeout(5)
+                got = b""
+                while b"data: 0" not in got:
+                    got += cl.recv(4096)
+            time.sleep(0.3)
+            t0 = time.monotonic()
+            cl.close()
+            for _ in range(100):
+                if stream in seen:
+                    break
+                time.sleep(0.02)
+            assert seen.get(stream) and seen[stream] - t0 < 1.0, (stream, seen)
+    finally:
+        srv.shutdown()
+        up.close()
+
+
 if __name__ == "__main__":
     run_all(globals())
