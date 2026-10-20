@@ -129,6 +129,32 @@ Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 w
 - The prefill's workspace does not grow with the prompt: 3.34 GiB above the engine at 131,054 tokens, 3.18 at 249,983 (the memory policy's `observed`). The adapter says so (`cost()`: a floor of 3.5 GiB, capped at 4.0); before, the 27B's line (30 kB a token) refused a 1,000,000-token prefill as 29 GiB of workspace. A slot 0 window above 262,144 adds its KV above it to the memory policy's ceiling and peak (+6 GiB at 1,048,576), as the side slots' bytes are added, so the caches are not refused for it during a long prefill.
 - Each side slot at 262,144 takes 2.82 GiB allocated and 3.10 GiB of MemAvailable at load (its KV 2.00 GiB), built in 9.2 s; measured with 3 and with 4 slots. With slot 0 at 1,048,576 and 4 slots the residency planner refused Laya (its 3 GiB claim under the 15 GiB floor against the engine's peak); with 3 slots it fits.
 
+### Super VL: community EXL3 packs
+
+ENG-377. A community pack on Super VL ([community-weights.md](community-weights.md#bases)) is served as `community/<id>`: the nearest own EXL3 profile (`nemotron-super-vl-exl3-4.0` for 3.5 bpw) with the pack in place of its weights, so the same limits, sampler, LiLiCorr drafter and lookup; price file `ops/prices/nemotron-3.5-super-vl-120b-a12b/community/<id>.dgx-spark.json`.
+
+The first one, aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw at 358667cf (57.8 GB), differs from our packs in layout:
+
+| | community 3.5 pack | our 4.0 pack |
+|-|-|-|
+| config | flat `NemotronHForCausalLM` (remapped from the Omni wrapper, which is kept as `config.json.orig-omni`) | the Omni wrapper, the trunk in `llm_config` |
+| keys | `backbone.*`, `lm_head.*`, `mtp.*` | `language_model.` before each |
+| tower | none (text only) | RADIO tower and projector in BF16 |
+| head | fp16 `lm_head.weight`, with `tie_word_embeddings: true` in the config | EXL3 at 6 bits, untied |
+| bits | routed experts 3.5, every other projection 5; MTP experts 4, MTP projections 6, `eh_proj` 5 | 4 everywhere, MTP 4 |
+| converter | exllamav3 1.6.0, mul1 codebook, `out_scales` auto | exllamav3 1.6.2, mul1 codebook |
+
+The reader takes it as stored: the prefixes map to the same canonical names, every trellis rate is one the kernels decode (3.5 / 4 / 5 / 6), the channel factors are `suh` / `svh`. The original Super VL head is untied, and the flat config's tie flag is the remap's: a stored head is read and the tie dropped (`PackIndex.stored_head`, an audit note); without a stored head the embedding stays the head. Anything else the layer table does not expect stops the load by name.
+
+Checked on the DGX Spark, 2026-10-20, 0.12.0 tree:
+
+- Against the converter's own forward (exllamav3 1.6.0 on the same pack, `flash_attn_nc`, teacher-forced on the engine's greedy tokens; `nh_check.py engine`, 8 prompts x 64 tokens, thinking on): top-1 510 of 512 (99.6 %); both differences are near ties (the reference's margin 0.22 and 0.00 logits); mean |diff| 0.23 logits (0.0047 of the row's largest), mean |diff| over the reference's top 10 0.27, KL 0.0019 nats; max |diff| 6.1 on a token of rank 21,810. Every position with a margin of 0.25 logits or more agrees (494 of 494).
+- The MTP head (`nh_check.py mtp`, depth 3, 4 prompts x 128 tokens): equal to the trunk's greedy token at depth 1 / 2 / 3 in 92.6 / 84.4 / 73.6 % of positions, mean accepted run 2.45 of 3.
+- Greedy answers in English and German, code, a two-turn chat and one tool call (`get_weather` with its arguments) through `/v1/chat/completions` are correct.
+- One fresh server a run, the GPU to itself, conductor raw, suffix store off, `--max-len 32768`, 512 greedy tokens, thinking off, one request at a time (n = 1): plain (`--drafter none`, 1 slot) 25.9 tok/s; LiLiCorr + lookup (`--drafter mtp --draft-head lilicorr --parallel 3`) prose 33.2, code 53.9, chat 37.4, edit 99.0, copy 112.3 tok/s (2.97 / 5.38 / 3.41 / 15.5 / 16.0 tokens a block), every text the plain run's. Prefill of one cold 7,507-token prompt 529 tok/s.
+- Load: weights 53.58 GiB allocated (55.3 GiB of MemAvailable), 47 to 58 s; the served profile (`ops/use-profile.sh community/nemotron-super-vl-exl3-3.5bpw`: 262,144 tokens, 3 slots, LiLiCorr) up and smoked in 110 s, the process 61.7 GiB on the GPU, MemAvailable 118 -> 52 GiB.
+- Plain decode 25.9 tok/s against the 4.0 pack's 31.1. What a decode token reads, from the headers: 7.95 GB here, 6.74 GB for the 4.0 pack (here the 5-bit dense projections 4.23 GB, the fp16 head 1.07 GB, the 3.5-bit experts 2.13 GB). The decode step's profile here: 5-bit dense rows 20.7 ms, the head and the routers 5.8 ms, the experts 10.2 ms, about 205 GB/s each; the 4.0 pack's profile was not measured in this run. Verify chains of 1 / 2 / 4 / 8 / 16 rows at 1k context: 38.2 / 45.6 / 58.7 / 77.1 / 106.2 ms (4.0: 31.3 / 39.8 / 53.3 / 74.5 / 105.8). LiLiCorr offline (`nh_check.py lilicorr`, 8 prompts x 256 tokens, thinking on): accepted length 4.79, the draft 21.9 ms.
+
 ### Super VL: images
 
 ENG-365. Every Super VL checkpoint carries the Omni model's image tower in BF16: the EXL3 packs copy it unquantised (shard 9 of the 4.0 pack, shard 5 of the 2.0), NVIDIA's ModelOpt checkpoint keeps it BF16 (shard 1; its 392 tensors are byte for byte the 4.0 pack's). `engine/models/nemotron_h/vision.py` loads it beside the trunk (`ctx.vision`, the server's image path of the Qwen towers) and runs the checkpoint's own arithmetic: transformers' `RadioModel` and `NemotronH_Omni_Reasoning_V3VisionProjector`, bf16, the reference's ops in its order.
