@@ -309,11 +309,18 @@ def exec_pipe(sandboxes, cid: str, command: str, args: list[str], env: dict):
         def closer():
             # a dropped or restarted server: closing the socket alone leaves its process
             # running in the sandbox (and forever), so end the exec itself; it dies, the
-            # engine closes the stream, the reader reaps the slot. The close is a finally:
-            # an OSError out of end_exec (the socket is already gone in this path) must
-            # not skip it and leak the fd.
+            # engine closes the stream, the reader reaps the slot. An OSError out of
+            # end_exec is logged, never re-raised: drop() calls this under a lock and
+            # session() marks the server failed after it — a raise here stopped drop()
+            # halfway and skipped the failure. The close stays a finally.
             try:
                 sandboxes.end_exec(exec_id)
+            except OSError as exc:
+                try:
+                    from chatd.__main__ import log        # the daemon's stderr line
+                    log(f"[mcp] end_exec({exec_id}) failed: {exc}")
+                except Exception:                     # a log must never outlive its caller
+                    pass
             finally:
                 sock.close()
         return (sock.sendall, lambda: threading.Thread(target=reader, daemon=True).start(),

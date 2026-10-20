@@ -22,6 +22,8 @@ from chatd import mcp as mcp_mod
 class FakeBox:
     def __init__(self):
         self.busy = 0
+        self.lock = threading.RLock()          # the real Box grew one (exec-reader
+                                               # threads take it around busy +-)
 
 
 class FakeSandboxes:
@@ -78,19 +80,18 @@ def test_session_close_goes_through_the_closer():
     assert sb.ended == ["exec-1"]
 
 
-def test_a_failing_end_exec_still_closes_the_socket():
+def test_a_failing_end_exec_ends_nothing_further():
+    """drop() calls the closer for every server of a chat, under a lock, and session()
+    marks the server failed after it. An OSError escaping here stopped drop() halfway
+    and left the server unmarked: the closer logs it and closes the socket anyway."""
     class Raising(FakeSandboxes):
         def end_exec(self, exec_id):
             FakeSandboxes.end_exec(self, exec_id)
             raise OSError("engine gone mid-kill")
     sb = Raising()
     _write, _start, closer = mcp_mod.exec_pipe(sb, "c1", "server", [], {})(lambda line: None)
-    raised = False
-    try:
-        closer()
-    except OSError:
-        raised = True
-    assert raised, "the closer swallowed the OSError instead of re-raising"
+    closer()                                                     # must not raise
+    assert sb.ended == ["exec-1"], "end_exec did not run"
     assert sb.sock.fileno() == -1, "a failing end_exec still skipped sock.close()"
 
 
