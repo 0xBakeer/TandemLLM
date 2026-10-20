@@ -266,6 +266,19 @@ def _snapshot_estimate(eng, length: int, drafter=None) -> int:
     return 2 * cost.section_bytes + int(1.25 * per_token * length)
 
 
+def mem_words(mem) -> str:
+    """The memory policy's figures in words, for a log line that says it refused: allocated
+    against the ceiling less the slack, all in GiB."""
+    if mem is None:
+        return "no policy"
+    try:
+        alloc, _ = mem.memory()
+        return (f"allocated {alloc / (1 << 30):.2f} GiB of a {mem.ceiling / (1 << 30):.2f} GiB "
+                f"ceiling less {mem.slack / (1 << 30):.2f} GiB of slack")
+    except Exception:                                              # noqa: BLE001
+        return "its figures unknown"
+
+
 def capture(eng, drafter=None, max_bytes: int = 0) -> "StateSnapshot | None":
     """Clone the engine's state at its current length. Cheap in time, dear in bytes.
 
@@ -1259,9 +1272,19 @@ class ResidentPrefix:
             e = len(tokens)
         if self._end_bufs is None:
             if self.mem is not None and not self.mem.admit("end", eng.cost().section_bytes):
-                self.stats["end_refused"] += 1
-                return "memory"
-            self._end_bufs = state_empty(eng)
+                # SRV-655: the end is worth more than an anchor below it (the next turn resumes
+                # there and reads only its new messages): an anchor's buffers take it, the
+                # anchor that leaves the smallest gap, before the end is refused
+                if not self._free and self.anchors:
+                    self._evict_one()
+                if not self._free:
+                    self.stats["end_refused"] += 1
+                    return "memory"
+                self._end_bufs = self._free.pop()
+                self._allocated -= 1
+                self.stats["end_from_anchor"] = self.stats.get("end_from_anchor", 0) + 1
+            else:
+                self._end_bufs = state_empty(eng)
         eng.settle()                       # a walked state or a pending commit, as `capture`
         state_save(self._end_bufs, eng)
         mark = getattr(drafter, "end_mark", None) if drafter is not None else None

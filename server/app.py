@@ -2711,11 +2711,22 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             est = cache._snapshot_estimate(eng, eng.kv.length, drafter)
             mem = STATE.get("mem")
             big = bool(store.max_entry) and est > store.max_entry
-            snap = (cache.capture(eng, drafter, max_bytes=store.max_entry)
-                    if store.reserve(est) and (mem is None or mem.admit("store", est)) else None)
+            room = store.reserve(est)
+            admitted = room and (mem is None or mem.admit("store", est))
+            snap = cache.capture(eng, drafter, max_bytes=store.max_entry) if admitted else None
             if snap is None:
-                store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
-                why = f"too big for the per-entry cap ({store.max_entry >> 20} MiB)"
+                # SRV-655: the reason itself. Every decline read "too big for the per-entry cap"
+                # (Ornith, 2026-10-20: at kv.length 18, a 0.31 GB snapshot under a 1 GiB cap),
+                # while the memory policy had refused it: its ceiling left the caches no room
+                if big or not room:
+                    store.stats["declined_big"] = store.stats.get("declined_big", 0) + 1
+                    why = (f"too big for the per-entry cap ({store.max_entry >> 20} MiB)" if big
+                           else f"over the store's budget ({store.budget >> 20} MiB)")
+                else:
+                    store.stats["declined_mem"] = store.stats.get("declined_mem", 0) + 1
+                    big = False
+                    why = (f"the memory policy refused its {est >> 20} MiB "
+                           f"({cache.mem_words(mem)})")
             else:
                 store.put(committed, snap, conv_id, kind="session")
                 why = ("the engine is ahead of the committed tokens" if
@@ -2770,7 +2781,8 @@ def _remember(prompt_ids: list[int], out_ids: list[int], conv_id: str | None,
             why = res.keep_end(eng, drafter, committed, int(STATE.get("last_prompt_n") or 0),
                                delta=int(mm.delta) if mm is not None else int(delta), mm=True)
         if STATE.get("verbose") and why != "kept":
-            print(f"[cache] end anchor not kept ({why}): kv.length={eng.kv.length} "
+            more = f", {cache.mem_words(STATE.get('mem'))}" if why == "memory" else ""
+            print(f"[cache] end anchor not kept ({why}{more}): kv.length={eng.kv.length} "
                   f"ctx={len(committed)}", flush=True)
         if slots_mod.current() is not None:
             # FX16: on a side slot with a resident prefix, what its next turn on slot 0 would

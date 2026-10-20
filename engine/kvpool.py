@@ -322,8 +322,11 @@ class KVPool:
             if getattr(b, "drv", None) is None:
                 continue
             out["paged"] += 1
+            # Flash-Next's and the Qwen3.5 MoE trunk's rows (`fn.k.*`, `fn.v.*`, their MTP
+            # layer's too) are the engine's KV: as "other" the dashboard's split counted the
+            # window's address range as KV (6.44 GB on Ornith with 0.61 GB committed)
             kind = ("drafter_kv" if str(b.name).startswith("draft") else
-                    "engine_kv" if str(b.name).startswith("kv") else "other")
+                    "engine_kv" if str(b.name).startswith(("kv", "fn.")) else "other")
             out[kind] += b.committed_bytes()
             out["reserved_va"] += int(getattr(b, "va_size", b.nbytes))
         return out
