@@ -218,12 +218,25 @@ COMMUNITY_SCHEMA_VERSION = 1
 COMMUNITY_SLUG = r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
 COMMUNITY_FORMATS = ("exl3", "nvfp4", "fp8", "gguf")
 COMMUNITY_SUPPORTED = ("exl3",)            # a format with a load path here; the others are refused
-# the base models a community pack loads on: #1's standalone loader and the EXL3 overlay are the
-# 27B family's (engine/loader.py); another model's packs load only through that model's own profiles
-COMMUNITY_BASES = ("qwen3.8-27b",)
 # what the engine reads on each load path today: the standalone path is text only (ENG-271); the
 # overlay keeps the base checkpoint's vision tower; no path takes audio or video
 COMMUNITY_LOADS = {"standalone": ("text",), "overlay": ("text", "image")}
+# the base models a community pack loads on, each with its rules (another model's packs load only
+# through that model's own profiles, `profile`):
+#   engine    the loader of a standalone pack: "qwen38" the 27B family's (engine/loader.py) with the EXL3
+#             overlay; "nemotron_h" NemotronH's (engine/models/nemotron_h, ENG-377), whose profile is the
+#             nearest own profile's (`like`: its limits, its drafters LiLiCorr and the lookup, its assets)
+#             with the pack in its place
+#   loads     the load paths a pack may take and what each serves
+#   drafters  the `drafters` values an entry may name; on NemotronH the pack brings none of its own
+#             ("none") and drafts with the model's own
+#   layers    the layer count a pack's config must have (server/setup/community.py check_pack)
+COMMUNITY_BASE_RULES = {
+    "qwen3.8-27b": {"engine": "qwen38", "loads": COMMUNITY_LOADS, "drafters": ("tandem-exl3", "dflash2", "none")},
+    "nemotron-3.5-super-vl-120b-a12b": {"engine": "nemotron_h", "loads": {"standalone": ("text",)},
+                                        "drafters": ("none",), "layers": 88},
+}
+COMMUNITY_BASES = tuple(COMMUNITY_BASE_RULES)
 MODALITIES = ("text", "image", "audio", "video")
 # the files under ~/.tandemllm/community/ that are not a pack's folder (community.py)
 _RESERVED_SUFFIXES = (".json", ".partial", ".env", ".tmp")
@@ -811,7 +824,17 @@ def _like(m: dict, fmt: str, bpw: float) -> dict | None:
     return min(same, key=lambda p: (abs(p["bpw"] - bpw), p["bpw"])) if same else None
 
 
-def community_assets(e: dict) -> list[str]:
+def community_engine(e: dict) -> str | None:
+    """The loader of entry `e`'s base (COMMUNITY_BASE_RULES), None outside the community bases."""
+    return (COMMUNITY_BASE_RULES.get(e["base_model"]) or {}).get("engine")
+
+
+def community_assets(e: dict, m: dict | None = None) -> list[str]:
+    """The base model's assets a community pack reads besides its own folder: by its drafters and its load
+    path on the 27B; on NemotronH (`m` the base) its nearest profile's, which it drafts with."""
+    if community_engine(e) == "nemotron_h":
+        like = _like(m, e["format"], e["bpw"]) if m is not None else None
+        return list(like["assets_required"]) if like else []
     return _COMMUNITY_ASSETS[e["drafters"]] + (["base-fp8"] if e["load"] == "overlay" else [])
 
 
@@ -849,6 +872,13 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
                             f"{p['format']} {p['bpw']} bpw")
     elif e["base_model"] not in COMMUNITY_BASES:
         errs.append(f"$.base_model: community packs load on {', '.join(COMMUNITY_BASES)} only")
+    rules = COMMUNITY_BASE_RULES.get(e["base_model"]) if own is None else None
+    if rules is not None and e["load"] not in rules["loads"]:
+        errs.append(f"$.load: {e['base_model']} packs load {', '.join(rules['loads'])} only")
+    if rules is not None and e["drafters"] not in rules["drafters"]:
+        errs.append(f"$.drafters: a {e['base_model']} pack takes {', '.join(rules['drafters'])}"
+                    + (" (it drafts with the model's own drafters, from its nearest profile)"
+                       if rules["engine"] == "nemotron_h" else ""))
     if own is None and e["format"] not in COMMUNITY_SUPPORTED:
         errs.append(f"$.format: TandemLLM has no load path for {e['format']} packs yet "
                     f"({', '.join(COMMUNITY_SUPPORTED)} only)")
@@ -857,7 +887,7 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append("$.modalities.text: a pack serves text")
     # a profile-backed pack serves what its model serves: images where the model has a Vision tool
     served = (("text", "image") if m and any("VISION" in c["knobs"] for c in m["components"]) else ("text",)) \
-        if own is not None else COMMUNITY_LOADS[e["load"]]
+        if own is not None else (rules["loads"] if rules is not None else COMMUNITY_LOADS).get(e["load"], ())
     for k in MODALITIES:
         if mods[k] and k not in served:
             errs.append(f"$.modalities.{k}: the {e['load']} load path does not serve {k} yet"
@@ -883,13 +913,18 @@ def community_errors(data, slug: str | None, folder: str | None, models: dict[st
         errs.append(f"$.verified.date: {v['date']!r} is not a date")
     if m is not None and own is None and e["base_model"] in COMMUNITY_BASES:
         have = {a["id"] for a in m["assets"]}
-        for a in community_assets(e):
+        for a in community_assets(e, m):
             if a not in have:
                 errs.append(f"$.drafters: {e['base_model']} has no asset {a!r} for "
                             f"{e['drafters']} on the {e['load']} path")
-        if e["format"] in COMMUNITY_SUPPORTED and _like(m, e["format"], e["bpw"]) is None:
+        like = _like(m, e["format"], e["bpw"]) if e["format"] in COMMUNITY_SUPPORTED else None
+        if e["format"] in COMMUNITY_SUPPORTED and like is None:
             errs.append(f"$.format: {e['base_model']} has no {e['format']} profile to estimate "
                         f"the memory from")
+        if like is not None and community_engine(e) == "nemotron_h" and \
+                not os.path.isfile(os.path.join(ROOT, "ops", "profiles", like["id"] + ".env")):
+            errs.append(f"$.format: no ops/profiles/{like['id']}.env, the profile a {e['base_model']} pack "
+                        f"is served with")
     return errs
 
 
@@ -921,7 +956,8 @@ def community_entry(e: dict, m: dict) -> dict:
                       for k, label, fmt in _SOCIAL_URL if social.get(k)],
         hf_url=f"https://huggingface.co/{e['hf']['repo']}/tree/{e['hf']['revision']}",
         memory={"weights_gib": like["weights_gib"],
-                "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" else 0.0,
+                "drafters_gib": like["drafters_gib"] if e["drafters"] != "none" or
+                community_engine(e) == "nemotron_h" else 0.0,
                 "like": like["id"]})
 
 
@@ -939,7 +975,7 @@ def community_profile(m: dict, c: dict) -> dict:
             "quality": {"kl_vs_bf16": None, "top1_pct": None, "ppl": None,
                         "date": v["date"] if v else c["added"],
                         "source": f"community entry {c['profile']} ({c['status']})"},
-            "assets_required": community_assets(c), "note": c["description"] or None,
+            "assets_required": community_assets(c, m), "note": c["description"] or None,
             "components_gib": dict(like.get("components_gib") or {}),
             "made_by": {"kind": "community", "name": c["author"]["github"], "github": c["author"]["github"],
                         "repo": None},

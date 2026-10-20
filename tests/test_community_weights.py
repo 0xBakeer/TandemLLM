@@ -37,6 +37,17 @@ VIS-175: a pack one of the model's own profiles serves (turboderp's Flash-Next b
      a pack without a profile are refused; the fetched index cannot replace it, and the index a
      box before 0.11.1 fetches holds none of them          test_a_pack_an_own_profile_serves
 
+ENG-377: a pack on the Nemotron 3.5 Super VL base (PR #63)
+
+ 13  the entry checks and loads on NemotronH: memory and drafters (LiLiCorr) of the nearest own EXL3
+     profile, text only; another NemotronH base, an overlay, a 27B drafter choice, images without a
+     tower are refused with their field; the profile through serve.env is the 4.0 profile with the
+     pack in its place; the served card is Super VL's, vision off
+                                                            test_a_nemotron_pack
+ 14  the file check: the pack's real config and index (the tower absent) pass; a wrong model type,
+     layer count or quantization, a missing shard, images listed without the tower each fail naming
+     the file or key                                        test_the_nemotron_file_check
+
 Run: python tests/test_community_weights.py
 """
 
@@ -69,6 +80,10 @@ ENTRY = os.path.join(ROOT, "models", "qwen3.8-27b", "community", SLUG + ".json")
 REV = "11447639033dd80a4c04536b5b37ed7d642802ee"
 FN_BPW = ("2.05", "3.05", "4.05", "5.05", "6.05")
 FN_ENTRY = os.path.join(ROOT, "models", "qwen3.8-flash-next", "community", "turboderp-flashnext-3.05.json")
+NH = "nemotron-3.5-super-vl-120b-a12b"
+NH_SLUG = "nemotron-super-vl-exl3-3.5bpw"
+NH_PID = "community/" + NH_SLUG
+NH_ENTRY = os.path.join(ROOT, "models", NH, "community", NH_SLUG + ".json")
 
 
 def _entry() -> dict:
@@ -158,9 +173,9 @@ def test_the_schema_and_index_files():
         assert fh.read() == community.render_index(community.build_index()), \
             "regenerate: python -m server.setup.community --index"
     idx = community.build_index()
-    assert [(e["model"], e["id"]) for e in idx["entries"]] == [("qwen3.8-27b", SLUG)]
+    assert [(e["model"], e["id"]) for e in idx["entries"]] == [(NH, NH_SLUG), ("qwen3.8-27b", SLUG)]
     import hashlib
-    assert idx["entries"][0]["sha256"] == hashlib.sha256(open(ENTRY, "rb").read()).hexdigest()
+    assert idx["entries"][1]["sha256"] == hashlib.sha256(open(ENTRY, "rb").read()).hexdigest()
     # the entries one of the model's own profiles serves are in community-builtin.json alone (VIS-175)
     with open(community.builtin_path(), encoding="utf-8") as fh:
         assert fh.read() == community.render_index(community.build_index(builtin=True)), \
@@ -218,7 +233,8 @@ def test_each_rule_refuses_a_bad_entry():
         assert hit, (field, part, errs)
     # a base model with no community load path, and one that is not there
     e = dict(_entry(), base_model="qwen3.8-flash-next")
-    assert any("qwen3.8-27b only" in x for x in registry.community_errors(e, SLUG, "qwen3.8-flash-next", models))
+    assert any("qwen3.8-27b, nemotron-3.5-super-vl-120b-a12b only" in x
+               for x in registry.community_errors(e, SLUG, "qwen3.8-flash-next", models))
     e = dict(_entry(), base_model="no-such-model")
     assert any("no model 'no-such-model'" in x for x in registry.community_errors(e, SLUG, None, models))
     # an overlay may claim images (the base checkpoint's tower); a drafter choice needs the base's assets
@@ -260,7 +276,7 @@ def test_the_cli_names_the_file_and_field():
                 out = io.StringIO()
                 with redirect_stdout(out):
                     rc = registry.main(["--check"])
-                assert rc == 0 and "6 packs, models/community-index.json matches" in out.getvalue(), out.getvalue()
+                assert rc == 0 and "7 packs, models/community-index.json matches" in out.getvalue(), out.getvalue()
         finally:
             registry.MODELS_DIR = saved
     finally:
@@ -602,6 +618,118 @@ def test_a_pack_an_own_profile_serves():
     # the index every box fetches holds no such entry: a box before 0.11.1 would drop it
     with open(community.bundled_path()) as fh:
         assert all("profile" not in r["entry"] for r in json.load(fh)["entries"])
+
+
+def _nh_entry() -> dict:
+    with open(NH_ENTRY) as fh:
+        return json.load(fh)
+
+
+def test_a_nemotron_pack():
+    from server import model_card
+    from server.setup import estimate
+    with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-nh-"), QSE_COMMUNITY_URL="off"):
+        models = _models()
+        m = models[NH]
+        assert registry.community_errors(_nh_entry(), NH_SLUG, NH, models) == []
+        c = registry.community(m, NH_PID)
+        assert c is not None and c["author"]["github"] == "styles01" and c["load"] == "standalone"
+        assert c["modalities"]["image"] is False and c["modalities_in_pack"] == ["text"]
+        assert "TensorFold" not in c["description"] and "EXL3 (exllamav3)" in c["description"]
+        # the nearest own EXL3 profile gives the memory and the drafters, whatever `drafters` says
+        assert c["memory"] == {"weights_gib": 58.35, "drafters_gib": 1.32, "like": "nemotron-super-vl-exl3-4.0"}, c
+        p = registry.profile(m, NH_PID)
+        assert p["assets_required"] == ["nemotron-super-vl-lilicorr"] and p["vision"] is False, p
+        assert registry.community_engine(c) == "nemotron_h" and registry.community_engine(_entry()) == "qwen38"
+        sel = estimate.check(m, {"model": NH, "profile": NH_PID, "components": {"vision": True}})
+        assert sel["components"].get("vision") is False, sel
+        # what the check refuses on this base
+        for change, field, part in [
+                (lambda e: e.update(load="overlay"), "$.load", "standalone only"),
+                (lambda e: e.update(drafters="tandem-exl3"), "$.drafters", "takes none"),
+                (lambda e: e["modalities"].update(image=True) or e.update(modalities_in_pack=["text", "image"]),
+                 "$.modalities.image", "does not serve image"),
+                (lambda e: e.update(modalities_in_pack=["image"]), "$.modalities_in_pack", "text works"),
+                (lambda e: e.update(format="nvfp4"), "$.format", "no load path for nvfp4")]:
+            e = copy.deepcopy(_nh_entry())
+            change(e)
+            errs = registry.community_errors(e, NH_SLUG, NH, models)
+            assert any(x.startswith(field) and part in x for x in errs), (field, errs)
+        bolt = dict(_nh_entry(), base_model="nemotron-3.5-bolt-74b-a9b")
+        errs = registry.community_errors(bolt, NH_SLUG, "nemotron-3.5-bolt-74b-a9b", models)
+        assert any(x.startswith("$.base_model") and "qwen3.8-27b, nemotron-3.5-super-vl-120b-a12b only" in x
+                   for x in errs), errs
+        # the profile through serve.env: the 4.0 profile's limits and drafters, the pack in its place
+        keys = ("QSE_WEIGHTS", "QSE_WEIGHTS_HF", "QSE_WEIGHTS_REVISION", "QSE_WEIGHTS_DIR", "QSE_WEIGHTS_GB",
+                "QSE_NH_MODEL", "QSE_NH_DIR", "QSE_NH_HEAD", "QSE_NH_LILICORR", "QSE_ENGINE_FLAGS", "QSE_ASSETS",
+                "VISION", "QSE_DISK_CACHE", "QSE_PAGE_CACHE_DROP", "QSE_MEM_NEED_GIB", "MAX_LEN", "QSE_PARALLEL",
+                "QWEN38_SUFFIX_STORE", "QWEN38_EXL3", "QWEN38_MODEL")
+        e = _resolve(community.env(m, c), keys)
+        d = f"~/.tandemllm/community/{NH_SLUG}"
+        assert e["QSE_WEIGHTS"] == NH_PID and e["QSE_WEIGHTS_DIR"] == d == e["QSE_NH_DIR"], e
+        assert e["QSE_WEIGHTS_HF"] == c["hf"]["repo"] and e["QSE_WEIGHTS_REVISION"] == c["hf"]["revision"], e
+        assert e["QSE_WEIGHTS_GB"] == "57.8" and e["QSE_NH_MODEL"] == NH and e["QSE_NH_HEAD"] == "lilicorr", e
+        assert e["QSE_ENGINE_FLAGS"] == f"--model {d} --drafter mtp --draft-head lilicorr --depth 3", e
+        assert e["QSE_ASSETS"] == "~/models/nemotron-3.5-super-vl-lilicorr/model.safetensors", e
+        assert e["VISION"] == "off" and e["QSE_PAGE_CACHE_DROP"] == d and e["QWEN38_EXL3"] == "<unset>", e
+        assert e["QSE_DISK_CACHE"] == f"~/.qwen38-spark-engine/cache/disk-community-{NH_SLUG}", e
+        assert (e["QSE_MEM_NEED_GIB"], e["MAX_LEN"], e["QSE_PARALLEL"]) == ("92", "262144", "3"), e
+        assert e["QWEN38_SUFFIX_STORE"] == "~/.qwen38-spark-engine/suffix-nemotron", e
+        # the served card is Super VL's, named after the pack, vision off
+        card = model_card.find(NH_PID)
+        assert card["model"] == NH and card["label"] == c["name"] and card["capabilities"]["vision"] is False, card
+
+
+def _nh_pack(d: str, raw: dict | None = None, keys: tuple = (), shards: int = 2) -> None:
+    """A pack folder with PR #63's config and an index of its names (the shards empty files)."""
+    with open(os.path.join(ROOT, "tests", "fixtures", "nemotron_h", "super-vl-exl3-3.5-community.json")) as fh:
+        cfg = json.load(fh)
+    json.dump(raw if raw is not None else cfg, open(os.path.join(d, "config.json"), "w"))
+    names = ["backbone.embeddings.weight", "lm_head.weight", *keys]
+    wm = {k: f"model-{i % shards + 1:05d}-of-{shards:05d}.safetensors" for i, k in enumerate(names)}
+    for fn in set(wm.values()):
+        open(os.path.join(d, fn), "wb").close()
+    json.dump({"metadata": {}, "weight_map": wm}, open(os.path.join(d, "model.safetensors.index.json"), "w"))
+    return cfg
+
+
+def test_the_nemotron_file_check():
+    with _Env(QSE_COMMUNITY_DIR=tempfile.mkdtemp(prefix="cw-nhf-"), QSE_COMMUNITY_URL="off"):
+        m = _models()[NH]
+        c = registry.community(m, NH_PID)
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _nh_pack(d)
+            assert community.check_pack(m, c, d) == []
+            # images listed: the tower is not in this pack
+            ci = dict(c, modalities_in_pack=["text", "image"])
+            errs = community.check_pack(m, ci, d)
+            assert "vision_model.radio_model.* not found in model.safetensors.index.json" in errs, errs
+            assert any("preprocessor_config.json" in x for x in errs) and any("vision_config" in x for x in errs)
+            # a pack with the tower passes the image check
+            _nh_pack(d, dict(cfg, vision_config={"model_type": "radio"}),
+                     keys=("vision_model.radio_model.model.blocks.0.attn.qkv.weight", "mlp1.0.weight"))
+            open(os.path.join(d, "preprocessor_config.json"), "w").write("{}")
+            assert community.check_pack(m, ci, d) == []
+            for bad, want in ((dict(cfg, model_type="qwen3_5"), "config.json: model_type 'qwen3_5', not nemotron_h"),
+                              (dict(cfg, layers_block_type=cfg["layers_block_type"][:80],
+                                    hybrid_override_pattern=cfg["hybrid_override_pattern"][:80]),
+                               "config.json: 88 layers expected, 80 found"),
+                              (dict(cfg, quantization_config={"quant_method": "fp8"}),
+                               "config.json: quantization_config.quant_method 'fp8', not exl3")):
+                _nh_pack(d, bad)
+                assert want in community.check_pack(m, c, d), (want, community.check_pack(m, c, d))
+            _nh_pack(d, keys=("backbone.norm_f.weight",), shards=3)
+            os.remove(os.path.join(d, "model-00003-of-00003.safetensors"))
+            errs = community.check_pack(m, c, d)
+            assert errs == ["model-00003-of-00003.safetensors: the index names it, the folder does not have it"], errs
+            # the CLI: the folder given, ok and exit 0 on a good pack
+            _nh_pack(d)
+            r = subprocess.run([sys.executable, "-m", "server.setup.community", "check-pack", NH_PID, "--dir", d],
+                               cwd=ROOT, capture_output=True, text=True,
+                               env=dict(os.environ, QSE_COMMUNITY_URL="off"))
+            assert r.returncode == 0 and r.stdout.startswith("ok"), r.stdout + r.stderr
+        # a 27B pack has no file check of this kind
+        assert community.check_pack(_models()["qwen3.8-27b"], _models()["qwen3.8-27b"]["community"][0], "/nope") == []
 
 
 def test_the_api():

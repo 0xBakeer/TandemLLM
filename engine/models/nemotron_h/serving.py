@@ -59,7 +59,11 @@ MODEL_IDS = {"nemotron-bolt-": "nemotron-3.5-bolt-74b-a9b", "nemotron-lightning-
 
 
 def model_id(path: str) -> str:
+    """The model of the served profile: by its name, or for a community pack (community/<id>, ENG-377) the base its
+    profile names (QSE_NH_MODEL)."""
     p = profile_of(path)
+    if p.startswith("community/") and os.environ.get("QSE_NH_MODEL"):
+        return os.environ["QSE_NH_MODEL"]
     return next((m for k, m in MODEL_IDS.items() if p.startswith(k)), "nemotron-3.5-lightning-30b-a3b")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
