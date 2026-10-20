@@ -2820,7 +2820,7 @@ GLUE_TEXTS = ("\n", "\n\n", "\n\n\n", "\n\n\n\n", " ", "  ", " \n", "\t")
 REREAD_SAY_TOKENS = int(_S.get("REREAD_SAY_TOKENS") or 8192)
 
 
-def _say_reread(cid: str, res, copy: list[int], plan) -> None:
+def _say_reread(cid: str, res, copy: list[int], plan, why_mm: str | None = None) -> None:
     """One log line and a journal field for a long prompt the end anchor did not serve: where
     the client's copy parts from the rows (token position and message number, never text) and
     what the alignment refused. The prefill then resumes at the last grid line below it."""
@@ -2829,8 +2829,11 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
             return
         e = int(res.end["at"])
         c = _shared_head(copy, res.tokens[:e])
-        if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048):
-            return          # another conversation's rows: nothing of this copy was ever kept
+        if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048) and (
+                why_mm is None or c < 2048):
+            # another conversation's rows: nothing of this copy was ever kept (a request with
+            # images that the end replay did not serve says so from 2,048 shared tokens on)
+            return
         al = STATE.get("end_align")
         ref = dict(al.last_refusal) if al is not None and al.last_refusal else {}
         marks = _conv_marks()
@@ -2843,6 +2846,7 @@ def _say_reread(cid: str, res, copy: list[int], plan) -> None:
         print(f"[cache] {cid} re-read ahead: the copy ({len(copy)} tokens) parts from the end "
               f"anchor's rows at token {c} of {e}"
               + (f" (message {k} of {m})" if k is not None else "")
+              + (f"; with images not served: {why_mm}" if why_mm else "")
               + f"; alignment refused: {why}"
               + (f" at {ref['at']}" if ref.get("at") is not None else "")
               + "; the prefill resumes at the last line below it", flush=True)
@@ -5264,19 +5268,26 @@ def _mm_end_replay(res, text: torch.Tensor, prompt: torch.Tensor, mm, images: li
     they were when nothing applies."""
     keys = list(mm.key_ids)
     out, spans, aligned = _end_replay(res, keys)
+    # SRV-657: why the replay did not serve, for `_say_reread`'s line (live 2026-10-21 00:05:59:
+    # 43,856 tokens re-read after a guest, and the log said nothing of where or why)
+    STATE["mm_end_why"] = "nothing to replay or align"
     if not spans and not aligned:
         return prompt, mm, [], 0, 0
     if out[:len(keys)] == keys and len(out) == len(keys):
         return prompt, mm, [], 0, 0
+    STATE["mm_end_why"] = "the images differ from the rows' (ones or order)"
     if _mm_runs(out) != _mm_runs(keys):
         return prompt, mm, [], 0, 0         # the images are not the same ones, in the same order
+    STATE["mm_end_why"] = "the replayed ids do not collapse to text"
     new_text = _mm_collapse(out, mm)
     if new_text is None:
         return prompt, mm, [], 0, 0
     t = torch.tensor(new_text, dtype=text.dtype, device=text.device)
     prompt2, mm2 = _mm_prompt(t, images, rec)
+    STATE["mm_end_why"] = "the rebuilt prompt's rows are not the replay's"
     if list(mm2.key_ids) != out:
         return prompt, mm, [], 0, 0         # never serve rows the replay did not ask for
+    STATE["mm_end_why"] = None
     mm.release()
     return prompt2, mm2, list(spans), int(aligned), len(out) - len(keys)
 
@@ -8129,7 +8140,8 @@ class Handler(BaseHTTPRequestHandler):
                                     plan.row["extra"]["end_aligned"] = mm_aligned
                                 plan.row["extra"]["end_mm"] = True
                         elif keys_n >= REREAD_SAY_TOKENS:
-                            _say_reread(cid, res_, list(mm.key_ids), plan)
+                            _say_reread(cid, res_, list(mm.key_ids), plan,
+                                        why_mm=STATE.pop("mm_end_why", None))
                     except Exception:                              # noqa: BLE001
                         logbuf.print_exc()      # served as rendered, as before SRV-546
             mm_end = mm

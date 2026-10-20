@@ -525,6 +525,31 @@ def test_a_long_re_read_says_why():
     return w
 
 
+def test_a_long_prompt_with_images_the_end_replay_did_not_serve_says_why():
+    """SRV-657 (live 2026-10-21 00:05:59, Ornith, chunk 4,096): a request with images re-read
+    43,856 tokens from 4,096, its copy parted from the rows at 7,175, and the log said nothing:
+    `_say_reread` stayed silent under two chunks (8,192), its guard against another
+    conversation's head. A request the end replay did not serve says so from 2,048 on, with the
+    replay's reason; a text request keeps the two-chunk guard."""
+    import io
+    from contextlib import redirect_stdout
+
+    class Res:
+        chunk, end = 4096, {"at": 20_000}
+        tokens = list(range(20_000))
+    copy = list(range(7_175)) + [-1] * 13_000
+    out = io.StringIO()
+    with redirect_stdout(out):
+        app._say_reread("chatcmpl-x", Res(), copy, None, why_mm="the images differ from the "
+                        "rows' (ones or order)")
+        app._say_reread("chatcmpl-y", Res(), copy, None)
+    log = out.getvalue()
+    assert "chatcmpl-x re-read ahead: the copy (20175 tokens) parts from the end anchor's rows " \
+           "at token 7175 of 20000" in log and "with images not served: the images differ" in log, log
+    assert "chatcmpl-y" not in log, log
+    return "with images: said from 2,048 shared tokens with the reason; text: the 8,192 guard"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in list(globals().items()):
