@@ -41,9 +41,16 @@
 0.11.4 & 10-18 & Agents mode in the Chat tab: a main agent with workers, the Task card, workers in the Context panel; a worker's and its parent's cache rows kept; file texts out of a chat's requests; a memory refusal compacts; cloud runs take no run slot \\
 0.12.0 & 10-19 & the \code{tools} profile for API clients that offer tools; structured outputs with tools; C5, one mutation per turn; the secret echo mask; the raw path's thinking in \code{reasoning_content} for plain API clients; tool-eval-bench results \\
 0.12.1 & 10-20 & the first community pack on Super VL, styles01's EXL3 3.5 bpw, text only; a request with images on a side slot; redirects kept in the port preview; eleven outside pull requests; \code{SECURITY.md} and a threat model \\
+0.12.2 & 10-20 & a Chat-tab run's tool results fit the room left and \code{read_file} reads by whole lines; the port preview streams; LFM2.5 adopts its 0.9.x to 0.11.1 conversations again \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.12.2, large reads and a streaming preview}\label{sec:changelog-0122}
+
+0.12.2 fixes two Chat-tab bugs that users reported, issues \#18 and \#86, and the adoption of LFM2.5's older saved conversations. A run that reads a large file now ends with an answer instead of a request over the window: one step's tool results share the room the model has left, \code{read_file} stops at whole lines and names the offset to read on from, and near the window chatd counts the request on our engine before it sends it (Chapter~\ref{ch:chat}). The port preview passes an app's Server-Sent Events and long-polls on as they arrive, and a browser that leaves ends the relay in the sandbox.
+
+No model, card or profile changed, and every profile writes the same text as in 0.12.1. \code{read_file}'s schema changes, so each chat's first request after the update reads its prompt again. LFM2.5 adopts the saved conversations of 0.9.x to 0.11.1 again; a box that ran 0.11.2 to 0.12.1 already lost them.
 
 \section{0.12.1, a community pack on Super VL}\label{sec:changelog-0121}
 
