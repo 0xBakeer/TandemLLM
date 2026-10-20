@@ -52,6 +52,45 @@ def test_a_one_way_flow_keeps_the_tunnel_past_the_idle_clock():
     assert done.wait(2.5), "the splice did not end when both directions went quiet"
 
 
+def test_a_download_survives_a_client_that_pauses_reading_past_the_poll():
+    # main's repro, small: 32 MiB from upstream against a client that reads one
+    # 64 K read and then goes quiet for longer than the old 1 s poll timeout.
+    # The 1 s SOCKET TIMEOUT covered the other pump's sendall too, so the
+    # blocked write raised and the tunnel closed after one CHUNK — 65,536
+    # delivered, then EOF. The select poll leaves the sockets blocking: the
+    # blocked sendall waits out the pause (backpressure), all 8 MiB arrive.
+    cl_a, cl_b = socket.socketpair()                 # client side of the splice
+    sv_a, sv_b = socket.socketpair()                 # upstream side
+    done = threading.Event()
+    threading.Thread(target=lambda: (_splice(cl_a, sv_a, idle=8.0), done.set()),
+                      daemon=True).start()
+
+    total = 8 * 1024 * 1024
+
+    def upstream():                                  # fill the tunnel + socket buffers
+        left = total
+        try:
+            while left:                              # send() blocks while the
+                n = sv_b.send(b"x" * min(64 * 1024, left))   # pumps fall behind
+                left -= n
+        except OSError:
+            pass
+    threading.Thread(target=upstream, daemon=True).start()
+
+    cl_b.settimeout(10.0)
+    first = cl_b.recv(64 * 1024)                     # one read, then the long pause
+    time.sleep(2.5)                                  # > the 1 s poll timeout
+    got = len(first)
+    while got < total:
+        d = cl_b.recv(64 * 1024)
+        assert d, f"the tunnel died early: {got} of {total} bytes"
+        got += len(d)
+    assert got == total
+    cl_b.close()                                     # both far ends gone: the pumps
+    sv_b.close()                                     # see EOF and the splice ends
+    assert done.wait(5.0), "the splice survived the end of the download forever"
+
+
 def test_each_direction_reaches_its_far_end():
     # four socket ends: client <-> a |splice| b <-> server, a|b spliced together
     cl_a, cl_b = socket.socketpair()                 # cl_b is the client's end

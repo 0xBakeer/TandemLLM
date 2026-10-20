@@ -29,6 +29,7 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import os
+import select
 import socket
 import ssl
 import threading
@@ -259,13 +260,17 @@ def _splice(a: socket.socket, b: socket.socket,
     def pump(src, dst):
         try:
             while True:
-                src.settimeout(min(1.0, idle))   # poll: the other pump may be the live side
-                try:
-                    d = src.recv(CHUNK)
-                except TimeoutError:
+                # The poll is a select, not a socket timeout: a 1 s timeout set for this
+                # pump's recv covered the same socket's sendall in the other pump, so a
+                # client that pauses reading for longer than it lost a live download.
+                # The sockets stay blocking — a blocked sendall waits the pause out as
+                # backpressure — and select answers the poll.
+                r, _, _ = select.select([src], [], [], min(1.0, idle))
+                if not r:
                     if time.monotonic() - last[0] > idle:
                         break
                     continue
+                d = src.recv(CHUNK)
                 if not d:
                     break
                 last[0] = time.monotonic()
