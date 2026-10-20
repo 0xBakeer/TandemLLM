@@ -12,8 +12,9 @@ tool or the text itself, and stays out on `tool`.
   2  TC-03: write-message stays out, everyday-core with its tools sentence stays in, journaled
   3  the user asks for the text itself: write-message goes in
   4  no tools, or tool_choice none: no question, write-message goes in
-  5  no answer: a send tool keeps it out (how: schema); a forced function keeps it out unasked
-  6  a tool the schema cannot read (post_update for social-post): the answer decides
+  5  no answer: a send tool keeps it out (how: schema); no tool that sends (Open WebUI's search
+     tools): no question, it goes in; a forced function keeps it out unasked
+  6  a post tool (post_update for social-post) is read as a send; the answer decides
   7  the tool turns of the same user message keep the decision, no question again
   8  a pinned package wins
   9  shadow journals only; off asks nothing and builds the block of 0.12.2
@@ -195,10 +196,18 @@ def test_5_no_answer_and_a_send_tool_keep_it_out():
     plan, _ = _turn(cond, TC03, [CONTACTS, SEND], "dl-noanswer")
     assert "write-message" not in _parts(plan)
     assert plan.row["extra"]["package_choice"]["kept_out"][0]["how"] == "schema"
-    # no answer and no tool that sends: the package goes in, as in 0.12.2
-    cond, fakes = _setup(answer="decider_down")
-    plan, _ = _turn(cond, TC03, [CONTACTS], "dl-noanswer-nosend")
-    assert "write-message" in _parts(plan)
+
+
+def test_5a_no_tool_that_sends_asks_nothing():
+    """Open WebUI's own tools, or get_contacts alone: no offered tool makes a send, so the
+    package goes in as in 0.12.2 and no side question is paid for."""
+    search = [_fn("search_web", "Search the web.", ["query"]),
+              _fn("fetch_url", "Fetch a page.", ["url"])]
+    for tools, sid in ((search, "dl-owui"), ([CONTACTS], "dl-contacts")):
+        cond, fakes = _setup()
+        plan, _ = _turn(cond, TC03, tools, sid)
+        assert "write-message" in _parts(plan) and _asked(fakes) == 0, sid
+        assert "kept_out" not in plan.row["extra"]["package_choice"]
 
 
 def test_5b_a_forced_function_keeps_it_out_unasked():
@@ -211,12 +220,17 @@ def test_5b_a_forced_function_keeps_it_out_unasked():
 
 # ------------------------------------------------------------------ 6 a tool the schema misses
 
-def test_6_a_tool_the_schema_cannot_read():
+def test_6_a_post_tool_is_read_as_a_send():
+    """post_update(text) has no recipient: the declaration's verb reads it as a send (C5's
+    reading), which makes the `post` deliverable; the answer decides."""
     cond, fakes = _setup(package="social-post")
     plan, _ = _turn(cond, "post that we are closed on Friday", [POST], "dl-post")
     assert "social-post" not in _parts(plan), _parts(plan)
     k = plan.row["extra"]["package_choice"]["kept_out"][0]
-    assert k["deliverable"] == "post" and k["tools"] == [] and k["how"] == "decider"
+    assert k["deliverable"] == "post" and k["tools"] == ["post_update"] and k["how"] == "decider"
+    cond, fakes = _setup(package="social-post", answer=("text", 0.9))
+    plan, _ = _turn(cond, "write a post that we are closed on Friday", [POST], "dl-post-text")
+    assert "social-post" in _parts(plan) and _asked(fakes) == 1
 
 
 # ------------------------------------------------------------------ 7 the tool turns

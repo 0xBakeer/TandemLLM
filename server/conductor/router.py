@@ -1724,17 +1724,20 @@ class Router:
         want = packages_mod.Library.deliverable(packages, name)
         if want is None:
             return None
+        # a post is sent to a feed: the declarations read `post`, `publish` and `share` as `send`
+        kinds = {"post": ("send",)}.get(want, (want,))
         effects = signals.tool_effects(body)
-        return want, sorted(n for n, e in effects.items() if want in e)
+        return want, sorted(n for n, e in effects.items() if set(kinds) & set(e))
 
     def _kept_out(self, plan, body, router, roles, packages, sh, sess, cls, name, row) -> bool:
         """SRV-615: True when the package `name`, about to go in, stays out because an offered
         tool delivers its result (a write-message draft where send_email is offered: TC-03 of
         tool-eval-bench, 2026-10-18, the model wrote a message to copy and called no tool).
         Only a package with a `deliverable` on a request that offers client tools is asked
-        about: a client that forces a function decided already; otherwise one cascade question,
-        the tool or the text itself, decides; with no answer a tool whose declaration makes the
-        deliverable keeps it out (`how: schema`) and without one the package goes in. A
+        about: a client that forces a function decided already; otherwise, when an offered tool's
+        declaration makes the deliverable, one cascade question, the tool or the text itself,
+        decides (with no answer the package stays out, `how: schema`); without such a tool the
+        package goes in and nothing is asked (Open WebUI's search tools cost no question). A
         follow-up of the same user message (the tool turns) keeps the first decision. The
         router's `tool_fit.deliverable`: `on` acts, `shadow` journals, `off` asks nothing."""
         fit = schema.tool_fit(router)
@@ -1776,10 +1779,12 @@ class Router:
         if choice == "required" or isinstance(choice, dict):
             # the client forces a function: it decided already
             return {"out": True, "how": "tool_choice", "tools": tools or names[:8], "p": None}
+        if not tools:
+            # no offered tool makes the deliverable: nothing to ask, the package goes in
+            return {"out": False, "how": "skipped", "tools": [], "p": None}
         text = sh.user_text or ""
         if not text.strip():
-            return {"out": bool(tools), "how": "schema" if tools else "skipped", "tools": tools,
-                    "p": None}
+            return {"out": True, "how": "schema", "tools": tools, "p": None}
         fit = schema.tool_fit(router)
         listing = "; ".join(_tool_line(t) for t in (body.get("tools") or ())[:12]
                             if isinstance(t, dict)) or "none"
@@ -1793,9 +1798,8 @@ class Router:
         if ans is not None:
             return {"out": ans.label == "tool", "how": ans.stage, "tools": tools,
                     "p": round(float(ans.confidence), 4)}
-        # no answer at the bar: a tool whose declaration makes the deliverable decides
-        return {"out": bool(tools), "how": "schema" if tools else "no_answer", "tools": tools,
-                "p": None}
+        # no answer at the bar: the tool whose declaration makes the deliverable decides
+        return {"out": True, "how": "schema", "tools": tools, "p": None}
 
     def fits(self, plan, packages: dict, name: str) -> bool:
         """SRV-243: the request's tools can carry out the package's steps (always with the
