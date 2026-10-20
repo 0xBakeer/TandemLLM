@@ -265,7 +265,7 @@ if HAVE_TRITON:
         cm = cols < N
         t = tl.arange(0, 32)
         e4 = tl.arange(0, 4)
-        j8 = tl.arange(0, 8)
+        e2 = tl.arange(0, 2)
         acc = tl.zeros([16, BN], dtype=tl.float32)
         for kb in range(pz * NBPC, tl.minimum((pz + 1) * NBPC, NB)):
             b = cols * NB + kb
@@ -274,12 +274,14 @@ if HAVE_TRITON:
                 q0 = tl.load(QW + b * 16 + 2 * g, mask=cm, other=0)                    # [BN]
                 q1 = tl.load(QW + b * 16 + 2 * g + 1, mask=cm, other=0)
                 idx = (q0[:, None] >> (8 * e4[None, :])) & 0xFF                        # [BN,4]
-                ge = tl.load(GR + idx)                                               # i64
-                mag = ((ge[:, :, None] >> (8 * j8[None, None, :])) & 0xFF).to(tl.int32)
+                ge = tl.load(GR + idx[:, :, None] * 2 + e2[None, None, :])             # [BN,4,2] i32 halves
                 si = (q1[:, None] >> (7 * e4[None, :])) & 0x7F                         # [BN,4]
                 ks = si | ((ld.popc(si) & 1) << 7)
-                neg = ((ks[:, :, None] >> j8[None, None, :]) & 1) == 1                 # [BN,4,8]
-                c = tl.where(neg, -mag, mag) + 64
+                sn = (ks[:, :, None] >> (4 * e2)[None, None, :]) & 0xF                 # [BN,4,2] 4 sign bits
+                tm = (sn * 0x01010101) & 0x08040201                                  # bit i -> byte i
+                msk = (((tm + 0x7F7F7F7F) | tm) >> 7 & 0x01010101) * 0xFF            # byte mask per half
+                gs = (ge ^ msk) + (msk & 0x01010101)                                 # signed grid bytes
+                c = (((gs[:, :, :, None] >> (8 * e4)[None, None, None, :]) & 0xFF) ^ 0x80) - 64
                 w = tl.reshape(((c | 0x4300).to(tl.int16)).to(tl.bfloat16, bitcast=True), (BN, 32))
                 dl = d * (0.5 + ((q1 >> 28) & 0xF).to(tl.float32)) * 0.25
                 x = tl.load(X + rows[:, None] * s_x + kb * 256 + g * 32 + t[None, :],
@@ -405,6 +407,7 @@ class IQ2Linear:
         self.qs = torch.from_numpy(qs).to(device)
         self.nbytes = N * (K // QK) * BLOCK_BYTES
         self._g8 = torch.from_numpy(GRID8).to(device)
+        self._g832 = self._g8.view(torch.int32)
         self._ks = torch.from_numpy(KSIGNS.astype(np.int32)).to(device)
 
     def dequant(self) -> torch.Tensor:
@@ -429,7 +432,7 @@ class IQ2Linear:
             RP = triton.cdiv(M, 16) * 16
             part = torch.empty(8, RP, self.N, dtype=torch.float32, device=x2.device)
             _iq2xxs_gemm2[(triton.cdiv(M, 16), triton.cdiv(self.N, 16), 8)](
-                x2, x2.stride(0), self.d, self.qs, self._g8, part, M, self.N,
+                x2, x2.stride(0), self.d, self.qs, self._g832, part, M, self.N,
                 nb, RP, BN=16, P=8, NBPC=triton.cdiv(nb, 8), num_warps=1, num_stages=1)
             _iq2xxs_red[(triton.cdiv(M, 16), triton.cdiv(self.N, 128))](
                 part, out, out.stride(0), M, self.N, RP, P=8, BC=128, F32=f32,

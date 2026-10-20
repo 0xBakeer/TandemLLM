@@ -442,3 +442,77 @@ device layout (FLUTE-style restructuring), the clear next lever for the 32-block
 Measurement lesson for this card: an idle 4080 drops its memory clock to 405 MHz (11.2 GHz loaded).
 Without a sustained warm-up the first cell after a pause reads 5-20x slow, and that confounded both
 the baseline and early A/Bs. Heat the GPU before every timed cell.
+
+### Update — plane-major repack for the 32-block nibble formats (1.8-2.2x)
+The ablation pointed at the load stream for Q4_0/Q4_1/Q5_0/Q5_1, not the decode. Their kernels issued
+byte-granular `[BN, 32]` gathers that loaded every byte twice, about one load instruction per weight.
+At init each row's blocks are now regrouped 8 at a time into 32 int32 words: word j holds element j's
+4-bit codes of blocks 8g..8g+7 at bits 4i ("P8 plane-major"). One loop step reads a contiguous
+128-byte line a row, unpacks `[BN, 8, 32]` with shifts (the reshape to `[BN, 256]` is already the
+contiguous K order, so x stays one `[16, 256]` load), folds the block scale in bf16 and does one K=256
+`tl.dot`. Padded tail blocks have zero scale/min and x is zero-padded past K. The repacked tensor
+replaces the original, so there is no standing VRAM cost; the CPU twin still reads `_raw`.
+
+Warm interleaved A/B against the previous commit, 5 shapes (incl. 5120x17408 / 17408x5120) x M=1/9/33:
+
+| format | geomean M=1 | worst cell | % of 620 GB/s at M=1 (was) |
+|---|---|---|---|
+| Q4_0 | 2.21x | 1.24x | 51-71% (21-50%) |
+| Q4_1 | 1.89x | 1.03x | 47-63% (22-50%) |
+| Q5_0 | 1.98x | 1.12x | 49-68% (23-47%) |
+| Q5_1 | 1.79x | 1.00x | 43-61% (22-50%) |
+
+The same repack lost on Q4_K/Q5_K (0.84x: they already read 32-byte runs, and the plane decode adds
+register pressure) and on IQ4_NL/IQ4_XS (~0.5x: a per-element global LUT gather on the wider tile).
+Precedent: FLUTE's offline restructuring of the quantized weight matrix (Guo et al., arXiv 2407.10960).
+
+### Update — register LUTs and SWAR sign decode for the IQ family
+- **IQ4_NL / IQ4_XS (2.0x / 2.15x geomean at M=1).** P8 plane-major layout, plus the 16-entry codebook
+  held as four int32 words of int8 values and selected in registers (sign-extended `(v ^ 0x80) - 0x80`).
+  This replaces the per-element global gather that made P8 lose in stage 4. Idea from llama.cpp's
+  `get_int_from_table_16` (byte-permute table lookup for IQ4_NL in MMVQ/MMQ).
+- **IQ2_XS / IQ2_S / IQ3_XXS (1.48x / 1.62x / 1.33x), IQ2_XXS on Ada (1.08x, bitwise identical to the
+  previous Ada kernel).** SWAR sign application on the packed grid entry before unpacking. The sign
+  bits become a byte mask with `t = (s * 0x01010101) & 0x08040201;
+  M = (((t + 0x7F7F7F7F) | t) >> 7 & 0x01010101) * 0xFF`, then `(g ^ M) + (M & 0x01010101)` negates
+  the marked bytes. That is valid because these grids' magnitudes are never 0, so no borrow crosses a
+  byte. The parity sign bit is computed per entry, not per element. Precedent: llama.cpp discussion
+  #5152 (Peter Reid's `__vcmpne4`/`__vsub4` sign vectorization for IQ2_XS) and PR #19624 (popcount
+  signs, whole-entry loads).
+- **IQ1_S / IQ1_M (1.32x / 1.47x).** Their grids contain 0, so SWAR doesn't apply. Gains came from the
+  magic-number decode and wider loads.
+- **IQ3_S rejected (0.89x geomean, 0.72x worst).** Joining its 4-bit sign fields cost more than it saved.
+  Its kernel is unchanged.
+
+All measured with the warm interleaved A/B over 5 shapes x M=1/9/33; every kept format's worst cell is
+>= 1.00x.
+
+### Cumulative — original code vs now (warm interleaved A/B, 5 shapes, M = 1 and 9)
+Shapes 4096x4096, 14336x4096, 4096x14336, 5120x17408, 17408x5120. IQ2 = IQ2Linear (IQ2_XXS, Ada
+path); its M=9 figure includes the split-K rewrite. Cells at 0.97-0.99x are unchanged kernels
+within run-to-run noise.
+
+| format | speedup M=1 (geomean, range) | M=9 geomean | % of 620 GB/s at M=1: before -> after |
+|---|---|---|---|
+| Q40 | 2.29x (1.50-2.77) | 2.35x | 21-49% -> 50-74% |
+| Q41 | 2.07x (1.74-2.41) | 2.11x | 21-37% -> 47-63% |
+| Q50 | 2.05x (1.75-2.40) | 2.16x | 22-39% -> 47-68% |
+| Q51 | 2.01x (1.48-2.59) | 2.12x | 19-41% -> 43-61% |
+| Q2K | 1.09x (0.99-1.31) | 1.09x | 20-29% -> 20-38% |
+| Q3K | 1.05x (1.01-1.17) | 1.05x | 29-50% -> 29-58% |
+| Q4K | 1.01x (0.99-1.03) | 1.02x | 48-67% -> 48-68% |
+| Q5K | 0.99x (0.99-1.00) | 1.00x | 39-76% -> 38-76% |
+| Q6K | 1.14x (0.97-1.52) | 1.15x | 33-57% -> 38-61% |
+| IQ2XS | 1.49x (1.39-1.62) | 1.48x | 12-15% -> 17-24% |
+| IQ3XXS | 1.37x (1.32-1.43) | 1.42x | 12-18% -> 16-24% |
+| IQ1S | 1.33x (1.14-1.50) | 1.33x | 8-10% -> 9-14% |
+| IQ4NL | 2.22x (1.47-2.72) | 2.27x | 17-42% -> 43-62% |
+| IQ3S | 1.03x (1.00-1.19) | 1.01x | 15-21% -> 15-21% |
+| IQ2S | 1.61x (1.37-2.00) | 1.26x | 9-15% -> 17-25% |
+| IQ4XS | 2.17x (1.44-2.56) | 2.20x | 17-40% -> 41-58% |
+| IQ1M | 1.49x (1.27-1.73) | 1.47x | 8-12% -> 13-19% |
+| Q8 | 0.99x (0.98-1.01) | 1.00x | 79-89% -> 78-88% |
+| IQ2 | 1.26x (0.98-1.54) | 5.00x | 14-15% -> 14-23% |
+
+Plus the two fixes that aren't kernel speed: prefill 109 ms -> ~0.35-0.45 ms per 4096x4096
+chunk, and a 33-row verify block now takes the decode kernel (bitwise row invariance).
