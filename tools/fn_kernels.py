@@ -16,7 +16,7 @@ reduction runs across rows, no tile shape depends on M. The `_rows` twins of the
                 projection d from `gemv`), the up projection of a, and the stream mean
                 x[j] = bf16(sum_s bf16(bf16(sigmoid(bf16(up_s . a))) * n[s H + j]) / hc) -- one warp
                 a column j, its four lane groups the four streams.
-  router        softmax over the bf16-rounded logits of E experts in fp32, the top k with the lower
+  router        softmax over the bf16-rounded logits of E <= 512 experts in fp32, the top k with the lower
                 index first on ties, weights renormalised in slot order and rounded to bf16 (as the
                 reference's `.to(logits.dtype)`), and one more slot for the shared expert: id E,
                 weight bf16(sigmoid(bf16(logit E))).
@@ -1634,9 +1634,13 @@ void fn_router(torch::Tensor logits, int64_t E, int64_t k, torch::Tensor ids, to
     TORCH_CHECK(logits.dtype() == torch::kFloat && logits.stride(1) == 1 && logits.size(1) >= E + 1, "logits fp32 [M, E + 1]");
     TORCH_CHECK(ids.dtype() == torch::kInt && wts.dtype() == torch::kFloat && ids.is_contiguous() && wts.is_contiguous(), "ids int32, wts fp32");
     TORCH_CHECK(ids.numel() == M * (k + 1) && wts.numel() == M * (k + 1) && k < 32, "slots");
-    TORCH_CHECK(E == 512, "router kernel is built for 512 experts");
-    launch(router_kernel<16>, dim3(M), dim3(32), 0, st, (const float*)logits.data_ptr(), (int)logits.stride(0), (int)E,
-        (int)k, (int*)ids.data_ptr(), (float*)wts.data_ptr());
+    TORCH_CHECK(E <= 512, "router kernel is built for up to 512 experts");
+    if (E <= 256)
+        launch(router_kernel<8>, dim3(M), dim3(32), 0, st, (const float*)logits.data_ptr(), (int)logits.stride(0), (int)E,
+            (int)k, (int*)ids.data_ptr(), (float*)wts.data_ptr());
+    else
+        launch(router_kernel<16>, dim3(M), dim3(32), 0, st, (const float*)logits.data_ptr(), (int)logits.stride(0), (int)E,
+            (int)k, (int*)ids.data_ptr(), (float*)wts.data_ptr());
 }
 
 static MoEArgs moe_args(const torch::Tensor& tr, const torch::Tensor& kb, const torch::Tensor& su,

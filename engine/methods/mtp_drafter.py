@@ -107,6 +107,12 @@ class MTPTreeDrafter:
         self._turn = None                   # this request drafts (True), takes plain steps (False), or undecided
         self.answer = 256.0                 # the usual answer length, tokens (EMA 0.2 of the requests')
         self._prime_ms = 0.0                # the last feed's backlog prime, ms
+        # opt-in (a block drafter whose draft costs a large share of a step): after a round the cut cut
+        # to the anchor alone, the next rounds take the plain step without a draft, 1, 2, 4 .. up to
+        # `anchor_backoff` of them as such rounds repeat; a round that keeps rows starts over. 0: off
+        self.anchor_backoff = 0
+        self._anchor_streak = 0
+        self._backoff_left = 0
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
@@ -167,6 +173,7 @@ class MTPTreeDrafter:
             self.answer = 0.8 * self.answer + 0.2 * max(32, self.req["tokens"])
         self.req = self._req()
         self._turn = None
+        self._anchor_streak = self._backoff_left = 0
 
     def prime(self, tokens: list[int]) -> None:
         # the prompt's rows come through `sync`; the lookup indexes its tokens
@@ -259,7 +266,11 @@ class MTPTreeDrafter:
         # calibrated q: the class-wide skip, learned for a head that drafts every round, priced the
         # lookup by the rounds that matched little (LFM2.5, 2026-10-14: three chat asks, then edit and
         # copy asks the lookup matched throughout took the plain step)
-        if self.head.depth and self.cut.skip(self.cls):
+        backoff = False
+        if self._backoff_left > 0:
+            self._backoff_left -= 1
+            backoff = True
+        if self.head.depth and (backoff or self.cut.skip(self.cls)):
             # no draft this round: the rows wait in the queue for the next one that drafts
             if self.held is not None:
                 ht, hs = self.held
@@ -292,6 +303,12 @@ class MTPTreeDrafter:
         tok, prob = self.head.read()
         toks, parents = self.cut.cut(int(context[-1]), tok, prob, look, self.cls)
         tree = DraftTree(tokens=toks, parents=parents).truncate(int(k) + 1)
+        if self.anchor_backoff:
+            if len(toks) <= 1:
+                self._anchor_streak += 1
+                self._backoff_left = min(1 << (self._anchor_streak - 1), self.anchor_backoff)
+            else:
+                self._anchor_streak = 0
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
         # less the backlog's prime (rows a skipped round left: owed whether this round drafts or not);
