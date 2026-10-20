@@ -221,6 +221,43 @@ def test_the_nemotron_tables_are_the_raw_data():
         assert registry.tile(m)["best_speed"] == {"tok_s": best[0], "task": best[1], "profile": rec}, mid
 
 
+
+def test_the_ornith_card_is_the_raw_data():
+    """OPS-215: Ornith-1.5-122B's card, profile and pin against measurements/0.13.0-summary.json and the raw runs."""
+    mid, pid = "ornith-1.5-122b", "ornith-1.5-122b-exl3-4.0"
+    m = registry.load(os.path.join(ROOT, "models", mid, "model.yaml"))
+    meas_dir = os.path.join(ROOT, "models", mid, "measurements")
+    with open(os.path.join(meas_dir, "0.13.0-summary.json")) as fh:
+        raw = json.load(fh)
+    with open(os.path.join(meas_dir, "0.12.2-drafters.json")) as fh:
+        runs = json.load(fh)
+    assert m["measurements"]["build"] == raw["build"] == "0.13.0"
+    assert m["measurements"]["source"] == f"models/{mid}/measurements/0.13.0-summary.json"
+    p = registry.profile(m, pid)
+    # the public repository at the card's commit; the weights are the measured commit's
+    assert p["hf_revision"] == raw["pack"]["revision"] and len(p["hf_revision"]) == 40 and not p["hf_private"]
+    assert p["disk_gb"] == raw["pack"]["disk_gb"]
+    env = open(os.path.join(ROOT, "ops", "profiles", f"{pid}.env")).read()
+    assert f"QSE_WEIGHTS_REVISION={p['hf_revision']}\n" in env and f"QSE_WEIGHTS_GB={p['disk_gb']}\n" in env
+    q = raw["quality_vs_bf16"]
+    assert p["quality"]["kl_vs_bf16"] == round(q["kl"], 4) and p["quality"]["top1_pct"] == q["top1_pct"]
+    assert p["quality"]["ppl"] == round(q["engine_ppl"], 3)
+    # exllamav3's forward on the same pack: not exact, and the summary says so
+    x = raw["vs_exllamav3_forward"]
+    assert x["exact_agreement"] is False and x["top1_agree"] < x["positions"]
+    (row,) = m["measurements"]["rows"]
+    assert row["profile"] == pid and row["build"] == "0.13.0" and row["comparable"]
+    for task, c in row["cells"]["greedy_512"].items():
+        r = raw["rows"]["profile"][task]
+        assert r == runs["rows"]["e"][task], task              # the summary copies the raw run
+        assert c == {"tok_s": r["tok_s"], "min": r["tok_s"], "ms_round": round(1000 * r["per_block"] / r["tok_s"], 2),
+                     "tok_round": r["per_block"], "n": 1}, (task, c)
+        assert raw["same_text_as_plain"][task], task
+        assert c["tok_s"] > raw["rows"]["plain"][task]["tok_s"], task
+    assert raw["rows"]["plain"]["long_code_2048"] == runs["long"]["plain"]
+    assert raw["rows"]["profile"]["long_code_2048"] == runs["long"]["e"]
+    assert raw["rows"]["dflash2"]["long_code_2048"] == runs["long"]["c"]
+
 def test_every_knob_is_registered():
     m = registry.load(SEED)
     assert registry.unregistered_keys(m) == [], registry.unregistered_keys(m)

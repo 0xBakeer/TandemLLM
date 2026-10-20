@@ -93,7 +93,7 @@ profiles:
   weights_gib: 59.95
   drafters_gib: 1.21
   hf_repo: 0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0
-  hf_private: true
+  hf_private: false
   made_by:
     kind: ours
     name: 0xBakeer
@@ -113,20 +113,21 @@ profiles:
     the MTP layer at 4, the vision tower at 6 (loaded beside it on the EXL3 kernels, 0.35 GB). Measured 2026-10-20: 59.95
     GiB at load, 61.16 with the MTP layer the profile drafts with (the lookup beside it, cut by StairCut from the pack''s
     price file); plain decode 37.2 to 38.4 tok/s. The DFlash2 drafter for Ornith is the other head (QSE_ORN_HEAD=dflash2,
-    2.86 GiB). The Hugging Face repository is private: a download needs a token with access.'
-  hf_revision: 9e73dddc081cc178408bdb79025d7fcbca1ffd6c
+    2.86 GiB).'
+  hf_revision: 92f7483cb2c7389757343e433b98d075c5ff611c
   max_window: 262144
 measurements:
-  build: 0.12.2
+  build: 0.13.0
   date: '2026-10-20'
   method: 'tools/q35m_ab.py through one fresh server a run on the Spark, the GPU to itself: the prose, chat, code, edit and
     copy asks, one greedy request each, thinking off, 512 new tokens, model TandemLLM (3,146 to 4,165 prompt tokens), one
-    slot, max_len 262,144, the pack''s price file; a 2,048-token game file through the raw model. One run a cell. Raw data:
-    models/ornith-1.5-122b/measurements/0.12.2-drafters.json (and 0.12.2-summary.json, the first runs without a price file).'
-  source: models/ornith-1.5-122b/measurements/0.12.2-drafters.json
+    slot, max_len 262,144, the pack''s price file; a 2,048-token game file through the raw model. One run a cell, on the
+    tree 0.13.0 ships (its /health read 0.12.2+<profile>). Summary: models/ornith-1.5-122b/measurements/0.13.0-summary.json;
+    raw data: 0.12.2-drafters.json (and 0.12.2-summary.json, the first runs without a price file).'
+  source: models/ornith-1.5-122b/measurements/0.13.0-summary.json
   rows:
   - profile: ornith-1.5-122b-exl3-4.0
-    build: 0.12.2
+    build: 0.13.0
     date: '2026-10-20'
     comparable: true
     note: The MTP layer + lookup, anchor backoff 8, the price file; edit and copy asks 115.87 and 124.75 tok/s, a 2,048-token
