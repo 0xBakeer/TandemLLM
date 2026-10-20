@@ -342,6 +342,8 @@ KNOBS: dict[str, tuple] = {
     # ENG-229: the lookup (the request's text, --corpus and the server's suffix store) in the MTP round's
     # cut, one tree with the head's chain; 0 = the head alone
     'FN_LOOKUP': ('0', 'engine/models/flashnext/serving.py'),
+    # ENG-391: the lookup in the Qwen3.5 MoE MTP round's cut (one tree with the MTP chain); 0 = the head alone
+    'Q35M_LOOKUP': ('1', 'engine/models/qwen3_5_moe/serving.py'),
 }
 
 
