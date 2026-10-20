@@ -71,6 +71,9 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              # SRV-619: the answer constraint's union and the call markers; a mask on the sampled
              # token, never a stored row
              ("engine/grammar.py", "ddcb9cf828c5e89c80a29c4ff25b20fac4a5d6230bfa4248a70893a94a97778b"):
+             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
+             # SRV-647: the masks keyed by a serial of the grammar, not its id(); no row changes
+             ("engine/grammar.py", "9c6617a799bd64b1fdbc3cfc23a2eba5b2ee471b64d1d21b4da7dc23adf59c65"):
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749"}
 
 
