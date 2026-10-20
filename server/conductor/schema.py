@@ -298,8 +298,10 @@ TOOL_FIT: dict = {
     # SRV-615: a package whose result an offered tool delivers (write-message where the chat
     # offers send_email) stays out when the user wants it done, not written: `on` acts, `shadow`
     # journals what would have stayed out, `off` asks nothing. The question goes to the class
-    # question's stages (the decider, then Qwen) with the user's message
-    "deliverable": "on",
+    # question's stages (the decider, then Qwen) with the user's message. Shipped in shadow: on
+    # the chat profile (2026-10-20, n = 1) TC-03 passed with it on, the score stayed 91 and
+    # TC-47 and TC-51 failed, cause not tested
+    "deliverable": "shadow",
     "deliverable_question": ("The chat offers these tools: {tools}. Does the user want the task "
                              "done with one of these tools, or do they want the text itself to "
                              "read, copy or send themselves?"),

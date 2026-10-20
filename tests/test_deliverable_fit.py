@@ -9,7 +9,7 @@ calling the tools. Under option 3 of the design a package with a `deliverable` (
 tool or the text itself, and stays out on `tool`.
 
   1  the deliverable field and the capabilities read off the declarations (signals.tool_effects)
-  2  TC-03: write-message stays out, everyday-core with its tools sentence stays in, journaled
+  2  TC-03: write-message stays out, everyday-core stays in, journaled
   3  the user asks for the text itself: write-message goes in
   4  no tools, or tool_choice none: no question, write-message goes in
   5  no answer: a send tool keeps it out (how: schema); no tool that sends (Open WebUI's search
@@ -85,7 +85,7 @@ PKGS = {
 }
 
 
-def _setup(mode=None, **kw):
+def _setup(mode="on", **kw):
     cond, fakes = T.setup(decider=_decider(**kw))
     _, p = cond.store.get("packages")
     for n, extra in PKGS.items():
@@ -99,6 +99,8 @@ def _setup(mode=None, **kw):
             c["policy"]["packages"] = list(PKGS)
     if mode is not None:
         r["tool_fit"] = dict(r.get("tool_fit") or {}, deliverable=mode)
+    else:
+        r.pop("tool_fit", None)
     cond.store.put("router", None, r, note="chat packages", author="t")
     return cond, fakes
 
@@ -120,7 +122,6 @@ def _asked(fakes) -> int:
 
 
 WRITE_MESSAGE_LINE = "so it can be copied and sent as it is"
-TOOLS_SENTENCE = "if the chat has tools, use them first"
 
 
 # ------------------------------------------------------------------ 1 the field and the reading
@@ -161,7 +162,7 @@ def test_2_tc03_a_send_tool_delivers_the_message():
     plan, text = _turn(cond, TC03, [CONTACTS, SEND], "dl-tc03")
     parts = _parts(plan)
     assert "write-message" not in parts and "everyday-core" in parts, parts
-    assert WRITE_MESSAGE_LINE not in text and TOOLS_SENTENCE in text.lower()
+    assert WRITE_MESSAGE_LINE not in text and "Everyday answers" in text
     choice = plan.row["extra"]["package_choice"]
     assert choice["chosen"] == "write-message", choice
     (k,) = choice["kept_out"]
@@ -250,7 +251,7 @@ def test_7_the_decision_holds_for_the_tool_turns():
     b["tools"] = [CONTACTS, SEND]
     plan2, ids, _ = T.turn(cond, b, headers={"x-session-id": sid}, kind="open-webui")
     assert WRITE_MESSAGE_LINE not in T.text_of(ids), "the tool turn brings it back"
-    assert TOOLS_SENTENCE in T.text_of(ids).lower(), "everyday-core is replayed"
+    assert "Everyday answers" in T.text_of(ids), "everyday-core is replayed"
     assert _asked(fakes) == 1, "no second question on the tool turn"
 
 
@@ -274,6 +275,14 @@ def test_9_shadow_journals_only():
     assert "write-message" in _parts(plan)
     (k,) = plan.row["shadow"]["tools"]["kept_out"]
     assert k["name"] == "write-message" and k["how"] == "decider"
+
+
+def test_9a_the_shipped_default_is_shadow():
+    assert schema.TOOL_FIT["deliverable"] == "shadow"
+    cond, fakes = _setup(None)
+    plan, _ = _turn(cond, TC03, [CONTACTS, SEND], "dl-default")
+    assert "write-message" in _parts(plan)
+    assert plan.row["shadow"]["tools"]["kept_out"][0]["name"] == "write-message"
 
 
 def test_9b_off_builds_the_block_of_0122():
