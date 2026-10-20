@@ -25,6 +25,13 @@ gave a tree that never shipped for Flash-Next and LFM2.5, so their 0.9.x files w
   * Flash-Next's and LFM2.5's legacy fingerprints hold their 0.9.x fp4 (`same_variants`);
   * a tree two releases on adopts the files the release before it wrote, and that one's.
 
+ENG-381: ENG-363 (0.11.2) changed engine/models/lfm2_moe/engine.py and kernels.py with no entry, so
+LFM2.5's legacy fingerprints reached neither 0.9.x's fp4 nor 0.10.0-0.11.1's. The rows are the same
+(tools/lfm_attn_rows_check.py), and the entries are in:
+
+  * LFM2.5's legacy fingerprints hold 0.10.0-0.11.1's fp4 too;
+  * an edit to an LFM2.5 module with no entry reaches neither.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -60,6 +67,8 @@ M27 = adapter.manifest()
 #: SAME_ROWS (0.7.2's), and fp4 by model on the bytes
 V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
+#: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
+FP4_LFM25_011 = "9049446866c5e4fc"
 
 
 def _sha(path):
@@ -117,6 +126,19 @@ def test_flash_next_and_lfm25_adopt_their_0_9_files():
         assert any(f.startswith(FP4_09[name]) for f in got), (name, [f[:16] for f in got])
         out.append(f"{name} {len(got)} variants")
     return ", ".join(out)
+
+
+def test_lfm25_adopts_0_11_1s_files_and_an_edit_without_an_entry_breaks_it():
+    m = lfm_serving.manifest()
+    got = [mf.fingerprint(ROOT, m, {}, same=s)[:16] for s in mf.same_variants(ROOT, m)]
+    assert FP4_LFM25_011 in got and FP4_09["lfm25"] in got, ("lfm25", got)
+    with tempfile.TemporaryDirectory() as d:
+        t = _code(d)
+        _edit(os.path.join(t, "engine", "models", "lfm2_moe", "kernels.py"), "from __future__",
+              "# x\nfrom __future__")
+        edited = [mf.fingerprint(t, m, {}, same=s)[:16] for s in mf.same_variants(t, m)]
+    assert FP4_LFM25_011 not in edited and FP4_09["lfm25"] not in edited, ("lfm25", edited)
+    return f"0.9.x {FP4_09['lfm25']} and 0.11.1 {FP4_LFM25_011} among {len(got)} variants"
 
 
 def test_a_tree_two_releases_on_adopts_the_release_befores_files():

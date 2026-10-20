@@ -47,6 +47,11 @@ FORMULA = "fp4"
 #: SPD-125: tools/fn_kernels.py adds `dense_rows` (a verify block's EXL3 projections, opt-in) beside the
 #: kernels it had; their code is the same, and on the Spark `dense` at 1..32 rows at Bolt's, the 27B's and
 #: Flash-Next's shapes equalled 0.9.0-0.9.2's byte for byte (tools/fn_dense_rows_check.py same)
+#: ENG-381 (ENG-363, 0.11.2): engine/models/lfm2_moe/engine.py keeps at most 32 joint decode graphs (which
+#: graphs are kept, never what one computes) and kernels.py's `attn_rows` sizes its split partials for a
+#: class's largest row count and reads the first rows' share (the same kernel and grid); on the Spark
+#: `attn_rows` at 1..32 rows, two classes, lone and with shared buffers, equalled 0.11.1's bit for bit
+#: (tools/lfm_attn_rows_check.py)
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -57,6 +62,10 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93",
              ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
              "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
+             ("engine/models/lfm2_moe/engine.py", "76bfb598fee3b1d731a51bd4f4ceb4afc8bb30ee8388ed4ca9551de82d7d388b"):
+             "2360b32729713510020bd47ed86e6c185a40f54b22c622fc33c4fa7e6646783e",
+             ("engine/models/lfm2_moe/kernels.py", "8f2e42e559a134a9992729497524b6fa5d57f6cb08378e56ed3d0b4fa8f02dea"):
+             "dbfbfd3aa2cc532ecca1d2ce0b5f23d6d48d68c7bfea6463298113fe8a49d754",
              ("tools/fn_prefill_kernels.py", "653b447087545778f29eb856e12681d0d1229847ada9ec7291477aeda8c54106"):
              "13fd5c1579579b11f94af618835798548216881173821cbb6447b3e6b21ec987",
              # SRV-619: the answer constraint's union and the call markers; a mask on the sampled
