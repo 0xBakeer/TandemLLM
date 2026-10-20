@@ -30,6 +30,10 @@ NVFP4 (`X.weight` uint8 [N, K / 2], `X.weight_scale` e4m3 [N, K / 16], `X.weight
 scales against the config's shape. The static activation scales (`input_scale`) and the KV scales (`k_scale`,
 `v_scale`) are read past: the engine keeps bf16 activations and a bf16 KV cache.
 
+A flat `NemotronHForCausalLM` config remapped from the Omni wrapper (community packs: `backbone.*` keys, no tower)
+may say `tie_word_embeddings: true` while the pack stores `lm_head` (fp16, or EXL3): the stored head is the model's
+(Super VL's head is untied), so a stored head is read and the tie is dropped (`stored_head`, an audit note).
+
 A GGUF reader (Bolt's IQ2_XXS release) plugs in beside this one with the same canonical names.
 """
 
@@ -126,6 +130,7 @@ class PackIndex:
     notes: list[str] = field(default_factory=list)
     quant: dict = field(default_factory=dict)   # the pack's quantization_config (an EXL3 pack's)
     formats: dict = field(default_factory=dict)  # projection base -> "bf16" | "f16" | "exl3" (after audit)
+    stored_head: bool = False                   # the config ties the head, the pack stores one: it is read
 
     @property
     def is_exl3(self) -> bool:
@@ -198,6 +203,13 @@ class PackIndex:
         idx.has_mtp = "mtp.layers.0.eh_proj.weight" in tensors or "mtp.layers.0.eh_proj.trellis" in tensors
         return idx
 
+    def __post_init__(self):
+        if self.cfg.tie_word_embeddings and ("lm_head.weight" in self.tensors or "lm_head.trellis" in self.tensors):
+            # a flat config remapped from the Omni wrapper says tied, but the pack stores the head (Super VL's is
+            # its own, untied in the original): the stored head is read, as the converter's own loader does
+            self.cfg.tie_word_embeddings = False
+            self.stored_head = True
+
     # --------------------------------------------------------------------------- checks
     def audit(self) -> list[str]:
         """Every tensor the layer table expects, with its shape, a projection as BF16/F16 or as a whole EXL3
@@ -235,6 +247,8 @@ class PackIndex:
         dt = Counter(t.dtype for t in self.tensors.values() if t.kind != "exl3" and not t.name.endswith(".trellis"))
         self.notes = [f"tensors {len(self.tensors)} ({dict(dt)}), mtp {'yes' if self.has_mtp else 'no'}"
                       + (f", {self.skipped} tower tensors skipped" if self.skipped else "")]
+        if self.stored_head:
+            self.notes.append("head: the config ties it to the embedding, the pack stores lm_head; the stored head is read")
         if self.quant.get("quant_method") == "modelopt":
             self.notes.append(f"ModelOpt {self.quant.get('quant_algo')}: projections {dict(Counter(formats.values()))}"
                               f" (activations bf16, KV bf16; checkpoint KV {self.quant.get('kv_cache_quant_algo')})")
