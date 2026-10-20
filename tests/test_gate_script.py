@@ -45,6 +45,18 @@ if args[:1] == ["-c"]:
 if args[:1] == ["-"] or (args and args[0].endswith("gatecheck.py")):
     sys.exit(subprocess.call([{python!r}] + args))
 tool = os.path.basename(args[0])
+if tool == "script_suite.py":
+    # SRV-661: the suite's runner, each file a call of its own, the count line at the end
+    import glob
+    files = sorted(glob.glob("tests/test_*.py"))
+    bad = [f for f in files if "FAIL" in open(f).read()]
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.log"), "a") as fh:
+        fh.writelines(f + "\n" for f in files)
+    for f in files:
+        print(f, "1 tests", "FAIL (exit 1)" if f in bad else "ok")
+    print(f"files={{len(files)}} ok={{len(files) - len(bad)}} fail={{len(bad)}} tests={{len(files)}}"
+          + (" -- " + " ".join(bad) if bad else ""))
+    sys.exit(1 if bad else 0)
 if tool.startswith("test_"):
     sys.exit(1 if "FAIL" in open(args[0]).read() else 0)
 if tool.startswith("flagoff_identity"):

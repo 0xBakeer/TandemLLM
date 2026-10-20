@@ -52,7 +52,10 @@ def test_the_suite_fails_a_file_that_ran_no_test_and_counts_the_others():
         some = _module(d, "test_some.py", "def test_a():\n    assert True\n\n\ndef test_b():\n"
                        "    assert 1\n\n\nif __name__ == '__main__':\n    test_a()\n    test_b()\n")
         said = _module(d, "test_said.py", "print('7 passed')\n")
-        r = _suite(none, some, said)
+        case = _module(d, "test_case.py", "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                       "    def test_a(self):\n        pass\n\n    def test_b(self):\n"
+                       "        pass\n\n\nif __name__ == '__main__':\n    unittest.main()\n")
+        r = _suite(none, some, said, case)
         out = r.stdout
         assert r.returncode == 1, out
         line = {ln.split()[0].split("/")[-1]: ln for ln in out.splitlines() if ln.endswith(
@@ -60,7 +63,9 @@ def test_the_suite_fails_a_file_that_ran_no_test_and_counts_the_others():
         assert "0 tests" in line["test_none.py"] and "FAIL (ran no test)" in line["test_none.py"], out
         assert "2 tests" in line["test_some.py"] and line["test_some.py"].endswith("ok"), out
         assert "7 tests" in line["test_said.py"] and line["test_said.py"].endswith("ok"), out
-        assert out.rstrip().splitlines()[-1].startswith("files=3 ok=2 fail=1 tests=9"), out
+        # a TestCase module: unittest finds its classes in `__main__` as under a plain python
+        assert "2 tests" in line["test_case.py"] and line["test_case.py"].endswith("ok"), out
+        assert out.rstrip().splitlines()[-1].startswith("files=4 ok=3 fail=1 tests=11"), out
 
 
 def test_scriptmode_runs_a_pytest_module_with_its_fixtures():

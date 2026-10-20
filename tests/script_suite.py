@@ -5,8 +5,8 @@
                                                          every tests/test_*.py, one process each
 
 A file ran its tests when its `test_*` functions were called (counted here: the module's names are
-wrapped as they are defined) or when it says so itself (`N passed`, N > 0, the last such line: a
-module that checks at import, tests/test_relax.py). A file that exits 0 having run none FAILS:
+wrapped as they are defined) or when it says so itself (`N passed` or unittest's `Ran N tests`,
+N > 0, the last such line: a module that checks at import, tests/test_relax.py; a TestCase module). A file that exits 0 having run none FAILS:
 until 0.13 (SRV-661) sixteen files had no `__main__` entry, ran nothing on the box and were counted as passed
 (tests/scriptmode.py is their runner now). `--all` runs each file in a clean environment (no
 serve.env, no QWEN38_*, CUDA_VISIBLE_DEVICES empty), prints a line a file and a total, and exits 1
@@ -27,21 +27,29 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 COUNT_LINE = "[script-suite] test functions run: "
-PASSED = re.compile(r"(?m)^\s*(\d+) passed\b")
+PASSED = re.compile(r"(?m)^\s*(\d+) passed\b|^Ran (\d+) tests? in ")
 
 
 class _Counted(dict):
     """A module namespace that wraps each test function of `path` as it is defined."""
 
-    def __init__(self, path: str, counter: list, **kw):
+    def __init__(self, path: str, counter: list, module, **kw):
         super().__init__(**kw)
-        self.path, self.counter = path, counter
+        self.path, self.counter, self.module = path, counter, module
+        module.__dict__.update(kw)
 
     def __setitem__(self, key, value):
         if (isinstance(key, str) and key.startswith("test_") and isinstance(value, types.FunctionType)
                 and value.__code__.co_filename == self.path):
             value = self._wrap(value)
         super().__setitem__(key, value)
+        # `sys.modules["__main__"]` is the module as the file defines it, as it is under a plain
+        # `python file.py`: unittest.main() finds the TestCase classes there, pickle the classes
+        self.module.__dict__[key] = value
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self.module.__dict__.pop(key, None)
 
     def _wrap(self, fn):
         counter = self.counter
@@ -61,7 +69,7 @@ def run_one(path: str, argv: list) -> int:
     with open(path, "rb") as fh:
         code = compile(fh.read(), path, "exec")
     mod = types.ModuleType("__main__")
-    g = _Counted(path, counter, __name__="__main__", __file__=path, __builtins__=__builtins__,
+    g = _Counted(path, counter, mod, __name__="__main__", __file__=path, __builtins__=__builtins__,
                  __package__=None, __spec__=None)
     sys.modules["__main__"] = mod
     rc = 0
@@ -70,7 +78,6 @@ def run_one(path: str, argv: list) -> int:
     except SystemExit as e:
         rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
     finally:
-        mod.__dict__.update(g)
         sys.stdout.flush()
         print(f"{COUNT_LINE}{counter[0]}", flush=True)
     return rc
@@ -82,8 +89,8 @@ def ran(log: str) -> int:
     for line in log.splitlines():
         if line.startswith(COUNT_LINE):
             n = int(line[len(COUNT_LINE):] or 0)
-    said = PASSED.findall(log)
-    return max(n, int(said[-1]) if said else 0)
+    said = [int(a or b) for a, b in PASSED.findall(log)]     # `N passed`, unittest's `Ran N tests`
+    return max(n, said[-1] if said else 0)
 
 
 def run_all(args: list) -> int:
