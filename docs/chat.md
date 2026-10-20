@@ -36,6 +36,17 @@ the model's context window (a tool result grew it past the guard's estimate) com
 and sends the call once more when the compaction made it smaller; when it cut nothing, or the
 smaller call is refused too, the run fails with the engine's message.
 
+One step's tool results share the room the model has left (#18): half of what is left under the
+compaction line, 2,000 tokens at least, never past the window less twice the answer's room, and
+never more than 64,000 characters a result (12,000 in Agents mode). `read_file` cuts at whole lines
+and says where to go on ("[truncated at 64,000 characters: lines 1-30 of 317 shown, 639,237 more
+bytes; read on with offset=31]"); a line longer than one read goes on with its `column` argument.
+Other results keep their first and last quarter and the whole output under `.tandem/outputs/`. A
+request's estimate carries a margin for the text the engine has not counted yet (15 % of it): at
+the edge our engine counts the request exactly (`POST /v1/tokenize`) and a request over the window
+fails before it is sent, with the count; a relayed model gets a `max_tokens` that leaves the
+margin free.
+
 File texts stay out of the request: a finished `write_file`'s content, and an `edit_file`'s old or
 new text over 2,000 characters, go to the model as a stub (path, lines, bytes, sha256 and the
 `read_file` call that shows it) from the next request on; the store and the thread keep the text.

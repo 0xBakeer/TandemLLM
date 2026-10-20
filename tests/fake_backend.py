@@ -74,7 +74,11 @@ once. `refuse=<status>` (in a test) makes every completion answer that status. `
 test) answers a completion of more than n prompt tokens with our engine's memory refusal: a 503
 "a <n>-token prefill needs ... GiB with every cache given back", Retry-After 1 (`fake.refused`
 counts them). `window=<n>` (in a test) answers a completion of more than n prompt tokens with our
-engine's 400 for a prompt past the context window (`fake.windowed` counts them). `--key` makes
+engine's 400 for a prompt past the context window (`fake.windowed` counts them); with
+`strict = True` the prompt and `max_tokens` together count, and the 400 is vLLM's ("maximum
+context length is n tokens", a relay's backend). `tokenize` (in a test) answers `POST
+/v1/tokenize` (server/tokenize_api.py) with the prompt's tokens, or this number when it is an int;
+None: 404, a server without the route (`fake.counted` counts the calls). `--key` makes
 every route need `Authorization: Bearer <key>`.
 """
 
@@ -149,6 +153,9 @@ class Fake:
         self.refused = 0
         self.window: int | None = None  # the prompt tokens over which the request is too long
         self.windowed = 0
+        self.strict = False             # the window holds the prompt and max_tokens (vLLM)
+        self.tokenize = None            # POST /v1/tokenize: True (count) or an int; None: 404
+        self.counted = 0
         self.key = key
         self.tps = float(tps)
         self.dialect = dialect
@@ -315,6 +322,28 @@ def make_handler(fake: Fake):
                                    f"given back; the engine's peak is 52.6 GiB; retry when the "
                                    f"engine is idle", "type": "server_busy", "code": 503}},
                         (("Retry-After", "1"),))
+            if p == "/v1/tokenize":
+                if fake.tokenize is None:
+                    return self._json(404, {"error": {"message": "no route", "type": "not_found"}})
+                with fake.lock:
+                    fake.counted += 1
+                n = fake.tokenize if isinstance(fake.tokenize, int) and \
+                    not isinstance(fake.tokenize, bool) else \
+                    sum(_words((m or {}).get("content")) + 4 for m in body.get("messages") or [])
+                return self._json(200, {"tokens": n, "parts": {"system": 0, "tools": 0,
+                                                               "messages": n}})
+            if fake.window is not None and fake.strict and p.endswith("/completions"):
+                n_prompt = sum(_words((m or {}).get("content")) + 4
+                               for m in body.get("messages") or [])
+                n_out = int(body.get("max_tokens") or 0)
+                if n_prompt + n_out > fake.window:
+                    with fake.lock:
+                        fake.windowed += 1
+                    return self._json(400, {"error": {
+                        "message": f"This model's maximum context length is {fake.window} "
+                                   f"tokens. However, you requested {n_prompt + n_out} tokens "
+                                   f"({n_prompt} in the messages, {n_out} in the completion).",
+                        "type": "BadRequestError", "param": None, "code": 400}})
             if fake.window is not None and p.endswith("/completions"):
                 n_prompt = sum(_words((m or {}).get("content")) + 4
                                for m in body.get("messages") or [])

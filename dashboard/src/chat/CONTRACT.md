@@ -450,6 +450,12 @@ asks for: the model's output limit, or the window's room when less is left.
   (a PDF: `script-src 'none'; object-src 'self'`): it plays or downloads, it never runs a script.
 - Tool output in events and parts is capped (30,000 characters per call); the full output is a file at
   `/workspace/.tandem/outputs/<call_id>.txt`.
+- What the model reads of one result is capped by the room its step has left (SRV-639): `read_file`
+  stops at whole lines and ends with `[truncated at <n> characters: lines <a>-<b> of <total> shown,
+  <bytes> more bytes; read on with offset=<b+1>]`, or `[<k> more lines; read on with offset=<b+1>]`
+  at its `limit`; a line longer than one read ends with `[line <i> goes on: <bytes> more bytes of it;
+  read on with offset=<i>, column=<c>]`. `column` (1-based, a character of line `offset`) is a
+  read_file argument.
 - MCP secrets never come back from the server (values are "").
 - The pane layout (`Conversation.ui`) is shared across devices; scroll positions and editor cursors stay
   on the device.

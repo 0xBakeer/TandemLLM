@@ -62,9 +62,9 @@ def test_a_read_past_eof_promises_no_more_lines():
     assert out == "", out
     # a huge offset too
     assert T._read(ctx, {"path": "f.txt", "offset": 10**9}).content == ""
-    # a normal read still shows the tail fragment
+    # a normal read still shows the tail fragment, with the offset to read on from (SRV-639)
     out = T._read(ctx, {"path": "f.txt", "offset": 4, "limit": 1}).content
-    assert out.endswith("[1 more lines]"), out
+    assert out.endswith("[1 more lines; read on with offset=5]"), out
     # the last full page says nothing more
     assert "more lines" not in T._read(ctx, {"path": "f.txt", "offset": 1, "limit": 5}).content
     # a negative limit reads (it used to yield an empty read plus a bogus fragment)

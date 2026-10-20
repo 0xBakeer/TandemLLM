@@ -27,6 +27,24 @@ base64 is never counted as text). Then:
    engine's 400 ("prompt is 40,982 tokens and the context is 40,960");
 4. `max_tokens` is set to what the window has left (and the model card's output limit), so a
    long thought ends at the window instead of past it.
+
+The estimate is only as good as the ratio, and the ratio was learned on the last request the engine
+counted. What was added since (a tool result, an attachment) is estimated at that ratio and may
+read denser: GitHub issue #18's request was 4,612 tokens over its estimate of 257,413, with a
+178,580-token tool result never counted, and `max_tokens` had left 256 tokens for the error. So
+the request carries a `margin`, 15 % of the estimate of the characters the engine never counted
+(256 at least): the guard and `max_tokens` keep it free. A request whose estimate and margin
+reach into the answer's room is counted exactly before it goes when the backend is our engine
+(`POST /v1/tokenize`, the model's own template; chatd/agent.py `request_for`); still too long, it
+fails before it is sent, with the numbers (SRV-639).
+
+One step's tool results share a budget (`step_budget`, chatd/agent.py `run_tools`): half of what
+is left under the compaction line, 2,000 tokens at least, never past the window less twice the
+answer's room. A tool cuts its result to its share with a marker (read_file at whole lines,
+naming the offset to read on), so one step can never fill the window: in #18 one step's results
+took 68 % of it, and inside the running turn nothing is dropped, so the run had nowhere to go.
+A run that pages on grows past the compaction line, and the next request compacts its earlier
+steps.
 """
 
 from __future__ import annotations
@@ -133,6 +151,42 @@ def learn(prompt_tokens: int, request_chars: int, image_tokens: int = 0) -> floa
     if text > 0 and request_chars > 200:
         return max(0.15, min(0.8, text / request_chars))
     return None
+
+
+#: the estimate's margin: this share of the estimate of the characters the engine never counted
+ESTIMATE_SLACK = 0.15
+MIN_MARGIN = 256
+
+
+def margin(chars: int, counted: int, ratio: float | None) -> int:
+    """The tokens a request may hold over its estimate: ESTIMATE_SLACK of the estimate of the
+    characters past `counted` (the last request the engine counted, `Conv.tok_counted`), all of
+    them when none was counted; MIN_MARGIN at least."""
+    fresh = max(0, chars - counted) if counted else chars
+    return max(MIN_MARGIN, int(fresh * (ratio or DEFAULT_RATIO) * ESTIMATE_SLACK))
+
+
+#: one step's tool results: this share of what is left under the compaction line, at least
+#: RESULT_FLOOR tokens, never past the window less twice MIN_ANSWER
+STEP_SHARE = 0.5
+RESULT_FLOOR = 2000
+MIN_RESULT_CHARS = 1000
+
+
+def step_budget(window: int, used: int, memory: int | None = None) -> int | None:
+    """The tokens one step's tool results may add to a request of `used` tokens; None without a
+    window (the tools' own caps hold)."""
+    if not window:
+        return None
+    soft = int(max(0, compact_at(window, memory) - used) * STEP_SHARE)
+    return max(0, min(window - used - 2 * MIN_ANSWER, max(RESULT_FLOOR, soft)))
+
+
+def result_chars(tokens: int, calls: int, ratio: float | None) -> int:
+    """One call's share of a step budget in characters, read at the chat's ratio plus the
+    estimate's slack (a result may read denser than the request the ratio was learned on)."""
+    r = (ratio or DEFAULT_RATIO) * (1 + ESTIMATE_SLACK)
+    return max(MIN_RESULT_CHARS, int(tokens / max(1, calls) / r))
 
 
 def compact_at(window: int, memory: int | None = None) -> int:

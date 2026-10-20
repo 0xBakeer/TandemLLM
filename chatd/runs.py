@@ -194,6 +194,8 @@ class Run:
         self.request_chars = 0
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
+        self.request_counted: int | None = None  # the engine's exact count of it, at the edge
+        self.result_cap: int | None = None      # one tool result's characters, this step (SRV-639)
         self.compacted = 0                      # the step a compaction last ran before
         self.compact_next = False               # the next request compacts first (memory, window)
         self.compact_cut = False                # the last request_for compacted the chat

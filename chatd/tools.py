@@ -155,30 +155,65 @@ def _read(ctx, a):
         return Result(f"{path}: a binary file, {st.st_size:,} bytes; not shown")
     lines = data.decode("utf-8", "replace").splitlines()
     off = max(1, int(a.get("offset") or 1))
+    col = max(1, int(a.get("column") or 1))
     lim = max(1, min(2000, int(a.get("limit") or 2000)))  # no limit or 0: 2,000 lines; a negative one: 1
+    # SRV-639: at most the call's share of the room the model has left (chatd/agent.py run_tools),
+    # never more than the result caps; `limit` counts lines, and a line can be long (#18)
+    cap = getattr(ctx, "cap", None)
     if getattr(ctx, "agents", False):
-        return _read_capped(lines, off, min(lim, AGENTS_READ_LINES))
-    chunk = lines[off - 1:off - 1 + lim]
-    body = "\n".join(f"{i:6d}\t{ln}" for i, ln in enumerate(chunk, off))
-    # an offset past EOF leaves rest negative: only promise more lines when some remain, or
-    # the model reads on forever
-    rest = len(lines) - (off - 1 + len(chunk))
-    more = f"\n[{rest} more lines]" if rest > 0 else ""
+        return _read_capped(lines, off, min(lim, AGENTS_READ_LINES), col,
+                            min(cap or AGENTS_LIMIT_CHARS, AGENTS_LIMIT_CHARS))
+    cap = min(cap or MODEL_LIMIT_CHARS, MODEL_LIMIT_CHARS)
+    rows, end, cut = _page(lines, off, lim, col, cap)
+    body = "\n".join(rows)
+    if cut:
+        return Result(body + _goes_on(cut))
+    # an offset past EOF leaves nothing: only promise more lines when some remain, or the model
+    # reads on forever
+    rest = len(lines) - end
+    if rest > 0 and end - off + 1 < lim:
+        after = sum(len(ln.encode()) + 1 for ln in lines[end:])
+        return Result(body + f"\n[truncated at {cap:,} characters: lines {off}-{end} of "
+                             f"{len(lines):,} shown, {after:,} more bytes; read on with "
+                             f"offset={end + 1}]")
+    more = f"\n[{rest} more lines; read on with offset={end + 1}]" if rest > 0 else ""
     return Result(body + more)
 
 
-def _read_capped(lines: list[str], off: int, lim: int) -> Result:
+def _page(lines: list[str], off: int, lim: int, col: int, cap: int) -> tuple[list, int, tuple]:
+    """Whole numbered lines from line `off` (from its character `col`), at most `lim` lines and
+    `cap` characters: (the rows, the last line shown whole, None); a first line longer than `cap`
+    comes in part: (its row, off - 1, (the line, the column to read on from, the bytes left of
+    it))."""
+    out, n = [], 0
+    for i in range(off, min(len(lines), off - 1 + lim) + 1):
+        text = lines[i - 1][col - 1:] if i == off else lines[i - 1]
+        row = f"{i:6d}\t{text}"
+        if n + len(row) + 1 > cap:
+            if out:
+                break
+            take = max(1, cap - 8)
+            start = col if i == off else 1
+            return [f"{i:6d}\t{text[:take]}"], off - 1, (i, start + take,
+                                                         len(text[take:].encode()))
+        out.append(row)
+        n += len(row) + 1
+    return out, off - 1 + len(out), None
+
+
+def _goes_on(cut: tuple) -> str:
+    i, col, rest = cut
+    return f"\n[line {i} goes on: {rest:,} more bytes of it; read on with offset={i}, column={col}]"
+
+
+def _read_capped(lines: list[str], off: int, lim: int, col: int = 1,
+                 cap: int = AGENTS_LIMIT_CHARS) -> Result:
     """A main agent's read in Agents mode: at most `lim` lines and AGENTS_LIMIT_CHARS characters,
     whole lines, and where it stopped when the file goes on."""
-    out, n = [], 0
-    for i, ln in enumerate(lines[off - 1:off - 1 + lim], off):
-        row = f"{i:6d}\t{ln}"
-        if out and n + len(row) + 1 > AGENTS_LIMIT_CHARS:
-            break
-        out.append(row[:AGENTS_LIMIT_CHARS])
-        n += len(row) + 1
-    end = off - 1 + len(out)
+    out, end, cut = _page(lines, off, lim, col, cap)
     body = "\n".join(out)
+    if cut:
+        return Result(body + _goes_on(cut))
     if end < len(lines):
         body += (f"\nShowing lines {off}-{end} of {len(lines):,}. Read a range with offset and "
                  f"limit, or give the reading to a worker.")
@@ -604,8 +639,9 @@ BUILTINS = [
          _obj({"command": _S, "timeout_s": _I, "background": _B}, ["command"]),
          risk="exec", default="ask", sandbox=True, executor=_bash),
     Tool("read_file", "Read a file in /workspace, with line numbers. offset and limit are line "
-         "numbers (default: the first 2,000 lines). Images come back as images.",
-         _obj({"path": _S, "offset": _I, "limit": _I}, ["path"]), executor=_read),
+         "numbers (default: the first 2,000 lines); column, a character in line offset to start "
+         "at. A cut result says where to read on. Images come back as images.",
+         _obj({"path": _S, "offset": _I, "limit": _I, "column": _I}, ["path"]), executor=_read),
     Tool("write_file", "Create or replace a file in /workspace with the given content.",
          _obj({"path": _S, "content": _S}, ["path", "content"]), risk="write",
          executor=_write),

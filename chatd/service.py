@@ -142,6 +142,7 @@ class Conv:
         self.sandbox_sent: tuple[float, dict | None] = (0.0, None)
         self.peek: tuple[float, dict | None] | None = None
         self.tok_ratio: float | None = None       # tokens per request character, learned
+        self.tok_counted = 0                      # the characters of the request it was learned on
         # chatd's estimate of the smallest request the engine refused for memory (runs.py): the
         # context guard compacts under it from then on (compaction.compact_at)
         self.memory_limit: int | None = None
@@ -947,7 +948,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         r = __import__("chatd.compaction", fromlist=["learn"]).learn(prompt_tokens, request_chars,
                                                                      image_tokens)
         if r is not None:
-            conv.tok_ratio = r
+            conv.tok_ratio, conv.tok_counted = r, request_chars
 
     def finish_guard(self, run: Run, outcome: str, exc: Exception) -> None:
         """The last line for a finish_run that broke halfway (runs.py `_main`). Forces the
