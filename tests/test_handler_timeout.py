@@ -134,6 +134,70 @@ def test_a_client_that_keeps_sending_is_served_keep_alive_and_all():
         _server.shutdown()
 
 
+def test_a_forward_that_lifts_the_timeout_leaves_the_next_request_guarded():
+    # the reported sequence: GET /health, GET /v1/chat-app/capabilities (the chat forward
+    # runs chat_forward._relay, which sets the socket timeout to None while it streams),
+    # then a stalled POST body on the SAME keep-alive connection. With the timeout never
+    # re-armed the 408 path can never run: the handler thread waits on bytes that never
+    # come, 10x the timeout and counting.
+    import http.server
+
+    class FakeChatd(http.server.BaseHTTPRequestHandler):
+        # HTTP/1.0 on purpose: the real answer here is small and the relay drains to the
+        # close — a keep-alive upstream would hold this relay thread, not our concern
+        def do_GET(self):                                   # capabilities: a sized 200
+            raw = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    fake = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeChatd)
+    threading.Thread(target=fake.serve_forever, daemon=True).start()
+    os.environ["QSE_CHAT_URL"] = f"http://127.0.0.1:{fake.server_address[1]}"
+    os.environ["QSE_CHAT_FORWARD_KEY"] = "test-key"
+    _serve()
+    try:
+        s = _connect()
+        try:
+            assert _get_health(s).startswith("HTTP/1.1 200")
+            s.sendall(b"GET /v1/chat-app/capabilities HTTP/1.1\r\nHost: x\r\n\r\n")
+            s.settimeout(WAIT_S)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                got = s.recv(4096)
+                assert got, "closed before the capabilities answer"
+                buf += got
+            head, _, rest = buf.partition(b"\r\n\r\n")
+            n = int(dict(l.split(": ", 1) for l in head.decode().split("\r\n")[1:]
+                         if ": " in l).get("Content-Length", 0))
+            while len(rest) < n:
+                rest += s.recv(4096)
+            assert b"200" in head.split(b"\r\n", 1)[0], head
+            # the next request on this connection: a stalled body must 408 again
+            s.sendall(b"POST /v1/dashboard/session HTTP/1.1\r\nHost: x\r\nContent-Type: "
+                      b"application/json\r\nContent-Length: 5000\r\n\r\n{}")   # 4998 to come
+            buf = b""
+            while b"\r\n" not in buf:
+                got = s.recv(4096)
+                if not got:
+                    raise AssertionError(f"closed, no status line: {buf!r}")
+                buf += got
+            status = buf.split(b"\r\n", 1)[0].decode()
+            assert status.startswith("HTTP/1.1 408"), \
+                f"the timeout was never re-armed after the forward: {status}"
+        finally:
+            s.close()
+    finally:
+        _server.shutdown()
+        fake.shutdown()
+        os.environ.pop("QSE_CHAT_URL", None)
+        os.environ.pop("QSE_CHAT_FORWARD_KEY", None)
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
