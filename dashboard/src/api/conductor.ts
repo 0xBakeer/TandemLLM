@@ -170,6 +170,8 @@ export interface PackageDoc {
   general?: boolean;
   /** R1: a skill of the package library (searched; its text before `## Reference` goes in) */
   library?: boolean;
+  /** SRV-615: what its result is for when a tool can make it; stays out when an offered tool delivers it */
+  deliverable?: 'send' | 'schedule' | 'post';
 }
 /** R1: GET /v1/library and /v1/library/search (server/library_api.py) */
 export interface LibrarySkill {

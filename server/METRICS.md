@@ -142,6 +142,7 @@ SRV-115: every decision of the TandemLLM conductor, the router's and the session
 | name | type | labels | what |
 |-|-|-|-|
 | `qse_conductor_decisions_total` | counter | `task`, `tier`, `mode`, `decision` | every decision: the monitor's tasks (`D1`, `E1`, `C3`, ...; `SP3` is an answer whose calls all passed) with `mode` act or shadow and `decision` the action in lower case or `pass`; the router's class with `task="route"`, `mode` the profile's (on, shadow) and `decision` the class id |
+| `qse_conductor_package_kept_out_total` | counter | `why`, `mode` | SRV-615: a package with a `deliverable` the router kept out of a turn because an offered tool delivers its result (`why` `tool_delivers`); `mode` act, or shadow under `tool_fit.deliverable: shadow` |
 | `qse_conductor_actions_total` | counter | `task`, `action` | decisions executed: `CLOSE_REASONING`, `CONTINUE_HIDDEN`, `REGENERATE_CALL`, `REPAIR_CALL`, `GIVE_UP`, `PROMPT_TAIL_NOTE` (a router note, `task="route"`), `SET_THINK_BUDGET` |
 | `qse_conductor_hidden_tokens_total` | counter | | tokens the model saw that the client did not send or receive: hidden closes, hidden turns, reminders, router notes new and replayed |
 | `qse_conductor_gave_up_total` | counter | | turns ended with the GIVE_UP sentence |

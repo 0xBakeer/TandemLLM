@@ -332,6 +332,10 @@ conductor_tier1_seconds = REGISTRY.add(Histogram(
 conductor_tier1_failures_total = REGISTRY.add(Counter(
     "qse_conductor_tier1_failures_total",
     "tier 1 questions without a usable answer, by reason", ("reason",)))
+conductor_package_kept_out_total = REGISTRY.add(Counter(
+    "qse_conductor_package_kept_out_total",
+    "packages the router kept out of a turn because an offered tool delivers their result "
+    "(SRV-615), by why and by mode (act, shadow)", ("why", "mode")))
 conductor_reasoning_tokens_cut_total = REGISTRY.add(Counter(
     "qse_conductor_reasoning_tokens_cut_total",
     "reasoning tokens written before a hidden close cut the block (the size of the blocks the "
@@ -861,6 +865,11 @@ def on_route(row: dict) -> None:
         conductor_tier1_seconds.observe(max(0.0, float(st.get("ms") or 0)) / 1e3)
         if st.get("error"):
             conductor_tier1_failures_total.inc(reason=str(st["error"]))
+    extra = row.get("extra") or {}
+    for mode, got in (("act", (extra.get("package_choice") or {}).get("kept_out")),
+                      ("shadow", ((row.get("shadow") or {}).get("tools") or {}).get("kept_out"))):
+        for k in got or ():
+            conductor_package_kept_out_total.inc(why=str(k.get("why") or ""), mode=mode)
     notes = sum(int(n.get("tokens") or 0) for n in row.get("injected") or ())
     replayed = int((row.get("replayed") or {}).get("tokens") or 0)
     if row.get("injected"):

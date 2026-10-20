@@ -1028,6 +1028,43 @@
         "note_write": {
           "type": "string",
           "maxLength": 2000
+        },
+        "deliverable": {
+          "enum": [
+            "off",
+            "shadow",
+            "on"
+          ]
+        },
+        "deliverable_question": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 600
+        },
+        "deliverable_options": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 300
+            },
+            "text": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 300
+            }
+          },
+          "required": [
+            "tool",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "deliverable_accept": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         }
       },
       "required": [],

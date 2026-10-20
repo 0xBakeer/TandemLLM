@@ -295,6 +295,18 @@ TOOL_FIT: dict = {
     "note_write": ("This chat can write files but has no shell{tools}. Write the files with the "
                    "file tool; do not try to run or test them, and end with one line on how to "
                    "open or run them."),
+    # SRV-615: a package whose result an offered tool delivers (write-message where the chat
+    # offers send_email) stays out when the user wants it done, not written: `on` acts, `shadow`
+    # journals what would have stayed out, `off` asks nothing. The question goes to the class
+    # question's stages (the decider, then Qwen) with the user's message
+    "deliverable": "on",
+    "deliverable_question": ("The chat offers these tools: {tools}. Does the user want the task "
+                             "done with one of these tools, or do they want the text itself to "
+                             "read, copy or send themselves?"),
+    "deliverable_options": {
+        "tool": "Done with a tool: the user wants it sent, booked, set or posted.",
+        "text": "The text itself: the user wants a draft, to read, copy or send themselves."},
+    "deliverable_accept": 0.6,
 }
 # S1 (2026-10-02): a client's side request (opencode's title or summary call, Hermes' title call)
 # is detected structurally (signals.side_shape: no tools and the client's fixed instruction) and
@@ -1738,7 +1750,15 @@ SCHEMAS: dict[str, dict] = {
         # SRV-243: what a turn whose tools cannot carry out its packages is told instead
         "tool_fit": _obj({"mode": {"enum": list(MODES3)},
                           "note_none": {"type": "string", "maxLength": 2000},
-                          "note_write": {"type": "string", "maxLength": 2000}}, required=()),
+                          "note_write": {"type": "string", "maxLength": 2000},
+                          # SRV-615: a deliverable package stays out when a tool delivers
+                          "deliverable": {"enum": list(MODES3)},
+                          "deliverable_question": {"type": "string", "minLength": 8,
+                                                   "maxLength": 600},
+                          "deliverable_options": _obj({
+                              "tool": {"type": "string", "minLength": 4, "maxLength": 300},
+                              "text": {"type": "string", "minLength": 4, "maxLength": 300}}),
+                          "deliverable_accept": _PROB}, required=()),
     }, required=("classes", "classifier", "structural", "stickiness", "effort", "injection")),
     "roles": {"type": "object", "additionalProperties": _obj({
         "endpoint": {"type": "string", "maxLength": 400}, "model": {"type": "string",
@@ -1771,7 +1791,10 @@ SCHEMAS: dict[str, dict] = {
                                "items": {"enum": ["shell", "write", "render", "render_video"]},
                                "maxItems": 4},
             "fallback": {"type": "string", "pattern": r"^[a-z0-9][a-z0-9_.-]*$",
-                         "maxLength": 80}},
+                         "maxLength": 80},
+            # SRV-615: what the package's result is for when an offered tool can make it: the
+            # router asks whether the user wants it done by the tool or the text itself
+            "deliverable": {"enum": ["send", "schedule", "post"]}},
             required=("title", "kind", "source", "description", "body", "max_tokens",
                       "enabled"))}}),
     "profiles": _obj({

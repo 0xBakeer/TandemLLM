@@ -60,6 +60,9 @@ SHIPPED_ROOT = shipped_root()
 # `{repo}` in a `skill_dirs` entry: the directory whose `packages/` holds the shipped texts
 REPO_TOKEN = "{repo}"
 URL_TOKEN = "{tandem_url}"
+# SRV-615: the results a package can name as its `deliverable`, the kinds signals.tool_effects
+# reads off a tool's declaration (`post` has no schema rule; the keep-out question decides it)
+DELIVERABLES = ("send", "schedule", "post")
 # SRV-171: the session's scratch directory, outside the user's project
 SCRATCH_TOKEN = "{tandem_scratch}"
 SCRATCH_DEFAULT = ".tandem"
@@ -253,6 +256,13 @@ class Library:
             return tuple(str(w) for w in want)
         body, _ = self._body(doc, name)
         return ("shell",) if body and URL_TOKEN in body else ()
+
+    @staticmethod
+    def deliverable(doc: dict, name: str) -> str | None:
+        """SRV-615: what the package's result is for when a tool can make it (`send`, `schedule`,
+        `post`), or None: a write-message draft is a message to send."""
+        d = ((doc.get("packages") or {}).get(name) or {}).get("deliverable")
+        return d if isinstance(d, str) and d in DELIVERABLES else None
 
     @staticmethod
     def fallback(doc: dict, name: str) -> str | None:

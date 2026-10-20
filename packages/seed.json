@@ -812,7 +812,8 @@
    "body": "",
    "max_tokens": 850,
    "enabled": true,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "send"
   },
   "formal-letter": {
    "title": "Formal letter",
@@ -822,7 +823,8 @@
    "body": "",
    "max_tokens": 950,
    "enabled": true,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "send"
   },
   "cv-cover-letter": {
    "title": "Cv cover letter",
@@ -872,7 +874,8 @@
    "body": "",
    "max_tokens": 750,
    "enabled": false,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "post"
   },
   "creative-writing": {
    "title": "Creative writing",
@@ -972,7 +975,8 @@
    "body": "",
    "max_tokens": 900,
    "enabled": true,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "schedule"
   },
   "meal-plan": {
    "title": "Meal plan",
@@ -1002,7 +1006,8 @@
    "body": "",
    "max_tokens": 1050,
    "enabled": true,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "schedule"
   },
   "checklist-builder": {
    "title": "Checklist builder",
@@ -1012,7 +1017,8 @@
    "body": "",
    "max_tokens": 1100,
    "enabled": true,
-   "requires_tools": []
+   "requires_tools": [],
+   "deliverable": "schedule"
   },
   "study-plan": {
    "title": "Study plan",

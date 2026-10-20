@@ -394,6 +394,7 @@ export class QseCondPackages extends LightElement {
         <span class="badge pk-kind pk-kind-${category}" data-pk-category>${CATEGORY_WORDS[category]}</span>
         <span class="badge">${inline ? 'inline' : p.source.startsWith('skill:') ? 'skill on the box' : 'file on the box'}</span>
         ${p.general ? html`<span class="badge badge-on">general</span>` : nothing}
+        ${p.deliverable ? html`<span class="badge" data-pk-deliverable title="stays out of a turn when an offered tool delivers its result (SRV-615)">deliverable: ${p.deliverable}</span>` : nothing}
         ${p.enabled ? html`<span class="badge badge-ok">enabled</span>` : html`<span class="badge">disabled</span>`}
         ${entry ? nothing : html`<span class="badge badge-shadow">not saved</span>`}
         ${entry && !entry.available && entry.error ? html`<span class="badge badge-warn">${entry.error.replace(/_/g, ' ')}</span>` : nothing}
