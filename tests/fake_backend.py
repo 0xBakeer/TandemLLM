@@ -67,7 +67,7 @@ chunk). The tests of the workers (VIS-E15) steer the main agent and each worker 
 the stream answers 429, so chatd's reader polls).
 
 A prefix cache: a request whose messages begin with the messages of an earlier request reports
-those messages' tokens as `cached_tokens` (vLLM's prefix caching, for P4's replay test). A token
+those messages' tokens as `cached_tokens` (a backend's prefix cache, for P4's replay test). A token
 here is a whitespace-separated word (plus 4 per message). `GET /fake/last` returns the last
 request's path, headers and body; `GET /fake/stats` the counts and the most streams it served at
 once. `refuse=<status>` (in a test) makes every completion answer that status. `memory=<n>` (in a
@@ -75,8 +75,8 @@ test) answers a completion of more than n prompt tokens with our engine's memory
 "a <n>-token prefill needs ... GiB with every cache given back", Retry-After 1 (`fake.refused`
 counts them). `window=<n>` (in a test) answers a completion of more than n prompt tokens with our
 engine's 400 for a prompt past the context window (`fake.windowed` counts them); with
-`strict = True` the prompt and `max_tokens` together count, and the 400 is vLLM's ("maximum
-context length is n tokens", a relay's backend). `tokenize` (in a test) answers `POST
+`strict = True` the prompt and `max_tokens` together count, and the 400 is a strict
+OpenAI-compatible backend's ("maximum context length is n tokens", a relay's backend). `tokenize` (in a test) answers `POST
 /v1/tokenize` (server/tokenize_api.py) with the prompt's tokens, or this number when it is an int;
 None: 404, a server without the route (`fake.counted` counts the calls). `--key` makes
 every route need `Authorization: Bearer <key>`.
@@ -153,7 +153,7 @@ class Fake:
         self.refused = 0
         self.window: int | None = None  # the prompt tokens over which the request is too long
         self.windowed = 0
-        self.strict = False             # the window holds the prompt and max_tokens (vLLM)
+        self.strict = False             # the window holds the prompt and max_tokens (strict)
         self.tokenize = None            # POST /v1/tokenize: True (count) or an int; None: 404
         self.counted = 0
         self.key = key
@@ -207,7 +207,7 @@ def make_handler(fake: Fake):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "FakeBackend"
-        # as vLLM's and SGLang's servers (uvicorn) do: without it, a keep-alive connection's
+        # as common OpenAI-compatible servers (uvicorn) do: without it, a keep-alive connection's
         # headers and first frame wait 40 ms for the reader's delayed ACK on Linux, and the
         # bench measured that instead of the proxy
         disable_nagle_algorithm = True

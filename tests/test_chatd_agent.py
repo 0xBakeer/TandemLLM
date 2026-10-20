@@ -881,7 +881,7 @@ def test_a_request_the_engine_counts_over_the_window_is_never_sent():
 def test_a_relayed_model_keeps_the_estimate_margin_free():
     c = Chat()
     try:
-        cid = _edge_chat(c, 12_000, backend="vllm", max_output=8192)
+        cid = _edge_chat(c, 12_000, backend="proxy", max_output=8192)
         c.fake.tokenize = 1                     # never asked: it counts our engine's model only
         c.send(cid, "word " * 2800)            # about 9,200 and its margin: the edge
         s = c.wait_idle(cid, 20)
