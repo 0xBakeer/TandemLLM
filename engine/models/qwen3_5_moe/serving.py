@@ -13,6 +13,7 @@ in the same cut (StairCut, priced online or from ops/prices/<model>/<profile>.<d
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 import numpy as np
 
@@ -70,6 +71,19 @@ class Qwen35MoeServing(FlashNextServing):
 
     def manifest(self) -> Manifest:
         return manifest()
+
+    def cost(self):
+        """Flash-Next's cost with this trunk's prefill workspace (SRV-655). The prompt's attention
+        (`Qwen35MoeEngine._attn_pre`) repeats the cache's K and V to every query head for SDPA: Hq x
+        head_dim x 2 bytes, twice, a token of context (32,768 B on Ornith), over the floor of a
+        4,096-row chunk's activations. Flash-Next's line (76,309 B a token, capped at 10.75 GiB) priced
+        Ornith's 148,184-token prefill at 11.5 GB, which the measured one never took (3.8 GB at
+        104,807 tokens, live 2026-10-21), and refused it for memory twice."""
+        c, base = self.cfg, super().cost()
+        per = int(c.num_attention_heads) * int(c.head_dim) * 2 * 2
+        floor = int(2.75 * (1 << 30))
+        return replace(base, workspace_floor=floor, workspace_per_token=per,
+                       workspace_cap=floor + per * int(self.max_len))
 
     def capture_cost(self, n: int) -> float:
         """0: a turn is not sent to the plain step for the graphs its class lacks. The idle captures take the
