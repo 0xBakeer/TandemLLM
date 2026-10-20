@@ -52,6 +52,9 @@ FORMULA = "fp4"
 #: class's largest row count and reads the first rows' share (the same kernel and grid); on the Spark
 #: `attn_rows` at 1..32 rows, two classes, lone and with shared buffers, equalled 0.11.1's bit for bit
 #: (tools/lfm_attn_rows_check.py)
+#: OPS-215 (ENG-383): tools/fn_kernels.py's router takes up to 512 experts, with a narrower instantiation for
+#: up to 256; before it refused any count but 512, and at 512 it launches the same instantiation with the
+#: same arguments, so no row a released profile stored changes (by the code; not run on the GPU)
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -62,6 +65,8 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93",
              ("tools/fn_kernels.py", "26139deda6a564355375158270ddedd8ba7acbbf16c97aaf2b5646c6c8678e93"):
              "630236e58c8230010d683b22604bfb97083ad932bfa36847ab048ef0ec5af55a",
+             ("tools/fn_kernels.py", "85e31c84a0709bfaec8f40c195354f29c225ed72defe4df85a5ad0a175a985e8"):
+             "152025a29380f1bc9c0a1d93b2382531260b443cbe542549f332fa245ac23b7f",
              ("engine/models/lfm2_moe/engine.py", "76bfb598fee3b1d731a51bd4f4ceb4afc8bb30ee8388ed4ca9551de82d7d388b"):
              "2360b32729713510020bd47ed86e6c185a40f54b22c622fc33c4fa7e6646783e",
              ("engine/models/lfm2_moe/kernels.py", "8f2e42e559a134a9992729497524b6fa5d57f6cb08378e56ed3d0b4fa8f02dea"):

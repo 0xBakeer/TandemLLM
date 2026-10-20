@@ -25,6 +25,12 @@ gave a tree that never shipped for Flash-Next and LFM2.5, so their 0.9.x files w
   * Flash-Next's and LFM2.5's legacy fingerprints hold their 0.9.x fp4 (`same_variants`);
   * a tree two releases on adopts the files the release before it wrote, and that one's.
 
+OPS-215: ENG-383 made tools/fn_kernels.py's router take up to 512 experts (it refused any count but 512),
+so Flash-Next's, LFM2.5's and NemotronH's fingerprints moved off 0.12.2's with no entry. At 512 experts the
+router launches as before, and the entry is in:
+
+  * Flash-Next's, LFM2.5's and NemotronH's legacy fingerprints hold 0.12.2's fp4.
+
 ENG-381: ENG-363 (0.11.2) changed engine/models/lfm2_moe/engine.py and kernels.py with no entry, so
 LFM2.5's legacy fingerprints reached neither 0.9.x's fp4 nor 0.10.0-0.11.1's. The rows are the same
 (tools/lfm_attn_rows_check.py), and the entries are in:
@@ -69,6 +75,8 @@ V2_09, V2_072 = "a0151bf64448bd92", "9ac3d8a94c8a9199"
 FP4_09 = {"27b": "432dc8e260606f4c", "flashnext": "cc8c32668aa6aa65", "lfm25": "aa8db59af76a1c98"}
 #: LFM2.5's fp4 of 0.10.0-0.11.1 (SPD-125's fn_kernels.py, lfm2_moe before ENG-363)
 FP4_LFM25_011 = "9049446866c5e4fc"
+#: OPS-215: the fp4 of 0.12.2 by model (extra {}), before ENG-383's router took other expert counts
+FP4_0122 = {"flashnext": "dac45dfe10281b1e", "lfm25": "899978df1e8b979b", "nemotron_h": "8cfead8de4befc19"}
 
 
 def _sha(path):
@@ -241,6 +249,17 @@ def test_an_unchanged_fingerprint_keeps_what_it_adopted():
         also = dc.equivalents(tier, "flash-next", ["flash-next", "v2 on the old loader"],
                               formula=mf.adoption())
         assert set(also) == {"the RC's fp3", "v2", "v2 on the old loader"}, also
+
+
+def test_flash_next_lfm25_and_nemotron_h_adopt_0_12_2s_files():
+    from engine.models.nemotron_h import serving as nh_serving
+    out = []
+    for name, m in (("flashnext", fn_serving.manifest()), ("lfm25", lfm_serving.manifest()),
+                    ("nemotron_h", nh_serving.manifest())):
+        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
+        assert any(g.startswith(FP4_0122[name]) for g in got), (name, [g[:16] for g in got])
+        out.append(f"{name} {FP4_0122[name]}")
+    return ", ".join(out)
 
 
 if __name__ == "__main__":
