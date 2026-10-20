@@ -20,6 +20,10 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 - The fake backend and a test of SRV-639 describe the strict window as a strict OpenAI-compatible backend's and the relayed model as a `proxy` backend, not by another engine's name (OPS-211).
 
+### Chat tab
+
+- `grep` given one file's path searches that file, whole and line by line, where it answered "is not a directory"; a folder's files over 2 MiB are named as not searched instead of being counted as no match (SRV-649). The tool's description is unchanged, so no chat reads its prompt again.
+
 ## 0.12.2, 2026-10-20
 
 0.12.2 fixes two Chat-tab bugs that users reported and the adoption of LFM2.5's older saved conversations. A run that reads a large file now ends with an answer instead of a request over the window (#18), and the port preview shows an app's Server-Sent Events and long-polls as they arrive (#86). No model, card or profile changed, and every profile writes the same text as in 0.12.1. `read_file`'s schema changes, so each chat's first request after the update reads its prompt again. A box that comes from 0.9.x to 0.11.1 adopts its LFM2.5 conversations again; a box that ran 0.11.2 to 0.12.1 already lost them.

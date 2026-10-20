@@ -37,7 +37,7 @@ import time
 import urllib.parse
 
 from chatd import render, sandbox as sandbox_mod
-from chatd.workspace import ChangedError, PathError
+from chatd.workspace import MAX_READ, ChangedError, PathError
 
 MODEL_LIMIT_CHARS = 64_000          # ~16,000 tokens
 MODEL_EDGE_CHARS = 16_000           # ~4,000 tokens kept from each end
@@ -260,9 +260,18 @@ def _glob(ctx, a):
 
 
 def _grep(ctx, a):
+    skipped: list = []
     hits = ctx.ws.grep(str(a.get("pattern") or ""), str(a.get("path") or "/workspace"),
-                       a.get("include") or None, bool(a.get("ignore_case")))
-    return Result("\n".join(hits) if hits else "no matches")
+                       a.get("include") or None, bool(a.get("ignore_case")), skipped=skipped)
+    text = "\n".join(hits) if hits else "no matches"
+    if skipped:
+        # a folder's large files are not read; say which, so "no matches" is not read as their
+        # answer (a file named by its path is searched whole)
+        names = ", ".join(f"{p} ({n:,} bytes)" for p, n in skipped[:5])
+        more = f" and {len(skipped) - 5} more" if len(skipped) > 5 else ""
+        text += (f"\n[not searched: {len(skipped)} file(s) over {MAX_READ // (1 << 20)} MiB: "
+                 f"{names}{more}; grep one of them by its path to search it whole]")
+    return Result(text)
 
 
 def _fetch(ctx, a):

@@ -41,6 +41,8 @@ compaction line, 2,000 tokens at least, never past the window less twice the ans
 never more than 64,000 characters a result (12,000 in Agents mode). `read_file` cuts at whole lines
 and says where to go on ("[truncated at 64,000 characters: lines 1-30 of 317 shown, 639,237 more
 bytes; read on with offset=31]"); a line longer than one read goes on with its `column` argument.
+`grep` takes a folder or one file: a file named by its path is searched whole, and a folder's
+files over 2 MiB are named as not searched instead of counted as no match (SRV-649).
 Other results keep their first and last quarter and the whole output under `.tandem/outputs/`. A
 request's estimate carries a margin for the text the engine has not counted yet (15 % of it): at
 the edge our engine counts the request exactly (`POST /v1/tokenize`) and a request over the window
