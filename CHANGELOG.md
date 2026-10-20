@@ -19,6 +19,7 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 ### Tests
 
 - The fake backend and a test of SRV-639 describe the strict window as a strict OpenAI-compatible backend's and the relayed model as a `proxy` backend, not by another engine's name (OPS-211).
+- `tests/test_grammar.py` passes run after run (SRV-647): it failed in most runs on 0.12.1 and 0.12.2 because the constraint's mask cache was keyed by `id()` of the grammar, and a grammar built after another was freed read that one's masks (a mask for a 97-token vocabulary on a 99-token one). Each grammar now keys its masks by a serial of its own, and a grammar replaced for another vocabulary drops its masks. On a box the same reuse could serve a wrong mask after the grammar cache replaced a grammar; no case was seen.
 
 ### Chat tab
 

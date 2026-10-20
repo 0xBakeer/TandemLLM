@@ -330,13 +330,58 @@ def test_the_mask_cache_is_bounded_and_forgets_dropped_grammars():
         G._GRAMMARS.clear()
         for i in range(3):
             G.grammar_for(f"x{i}", v, keep=2).mask(0, frozenset(), "cpu")
-        live = {id(x) for x in G._GRAMMARS.values()}
-        assert {k[0] for k in G._MASKS} - {id(g)} <= live, "a dropped grammar leaves no masks"
+        live = {x.serial for x in G._GRAMMARS.values()}
+        assert {k[0] for k in G._MASKS} - {g.serial} <= live, "a dropped grammar leaves no masks"
     finally:
         G.MASK_CACHE = old
         G._MASKS.clear()
         G._GRAMMARS.clear()
     return "5 masks kept of 8, LRU order; a grammar dropped from the cache takes its masks along"
+
+
+def test_a_new_grammar_never_reads_a_freed_grammars_masks():
+    """The masks were keyed by `id(grammar)`, and CPython hands a freed object's id to the next
+    one: a grammar built after another was freed read its masks (a mask for a 97-token
+    vocabulary on a 99-token one: `test_the_handler_forces_the_call` and two more failed in
+    most runs on 0.12.2). Built and dropped in a loop, the ids repeat; the keys must not."""
+    import gc
+    G._MASKS.clear()
+    G._GRAMMARS.clear()
+    try:
+        v, _ = _toy_vocab()
+        seen_ids, serials = set(), set()
+        reused = False
+        for i in range(50):
+            g = G.Grammar(r"[a-c]{4}" if i % 2 else r"[ab]{3}", v)
+            reused |= id(g) in seen_ids
+            seen_ids.add(id(g))
+            assert g.serial not in serials
+            serials.add(g.serial)
+            want = g.vocab.mask(g.dfa, g.dfa.start)
+            got = g.mask(g.dfa.start, frozenset(), "cpu").numpy()
+            assert (got == want).all(), f"grammar {i} read another grammar's mask"
+            del g
+            gc.collect()
+        return f"50 grammars, ids reused: {reused}, every mask its own"
+    finally:
+        G._MASKS.clear()
+        G._GRAMMARS.clear()
+
+
+def test_the_same_pattern_on_another_vocabulary_drops_the_old_masks():
+    G._MASKS.clear()
+    G._GRAMMARS.clear()
+    try:
+        v1, _ = _toy_vocab()
+        v2, _ = _toy_vocab()
+        g1 = G.grammar_for(r"[a-c]{4}", v1)
+        g1.mask(g1.dfa.start, frozenset(), "cpu")
+        g2 = G.grammar_for(r"[a-c]{4}", v2)
+        assert g2 is not g1 and g2.vocab is v2
+        assert not any(k[0] == g1.serial for k in G._MASKS), "the replaced grammar's masks left"
+    finally:
+        G._MASKS.clear()
+        G._GRAMMARS.clear()
 
 
 # ------------------------------------------------------------------ tool_choice as a mask
