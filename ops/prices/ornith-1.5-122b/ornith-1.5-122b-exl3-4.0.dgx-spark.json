@@ -24,9 +24,6 @@
   },
   "spec": {
    "1": 18.3
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "8192": {
@@ -54,9 +51,6 @@
   },
   "spec": {
    "1": 19.1
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "16384": {
@@ -83,9 +77,6 @@
   },
   "spec": {
    "1": 19.9
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "32768": {
@@ -124,9 +115,6 @@
   },
   "spec": {
    "1": 21.4
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "65536": {
@@ -159,9 +147,6 @@
   },
   "spec": {
    "1": 35.0
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "131072": {
@@ -194,11 +179,8 @@
   },
   "spec": {
    "1": 44.0
-  },
-  "prime": {
-   "1": 0.02
   }
  },
  "step_ms": 4.0,
- "measured": "2026-10-20, Ornith-1.5-122B EXL3 4.0 on the DGX Spark (ENG-391). Context classes: Qwen35MoeServing.price_class (0 up to 4,096 tokens, then 4,096 x 2^k). chain: a verify block and its commit by rows, as StairCut learned them online on the A/B runs (class 0) and two Chat-tab turns (16,384, 32,768, 65,536 at 12-31k and 31-39k tokens), made non-decreasing; 8,192 takes class 0's and 131,072 the 65,536 class's (not measured). plain: class 0 measured (38.2 tok/s at 3-4k-token prompts); the others ESTIMATED from the bytes a step reads (4.76 GB of weights + 24 KiB of KV a context token). spec: ESTIMATED as 0.7 of plain up to 32,768 (the drafted rounds' ms a token measured 13.2-19.6 at class 0, 16.5 at 16,384, 21.7 at 32,768 with anchor-only rounds included), equal to plain past it (46.6 measured at 65,536 in one turn). prime: the MTP layer's backlog row, as Flash-Next's class 0."
+ "measured": "2026-10-20, Ornith-1.5-122B EXL3 4.0 on the DGX Spark (ENG-391). Context classes: Qwen35MoeServing.price_class (0 up to 4,096 tokens, then 4,096 x 2^k). chain: a verify block and its commit by rows, as StairCut learned them online on the A/B runs (class 0) and two Chat-tab turns (16,384, 32,768, 65,536 at 12-31k and 31-39k tokens), made non-decreasing; 8,192 takes class 0's and 131,072 the 65,536 class's (not measured). plain: class 0 measured (38.2 tok/s at 3-4k-token prompts); the others ESTIMATED from the bytes a step reads (4.76 GB of weights + 24 KiB of KV a context token). spec: ESTIMATED as 0.7 of plain up to 32,768 (the drafted rounds' ms a token measured 13.2-19.6 at class 0, 16.5 at 16,384, 21.7 at 32,768 with anchor-only rounds included), equal to plain past it (46.6 measured at 65,536 in one turn). No prime prior: a turn always drafts until the head's backlog cost is learned (with one, every 3-4k-token turn of the A/B took the plain step, turn=False, 2026-10-20)."
 }

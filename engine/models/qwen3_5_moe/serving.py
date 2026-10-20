@@ -71,6 +71,13 @@ class Qwen35MoeServing(FlashNextServing):
     def manifest(self) -> Manifest:
         return manifest()
 
+    def capture_cost(self, n: int) -> float:
+        """0: a turn is not sent to the plain step for the graphs its class lacks. The idle captures take the
+        class of the state's last length, which on a conductor box is a short side question's, so a class's
+        graphs stayed missing and every 3-4k-token turn of the A/B took the plain step (2026-10-20); the
+        first drafted rounds of a class capture its graphs and are not priced."""
+        return 0.0
+
 
 class _TapKV(_KV):
     """`kv` with the taps' bookkeeping: a length set by a restore (the caches) leaves the taps below it

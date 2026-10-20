@@ -1,7 +1,7 @@
 # Ornith-1.5-122B in TandemLLM: the setup guide's registry entry (docs/setup.md). Schema 1.
 #
 # Ornith's agentic and coding model on the Qwen3.5 mixture-of-experts architecture (engine/models/qwen3_5_moe), from our
-# EXL3 pack, with the public DFlash2 drafter for it. weights_gib: allocated at load (measured 2026-10-20). Window
+# EXL3 pack, drafting with its own MTP layer (the public DFlash2 drafter for it is the other head). weights_gib: allocated at load (measured 2026-10-20). Window
 # 262,144 tokens (max_position_embeddings); its KV is 24,576 bytes a token (12 attention layers, 2 KV heads of 256).
 # One sequence slot: the joint verify of several slots is not built for this trunk yet. Rows of the measured table come
 # from real runs only.
@@ -91,7 +91,7 @@ profiles:
   bpw: 4.0
   disk_gb: 64.6
   weights_gib: 59.95
-  drafters_gib: 2.35
+  drafters_gib: 1.21
   hf_repo: 0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0
   hf_private: true
   made_by:
@@ -108,43 +108,60 @@ profiles:
     date: '2026-10-20'
     source: 'this engine against the BF16 checkpoint''s logits (tools/q35m_quality.py, 8 wikitext rows of 1,024 tokens from
       the conversion job, BF16 ppl 7.094; the converter''s own forward of the pack: KL 0.136, ppl 7.315)'
-  assets_required:
-  - ornith-dflash2
+  assets_required: []
   note: 'Converted from the BF16 checkpoint (revision e09bc0dfbe) by exllamav3 1.6.2: every projection at 4 bits, head 6,
     the MTP layer at 4, the vision tower at 6 (loaded beside it on the EXL3 kernels, 0.35 GB). Measured 2026-10-20: 59.95
-    GiB at load without the MTP layer (61.16 with it), plain decode 37.5 to 38.4 tok/s at 3-4k-token prompts. Drafts with
-    the DFlash2 drafter for Ornith and the lookup. The Hugging Face repository is private: a download needs a token with access.'
+    GiB at load, 61.16 with the MTP layer the profile drafts with (the lookup beside it, cut by StairCut from the pack''s
+    price file); plain decode 37.2 to 38.4 tok/s. The DFlash2 drafter for Ornith is the other head (QSE_ORN_HEAD=dflash2,
+    2.86 GiB). The Hugging Face repository is private: a download needs a token with access.'
   hf_revision: 9e73dddc081cc178408bdb79025d7fcbca1ffd6c
   max_window: 262144
 measurements:
   build: 0.12.2
   date: '2026-10-20'
-  method: >-
-    tools/fn_lookup_ab.py through one fresh server a run on the Spark, the GPU to itself: the prose, chat, code, edit and
-    copy asks, one greedy request each, thinking off, 512 new tokens, model TandemLLM (the conductor's prompt, 3,146 to
-    4,165 prompt tokens), one slot, max_len 262,144; plain decode, the MTP layer + lookup, and DFlash2 + lookup, each cut
-    by StairCut learning its prices online (no price file yet). One run a cell. Raw data:
-    models/ornith-1.5-122b/measurements/0.12.2-summary.json.
-  source: models/ornith-1.5-122b/measurements/0.12.2-summary.json
+  method: 'tools/q35m_ab.py through one fresh server a run on the Spark, the GPU to itself: the prose, chat, code, edit and
+    copy asks, one greedy request each, thinking off, 512 new tokens, model TandemLLM (3,146 to 4,165 prompt tokens), one
+    slot, max_len 262,144, the pack''s price file; a 2,048-token game file through the raw model. One run a cell. Raw data:
+    models/ornith-1.5-122b/measurements/0.12.2-drafters.json (and 0.12.2-summary.json, the first runs without a price file).'
+  source: models/ornith-1.5-122b/measurements/0.12.2-drafters.json
   rows:
   - profile: ornith-1.5-122b-exl3-4.0
     build: 0.12.2
     date: '2026-10-20'
     comparable: true
-    note: 'DFlash2 + lookup cut by StairCut (no price file: learned online); edit and copy asks 78.3 and 106.7 tok/s; plain prose / chat / code / edit / copy 37.46 / 37.84 / 38.44 / 38.24 / 38.24; the MTP layer + lookup 75.27 / 56.91 / 36.21 / 43.0 / 33.94; every text the plain run''s.'
+    note: The MTP layer + lookup, anchor backoff 8, the price file; edit and copy asks 115.87 and 124.75 tok/s, a 2,048-token
+      game file 103.28; plain prose / chat / code / edit / copy 37.55 / 37.81 / 38.42 / 38.03 / 38.13 and the game file 37.18;
+      DFlash2 (NVFP4, hot head) 67.29 / 92.22 / 91.66 / 106.87 / 122.76 and 96.77; every text the plain run's.
     cells:
-      greedy_512: {prose: [59.48, 59.48, 282.95, 16.83, 1], chat: [51.05, 51.05, 179.43, 9.16, 1], code: [75.95, 75.95, 149.57, 11.36, 1]}
+      greedy_512:
+        prose:
+        - 85.3
+        - 85.3
+        - 169.17
+        - 14.43
+        - 1
+        chat:
+        - 110.0
+        - 110.0
+        - 143.82
+        - 15.82
+        - 1
+        code:
+        - 114.19
+        - 114.19
+        - 87.75
+        - 10.02
+        - 1
     ttft_s: {}
     lossless: null
-
 memory:
   parts:
   - id: engine
     label: Engine state, the decode graphs and warm-up
     gib: 1.6
     kind: fixed
-    source: 'measured 2026-10-20 at load with the DFlash2 drafter: the engine 0.59, the warm-up 0.80 and the graphs 0.19 GiB
-      of MemAvailable beyond the weights (server [memory] line)'
+    source: 'measured 2026-10-20 at load with the MTP layer: the engine 0.52, the drafters 1.48, the warm-up 0.38 and the
+      graphs 0.10 GiB of MemAvailable beyond the weights (server [memory] line)'
   - id: allocator
     label: Allocator reserve
     gib: 1.5

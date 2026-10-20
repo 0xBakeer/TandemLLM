@@ -22,8 +22,14 @@ GAME = ("Write a Mario-style platformer game in one HTML file that works on a ph
         "and jump), with a scrolling level, coins and enemies. Give the whole file in one code block.")
 
 
-def ask(url: str, text: str, n: int) -> dict:
-    body = {"model": "TandemLLM", "max_tokens": n, "temperature": 0, "messages": [{"role": "user", "content": text}],
+#: the long code answer through the raw model (no conductor: the agent persona answered the game ask in 134 tokens)
+LONG = ("Write a complete Mario-style platformer game as one HTML file for a phone: canvas rendering, touch buttons "
+        "for left, right and jump, a scrolling level with platforms, coins, enemies, score and lives. Reply with the "
+        "whole file in one code block and nothing else.")
+
+
+def ask(url: str, text: str, n: int, model: str = "TandemLLM") -> dict:
+    body = {"model": model, "max_tokens": n, "temperature": 0, "messages": [{"role": "user", "content": text}],
             "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -40,6 +46,7 @@ def main() -> None:
     ap.add_argument("--label", default="")
     ap.add_argument("--out")
     ap.add_argument("--compare", nargs="+")
+    ap.add_argument("--long", action="store_true", help="only the long code answer (2,048 tokens, the raw model)")
     a = ap.parse_args()
     if a.compare:
         runs = [json.load(open(p)) for p in a.compare]
@@ -55,8 +62,10 @@ def main() -> None:
     out = {"label": a.label, "version": health.get("version"), "drafters": (health.get("weights") or {}).get("drafters"),
            "answers": {}}
     asks = [(k, v, 512) for k, v in cases().items()] + [("game", GAME, 2048)]
+    if a.long:
+        asks = [("long", LONG, 2048)]
     for name, text, n in asks:
-        out["answers"][name] = r = ask(a.url, text, n)
+        out["answers"][name] = r = ask(a.url, text, n, "qwen38-spark-engine" if a.long else "TandemLLM")
         print(f"[ab] {a.label} {name}: prompt {r['prompt']}, {r['n']} tokens, {r['tok_s']} tok/s, {r['per_block']} a block",
               flush=True)
     if a.out:
