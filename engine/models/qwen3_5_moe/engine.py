@@ -72,6 +72,12 @@ class Qwen35MoeEngine(FlashNextEngine):
         super().reset(st)
         st.tap_from, st.tap_gen = 0, getattr(st, "tap_gen", 0) + 1
 
+    def build_pool(self, st, layers=None) -> None:
+        """No pooled indexer keys: this family's attention is dense (Flash-Next's pool is its sparse
+        indexer's; a cache restore and the MTP head's resume call this)."""
+        if self.cfg.has_indexer:
+            super().build_pool(st, layers)
+
     def _rows_buffers(self, M: int, key=None) -> dict:
         rb = super()._rows_buffers(M, key)
         if self.taps and "taps" not in rb:
