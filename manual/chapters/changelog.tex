@@ -42,9 +42,16 @@
 0.12.0 & 10-19 & the \code{tools} profile for API clients that offer tools; structured outputs with tools; C5, one mutation per turn; the secret echo mask; the raw path's thinking in \code{reasoning_content} for plain API clients; tool-eval-bench results \\
 0.12.1 & 10-20 & the first community pack on Super VL, styles01's EXL3 3.5 bpw, text only; a request with images on a side slot; redirects kept in the port preview; eleven outside pull requests; \code{SECURITY.md} and a threat model \\
 0.12.2 & 10-20 & a Chat-tab run's tool results fit the room left and \code{read_file} reads by whole lines; the port preview streams; LFM2.5 adopts its 0.9.x to 0.11.1 conversations again \\
+0.13.0 & 10-20 & Ornith-1.5-122B on the Qwen3.5 MoE trunk, from our EXL3 4.0 pack, drafting with its MTP layer; the conductor's third tool-eval-bench round; \code{grep} and \code{read_file} fixes in \code{chatd} \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\section{0.13.0, Ornith-1.5-122B}\label{sec:changelog-0130}
+
+0.13.0 adds Ornith AI's Ornith-1.5-122B from our EXL3 pack at 4.0 bits a weight (Chapter~\ref{ch:ornith}). It is a Qwen3.5 mixture-of-experts model that reads images, on a new trunk, \code{engine/models/qwen3_5_moe}. The profile drafts with the model's MTP layer and the lookup: on a DGX Spark, one request, 512 greedy tokens, thinking off, one run each, 37.2 to 38.4~tok/s plain and 85.3 to 124.8 drafted, every drafted text the plain one. The engine's top token agrees with exllamav3's own forward on the pack at 498 of 512 positions.
+
+The other models write the same text as in 0.12.2. The router kernel's new bytes moved the fingerprints of Flash-Next, LFM2.5 and NemotronH; at 512 experts it launches as before, \code{SAME_ROWS} names the new bytes as the old, and their first start adopts 0.12.2's saved conversations once. The release also carries the response cache's key on the resolved effort level, the tool-eval-bench batch tools, the deliverable keep-out in shadow, \code{grep} on one file's path, \code{read_file} past 4~MiB and a grammar test that passes every run.
 
 \section{0.12.2, large reads and a streaming preview}\label{sec:changelog-0122}
 

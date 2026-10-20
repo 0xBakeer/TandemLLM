@@ -2,10 +2,33 @@
 
 Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o256-v1` (one request at a time, 256 prompt tokens, 256 generated, thinking off, greedy), mean tok/s with the lookup store off unless noted. [docs/measurement.md](docs/measurement.md) explains the row. Every release produces the same text as the one before it, except where an entry says otherwise.
 
-## Unreleased
+## 0.13.0, 2026-10-20
+
+0.13.0 adds Ornith AI's Ornith-1.5-122B, from our EXL3 pack at 4.0 bits a weight. It is a Qwen3.5 mixture-of-experts model that reads images and thinks before it answers, and it drafts with its own MTP layer. On one DGX Spark it decodes 37.2 to 38.4 tok/s plain and 85.3 to 124.8 with the MTP layer and the lookup, and every drafted text is the plain run's. The release also carries the conductor's third round of tool-eval-bench work, two `chatd` tool fixes and a fixed grammar test. The other models write the same text as in 0.12.2 and keep their saved conversations: Flash-Next's, LFM2.5's and NemotronH's fingerprints change, and their first start adopts 0.12.2's files.
+
+### Ornith-1.5-122B
+
+Ornith-1.5-122B has 48 layers, 36 Gated DeltaNet and 12 gated attention (ENG-E15). Each layer has 256 routed experts, of which 8 run a token, and a shared expert. One more layer predicts the next tokens (MTP), a Qwen3.5 vision tower reads images, and the context is 262,144 tokens. About 10B of its 122B parameters run for each token.
+
+- The Qwen3.5 MoE trunk, `engine/models/qwen3_5_moe` (ENG-383, ENG-391). It reads the config strictly and the EXL3 pack with its per-expert projections and mixed rates. The row step and the prefill run on Flash-Next's EXL3 kernels with one residual stream, and the row attention is dense at any context length. The router kernel now takes up to 512 experts. The reference forward matches transformers on tiny configs of both Qwen3.5 MoE shapes, and a cache restore on this trunk builds no sparse-indexer pool (the second call of every tool turn failed without it).
+- One profile, `ornith-1.5-122b-exl3-4.0`. Our pack has every projection at 4 bits, the head at 6, the MTP layer at 4 and the vision tower at 6, 64.6 GB. exllamav3 1.6.2 converted it from the BF16 checkpoint at revision e09bc0dfbe, with a patch for 13 experts whose weights are all zero in fp16. The repository `0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0` is public, pinned at 92f7483c, and sits in [one collection](https://huggingface.co/collections/0xBakeer/ornith-15-122b-exl3-for-tandemllm-6ad7ccf04f93a379ba434c4c) with the base model and the DFlash2 drafter. A download needs no token.
+- Drafting: the MTP layer as a chain of 3 and the lookup in one tree, cut by StairCut from the pack's price file. After a round that StairCut cut to the anchor alone, the next 1, 2, 4, then 8 rounds take the plain step (`QWEN38_Q35M_ANCHOR_BACKOFF`). `QSE_ORN_HEAD=dflash2` drafts with incoai's DFlash2 drafter for Ornith instead, with its projections in NVFP4 and its head over the 32,768 most used tokens; the profile then fetches it (1.86 GB). The lookup keeps a suffix store of its own, since the tokenizer is not the Qwen3.8 one.
+- Serving: one slot, a window up to 262,144 tokens, vision on with the pack's own tower (0.35 GB). The model thinks in a `<think>` block and calls tools in the XML form. Temperature 0.6, `top_k` 20 and `top_p` 0.95 come from its generation config. A start needs 93 GiB of free memory.
+- Against the BF16 checkpoint's logits (`tools/q35m_quality.py`, 8 wikitext rows of 1,024 tokens): KL 0.139, top-1 86.2 %, perplexity 7.27 against BF16's 7.09. exllamav3's own forward of the pack gives KL 0.136 on the same rows.
+- Against exllamav3 1.6.0's forward on the same pack, fed the engine's greedy tokens, the top token agrees at 498 of 512 positions (97.3 %, KL 0.027). Agreement is not exact. Of the 14 differences, 9 have a margin under 0.5 logits and one a margin over 4. The cause is not tested.
+- Measured on one DGX Spark on 2026-10-20: one fresh server a row, greedy, thinking off, 512 new tokens on prompts of 3,146 to 4,165 tokens, one run a cell. The last column is a 2,048-token code answer (a game in one HTML file) through the raw path. Every drafted text is the plain run's.
+
+| tok/s | prose | code | chat | edit | copy | 2,048-token code |
+|-|-|-|-|-|-|-|
+| plain | 37.6 | 38.4 | 37.8 | 38.0 | 38.1 | 37.2 |
+| MTP layer + lookup (the profile) | 85.3 | 114.2 | 110.0 | 115.9 | 124.8 | 103.3 |
+| DFlash2 + lookup | 67.3 | 91.7 | 92.2 | 106.9 | 122.8 | 96.8 |
+
+- A start loads the pack in 65 s: the weights take 59.95 GiB, 61.16 with the MTP layer. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs. Not measured: requests at once (a joint verify for side slots on this trunk is SRV-653), prompt reading speed, images, sampled decoding, repeat runs and tool-eval-bench.
 
 ### Caches
 
+- Flash-Next, LFM2.5 and NemotronH adopt their 0.12.2 conversations (OPS-215). ENG-383's router change moved their fingerprints, since `tools/fn_kernels.py` is in their manifests. At 512 experts the router launches the same kernel with the same arguments as before, so a `SAME_ROWS` entry maps the new bytes to the old. Without it their first start on 0.13.0 would have swept every saved chat. The 27B's fingerprint does not change.
 - The response cache keys on the effort level a request resolved to, the client's word and the router's level (SRV-645). `high` and `xhigh` render the same prompt and, at a 16,384-token limit, the same thinking cap after the answer reserve, so a raw `xhigh` tool-eval-bench run replayed 190 answers of the `high` run before it. The same request at the same level still replays.
 
 ### Tools
@@ -18,13 +41,16 @@ Releases of TandemLLM. Speed numbers are the benchmark row `serve-single-i256-o2
 
 ### Tests
 
+- New CPU tests for the Qwen3.5 MoE trunk: the config and the pack's layout, the reference against transformers, the row attention (Triton on a GPU, or the interpreter), the DFlash2 selector and its hot ids, and a cache restore on a tiny engine (`tests/test_q35m_*.py`). `test_the_ornith_card_is_the_raw_data` holds the card and the profile's pin to the summary (OPS-215).
 - The fake backend and a test of SRV-639 describe the strict window as a strict OpenAI-compatible backend's and the relayed model as a `proxy` backend, not by another engine's name (OPS-211).
 - `tests/test_grammar.py` passes run after run (SRV-647): it failed in most runs on 0.12.1 and 0.12.2 because the constraint's mask cache was keyed by `id()` of the grammar, and a grammar built after another was freed read that one's masks (a mask for a 97-token vocabulary on a 99-token one). Each grammar now keys its masks by a serial of its own, and a grammar replaced for another vocabulary drops its masks. On a box the same reuse could serve a wrong mask after the grammar cache replaced a grammar; no case was seen.
 
 ### Chat tab
 
-- `grep` given one file's path searches that file, whole and line by line, where it answered "is not a directory"; a folder's files over 2 MiB are named as not searched instead of being counted as no match (SRV-649). The tool's description is unchanged, so no chat reads its prompt again.
+- `grep` given one file's path searches that file line by line, where it answered "is not a directory"; a folder's files over 2 MiB are named as not searched instead of being counted as no match (SRV-649). The tool's description is unchanged, so no chat reads its prompt again.
 - `read_file` reaches every line of a file over 4 MiB (SRV-651). It decoded the first 4 MiB of any file and paged inside them as if the file ended there: the window's last page promised nothing more and an offset past it came back empty. A large file is now read 4 MiB at a time from the line `offset` names, whole lines numbered as in the file, and the marker names the bytes after the page and the offset to read on from; a line longer than 4 MiB says so. Files up to 4 MiB read as before, and the schema is unchanged.
+
+Upgrade: run the 0.13.0 installer again (`--setup --force-setup` on a box installed with `--setup`, then `ops/use-profile.sh` with your profile; the same `--dir` otherwise), then `tandem restart` and `tandem chat restart`. For Ornith run `ops/use-profile.sh ornith-1.5-122b-exl3-4.0`; it downloads 64.6 GB.
 
 ## 0.12.2, 2026-10-20
 

@@ -23,6 +23,7 @@
 \texttt{qse\_\allowbreak{}conductor\_\allowbreak{}gave\_\allowbreak{}up\_\allowbreak{}total} & \texttt{counter} & turns the conductor ended with its GIVE\_UP sentence \\
 \texttt{qse\_\allowbreak{}conductor\_\allowbreak{}tier1\_\allowbreak{}seconds} & \texttt{histogram} & one tier 1 question (a classifier stage: the decider or Qwen), answered or not \\
 \texttt{qse\_\allowbreak{}conductor\_\allowbreak{}tier1\_\allowbreak{}failures\_\allowbreak{}total} & \texttt{counter,\allowbreak{} reason} & tier 1 questions without a usable answer, by reason \\
+\texttt{qse\_\allowbreak{}conductor\_\allowbreak{}package\_\allowbreak{}kept\_\allowbreak{}out\_\allowbreak{}total} & \texttt{counter,\allowbreak{} why,\allowbreak{} mode} & packages the router kept out of a turn because an offered tool delivers their result, by why and by mode (act, shadow) \\
 \texttt{qse\_\allowbreak{}conductor\_\allowbreak{}reasoning\_\allowbreak{}tokens\_\allowbreak{}cut\_\allowbreak{}total} & \texttt{counter} & reasoning tokens written before a hidden close cut the block (the size of the blocks the conductor closed) \\
 \texttt{qse\_\allowbreak{}requests\_\allowbreak{}running} & \texttt{gauge} & generations the engine is working on \\
 \texttt{qse\_\allowbreak{}requests\_\allowbreak{}waiting} & \texttt{gauge} & requests holding a socket and waiting for the engine \\
