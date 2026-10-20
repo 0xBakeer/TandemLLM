@@ -128,7 +128,10 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 3, mark=
     mark("engine")
     drafter, check, hot = None, None, int(_S.get("FN_DRAFT_HOT"))
     if spec and dflash2:
-        hot = 0
+        from engine.models.qwen3_5_moe import dflash2 as D2
+        hot = int(_S.get("FN_DRAFT_HOT")) if D2.HOT and idx.cfg.vocab_size == 248_320 else 0
+        if hot:
+            eng_.set_draft_head(np.load(os.path.join(ROOT, "ops", "fn-hot-vocab.npy"))[:hot])
         text = tok.apply_chat_template([{"role": "user", "content": "Count from one to twenty in words."}],
                                        tokenize=False, add_generation_prompt=True, enable_thinking=False)
         prompt = tok(text, add_special_tokens=False)["input_ids"]
@@ -161,10 +164,12 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 3, mark=
                 log(f"[server] {d2.get('why', 'DFlash2 off')}: the lookup drafts alone")
             eng.dflash2 = head
             drafter = MTPTreeDrafter(eng, head if head is not None else NoHead(),
-                                     StairCut(prices(pack, log), siblings=False), ngram)
+                                     StairCut(prices(pack, log), siblings=_S.get("Q35M_SIBLINGS") == "1"), ngram)
+            drafter.anchor_backoff = int(_S.get("Q35M_ANCHOR_BACKOFF") or 0)
             drafter.capture_all()
         mark("drafters")
-        info = {"pack": pack, "load": timing, "self_check": check, "draft_head": "dflash2" if head else None,
+        info = {"pack": pack, "load": timing, "self_check": check,
+                "draft_head": ("dflash2" + (" nvfp4" if D2.NVFP4 else "") + (f" hot {hot}" if hot else "")) if head else None,
                 "dflash2": d2, "depth": head.depth if head is not None else 0}
         return eng, drafter, info
     spec = spec and timing.get("mtp", False)
@@ -185,7 +190,9 @@ def build(pack: str, max_len: int, tok, spec: bool = True, depth: int = 3, mark=
                                      max_depth=16, min_corpus_order=8)
                 log(f"[server] Qwen3.5 MoE lookup in the cut: corpus "
                     f"{(corpus or 'none') if ngram.corpus is not None else 'none'}")
-            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth), StairCut(prices(pack, log), siblings=False), ngram)
+            drafter = MTPTreeDrafter(eng, eng.add_mtp_head(depth),
+                                     StairCut(prices(pack, log), siblings=_S.get("Q35M_SIBLINGS") == "1"), ngram)
+            drafter.anchor_backoff = int(_S.get("Q35M_ANCHOR_BACKOFF") or 0)
             drafter.capture_all()
         else:
             log("[server] Qwen3.5 MoE self-check FAILED: speculation off, plain decode only")

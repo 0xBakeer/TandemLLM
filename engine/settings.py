@@ -344,6 +344,13 @@ KNOBS: dict[str, tuple] = {
     'FN_LOOKUP': ('0', 'engine/models/flashnext/serving.py'),
     # ENG-391: the lookup in the Qwen3.5 MoE MTP round's cut (one tree with the MTP chain); 0 = the head alone
     'Q35M_LOOKUP': ('1', 'engine/models/qwen3_5_moe/serving.py'),
+    # the DFlash2 head's projections in NVFP4 / its head over the hot vocabulary (drafter only: acceptance, not text)
+    'Q35M_DFLASH2_NVFP4': ('0', 'engine/models/qwen3_5_moe/dflash2.py'),
+    'Q35M_DFLASH2_HOT': ('0', 'engine/models/qwen3_5_moe/dflash2.py'),
+    # the cut's second-choice leaf a depth (a tree block) for the Qwen3.5 MoE drafters
+    'Q35M_SIBLINGS': ('0', 'engine/models/qwen3_5_moe/serving.py'),
+    # rounds after an anchor-only cut that take the plain step (1, 2, 4 .. up to this; 0 = off)
+    'Q35M_ANCHOR_BACKOFF': ('0', 'engine/models/qwen3_5_moe/serving.py'),
 }
 
 

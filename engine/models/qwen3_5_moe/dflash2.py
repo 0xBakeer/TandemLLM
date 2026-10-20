@@ -63,8 +63,11 @@ class _RingConfig:
 class DFlash2RingModel(LiLiCorrModel):
     """The draft's arithmetic over its weights, the target's embedding and head (rows -> fp32 logits)."""
 
-    def __init__(self, cfg: _RingConfig, W: dict, embed: torch.Tensor, head):
-        self.cfg, self.W, self.embed, self.head = cfg, W, embed, head
+    def __init__(self, cfg: _RingConfig, W: dict, embed: torch.Tensor, head, kv_from: dict | None = None,
+                 ids_map: torch.Tensor | None = None):
+        """`kv_from`: the bf16 weights the context's K and V are projected with (when `W`'s block
+        projections are quantised); `ids_map`: the vocabulary ids of the head's rows (a hot head)."""
+        self.cfg, self.W, self.embed, self.head, self.ids_map = cfg, W, embed, head, ids_map
         c = cfg
         self.convs = []
         for i in range(c.num_hidden_layers):
@@ -74,7 +77,8 @@ class DFlash2RingModel(LiLiCorrModel):
                       c.conv_kernel_size, c.num_groups, c.conv_group_size),
                 _Conv(W[f"{p}.mlp_conv.base_kernel"], W[f"{p}.mlp_conv.kernel_projection.weight"],
                       c.conv_kernel_size, c.num_groups, c.conv_group_size)))
-        self.kv_w = torch.cat([W[f"layers.{i}.self_attn.{x}_proj.weight"]
+        kw = kv_from if kv_from is not None else W
+        self.kv_w = torch.cat([kw[f"layers.{i}.self_attn.{x}_proj.weight"]
                                for i in range(c.num_hidden_layers) for x in "kv"]).contiguous()
         self.sink = [None] * c.num_hidden_layers
 
@@ -95,6 +99,8 @@ class DFlash2RingModel(LiLiCorrModel):
         hid = self.block(anchor, pos0, ck, cv, ctx_ok)
         rows = hid[1:]
         top, ids = torch.topk(self.head(rows).float(), self.cfg.selector_top_k, dim=-1)
+        if self.ids_map is not None:
+            ids = self.ids_map[ids]
         sc = self.selector(rows, ids, top, anchor)
         return self.walk(ids, sc[0, 0], sc[1:])
 
@@ -102,6 +108,15 @@ class DFlash2RingModel(LiLiCorrModel):
 class DFlash2Head(LiLiCorrHead):
     """The DFlash2 draft as a head of the tree drafter: depth block - 1, its context from the engine's taps."""
 
+
+from engine.settings import SETTINGS as _S  # noqa: E402
+
+#: the draft's attention and MLP projections in NVFP4 (quantised at load, `dflash2.quantise_projections`): a
+#: draft reads 0.4 GB instead of 1.4; drafter only, so the text cannot change, acceptance can
+NVFP4 = _S.get("Q35M_DFLASH2_NVFP4") == "1"
+#: the draft's head over the hot vocabulary (the engine's `set_draft_head`, int8 rows) instead of the target's
+#: EXL3 head (0.57 GB a draft)
+HOT = _S.get("Q35M_DFLASH2_HOT") == "1"
 
 #: where a target layer id is read: 0 = the residual entering that layer, 1 = the layer's output (the residual
 #: entering the next one, `hidden_states[id + 1]` of transformers' output_hidden_states). Measured on Ornith 4.0
@@ -126,10 +141,26 @@ def build_head(srv, path: str, log=print) -> DFlash2Head:
     if tuple(eng.taps) != tuple(x + TAP_SHIFT for x in cfg.target_layer_ids):
         raise ValueError(f"the engine taps {eng.taps}, the draft reads {cfg.target_layer_ids}")
     W = load_weights(path, str(eng.device))
-    hw = eng.W["lm_head.weight"]
-    model = DFlash2RingModel(cfg, W, eng.W["embed_tokens.weight"], lambda rows: eng.lin(rows.contiguous(), hw).float())
+    Wb = W
+    if NVFP4:
+        from engine.drafters.dflash2 import quantise_projections
+        W = quantise_projections(W, cfg.num_hidden_layers)
+    ids_map = None
+    if HOT and getattr(eng, "draft_head", None) is not None:
+        from tools import fn_kernels as K
+        dh, ids_map = eng.draft_head, eng.draft_ids
+
+        def head(rows):
+            return K.gemv(rows.contiguous(), dh)
+    else:
+        hw = eng.W["lm_head.weight"]
+
+        def head(rows):
+            return eng.lin(rows.contiguous(), hw).float()
+    model = DFlash2RingModel(cfg, W, eng.W["embed_tokens.weight"], head, kv_from=Wb, ids_map=ids_map)
     log(f"[dflash2] {path}: {cfg.num_hidden_layers} layers, block {cfg.block_size}, window {cfg.window}, "
-        f"taps {cfg.target_layer_ids}, selector top {cfg.selector_top_k} rank {cfg.selector_rank}")
+        f"taps {cfg.target_layer_ids}, selector top {cfg.selector_top_k} rank {cfg.selector_rank}, "
+        f"projections {'NVFP4' if NVFP4 else 'BF16'}, head {'hot ' + str(ids_map.numel()) if ids_map is not None else 'the target'}'s")
     return DFlash2Head(srv, model)
 
 
