@@ -14,15 +14,18 @@ same bytes across calls and across a restart (a fresh store read).
                     images as `image_url` parts when the model reads images), assistant text with
                     its reasoning as `reasoning_content` (the engine's template decides what to keep);
                     notices (role `system` in the tree) are the UI's and are left out
-    tool images     in the tool message that returned them, append-only: all up to
-                    TOOL_IMAGES_KEPT, then the first ones and the newest; the newest-but-one
-                    becomes a line saying a newer one follows (SRV-546)
+    tool images     in the tool message that returned them, append-only between fold points:
+                    all while they fit the image cap; the one that would pass it turns the kept
+                    ones after the cap's first half into a line saying a newer one follows
+                    (SRV-546, SRV-676, `kept_tool_images`)
     file texts      a write_file's content and an edit_file's long old and new text whole while
                     the run's whole texts stay under FILES_HIGH_CHARS; past it (or at a
                     compaction) the oldest leave the call and their tool result says so, the
                     newest FILES_KEEP_CHARS stay (`folded_calls`); a long read_file or bash result
                     whole until a compaction, a stub after it (FOLD_ARG_CHARS, FOLD_RESULT_CHARS)
-    effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide)
+    effort          `reasoning_effort` only when the chat picked one (`auto` lets the harness decide);
+                    plan mode on our engine adds `max_reasoning_tokens`, never a new word: the
+                    template renders the word in the system turn (SRV-663)
     thinking off    `chat_template_kwargs.enable_thinking: false` (read by our engine, vLLM and
                     SGLang alike)
     continue        an interrupted answer resumes as the last assistant message with
@@ -106,13 +109,22 @@ def steps(parts: list[dict]) -> list[list[dict]]:
     return [out[k] for k in sorted(out)]
 
 
-#: the tool images a request carries as images: every one up to TOOL_IMAGES_KEPT, past it the
-#: first TOOL_IMAGES_KEPT - 1 and the newest; the others become a line. An image once sent stays
-#: where it is: with only the newest kept (2026-10-13), each new screenshot turned the previous one
-#: into a line, the prompt changed where it sat, and the engine read everything after it again at
-#: every screenshot (SRV-546: 90,186 tokens in 161 s at 10:18:36 on 2026-10-17). Past the cap the
-#: line replaces the newest-but-one, at the prompt's tail
-TOOL_IMAGES_KEPT = 8
+#: the tool images a request carries as images (SRV-676). An image once sent stays where it is
+#: until a fold point: the images of the branch are walked in order and all are kept while they fit
+#: the request's image cap (the engine's --max-images, TOOL_IMAGES_CAP when the model card does not
+#: say, less the user's own images before them); the one that would pass it is a fold point: the
+#: kept images after the first half of the cap become a line (LEFT_OUT) and the new one is kept. So
+#: the first half stays for the whole run and the rest fills up again, and the prompt changes once
+#: per half a cap of screenshots, at the oldest image the fold takes. History: with only the newest
+#: kept (2026-10-13), each new screenshot turned the previous one into a line and the engine read
+#: everything after it again (SRV-546: 90,186 tokens in 161 s on 2026-10-17); with the first 7 and
+#: the newest (SRV-546, until 0.13), each screenshot past the 8th still did it for the turns since
+#: the one before (SRV-676: 7-11k tokens, 17-30 s at 175-210k on 2026-10-21, 19 times in 27
+#: screenshots). Both rules read about the same tokens again over a run; folding in blocks reads
+#: them in 2 stalls instead of 19, saves the grid line's re-read each stall costs, and a run that
+#: ends or compacts before the next fold never reads its last block again.
+TOOL_IMAGES_CAP = 16
+TOOL_IMAGES_MIN = 2
 LEFT_OUT = "\n[The image of this result is left out: a newer screenshot follows.]"
 
 
@@ -121,19 +133,36 @@ def _image_part(a: dict, data: bytes) -> dict:
         "url": f"data:{a.get('mime') or 'image/png'};base64," + base64.b64encode(data).decode()}}
 
 
-def kept_tool_images(branch: list[dict], n: int | None = None) -> set:
-    """The ids of the images tool results returned on `branch` that a request carries: all of
-    them up to `n` (TOOL_IMAGES_KEPT), else the first `n - 1` and the newest, so a kept image never
-    becomes a line later and the prompt before the newest-but-one never changes."""
-    n = TOOL_IMAGES_KEPT if n is None else n
-    ids = [a.get("id") for m in branch if m.get("role") == "assistant"
-           for p in m.get("parts") or [] if p.get("type") == "tool_call"
-           for a in (p.get("output") or {}).get("images") or []]
-    if n <= 0:
-        return set()
-    if len(ids) <= n:
-        return set(ids)
-    return set(ids[:n - 1]) | {ids[-1]}
+def kept_tool_images(branch: list[dict], cap: int | None = None,
+                     step_from: tuple[int, int] | None = None) -> set:
+    """The ids of the images tool results returned on `branch` that a request carries.
+
+    A function of the branch alone, decided image by image in order, so a later image never
+    changes what an earlier request carried except at a fold point: the room at an image is `cap`
+    (the engine's image cap, TOOL_IMAGES_CAP when unknown) less the user's images before it
+    (at least TOOL_IMAGES_MIN); when keeping it would pass the room, the kept images after the
+    first `room // 2` leave and it is kept. `step_from`: (message index, step) of an in-run
+    compaction, whose earlier steps the request does not carry and which count for nothing."""
+    cap = TOOL_IMAGES_CAP if not cap or cap <= 0 else int(cap)
+    kept: list = []
+    users = 0
+    for i, m in enumerate(branch):
+        if m.get("role") == "user":
+            users += sum(1 for a in m.get("attachments") or [] if a.get("kind") == "image")
+            continue
+        if m.get("role") != "assistant":
+            continue
+        for p in m.get("parts") or []:
+            if p.get("type") != "tool_call":
+                continue
+            if step_from and i == step_from[0] and int(p.get("step") or 1) < step_from[1]:
+                continue
+            for a in (p.get("output") or {}).get("images") or []:
+                room = max(TOOL_IMAGES_MIN, cap - users)
+                if len(kept) + 1 > room:
+                    del kept[max(1, room // 2):]
+                kept.append(a.get("id"))
+    return set(kept)
 
 
 #: the file texts a request leaves out: the files are on disk, so the request can keep what was
@@ -449,7 +478,7 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
          keep_reasoning_from: int = 0, tail: str | None = None,
          tandem: dict | None = None, inline_images: bool = True,
          step_from: tuple[int, int] | None = None, fold_before: str | None = None,
-         window: int | None = None) -> dict:
+         window: int | None = None, max_images: int | None = None) -> dict:
     """`keep_reasoning_from`: the branch index from which assistant reasoning goes back (the
     context guard drops it before that); `tail`: a hidden last user line for one call, never
     stored (the empty-turn nudge; a worker's report sent back, or its report at the step cap);
@@ -457,11 +486,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
     `step_from`: (a branch index, a step): that assistant message's steps before the step were
     compacted (a long run: the summary is in the system block); `fold_before`: the newest
     compaction's time, the long results of calls that ended before it are stubs (`result_for`)
-    and a fold point of the write and edit texts (`folded_calls`, with the model's `window`)."""
+    and a fold point of the write and edit texts (`folded_calls`, with the model's `window`);
+    `max_images`: the engine's image cap (`kept_tool_images`)."""
     msgs: list[dict] = []
     if system:
         msgs.append({"role": "system", "content": system})
-    keep = kept_tool_images(branch)
+    keep = kept_tool_images(branch, max_images, step_from)
     folded = folded_calls(branch, fold_before, step_from, window)
     for i, m in enumerate(branch):
         msgs.extend(message(m, vision, blob, keep_reasoning=i >= keep_reasoning_from, keep=keep,

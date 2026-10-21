@@ -92,7 +92,8 @@ def _community_card(pack: str, models_dir: str | None = None) -> dict | None:
 
 def card(facts: dict, models_dir: str | None = None) -> dict:
     """The `tandem` object for the engine's model. `facts`: pack, max_len, max_output, vision
-    (the tower loaded), effort_caps ({level: cap, 0 no cap}), label (the served name), loaded."""
+    (the tower loaded), effort_caps ({level: cap, 0 no cap}), label (the served name), loaded,
+    max_images (the request's image cap)."""
     c = find(facts.get("pack"), models_dir) or {}
     caps = dict(DEFAULT_CAPS)
     caps.update({k: bool(v) for k, v in (c.get("capabilities") or {}).items() if k in caps})
@@ -114,6 +115,9 @@ def card(facts: dict, models_dir: str | None = None) -> dict:
         "effort_budgets": ({k: int(v or 0) for k, v in efforts.items()}
                            if caps["thinking"] else {}),
         "loaded": bool(facts.get("loaded", True)),
+        # the images one request may send (--max-images): a client that keeps its images under
+        # it never has the server leave the oldest out (SRV-676); None without the vision tower
+        "max_images": int(facts.get("max_images") or 0) or None if caps["vision"] else None,
     }
 
 

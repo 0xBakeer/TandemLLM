@@ -785,6 +785,7 @@ class AgentMixin:
                            tandem=self.tandem_field(settings) if ours else None,
                            inline_images=ours, step_from=self._step_from(c),
                            fold_before=c[3] if c else None, window=int(info.get("max_len") or 0),
+                           max_images=info.get("max_images"),
                            levels=info.get("effort_levels"),
                            effort_off=info.get("effort_off"), **kw)
 

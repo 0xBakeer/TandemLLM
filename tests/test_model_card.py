@@ -38,6 +38,9 @@ def test_the_27b_card_matches_its_card_file_and_the_loader():
     c = model_card.card(_facts(max_len=65536, vision=False, pack="nvfp4"))
     assert c["context_length"] == 65536 and c["capabilities"]["vision"] is False
     assert c["model"] == "qwen3.8-27b"
+    # SRV-676: the image cap a client keeps its images under, only with the tower loaded
+    assert c["max_images"] is None
+    assert model_card.card(_facts(max_images=12))["max_images"] == 12
 
 
 def test_a_new_architecture_fills_its_card_with_no_server_edit():

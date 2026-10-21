@@ -1625,6 +1625,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "_effort_budgets": card.get("effort_budgets") or {},
                 # the word a provider takes to turn thinking off (DeepSeek: reasoning_effort none)
                 "_effort_off": c.get("effort_off"),
+                # the images one request may send (our engine's --max-images, SRV-676)
+                "_max_images": card.get("max_images"),
             })
         first = out[0] if out else None
         levels = (first or {}).get("capabilities", {}).get("effort_levels") or []
@@ -1653,7 +1655,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 "tools": (m.get("capabilities") or {}).get("tools", True),
                 "effort_budgets": m.get("_effort_budgets") or {},
                 "effort_levels": (m.get("capabilities") or {}).get("effort_levels") or [],
-                "effort_off": m.get("_effort_off")}
+                "effort_off": m.get("_effort_off"), "max_images": m.get("_max_images")}
 
     def takes_slot(self, run) -> bool:
         """Whether the run's next call needs one of the run slots: a cloud model's does not, it

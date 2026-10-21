@@ -5845,11 +5845,12 @@ def served_name() -> str:
 
 def _card_facts() -> dict:
     """What the loader serves, for the model card (server/model_card.py): the pack, the window,
-    the default output limit, the vision tower, the effort levels' caps."""
+    the default output limit, the vision tower, the effort levels' caps, the image cap."""
     w = weights_profile()
     return {"pack": w.get("name") or w.get("format"), "max_len": STATE.get("max_len"),
             "max_output": STATE.get("default_max_tokens"), "vision": STATE.get("vision") is not None,
-            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True}
+            "effort_caps": _effort_caps(), "label": served_name(), "loaded": True,
+            "max_images": (STATE.get("image_limits") or images_mod.Limits()).max_images}
 
 
 def _effort_caps() -> dict:

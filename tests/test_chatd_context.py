@@ -8,10 +8,11 @@ also came as its own user message, six user turns in all, and the model wrote "T
 repeating the same message for the 4th time". No compaction: the one user turn left nothing before
 the last two turns to summarize.
 
-  1  a tool's image rides in its tool message (one user turn). Images are append-only (SRV-546):
-     all of them up to TOOL_IMAGES_KEPT, then the first ones and the newest, so a new screenshot
-     never changes the prompt before the newest-but-one; that one becomes a line saying a newer
-     screenshot follows. Other backends get the images in a user message after the results
+  1  a tool's image rides in its tool message (one user turn). Images are append-only between
+     fold points (SRV-546, SRV-676): all of them while they fit the image cap; the one that would
+     pass it turns the kept ones after the cap's first half into a line saying a newer screenshot
+     follows, once per half a cap. Other backends get the images in a user message after the
+     results
   2  the estimate counts an image by its pixels (32 x 32 a token), never by its base64, and the
      tokens-per-character ratio is learned on the text alone
   3  a long run compacts its earlier steps between two steps, keeps its user message and goes on
@@ -107,44 +108,52 @@ def test_tool_screenshots_ride_in_their_tool_message_and_stay_where_they_are():
 
 def test_srv546_a_new_screenshot_only_appends_to_the_prompt():
     """SRV-546 (live 2026-10-17 10:18:36): with only the newest screenshot kept, each new one turned
-    the previous into a line and the engine read 90,186 tokens again. Every step's request now
-    starts with the previous step's request, byte for byte, up to the cap; past it only the
-    newest-but-one changes, and everything before it stays."""
-    # the pagoda run's seven screenshots: every request starts with the one before it
-    branch7, blob7 = run_with_screenshots(7, pad=10)
-    msgs = [render.body("m", {}, [branch7[0], {"id": "a", "role": "assistant", "parts": [
-        p for p in branch7[1]["parts"] if p["step"] <= step]}], system="s", vision=True,
-        blob=blob7)["messages"] for step in range(1, 15)]
-    for step in range(1, 14):
-        assert msgs[step][:len(msgs[step - 1])] == msgs[step - 1], f"step {step + 1} rewrote it"
-    k = render.TOOL_IMAGES_KEPT
-    n = k + 3
+    the previous into a line and the engine read 90,186 tokens again. SRV-676 (live 2026-10-21):
+    with the first 7 and the newest kept, every screenshot past the 8th still turned the one
+    before into a line (7-11k tokens read again, 17-30 s, 19 times in 27 screenshots). Now every
+    request starts with the one before it, byte for byte, except at a fold point: the screenshot
+    that would pass the cap, where the kept ones after the cap's first half become lines at once."""
+    cap = 6
+    n = 3 * cap
     branch, blob = run_with_screenshots(n, pad=10)
     full = branch[1]["parts"]
 
-    def at(step):                       # the request after `step` model calls
+    def at(step, cap=cap):              # the request after `step` model calls
         b = [branch[0], {"id": "a", "role": "assistant",
                          "parts": [p for p in full if p["step"] <= step]}]
-        return render.body("m", {}, b, system="s", vision=True, blob=blob)["messages"]
+        return render.body("m", {}, b, system="s", vision=True, blob=blob,
+                           max_images=cap)["messages"]
 
-    prev = None
+    folds, prev = [], None
     for step in range(1, 2 * n + 1):
         cur = at(step)
-        if prev is not None:
-            shots_now = (step + 1) // 2         # odd steps add a screenshot
-            if shots_now <= k or step % 2 == 0:
-                assert cur[:len(prev)] == prev, f"step {step} rewrote the prompt"
-            else:
-                # past the cap: the messages before the newest-but-one's result stay as they were
-                ids = [m.get("tool_call_id") for m in prev]
-                cut = ids.index(f"call_{shots_now - 2}")
-                assert cur[:cut] == prev[:cut], f"step {step} changed an earlier image"
-                assert cur[cut] != prev[cut] and render.LEFT_OUT in cur[cut]["content"]
+        shots = _shots({"messages": cur})
+        assert len(_images(shots)) <= cap
+        if prev is not None and cur[:len(prev)] != prev:
+            folds.append((step + 1) // 2)       # the screenshot that made the fold
+            # the first change is an image that became its line: every image of the first half
+            # and everything before the oldest folded image stay as they were
+            cut = next(i for i, (x, y) in enumerate(zip(prev, cur)) if x != y)
+            assert isinstance(prev[cut]["content"], list), f"step {step} changed a text"
+            assert render.LEFT_OUT in cur[cut]["content"]
+            assert prev[cut]["tool_call_id"] not in {f"call_{i}" for i in range(cap // 2)}
+            assert all(isinstance(m["content"], list) for m in _shots({"messages": cur})[:cap // 2])
         prev = cur
+    # a cap of 6: folds at the 7th, 10th, 13th and 16th screenshot, never between
+    assert folds == [cap + 1, cap + 1 + cap // 2, cap + 1 + 2 * (cap // 2),
+                     cap + 1 + 3 * (cap // 2)], folds
     shots = _shots({"messages": at(2 * n)})
     kept = [m["tool_call_id"] for m in shots if isinstance(m["content"], list)]
-    assert kept == [f"call_{i}" for i in range(k - 1)] + [f"call_{n - 1}"]
+    assert kept == [f"call_{i}" for i in range(cap // 2)] + [f"call_{i}" for i in range(n - 3, n)]
     assert all(render.LEFT_OUT in m["content"] for m in shots if not isinstance(m["content"], list))
+    # the default cap is the engine's --max-images default; the user's own images count against it
+    assert render.TOOL_IMAGES_CAP == 16
+    assert render.kept_tool_images(branch) == {f"img{i}" for i in (*range(8), 16, 17)}
+    with_user = [{**branch[0], "attachments": [{"kind": "image", "id": "u1"},
+                                               {"kind": "image", "id": "u2"}]}, branch[1]]
+    assert render.kept_tool_images(with_user) == {f"img{i}" for i in (*range(7), 14, 15, 16, 17)}
+    # an in-run compaction: the steps before it carry nothing and count for nothing
+    assert render.kept_tool_images(branch, cap, step_from=(1, 2 * (n - 2) + 1)) == {"img16", "img17"}
 
 
 def test_srv546_the_now_line_names_a_re_read_and_its_reason():
@@ -173,12 +182,8 @@ def test_the_estimate_counts_an_image_by_its_pixels_not_its_base64():
     est = comp.estimate(body, 0.15)
     assert est < 6_000, est
     # the old count: every image's base64 as text, all five kept
-    real = render.TOOL_IMAGES_KEPT
-    render.TOOL_IMAGES_KEPT = 99
-    try:
-        old = render.body("m", {}, branch, system="s", vision=True, blob=blob, inline_images=False)
-    finally:
-        render.TOOL_IMAGES_KEPT = real
+    old = render.body("m", {}, branch, system="s", vision=True, blob=blob, inline_images=False,
+                      max_images=99)
     old_chars = len(json.dumps(old["messages"], ensure_ascii=False))
     assert old_chars * 0.15 > 50 * est
     # the ratio is learned on text: the engine's count less the images' tokens
