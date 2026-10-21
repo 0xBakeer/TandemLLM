@@ -6,8 +6,7 @@ weight (`EXL3Block.dequant()`, bf16 of the fp32 rotation product), a mixer by it
 fp16 weight (`pack.mixer_weight`), the n-gram rows as `ple.EXL3NGramTable` decodes them. Activations
 stay in the compute dtype (bf16 when serving; fp32 in the tight CPU test against `transformers`);
 norms, softmaxes, the router and the recurrent state run in fp32 as in the reference. Ported from
-branch `flashnext` (1a6b91ec, 5ac0e35a, 36ef4e3c, ef246906, 87522636), where it read Mia's NVFP4
-checkpoint.
+branch `flashnext` (1a6b91ec, 5ac0e35a, 36ef4e3c, ef246906, 87522636).
 
 One step of the model, per layer (hc = 4 residual streams of `hidden`):
 

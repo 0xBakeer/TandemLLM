@@ -108,7 +108,7 @@
    "tool": "llama-bench -ngl 99 -p 0 -n 256 -r 3",
    "bf16_gguf": "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF@8a08a1c8 BF16",
    "bf16_tg256_tok_s": 33.31,
-   "ud_iq2_xxs_gguf": "unsloth UD-IQ2_XXS@f2d3fe36 (no IQ2_XXS tensors: IQ4_NL/Q5_0 experts)",
+   "ud_iq2_xxs_gguf": "UD-IQ2_XXS@f2d3fe36 (no IQ2_XXS tensors: IQ4_NL/Q5_0 experts)",
    "ud_iq2_xxs_tg256_tok_s": 79.99
   },
   "parallel_lookup": {

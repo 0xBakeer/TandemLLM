@@ -55,6 +55,7 @@ FORMULA = "fp4"
 #: OPS-215 (ENG-383): tools/fn_kernels.py's router takes up to 512 experts, with a narrower instantiation for
 #: up to 256; before it refused any count but 512, and at 512 it launches the same instantiation with the
 #: same arguments, so no row a released profile stored changes (by the code; not run on the GPU)
+#: OPS-219: engine/models/flashnext/ref.py's module docstring loses half a sentence; no code changes
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -79,7 +80,9 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
              # SRV-647: the masks keyed by a serial of the grammar, not its id(); no row changes
              ("engine/grammar.py", "9c6617a799bd64b1fdbc3cfc23a2eba5b2ee471b64d1d21b4da7dc23adf59c65"):
-             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749"}
+             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
+             ("engine/models/flashnext/ref.py", "497c681a0b2e8d33e45a3bb2d4f565b5983ca2edc9da021619048bdb258267c4"):
+             "f814ce162695f81e1ff8d7b80eb8c90619837f99e6cebb35f10bcb39983bf3f4"}
 
 
 def adoption() -> str:
