@@ -36,7 +36,9 @@ def ask(url: str, text: str, n: int, model: str = "TandemLLM") -> dict:
     with urllib.request.urlopen(req, timeout=1800) as r:
         d = json.loads(r.read())
     t = d.get("timings") or {}
-    return {"text": d["choices"][0]["message"].get("content"), "tok_s": t.get("predicted_per_second"),
+    m = d["choices"][0]["message"]
+    # a model that reasons in the answer (Flint): the reasoning is part of the text a drafted run must equal
+    return {"text": (m.get("reasoning_content") or "") + (m.get("content") or ""), "tok_s": t.get("predicted_per_second"),
             "per_block": t.get("tokens_per_block"), "n": t.get("predicted_n"), "prompt": t.get("prompt_n")}
 
 
@@ -47,6 +49,7 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--compare", nargs="+")
     ap.add_argument("--long", action="store_true", help="only the long code answer (2,048 tokens, the raw model)")
+    ap.add_argument("--model", help="the model name to ask (default: TandemLLM, the raw engine's for --long)")
     a = ap.parse_args()
     if a.compare:
         runs = [json.load(open(p)) for p in a.compare]
@@ -65,7 +68,7 @@ def main() -> None:
     if a.long:
         asks = [("long", LONG, 2048)]
     for name, text, n in asks:
-        out["answers"][name] = r = ask(a.url, text, n, "qwen38-spark-engine" if a.long else "TandemLLM")
+        out["answers"][name] = r = ask(a.url, text, n, a.model or ("qwen38-spark-engine" if a.long else "TandemLLM"))
         print(f"[ab] {a.label} {name}: prompt {r['prompt']}, {r['n']} tokens, {r['tok_s']} tok/s, {r['per_block']} a block",
               flush=True)
     if a.out:
