@@ -28,6 +28,7 @@ from engine.models.graph_lru import joint_graphs
 from engine.models.lfm2_moe import kernels as K
 from engine.models.lfm2_moe.engine import CAPTURE_ROWS, PREFILL_CHUNK, DecodeGraph, Lfm2MoeEngine
 from engine.models.state import SectionState
+from tools.cuda_arch import inline_supported as _sm_supported
 
 #: fingerprint v3: the package's files that compute rows
 MODULES = ("engine/models/lfm2_moe/__init__.py", "engine/models/lfm2_moe/config.py",
@@ -148,6 +149,7 @@ class Lfm2MoeServing:
         self.dg = None
         self.vgraphs: dict = {}
         self.cgraphs: dict = {}
+        self._graphs = None
         self.picks = None
         self.tap = None
         self.mm = None                       # no vision tower: the server's image path is off
@@ -162,6 +164,20 @@ class Lfm2MoeServing:
         self.sides: list = []
         self._plain_pending = False        # a joint plain step ran; its commit_tree([0]) moves the length
         self.stats = {"prefill_rows": 0, "decode_steps": 0, "verify_blocks": 0, "verify_rows": 0}
+
+    @property
+    def _graphs_ok(self) -> bool:
+        """May the decode/verify passes be captured? On an arch the inline extensions cover, yes.
+        Elsewhere the eager fallbacks' host loops cannot sit inside a graph -- but where the Triton
+        kernels have probed true (every decode and MoE launch a device kernel), they can. Evaluated
+        lazily: the probes resolve on the first eager calls (warm-up, self-check), before capture."""
+        if self._graphs is None:
+            ok = _sm_supported(self.fn.device)
+            if not ok and self.fn.device.type == "cuda":
+                from tools import exl3_ada, moe_ada
+                ok = bool(exl3_ada._GEMV_OK and moe_ada._OK)
+            self._graphs = ok
+        return self._graphs
 
     # --- the loop's interface -------------------------------------------------------------------
     @property
@@ -188,6 +204,9 @@ class Lfm2MoeServing:
 
     def precapture(self, drafter) -> int | None:
         """The decode graph of the first class, after the server's warm-up (whose rows are nobody's)."""
+        if not self._graphs_ok:
+            self.kv.length = 0
+            return None
         if self.dg is None:
             self.dg = DecodeGraph(self.fn, self.st, self.slot)
         self.kv.length = 0
@@ -269,12 +288,21 @@ class Lfm2MoeServing:
         T = ids.numel()
         self._ensure(start + T + CAPTURE_ROWS)
         if T == 1 and start > 0:
-            if self.dg is None:
-                self.dg = DecodeGraph(self.fn, self.st, self.slot)
-            n0 = self.dg.captures
-            lg = self.dg(int(ids[0]))
-            self.plain_captured = self.dg.captures != n0
-            self._hidden = self.dg.rb["hidden"].view(1, 1, -1)
+            ns = K.class_of(self.st.length + 1, self.st.cap)
+            rb = self.fn._rows_buffers(1, self.fn._key(self.slot, 1))
+            if self._graphs_ok:
+                if self.dg is None:
+                    self.dg = DecodeGraph(self.fn, self.st, self.slot)
+                n0 = self.dg.captures
+                lg = self.dg(int(ids[0]))
+                self.plain_captured = self.dg.captures != n0
+                self._hidden = self.dg.rb["hidden"].view(1, 1, -1)
+            else:
+                self.fn.stage(int(ids[0]), self.st, self.slot)
+                self.fn.step(self.st, ns, self.slot)
+                self.st.length += 1
+                lg = rb["logits"]
+                self._hidden = rb["hidden"].view(1, 1, -1)
             self.stats["decode_steps"] += 1
             return lg.view(1, 1, -1)
         lg = self.fn.prefill(ids, self.st)
@@ -293,7 +321,8 @@ class Lfm2MoeServing:
         M = len(toks)
         self._ensure(start + M + CAPTURE_ROWS)
         n_graphs = len(self.vgraphs)
-        self.fn.verify(toks, [int(p) for p in parents], self.st, self.vgraphs, slot=self.slot)
+        self.fn.verify(toks, [int(p) for p in parents], self.st,
+                       self.vgraphs if self._graphs_ok else None, slot=self.slot)
         self.captured = len(self.vgraphs) > n_graphs
         self._width = M
         rb = self.fn._rb[self.fn._key(self.slot, M)]
@@ -323,7 +352,7 @@ class Lfm2MoeServing:
                 s._at(start)
                 s._ensure(start + 1 + CAPTURE_ROWS)
             rbs = fn.decode_multi([(int(block.view(-1)[0]), s.st, s.slot) for s, block, _, _ in items],
-                                  graphs=joint_graphs(fn))
+                                  graphs=joint_graphs(fn) if items[0][0]._graphs_ok else None)
             out = []
             for (s, block, _, _), rb in zip(items, rbs):
                 s.picks, s._hidden = rb["next"][:1], rb["hidden"][:1].unsqueeze(0)
@@ -384,7 +413,7 @@ class Lfm2MoeServing:
             return
         t0 = time.perf_counter()
         n_graphs = len(self.cgraphs)
-        self.fn.commit(self.st, [int(p) for p in path], self.cgraphs)
+        self.fn.commit(self.st, [int(p) for p in path], self.cgraphs if self._graphs_ok else None)
         self.commit_ms = (time.perf_counter() - t0) * 1e3
         if len(self.cgraphs) > n_graphs:
             self.captured = True
@@ -492,9 +521,13 @@ def serve(a, ctx) -> dict:
     drafter = None
     if a.drafter != "none":
         if info["self_check"] and info["self_check"]["ok"]:
-            drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log)
-            # the loop hands a round k rows past the anchor: the lookup's copy runs up to what the cut admits
-            a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
+            if srv._graphs_ok:
+                drafter = lookup_drafter(srv, a.model, a.corpus, ctx.log)
+                # the loop hands a round k rows past the anchor: the lookup's copy runs up to what
+                # the cut admits
+                a.k = max(int(a.k or 0), drafter.cut.max_rows - 1)
+            else:
+                ctx.log("[server] LFM2 speculation off: no capturable kernel path on this device")
         else:
             ctx.log("[server] LFM2 self-check FAILED: speculation off, plain decode only")
     ctx.mark("drafters")
