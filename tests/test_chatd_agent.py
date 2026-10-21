@@ -172,6 +172,10 @@ def test_the_step_cap_ends_interrupted_and_continue_goes_on():
         s = c.wait_idle(cid, 20)
         a = s["messages"][-1]
         assert a["status"] == "interrupted" and "limit of 1 model call" in a["parts"][-1]["message"]
+        # the cap is no error: the chat's status is idle, the Continue card says the rest
+        assert s["status"] == "idle", s["status"]
+        assert next(x for x in c.ok("GET", "/conversations")["conversations"]
+                    if x["id"] == cid)["status"] == "idle"
         c.ok("POST", f"/conversations/{cid}/continue")
         s = c.wait_idle(cid, 20)
         a = s["messages"][-1]

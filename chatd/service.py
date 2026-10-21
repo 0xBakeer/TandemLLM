@@ -457,6 +457,20 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 child is not None and child.phase == "permission") else "running"
         if branch and branch[-1]["role"] == "assistant" and branch[-1]["status"] in (
                 "error", "interrupted"):
+            # a run that stopped at its own step cap is no error: its Continue card goes on
+            # from there (live 2026-10-21, a 100-call run's header said "error")
+            last = conv.run if conv.run is not None and conv.run.message_id == branch[-1]["id"] \
+                else None
+            stats = branch[-1].get("stats") or {}
+            if isinstance(stats, str):                  # the rail's row: the column as stored
+                try:
+                    stats = json.loads(stats)
+                except ValueError:
+                    stats = {}
+            if branch[-1]["status"] == "interrupted" and (
+                    (stats or {}).get("interrupted") == "limit" or
+                    getattr(last, "interrupt", None) == "limit"):
+                return "idle"
             return "error"
         return "idle"
 
@@ -485,11 +499,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         with conv.lock:
             row = self._row(cid)
             metas = [dict(r) for r in self.store.all(
-                "WITH RECURSIVE p(id, parent_id, role, status, depth) AS ("
-                "SELECT id, parent_id, role, status, 0 FROM messages WHERE id = ? AND "
-                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, "
+                "WITH RECURSIVE p(id, parent_id, role, status, stats, depth) AS ("
+                "SELECT id, parent_id, role, status, stats, 0 FROM messages WHERE id = ? AND "
+                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, NULL, "
                 "p.depth + 1 FROM messages m JOIN p ON m.id = p.parent_id) "
-                "SELECT id, role, status FROM p ORDER BY depth DESC", (row["head_id"], cid))]
+                "SELECT id, role, status, stats FROM p ORDER BY depth DESC", (row["head_id"], cid))]
             if conv.live is not None and metas and metas[-1]["id"] == conv.live["id"]:
                 metas[-1]["status"] = conv.live["status"]
             last_user = next((m for m in reversed(metas) if m["role"] == "user"), None)
