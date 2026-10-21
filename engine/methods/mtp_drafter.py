@@ -121,7 +121,7 @@ class MTPTreeDrafter:
         q = self.req
         return (f"mtp request: turn={q['turn']} rounds={q['rounds']} plain={q['plain']} wall_ms={q['wall_ms']:.0f} "
                 f"draft_ms={q['draft_ms']:.0f} verify_ms={q['verify_ms']:.0f} ({q['verify_rows']} rows) "
-                f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows) "
+                f"prime_ms={q['prime_ms']:.0f} ({q['prime_rows']} rows, {q['primes']} calls) commit_ms={q['commit_ms']:.0f} "
                 f"spans={ {k: [n, round(ms), t] for k, (n, ms, t) in q['spans'].items()} } "
                 f"spec_ms={c.spec_ms(self.cls) if c.spec_ms(self.cls) is None else round(c.spec_ms(self.cls), 2)} | "
                 f"mtp rounds={self.stats['rounds']} fed={self.stats['fed_rows']} looked={self.stats['looked']} "
@@ -134,7 +134,7 @@ class MTPTreeDrafter:
     @staticmethod
     def _req() -> dict:
         return {"rounds": 0, "plain": 0, "wall_ms": 0.0, "draft_ms": 0.0, "verify_ms": 0.0, "verify_rows": 0,
-                "prime_ms": 0.0, "prime_rows": 0, "tokens": 0, "turn": None,
+                "prime_ms": 0.0, "prime_rows": 0, "primes": 0, "commit_ms": 0.0, "tokens": 0, "turn": None,
                 "spans": {"block": [0, 0.0, 0], "anchor": [0, 0.0, 0], "plain": [0, 0.0, 0],
                           "unpriced": [0, 0.0, 0]}}
 
@@ -199,6 +199,10 @@ class MTPTreeDrafter:
         if self.ngram is not None:
             self.ngram.observe(tokens)
         self.req["tokens"] += len(tokens)
+        if self.verify_ms is not None:
+            # a drafted round's commit (the host's side of it: a graph's replay is launched, its GPU
+            # time lands in the next wait)
+            self.req["commit_ms"] += float(getattr(self.s, "commit_ms", 0.0) or 0.0)
         # priced at the next round's start, by the wall time between the two; a round that captured a
         # graph took the capture's time and teaches nothing (its price for that row count would start
         # at ~170 ms and the cut would never ask again)
@@ -430,6 +434,7 @@ class MTPTreeDrafter:
             self._prime_ms = (time.perf_counter() - t0) * 1e3
             self.req["prime_ms"] += self._prime_ms
             self.req["prime_rows"] += n - keep
+            self.req["primes"] += 1
             if n - keep >= 64:
                 self.cut.observe_prime(self._prime_ms / (n - keep), self.cls)
         self.pending = (rows[n - keep:], nexts[n - keep:])
