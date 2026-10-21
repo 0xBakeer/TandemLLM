@@ -309,9 +309,17 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         self.emit(conv, {"type": "sandbox.changed", "sandbox": status})
 
     def library_available(self) -> bool:
+        """Whether the library's tools go into requests. A check that gets no answer (a busy
+        engine: the 3 s timeout, a reset) keeps the last answer (SRV-663): the tool list is the
+        prompt's head, and a flap dropped library_search and library_read from one request of a
+        196,472-token run on Ornith, which read it all again twice (2026-10-21 05:29, 05:42).
+        Only an answer of the engine's (any status) changes it."""
         if self._library is None or time.monotonic() - self._library[0] > 300:
             st, _ = self.engine.get_json("/v1/library", timeout=3.0)
-            self._library = (time.monotonic(), st == 200)
+            if st == 0 and self._library is not None:
+                self._library = (time.monotonic(), self._library[1])
+            else:
+                self._library = (time.monotonic(), st == 200)
         return self._library[1]
 
     def store_blob(self, cid: str | None, name: str, mime: str, data: bytes) -> dict:
@@ -449,6 +457,20 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 child is not None and child.phase == "permission") else "running"
         if branch and branch[-1]["role"] == "assistant" and branch[-1]["status"] in (
                 "error", "interrupted"):
+            # a run that stopped at its own step cap is no error: its Continue card goes on
+            # from there (live 2026-10-21, a 100-call run's header said "error")
+            last = conv.run if conv.run is not None and conv.run.message_id == branch[-1]["id"] \
+                else None
+            stats = branch[-1].get("stats") or {}
+            if isinstance(stats, str):                  # the rail's row: the column as stored
+                try:
+                    stats = json.loads(stats)
+                except ValueError:
+                    stats = {}
+            if branch[-1]["status"] == "interrupted" and (
+                    (stats or {}).get("interrupted") == "limit" or
+                    getattr(last, "interrupt", None) == "limit"):
+                return "idle"
             return "error"
         return "idle"
 
@@ -477,11 +499,11 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         with conv.lock:
             row = self._row(cid)
             metas = [dict(r) for r in self.store.all(
-                "WITH RECURSIVE p(id, parent_id, role, status, depth) AS ("
-                "SELECT id, parent_id, role, status, 0 FROM messages WHERE id = ? AND "
-                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, "
+                "WITH RECURSIVE p(id, parent_id, role, status, stats, depth) AS ("
+                "SELECT id, parent_id, role, status, stats, 0 FROM messages WHERE id = ? AND "
+                "conversation_id = ? UNION ALL SELECT m.id, m.parent_id, m.role, m.status, NULL, "
                 "p.depth + 1 FROM messages m JOIN p ON m.id = p.parent_id) "
-                "SELECT id, role, status FROM p ORDER BY depth DESC", (row["head_id"], cid))]
+                "SELECT id, role, status, stats FROM p ORDER BY depth DESC", (row["head_id"], cid))]
             if conv.live is not None and metas and metas[-1]["id"] == conv.live["id"]:
                 metas[-1]["status"] = conv.live["status"]
             last_user = next((m for m in reversed(metas) if m["role"] == "user"), None)
@@ -838,6 +860,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             self.store.run("UPDATE conversations SET head_id = ? WHERE id = ?", (mid, conv.id))
         else:
             self.todos_onto(conv.id, user_mid)
+            self.plan_onto(conv.id, user_mid)
             m = self._insert_message(conv.id, user_mid, "assistant", [], "streaming")
             mid = m["id"]
             conv.live = {"id": mid, "parts": [], "status": "streaming"}
@@ -1429,7 +1452,7 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
         cp = self._compaction_for(conv.id, branch) if hasattr(self, "_compaction_for") else None
         step_from = (cp[2][0], cp[2][1]) if cp and cp[2] else None
         files += ctx_mod.file_tokens(branch, cp[1] if cp else 0, step_from, cp[3] if cp else None,
-                                     worker=conv.parent_id is not None)
+                                     int(info.get("max_len") or 0))
         # the run in flight counts from its own calls, whoever asks (a snapshot too)
         on = run or (conv.run if conv.run is not None and conv.run.active else None)
         tokens = _branch_tokens(branch, on, step_from)

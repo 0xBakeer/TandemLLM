@@ -15,7 +15,7 @@ from chatd import compaction as comp
 from chatd import egress, render
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
-from chatd.plans import PLAN_REFUSAL, PLAN_RULE, PLAN_TOOLS
+from chatd.plans import PLAN_REFUSAL, PLAN_TOOLS
 from chatd.runs import GuardError
 from chatd.sandbox import Gone, Unavailable
 from chatd.tasks import IGNORED_CALL, SALVAGE_TOKENS, steer_note, ws_digest
@@ -338,9 +338,10 @@ class AgentMixin:
             out = [t for t in out if t.needs != "web_search"]
         if cid and self.root_cid(cid) != cid:
             return [t for t in out if t.name in tools_mod.WORKER_TOOLS]
-        if settings.get("plan_mode"):
-            # SRV-363: the read tools and the todo list, nothing that changes the world
-            return [t for t in out if t.name in PLAN_TOOLS]
+        # SRV-363: plan mode runs the read tools and the todo list only; since SRV-663 the request
+        # keeps every tool (the run refuses the others, `PLAN_REFUSAL`): a tool list that changed
+        # with the mode changed the prompt's head, and the turn into plan mode and the turn out
+        # of it read the whole conversation again (84,423 tokens cold, live 2026-10-21 03:31)
         if agents:
             # SRV-583: no bash, write_file or edit_file; the todo list and task
             out = [t for t in out if t.name in tools_mod.AGENTS_TOOLS] + [tools_mod.BY_NAME["task"]]
@@ -535,7 +536,8 @@ class AgentMixin:
             except ToolError as exc:
                 self._finish_call(run, part, Result(str(exc), is_error=True))
                 continue
-            if tool is None and settings.get("plan_mode") and self.tool(part.get("name") or ""):
+            if settings.get("plan_mode") and part.get("name") not in PLAN_TOOLS and (
+                    tool is not None or self.tool(part.get("name") or "")):
                 self._finish_call(run, part, Result(PLAN_REFUSAL, is_error=True))
                 continue
             if tool is None and run.agents and part.get("name") in tools_mod.BY_NAME:
@@ -761,17 +763,16 @@ class AgentMixin:
             prompt = r["template"] if r else None
         skills = self.skill_index(settings) if hasattr(self, "skill_index") else None
         today = _dt.date.today().isoformat() if tools else None
+        # the plan rule rides on the plan turn's user message (`plans.plan_onto`), not here: the
+        # system block is the prompt's head, the same in and out of plan mode (SRV-663)
         return render.system_block(today=today, tools=bool(tools), summary=summary,
-                                   skills=skills, prompt=prompt,
-                                   plan=PLAN_RULE if settings.get("plan_mode") and not worker
-                                   else None, worker=worker, agents=agents)
+                                   skills=skills, prompt=prompt, worker=worker, agents=agents)
 
     def _request(self, settings: dict, info: dict, tools: list, path: list[dict], c,
                  head: dict | None = None, **kw) -> dict:
         """The chat's request over `path` under the compaction `c` (`_compaction_for`'s tuple, or
         None): the system block with its summary, the messages from its first kept one on, its
-        steps and its stubs. `head`: who asks (`_head`: a worker's block; a worker's write_file
-        and edit_file arguments stay whole until a compaction, chatd/render.py `call_arguments`)."""
+        steps and its stubs. `head`: who asks (`_head`: a worker's block)."""
         b = c[1] if c else 0
         ours = info.get("backend") == "engine"
         if "keep_reasoning_from" in kw:
@@ -783,7 +784,7 @@ class AgentMixin:
                            tools=[t.openai() for t in tools],
                            tandem=self.tandem_field(settings) if ours else None,
                            inline_images=ours, step_from=self._step_from(c),
-                           fold_before=c[3] if c else None, worker="worker" in (head or {}),
+                           fold_before=c[3] if c else None, window=int(info.get("max_len") or 0),
                            levels=info.get("effort_levels"),
                            effort_off=info.get("effort_off"), **kw)
 
@@ -964,15 +965,18 @@ class AgentMixin:
         msgs: list[dict] = [{"role": "system", "content": system}] if system else []
         fold = prior[3] if prior else None
         end = b if sb is None else sb[0]
+        gone = render.all_folded(path[start:end + 1])     # file texts: on disk, not summarized
         for k in range(start, end):
             msgs.extend(render.message(path[k], False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == k else 0))
+                                       from_step=done[1] if done and done[0] == k else 0,
+                                       folded=gone))
         if sb is not None:
             i, keep_step = sb
             run_msg = dict(path[i], parts=[p for p in path[i].get("parts") or []
                                            if int(p.get("step") or 1) < keep_step])
             msgs.extend(render.message(run_msg, False, self._blob_of, fold_before=fold,
-                                       from_step=done[1] if done and done[0] == i else 0))
+                                       from_step=done[1] if done and done[0] == i else 0,
+                                       folded=gone))
         asked = comp.estimate({"messages": msgs}, ratio)
         # a chat the engine refused for memory: the summary's request stays under the guard's
         # share of the refused one, or the engine refuses it too

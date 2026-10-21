@@ -194,6 +194,38 @@ def test_the_turn_after_an_aligned_turn_is_aligned_again():
     assert pre3["kind"] == "end" and pre3["reused"] == e2, pre3
 
 
+def test_a_later_generation_the_copy_rewrote_resumes_at_the_highest_aligned_anchor():
+    """SRV-657 (2026-10-21 02:26, Ornith): every turn aligned an early answer's whitespace, until
+    one generation's tool call came back with a character changed (not whitespace): the whole
+    alignment was refused and the turn resumed at the grid line below the FIRST difference,
+    132,635 of 144,923 tokens read again. Now the rows are served up to the highest resident
+    anchor inside the part the copy holds token for token past the aligned regions, and the turn
+    resumes there; the regions below it travel on."""
+    prompt = tokens(100, seed=79)
+    res, al = _setup()
+    out1, _ = _first(prompt, 40)
+    e1 = res.end["at"]
+    copy2 = prompt + out1[:10] + [NL] + out1[10:] + TOOL
+    ids2, _, a2 = app._end_replay(res, copy2)
+    assert a2 and ids2[:e1] == res.tokens[:e1]
+    out2, pre2, _ = turn(ids2, 30)
+    assert pre2["kind"] == "end"
+    line = max(b for b in res.anchors if b <= len(ids2))
+    assert line > e1, (sorted(res.anchors), e1)       # turn 2's prefill crossed a grid line
+    # turn 3: turn 1 re-rendered the same way, turn 2's answer with a character changed
+    k = next(i for i in range(5, len(out2) - 2) if out2[i] not in (NL, SP))
+    other = next(t for t in range(1, 95) if t != out2[k])
+    copy3 = copy2 + out2[:k] + [other] + out2[k + 1:] + TOOL2
+    ids3, spans, a3 = app._end_replay(res, copy3)
+    assert al.last_partial == line, (al.last_partial, line)
+    assert ids3[:line] == res.tokens[:line] and ids3[line:] == copy3[line + 1:], (len(ids3), line)
+    assert a3 == line - (len(prompt) + 10) and al.stats["partial"] == 1, (a3, al.stats)
+    got, pre3, _ = turn(ids3, 6)
+    assert pre3["kind"] == "resident" and pre3["reused"] == line, pre3
+    assert got == _cold(ids3, 6), "the anchor's gate: the same greedy tokens as cold"
+    return f"resumed at {line} of {len(ids3)} (the whole alignment refused; before: at 96)"
+
+
 # ------------------------------------------------------------------ 5. with a hidden span
 
 def test_a_hidden_span_and_whitespace_in_one_generation():

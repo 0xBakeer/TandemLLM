@@ -111,3 +111,8 @@ def test_a_small_file_reads_as_before():
     ws = _ws()
     ws.write("s.txt", b"a\nb\nc\n")
     assert T._read(_Ctx(ws), {"path": "s.txt"}).content == "     1\ta\n     2\tb\n     3\tc"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

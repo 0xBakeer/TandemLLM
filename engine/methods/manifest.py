@@ -79,7 +79,12 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
              # SRV-647: the masks keyed by a serial of the grammar, not its id(); no row changes
              ("engine/grammar.py", "9c6617a799bd64b1fdbc3cfc23a2eba5b2ee471b64d1d21b4da7dc23adf59c65"):
-             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749"}
+             "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
+             # ENG-383: the router kernel takes up to 512 experts (a 256-expert trunk takes an
+             # 8-wide variant); at 512 experts, Flash-Next's and LFM2.5's shape, the launch is the
+             # one it was, so no row of theirs changes
+             ("tools/fn_kernels.py", "85e31c84a0709bfaec8f40c195354f29c225ed72defe4df85a5ad0a175a985e8"):
+             "152025a29380f1bc9c0a1d93b2382531260b443cbe542549f332fa245ac23b7f"}
 
 
 def adoption() -> str:

@@ -17,6 +17,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_chatd_imported_before_chatd_util_keeps_the_tests_limit():
+    import importlib.util
+    import unittest
+    if importlib.util.find_spec("pytest") is None:
+        # it asks pytest's collection order; a box without pytest runs the scripts one by one
+        raise unittest.SkipTest("pytest is not installed")
     env = {k: v for k, v in os.environ.items() if not k.startswith("QSE_SANDBOX_")}
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                         "tests/chatd_import_first.py", "tests/test_chatd_agent.py",
@@ -31,3 +36,8 @@ def test_the_limit_in_this_session():
     from chatd import sandbox as sb_mod
     assert sb_mod.LIMIT_BYTES == sb_mod.GiB
     assert sb_mod.SOCKET != "/var/run/docker.sock" or os.environ.get("QSE_SANDBOX_BOX") == "1"
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

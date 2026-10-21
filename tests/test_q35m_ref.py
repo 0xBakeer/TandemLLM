@@ -27,3 +27,8 @@ def test_ornith_shape():
 
 def test_minicpm_shape():
     _run("minicpm")
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

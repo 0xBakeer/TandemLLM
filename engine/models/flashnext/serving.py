@@ -346,8 +346,13 @@ class FlashNextServing:
             self._weights = by
         st = self.st
 
+        from engine import kvpool as _kvp
+
         def nb(*ds):
-            return sum(int(t.numel() * t.element_size()) for d in ds for t in d.values())
+            # a paged buffer's `nbytes` is its reserved address range: its committed pages are
+            # the pool's figure (server/memsplit.py adds them as `kv_pool`)
+            return sum(int(t.numel() * t.element_size()) for d in ds for t in d.values()
+                       if not _kvp.paged(t))
         head = self.heads.get("mtp")
         mtp_kv = 0
         if head is not None:

@@ -51,3 +51,8 @@ def test_hot_ids_map_back():
     top, idx = torch.topk(hl, 4, dim=-1)
     want = DFlash2Module.walk(hot[idx], ref.lattice(rows, hot[idx], top, 5))
     assert out[:, 0].long().tolist() == want.tolist()
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

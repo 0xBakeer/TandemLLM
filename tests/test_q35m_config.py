@@ -81,3 +81,8 @@ def test_the_layout_names_every_part():
     assert "layers.0.linear_attn.in_proj_qkv.trellis" in names and "layers.3.self_attn.q_proj.trellis" in names
     assert "mtp.fc.trellis" in names and "mtp.layers.0.mlp.experts.255.down_proj.trellis" in names
     assert sum(1 for n in names if ".experts." in n and not n.startswith("mtp.")) == 48 * 256 * 3
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

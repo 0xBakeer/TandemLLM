@@ -58,3 +58,13 @@ def test_cost_and_state_have_no_flash_next_parts():
     assert secs["mtp.h_last"].shape == (1, c.hidden_size)
     assert [v[0] for v in srv.state.views()] == [f"{x}.{li}" for li in c.attention_layers for x in "kv"]
     assert srv.price_class(100) == 0 and srv.price_class(5000) == 8192
+    # SRV-655: the prompt's workspace is this trunk's (K and V repeated to every query head for
+    # SDPA), not Flash-Next's line: 32,768 B a token at Ornith's 32 heads of 256
+    assert cost.workspace_per_token == c.num_attention_heads * c.head_dim * 2 * 2
+    assert cost.workspace_floor == int(2.75 * (1 << 30))
+    assert cost.workspace_cap == cost.workspace_floor + cost.workspace_per_token * srv.max_len
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

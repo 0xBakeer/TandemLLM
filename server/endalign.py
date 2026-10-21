@@ -139,7 +139,12 @@ class EndAlign:
         self._carry: list[tuple[int, int, int]] = []    # the served prompt's, for the next `kept`
         self.stats = {"aligned": 0, "aligned_tokens": 0, "refused": 0, "regions": 0,
                       "aligned_reasoning": 0, "reasoning_tokens": 0,
-                      "aligned_moved": 0, "moved_tokens": 0}
+                      "aligned_moved": 0, "moved_tokens": 0, "partial": 0, "partial_tokens": 0}
+        # SRV-657: the rows ranges the first pass found token for token in the copy, (rows start,
+        # rows end, copy start), for a partial alignment (`_partial`); and the rows line the last
+        # `replay` served a partial alignment up to (None: a whole one, or none)
+        self._segs: list[tuple[int, int, int]] = []
+        self.last_partial: int | None = None
         # the rows ranges the last `replay` served that the client's copy left out (SRV-233)
         self.last_omitted: list[tuple[int, int]] = []
         # FX16: the rows ranges of the client's own block the last `replay` served from the rows
@@ -167,12 +172,18 @@ class EndAlign:
         (or when off), else the copy aligned to the rows where only whitespace differs."""
         out, spans = res.replay(ids)
         aligned = 0
-        self.last_omitted = []
+        self.last_omitted, self.last_partial = [], None
         if not spans and self.on and res.end is not None:
             got = self._align(res, ids)
             if got is not None:
                 out, aligned = got
                 spans = list(res.end["hidden"])
+            else:
+                part = self._partial(res, ids)
+                if part is not None:
+                    out, aligned, x = part
+                    spans = [(p, h) for p, h in res.end["hidden"] if p + len(h) <= x]
+                    self.last_partial = x
         self._carry = self._carried(res, out)
         return out, spans, aligned
 
@@ -181,7 +192,42 @@ class EndAlign:
         if not regs or res.end is None:
             return []
         e = res.end["at"]
+        if self.last_partial is not None:
+            # a partial alignment served the rows up to its line: the regions below it stay
+            x = self.last_partial
+            return [r for r in regs if r[1] <= x] if served[:x] == res.tokens[:x] else []
         return regs if len(served) >= e and served[:e] == res.tokens[:e] else []
+
+    def _partial(self, res, copy: list[int]):
+        """SRV-657: when no pass aligns the whole copy, the longest part that the first pass did:
+        the rows up to the highest resident anchor inside a run the copy holds token for token
+        (`_segs`), the copy after the matching position. A generation whose tool call the parser
+        re-wrote (a boolean typed, keys in another order: not whitespace) refused the whole
+        alignment, and the turn resumed at the grid line below the FIRST place the copy parts
+        from the rows -- an early answer's whitespace that every turn had aligned -- and read the
+        rest again: 132,635 of 144,923 tokens on Ornith (2026-10-21 02:26), 36,316 of 48,604 on
+        the owner's run. `(ids, tokens aligned below the line, the line)` or None when no anchor
+        beats the plain shared head's."""
+        anchors = sorted(getattr(res, "anchors", None) or {})
+        if not anchors or not self._segs:
+            return None
+        e = int(res.end["at"])
+        rows = res.tokens
+        c = _common(copy, rows[:e])
+        plain = max((b for b in anchors if b <= c), default=0)
+        best = None
+        for i, a, j in self._segs:
+            for x in anchors:
+                if i <= x <= a and x > plain and (best is None or x > best[0]):
+                    best = (x, j + (x - i))
+        if best is None:
+            return None
+        x, y = best
+        if y >= len(copy):
+            return None                    # the copy must go on past the line: its own turn
+        self.stats["partial"] += 1
+        self.stats["partial_tokens"] += x - c
+        return rows[:x] + copy[y:], max(0, x - c), x
 
     def kept(self, res, n_prompt: int, why: str) -> None:
         """After `ResidentPrefix.keep_end`: the new end anchor's regions are the served prompt's
@@ -265,7 +311,8 @@ class EndAlign:
         region's reasoning left out of what the copy must hold."""
         refused = self.stats["refused"]
         self.last_omitted, self.last_moved, self.last_refusal = [], [], None
-        got = self._walk(res, copy, False)
+        self._segs = []
+        got = self._walk(res, copy, False, segs=self._segs)
         thinks = self.reasoning and any(r[2] > r[0] for r in self.regions(res))
         if got is None and thinks:
             got = self._walk(res, copy, True)
@@ -399,7 +446,8 @@ class EndAlign:
                 out.append((a, b))
         return out
 
-    def _walk(self, res, copy: list[int], omit: bool, moved=(), notes_absent: bool = False):
+    def _walk(self, res, copy: list[int], omit: bool, moved=(), notes_absent: bool = False,
+              segs: list | None = None):
         end = res.end
         e, rows = int(end["at"]), res.tokens
         regs = self.regions(res)
@@ -452,11 +500,17 @@ class EndAlign:
         i = j = first[0]
         aligned = 0
         tb = self.tbytes
+        if segs is not None:
+            segs.append((0, i, 0))         # the shared head, token for token
         for a, b in zones:
             if b <= i:
                 continue
             if copy[j:j + a - i] != rows[i:a]:
+                if segs is not None:
+                    segs.append((i, i + _common(copy[j:], rows[i:a]), j))
                 return self._refuse("between_zones", c, e, at=i)
+            if segs is not None:
+                segs.append((i, a, j))
             j += a - i
             want = b"".join(_bare(tb(rows[p])) for p in range(a, b) if p not in hid)
             pos = 0
@@ -472,6 +526,8 @@ class EndAlign:
             while i < e and j < len(copy) and copy[j] != rows[i] and not _bare(tb(copy[j])):
                 j += 1
         if len(copy) - j <= e - i or copy[j:j + e - i] != rows[i:e]:
+            if segs is not None:
+                segs.append((i, i + _common(copy[j:], rows[i:e]), j))
             return self._refuse("tail", c, e, at=i)
         self.stats["aligned"] += 1
         self.stats["aligned_tokens"] += aligned

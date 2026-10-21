@@ -52,3 +52,8 @@ def test_rows_attention():
         assert torch.equal(one[0], o[i]), i
     wide = K.attn_rows(q, kc, vc, ctl, anc, 16)
     assert torch.equal(wide, o)
+
+
+if __name__ == "__main__":
+    from scriptmode import run
+    run(globals())

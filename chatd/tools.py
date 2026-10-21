@@ -312,14 +312,40 @@ def _read_capped(lines: list[str], off: int, lim: int, col: int = 1,
     return Result(body)
 
 
+def _note_as_content(ctx, path: str, note: str) -> str:
+    """The write guard's answer to a history note sent as a file's text: whether the file is on
+    disk, and as written (the note's sha256 against the file's), so the model does not write it
+    again; how to change it if it must."""
+    head = ("content is the note the conversation shows for an earlier write, not file text; "
+            "nothing was written. ")
+    try:
+        where = ctx.ws.show(ctx.ws.resolve(path))
+    except Exception:                                              # noqa: BLE001
+        where = path
+    try:
+        data = ctx.ws.read(path)
+    except Exception:                                              # noqa: BLE001
+        return head + (f"There is no file at {where} yet: write it with its whole text as the "
+                       f"content.")
+    sha = hashlib.sha256(data).hexdigest()[:8]
+    noted = re.search(r"sha256 ([0-9a-f]{8})", note)
+    same = noted is not None and noted.group(1) == sha
+    return head + (f"{where} is on disk ({len(data):,} bytes, sha256 {sha})"
+                   + (": it is the text that write sent, correct as it is, so there is nothing to "
+                      "write again. " if same else ". ")
+                   + "Use read_file to see it and edit_file to change part of it; a new "
+                     "write_file needs the file's whole text.")
+
+
 def _write(ctx, a):
     path, content = str(a.get("path") or ""), a.get("content")
     if not isinstance(content, str):
         raise ToolError("content must be a string")
-    if render.WROTE_STUB.match(content.strip()):
-        # an earlier write's content reads as this stub in the request (chatd/render.py)
-        raise ToolError("content is the stub of an earlier write, not the file's text; send the "
-                        "whole text, or use edit_file for a change")
+    c = content.strip()
+    if render.WROTE_STUB.match(c) or render.FOLDED_NOTE.match(c):
+        # a note the history shows for an earlier write (chatd/render.py), copied as the text:
+        # refused with what is on disk, so the model does not write it again (SRV-659)
+        raise ToolError(_note_as_content(ctx, path, c))
     ctx.ws.write(path, content.encode())
     ctx.changed(path)
     return Result(f"wrote {ctx.ws.show(ctx.ws.resolve(path))} ({len(content.encode()):,} bytes)")
@@ -334,7 +360,8 @@ def _edit(ctx, a):
     if n == 0:
         # the request shows an earlier write's or read's text as a stub (chatd/render.py)
         raise ToolError("old was not found in the file; read it again with read_file and copy it "
-                        "exactly (an earlier write or read of it may show only a stub)")
+                        "exactly (an earlier read of it may show only a stub, an earlier write's "
+                        "text may be left out of the conversation)")
     if n > 1 and not a.get("replace_all"):
         raise ToolError(f"old occurs {n} times; give more context to make it unique, or set "
                         f"replace_all")
