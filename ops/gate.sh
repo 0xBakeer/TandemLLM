@@ -164,7 +164,7 @@ if [ $SKIP_SUITE = 0 ]; then
   # tests it ran: a file that exits 0 having run none fails (sixteen did, and passed, until 0.13)
   SUM=$(env -i HOME="$HOME" PATH="$PATH" SUITE_PYTHONPATH="$HOME/pylibs" \
         "$PY" -u tests/script_suite.py --all --out "$OUT/suite" --timeout 900 2>&1 | tee "$OUT/suite.log" | tail -1)
-  bad=0; case "$SUM" in *" fail=0 "*) ;; *) bad=1 ;; esac
+  bad=0; case "$SUM" in *" fail=0 "*) ;; *) bad=1 ;; esac      # skipped=N files are listed, not failed
   stub '```'; stub "\$ python tests/script_suite.py --all  (every tests/test_*.py, env -i, CUDA off)"
   stub "$SUM"; stub '```'
   say "suite $SUM"

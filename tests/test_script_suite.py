@@ -55,7 +55,8 @@ def test_the_suite_fails_a_file_that_ran_no_test_and_counts_the_others():
         case = _module(d, "test_case.py", "import unittest\n\n\nclass T(unittest.TestCase):\n"
                        "    def test_a(self):\n        pass\n\n    def test_b(self):\n"
                        "        pass\n\n\nif __name__ == '__main__':\n    unittest.main()\n")
-        r = _suite(none, some, said, case)
+        gpu = _module(d, "test_gpu.py", "print('skipped: Triton on a GPU')\n")
+        r = _suite(none, some, said, case, gpu)
         out = r.stdout
         assert r.returncode == 1, out
         line = {ln.split()[0].split("/")[-1]: ln for ln in out.splitlines() if ln.endswith(
@@ -65,7 +66,9 @@ def test_the_suite_fails_a_file_that_ran_no_test_and_counts_the_others():
         assert "7 tests" in line["test_said.py"] and line["test_said.py"].endswith("ok"), out
         # a TestCase module: unittest finds its classes in `__main__` as under a plain python
         assert "2 tests" in line["test_case.py"] and line["test_case.py"].endswith("ok"), out
-        assert out.rstrip().splitlines()[-1].startswith("files=4 ok=3 fail=1 tests=11"), out
+        # a file that says it skipped on purpose is listed apart, neither passed nor failed
+        assert "0 tests" in line["test_gpu.py"] and "SKIPPED (Triton on a GPU)" in line["test_gpu.py"], out
+        assert out.rstrip().splitlines()[-1].startswith("files=5 ok=3 fail=1 skipped=1 tests=11"), out
 
 
 def test_scriptmode_runs_a_pytest_module_with_its_fixtures():

@@ -8,7 +8,8 @@ A file ran its tests when its `test_*` functions were called (counted here: the 
 wrapped as they are defined) or when it says so itself (`N passed` or unittest's `Ran N tests`,
 N > 0, the last such line: a module that checks at import, tests/test_relax.py; a TestCase module). A file that exits 0 having run none FAILS:
 until 0.13 (SRV-661) sixteen files had no `__main__` entry, ran nothing on the box and were counted as passed
-(tests/scriptmode.py is their runner now). `--all` runs each file in a clean environment (no
+(tests/scriptmode.py is their runner now); a file that runs none on purpose prints `skipped: <why>`
+and is listed as skipped. `--all` runs each file in a clean environment (no
 serve.env, no QWEN38_*, CUDA_VISIBLE_DEVICES empty), prints a line a file and a total, and exits 1
 when any file failed or ran nothing. Standard library only.
 """
@@ -27,6 +28,9 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 COUNT_LINE = "[script-suite] test functions run: "
+#: a file that runs nothing here on purpose says so on a line of its own: `skipped: <why>` (a GPU
+#: kernel test on the CPU); the suite lists it apart, never as passed
+SKIPPED = re.compile(r"(?mi)^skipped:?\s*(.*)$")
 PASSED = re.compile(r"(?m)^\s*(\d+) passed\b|^Ran (\d+) tests? in ")
 
 
@@ -109,7 +113,7 @@ def run_all(args: list) -> int:
     env = {k: v for k, v in os.environ.items() if k in ("HOME", "PATH", "LANG", "TMPDIR", "USER")}
     env.update(PYTHONPATH=os.pathsep.join(p for p in (ROOT, os.environ.get("SUITE_PYTHONPATH")) if p),
                CUDA_VISIBLE_DEVICES="", TZ="Europe/Berlin", PYTHONDONTWRITEBYTECODE="1")
-    bad, total = [], 0
+    bad, skipped, total = [], [], 0
     for f in files:
         t0 = time.time()
         try:
@@ -120,15 +124,22 @@ def run_all(args: list) -> int:
             rc, log = 124, (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
         n = ran(log)
         total += n
-        verdict = "ok" if rc == 0 and n > 0 else ("FAIL (ran no test)" if rc == 0 else f"FAIL (exit {rc})")
-        if verdict != "ok":
+        skip = SKIPPED.search(log) if rc == 0 and n == 0 else None
+        verdict = ("ok" if rc == 0 and n > 0 else
+                   f"SKIPPED ({skip.group(1).strip()[:80]})" if skip else
+                   "FAIL (ran no test)" if rc == 0 else f"FAIL (exit {rc})")
+        if skip:
+            skipped.append(os.path.relpath(f, ROOT))
+        elif verdict != "ok":
             bad.append(os.path.relpath(f, ROOT))
         if out:
             with open(os.path.join(out, os.path.basename(f)[:-3] + ".log"), "w") as fh:
                 fh.write(log)
         print(f"{os.path.relpath(f, ROOT):56s} {n:5d} tests {time.time() - t0:7.1f} s  {verdict}", flush=True)
-    print(f"files={len(files)} ok={len(files) - len(bad)} fail={len(bad)} tests={total}"
-          + (" -- " + " ".join(bad) if bad else ""), flush=True)
+    print(f"files={len(files)} ok={len(files) - len(bad) - len(skipped)} fail={len(bad)} "
+          f"skipped={len(skipped)} tests={total}"
+          + (" -- " + " ".join(bad) if bad else "") + (" -- skipped: " + " ".join(skipped) if skipped else ""),
+          flush=True)
     return 1 if bad else 0
 
 
