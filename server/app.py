@@ -56,8 +56,8 @@ from server.stream import (  # noqa: E402
     answer_stops, drop_stray_close, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, FlintCalls, PythonicCalls, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, rewrite_flint, rewrite_pythonic, schema_types,
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, ArgKeyCalls, PythonicCalls, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_argkey, rewrite_pythonic, schema_types,
                              strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
@@ -7237,7 +7237,7 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "flint"))
+                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "argkey"))
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None
@@ -8585,8 +8585,8 @@ class Handler(BaseHTTPRequestHandler):
                         ended = bool(ids) and ids[-1] in eos
                         if STATE.get("tool_format") == "pythonic":
                             answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
-                        elif STATE.get("tool_format") == "flint":
-                            answer = rewrite_flint(answer, eos=ended)
+                        elif STATE.get("tool_format") == "argkey":
+                            answer = rewrite_argkey(answer, eos=ended)
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -8729,9 +8729,9 @@ class Handler(BaseHTTPRequestHandler):
                     if parse_calls else None)
             # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
             # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
-            # Flint writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`: the same
-            # rewrite into the buffer's JSON tier (`FlintCalls`)
-            pyc = ({"pythonic": PythonicCalls, "flint": FlintCalls}.get(STATE.get("tool_format"))
+            # a model that writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>` (tool_format
+            # argkey): the same rewrite into the buffer's JSON tier (`ArgKeyCalls`)
+            pyc = ({"pythonic": PythonicCalls, "argkey": ArgKeyCalls}.get(STATE.get("tool_format"))
                    if tbuf is not None else None)
             pyc = pyc() if pyc is not None else None
             rec.live_refs = (think, tbuf)

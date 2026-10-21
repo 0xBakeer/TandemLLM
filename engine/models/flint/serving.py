@@ -477,7 +477,7 @@ def serve(a, ctx) -> dict:
     """Recursive's Flint from a BF16 checkpoint or an EXL3 pack for the server (`--model <dir>`, the registry's
     `serve`; server/app.py `_load`). Plain decode from the captured step; any `--drafter` but none serves the
     lookup cut by StairCut (`lookup_drafter`, FLINT_LOOKUP, gated by the load-time self-check). Tool calls in the
-    checkpoint's own format (`tool_format` "flint", server/toolcall.py `FlintCalls`)."""
+    checkpoint's own format (`tool_format` "argkey", server/toolcall.py `ArgKeyCalls`)."""
     from transformers import AutoTokenizer
 
     from engine.spec import Relax
@@ -501,7 +501,7 @@ def serve(a, ctx) -> dict:
     return {"engine": srv, "tok": tok, "drafter": drafter, "path": a.model, "device": "cuda",
             "cfg": None, "w": None, "describe": describe,
             "serving": {"tree": drafter is not None, "sampled_tree": "det", "relax": Relax(1.0, 1),
-                        "tool_format": "flint",
+                        "tool_format": "argkey",
                         # the template opens no reasoning block; the model writes `<think>` when it reasons
                         "self_think": True,
                         "weights_info": {"format": fmt, "weights": a.model,

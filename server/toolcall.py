@@ -1312,16 +1312,16 @@ def rewrite_pythonic(text: str, eos: bool = False) -> str:
     return p.feed(text) + p.finish(eos=eos)
 
 
-# Flint's calls (its chat template's form): `<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...
+# The arg-key form of a call (tool_format "argkey", e.g. Flint's chat template): `<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...
 # </tool_call>`, a string value as written and any other value as JSON. A block is rewritten into this module's
 # JSON tier with every value as the text the model wrote, so `_typed` turns the values a schema types into JSON
 # values and a string stays exactly as written (no trimming); a block that does not read as one call goes out as
 # the text it was.
-_FLINT_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+_ARGKEY_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
 
 
-def flint_calls(inner: str) -> list[dict] | None:
-    """The call of one Flint block's inner text, [{"name", "arguments"}], or None if it is not one."""
+def argkey_calls(inner: str) -> list[dict] | None:
+    """The call of one arg-key block's inner text, [{"name", "arguments"}], or None if it is not one."""
     i = inner.find("<arg_key>")
     name = (inner if i < 0 else inner[:i]).strip()
     if not name or "<" in name or "\n" in name:
@@ -1329,7 +1329,7 @@ def flint_calls(inner: str) -> list[dict] | None:
     rest = "" if i < 0 else inner[i:]
     args: dict = {}
     pos = 0
-    for m in _FLINT_ARG.finditer(rest):
+    for m in _ARGKEY_ARG.finditer(rest):
         if rest[pos:m.start()].strip():
             return None
         args[m.group(1).strip()] = m.group(2)
@@ -1339,15 +1339,15 @@ def flint_calls(inner: str) -> list[dict] | None:
     return [{"name": name, "arguments": args}]
 
 
-def flint_block(inner: str) -> str | None:
-    calls = flint_calls(inner)
+def argkey_block(inner: str) -> str | None:
+    calls = argkey_calls(inner)
     if calls is None:
         return None
     return OPEN + json.dumps(calls, ensure_ascii=False) + CLOSE
 
 
-class FlintCalls(PythonicCalls):
-    """The stream's rewrite of Flint blocks (above), PythonicCalls' machine with Flint's tags."""
+class ArgKeyCalls(PythonicCalls):
+    """The stream's rewrite of arg-key blocks (above): PythonicCalls' machine on the `<tool_call>` tags."""
 
     OPEN_TAG, CLOSE_TAG = OPEN, CLOSE
 
@@ -1377,7 +1377,7 @@ class FlintCalls(PythonicCalls):
             self._open = False
 
     def _close(self, inner: str, closed: bool) -> str:
-        got = flint_block(inner)
+        got = argkey_block(inner)
         if got is None:
             self.bad += 1
             return OPEN + inner + (CLOSE if closed else "")
@@ -1395,7 +1395,7 @@ class FlintCalls(PythonicCalls):
         return OPEN + buf
 
 
-def rewrite_flint(text: str, eos: bool = False) -> str:
-    """A whole answer with its Flint blocks rewritten (the non-streamed path)."""
-    p = FlintCalls()
+def rewrite_argkey(text: str, eos: bool = False) -> str:
+    """A whole answer with its arg-key blocks rewritten (the non-streamed path)."""
+    p = ArgKeyCalls()
     return p.feed(text) + p.finish(eos=eos)
