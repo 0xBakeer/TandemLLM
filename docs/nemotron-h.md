@@ -39,7 +39,6 @@ DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768
 | 1 / 2 / 3 requests at once, 256 tokens each, total (`lfm_parallel.py`) | | 26.94 / 32.57 / 38.30 tok/s, 2 and 3 slots decoding together (254 joint rounds), each text its request's alone |
 | verify chain of 1 / 2 / 4 / 8 / 16 rows at 1,024 tokens (`nh_check.py staircase`, the profile's price file) | | 34.8 / 41.5 / 47.2 / 73.2 / 114.3 ms |
 
-- llama.cpp on the same GGUF (master 620d2225c with #30520, same board): `llama-bench -ngl 99 -p 0 -n 128` 35.37 tok/s; llama-server greedy on the 8 prompts below 38.6-39.4 tok/s. The engine's 27.94 is 1.27x below llama-bench.
 - Every lookup answer is the plain run's text. Through `fn_server_check.py`, 19 of 20 answers are identical; the thinking-on one is identical up to the reasoning budget's forced close, which lands one token later at the end of the verified block (docs/exactness.md, output changes).
 - A verify row costs 2.7 to 14.6 ms more than the one before it (about 4 ms, a step at 5 and 9 rows): the IQ2_XXS shared expert decodes its weights once for up to 16 rows (5,376 x 4,096: 0.10 ms for one row, 0.36 for 8, 0.47 for 16) and the routed experts run one (row, expert) pair a program, so the lookup pays off on edit and copy asks and not on prose.
 - A CUDA GEMV for the IQ2_XXS shared experts took the decode step to 32.7 tok/s and 8 / 16-row chains to 57.9 / 93.2 ms; it is not in this tree, so this profile decodes at the rates above, and the LiLiCorr rows of the IQ2 table under [LiLiCorr](#lilicorr), measured with it, are higher than this tree gives.
@@ -96,7 +95,7 @@ Drafted against plain (SPD-127, 0.11.1, 2026-10-16): the same asks, one fresh se
 
 Every drafted text is the plain run's. Each EXL3 price file comes from one load on the Spark: `nh_check.py bench` (256 tokens), `staircase` (1,024 and 8,192 tokens, 20 replays a count) and `lilicorr` (8 prompts of 256 tokens, thinking on), then `nh_check.py prices --lilicorr`: the chain of 1 to 16 rows and the plain step per context class, and the `spec` prior, (8-row chain + draft) / (0.75 x accepted length), 13.9 ms a token on 2.5 to 20.2 on 6.0.
 
-Without a price file (0.11.0, 2.5 to 6.0) the one-row block kept a price of 1 ms: a round the cut cuts to the anchor alone prices `spec`, never the chain. Once the 2- to 8-row blocks were priced at 33 to 44 ms, the cut took the anchor alone wherever the draft was unsure, after the draft (about 10 ms) had run. On 4.0, 247 of 277 prose rounds were such rounds, 35.6 ms a token against the 24.6 ms plain step, and 3.0 to 4.0 wrote prose at 31 to 33 tok/s and chat at 39 to 40. A price file without the `spec` prior (0.10.0, 4.0) kept every ask on plain steps, at 40.3 to 40.5 tok/s. The IQ2 profile drafts with the lookup alone: prose and chat run at its plain rate (27.7 and 27.8 tok/s against 27.7), code at 31.9; LiLiCorr beside it with a `spec` prior is not measured yet. llama.cpp (620d2225c, `--spec-type draft-dflash`, 7 draft tokens, one slot) decodes the GGUF plain at 38.2 tok/s and with LiLiCorr at 49.3 / 62.0 / 92.2 / 92.5 / 132.0 (0.10.0's windows); its LiLiCorr texts differ from its plain texts on prose and chat.
+Without a price file (0.11.0, 2.5 to 6.0) the one-row block kept a price of 1 ms: a round the cut cuts to the anchor alone prices `spec`, never the chain. Once the 2- to 8-row blocks were priced at 33 to 44 ms, the cut took the anchor alone wherever the draft was unsure, after the draft (about 10 ms) had run. On 4.0, 247 of 277 prose rounds were such rounds, 35.6 ms a token against the 24.6 ms plain step, and 3.0 to 4.0 wrote prose at 31 to 33 tok/s and chat at 39 to 40. A price file without the `spec` prior (0.10.0, 4.0) kept every ask on plain steps, at 40.3 to 40.5 tok/s. The IQ2 profile drafts with the lookup alone: prose and chat run at its plain rate (27.7 and 27.8 tok/s against 27.7), code at 31.9; LiLiCorr beside it with a `spec` prior is not measured yet.
 
 ### Super VL: nemotron-super-vl-exl3-4.0, nemotron-super-vl-exl3-2.0, nemotron-super-vl-nvfp4
 
@@ -113,8 +112,6 @@ Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 w
 | `nemotron-super-vl-exl3-4.0` | 58.35 GiB | 0.049 | 92.9 % | 3.94 | 31.1 | 33.1 / 43.9 / 53.6 / 101.0 / 108.3 |
 | `nemotron-super-vl-exl3-2.0` | 31.24 GiB | 0.325 | 82.1 % | 4.93 | 36.5 | 35.6 / 46.2 / 46.3 / 125.1 / 139.2 |
 | `nemotron-super-vl-nvfp4` | 66.63 GiB | 0.041 | 93.4 % | 3.83 | 19.6 | 23.9 / 28.7 / 39.9 / 73.5 / 81.7 |
-| NVIDIA's NVFP4 in vLLM (nightly-3f1bcfd8, the card's Spark flags) | | | | | 19.4 | 29.9 / 34.8 / 52.7 / 72.4 / 72.7 (LiLiCorr, 7 tokens) |
-| the same, the checkpoint's MTP head (5 tokens) | | | | | | 29.1 / 32.3 / 43.2 / 52.9 / 53.1 |
 
 - exllamav3's `model_diff` on 100 wikitext-2 rows of 2,048 tokens, the 4.0 pack: KL 0.0224, top-1 94.3 %; on the 8 rows above KL 0.049, top-1 93.0 %, perplexity 3.948 (the engine 0.0486, 92.9 %, 3.941).
 - A decode token reads 10.11 GB of the NVFP4 checkpoint: the FP8 Mamba2 projections 4.38 GB, routed experts 2.73 (22 a layer), shared experts 0.99, the BF16 latent pair 0.67, the FP8 head 0.54, the SSM states 0.34; 19.6 tok/s is 198 GB/s.
@@ -122,8 +119,8 @@ Quality against BF16 (`tools/nh_quality.py`, the BF16 checkpoint's logits on 8 w
 - LiLiCorr offline (`nh_check.py lilicorr`, 4 prompts x 192 tokens, thinking on): accepted length 4.82 on NVFP4 (2.86 .. 6.16), 4.65 on EXL3 4.0; the draft takes 21.3 ms (its NVFP4 head over 131,072 tokens and the 8,192-key window).
 - The checkpoint's MTP head (`nh_check.py mtp`, depth 3, the 4.0 pack's 4-bit head): the draft equals the trunk's greedy token at depth 1, 2 and 3 in 90.6, 82.2 and 69.4 % of positions, mean accepted run 2.38 of 3. Not served: it runs eagerly and LiLiCorr drafts 7 tokens at a higher accepted length.
 - Every LiLiCorr text of the five asks is the plain run's. `fn_server_check.py`, 20 requests: 16 the same on NVFP4 and on EXL3 4.0, 17 on EXL3 2.0; the others (thinking on with a low cap, JSON with a reasoning budget) the same up to the reasoning budget's forced close, which lands at the end of the verified block (docs/exactness.md, output changes).
-- 1 / 2 / 3 requests at once with LiLiCorr + lookup (256 tokens, the server's `parallel.running` sampled every 50 ms: 1, 2 and 3): EXL3 4.0 20.8 / 18.5 / 19.6 tok/s in total, EXL3 2.0 22.5 / 19.4 / 20.7, NVFP4 16.7 / 15.9 / 17.6. Speculating slots take turns; with 22 experts a row the turns gain nothing over one slot. vLLM batches the same three requests plain: 18.9 / 31.1 / 35.9.
-- Prefill (one cold prompt): EXL3 4.0 564 / 577 / 572 tok/s at 7k / 30k / 115k tokens, NVFP4 476 / 490 / 502; vLLM on the NVFP4 checkpoint 2,318 / 2,521 / 2,158 (its grouped MoE GEMMs; the engine runs one GEMM pair an expert, 512 a layer).
+- 1 / 2 / 3 requests at once with LiLiCorr + lookup (256 tokens, the server's `parallel.running` sampled every 50 ms: 1, 2 and 3): EXL3 4.0 20.8 / 18.5 / 19.6 tok/s in total, EXL3 2.0 22.5 / 19.4 / 20.7, NVFP4 16.7 / 15.9 / 17.6. Speculating slots take turns; with 22 experts a row the turns gain nothing over one slot.
+- Prefill (one cold prompt): EXL3 4.0 564 / 577 / 572 tok/s at 7k / 30k / 115k tokens, NVFP4 476 / 490 / 502 (the engine runs one GEMM pair an expert, 512 a layer).
 - The 2.0 pack: KL 0.325 is twice the loss of Bolt's 2.0 with the same recipe (0.170); decode 36.8 tok/s.
 - Window (ENG-363): up to 1,048,576 tokens, the checkpoint's own (`llm_config.max_position_embeddings`, the tokenizer's `model_max_length`), for slot 0 and the side slots; the default stays 262,144. Attention has no positional encoding, and nothing in the engine is sized below that: K and V are [2, window, 128] a layer (8 GiB at 1,048,576), attention runs 4 to 2,048 programs of 512 keys, prompts run in 4,096-row chunks. Checked on EXL3 4.0 with slot 0 at 1,048,576, three side slots at 262,144, LiLiCorr and the lookup, the caches and conductor as served, the response cache off, a request raw (2026-10-16): five facts at 5 / 25 / 50 / 75 / 95 % of synthetic filler, greedy, thinking off, all five answered at 131,054 prompt tokens (first token after 228 s, 574 tok/s of prefill) and at 249,983 (475 s, 526 tok/s). A 1,000,000-token prompt was not measured.
 - The prefill's workspace does not grow with the prompt: 3.34 GiB above the engine at 131,054 tokens, 3.18 at 249,983 (the memory policy's `observed`). The adapter says so (`cost()`: a floor of 3.5 GiB, capped at 4.0); before, the 27B's line (30 kB a token) refused a 1,000,000-token prefill as 29 GiB of workspace. A slot 0 window above 262,144 adds its KV above it to the memory policy's ceiling and peak (+6 GiB at 1,048,576), as the side slots' bytes are added, so the caches are not refused for it during a long prefill.
@@ -148,7 +145,7 @@ The reader takes it as stored: the prefixes map to the same canonical names, eve
 
 Checked on the DGX Spark, 2026-10-20, on the 0.12.1 code before its version bump (`measurements/0.12.1-summary.json` has the runs):
 
-- Against the converter's own forward (exllamav3 1.6.0 on the same pack, `flash_attn_nc`, teacher-forced on the engine's greedy tokens; `nh_check.py engine`, 8 prompts x 64 tokens, thinking on): top-1 510 of 512 (99.6 %); both differences are near ties (the reference's margin 0.22 and 0.00 logits); mean |diff| 0.23 logits (0.0047 of the row's largest), mean |diff| over the reference's top 10 0.27, KL 0.0019 nats; max |diff| 6.1 on a token of rank 21,810. Every position with a margin of 0.25 logits or more agrees (494 of 494).
+- Against the converter's own forward (1.6.0, on the same pack, `flash_attn_nc`, teacher-forced on the engine's greedy tokens; `nh_check.py engine`, 8 prompts x 64 tokens, thinking on): top-1 510 of 512 (99.6 %); both differences are near ties (the reference's margin 0.22 and 0.00 logits); mean |diff| 0.23 logits (0.0047 of the row's largest), mean |diff| over the reference's top 10 0.27, KL 0.0019 nats; max |diff| 6.1 on a token of rank 21,810. Every position with a margin of 0.25 logits or more agrees (494 of 494).
 - The MTP head (`nh_check.py mtp`, depth 3, 4 prompts x 128 tokens): equal to the trunk's greedy token at depth 1 / 2 / 3 in 92.6 / 84.4 / 73.6 % of positions, mean accepted run 2.45 of 3.
 - Greedy answers in English and German, code, a two-turn chat and one tool call (`get_weather` with its arguments) through `/v1/chat/completions` are correct.
 - One fresh server a run, the GPU to itself, conductor raw, suffix store off, `--max-len 32768`, 512 greedy tokens, thinking off, one request at a time (n = 1): plain (`--drafter none`, 1 slot) 25.9 tok/s; LiLiCorr + lookup (`--drafter mtp --draft-head lilicorr --parallel 3`) prose 33.2, code 53.9, chat 37.4, edit 99.0, copy 112.3 tok/s (2.97 / 5.38 / 3.41 / 15.5 / 16.0 tokens a block), every text the plain run's. Prefill of one cold 7,507-token prompt 529 tok/s.
@@ -195,7 +192,6 @@ DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768
 | `fn_server_check.py` set (thinking on, tools, JSON), per request | 32.3-33.9 tok/s | 1.0-1.28 tokens a block | 34.2-53.3 tok/s, 1.0-4.3 tokens a block |
 | 1 / 2 / 3 requests at once, 256 tokens each, total (`lfm_parallel.py`, lookup drafter) | | 33.73 / 44.73 / 50.65 tok/s, 2 and 3 slots decoding together (254 joint rounds), each text its request's alone | |
 
-- Same weights in llama.cpp (5ecbe1ac1, `llama-bench -ngl 99 -p 0 -n 256`, the BF16 GGUF of ggml-org at 8a08a1c8, same board): 33.31 tok/s against the engine's 33.63.
 - Every answer of the lookup and the MTP runs is the plain run's text. Through `fn_server_check.py`, 15 of 20 MTP answers equal the plain ones; the other 5 differ only from the reasoning budget's close on, which lands at the end of the verified block (2 to 3 tokens later than the plain step's), one of the output changes docs/exactness.md lists.
 - The MTP head runs eagerly (no graph) and reads the 0.70 GB head once a depth; with thinking off StairCut priced its rounds above the plain step and took plain steps. Not the profile's default until its rounds are captured and priced.
 - Prefill (`nh_check.py staircase`, one expert GEMM pair an expert): 545 tok/s at 1,024 tokens, 2,537 at 8,192. Two batched GEMMs padded to the busiest expert measured 359 and 1,248 and were dropped.
@@ -218,7 +214,7 @@ The reference forward (`ref.py`) follows transformers' NemotronH and the CUDA pa
 - Verify writes nothing but its KV rows. A commit walks each SSM state along the kept path with the decode step's own kernel (the same products in the same order) and takes the conv state from the path's last three inputs: the committed state is the decode steps' state bit for bit.
 - Prefill: 4,096-token chunks, the chunked SSD form in fp32 matmuls (chunk 128), SDPA, one GEMM pair an expert. The next token agrees with the row path; the bits do not.
 - CUDA graphs: the decode step per attention class, verify blocks, commits, joint decode steps of the side slots.
-- Taps (`set_taps`, a block drafter's context): the residual stream entering the tapped layers (llama.cpp's `t_layer_inp`) of every row, copied inside the graphs; a committed row's taps go to the state's ring by position (window + 64 rows): a decode step's in the step, a verify block's kept path's in the commit, a prompt chunk's last rows in the chunk. A restore or a restart moves `tap_gen`, so a drafter drops what it read of the rows below the length.
+- Taps (`set_taps`, a block drafter's context): the residual stream entering the tapped layers of every row, copied inside the graphs; a committed row's taps go to the state's ring by position (window + 64 rows): a decode step's in the step, a verify block's kept path's in the commit, a prompt chunk's last rows in the chunk. A restore or a restart moves `tap_gen`, so a drafter drops what it read of the rows below the length.
 - EXL3 projections (a pack's Mamba2, attention, latent, shared-expert and head blocks): `tools/fn_kernels.dense_rows` for the decode step and verify blocks up to 32 rows. Each row's input is rotated once (`dense_rot_kernel`, the arithmetic `dense` fuses), then one CTA a 128-column block, group of 16 rows and cluster rank decodes the trellis tiles once for the group: rows 0..7 in the m16n8k16 tile's a0/a2 lane groups, rows 8..15 in a1/a3. A row's K slices, warp and rank order, output rotation and svh are the one-row `dense` call's, so every output byte is its byte; the ranks' partials are added by every warp of the cluster, a row a warp. `QSE_NH_DENSE_ROWS=off` runs `dense`, a CTA a row.
 - EXL3 experts (`tools/exl3_relu2.Relu2Bank`): a verify block's (row, slot) pairs in ascending expert id, cut into groups of up to 8 pairs of one expert; a group's CTA decodes the expert's tiles once (row r in lane group r) with each pair's lone-call arithmetic. `QSE_NH_BANK_GROUP=off`: a CTA a pair.
 - Load-time self-check: a 24-token decode replayed as one verify block, every row and the committed states compared bit for bit (with taps, each row's taps and the committed ring too); a difference turns speculation off.
@@ -232,12 +228,12 @@ The reference forward (`ref.py`) follows transformers' NemotronH and the CUDA pa
 | ModelOpt NVFP4 / FP8 (Super VL's NVFP4 release, `hf_quant_config.json` MIXED_PRECISION) | `pack.py`, `load.py`, `tools/nvfp4_relu2.py` | NVFP4 (`weight` uint8 [N, K / 2], e4m3 `weight_scale` [N, K / 16], fp32 `weight_scale_2`): the routed experts an `NVFP4Bank` (one program a (row, expert) pair and 32 outputs, fp32 products, the tensor scale on the sum, the BF16 experts' roundings; row-invariant), the shared experts on `tools/nvfp4_skinny` (a down projection's input scaled by a power of two into fp16's range first, `NVFP4Wide`); FP8 (`weight` e4m3 [N, K], fp32 `weight_scale`): `FP8Linear`, the codes widened to bf16 in a 16-row tensor-core product, the scale on the fp32 sum (fp32 logits for the head). `input_scale`, `k_scale` and `v_scale` are read past: activations and the KV cache stay bf16 |
 | GGUF (`nemotron_h_moe`) | `gguf.py`, `gguf_load.py` | config from the metadata (per-layer expert counts from the router's rows), checked against the checkpoint's config.json when there is one; IQ2_XXS, NVFP4 and Q8_0 matrices and the expert banks kept packed (the embedding dequantised to bf16 for its row gather); other types refused by name |
 
-The GGUF types Bolt holds, each with a twin equal to gguf-py's dequant bit for bit (`tests/test_iq2_kernels.py`; NVFP4 needs gguf-py from llama.cpp after GGML_TYPE_NVFP4):
+The GGUF types Bolt holds, each with a twin equal to gguf-py's dequant bit for bit (`tests/test_iq2_kernels.py`; NVFP4 needs a gguf-py that has GGUF type 40):
 
 | type | where in Bolt | format | kernel (rows 1..32 row-invariant) | prompt chunk |
 |-|-|-|-|-|
 | IQ2_XXS (16) | routed and shared experts | 256 weights in 66 bytes, w = d (0.5 + s) / 4 x grid x sign | dense: 8 outputs and 4 groups a step, decoded once for up to 16 rows of a program (`IQ2Linear`); bank: one (row, expert) pair a program (`IQ2Bank`) | decoded to bf16 on `_iq2_dequant`, cuBLAS |
-| NVFP4 (40) | every Mamba2 in_proj and out_proj | 64 weights in 36 bytes: 4 UE4M3 scales (one a 16) and E2M1 nibbles, w = kvalue x ue4m3; a per-tensor fp32 scale (`blk.N.ssm_in.scale`, `ssm_out.scale`) multiplies the matmul's output, as llama.cpp's build_lora_mm does | repacked at load into the checkpoints' NVFP4 layout without changing a value (kvalues = 2 E2M1, ue4m3 = E4M3 / 2) and run on `tools/nvfp4_skinny.py`, the tensor scale on the fp32 sum (tiles in `ops/skinny-tiles.json`) | `nvfp4_matmul` |
+| NVFP4 (40) | every Mamba2 in_proj and out_proj | 64 weights in 36 bytes: 4 UE4M3 scales (one a 16) and E2M1 nibbles, w = kvalue x ue4m3; a per-tensor fp32 scale (`blk.N.ssm_in.scale`, `ssm_out.scale`) multiplies the matmul's output | repacked at load into the checkpoints' NVFP4 layout without changing a value (kvalues = 2 E2M1, ue4m3 = E4M3 / 2) and run on `tools/nvfp4_skinny.py`, the tensor scale on the fp32 sum (tiles in `ops/skinny-tiles.json`) | `nvfp4_matmul` |
 | Q8_0 (8) | head, attention, latent projections, embedding | 32 int8 and an fp16 scale | 16-row tiles, one bf16 tensor-core product a block of 32 (int8 is exact in bf16) times its scale: the same time for 1..32 rows (`Q8Linear`) | the twin in bf16, cuBLAS |
 
 IQ2_XXS needs K a multiple of 256: Lightning's 2,688 and 1,856 are not, so its community IQ2 GGUFs hold IQ4_NL / Q5_0 experts. Bolt's widths 1,536..2,560, latent 1,024 and shared 5,376 are multiples.
@@ -251,7 +247,7 @@ IQ2_XXS needs K a multiple of 256: Lightning's 2,688 and 1,856 are not, so its c
 
 ### LiLiCorr
 
-NVIDIA's drafter for Bolt (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr, revision 4c6a5613, 0.96 GB, ModelOpt NVFP4 W4A16, arXiv 2608.20530), `engine/drafters/lilicorr.py`, ported from vLLM's `LiLiCorrForCausalLM` and llama.cpp's `src/models/dflash.cpp`:
+NVIDIA's drafter for Bolt (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr, revision 4c6a5613, 0.96 GB, ModelOpt NVFP4 W4A16, arXiv 2608.20530), `engine/drafters/lilicorr.py`, written from the drafter's paper, its config and its tensors:
 
 - context: for every committed token Bolt's residual rows entering layers 1, 18, 35, 51, 68 and 85 (the engine's taps), concatenated, `fc` (NVFP4) and `hidden_norm` = g; each of the five layers' K (k_norm, RoPE) and V of g at the token's position, kept in a window ring of 1,024 positions; computed for the rows a draft has not read yet, from the engine's tap ring
 - block: [anchor, mask 990 x 7] at positions n .. n + 7 on Bolt's embedding; per layer RMSNorm, the grouped dynamic convolution's input side (kernel 2, group 16), q/k/v with q_norm and k_norm, RoPE (theta 10,000), attention of each block row over the context keys within its window (query - key < 1,024) and the whole block with a sink logit a head in the softmax, o_proj, the convolution's output side; the same around the SiLU MLP (12,288, NVFP4); the final norm; Bolt's head on rows 1 .. 7
@@ -262,33 +258,33 @@ NVIDIA's drafter for Bolt (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr
 - a draft head of the shared tree drafter beside the lookup, cut by StairCut; the lookup beside it matches 6 tokens at least (`LOOK_MIN_ORDER_HEAD`; at 3 its short matches cost chat 7 % and code 4 %); `QSE_NH_LOOKUP=off` drafts with the head alone
 - load-time gate: drafts against the trunk's greedy decode of the self-check's prompt; a mean run under 1.0, missing files or a load error leave the lookup drafting alone, with the reason in the log and in `/health` (`weights.lilicorr`)
 
-Offline, a draft at every position of the trunk's greedy text (`nh_check.py lilicorr`, 8 chat prompts x 256 tokens, thinking on): accepted length 4.55 (3.43 .. 6.49), against llama.cpp master 620d2225c with the LiLiCorr GGUF on the same prompts 4.57 (3.45 .. 6.38) and NVIDIA's 4.68 (greedy, SPEED-Bench); the draft agrees with the trunk at depth 1 .. 7 in 89.3, 80.0, 70.3, 60.4, 53.0, 45.5, 39.5 % of positions.
+Offline, a draft at every position of the trunk's greedy text (`nh_check.py lilicorr`, 8 chat prompts x 256 tokens, thinking on): accepted length 4.55 (3.43 .. 6.49), against NVIDIA's 4.68 (greedy, SPEED-Bench); the draft agrees with the trunk at depth 1 .. 7 in 89.3, 80.0, 70.3, 60.4, 53.0, 45.5, 39.5 % of positions.
 
 DGX Spark, 2026-10-15, `nemotron-bolt-iq2` on a build with the CUDA GEMV for the IQ2_XXS shared experts (not in this tree, see [the IQ2 profile](#bolt-nemotron-bolt-iq2)), one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
 
-| class | plain | lookup | LiLiCorr | LiLiCorr + lookup | llama.cpp plain | llama.cpp + LiLiCorr |
-|-|-|-|-|-|-|-|
-| prose | 32.11 | 32.45 | 40.99 (2.53) | 40.47 (2.51) | 38.49 | 47.93 |
-| code | 32.17 | 36.14 | 73.99 (4.96) | 73.51 (4.96) | 38.31 | 89.00 |
-| chat | 32.24 | 32.45 | 49.67 (3.01) | 48.04 (3.01) | 38.61 | 60.28 |
-| edit | 32.09 | 103.36 (6.47) | 79.00 (5.32) | 101.77 (13.10) | 38.34 | 94.48 |
-| copy | 32.10 | 121.63 (13.45) | 106.57 (7.86) | 147.94 (15.97) | 38.11 | 135.11 |
+| class | plain | lookup | LiLiCorr | LiLiCorr + lookup |
+|-|-|-|-|-|
+| prose | 32.11 | 32.45 | 40.99 (2.53) | 40.47 (2.51) |
+| code | 32.17 | 36.14 | 73.99 (4.96) | 73.51 (4.96) |
+| chat | 32.24 | 32.45 | 49.67 (3.01) | 48.04 (3.01) |
+| edit | 32.09 | 103.36 (6.47) | 79.00 (5.32) | 101.77 (13.10) |
+| copy | 32.10 | 121.63 (13.45) | 106.57 (7.86) | 147.94 (15.97) |
 
-- Every text of the four engine columns is the plain run's; llama.cpp's LiLiCorr texts differ from its plain ones on prose and chat. llama.cpp's accepted lengths on these asks: 2.93, 5.31, 3.52, 5.44, 7.86 (it verifies every drafted token; StairCut cuts a block where the next row costs more than it is worth).
-- The shared bench of the engine survey (`bench_decode.py`, a 256-token story prompt, 256 tokens, greedy, thinking off, 3 runs): plain 32.2, LiLiCorr 40.5-47.9, LiLiCorr + lookup 38.7-47.6; llama.cpp plain 38.1, llama.cpp + LiLiCorr 47.2 (median).
+- Every text of the four columns is the plain run's. StairCut cuts a block where the next row costs more than it is worth.
+- The shared bench of the engine survey (`bench_decode.py`, a 256-token story prompt, 256 tokens, greedy, thinking off, 3 runs): plain 32.2, LiLiCorr 40.5-47.9, LiLiCorr + lookup 38.7-47.6.
 - 1 / 2 / 3 requests at once with LiLiCorr + lookup (`lfm_parallel.py`, 256 tokens): 41.6 / 50.0 / 56.0 tok/s in total, every text its request's alone.
 - `fn_server_check.py`, 20 requests: 17 the same as plain; the other 3 (thinking on, a low thinking cap, JSON with 150 tokens) the same up to the reasoning budget's close, which lands at the end of the verified block (4 to 6 tokens later, docs/exactness.md, output changes).
 - A verify block's cost is the IQ2_XXS kernels (CUDA events, 1k context, 1 / 8 / 16 rows): the expert bank 3.9 / 22.1 / 42.7 ms, the shared experts' GEMV 3.4 / 11.3 / 22.4; the NVFP4 projections (11.0 .. 11.6), the Q8_0 head, attention and latents (9.5 .. 9.9) and the SSM walk (0.8 .. 2.2) barely move. Chains of 1 / 2 / 4 / 8 / 16 rows: 29.4 / 34.4 / 41.5 / 57.6 / 90.2 ms.
 
 On the EXL3 2.0 pack (`nemotron-bolt-exl3-2.0`: experts at 2 bits, the dense projections at 4, head 6), with the projections on `dense_rows` and the bank grouped ([How the engine runs it](#how-the-engine-runs-it)); DGX Spark, 2026-10-15, one fresh server a run, the GPU to itself, max_len 32,768, conductor raw, suffix store off, 512 greedy tokens, thinking off (`fn_lookup_ab.py`; tok/s, tokens a block):
 
-| class | EXL3 plain | EXL3 LiLiCorr + lookup | IQ2 LiLiCorr + lookup (above) | llama.cpp + LiLiCorr (IQ2 GGUF) |
-|-|-|-|-|-|
-| prose | 43.04 | 65.81 (3.01) | 42.59 | 47.93 |
-| code | 43.01 | 98.98 (4.87) | 73.83 | 89.00 |
-| chat | 43.16 | 69.27 (3.10) | 47.99 | 60.28 |
-| edit | 43.10 | 152.75 (12.46) | 114.16 | 94.48 |
-| copy | 43.16 | 256.00 (15.97) | 147.15 | 135.11 |
+| class | EXL3 plain | EXL3 LiLiCorr + lookup | IQ2 LiLiCorr + lookup (above) |
+|-|-|-|-|
+| prose | 43.04 | 65.81 (3.01) | 42.59 |
+| code | 43.01 | 98.98 (4.87) | 73.83 |
+| chat | 43.16 | 69.27 (3.10) | 47.99 |
+| edit | 43.10 | 152.75 (12.46) | 114.16 |
+| copy | 43.16 | 256.00 (15.97) | 147.15 |
 
 - Every LiLiCorr text is the plain run's. `fn_server_check.py`, 20 requests: 16 the same; thinking on, a low thinking cap and JSON at 150 and 140 tokens the same up to the reasoning budget's close (docs/exactness.md, output changes). 1 / 2 / 3 requests at once (3 slots, 256 tokens): 58.8 / 66.4 / 72.1 tok/s in total, every text its request's alone.
 - Chains of 1 / 2 / 4 / 8 / 16 rows at 1k context: 22.1 / 24.7 / 28.7 / 33.8 / 44.9 ms (a CTA a row: 23.8 / 28.0 / 41.7 / 74.7 / 142.1); the decode step 23.1 ms (44.2 tok/s from its graph in a later window; `dense`: 41.0). At 8 rows: `dense_rows` 17.3 ms (the decode step's `dense` 18.0), the bank 10.6, the head 1.6, the SSM walk 1.3.
@@ -303,7 +299,7 @@ On the EXL3 2.0 pack (`nemotron-bolt-exl3-2.0`: experts at 2 bits, the dense pro
 | kernels: chain rows = decode steps, commit = decode state | bit for bit, GB10 and the CPU interpreter |
 | engine: verify = decode, tree, moved-path commit, rollback, joint passes, graphs | 8 tests, GB10 |
 | GGUF: tiny IQ2_XXS / Q8_0 / NVFP4 (with a tensor scale) file through the engine | self-check bit for bit on the packed kernels |
-| Bolt's GGUF against llama.cpp on the same file, teacher-forced on llama.cpp's greedy tokens (`nh_check.py llamacpp`, `engine --force`, `llamacmp`; 8 chat prompts x 128 tokens) | top-1 97.75 % of 1,024 positions; all 23 differences near ties by llama.cpp's own margin, none other; mean absolute log-prob difference over llama.cpp's top 10: 0.17 |
+| Bolt's GGUF against the GGUF reference on the same file, teacher-forced on the reference's greedy tokens (`nh_check.py gguf-ref`, `engine --force`, `gguf-cmp`; 8 chat prompts x 128 tokens) | top-1 97.75 % of 1,024 positions; all 23 differences near ties by the reference's own margin, none other; mean absolute log-prob difference over the reference's top 10: 0.17 |
 | Bolt load-time self-check | PASS, 24 rows and the committed states |
 | Bolt server: plain vs lookup, 20 requests | 19 the same; the thinking-on one the same up to the reasoning budget's close (one token later) |
 | Lightning BF16 against transformers BF16, teacher-forced (`nh_check.py hf --shared`, 8 chat prompts x 128 tokens) | top-1 98.63 % of 1,024 positions; all 14 differences near ties (margin under 8 bf16 steps), none other; mean relative logit difference 0.0075 |
@@ -312,8 +308,7 @@ On the EXL3 2.0 pack (`nemotron-bolt-exl3-2.0`: experts at 2 bits, the dense pro
 | caches (`fn_cache_check.py`): two sessions parked and restored, a 10k document twice, against cold answers | every answer the same token for token; logprobs within 0.07 where the end anchor restored (the tail's prefill chunks differ from the cold prompt's) |
 | taps (`tests/test_lilicorr.py`): verify rows' taps and the committed ring against the decode steps', graphs, joint steps, prompt chunks | bit for bit; chunk rows near the row path |
 | SSM walk of a verify block (`tests/test_nemotron_h_kernels.py`): a chain and a branching tree | every row the decode steps along its path, bit for bit |
-| LiLiCorr against an fp32 reference written from vLLM's and llama.cpp's code (tiny weights) | block within 2e-5, lattice scores within 1e-4, the same walk |
-| LiLiCorr on Bolt against llama.cpp + LiLiCorr, 8 prompts x 256 | accepted length 4.55 against 4.57 |
+| LiLiCorr against an fp32 reference written from the drafter's definition (tiny weights) | block within 2e-5, lattice scores within 1e-4, the same walk |
 | Bolt server: plain vs LiLiCorr + lookup, 20 requests and 5 asks | 22 the same, 3 the same up to the reasoning budget's close |
 | EXL3 rows path (`tools/fn_dense_rows_check.py`): `dense_rows` against the one-row `dense` at Bolt's, the 27B's and Flash-Next's shapes, M 1..32, clusters, 8 warps, groups, the fp32 head, every rate; all 281 projections of the 2.0 pack; `dense` against 0.9.x's | every byte the same |
 | EXL3 bank grouped (`tests/gpu/test_nemotron_h_exl3_gpu.py`, `fn_dense_rows_check.py bank`): M 2..32, every row on the same 9 experts up to few shared | every pair its lone call's bytes |

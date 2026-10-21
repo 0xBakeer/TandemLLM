@@ -32,21 +32,21 @@ Our pack has every projection at 4 bits: the routed and shared experts, the Gate
 
 \begin{table}[htbp]
 \centering\small
-\caption[Ornith's quality]{The pack against the BF16 checkpoint's logits, 8 wikitext rows of 1,024 tokens (\code{tools/q35m_quality.py}), and this engine against exllamav3 1.6.0's own forward on the same pack, fed the engine's greedy tokens (512 positions). \measured, 2026-10-20.}\label{tab:orn-quality}
+\caption[Ornith's quality]{The pack against the BF16 checkpoint's logits, 8 wikitext rows of 1,024 tokens (\code{tools/q35m_quality.py}), and this engine against the converter's own forward (1.6.0) on the same pack, fed the engine's greedy tokens (512 positions). \measured, 2026-10-20.}\label{tab:orn-quality}
 \begin{tabularx}{\linewidth}{@{}L{.4\linewidth}Y@{}}
 \toprule
 \hd{check} & \hd{result} \\
 \midrule
 this engine against BF16 & KL 0.139, top-1 86.2~\%, perplexity 7.27 against 7.09 \\
-exllamav3's forward against BF16 & KL 0.136, perplexity 7.32 \\
-this engine against exllamav3's forward & top token at 498 of 512 positions (97.3~\%), KL 0.027 \\
+the converter's forward against BF16 & KL 0.136, perplexity 7.32 \\
+this engine against the converter's forward & top token at 498 of 512 positions (97.3~\%), KL 0.027 \\
 prefill against the engine's reference & the same top token \\
 a verify block's rows against the decode step & equal, chains of 2 to 32 rows and a tree \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-The engine and exllamav3 do not agree on every token. Of the 14 positions where the top token differs, 9 have a margin under 0.5 logits, 2 a margin between 0.5 and 1, 2 between 1 and 2, and one over 4. The cause is not tested.
+The engine and the converter's forward do not agree on every token. Of the 14 positions where the top token differs, 9 have a margin under 0.5 logits, 2 a margin between 0.5 and 1, 2 between 1 and 2, and one over 4. The cause is not tested.
 
 \section{Drafting}
 
@@ -76,5 +76,5 @@ One slot, a window up to 262,144 tokens, the pack's own vision tower on the EXL3
 \item Requests at once: the joint verify of several slots is not built for this trunk yet (SRV-653), so the profile has one slot.
 \item Prompt reading speed, first-token times, images, sampled decoding and repeat runs.
 \item Any task benchmark beyond tool-eval-bench. On the 0.13.0 code, one run a row, it scored 93 and 94 on the raw path at every thinking setting, 96 with the conductor's \code{tools} profile, and 80 raw against 84 with the conductor in hard mode (\code{docs/tool-eval-bench.md}).
-\item The cause of the 14 differences from exllamav3's forward.
+\item The cause of the 14 differences from the converter's forward.
 \end{itemize}

@@ -89,7 +89,7 @@ LFM2.5-24B-A2B runs from Liquid's BF16 checkpoint or from one of our six EXL3 pa
 | `lfm25-exl3-6.0` | 18.63 GB | 105.2 | 93.4 % |
 | `lfm25-bf16` | 47.9 GB | 44.5 | 100 % |
 
-The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and exllamav3, and the run behind each number.
+The default is the fastest profile in chat, with the lookup on, whose top-1 agreement with BF16 is at least 85 %. Edit and copy asks run 1.8 to 3.6 times faster with the lookup. [docs/lfm2.5-24b-a2b.md](docs/lfm2.5-24b-a2b.md) has the KL values, the correctness checks against transformers and the converter's own forward, and the run behind each number.
 
 Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, converted from NVIDIA's BF16 checkpoint, or from NVIDIA's own 2-bit GGUF. It is a hybrid of 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 9 of up to 496 experts a token. The EXL3 profiles draft with NVIDIA's LiLiCorr drafter and the lookup, the GGUF profile with the lookup alone, and every drafted text is the plain decode's. The packs are public, one repository a size (`0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-<bpw>`, for example [the 2.0 pack](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Bolt-74B-A9B-EXL3-2.0), all seven in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-bolt-74b-a9b-exl3-for-tandemllm-6ad16f70eaa4c1d9c56c6831)); the GGUF and the drafter come from NVIDIA's repositories. TandemLLM serves Bolt's text; its image tower is not served yet. Measured on one DGX Spark on 2026-10-15 and 16; quality against the BF16 checkpoint's logits on 8 wikitext-2 rows of 1,024 tokens; one request through the server, 512 greedy tokens, thinking off, the mean of 3 runs on this release, plain and with the profile's drafting (LiLiCorr and the lookup; the GGUF: the lookup):
 
@@ -104,7 +104,7 @@ Nemotron 3.5 Bolt 74B-A9B runs from our EXL3 packs at 2.0 to 6.0 bits a weight, 
 | `nemotron-bolt-exl3-6.0` | 58.37 GB | 0.0087 | 96.2 % | 29.1 | 40.1 / 50.1 / 76.3 / 110.8 / 157.3 |
 | `nemotron-bolt-iq2` (NVIDIA's GGUF) | 22.04 GB | 0.259 | 79.6 % | 27.7 | 27.7 / 27.8 / 31.9 / 97.8 / 131.6 |
 
-Every pack drafts at least as fast as it decodes plain, on every ask: since 0.11.1 each EXL3 pack has its StairCut price file, and before that 3.0 to 4.0 wrote prose and chat slower than plain. The GGUF profile's lookup finds little in prose and chat, which run at its plain rate. llama.cpp on NVIDIA's GGUF decodes at 38.2 tok/s on the same asks. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, llama.cpp and BF16, and the run behind each number.
+Every pack drafts at least as fast as it decodes plain, on every ask: since 0.11.1 each EXL3 pack has its StairCut price file, and before that 3.0 to 4.0 wrote prose and chat slower than plain. The GGUF profile's lookup finds little in prose and chat, which run at its plain rate. [docs/nemotron-h.md](docs/nemotron-h.md) has the checks against transformers, the GGUF reference and BF16, and the run behind each number.
 
 Nemotron 3.5 Super VL 120B-A12B runs from two EXL3 packs of NVIDIA's BF16 checkpoint or from NVIDIA's own NVFP4 release, read as stored. It has the same hybrid layout as Bolt at a larger size: 40 Mamba2, 40 mixture-of-experts and 8 attention layers, with 22 of 512 experts a token. Every profile drafts with NVIDIA's LiLiCorr drafter for Super VL and the lookup, and every drafted text is the plain decode's. The packs are public ([4.0](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-4.0), [2.0](https://huggingface.co/0xBakeer/TandemLLM-Nemotron-3.5-Super-VL-120B-A12B-EXL3-2.0), both in [one collection](https://huggingface.co/collections/0xBakeer/nemotron-35-super-vl-120b-a12b-exl3-for-tandemllm-6ad1bc063ad2f3f5df638016)). TandemLLM serves Super VL's text; its vision tower is not served yet. Same measurement as for Bolt, on 2026-10-16:
 
@@ -114,7 +114,7 @@ Nemotron 3.5 Super VL 120B-A12B runs from two EXL3 packs of NVIDIA's BF16 checkp
 | `nemotron-super-vl-exl3-2.0` (experts 2 bits, dense 4) | 36.84 GB | 0.325 | 82.1 % | 36.5 | 35.6 / 46.2 / 46.3 / 125.1 / 139.2 |
 | `nemotron-super-vl-nvfp4` (NVIDIA's NVFP4) | 75.06 GB | 0.041 | 93.4 % | 19.6 | 23.9 / 28.7 / 39.9 / 73.5 / 81.7 |
 
-The 2.0 pack is 17 % faster plain than 4.0 but loses far more against BF16; use it only where 4.0 does not fit. vLLM on NVIDIA's NVFP4 release decodes at 19.4 tok/s plain and reads prompts 4 to 5 times as fast as TandemLLM. [docs/nemotron-h.md](docs/nemotron-h.md) has both comparisons.
+The 2.0 pack is 17 % faster plain than 4.0 but loses far more against BF16; use it only where 4.0 does not fit. [docs/nemotron-h.md](docs/nemotron-h.md) has the comparison.
 
 Ornith-1.5-122B, Ornith AI's agentic and coding model, runs from our EXL3 pack at 4.0 bits a weight, converted from the BF16 checkpoint. It is a Qwen3.5 mixture-of-experts model: 36 Gated DeltaNet and 12 gated attention layers, 8 of 256 experts and a shared one a token, an MTP layer and a vision tower, which the pack carries at 6 bits. The profile drafts with the MTP layer and the lookup; incoai's [DFlash2 drafter for Ornith](https://huggingface.co/incoai/Ornith-1.5-122B-DFlash2) is the other head (`QSE_ORN_HEAD=dflash2`). The pack is public, [0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0](https://huggingface.co/0xBakeer/TandemLLM-Ornith-1.5-122B-EXL3-4.0), and in [one collection](https://huggingface.co/collections/0xBakeer/ornith-15-122b-exl3-for-tandemllm-6ad7ccf04f93a379ba434c4c) with the base model and the drafter. TandemLLM serves it with one slot. Measured on one DGX Spark on 2026-10-20: quality against the BF16 checkpoint's logits on 8 wikitext rows of 1,024 tokens; one fresh server a row, 512 greedy tokens, thinking off, one run each:
 
@@ -124,7 +124,7 @@ Ornith-1.5-122B, Ornith AI's agentic and coding model, runs from our EXL3 pack a
 
 ![Decode speed of Ornith-1.5-122B on one DGX Spark, plain and with each draft head](docs/media/ornith-decode-speed.png)
 
-Every drafted text is the plain decode's. On the same pack the engine's top token agrees with exllamav3's own forward at 498 of 512 positions, so the two are close but not equal. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs, DFlash2's row and what is not measured.
+Every drafted text is the plain decode's. On the same pack the engine's top token agrees with the converter's own forward at 498 of 512 positions, so the two are close but not equal. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs, DFlash2's row and what is not measured.
 
 ### Community weights
 
@@ -350,7 +350,7 @@ The current release is `v0.13.0`. It adds Ornith AI's Ornith-1.5-122B from our E
 
 ## Credits
 
-Qwen made the model weights and their reference implementation. turboderp made exllamav3, which quantised our EXL3 sizes of the 27B, and the Flash-Next packs the engine serves. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). NVIDIA made Nemotron 3.5 Bolt and Super VL, Bolt's IQ2 GGUF, Super VL's NVFP4 release and the LiLiCorr drafters; our LiLiCorr port follows vLLM's and llama.cpp's implementations, and exllamav3 quantised our EXL3 packs of Bolt and Super VL. The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
+Qwen made the model weights and their reference implementation. turboderp made exllamav3, which quantised our EXL3 sizes of the 27B, and the Flash-Next packs the engine serves. Inco AI made the base block drafter, DFlash2 for Qwen3.8-27B (`incoai/Qwen3.8-27B-DFlash2`, mirrored as `z-lab/Qwen3.8-27B-DFlash2`). NVIDIA made Nemotron 3.5 Bolt and Super VL, Bolt's IQ2 GGUF, Super VL's NVFP4 release and the LiLiCorr drafters; our LiLiCorr implementation follows the drafter's paper and checkpoint, and exllamav3 quantised our EXL3 packs of Bolt and Super VL. The engine runs on PyTorch and Triton over CUDA. We build the lookup corpus from public, permissively licensed text. Everything else in this repository is our own work.
 
 ## License
 

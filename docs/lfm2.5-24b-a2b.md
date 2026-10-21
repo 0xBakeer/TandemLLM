@@ -41,7 +41,7 @@ DGX Spark, 2026-10-14. Decode step: `tools/lfm_check.py bench`, one request, 256
 - Setup Guide tile: the fastest cell of the default profile's served row, 147.5 tok/s (3.5, prose).
 - `-hq` 4.0 (attention and convolution projections +2 bits, dense MLPs +1, 4.06 bpw, 12.81 GB): chat KL 0.082, top-1 89.7 %; served chat 131.2 tok/s against 144.0 for 4.0 and 127.6 for 4.5 in one window. Not offered.
 - The KL values are high for these rates. The same recipe on the 8B sibling at 4.10 bpw gives KL 0.0955 against 0.0862 for a reference conversion. The cause on the 24B is not known.
-- Half-integer rates: below 4 bpw exllamav3 1.6.0 gives some tensors 1.5, 2.5 or 3.5 bits a weight (a tile is 16 K + 8 int16 wide; an odd weight takes one bit more than an even one). The 2.5 and 3.5 packs use them. The EXL3 kernels decode them as exllamav3 does (`tools/exl3_linear.py`, `dq8_frac`; bit codes 15, 25, 35) in the decode step, a verify block and the prefill. The pack reader refuses an unsupported rate or codebook by tensor name.
+- Half-integer rates: below 4 bpw exllamav3 1.6.0 gives some tensors 1.5, 2.5 or 3.5 bits a weight (a tile is 16 K + 8 int16 wide; an odd weight takes one bit more than an even one). The 2.5 and 3.5 packs use them. The EXL3 kernels decode them as the format defines (`tools/exl3_linear.py`, `dq8_frac`; bit codes 15, 25, 35) in the decode step, a verify block and the prefill. The pack reader refuses an unsupported rate or codebook by tensor name.
 
 Switch: `ops/use-profile.sh lfm25-exl3-3.5`, or the Setup Guide (`#/setup`).
 
@@ -149,8 +149,8 @@ Each row adds about 3 ms because a block reads the union of its rows' experts. A
 | reference forward against transformers' `Lfm2MoeForCausalLM`, tiny random model, fp32 | `tests/test_lfm2_moe_ref.py` | prefill and 3 decode steps within 2.1e-5 |
 | verify tree against sequential decode; commit and rollback | `tests/test_lfm2_moe_ref.py`, `tests/test_lfm2_moe_engine.py` | equal (engine: bit for bit) |
 | BF16 engine against transformers in BF16, 8 chat prompts x 128 tokens, teacher-forced | `tools/lfm_check.py hf`, `tests/gpu/test_lfm2_moe_box_gpu.py rung_b` | top token 98.05 % (1,004 of 1,024); 19 of 20 differences near ties; KL 0.0064 |
-| 4.0 pack against exllamav3's forward, same tokens | `tools/lfm_check.py exl3`, `rung_c` | top token 97.85 %; all 22 differences near ties |
-| trellis decode against exllamav3 `LinearEXL3` | `tools/lfm_check.py xcheck` | bit for bit |
+| 4.0 pack against the converter's own forward, same tokens | `tools/lfm_check.py exl3`, `rung_c` | top token 97.85 %; all 22 differences near ties |
+| trellis decode against the converter's own decode | `tools/lfm_check.py xcheck` | bit for bit |
 | verify rows against decode steps at every start | load-time self-check | 24 rows bit for bit |
 | pack reader, synthetic and real packs | `tests/test_lfm2_moe_pack.py`, `tests/test_lfm2_moe_packs_on_disk.py` | pass |
 | row kernels against torch twins; row invariance; one graph a decode step | `tests/test_lfm2_moe_kernels.py`, `tests/gpu/test_lfm2_moe_gpu.py` | pass |

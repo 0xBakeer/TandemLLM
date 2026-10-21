@@ -63,7 +63,7 @@ pack & \code{aitamedia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-EXL3-3.5bpw}, EXL3
 modalities & text; the pack holds no image tower \\
 drafters & LiLiCorr and the lookup, from \code{nemotron-super-vl-exl3-4.0} \\
 speed & 33.2~tok/s prose, 53.9 code, 37.4 chat, 99.0 edit, 112.3 copy; 25.9 without speculation; every drafted text the plain run's \\
-agreement & top token equal to exllamav3 1.6.0's own forward on the pack at 510 of 512 positions, both others near ties; KL 0.0019 \\
+agreement & top token equal to the converter's own forward (1.6.0) on the pack at 510 of 512 positions, both others near ties; KL 0.0019 \\
 memory & 53.58~GiB of weights at load; the served profile (262,144 tokens, 3 slots) starts and answers in 110~s \\
 license & OpenMDW-1.1 \\
 \bottomrule
