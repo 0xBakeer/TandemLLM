@@ -73,6 +73,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--head", default="nvfp4", choices=("nvfp4", "bf16"))
     ap.add_argument("--keep", default="", help="comma-separated parts left in BF16: attn, dense, shared, experts")
+    ap.add_argument("--bf16-expert-layers", default="",
+                    help="comma-separated layers whose routed experts stay BF16 (the top layers' massive activations)")
     a = ap.parse_args()
     t0 = time.time()
     raw = json.load(open(os.path.join(a.model, "config.json")))
@@ -82,7 +84,10 @@ def main() -> None:
     keep = set(filter(None, a.keep.split(",")))
     part = lambda k: ("attn" if ".self_attn." in k else "shared" if ".shared_expert." in k
                       else "experts" if ".experts." in k else "dense")
-    gs = [g for g in groups(cfg) if part(g[0]) not in keep]
+    xl = {int(x) for x in a.bf16_expert_layers.split(",") if x.strip()}
+    layer_of = lambda k: int(k.split(".")[2]) if k.startswith("model.layers.") else -1
+    gs = [g for g in groups(cfg) if part(g[0]) not in keep
+          and not (part(g[0]) == "experts" and layer_of(g[0]) in xl)]
     if a.head == "nvfp4":
         gs.append(("lm_head",))
     quantized = {k for g in gs for k in g}
@@ -137,7 +142,8 @@ def main() -> None:
         if os.path.isfile(os.path.join(a.model, f)):
             shutil.copy(os.path.join(a.model, f), os.path.join(a.out, f))
     raw["quantization_config"] = {"quant_method": "nvfp4", "group_size": 16, "scale_dtype": "float8_e4m3fn",
-                                  "tensor_scale": "fp32", "head": a.head, "bf16_parts": sorted(keep), "scales": "clip search, unweighted",
+                                  "tensor_scale": "fp32", "head": a.head, "bf16_parts": sorted(keep),
+                                  "bf16_expert_layers": sorted(xl), "scales": "clip search, unweighted",
                                   "producer": "TandemLLM tools/flint_nvfp4.py"}
     json.dump(raw, open(os.path.join(a.out, "config.json"), "w"), indent=2)
     print(json.dumps({"groups": len(gs), "shards": n_shard, "seconds": round(time.time() - t0),

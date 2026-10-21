@@ -5154,6 +5154,10 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         # Qwen template's own thinking off renders it, so the answer starts at once
         close = (list(tok(CLOSE_THINK, add_special_tokens=False).input_ids)
                  if client.off and kwargs.get("add_generation_prompt") else [])
+        # SRV-685: a model that opens its own reasoning block (STATE["self_think"], no thinking switch in its
+        # template) gets an empty block after the generation prompt, so it answers at once
+        selfoff = (list(tok(OPEN_THINK + CLOSE_THINK, add_special_tokens=False).input_ids)
+                   if close and STATE.get("self_think") else [])
         seg = STATE.get("segments")
         if seg is None:
             enc = tok.apply_chat_template(messages, return_tensors="pt", return_dict=True,
@@ -5161,6 +5165,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
             cids = _as_ids(enc, device="cpu")
             if close and opens_think(tok.decode(cids[-8:].tolist(), skip_special_tokens=False)):
                 cids = torch.cat([cids, torch.tensor(close, dtype=cids.dtype)])
+            elif selfoff:
+                cids = torch.cat([cids, torch.tensor(selfoff, dtype=cids.dtype)])
             if count == "ids":
                 return cids.tolist()
             if count == "think":
@@ -5178,6 +5184,8 @@ def build_prompt(body: dict, client: "thinking_mod.Client | None" = None, *, cou
         ids = seg.encode(text)
         if close and opens_think(tok.decode(ids[-8:], skip_special_tokens=False)):
             ids = list(ids) + close
+        elif selfoff:
+            ids = list(ids) + selfoff
         if count == "ids":
             return list(ids)
         if count == "think":
