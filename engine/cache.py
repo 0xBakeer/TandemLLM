@@ -1398,6 +1398,17 @@ class ResidentPrefix:
                 self._spill(eng, drafter, "evict")
             self.clear()
             self.owner = session
+            if not scratch:
+                # SRV-678: the restore writes the snapshot's rows in place (`restore`), so they
+                # are this prompt's up to `start`, and the prefill goes on from there as from an
+                # end anchor: every row a session's (`taint` 0, its anchors resumes under the
+                # gate). Cleared and left at that, the generation's `keep_end` found nothing
+                # resident (`not_resident`) and the next turn re-read from the last grid line
+                # (prefix check, 2026-10-21: 21,782 tokens after a store resume at 20,480)
+                self.tokens = list(ids)
+                self.valid = start
+                self.capturing = self.chunk > 0
+                self.taint = 0
             return
         n = len(ids)
         if not stay and self.is_guest(n, c):
