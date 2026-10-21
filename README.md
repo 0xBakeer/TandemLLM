@@ -7,7 +7,6 @@
   <a href="https://github.com/0xBakeer/TandemLLM/releases/latest"><img src="https://img.shields.io/github/v/release/0xBakeer/TandemLLM?color=3987e5" alt="release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="license"></a>
   <img src="https://img.shields.io/badge/hardware-DGX%20Spark%20(GB10)-76b900" alt="DGX Spark">
-  <a href="https://huggingface.co/collections/0xBakeer/tandemllm-qwen38-27b-exl3-6acdd787008264fa4f35eab4"><img src="https://img.shields.io/badge/%F0%9F%A4%97-EXL3%20weights-yellow" alt="weights"></a>
   <a href="manual/tandemllm-manual.pdf"><img src="https://img.shields.io/badge/manual-PDF-lightgrey" alt="manual"></a>
   <a href="https://doi.org/10.5281/zenodo.23045275"><img src="https://img.shields.io/badge/paper-StairCut-informational" alt="paper"></a>
   <a href="docs/community-weights.md"><img src="https://img.shields.io/badge/community-weights-3987e5" alt="community weights"></a>
