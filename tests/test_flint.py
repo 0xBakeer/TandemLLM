@@ -127,7 +127,8 @@ def plain_forward(raw: dict, W: dict, ids: torch.Tensor) -> torch.Tensor:
 def test_config():
     cfg = config_from_dict(TINY, "tiny")
     assert cfg.sliding_layers == [2, 3, 5] and cfg.full_layers == [0, 1, 4] and cfg.moe_layers == [2, 3, 4, 5]
-    assert not cfg.has_rope(4) and cfg.has_rope(2) and cfg.eos_token_ids == [2, 3]
+    assert not cfg.has_rope(4) and cfg.has_rope(2) and cfg.eos_token_ids == [2, 3] and cfg.route_scale == 1.0
+    assert config_from_dict({**TINY, "quantization_config": {"expert_interm_div": 128}}, "tiny").route_scale == 128.0
     for bad in ({"softmax_type": "off"}, {"router_score_function": "softmax"}, {"new_field": 1},
                 {"layer_types": TYPES[:-1]}):
         try:
@@ -189,6 +190,8 @@ def test_kernels_twins():
     ids, w = K.router(logits, None, 3, 1e-20)
     ids2, w2 = K.router_reference(logits, None, 3, 1e-20)
     assert torch.equal(ids.cpu(), ids2.cpu()) and (w - w2).abs().max() < 1e-6
+    ids3, w3 = K.router(logits, None, 3, 1e-20, scale=128.0)          # an EXL3 pack's expert scale
+    assert torch.equal(ids3, ids) and torch.equal(w3, w * 128.0)
 
 
 def test_prompt_attention_reference():

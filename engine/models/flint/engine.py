@@ -189,7 +189,7 @@ class FlintEngine(FlintRef):
         c = self.cfg
         g16 = self._gate16.get(li)
         logits = FK.gemv(n, g16) if g16 is not None else LK.linear_rows(n, self._gate[li], f32=True)
-        ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps)
+        ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps, scale=c.route_scale)
         if li in self.banks:
             yd = FK.moe_experts(n, ids, self.banks[li], order=self._order1 if n.shape[0] == 1 else None)
         else:
@@ -528,9 +528,11 @@ class FlintEngine(FlintRef):
             if c.is_moe(li):
                 logits = F.linear(n, self._gate[li]).float()
                 if dev.type == "cuda":
-                    ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps)
+                    ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps,
+                                        scale=c.route_scale)
                 else:
-                    ids, wts = K.router_reference(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps)
+                    ids, wts = K.router_reference(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps,
+                                                  c.route_scale)
                 if li in self.banks:
                     from tools import fn_prefill_kernels as PK
                     yd = PK.moe_grouped(n, ids, self.banks[li])

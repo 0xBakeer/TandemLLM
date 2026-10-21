@@ -74,6 +74,10 @@ class FlintConfig:
     eos_token_ids: list[int] = field(default_factory=list)   # generation stop ids
     # the routed experts' renormalisation: sum + ROUTE_EPS (the published routing's 1e-20)
     route_eps: float = 1e-20
+    # the routing weights' factor: an EXL3 pack whose routed experts' up projections are stored divided by
+    # `quantization_config.expert_interm_div` (the converter keeps their activations inside fp16) multiplies
+    # them back here; 1 for the BF16 checkpoint
+    route_scale: float = 1.0
 
     @property
     def q_dim(self) -> int:
@@ -151,6 +155,7 @@ def config_from_dict(raw: dict, path: str = "", gen: dict | None = None) -> Flin
         eos_token_id=int(eos_list[0]),
         bos_token_id=t.get("bos_token_id"),
         eos_token_ids=[int(x) for x in (gen_eos or eos_list)],
+        route_scale=float((raw.get("quantization_config") or {}).get("expert_interm_div", 1.0)),
     )
     validate(cfg, t)
     return cfg

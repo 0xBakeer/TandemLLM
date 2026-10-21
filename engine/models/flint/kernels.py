@@ -12,7 +12,8 @@ block is the decode step's row bit for bit.
                    layer launches 2 chunks from the CHUNK-aligned start of its window, whatever the
                    context, so its cost does not grow with the context
   router           sigmoid of the bf16 logits in fp32 (as the published routing), an optional bias for the
-                   choice, the top k (ties to the lower id), the chosen sigmoids over their sum + eps, fp32
+                   choice, the top k (ties to the lower id), the chosen sigmoids over their sum + eps, fp32,
+                   times the pack's expert scale (an EXL3 pack stores the experts' up projections divided by it)
   prompt_attention a prompt chunk's attention on SDPA's flash kernel with the KV heads as they are (no copy
                    per query head), the causal mask aligned to the chunk's end, the sliding window, and the
                    sink applied from the kernel's log-sum-exp: o * 1 / (1 + exp(sink - lse))
@@ -118,7 +119,7 @@ if HAVE_TRITON:
         tl.store(OUT + (t * HQ + qh) * D + od, o.to(tl.bfloat16))
 
     @triton.jit
-    def _router(LOG, s_log, BIAS, IDS, WTS, eps, E: tl.constexpr, KK: tl.constexpr, BIASED: tl.constexpr):
+    def _router(LOG, s_log, BIAS, IDS, WTS, eps, scale, E: tl.constexpr, KK: tl.constexpr, BIASED: tl.constexpr):
         r = tl.program_id(0)
         o = tl.arange(0, E)
         lb = tl.load(LOG + r * s_log + o).to(tl.bfloat16).to(tl.float32)
@@ -139,7 +140,7 @@ if HAVE_TRITON:
         den = tot + eps
         for j in tl.static_range(KK):
             wj = tl.load(WTS + r * KK + j)
-            tl.store(WTS + r * KK + j, wj / den)
+            tl.store(WTS + r * KK + j, wj / den * scale)
 
 
 def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Tensor, anc: torch.Tensor, ns: int,
@@ -202,23 +203,25 @@ def attn_rows_reference(q, kc, vc, ctl, anc, sink, window: int = 0, ring: int = 
     return torch.stack(out)
 
 
-def router(logits: torch.Tensor, bias: torch.Tensor | None, k: int, eps: float, ids=None, wts=None):
-    """logits fp32 [M, E] -> ids int32 [M, k], wts fp32 [M, k]."""
+def router(logits: torch.Tensor, bias: torch.Tensor | None, k: int, eps: float, ids=None, wts=None,
+           scale: float = 1.0):
+    """logits fp32 [M, E] -> ids int32 [M, k], wts fp32 [M, k] (times `scale`: a pack whose experts' up
+    projections are stored divided by it)."""
     M, E = logits.shape
     if ids is None:
         ids = torch.empty(M, k, dtype=torch.int32, device=logits.device)
         wts = torch.empty(M, k, dtype=torch.float32, device=logits.device)
-    _router[(M,)](logits, logits.stride(0), bias if bias is not None else logits, ids, wts, float(eps), E=E, KK=k,
+    _router[(M,)](logits, logits.stride(0), bias if bias is not None else logits, ids, wts, float(eps), float(scale), E=E, KK=k,
                   BIASED=bias is not None, num_warps=1)
     return ids, wts
 
 
-def router_reference(logits, bias, k: int, eps: float):
+def router_reference(logits, bias, k: int, eps: float, scale: float = 1.0):
     s = logits.to(torch.bfloat16).float().sigmoid()
     sc = s + bias if bias is not None else s
     order = torch.sort(sc, dim=-1, descending=True, stable=True).indices[:, :k]
     w = torch.gather(s, 1, order)
-    return order.to(torch.int32), w / (w.sum(-1, keepdim=True) + eps)
+    return order.to(torch.int32), w / (w.sum(-1, keepdim=True) + eps) * scale
 
 
 #: whether the flash kernel ran here (None: not tried yet; False: the torch path)

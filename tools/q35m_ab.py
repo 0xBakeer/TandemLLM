@@ -50,6 +50,8 @@ def main() -> None:
     ap.add_argument("--compare", nargs="+")
     ap.add_argument("--long", action="store_true", help="only the long code answer (2,048 tokens, the raw model)")
     ap.add_argument("--model", help="the model name to ask (default: TandemLLM, the raw engine's for --long)")
+    ap.add_argument("--only", help="comma-separated asks to run (default: all)")
+    ap.add_argument("--tokens", type=int, help="new tokens of every ask but the game file (default 512)")
     a = ap.parse_args()
     if a.compare:
         runs = [json.load(open(p)) for p in a.compare]
@@ -64,7 +66,9 @@ def main() -> None:
     health = json.loads(urllib.request.urlopen(a.url + "/health", timeout=10).read())
     out = {"label": a.label, "version": health.get("version"), "drafters": (health.get("weights") or {}).get("drafters"),
            "answers": {}}
-    asks = [(k, v, 512) for k, v in cases().items()] + [("game", GAME, 2048)]
+    asks = [(k, v, a.tokens or 512) for k, v in cases().items()] + [("game", GAME, 2048)]
+    if a.only:
+        asks = [x for x in asks if x[0] in a.only.split(",")]
     if a.long:
         asks = [("long", LONG, 2048)]
     for name, text, n in asks:

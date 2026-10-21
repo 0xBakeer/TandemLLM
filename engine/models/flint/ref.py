@@ -157,7 +157,7 @@ class FlintRef:
         bias = self.W.get(p + "gate.expert_bias")
         _, ids = torch.topk(s + bias if bias is not None else s, k=c.num_experts_per_tok, dim=-1)
         wts = torch.gather(s, 1, ids)
-        return ids, wts / (wts.sum(dim=-1, keepdim=True) + c.route_eps)
+        return ids, wts / (wts.sum(dim=-1, keepdim=True) + c.route_eps) * c.route_scale
 
     def expert(self, x: torch.Tensor, li: int, e: int) -> torch.Tensor:
         if li in self.experts:
