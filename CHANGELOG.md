@@ -24,7 +24,8 @@ Ornith-1.5-122B has 48 layers, 36 Gated DeltaNet and 12 gated attention (ENG-E15
 | MTP layer + lookup (the profile) | 85.3 | 114.2 | 110.0 | 115.9 | 124.8 | 103.3 |
 | DFlash2 + lookup | 67.3 | 91.7 | 92.2 | 106.9 | 122.8 | 96.8 |
 
-- A start loads the pack in 65 s: the weights take 59.95 GiB, 61.16 with the MTP layer. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs. Not measured: requests at once (a joint verify for side slots on this trunk is SRV-653), prompt reading speed, images, sampled decoding, repeat runs and tool-eval-bench.
+- A start loads the pack in 65 s: the weights take 59.95 GiB, 61.16 with the MTP layer. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs. Not measured: requests at once (a joint verify for side slots on this trunk is SRV-653), prompt reading speed, images, sampled decoding and repeat runs.
+- tool-eval-bench on the 0.13.0 code, one run a row: 93 and 94 on the raw path at every thinking setting, 96 for the conductor's `tools` profile, 94 to 97 for the other conductor profiles, and 80 raw against 84 for the conductor in hard mode. [docs/tool-eval-bench.md](docs/tool-eval-bench.md#ornith-15-122b-on-0130-2026-10-21) has the rows.
 
 ### Caches
 

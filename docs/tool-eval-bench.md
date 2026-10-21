@@ -102,3 +102,38 @@ A held-out pack of 12 scenarios passed 12 of 12 on both paths. Hard mode, 28 sce
 - TC-03 passed in the `chat` and `bench-pk` rows, where it failed on 0.12.0: the package question picked write-message at 0.995 as before, and the keep-out question answered `tool` at 0.87, so the model looked up Sarah and sent the email. Both rows lost other scenarios (`chat` TC-47 and TC-51, `bench-pk` TC-18 and TC-42) and scored 91 and 90 against 91 and 94. The cause is not tested, so SRV-615 ships in shadow.
 - The raw and `tools` rows are within the 2-point noise of 0.12.0's.
 - In hard mode a scenario without tools runs under the default profile when no profile is pinned; pinned to `tools` the row failed TC-88 both times, unpinned it passed. One scenario, the cause not tested; the batch's conductor rows pin no profile.
+
+## Ornith-1.5-122B on 0.13.0, 2026-10-21
+
+Ornith-1.5-122B scored 93 to 97 on the full suite and 80 and 84 in hard mode. The conductor rows scored 94 to 97 and the raw rows 93 and 94. With packages a row took 20.1 and 30.1 min, against 14.1 without.
+
+- Model: Ornith-1.5-122B in our EXL3 4.0 pack, drafting with its MTP layer and the lookup, on the 0.13.0 code; `/health` said `0.13.0+ornith-1.5-122b-exl3-4.0`.
+- Server: default effort `xhigh`, one slot (the server log: side slots are not built for this model yet), response cache on, a window of 262,144 tokens, 32,768 tokens an answer by default. The model's own sampling defaults are temperature 0.6, `top_k` 20 and `top_p` 0.95; the bench sends temperature 0.
+- Bench f2e368b and the settings above, through `tools/teb_batch.sh`, each row one run (n = 1). The conductor's `tools` row and its hard-mode row send no profile header. We made `bench-pk` and `bench-nopk` again from this build's `tools` profile with the commands above.
+- The server restarted before the raw rows and again before the conductor and hard-mode rows. No answer in a row came from the response cache.
+
+| path | thinking | packages | score | deployability | responsiveness | time | not passed |
+|-|-|-|-|-|-|-|-|
+| raw | off |  | 93 | 82 | 56 | 9.8 min | TC-03, TC-14, TC-39, TC-43, TC-50, TC-51, TC-52, TC-57 partial; TC-68 failed |
+| raw | `low` |  | 93 | 77 | 41 | 18.4 min | TC-14, TC-50, TC-57, TC-62 partial; TC-38, TC-51, TC-68 failed |
+| raw | `medium` |  | 94 | 82 | 53 | 13.1 min | TC-14, TC-50, TC-52, TC-57, TC-60, TC-62 partial; TC-68 failed |
+| raw | `high` |  | 94 | 83 | 57 | 13.5 min | TC-14, TC-50, TC-52, TC-57, TC-60, TC-62 partial; TC-68 failed |
+| raw | `xhigh` |  | 93 | 83 | 59 | 11.8 min | TC-14, TC-50, TC-52, TC-57, TC-60 partial; TC-62, TC-68 failed |
+| conductor, `tools` | the server's (`xhigh`) | off | 96 | 84 | 56 | 12.2 min | TC-14, TC-50, TC-57, TC-60 partial; TC-68 failed |
+| conductor, `bench-nopk` | by turn class | off | 94 | 81 | 50 | 14.1 min | TC-14, TC-22, TC-50, TC-52, TC-57, TC-60 partial; TC-68 failed |
+| conductor, `bench-pk` | by turn class | on | 97 | 78 | 34 | 20.1 min | TC-43, TC-62 partial; TC-68 failed |
+| conductor, `chat` | by turn class | on | 95 | 74 | 24 | 30.1 min | TC-43, TC-62, TC-63 partial; TC-51, TC-68 failed |
+
+Hard mode, 28 scenarios:
+
+| path | score | deployability | responsiveness | time | not passed |
+|-|-|-|-|-|-|
+| raw, `xhigh` | 80 | 67 | 36 | 10.7 min | TC-91, TC-94, TC-97 partial; TC-74, TC-85, TC-89, TC-92 failed |
+| conductor, no header | 84 | 73 | 48 | 10.1 min | TC-90, TC-94, TC-97 partial; TC-85, TC-89, TC-92 failed |
+
+- With thinking off the suite ran in 9.8 min at 93; with thinking on, 11.8 to 18.4 min at 93 and 94. `low` took the longest of the raw rows. It is one run, and the cause is not tested.
+- The `tools` row scored 96 against 93 for raw `xhigh` at the same effort. That is 3 points, a little over the 2-point noise of the 27B rows; one run a side.
+- `bench-pk` scored 97 and `bench-nopk` 94, so on this model the row with packages scored 3 points more and took 20.1 min against 14.1. On the 27B it was the other way round. One run each: this needs a second run before it says anything about packages.
+- `chat` took 30.1 min, the longest row. Its responsiveness was 24 against 56 for `tools`.
+- TC-68 fails in every row, as on the 27B. TC-14, TC-50 and TC-57 are partial in most rows.
+- In hard mode the conductor scored 84 against 80 for raw. Both rows failed TC-85, TC-89 and TC-92, and raw also failed TC-74.

@@ -293,7 +293,7 @@
   },
   "ok": true
  },
- "not_measured": "tool-eval-bench (a run follows); images; sampled decoding; more than one run a cell; requests at once (one slot); first-token times",
+ "not_measured": "images; sampled decoding; more than one run a cell; requests at once (one slot); first-token times. tool-eval-bench: docs/tool-eval-bench.md (2026-10-21)",
  "raw": [
   "models/ornith-1.5-122b/measurements/0.12.2-drafters.json",
   "models/ornith-1.5-122b/measurements/0.12.2-summary.json"
