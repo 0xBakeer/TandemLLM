@@ -2829,6 +2829,8 @@ def _say_reread(cid: str, res, copy: list[int], plan, why_mm: str | None = None)
             return
         e = int(res.end["at"])
         c = _shared_head(copy, res.tokens[:e])
+        if c >= e:
+            return          # the copy holds every row: the end anchor serves it, nothing to say
         if c < max(2 * int(getattr(res, "chunk", 1024) or 1024), 2048) and (
                 why_mm is None or c < 2048):
             # another conversation's rows: nothing of this copy was ever kept (a request with
