@@ -132,11 +132,15 @@ class Reasoning:
     still grow into one is held back until it either becomes the tag or cannot.
     """
 
-    def __init__(self, fmt: str = "tags", *, in_think: bool = True, boundary: str = ""):
+    def __init__(self, fmt: str = "tags", *, in_think: bool = True, boundary: str = "", self_open: bool = False):
         if fmt not in FORMATS:
             raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
         self.fmt = fmt
         self.in_think = bool(in_think)
+        # a model that opens its own reasoning block (Flint: its template opens none and the model writes
+        # `<think>` when it decides to reason): the answer's first characters are held until they are the
+        # tag (the block opens here, the tag dropped where the format drops it) or cannot be (content)
+        self._lead = "" if (self_open and not self.in_think) else None
         # SRV-193: `reasoning_content` for Open WebUI marks where the reasoning ends with a content
         # piece of blank lines (the template's own "\n\n"): Open WebUI closes a round's reasoning
         # item, and times it, at the first content; a round that goes from its thinking straight
@@ -164,6 +168,23 @@ class Reasoning:
         "tagged": the content field, carrying the reasoning block in `tags` and `both` format."""
         if not piece:
             return []
+        if self._lead is not None:
+            lead = self._lead + piece
+            s = lead.lstrip()
+            if s.startswith(OPEN_THINK):
+                self._lead, self.in_think = None, True
+                rest = s[len(OPEN_THINK):]
+                if self.fmt == "tags":
+                    return [("tagged", lead[:len(lead) - len(rest)])] + (self._tagged(rest) if rest else [])
+                if self.fmt == "both":
+                    out = [("tagged", lead[:len(lead) - len(rest)])]
+                    return out + (self.push(rest) if rest else [])
+                return self.push(rest.lstrip("\n")) if rest.lstrip("\n") else []
+            if OPEN_THINK.startswith(s):
+                self._lead = lead
+                return []
+            self._lead = None
+            piece = lead
         if not self.splits and self.in_think:
             return self._tagged(piece)
         if not self.splits or not self.in_think:
@@ -239,6 +260,9 @@ class Reasoning:
 
     def finish(self) -> list[tuple[str, str]]:
         """Whatever is still held back when the generation ends: it never became a tag."""
+        if self._lead:
+            rest, self._lead = self._lead, None
+            return [("content", rest)]
         if not self.pending:
             return []
         rest, self.pending = self.pending, ""
@@ -378,14 +402,22 @@ def _tag_prefix_len(text: str) -> int:
     return 0
 
 
-def split_full(text: str, fmt: str = "tags", *, in_think: bool = True) -> tuple[str, str | None]:
+def split_full(text: str, fmt: str = "tags", *, in_think: bool = True,
+               self_open: bool = False) -> tuple[str, str | None]:
     """The whole generation as `(content, reasoning_content)`, for a non-streamed answer.
 
     The same three formats as `Reasoning`, and the same reason the opening tag is put back: the
-    model never wrote it because the prompt already had.
+    model never wrote it because the prompt already had. `self_open`: the model opens its own block
+    (an answer that starts with `<think>`), and in `tags` the text stays as the model wrote it.
     """
     if fmt not in FORMATS:
         raise ValueError(f"reasoning_format must be one of {FORMATS}, not {fmt!r}")
+    if not in_think and self_open and text.lstrip().startswith(OPEN_THINK):
+        if fmt == "tags":
+            return text, None
+        body = text.lstrip()[len(OPEN_THINK):].lstrip("\n")
+        content, reasoning = split_full(body, fmt, in_think=True)
+        return (text if fmt == "both" else content), reasoning
     if not in_think:
         return text, None
     idx = text.find(CLOSE_THINK)

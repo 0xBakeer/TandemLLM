@@ -56,8 +56,9 @@ from server.stream import (  # noqa: E402
     answer_stops, drop_stray_close, opens_think, split_full,
 )
 from engine.tree import DraftTree  # noqa: E402
-from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, PythonicCalls, ToolCallBuffer,  # noqa: E402
-                             answer_items, parse_tool_calls, rewrite_pythonic, schema_types, strip_blocks)
+from server.toolcall import (JSON_ANY, OPEN as TOOL_OPEN, FlintCalls, PythonicCalls, ToolCallBuffer,  # noqa: E402
+                             answer_items, parse_tool_calls, rewrite_flint, rewrite_pythonic, schema_types,
+                             strip_blocks)
 from server import compat  # noqa: E402
 from server import thinking as thinking_mod  # noqa: E402
 from engine import grammar as grammar_mod  # noqa: E402
@@ -7236,7 +7237,7 @@ class Handler(BaseHTTPRequestHandler):
             # allowed functions, their values typed by the schemas; SRV-619: tools under
             # auto beside a document -- the calls or the document, one automaton
             ac = (compat.answer_constraint(body, chat,
-                                           xml_calls=STATE.get("tool_format") != "pythonic")
+                                           xml_calls=STATE.get("tool_format") not in ("pythonic", "flint"))
                   if structured else None)
             pattern = ac.pattern if ac is not None else None
             rec.constrained = ac.kind if ac is not None else None
@@ -8584,6 +8585,8 @@ class Handler(BaseHTTPRequestHandler):
                         ended = bool(ids) and ids[-1] in eos
                         if STATE.get("tool_format") == "pythonic":
                             answer = rewrite_pythonic(answer, eos=ended)       # SRV-425
+                        elif STATE.get("tool_format") == "flint":
+                            answer = rewrite_flint(answer, eos=ended)
                         if sup is not None and sup.holds_calls and last_choice:
                             # SP3: the held calls as the checks decided; what came before a
                             # regeneration (`sup.cuts`, in tokens) lost its blocks
@@ -8642,7 +8645,8 @@ class Handler(BaseHTTPRequestHandler):
                     entries = (lp_mod.emitted(d["lpr"].entries, d["ids"], eos)
                                if d["lpr"] is not None else None)
                     if chat:
-                        content, reasoning = split_full(d["text"], fmt, in_think=in_think)
+                        content, reasoning = split_full(d["text"], fmt, in_think=in_think,
+                                                        self_open=bool(STATE.get("self_think")))
                         if plan is not None and plan.active:
                             content, n_stray = drop_stray_close(content, fmt, in_think)  # SRV-187
                             if n_stray and plan.row is not None:
@@ -8705,7 +8709,8 @@ class Handler(BaseHTTPRequestHandler):
             # code point back until all of its bytes have arrived, which is bug 3. `Reasoning` says
             # which field each piece belongs in, which is the second half of bug 1.
             det = Detokenizer(lambda seq: tok.decode(seq, skip_special_tokens=True))
-            split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary)
+            split = Reasoning(fmt, in_think=in_think, boundary=fmt_boundary,
+                              self_open=bool(STATE.get("self_think")))
             # a tail that could still become a stop string waits until it does or cannot;
             # the stop string is never sent, not even the part of it that arrives first.
             stopper = StopStrings(stops)
@@ -8724,7 +8729,11 @@ class Handler(BaseHTTPRequestHandler):
                     if parse_calls else None)
             # SRV-425: a model that writes Pythonic calls (LFM2: `<|tool_call_start|>[f(a=1)]...`) has
             # each block rewritten into the buffer's JSON tier as it arrives (server/toolcall.py)
-            pyc = PythonicCalls() if tbuf is not None and STATE.get("tool_format") == "pythonic" else None
+            # Flint writes `<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`: the same
+            # rewrite into the buffer's JSON tier (`FlintCalls`)
+            pyc = ({"pythonic": PythonicCalls, "flint": FlintCalls}.get(STATE.get("tool_format"))
+                   if tbuf is not None else None)
+            pyc = pyc() if pyc is not None else None
             rec.live_refs = (think, tbuf)
             # 2026-10-05: the model's memory blocks held back from the client and written
             # (server/memblock.py, server/conductor/memory.py); None with the profile's memory off
@@ -9558,8 +9567,9 @@ def _refused(plan, cid: str, calls: list) -> None:
 
 def _reasoning_head(text: str, in_think: bool) -> tuple[str, str]:
     """`(reasoning block, answer)`: the text through the first `</think>` when the prompt opened
-    the block, the rest after it. A block that never closed has no answer yet."""
-    if not in_think:
+    the block (or the model opened it as its first words, STATE["self_think"]), the rest after it. A
+    block that never closed has no answer yet."""
+    if not in_think and not (STATE.get("self_think") and text.lstrip().startswith(OPEN_THINK)):
         return "", text
     i = text.find("</think>")
     return (text, "") if i < 0 else (text[:i + len("</think>")], text[i + len("</think>"):])

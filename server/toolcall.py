@@ -1310,3 +1310,92 @@ def rewrite_pythonic(text: str, eos: bool = False) -> str:
     """A whole answer with its Pythonic blocks rewritten (the non-streamed path)."""
     p = PythonicCalls()
     return p.feed(text) + p.finish(eos=eos)
+
+
+# Flint's calls (its chat template's form): `<tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...
+# </tool_call>`, a string value as written and any other value as JSON. A block is rewritten into this module's
+# JSON tier with every value as the text the model wrote, so `_typed` turns the values a schema types into JSON
+# values and a string stays exactly as written (no trimming); a block that does not read as one call goes out as
+# the text it was.
+_FLINT_ARG = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.S)
+
+
+def flint_calls(inner: str) -> list[dict] | None:
+    """The call of one Flint block's inner text, [{"name", "arguments"}], or None if it is not one."""
+    i = inner.find("<arg_key>")
+    name = (inner if i < 0 else inner[:i]).strip()
+    if not name or "<" in name or "\n" in name:
+        return None
+    rest = "" if i < 0 else inner[i:]
+    args: dict = {}
+    pos = 0
+    for m in _FLINT_ARG.finditer(rest):
+        if rest[pos:m.start()].strip():
+            return None
+        args[m.group(1).strip()] = m.group(2)
+        pos = m.end()
+    if rest[pos:].strip():
+        return None
+    return [{"name": name, "arguments": args}]
+
+
+def flint_block(inner: str) -> str | None:
+    calls = flint_calls(inner)
+    if calls is None:
+        return None
+    return OPEN + json.dumps(calls, ensure_ascii=False) + CLOSE
+
+
+class FlintCalls(PythonicCalls):
+    """The stream's rewrite of Flint blocks (above), PythonicCalls' machine with Flint's tags."""
+
+    OPEN_TAG, CLOSE_TAG = OPEN, CLOSE
+
+    def feed(self, piece: str) -> str:
+        self._buf += piece
+        out = ""
+        while True:
+            if not self._open:
+                i = self._buf.find(OPEN)
+                if i < 0:
+                    k = len(self._buf)
+                    for n in range(min(len(OPEN) - 1, len(self._buf)), 0, -1):
+                        if OPEN.startswith(self._buf[-n:]):
+                            k = len(self._buf) - n
+                            break
+                    out += self._buf[:k]
+                    self._buf = self._buf[k:]
+                    return out
+                out += self._buf[:i]
+                self._buf = self._buf[i + len(OPEN):]
+                self._open = True
+            j = self._buf.find(CLOSE)
+            if j < 0:
+                return out
+            out += self._close(self._buf[:j], closed=True)
+            self._buf = self._buf[j + len(CLOSE):]
+            self._open = False
+
+    def _close(self, inner: str, closed: bool) -> str:
+        got = flint_block(inner)
+        if got is None:
+            self.bad += 1
+            return OPEN + inner + (CLOSE if closed else "")
+        self.blocks += 1
+        return got
+
+    def finish(self, eos: bool = False) -> str:
+        buf, self._buf = self._buf, ""
+        if not self._open:
+            return buf
+        self._open = False
+        if eos:
+            return self._close(buf, closed=False)
+        self.bad += 1
+        return OPEN + buf
+
+
+def rewrite_flint(text: str, eos: bool = False) -> str:
+    """A whole answer with its Flint blocks rewritten (the non-streamed path)."""
+    p = FlintCalls()
+    return p.feed(text) + p.finish(eos=eos)
