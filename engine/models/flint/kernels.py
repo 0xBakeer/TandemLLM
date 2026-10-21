@@ -143,6 +143,61 @@ if HAVE_TRITON:
             tl.store(WTS + r * KK + j, wj / den * scale)
 
 
+if HAVE_TRITON:
+
+    @triton.jit
+    def _glu_act(GU, s_gu, A, s_a, I: tl.constexpr, BLOCK: tl.constexpr):
+        r = tl.program_id(0)
+        c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        m = c < I
+        g = tl.load(GU + r * s_gu + c, mask=m, other=0.0).to(tl.float32)
+        u = tl.load(GU + r * s_gu + I + c, mask=m, other=0.0).to(tl.float32)
+        sg = (g / (1.0 + tl.exp(-g))).to(tl.bfloat16).to(tl.float32)
+        tl.store(A + r * s_a + c, (sg * u).to(tl.bfloat16), mask=m)
+
+    @triton.jit
+    def _add2_rms(H_IN, D1, D2, H_OUT, N_OUT, W, eps, N: tl.constexpr, BLOCK: tl.constexpr):
+        r = tl.program_id(0)
+        o = tl.arange(0, BLOCK)
+        m = o < N
+        d = (tl.load(D1 + r * N + o, mask=m, other=0.0).to(tl.float32)
+             + tl.load(D2 + r * N + o, mask=m, other=0.0).to(tl.float32)).to(tl.bfloat16)
+        h = (tl.load(H_IN + r * N + o, mask=m, other=0.0).to(tl.float32) + d.to(tl.float32)).to(tl.bfloat16)
+        tl.store(H_OUT + r * N + o, h, mask=m)
+        hf = h.to(tl.float32)
+        var = tl.sum(hf * hf, 0) / N
+        nrm = (hf * tl.rsqrt(var + eps)).to(tl.bfloat16)
+        w = tl.load(W + o, mask=m, other=0.0)
+        tl.store(N_OUT + r * N + o, (nrm.to(tl.float32) * w.to(tl.float32)).to(tl.bfloat16), mask=m)
+
+
+def glu_act(gu: torch.Tensor, I: int, out: torch.Tensor | None = None) -> torch.Tensor:
+    """gu [M, 2 I] bf16 (gate | up) -> bf16(bf16(silu(gate)) * up) [M, I] in one launch: the bits of
+    `F.silu(gu[:, :I]) * gu[:, I:]` in bf16."""
+    M = gu.shape[0]
+    if out is None:
+        out = torch.empty(M, I, dtype=torch.bfloat16, device=gu.device)
+    if not gu.is_cuda:
+        return out.copy_(glu_act_reference(gu, I))
+    _glu_act[(M, triton.cdiv(I, 1024))](gu, gu.stride(0), out, out.stride(0), I=I, BLOCK=1024, num_warps=4)
+    return out
+
+
+def glu_act_reference(gu, I):
+    return torch.nn.functional.silu(gu[:, :I]) * gu[:, I:]
+
+
+def add2_rms(h: torch.Tensor, d1: torch.Tensor, d2: torch.Tensor, w: torch.Tensor, eps: float):
+    """(h + bf16(d1 + d2), its norm) in one launch: the bits of LFM2's add_rms(h, d1 + d2, w) with the sum in bf16."""
+    M, N = h.shape
+    if not h.is_cuda:
+        from engine.models.lfm2_moe.kernels import add_rms_reference
+        return add_rms_reference(h, (d1.float() + d2.float()).to(torch.bfloat16), w, eps)
+    hn, nn = torch.empty_like(h), torch.empty_like(h)
+    _add2_rms[(M,)](h, d1, d2, hn, nn, w, eps, N=N, BLOCK=triton.next_power_of_2(N), num_warps=4)
+    return hn, nn
+
+
 def attn_rows(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, ctl: torch.Tensor, anc: torch.Tensor, ns: int,
               sink: torch.Tensor, window: int = 0, ring: int = 0, bufs: dict | None = None,
               out: torch.Tensor | None = None) -> torch.Tensor:

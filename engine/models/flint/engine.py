@@ -188,7 +188,7 @@ class FlintEngine(FlintRef):
 
     def glu_rows(self, n: torch.Tensor, p: str, I: int) -> torch.Tensor:
         gu = self._fused(n, p, "gate_up", ("gate_proj", "up_proj"))
-        return self.lin(F.silu(gu[:, :I]) * gu[:, I:], self.W[p + "down_proj.weight"])
+        return self.lin(K.glu_act(gu, I), self.W[p + "down_proj.weight"])
 
     def moe_rows(self, n: torch.Tensor, li: int) -> torch.Tensor:
         """The MoE of M <= 32 rows: the router, every (row, slot) pair through its expert, the combine in
@@ -209,7 +209,8 @@ class FlintEngine(FlintRef):
             self.route_trace.append((li, ids.long()))
         m = FK.moe_combine(yd, ids, wts) if self.device.type == "cuda" else LK.combine_reference(yd, ids, wts)
         if c.shared_expert_intermediate_size:
-            m = m + self.glu_rows(n, self.pre(li) + "mlp.shared_expert.", c.shared_expert_intermediate_size)
+            # the shared expert's output beside the routed sum: the caller adds both in one launch (add2_rms)
+            return m, self.glu_rows(n, self.pre(li) + "mlp.shared_expert.", c.shared_expert_intermediate_size)
         return m
 
     route_trace = None
@@ -351,7 +352,7 @@ class FlintEngine(FlintRef):
             m = self.moe_rows(n, li) if c.is_moe(li) else self.glu_rows(n, p + "mlp.", c.intermediate_size)
             nxt = self.W[self.pre(li + 1) + "input_layernorm.weight"] if li + 1 < c.num_hidden_layers \
                 else self.W["norm.weight"]
-            h, n = LK.add_rms(h, m, nxt, eps)
+            h, n = K.add2_rms(h, m[0], m[1], nxt, eps) if isinstance(m, tuple) else LK.add_rms(h, m, nxt, eps)
         if one:
             rb = parts[0][1]
             rb["hidden"].copy_(n)

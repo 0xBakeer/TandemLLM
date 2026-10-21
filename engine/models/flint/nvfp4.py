@@ -92,7 +92,8 @@ class NVFP4GLUBank:
         yd = torch.empty(P, self.H, dtype=torch.float32, device=x.device)
         _nvfp4_bank[(P, 2 * self.I // 32)](x, x.stride(0), flat, self.gw, self.gs, self.g2, self._f4, self._f8, gu,
                                            NOUT=2 * self.I, KIN=self.H, S_=S, BN=32, BK=128, RELU2=False, num_warps=4)
-        a = (F.silu(gu[:, :self.I]) * gu[:, self.I:])
+        from engine.models.flint.kernels import glu_act
+        a = glu_act(gu, self.I)
         _nvfp4_bank[(P, self.H // 32)](a, a.stride(0), flat, self.dw, self.ds, self.d2, self._f4, self._f8, yd,
                                        NOUT=self.H, KIN=self.I, S_=1, BN=32, BK=128, RELU2=False, num_warps=4)
         return yd
