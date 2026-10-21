@@ -3574,6 +3574,28 @@ def _gate_holding_end(mem, res, keys: list[int], n: int, mm_ok: bool) -> None:
             _PARK_LET_GO.on = False
 
 
+class EndLost(Exception):
+    """SRV-669: the memory gate gave back the end anchor a scratch turn continues after images."""
+
+
+def _gate_record(res, r, ids: list[int]) -> None:
+    """SRV-669: the memory gate of a scratch turn that continues the record `r` (the preparer's
+    summary, the memory writer's notes), with the end anchor it resumes at held as a request's
+    (`_gate_holding_end`). A record after images holds the images' key ids, which only the end
+    anchor's state has read: when the gate gave that end back all the same (a refusal with it
+    held runs once more without the hold), the turn does not run (`EndLost`). Live 2026-10-21
+    about 15:00 the writer's own gate (a plain `Budget.gate`) shed the end of a 174,166-token
+    record with 8 images, the prefill resumed at an anchor below them and forwarded their key ids
+    as token ids: the embedding's gather asserted on the device and every later request failed."""
+    mem = STATE.get("mem")
+    if mem is None:
+        return
+    memlimits.refresh(STATE)
+    _gate_holding_end(mem, res, ids, len(ids), True)
+    if r.mm and not _end_held(res, ids, len(ids), True):
+        raise EndLost(f"the end anchor at {r.at} went at the memory gate")
+
+
 def _compaction_plan(body: dict, conv_id: str | None, kind: str | None, n_client: int,
                      row: dict | None) -> dict | None:
     """A compaction request served as the continuation of the conversation the engine
@@ -3801,10 +3823,7 @@ def prepare_once() -> str:
             return why
         saved = (list(res.tokens), res.valid, res.taint, res.owner, res.capturing)
         prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
-        mem = STATE.get("mem")
-        if mem is not None:
-            memlimits.refresh(STATE)
-            mem.gate(int(prompt.numel()))
+        _gate_record(res, r, r.tokens + tail)
 
         def check(done, total):
             if _waiting() or yielded():
@@ -3839,6 +3858,9 @@ def prepare_once() -> str:
     except cache.MemoryRefused:
         why = "memory"
         return why
+    except EndLost:
+        why = "end_lost"
+        return why
     except Exception:                                              # noqa: BLE001
         prep.stats["failed"] += 1
         logbuf.print_exc()
@@ -3854,6 +3876,7 @@ def prepare_once() -> str:
             # written, the end anchor's state is in its own buffers, no anchor was taken
             res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
             res._cut(res.valid)
+        res.end_hold = False                 # SRV-669: never a hold the turn left behind
         if STATE.get("mem") is not None:
             try:
                 STATE["mem"].done()
@@ -4143,9 +4166,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
     why = "failed"
     try:
         prompt = torch.tensor(r.tokens + tail, dtype=torch.long, device=STATE["device"])
-        if STATE.get("mem") is not None:
-            memlimits.refresh(STATE)
-            STATE["mem"].gate(int(prompt.numel()))
+        _gate_record(res, r, r.tokens + tail)
 
         def check(done, total):
             if stop():
@@ -4197,6 +4218,10 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
         why = "memory"
         mem.writer.skipped(conv, trigger, why, r.at, info)
         return why
+    except EndLost:
+        why = "end_lost"
+        mem.writer.skipped(conv, trigger, why, r.at, info)
+        return why
     except Exception:                                              # noqa: BLE001
         logbuf.print_exc()
         mem.writer.skipped(conv, trigger, "failed", r.at, info)
@@ -4209,6 +4234,7 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
                 pass
         res.tokens, res.valid, res.taint, res.owner, res.capturing = saved
         res._cut(res.valid)
+        res.end_hold = False                 # SRV-669: never a hold the turn left behind
         print(f"[memory] writer {conv and conv[:16]}: {trigger} {why}"
               f"{f': {said}' if why == 'wrote' else ''}, {r.at} tokens, "
               f"{len(ids)} out, {(time.perf_counter() - t0) * 1e3:.0f} ms", flush=True)
@@ -8252,9 +8278,11 @@ class Handler(BaseHTTPRequestHandler):
                         if obj is not None:
                             obj.drop_session(conv_id)
                 try:
+                    # SRV-669: a compaction served as the continuation resumes at the end
+                    # anchor (`end_mm`), after images too: its end is held as well
                     _gate_holding_end(mem, res_, list(mm.key_ids) if mm is not None
                                       else prompt.tolist(), n_prompt,
-                                      mm is not None and MM_END == "on" and comp is None)
+                                      (mm is not None and MM_END == "on") or comp is not None)
                 except cache.MemoryRefused as exc:
                     rec.stop_detail = "memory"
                     print(f"[memory] {cid} refused: {exc}", flush=True)

@@ -2588,6 +2588,7 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
         start, kind = be, "end"
     elif b > 0:
         start, kind = b, "resident"
+    _no_key_ids(eng, ids, start)
     if disk is not None:
         # the rows this prefill leaves as they are: a write still copying them may go on
         _disk(disk, "fence", start if kind in ("resident", "end")
@@ -2756,6 +2757,32 @@ def prefill(eng, drafter, ids: list[int], device, *, store: StateStore | None = 
                              "reread": n - start, "via": via or kind or "none",
                              "ms": round((time.perf_counter() - t_in) * 1e3, 1)})
     return logits, start, n - start
+
+
+class KeyIdsForwarded(ValueError):
+    """SRV-669: a prefill would forward ids outside the model's vocabulary (images' key ids)."""
+
+
+def _no_key_ids(eng, ids, start: int) -> None:
+    """SRV-669: every id this prefill forwards (`ids[start:]`) is a token of the model's
+    vocabulary, checked before any row or state changes. A continuation of a record after images
+    (a compaction, the preparer, the memory writer) carries the images' key ids, which only the
+    end anchor's state has read; forwarded, the embedding's gather asserts on the device and the
+    CUDA context is lost for every later request (live 2026-10-21). Raised here instead, the
+    request fails alone."""
+    vocab = int(getattr(getattr(eng, "cfg", None), "vocab_size", 0) or 0)
+    if vocab <= 0 or start >= len(ids):
+        return
+    seg = ids[start:]
+    if torch.is_tensor(seg):
+        lo, hi = int(seg.min()), int(seg.max())
+    else:
+        lo, hi = min(seg), max(seg)
+    if lo < 0 or hi >= vocab:
+        bad = next(j for j in range(start, len(ids)) if not 0 <= int(ids[j]) < vocab)
+        raise KeyIdsForwarded(f"the prefill would forward an id outside the vocabulary at row "
+                              f"{bad} (resuming at {start} of {len(ids)}): an image's key id "
+                              f"whose end anchor is gone")
 
 
 #: SRV-546: a prefill that reads at least this many tokens again says why, in words the chat's
