@@ -108,13 +108,14 @@ for row in "${LIST[@]}"; do
   label=${row%%:*}; flags=${row#*:}
   # the flags as the shell would split them, quotes kept (a JSON value is one word)
   eval "args=($flags)"
-  echo "[teb] $label: ${args[*]}"
+  # bash 3.2 (macOS) under set -u calls an empty array unbound: a row with no flags (`cond`) needs the guards
+  echo "[teb] $label: ${args[*]-}"
   health "$OUT/$label.health.before.json"
   date -u +%FT%TZ > "$OUT/$label.start"
   printf '%s\n' "$flags" > "$OUT/$label.flags"
   # from the results folder: the bench keeps its history (data/benchmarks.sqlite) where it runs
   ( cd "$OUT" && $BENCH run "${COMMON[@]}" --label "$label" --json-file "$OUT/$label.json" \
-    --output-dir "$OUT/reports" "${args[@]}" ) > "$OUT/$label.log" 2>&1
+    --output-dir "$OUT/reports" ${args[@]+"${args[@]}"} ) > "$OUT/$label.log" 2>&1
   echo "exit $?" >> "$OUT/$label.log"
   date -u +%FT%TZ > "$OUT/$label.end"
   health "$OUT/$label.health.after.json"

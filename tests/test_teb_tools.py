@@ -73,6 +73,27 @@ def test_a_dry_run_lists_the_standard_rows():
     assert got[3].endswith("--hardmode-only")
 
 
+
+def test_a_row_with_no_flags_runs():
+    """The `cond` row has no flags; bash 3.2 under set -u called its empty array unbound and the batch
+    stopped before the row (2026-10-21). A fake bench prints its arguments, a fake /health answers."""
+    with tempfile.TemporaryDirectory() as d:
+        bench = os.path.join(d, "bench.sh")
+        with open(bench, "w") as fh:
+            fh.write('#!/bin/bash\necho "args: $*"\n')
+        os.chmod(bench, 0o755)
+        health = "echo '{\"version\": \"x\", \"cache\": {\"response_cache\": {\"hits\": 0}}}'"
+        got = subprocess.run(["bash", os.path.join(ROOT, "tools", "teb_batch.sh"), "--out", d,
+                              "--health", health, "--bench", bench, "cond:",
+                              "raw:--header X-Tandem=raw --backend-kwargs '{\"reasoning_effort\": \"low\"}'"],
+                             capture_output=True, text=True)
+        assert got.returncode == 0, got.stdout + got.stderr
+        cond = open(os.path.join(d, "cond.log")).read()
+        assert cond.startswith("args: run ") and "--label cond --json-file" in cond and "exit 0" in cond, cond
+        raw = open(os.path.join(d, "raw.log")).read()
+        assert "--backend-kwargs {\"reasoning_effort\": \"low\"}" in raw, raw
+        assert "response_cache_hits 0" in raw
+
 if __name__ == "__main__":
     from scriptmode import run
     run(globals())
