@@ -78,6 +78,7 @@ from server import auth as auth_mod  # noqa: E402
 from server import static  # noqa: E402
 from server import images as images_mod  # noqa: E402
 from server import memlimits  # noqa: E402
+from server import gpu_health  # noqa: E402
 from server import memsplit  # noqa: E402
 from server import rolemem  # noqa: E402
 from server import refwatch as refwatch_mod  # noqa: E402
@@ -3861,9 +3862,10 @@ def prepare_once() -> str:
     except EndLost:
         why = "end_lost"
         return why
-    except Exception:                                              # noqa: BLE001
+    except Exception as exc:                                       # noqa: BLE001
         prep.stats["failed"] += 1
         logbuf.print_exc()
+        gpu_health.note(exc, "summary preparer", STATE.get("device"))  # SRV-671
         return why
     finally:
         if gen is not None:
@@ -4222,8 +4224,9 @@ def _writer_turn(mem, cfg, conv, r, trigger, gate, stop=lambda: False, yielded=N
         why = "end_lost"
         mem.writer.skipped(conv, trigger, why, r.at, info)
         return why
-    except Exception:                                              # noqa: BLE001
+    except Exception as exc:                                       # noqa: BLE001
         logbuf.print_exc()
+        gpu_health.note(exc, "memory writer", STATE.get("device"))   # SRV-671
         mem.writer.skipped(conv, trigger, "failed", r.at, info)
         return why
     finally:
@@ -6639,12 +6642,20 @@ class Handler(BaseHTTPRequestHandler):
             # "not taking work" and "broken", and a restarter that cannot tell them apart will
             # kill a server in the middle of a graceful shutdown.
             code = 503 if STATE.get("draining") else 200
+            status = "draining" if STATE.get("draining") else "ok"
+            # SRV-671: a CUDA context that no longer answers is a failure, never "ok": 500 and
+            # `failed`, which the watchdog restarts (a 503 is a drain it leaves alone)
+            fault = gpu_health.check(STATE.get("device"))
+            failed = ({"failed": fault["error"], "error": gpu_health.words(fault),
+                       "gpu": dict(fault)} if fault is not None else {})
+            if fault is not None:
+                code, status = 500, "failed"
             if _auth().decide("health_full", self._peer(), self.headers) != "ok":
                 # through the proxy, the status and nothing about the configuration (a page there
                 # reaches the status responder through the same proxy, OPS-175)
-                return self._json(code, {"status": "draining" if STATE.get("draining") else "ok"})
+                return self._json(code, {"status": status, **failed})
             return self._json(code, {
-                "status": "draining" if STATE.get("draining") else "ok",
+                "status": status, **failed,
                 "status_port": _status_port(),
                 "model": served_name(), "base_model": STATE.get("model"),
                 "version": STATE.get("version", ""), "weights": weights_profile(),
@@ -6687,7 +6698,8 @@ class Handler(BaseHTTPRequestHandler):
             # a public page with one number and nothing else, so the scrape can tell an
             # engine that is down from a metrics token that is wrong (the real page's 401).
             raw = (b"# HELP qse_up 1 while the server takes work, 0 while it drains\n"
-                   b"# TYPE qse_up gauge\nqse_up " + (b"0" if STATE.get("draining") else b"1")
+                   b"# TYPE qse_up gauge\nqse_up "
+                   + (b"0" if STATE.get("draining") or gpu_health.FAULT is not None else b"1")
                    + b"\n")
             try:
                 self.send_response(200)
@@ -6947,6 +6959,12 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):                      # SRV-167: `[]`, `"hi"`, `null`
             return self._json(400, compat.Refusal("body", "the request body must be a JSON "
                                                           "object").body())
+        if gpu_health.FAULT is not None:
+            # SRV-671: a failed CUDA context serves nothing until a restart; the client and the
+            # Chat tab get the reason in words, not the driver's text
+            return self._send_bytes(503, json.dumps({"error": {
+                "message": gpu_health.words(), "type": "engine_failed", "code": 503}}).encode(),
+                extra_headers=(("Retry-After", str(gpu_health.RETRY_AFTER_S)),))
         with logbuf.serving(body):
             return self._complete_logged(body, path)
 
@@ -7062,6 +7080,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as exc:                                  # noqa: BLE001
             logbuf.print_exc()
+            fault = gpu_health.note(exc, "request", STATE.get("device"))
+            if fault is not None:
+                # SRV-671: the CUDA context is lost; the reason in words, not the driver's text
+                return self._fail_gpu()
             if self._early is not None and not self._early["done"] and not self._early_body:
                 # a stream opened early that failed before its generation: closed, with the reason
                 return self._early_end(500, json.dumps({"error": {
@@ -7080,6 +7102,20 @@ class Handler(BaseHTTPRequestHandler):
                                                   "type": "internal_error"}})
             except Exception:
                 return
+
+    def _fail_gpu(self) -> None:
+        """SRV-671: a request that failed with the CUDA context: 503, the reason in words."""
+        raw = json.dumps({"error": {"message": gpu_health.words(), "type": "engine_failed",
+                                    "code": 503}}).encode()
+        try:
+            if self._early is not None and not self._early["done"] and not self._early_body:
+                return self._early_end(503, raw)
+            if self._streamed:
+                return
+            return self._send_bytes(503, raw, extra_headers=(
+                ("Retry-After", str(gpu_health.RETRY_AFTER_S)),))
+        except Exception:                                          # noqa: BLE001
+            return
 
     _streamed = False
 

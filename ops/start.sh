@@ -142,7 +142,7 @@ if [ "$SETUP" = "1" ]; then
     status failed --reason "the setup guide did not answer /health within 120 s"
     echo "[start] setup mode did not answer /health in 120 s; tail of $LOG:"; tail -20 "$LOG"; exit 1
 fi
-status starting --reason "$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")"
+status starting --reason "${START_REASON:-$( [ "${HOLD_RESTART:-0}" = "1" ] && echo "restarting after a hold" || echo "loading the model")}"
 # The usage ledger is this service's alone: the server does not read QSE_USAGE_LEDGER from
 # its environment, so a benchmark server started with serve.env exported stays off. The same for
 # the conductor's config (QSE_CONDUCTOR_CONFIG): `TandemLLM` exists on the :8000 service only. And

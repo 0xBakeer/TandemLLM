@@ -45,7 +45,7 @@ The FP8 profile needs about 27.5 GiB of weights on the device instead of 16.4. T
 
 `ops/start.sh` is safe to run at any time. If the engine is healthy it says so and exits. It refuses, with a non-zero exit, while any engine is alive or while something else holds the port without answering `/health`.
 
-The watchdog restarts only what it is sure about. A healthy server is left alone, and so is a draining one, because killing a graceful stop halfway is worse than a slow stop. A loading engine is left alone for up to 900 s. Only a server that fails three checks in a row is restarted, so one slow check during a long verify does not bounce a working server.
+The watchdog restarts only what it is sure about. A healthy server is left alone, and so is a draining one, because killing a graceful stop halfway is worse than a slow stop. A loading engine is left alone for up to 900 s. Only a server that fails three checks in a row is restarted, so one slow check during a long verify does not bounce a working server. A server whose `/health` answers 500 with `status: failed` (SRV-671: its CUDA context failed, after a device-side assert every CUDA call of the process fails) is restarted after two checks, with no loading grace, and the status page's reason says why while it stops and loads again.
 
 chatd, the Chat tab's service, is its own process ([chat.md](chat.md)): `ops/start.sh` starts it once the engine answers, `ops/stop.sh` and the watchdog's restart leave it running, `tandem stop` stops it. When the engine answers and chatd does not, the watchdog starts chatd, at most 3 times an hour (one line each in `logs/watchdog.log`), and never restarts the engine for it.
 

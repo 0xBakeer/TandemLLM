@@ -441,6 +441,8 @@ A call with `session` is a driver step: its own rate, `api.drive_rate_per_s` (10
 
 ## Draining
 
+A CUDA context that fails (SRV-671: after a device-side assert every CUDA call of the process fails until it exits) is seen by the request or the background job that met the error, or by `/health`'s own probe (`torch.cuda.mem_get_info` every 5 s, skipped while a graph capture holds the capture lock). From then on `/health` answers 500 with `status: failed`, the error's first line under `failed` and a sentence under `error`; `qse_up` is 0; a completion gets a 503 of type `engine_failed` with that sentence and `Retry-After: 60`, without touching the GPU. `server/gpu_health.py` has the rules; `ops/watchdog.sh` restarts such an engine.
+
 SIGTERM and SIGINT drain the server. It stops taking work, `/health` answers `draining` with a 503, new requests get a 503 with `Retry-After: 30`, the generation in flight finishes with its last chunk and `[DONE]`, and the process exits 0. `ops/stop.sh` sends SIGTERM and waits up to 60 s (its first argument) before it kills. From 0.3.22-test the drain then writes the resident conversation and the parked one to the NVMe (engine/spill.py, docs/caches.md "Live conversations on the NVMe"), about 3 s for 130,000 tokens, and the next start reads the resident one back before it serves, so the conversation's next turn resumes at its end anchor instead of reading it again.
 
 ## Logs and privacy

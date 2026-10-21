@@ -38,11 +38,12 @@ READ_TIMEOUT_S = 900.0       # a 158k prefill is about 3.5 minutes of silence
 
 class EngineError(Exception):
     def __init__(self, status: int, message: str, retryable: bool,
-                 retry_after: float | None = None):
+                 retry_after: float | None = None, kind: str | None = None):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
         self.retry_after = retry_after        # the refusal's Retry-After, in seconds
+        self.kind = kind                      # the error's `type` (SRV-671: `engine_failed`)
 
 
 class Call:
@@ -178,18 +179,21 @@ class Engine:
         if resp.status != 200:
             raw = resp.read()
             conn.close()
-            msg = f"HTTP {resp.status}"
+            msg, kind = f"HTTP {resp.status}", None
             try:
                 err = json.loads(raw).get("error")
                 if isinstance(err, dict) and err.get("message"):
                     msg = str(err["message"])[:300]
+                if isinstance(err, dict) and isinstance(err.get("type"), str):
+                    kind = err["type"]
             except (ValueError, AttributeError):
                 pass
             try:
                 after = float(resp.getheader("Retry-After") or "")
             except ValueError:
                 after = None
-            raise EngineError(resp.status, msg, resp.status == 429 or resp.status >= 500, after)
+            raise EngineError(resp.status, msg, resp.status == 429 or resp.status >= 500, after,
+                              kind=kind)
         return Call(conn, resp)
 
     def models(self) -> list[dict]:

@@ -47,7 +47,8 @@ FAKE_CURL = """#!/bin/bash
 # curl still prints 000 and exits 7; `-sf` asks for an exit status.
 case " $* " in
   *" -w "*) printf '%s' "${FAKE_HTTP_CODE:-000}"; [ "${FAKE_HTTP_CODE:-000}" = "000" ] && exit 7;;
-  *) [ "${FAKE_HEALTHY:-0}" = "1" ] || exit 22;;
+  *) [ -n "${FAKE_HTTP_BODY:-}" ] && printf '%s' "$FAKE_HTTP_BODY"
+     [ "${FAKE_HEALTHY:-0}" = "1" ] || exit 22;;
 esac
 exit 0
 """
@@ -878,6 +879,45 @@ def test_the_watchdog_restarts_inside_the_box_lock():
     assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="000").returncode == 0
     assert "start.sh lock held" in open(os.path.join(repo, "markers")).read()
     assert subprocess.run(["flock", "-n", lock, "true"]).returncode == 0
+
+
+FAILED_BODY = ('{"status": "failed", "failed": "CUDA error: device-side assert triggered", '
+               '"error": "The engine needs a restart: its GPU stopped working (CUDA error: '
+               'device-side assert triggered). No request can be served until it restarts.", '
+               '"gpu": {"error": "CUDA error: device-side assert triggered"}}')
+
+
+def test_a_failed_engine_is_restarted_without_a_loading_grace():
+    """SRV-671: /health answers 500 with `status: failed` (a CUDA context lost to a device-side
+    assert, 2026-10-21: 30 minutes of 500s and logs/watchdog.fails at 0). The engine process is
+    alive and answers, so it is not loading: two checks, then a restart, and the status page's
+    reason says why. A 500 without `failed` keeps the loader's grace as before."""
+    repo = _box(["watchdog.sh"])
+    _proc(repo, 4343, _engine_argv())                 # the engine, alive and answering
+    with open(os.path.join(repo, "ops", "stop.sh"), "w") as fh:
+        fh.write('#!/bin/bash\necho "stop.sh $* reason=$STATUS_REASON" >> "$MARKERS"\n')
+    with open(os.path.join(repo, "ops", "start.sh"), "w") as fh:
+        fh.write('#!/bin/bash\necho "start.sh reason=$START_REASON" >> "$MARKERS"\n')
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500", FAKE_HTTP_BODY=FAILED_BODY)
+    assert r.returncode == 0, r.stderr
+    assert _fails(repo) == "1" and not os.path.exists(os.path.join(repo, "markers"))
+    log = _wd_log(repo)
+    assert "the engine failed (code 500): CUDA error: device-side assert triggered, 1/2" in log, log
+    assert "loading" not in log, log
+    assert _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500",
+                FAKE_HTTP_BODY=FAILED_BODY).returncode == 0
+    marks = open(os.path.join(repo, "markers")).read().splitlines()
+    assert marks == ["stop.sh 30 reason=the engine failed: CUDA error: device-side assert "
+                     "triggered",
+                     "start.sh reason=restarting after a failure: CUDA error: device-side "
+                     "assert triggered"], marks
+    assert _fails(repo) == "0" and "restarted" in _wd_log(repo)
+    # a 500 that says nothing of a failure, with the engine alive: the loader's grace, as before
+    repo = _box(["watchdog.sh"])
+    _proc(repo, 4343, _engine_argv())
+    r = _run(repo, "watchdog.sh", FAKE_HTTP_CODE="500", FAKE_HTTP_BODY='{"error": "x"}')
+    assert r.returncode == 0 and "loading (code 500" in _wd_log(repo), _wd_log(repo)
+    assert _fails(repo) == "0"
 
 
 def test_a_cold_boot_is_left_to_load():

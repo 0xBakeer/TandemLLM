@@ -108,6 +108,23 @@ def memory_words(exc: EngineError) -> str | None:
             f"({int(m.group(1)) // 1000}k tokens, needs {m.group(2)} GiB of {m.group(3)})")
 
 
+#: SRV-671: the driver's text of a lost CUDA context, as an engine before the fix answered it
+_CUDA = re.compile(r"CUDA error|device-side assert|AcceleratorError|cudaError")
+
+
+def engine_words(exc: EngineError) -> str:
+    """The engine's refusal in words for the Chat tab: a failed engine's own sentence
+    (`engine_failed`), else the message's first line, the driver's text of a lost CUDA context
+    named for a person (live 2026-10-21 the Now line read "Waiting for the engine (CUDA error:
+    device-side assert triggered Search for `cudaErrorAssert' in ...")."""
+    msg = str(exc.args[0]) if exc.args else ""
+    if getattr(exc, "kind", None) == "engine_failed":
+        return msg
+    if _CUDA.search(msg):
+        return "its GPU stopped working; the engine needs a restart"
+    return next((ln.strip() for ln in msg.splitlines() if ln.strip()), msg)[:200]
+
+
 def over_window(exc: EngineError) -> bool:
     """The refusal is a 400 for a request over the model's context window."""
     return exc.status == 400 and _WINDOW.search(exc.args[0]) is not None
@@ -496,12 +513,15 @@ class Run:
                     deadline = time.monotonic() + self.svc.retry_window_s
                     continue
                 if time.monotonic() + backoff > deadline:
-                    self.error = exc.args[0]
+                    self.error = exc.args[0] if memory else engine_words(exc)
                     if memory:                       # the card under the answer says why
                         self.notice = f"{memory}. Continue goes on from here."
                     return "interrupted"
+                failed = getattr(exc, "kind", None) == "engine_failed"
                 self.set_phase("queued", f"{memory}: retry in {int(backoff)} s" if memory else
-                               f"Waiting for the engine ({exc.args[0]}), retry in {int(backoff)} s")
+                               f"{engine_words(exc)} Retry in {int(backoff)} s." if failed else
+                               f"Waiting for the engine ({engine_words(exc)}), retry in "
+                               f"{int(backoff)} s")
                 self.wake.wait(backoff)
                 backoff = min(BACKOFF_MAX_S, backoff * 2)
                 continue
