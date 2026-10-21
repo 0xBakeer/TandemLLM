@@ -8,8 +8,7 @@ a request that asks for sampling must get real sampling, not a 400.
 `temperature`, `min_p`, `top-k` and `top-p` are applied to a row AFTER the penalties, `logit_bias`
 and the no-repeat rule (deterministic transforms, still meaningful under sampling), with a
 per-request `torch.Generator` so a `seed` reproduces a request exactly. `min_p` keeps the
-tokens whose probability is at least `min_p` times the top one's, after the temperature (vLLM's
-order). Like the other filters it is part of `_filter`, the one function every target row goes
+tokens whose probability is at least `min_p` times the top one's, after the temperature. Like the other filters it is part of `_filter`, the one function every target row goes
 through -- the single draw, `probs_rows` for the chain and the tree, the keyed draws -- so the
 walks below accept against the filtered distribution and stay exact; a sampling drafter draws its
 proposal through the same filter, and its q is what it drew from, which is all the q-aware accept
@@ -121,8 +120,8 @@ class Sampler:
 
     @property
     def on(self) -> bool:
-        # `temperature = 0` is greedy whatever top-p and top-k say -- OpenAI's reading and vLLM's,
-        # and the only one that makes sense: both filters shrink a candidate set the argmax is
+        # `temperature = 0` is greedy whatever top-p and top-k say -- OpenAI's reading, and the
+        # only one that makes sense: both filters shrink a candidate set the argmax is
         # already the maximum of. Reading a lone top-p as "sampling on" made
         # `{"temperature": 0, "top_p": 0.95}` sample the RAW logits, because `_filter` divides by
         # the temperature only when there is one, and it also took the request out of the response

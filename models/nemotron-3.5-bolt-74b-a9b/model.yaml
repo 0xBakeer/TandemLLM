@@ -124,7 +124,7 @@ profiles:
     ppl: 7.48
     date: '2026-10-15'
     source: 'this engine against the BF16 checkpoint''s logits (tools/nh_quality.py, 8 wikitext-2 rows of 1,024 tokens from
-      an HF job, BF16 ppl 5.97); against llama.cpp on the same GGUF, teacher-forced: top-1 97.75 % of 1,024 chat
+      an HF job, BF16 ppl 5.97); against the GGUF reference on the same file, teacher-forced: top-1 97.75 % of 1,024 chat
       positions, every difference a near tie'
   assets_required:
   - nemotron-bolt-iq2-gguf

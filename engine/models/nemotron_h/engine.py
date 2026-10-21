@@ -26,7 +26,7 @@ step as a CUDA graph.
 M-row block.
 
 Taps (`set_taps`, a block drafter's context, SPD-123): the residual stream entering each tapped layer
-(llama.cpp's `t_layer_inp`, the output of the layer before after its residual add) of every row lands in
+(the output of the layer before after its residual add) of every row lands in
 the row buffers ("taps"), inside the graphs; a committed row's taps go to the state's ring (`st.ring`, by
 position modulo its rows): a decode step's in the step, a verify block's kept path's in the commit, a
 prompt chunk's last rows in the chunk. They are copies of values the rows compute anyway, so the rows'

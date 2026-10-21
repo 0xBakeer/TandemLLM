@@ -9,21 +9,9 @@ turned into tokens by the *target's* `lm_head`.
 
 WHICH TARGET HIDDEN STATES, AND FROM WHERE
 ------------------------------------------
-`dflash_config.target_layer_ids = [5, 19, 33, 47, 61]`, and those ids are consumed by the serving
-stack as *capture points at the entry of that layer*, not as that layer's output. The target model
-marks the listed layers and each marked layer captures inside
-`LayerCommunicator.prepare_attn_and_capture_last_layer_outputs`, whose body is:
-
-    hidden_states, residual = self.prepare_attn(hidden_states, residual, ...)
-    if captured_last_layer_outputs is not None:
-        gathered_last_layer_output = self._communicate_simple_fn(hidden_states=residual, ...)
-        ...
-        captured_last_layer_outputs.append(gathered_last_layer_output)
-
-`prepare_attn` is the fused add-norm: it folds the incoming `hidden_states` into `residual` and
-writes `input_layernorm(residual)` into `hidden_states`. What is appended is **`residual`** -- the
-residual stream *entering* layer L, i.e. the output of layer L-1 *after* its MLP residual add and
-*before* layer L's `input_layernorm`. The name of the helper says it: "capture_last_layer_outputs".
+`dflash_config.target_layer_ids = [5, 19, 33, 47, 61]`, and each id names a *capture point at the
+entry of that layer*, not that layer's output: the residual stream *entering* layer L, i.e. the
+output of layer L-1 *after* its MLP residual add and *before* layer L's `input_layernorm`.
 
 So the five tensors this drafter needs are the residual stream entering target layers
 5, 19, 33, 47 and 61, concatenated in that (ascending) order into [N, 5 * 5120] and fed to `fc`.
@@ -42,17 +30,11 @@ THE BLOCK
     ids       = [anchor, MASK, MASK, MASK, MASK, MASK, MASK, MASK]      (mask id 248070)
     positions = [p,      p+1,  p+2,  p+3,  p+4,  p+5,  p+6,  p+7]
 
-where `anchor` is the last token the target decided and `p` is its position -- the serving worker
-builds precisely this (`block_ids.fill_(mask_token_id); block_ids[:, 0].copy_(bonus_tokens)`,
-`positions = prefix_lens + [0..block_size-1]`).
+where `anchor` is the last token the target decided and `p` is its position.
 
 Row j of the module's output predicts the token at position p+j, so **row 0 is dead** (its token is
-the anchor, already known) and one block yields `block_size - 1 = 7` proposals, not 8:
-
-    draft_hidden = draft_hidden.view(bs, block_size, -1)
-    pred_hidden  = draft_hidden[:, 1:, :]            # [bs, block_size-1, H]
-    ...
-    draft_tokens[:, 0].copy_(block_ids[:, 0]); draft_tokens[:, 1:].copy_(draft_next)
+the anchor, already known) and one block yields `block_size - 1 = 7` proposals, not 8: the draft
+tokens are the head's choices on rows 1..7.
 
 That matches `engine/spec.py` one for one: the verify pass runs `[tok] + draft` with
 `len(draft) == 7`, and an all-accept block yields 7 drafted tokens plus the bonus.
@@ -61,21 +43,15 @@ CONTEXT ENTERS AS KV, NOT AS TOKENS
 -----------------------------------
 `target_hidden` is projected once, `hidden_norm(fc(target_hidden))`, and that single tensor is what
 every one of the five layers projects its context K and V from -- the HF reference passes the same
-`target_hidden` into every layer, and the serving worker materialises it into the draft KV cache
-once per committed token:
-
-    ctx_hidden = self.draft_model.project_target_hidden(target_hidden)
-    for layer in self.draft_model.layers:
-        k, v = layer.self_attn.kv_proj_only(ctx_hidden)
-        k = attn.apply_k_norm(k); k = attn.apply_k_rope(positions, k)
+`target_hidden` into every layer. Each layer's context K is k_norm then RoPE of `k_proj` of it at the
+token's position, its V `v_proj` of it, computed once per committed token.
 
 So the context costs `k_proj + v_proj` per layer per committed token, paid in `sync()`, and the
 draft pass itself only ever projects Q from the eight noise rows. Q comes from the noise block, K
 and V from context concatenated with the noise block, which is the KV injection the reference
 names.
 
-Attention is **non-causal**: `config.is_causal = false` maps to `AttentionType.ENCODER_ONLY`, so
-inside the block every row sees every other row, including later ones -- that is what makes this a
+Attention is **non-causal** (`config.is_causal = false`), so inside the block every row sees every other row, including later ones -- that is what makes this a
 block drafter rather than seven chained steps. All five layers are `sliding_attention` with
 `sliding_window = 2048`, applied to the context side.
 
@@ -83,7 +59,7 @@ NORM CONVENTION -- THE THING THAT IS EASY TO GET WRONG
 ------------------------------------------------------
 The target uses `GemmaRMSNorm`, `normalize(x) * (1 + w)`, which is what `engine.model.rms_norm`
 implements. The draft checkpoint does **not**: it is a Qwen3 draft (`Qwen3RMSNorm` in the HF
-reference, sglang's plain `RMSNorm` whose weight is initialised to `ones`) and computes
+reference, whose weight is initialised to `ones`) and computes
 `normalize(x) * w`. Every norm in this file therefore uses the local `_rms`, never the engine's.
 `tools/dflash2_probe.py` checks this empirically: the checkpoint's norm weights sit near 1.0, which
 only makes sense for the plain convention.
@@ -113,18 +89,9 @@ for 7. Against a 26.93 GB verify step it is 23 % of a step for up to 8 accepted 
 
 THE SELECTOR DOES NOT REPLACE THE HEAD READ
 -------------------------------------------
-It is an inference-time device -- the serving worker runs it on every draft, greedy and sampling
-alike -- but it *consumes* the head's output instead of avoiding it. `compute_candidates` runs the
-full head and then takes the top k:
-
-    def _project_candidate_logits(hidden, lm_head, *, num_org, use_quant_head):
-        weight = lm_head.weight
-        return torch.matmul(hidden.to(weight.dtype), weight[:num_org].T)
-    ...
-    def _radix_topk(scores, k):
-        # The selector's largest single cost: it reads the whole logits tensor.
-
-and the codebooks are then *gathered* by candidate id, 32 rows of 256 per slot. So the whole
+It is an inference-time device -- it runs on every draft, greedy and sampling alike -- but it
+*consumes* the head's output instead of avoiding it: the candidates are the top k of the full head's
+logits, so the whole logits tensor is read, and the codebooks are then *gathered* by candidate id, 32 rows of 256 per slot. So the whole
 2,542,796,800 B of `lm_head` is read either way; the selector adds 2,621,440 B for
 `hidden_projection` and 114,688 B of gathers, 0.04 % of the draft, and buys acceptance rather than
 bytes: it rescores the 16 candidates per slot against the previous slot's choice through a rank-256
@@ -138,10 +105,9 @@ path is wired here behind `draft_head=`, off by default until `tools/draft_head.
 
 WHAT IS NOT IN THE REFERENCE
 ----------------------------
-`blocks=2` (two chained 8-wide drafts, 14 proposals) has no counterpart in the serving stack. The
-worker runs exactly one draft forward per verify; the only supported way to propose more is a larger
-`block_size` (`speculative_num_draft_tokens` overrides the checkpoint's 8 and `set_block_size`
-re-blocks the convolutions). The chaining implemented below is therefore this engine's own, and its
+`blocks=2` (two chained 8-wide drafts, 14 proposals) has no counterpart in the reference, which runs
+exactly one draft forward per verify; there the only way to propose more is a larger `block_size`
+(`set_block_size` re-blocks the convolutions). The chaining implemented below is therefore this engine's own, and its
 shape is stated where it is built.
 """
 
@@ -233,7 +199,7 @@ class DFlash2Config:
         self.rope_theta = float(raw.get("rope_parameters", {}).get("rope_theta", 1e7))
         self.layer_types = list(raw.get("layer_types", ["full_attention"] * self.num_hidden_layers))
         self.sliding_window = int(raw.get("sliding_window") or 0) or None
-        # `is_causal: false` -> AttentionType.ENCODER_ONLY in the serving stack.
+        # `is_causal: false`: every block row attends to every other one.
         self.is_causal = bool(raw.get("is_causal", False))
         # z-lab's DFlash2 carries `block_size` inside `dflash_config`; the SpecForge-derived
         # checkpoints (DSpark) carry it at the top level, where their base class reads it.
@@ -495,8 +461,8 @@ def _rope_tables(positions: torch.Tensor, dim: int, theta: float,
                  dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     """Neox-style full rotary over all `dim` of the head; the draft has no partial factor.
 
-    Distinct from the target's rotary in this engine, which is partial at 0.25 over head_dim 256.
-    `get_rope(head_dim, rotary_dim=head_dim, base=1e7, is_neox_style=True)` in the serving stack.
+    Distinct from the target's rotary in this engine, which is partial at 0.25 over head_dim 256:
+    NeoX-style rotation over the whole head_dim, base 1e7.
     """
     inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32,
                                         device=positions.device) / dim))
@@ -513,41 +479,32 @@ def _apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.
 def _grouped_conv(h: torch.Tensor, delta: torch.Tensor, base: torch.Tensor,
                   num_groups: int, group_size: int, taps: int,
                   block_pos: torch.Tensor) -> torch.Tensor:
-    """One dynamic depthwise K-tap convolution along the token axis, inside a block.
+    """One dynamic depthwise K-tap convolution along the token axis, inside a block:
 
-    Port of `_grouped_conv` in the serving model, operation for operation:
+        y[t, c] = sum over j < taps with block_pos[t] >= j of (base[j, c] + delta[t, j, c // group_size]) * h[t - j, c]
 
-        blocks = hidden_states.unflatten(-1, (num_groups, group_size))
-        coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
-        out = coefficients[:, 0] * blocks
-        position = arange(T) & (block_size - 1)
-        for tap in range(1, taps):
-            shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-            out = out + coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
-        return out.flatten(-2)
+    the terms added in tap order, each product taken as (coefficient * h) * mask.
 
-    Three details that are the whole thing:
+      * grouping -- channel c is in group c // group_size (contiguous runs). `base` is per channel
+        [taps, H]; `delta` is per group [T, taps, num_groups] and is shared by the channels of its
+        group. `kernel_projection` emits 2 * taps * num_groups features laid out [side][tap][group],
+        the order `_Conv.prepare` reshapes them in.
+      * direction -- tap j reads row t - j: the convolution looks backwards, it is causal.
+      * blocking -- `block_pos` is a row's index within its block, and a tap that would reach across
+        a block boundary (block_pos[t] < j) adds nothing. A block never sees the one before it.
 
-      * grouping -- `unflatten(-1, (num_groups, group_size))` splits the 5120 channels into 320
-        contiguous runs of 16, so channel c is in group c // 16. `base_kernel` is per *channel*
-        [2, taps, 5120]; the projected `delta` is per *group* [T, taps, 320] and is broadcast
-        across the 16 channels of its group. `kernel_projection` emits 2 * taps * num_groups =
-        1280 features laid out [side][tap][group], which is the reshape order used here.
-      * direction -- `F.pad(blocks[:-tap], (..., tap, 0))` pads the *front* of the token axis, so
-        `shifted[t] = blocks[t - tap]`. The convolution looks backwards: it is causal.
-      * blocking -- `position` is the index *within* the block, and the `position >= tap` mask kills
-        every tap that would reach across a block boundary. A block never sees the one before it.
-
-    The coefficient used at tap t belongs to the *current* token: the kernel is dynamic per output
-    row, not a shared filter.
+    The coefficient at tap j belongs to the *current* row t: the kernel is dynamic per output row,
+    not a shared filter.
     """
-    blocks = h.unflatten(-1, (num_groups, group_size))
-    coef = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
-    out = coef[:, 0] * blocks
-    for tap in range(1, taps):
-        shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
-        out = out + coef[:, tap] * shifted * (block_pos >= tap).view(-1, 1, 1)
-    return out.flatten(-2)
+    T = h.shape[0]
+    x = h.unflatten(-1, (num_groups, group_size))                          # [T, groups, size]
+    k = base.view(1, taps, num_groups, group_size) + delta[..., None]      # [T, taps, groups, size]
+    y = k[:, 0] * x
+    for j in range(1, taps):
+        back = torch.zeros_like(x)                                         # back[t] = x[t - j], 0 before
+        back[j:] = x[:T - j]
+        y = y + k[:, j] * back * (block_pos >= j).view(-1, 1, 1)
+    return y.flatten(-2)
 
 
 class _Conv:
@@ -1026,7 +983,7 @@ class DFlash2Drafter(Drafter):
         """
         self.eng = eng
         # Which hidden state `target_layer_ids` names. The header argues for the residual stream
-        # ENTERING the listed layer, from the serving stack's capture point. The alternative
+        # ENTERING the listed layer, the reference's capture point. The alternative
         # reading -- the listed layer's OUTPUT -- is one index along, and it is the one thing the
         # CPU probe cannot settle, because the probe feeds synthetic hidden states. So it is a
         # flag, and acceptance decides it.
@@ -1386,7 +1343,7 @@ class DFlash2Drafter(Drafter):
         the module, turn rows 1.. into tokens, and hand back the block's own K/V for a chained
         second block.
 
-        The chain (`blocks=2`) is this engine's own and has no counterpart in the serving stack,
+        The chain (`blocks=2`) is this engine's own and has no counterpart in the reference,
         which runs one draft forward per verify; there the only way to propose more than
         `block_size - 1` tokens is to raise `block_size` itself. What is carried here is rows
         0..block_size-2 of this block's per-layer K and V -- not row block_size-1, whose position

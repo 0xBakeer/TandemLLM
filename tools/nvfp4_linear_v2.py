@@ -100,9 +100,8 @@ def _nvfp4_linear_v2_kernel(X, W, S, Y, M, N, KQ, s2, S2,
     for q in range(pid_k, KQ, SPLIT_K):
         packed = tl.load(w_tile + q * 64)
         if PREFETCH:
-            # Spark-specific: llama.cpp PR #26705 measured +4.8 % median decode from touching the
-            # next tile's line early. `evict_last` on a read of the next step's first byte is the
-            # portable way to say the same thing in Triton; the value is discarded.
+            # Spark-specific: touch the next tile's line early. `evict_last` on a read of the next
+            # step's first byte is the portable way to say that in Triton; the value is discarded.
             tl.load(w_tile + (q + SPLIT_K) * 64, mask=(q + SPLIT_K) < KQ, other=0,
                     eviction_policy="evict_last")
         we, wo = _fp4_decode(packed)                        # [BN, 64] each: logical 2c and 2c+1

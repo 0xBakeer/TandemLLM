@@ -24,11 +24,10 @@ cost of the wrappers is two `perf_counter()` calls and a few dictionary incremen
 block that is 133 ms.
 
 WHAT IS NOT HERE. The engine serves one sequence, so there is no batch, no KV utilisation and no
-preemption to report; those metrics exist in vLLM because it has a scheduler and this server does
-not. docs/roadmap.md says what would have to be true first. `qse_requests_waiting` is
+preemption to report; those metrics belong to a batching scheduler and this server has none. docs/roadmap.md says what would have to be true first. `qse_requests_waiting` is
 the queue this server does have -- callers waiting for the one engine lock.
 
-Names follow vLLM's set where the quantity is the same one, with a `qse_` prefix. Units are in the
+Names follow the common serving-metric set where the quantity is the same one, with a `qse_` prefix. Units are in the
 name and they are seconds and bytes, never milliseconds, because that is what the format expects.
 
     curl -s localhost:8000/metrics
@@ -923,8 +922,8 @@ def track_http(fn):
 def track_stream(fn):
     """Wrap `generate_stream` so the token times are taken where the tokens are.
 
-    Time to first token is measured from the moment the request arrived, which is what vLLM's
-    metric of that name means and what a caller experiences; the queue wait is part of it. The
+    Time to first token is measured from the moment the request arrived, which is what the
+    common metric of that name means and what a caller experiences; the queue wait is part of it. The
     arrival time comes from the `_complete` wrapper below, and a generator called from anywhere
     else falls back to its own start.
     """

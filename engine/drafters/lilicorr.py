@@ -1,40 +1,40 @@
-"""LiLiCorr: NVIDIA's block drafter for Nemotron 3.5 Bolt (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr,
-arXiv 2608.20530), as a draft head of the shared tree drafter (engine/methods/mtp_drafter.py).
+"""LiLiCorr: NVIDIA's block drafter for Nemotron 3.5 Bolt and Super VL (for Bolt
+nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr, arXiv 2608.20530), as a draft head of the shared
+tree drafter (engine/methods/mtp_drafter.py).
 
-The checkpoint (`LiLiCorrDraftModel`, ModelOpt NVFP4 W4A16, group 16) is a DFlash2-style backbone and a
-two-layer candidate-lattice head over the target's own embedding and LM head:
+Written from the drafter's paper, its config.json and the tensors of its checkpoint
+(`LiLiCorrDraftModel`, ModelOpt NVFP4 W4A16, group 16). A draft is three stages over the target's own
+embedding and LM head; the tensor names below are the checkpoint's.
 
-  context   for every committed target token, the residual rows entering Bolt's layers 1, 18, 35, 51, 68
-            and 85 (llama.cpp's `t_layer_inp`, `NemotronHEngine.set_taps`), concatenated [6 x 4096] ->
-            fc (NVFP4) -> RMSNorm hidden_norm = g; each of the five layers' K = rope(k_norm(k_proj g)) and
-            V = v_proj g at the token's position, kept in a window ring of 1,024 positions
-  block     [anchor, MASK x 7] (mask 990) at positions n .. n+7, the target's embedding; per layer:
-            RMSNorm, the grouped dynamic convolution's input side (kernel 2, group 16; dflash2._Conv),
-            q/k/v, q_norm/k_norm, RoPE (theta 10,000, all 128 dims), attention of every block row over
-            the context keys within its window (query - key < 1,024) and all 8 block rows, with a learned
-            sink logit a head in the softmax's denominator (`attention_sink_bias`), o_proj, the output
-            side of the convolution, the residual; the same around the SiLU MLP (12,288, NVFP4); the
-            final norm; the target's LM head on rows 1..7
-  lattice   per slot the top 8 candidates (descending), features [log p, p, log p - log p_top, rank / 7,
-            rank == 0] -> LayerNorm(5) -> MLP 5 -> 1,024 -> 1,024; token states token_proj(embedding),
-            pass states pass_hidden_proj(the slot's final row), slot and rank embeddings; two
-            pre-norm transformer layers over the 56 nodes with a learned per-head bias by slot distance;
-            output_norm; the anchor context_proj(g of the token before the anchor) -> anchor_norm;
-            factor = silu(factor_input_proj([x, a, x * a])) -> L2-normalised out_head / in_head vectors;
-            score(slot 1, j) = 8 <anchor_out_head(a), in_1j>, score(slot s, j | slot s-1, i) =
-            8 <out_(s-1)i, in_sj>
-  walk      greedy, left to right, on the GPU: slot 1's best start, then each slot's best given the
-            previous choice; the draft is 7 tokens, each with the softmax of its row of scores as its
-            confidence (llama.cpp's p_min reads the same)
-
-Arithmetic and names follow vLLM's `LiLiCorrForCausalLM` (Apache-2.0, adapted from SGLang #37462) and
-llama.cpp's `src/models/dflash.cpp` + `common/speculative.cpp` (MIT, #30506); the window and the sinks
-follow llama.cpp's SWA mask and `ggml_soft_max_add_sinks`.
+  context   one row g per committed target token: the residual rows entering the target layers
+            `target_layer_ids` (Bolt: 1, 18, 35, 51, 68, 85; the engine's taps,
+            `NemotronHEngine.set_taps`) concatenated, `fc`, RMSNorm `hidden_norm`. Every draft layer's
+            context key is RoPE(k_norm(k_proj g)) and its value v_proj g, at the token's position, kept
+            in a ring of `swa_window_size` positions
+  block     the ids [anchor, mask x (block - 1)] at positions n .. n + block - 1, embedded with the
+            target's table. A layer: RMSNorm; the grouped dynamic convolution's input side
+            (dflash2._Conv); q, k, v with q_norm and k_norm and RoPE over the whole head; each block row
+            attends to the context keys inside its window (query - key < window) and to every row of
+            the block, with one learned logit a head (`attention_sink_bias`) added to the softmax's
+            denominator; o_proj; the convolution's output side; the residual. The SiLU MLP the same way
+            around its own convolution. The final norm, then the target's head on rows 1 .. block - 1
+  lattice   a node per (slot, candidate): each slot's top `lilicorr_candidate_topk` tokens. A node's
+            state is the token's embedding (projected to the lattice width), the slot's block row
+            (`pass_hidden_proj`), an MLP over the LayerNorm of five features of the candidate
+            (log p, p, log p - max log p, rank / (k - 1), rank == 0), and slot and rank embeddings;
+            then `lilicorr_num_layers` pre-norm transformer layers over all nodes, whose attention
+            adds a learned bias a head by the slot distance and another for the same slot; the output
+            norm. The anchor's state is `context_proj` of the g before the anchor, `anchor_norm`ed.
+            Each node's factor silu(W [x, a, x * a] + b) gives an outgoing and an incoming unit
+            vector (`out_head`, `in_head`); slot 1 scores scale * <anchor_out_head(a), in>, slot s
+            given slot s - 1's pick scale * <out_pick, in>
+  walk      greedy from the left, on the device: slot 1's best, then each slot's best given the
+            previous pick; each drafted token's confidence is the softmax of its slot's row of scores
 
 The draft reads its context from the engine's tap ring (`NhState.ring`) by position, not from the rows
 the tree drafter hands over (those are the trunk's final rows, which the lookup's bookkeeping counts):
 a draft anchored at n computes g, K and V for the committed rows it has not read yet within the window
-(n - 1,023 .. n - 1) and drops its ring when the engine's rows below the length stop being this
+(n - window + 1 .. n - 1) and drops its ring when the engine's rows below the length stop being this
 sequence's (`tap_gen`: a restart, a cache restore). Rows it never read change a draft, never the text:
 every drafted token is verified by the trunk, so a draft's arithmetic (bf16, torch) never reaches it.
 """
@@ -55,16 +55,20 @@ FILES = ("config.json", "model.safetensors")
 
 
 class LiLiCorrConfig:
-    """The checkpoint's config.json, the fields the draft reads; anything else it asks for is refused."""
+    """The fields of the checkpoint's config.json a draft reads (the lattice's under `dflash_config`).
+    A setting the draft does not implement is refused, never ignored."""
 
     def __init__(self, raw: dict):
-        d = raw.get("dflash_config") or {}
-        if "LiLiCorrDraftModel" not in (raw.get("architectures") or []) or not d.get("lilicorr_enabled"):
-            raise ValueError(f"not a LiLiCorr draft: architectures {raw.get('architectures')}")
-        if d.get("projector_type", "lilicorr") != "lilicorr" or d.get("causal", False):
-            raise ValueError(f"LiLiCorr projector {d.get('projector_type')!r}, causal {d.get('causal')}: unsupported")
+        dc = raw.get("dflash_config") or {}
+        arch = raw.get("architectures") or []
+        if "LiLiCorrDraftModel" not in arch or not dc.get("lilicorr_enabled"):
+            raise ValueError(f"not a LiLiCorr draft: architectures {arch}")
+        if dc.get("projector_type", "lilicorr") != "lilicorr" or dc.get("causal", False):
+            raise ValueError(f"LiLiCorr projector {dc.get('projector_type')!r}, causal {dc.get('causal')}: "
+                             "unsupported")
         if raw.get("hidden_act", "silu") != "silu" or raw.get("rope_scaling"):
             raise ValueError("LiLiCorr: silu MLP and plain RoPE only")
+        # the draft backbone
         self.hidden_size = int(raw["hidden_size"])
         self.num_hidden_layers = int(raw["num_hidden_layers"])
         self.num_attention_heads = int(raw["num_attention_heads"])
@@ -74,34 +78,38 @@ class LiLiCorrConfig:
         self.rms_norm_eps = float(raw["rms_norm_eps"])
         self.rope_theta = float(raw.get("rope_theta", 10000.0))
         self.vocab_size = int(raw["vocab_size"])
-        self.block_size = int(raw.get("block_size") or d["block_size"])
-        self.mask_token_id = int(d["mask_token_id"])
-        self.target_layer_ids = [int(x) for x in d["target_layer_ids"]]
-        self.window = int(d.get("swa_window_size") or raw.get("sliding_window")) if d.get("use_swa", True) else 0
-        self.sinks = bool(d.get("attention_sink_bias", raw.get("attention_sink_bias", False)))
-        self.conv_kernel_size = int(d.get("conv_kernel_size") or 0)
-        self.conv_group_size = int(d.get("conv_group_size") or 0)
-        self.topk = int(d["lilicorr_candidate_topk"])
-        self.lc_hidden = int(d.get("lilicorr_hidden_size") or self.hidden_size)
-        self.lc_layers = int(d["lilicorr_num_layers"])
-        self.lc_heads = int(d["lilicorr_num_heads"])
-        self.lc_mlp = int(self.lc_hidden * float(d.get("lilicorr_mlp_ratio", 2.0)))
-        self.factor_dim = int(d.get("lilicorr_factor_dim") or self.lc_hidden)
-        self.vector_eps = float(d.get("lilicorr_vector_eps", 1e-4))
-        self.logit_scale = float(d.get("lilicorr_logit_scale", 1.0))
-        # Super VL's drafter carries its own LM head (NVFP4, the target's vocabulary); Bolt's borrows the target's
+        # the block, the taps, the window and the convolution
+        self.block_size = int(raw.get("block_size") or dc["block_size"])
+        self.mask_token_id = int(dc["mask_token_id"])
+        self.target_layer_ids = [int(t) for t in dc["target_layer_ids"]]
+        use_window = dc.get("use_swa", True)
+        self.window = int(dc.get("swa_window_size") or raw.get("sliding_window")) if use_window else 0
+        self.sinks = bool(dc.get("attention_sink_bias", raw.get("attention_sink_bias", False)))
+        self.conv_kernel_size = int(dc.get("conv_kernel_size") or 0)
+        self.conv_group_size = int(dc.get("conv_group_size") or 0)
+        # the lattice
+        self.topk = int(dc["lilicorr_candidate_topk"])
+        self.lc_hidden = int(dc.get("lilicorr_hidden_size") or self.hidden_size)
+        self.lc_layers = int(dc["lilicorr_num_layers"])
+        self.lc_heads = int(dc["lilicorr_num_heads"])
+        self.lc_mlp = int(self.lc_hidden * float(dc.get("lilicorr_mlp_ratio", 2.0)))
+        self.factor_dim = int(dc.get("lilicorr_factor_dim") or self.lc_hidden)
+        self.vector_eps = float(dc.get("lilicorr_vector_eps", 1e-4))
+        self.logit_scale = float(dc.get("lilicorr_logit_scale", 1.0))
+        # Super VL's drafter has an LM head of its own (NVFP4, the target's vocabulary); Bolt's uses the target's
         self.own_head = bool(raw.get("has_own_lm_head", False))
         if self.own_head and int(raw.get("draft_vocab_size") or self.vocab_size) != self.vocab_size:
             raise ValueError("LiLiCorr with its own head over a draft vocabulary: unsupported")
         if not self.window:
             raise ValueError("LiLiCorr without a sliding window: the context ring needs one")
-        if self.topk < 1 or self.topk > 16 or self.topk & (self.topk - 1):
+        if not (1 <= self.topk <= 16) or self.topk & (self.topk - 1):
             raise ValueError(f"LiLiCorr candidate_topk {self.topk}: a power of two up to 16")
-        if bool(self.conv_kernel_size) != bool(self.conv_group_size):
+        if (self.conv_kernel_size == 0) != (self.conv_group_size == 0):
             raise ValueError("LiLiCorr convolution: kernel and group size together")
 
     @property
     def slots(self) -> int:
+        """Drafted tokens a block: every row but the anchor's."""
         return self.block_size - 1
 
     @property
@@ -117,7 +125,7 @@ def load_config(path: str) -> LiLiCorrConfig:
 def missing_files(path: str | None) -> list[str]:
     if not path or not os.path.isdir(path):
         return [path or "(no path)"]
-    return [f for f in FILES if not os.path.isfile(os.path.join(path, f))]
+    return [name for name in FILES if not os.path.isfile(os.path.join(path, name))]
 
 
 def load_weights(path: str, device: str = "cuda") -> dict:
@@ -126,22 +134,21 @@ def load_weights(path: str, device: str = "cuda") -> dict:
     from safetensors import safe_open
 
     from tools.nvfp4_linear import NVFP4Block
-    raw = {}
     with safe_open(os.path.join(path, "model.safetensors"), framework="pt", device="cpu") as f:
-        for k in f.keys():
-            raw[k] = f.get_tensor(k)
-    W = {}
-    for k, t in raw.items():
-        if k.endswith((".weight_scale", ".weight_scale_2", ".input_scale")):
+        stored = {name: f.get_tensor(name) for name in f.keys()}
+    out = {}
+    for name, t in stored.items():
+        if name.endswith((".weight_scale", ".weight_scale_2", ".input_scale")):
+            continue                                                      # read with their weight
+        if t.dtype != torch.uint8:
+            out[name] = t.to(device=device, dtype=torch.bfloat16)
             continue
-        if t.dtype == torch.uint8:
-            base = k[:-len("weight")]
-            if base + "weight_scale" not in raw or base + "weight_scale_2" not in raw:
-                raise ValueError(f"{k}: an NVFP4 weight without its scales")
-            W[k] = NVFP4Block(t.to(device), raw[base + "weight_scale"].to(device), raw[base + "weight_scale_2"].float())
-        else:
-            W[k] = t.to(device=device, dtype=torch.bfloat16)
-    return W
+        stem = name[:-len("weight")]
+        scale, scale2 = stored.get(stem + "weight_scale"), stored.get(stem + "weight_scale_2")
+        if scale is None or scale2 is None:
+            raise ValueError(f"{name}: an NVFP4 weight without its scales")
+        out[name] = NVFP4Block(t.to(device), scale.to(device), scale2.float())
+    return out
 
 
 #: the largest activation the NVFP4 kernels take as it is: they multiply in fp16 (max 65,504)
@@ -160,208 +167,232 @@ def _lin_wide(x: torch.Tensor, w) -> torch.Tensor:
 
 
 def _linb(x: torch.Tensor, W: dict, name: str) -> torch.Tensor:
-    """A linear layer of the checkpoint with its bias when it has one."""
+    """The checkpoint's linear `name`, plus its bias when it has one."""
     y = _lin(x, W[name + ".weight"])
-    b = W.get(name + ".bias")
-    return y if b is None else y + b
+    bias = W.get(name + ".bias")
+    return y if bias is None else y + bias
+
+
+def _unit(x: torch.Tensor, eps: float) -> torch.Tensor:
+    """x over its L2 norm along the last axis (the norm floored at eps)."""
+    return F.normalize(x, dim=-1, eps=eps)
 
 
 class LiLiCorrModel:
-    """The draft's arithmetic over its weights `W`, the target's embedding `embed` [vocab, H] and LM head
-    `head` (rows [M, H] -> logits [M, vocab] fp32). Knows nothing of the engine, so tests and tools can
-    drive it."""
+    """A draft's arithmetic over the checkpoint's tensors `W`, the target's embedding `embed`
+    [vocab, H] and LM head `head` (rows [M, H] -> logits [M, vocab], fp32). It knows nothing of the
+    engine, so tests and tools drive it directly."""
 
     def __init__(self, cfg: LiLiCorrConfig, W: dict, embed: torch.Tensor, head):
         self.cfg, self.W, self.embed, self.head = cfg, W, embed, head
-        c = cfg
-        self.convs = []
-        for i in range(c.num_hidden_layers):
-            p = f"layers.{i}"
-            self.convs.append(None if not c.conv_kernel_size else (
-                _Conv(W[f"{p}.attention_conv.base_kernel"], W[f"{p}.attention_conv.kernel_projection.weight"],
-                      c.conv_kernel_size, c.num_groups, c.conv_group_size),
-                _Conv(W[f"{p}.mlp_conv.base_kernel"], W[f"{p}.mlp_conv.kernel_projection.weight"],
-                      c.conv_kernel_size, c.num_groups, c.conv_group_size)))
-        # every layer's K and V of a context row in one product (the context is written a row at a time)
-        self.kv_w = torch.cat([W[f"layers.{i}.self_attn.{x}_proj.weight"]
-                               for i in range(c.num_hidden_layers) for x in "kv"]).contiguous()
-        self.sink = [W[f"layers.{i}.self_attn.attention_sink_bias"].float() if c.sinks else None
-                     for i in range(c.num_hidden_layers)]
+        L = cfg.num_hidden_layers
+        self.convs = [self._convs_of(i) for i in range(L)]
+        # a context row's K and V for every layer come out of one product with the stacked weights
+        self.kv_w = torch.cat([W[f"layers.{i}.self_attn.{side}_proj.weight"]
+                               for i in range(L) for side in ("k", "v")]).contiguous()
+        self.sink = [W[f"layers.{i}.self_attn.attention_sink_bias"].float() if cfg.sinks else None
+                     for i in range(L)]
         self.attn_bias = self._lattice_bias()
-        T = c.topk
-        self.rank_frac = (torch.arange(T, dtype=torch.float32) / max(T - 1, 1)).to(self.device)
-        self.is_top1 = (torch.arange(T) == 0).float().to(self.device)
-        h = c.lc_hidden
-        fw = W["lilicorr.factor_input_proj.weight"]
-        self.factor_w = (fw[:, :h].contiguous(), fw[:, h:2 * h].contiguous(), fw[:, 2 * h:].contiguous())
+        k = cfg.topk
+        self.rank_frac = (torch.arange(k, dtype=torch.float32) / max(k - 1, 1)).to(self.device)
+        self.is_top1 = (torch.arange(k) == 0).float().to(self.device)
+        # the factor input [x, a, x * a] is one weight of three column blocks; each block multiplies
+        # its own part
+        w3, h = W["lilicorr.factor_input_proj.weight"], cfg.lc_hidden
+        self.factor_w = tuple(w3[:, j * h:(j + 1) * h].contiguous() for j in range(3))
 
     @property
     def device(self) -> torch.device:
         return self.embed.device
 
+    def _convs_of(self, i: int):
+        """Layer i's two convolutions (attention side, MLP side), or None when the draft has none."""
+        c, W = self.cfg, self.W
+        if not c.conv_kernel_size:
+            return None
+        return tuple(_Conv(W[f"layers.{i}.{side}.base_kernel"], W[f"layers.{i}.{side}.kernel_projection.weight"],
+                           c.conv_kernel_size, c.num_groups, c.conv_group_size)
+                     for side in ("attention_conv", "mlp_conv"))
+
     def _lattice_bias(self) -> torch.Tensor:
-        """The head's attention bias [heads, nodes, nodes]: by the slot distance (offset block - 1) plus a
-        same-slot term (vLLM's `_build_attention_bias`)."""
-        c = self.cfg
-        slot = torch.arange(c.slots, device=self.device).repeat_interleave(c.topk)
-        rel = slot[:, None] - slot[None, :]
-        bias = self.W["lilicorr.relative_slot_bias"][:, rel + c.block_size - 1]
-        same = (slot[:, None] == slot[None, :]).to(bias.dtype)
-        return (bias + same[None] * self.W["lilicorr.same_slot_bias"].view(-1, 1, 1)).contiguous()
+        """The lattice attention's additive bias [heads, nodes, nodes]: a head's learned value for the
+        slot distance between the two nodes (`relative_slot_bias`, distance + block - 1 its index),
+        plus `same_slot_bias` where both nodes are in one slot."""
+        c, W = self.cfg, self.W
+        node_slot = torch.arange(c.slots, device=self.device).repeat_interleave(c.topk)
+        dist = node_slot[:, None] - node_slot[None, :]
+        by_dist = W["lilicorr.relative_slot_bias"][:, dist + (c.block_size - 1)]
+        same = (dist == 0).to(by_dist.dtype)
+        return (by_dist + same[None] * W["lilicorr.same_slot_bias"].view(-1, 1, 1)).contiguous()
 
-    # ---- the context ---------------------------------------------------------------------------
+    # ---- context ---------------------------------------------------------------------------------
     def context(self, taps: torch.Tensor, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Rows of the target's taps [n, taps, H] at `positions` -> (g [n, H], K, V [layers, kv heads, n,
-        head_dim]): K normed and roped, as the block reads them."""
-        c = self.cfg
-        n = taps.shape[0]
-        g = _rms(_lin_wide(taps.reshape(n, -1), self.W["fc.weight"]), self.W["hidden_norm.weight"], c.rms_norm_eps)
-        kv = F.linear(g, self.kv_w).view(n, c.num_hidden_layers, 2, c.num_key_value_heads, c.head_dim)
-        k = torch.stack([_rms(kv[:, i, 0], self.W[f"layers.{i}.self_attn.k_norm.weight"], c.rms_norm_eps)
-                         for i in range(c.num_hidden_layers)])                  # [L, n, kv, D]
+        """Target tap rows [n, taps, H] at `positions` -> (g [n, H], K, V [layers, kv heads, n, head_dim]),
+        K normed and rotated, ready for the block."""
+        c, W = self.cfg, self.W
+        n, L, eps = taps.shape[0], c.num_hidden_layers, c.rms_norm_eps
+        g = _rms(_lin_wide(taps.reshape(n, -1), W["fc.weight"]), W["hidden_norm.weight"], eps)
+        kv = F.linear(g, self.kv_w).view(n, L, 2, c.num_key_value_heads, c.head_dim)
+        keys = torch.stack([_rms(kv[:, i, 0], W[f"layers.{i}.self_attn.k_norm.weight"], eps)
+                            for i in range(L)])                                      # [L, n, kv, D]
         cos, sin = _rope_tables(positions, c.head_dim, c.rope_theta, g.dtype)
-        k = _apply_rope(k.transpose(1, 2), cos, sin)                            # [L, kv, n, D]
-        v = kv[:, :, 1].permute(1, 2, 0, 3)
-        return g, k, v
+        keys = _apply_rope(keys.transpose(1, 2), cos, sin)                            # [L, kv, n, D]
+        return g, keys, kv[:, :, 1].permute(1, 2, 0, 3)
 
-    # ---- the block -----------------------------------------------------------------------------
+    # ---- block -----------------------------------------------------------------------------------
     def block(self, anchor: torch.Tensor, pos0: torch.Tensor, ck: torch.Tensor, cv: torch.Tensor,
               ctx_ok: torch.Tensor) -> torch.Tensor:
-        """The block [anchor, MASK x (block - 1)] at positions pos0 .. pos0 + block - 1 over the context
-        keys `ck`, `cv` [layers, kv heads, C, D] where `ctx_ok` [block, C] (bool) says which key each row
-        sees. Returns the final normed rows [block, H]."""
-        c = self.cfg
-        B, nh, nkv, D = c.block_size, c.num_attention_heads, c.num_key_value_heads, c.head_dim
-        dev = self.device
+        """The rows [anchor, mask, ...] at positions pos0 .. pos0 + block - 1, attending to the context
+        keys `ck` / values `cv` [layers, kv heads, C, D] where `ctx_ok` [block, C] (bool) allows it and to
+        every block row. The final normed rows [block, H]."""
+        c, W = self.cfg, self.W
+        B, eps, dev = c.block_size, c.rms_norm_eps, self.device
         ids = torch.full((B,), c.mask_token_id, dtype=torch.long, device=dev)
         ids[:1] = anchor
         h = self.embed.index_select(0, ids)
-        bpos = torch.arange(B, device=dev)
-        cos, sin = _rope_tables(pos0 + bpos, D, c.rope_theta, h.dtype)
-        # the score mask: the context keys a row sees, then every row of the block, then the sink
-        keep = torch.cat([ctx_ok, torch.ones(B, B, dtype=torch.bool, device=dev)], 1)
-        neg = torch.zeros(keep.shape, dtype=torch.float32, device=dev).masked_fill_(~keep, float("-inf"))
-        eps = c.rms_norm_eps
+        row = torch.arange(B, device=dev)
+        cos, sin = _rope_tables(pos0 + row, c.head_dim, c.rope_theta, h.dtype)
+        # additive mask over [context keys | block keys]: 0 where a row may look, -inf elsewhere
+        allowed = torch.cat([ctx_ok, torch.ones(B, B, dtype=torch.bool, device=dev)], 1)
+        mask = torch.zeros(allowed.shape, dtype=torch.float32, device=dev).masked_fill_(~allowed, float("-inf"))
         for i in range(c.num_hidden_layers):
-            p = f"layers.{i}"
-            conv = self.convs[i]
-            x = _rms(h, self.W[f"{p}.input_layernorm.weight"], eps)
-            ak = None
-            if conv is not None:
-                x, ak = conv[0].prepare(x, bpos)
-            q = _lin(x, self.W[f"{p}.self_attn.q_proj.weight"]).view(B, nh, D)
-            k = _lin(x, self.W[f"{p}.self_attn.k_proj.weight"]).view(B, nkv, D)
-            v = _lin(x, self.W[f"{p}.self_attn.v_proj.weight"]).view(B, nkv, D)
-            q = _apply_rope(_rms(q, self.W[f"{p}.self_attn.q_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]
-            k = _apply_rope(_rms(k, self.W[f"{p}.self_attn.k_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]
-            keys = torch.cat([ck[i], k], 1)                                     # [kv, C + B, D]
-            vals = torch.cat([cv[i], v.transpose(0, 1)], 1)
-            o = self._attend(q, keys, vals, neg, self.sink[i])                  # [B, nh * D]
-            o = _lin(o, self.W[f"{p}.self_attn.o_proj.weight"])
-            if conv is not None:
-                o = conv[0].finish(o, ak, bpos)
-            h = h + o
-            x = _rms(h, self.W[f"{p}.post_attention_layernorm.weight"], eps)
-            mk = None
-            if conv is not None:
-                x, mk = conv[1].prepare(x, bpos)
-            x = _lin_wide(F.silu(_lin_wide(x, self.W[f"{p}.mlp.gate_proj.weight"]))
-                          * _lin_wide(x, self.W[f"{p}.mlp.up_proj.weight"]), self.W[f"{p}.mlp.down_proj.weight"])
-            if conv is not None:
-                x = conv[1].finish(x, mk, bpos)
-            h = h + x
-        return _rms(h, self.W["norm.weight"], eps)
+            h = h + self._attention_part(i, h, row, cos, sin, ck[i], cv[i], mask)
+            h = h + self._mlp_part(i, h, row)
+        return _rms(h, W["norm.weight"], eps)
 
-    def _attend(self, q, keys, vals, neg, sink) -> torch.Tensor:
-        """q [heads, B, D] over keys/vals [kv heads, K, D] (GQA), the additive mask `neg` [B, K], a sink
-        logit a head (or none) in the softmax's denominator; fp32. -> [B, heads * D]."""
+    def _attention_part(self, i, h, row, cos, sin, ck, cv, mask) -> torch.Tensor:
+        """Layer i's attention sublayer on the block rows `h`, inside its convolution: its residual."""
+        c, W, p = self.cfg, self.W, f"layers.{i}.self_attn"
+        B, D, eps = h.shape[0], c.head_dim, c.rms_norm_eps
+        conv = self.convs[i][0] if self.convs[i] is not None else None
+        x = _rms(h, W[f"layers.{i}.input_layernorm.weight"], eps)
+        out_coef = None
+        if conv is not None:
+            x, out_coef = conv.prepare(x, row)
+        q = _lin(x, W[f"{p}.q_proj.weight"]).view(B, c.num_attention_heads, D)
+        k = _lin(x, W[f"{p}.k_proj.weight"]).view(B, c.num_key_value_heads, D)
+        v = _lin(x, W[f"{p}.v_proj.weight"]).view(B, c.num_key_value_heads, D)
+        q = _apply_rope(_rms(q, W[f"{p}.q_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]
+        k = _apply_rope(_rms(k, W[f"{p}.k_norm.weight"], eps).transpose(0, 1)[None], cos, sin)[0]
+        o = self._attend(q, torch.cat([ck, k], 1), torch.cat([cv, v.transpose(0, 1)], 1), mask, self.sink[i])
+        o = _lin(o, W[f"{p}.o_proj.weight"])
+        return o if conv is None else conv.finish(o, out_coef, row)
+
+    def _mlp_part(self, i, h, row) -> torch.Tensor:
+        """Layer i's SiLU MLP on the block rows `h`, inside its convolution: its residual."""
+        W, p = self.W, f"layers.{i}.mlp"
+        conv = self.convs[i][1] if self.convs[i] is not None else None
+        x = _rms(h, W[f"layers.{i}.post_attention_layernorm.weight"], self.cfg.rms_norm_eps)
+        out_coef = None
+        if conv is not None:
+            x, out_coef = conv.prepare(x, row)
+        gate, up = _lin_wide(x, W[f"{p}.gate_proj.weight"]), _lin_wide(x, W[f"{p}.up_proj.weight"])
+        y = _lin_wide(F.silu(gate) * up, W[f"{p}.down_proj.weight"])
+        return y if conv is None else conv.finish(y, out_coef, row)
+
+    def _attend(self, q, keys, vals, mask, sink) -> torch.Tensor:
+        """Grouped-query attention in fp32: q [heads, B, D] over keys / vals [kv heads, K, D], the
+        additive `mask` [B, K], and when `sink` [heads] is given one extra logit a head that only
+        enlarges the softmax's denominator. -> [B, heads * D] in q's dtype."""
         nh, B, D = q.shape
-        rep = nh // keys.shape[0]
-        s = torch.einsum("grbd,gkd->grbk", q.float().view(-1, rep, B, D), keys.float()) / math.sqrt(D)
-        s = s.reshape(nh, B, -1) + neg
+        G, K = keys.shape[0], keys.shape[1]
+        per = nh // G
+        logits = torch.einsum("gqbd,gkd->gqbk", q.float().view(-1, per, B, D), keys.float()) / math.sqrt(D)
+        logits = logits.reshape(nh, B, -1) + mask
         if sink is not None:
-            s = torch.cat([s, sink.view(nh, 1, 1).expand(nh, B, 1)], -1)
-        p = torch.softmax(s, -1)[..., :keys.shape[1]]
-        o = torch.einsum("grbk,gkd->grbd", p.view(-1, rep, B, keys.shape[1]), vals.float())
+            logits = torch.cat([logits, sink.view(nh, 1, 1).expand(nh, B, 1)], -1)
+        w = torch.softmax(logits, -1)[..., :K]
+        o = torch.einsum("gqbk,gkd->gqbd", w.view(-1, per, B, K), vals.float())
         return o.reshape(nh, B, D).transpose(0, 1).reshape(B, nh * D).to(q.dtype)
 
-    # ---- the lattice ---------------------------------------------------------------------------
+    # ---- lattice ---------------------------------------------------------------------------------
     def candidates(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Each slot's top-k ids and their log-probabilities (descending) from its logits [slots, vocab]."""
-        top, ids = torch.topk(logits.float(), self.cfg.topk, dim=-1)
-        return ids, top - torch.logsumexp(logits.float(), -1, keepdim=True)
+        best, ids = torch.topk(logits.float(), self.cfg.topk, dim=-1)
+        return ids, best - torch.logsumexp(logits.float(), -1, keepdim=True)
 
     def lattice(self, ids: torch.Tensor, logp: torch.Tensor, pass_hidden: torch.Tensor, anchor_g: torch.Tensor,
                 anchor_ok: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
-        """(start [k], pairs [slots - 1, k, k]) in logit units: vLLM's `LiLiCorrHead.forward` for one
-        sequence. ids/logp [slots, k], pass_hidden [slots, H] (the block's final rows 1..), anchor_g [H]
-        (g of the token before the anchor)."""
+        """(start [k], pairs [slots - 1, k, k]) in logit units for one sequence. ids / logp [slots, k],
+        pass_hidden [slots, H] (the block's final rows 1 ..), anchor_g [H] (g of the token before the
+        anchor; `anchor_ok` 0 when that row is not this sequence's)."""
+        c = self.cfg
+        S, k = ids.shape[0], c.topk
+        dt = self.W["lilicorr.slot_embedding"].dtype
+        x = self._nodes(ids, logp, pass_hidden)                                       # [S * k, Hc]
+        a = _linb(anchor_g.view(1, -1).to(dt), self.W, "lilicorr.context_proj") * anchor_ok
+        x = self._encode(x, S * k).view(S, k, c.lc_hidden)
+        return self._scores(x, a)
+
+    def _nodes(self, ids, logp, pass_hidden) -> torch.Tensor:
+        """The nodes' input states [S * k, Hc]: candidate token, block row, candidate features, slot
+        and rank."""
         c, W = self.cfg, self.W
-        S, T, Hc = ids.shape[0], c.topk, c.lc_hidden
-        eps = c.rms_norm_eps
+        S, k, Hc = ids.shape[0], c.topk, c.lc_hidden
         dt = W["lilicorr.slot_embedding"].dtype
         tok = self.embed.index_select(0, ids.reshape(-1)).to(dt)
-        x = (_linb(tok, W, "lilicorr.token_proj") if c.lc_hidden != c.hidden_size else tok).view(S, T, Hc)
-        x = x + _linb(pass_hidden.to(dt), W, "lilicorr.pass_hidden_proj").unsqueeze(1)
+        x = _linb(tok, W, "lilicorr.token_proj") if c.lc_hidden != c.hidden_size else tok
+        x = x.view(S, k, Hc) + _linb(pass_hidden.to(dt), W, "lilicorr.pass_hidden_proj").unsqueeze(1)
         lp = logp.float()
-        feat = torch.stack([lp, lp.exp(), lp - lp.max(-1, keepdim=True).values,
-                            self.rank_frac.expand_as(lp), self.is_top1.expand_as(lp)], -1).to(dt)
-        feat = F.layer_norm(feat, (5,), W["lilicorr.feature_norm.weight"], W["lilicorr.feature_norm.bias"])
-        x = x + _linb(F.silu(_linb(feat, W, "lilicorr.feature_mlp.up_proj")), W, "lilicorr.feature_mlp.down_proj")
+        feats = torch.stack([lp, lp.exp(), lp - lp.max(-1, keepdim=True).values,
+                             self.rank_frac.expand_as(lp), self.is_top1.expand_as(lp)], -1).to(dt)
+        feats = F.layer_norm(feats, (5,), W["lilicorr.feature_norm.weight"], W["lilicorr.feature_norm.bias"])
+        x = x + _linb(F.silu(_linb(feats, W, "lilicorr.feature_mlp.up_proj")), W, "lilicorr.feature_mlp.down_proj")
         x = x + W["lilicorr.slot_embedding"][0, 0, :S] + W["lilicorr.rank_embedding"][0, 0]
-        x = x.reshape(S * T, Hc)
-        a = _linb(anchor_g.view(1, -1).to(dt), W, "lilicorr.context_proj") * anchor_ok
-        n = S * T
+        return x.reshape(S * k, Hc)
+
+    def _encode(self, x: torch.Tensor, n: int) -> torch.Tensor:
+        """The lattice's pre-norm transformer layers over the n nodes, then its output norm."""
+        c, W = self.cfg, self.W
+        eps, heads = c.rms_norm_eps, c.lc_heads
+        hd = c.lc_hidden // heads
         bias = self.attn_bias[:, :n, :n]
-        hd = Hc // c.lc_heads
         for j in range(c.lc_layers):
             p = f"lilicorr.layers.{j}"
             y = _rms(x, W[f"{p}.attn_norm.weight"], eps)
             qkv = F.linear(y, W[f"{p}.attn.in_proj_weight"], W[f"{p}.attn.in_proj_bias"])
-            q, k, v = (t.view(n, c.lc_heads, hd).transpose(0, 1) for t in qkv.chunk(3, -1))
-            o = F.scaled_dot_product_attention(q[None], k[None], v[None], attn_mask=bias[None])[0]
-            x = x + _linb(o.transpose(0, 1).reshape(n, Hc), W, f"{p}.attn.out_proj")
-            y = _rms(x, W[f"{p}.mlp_norm.weight"], eps)
-            y = F.silu(_linb(y, W, f"{p}.mlp.up_proj"))
+            q, kk, v = (t.view(n, heads, hd).transpose(0, 1) for t in qkv.chunk(3, -1))
+            o = F.scaled_dot_product_attention(q[None], kk[None], v[None], attn_mask=bias[None])[0]
+            x = x + _linb(o.transpose(0, 1).reshape(n, c.lc_hidden), W, f"{p}.attn.out_proj")
+            y = F.silu(_linb(_rms(x, W[f"{p}.mlp_norm.weight"], eps), W, f"{p}.mlp.up_proj"))
             x = x + _lin_wide(y, W[f"{p}.mlp.down_proj.weight"]) + W[f"{p}.mlp.down_proj.bias"]
-        x = _rms(x, W["lilicorr.output_norm.weight"], eps).view(S, T, Hc)
-        a = _rms(a, W["lilicorr.anchor_norm.weight"], eps)
-        ws, wa, wx = self.factor_w
-        pre = F.linear(x, ws, W["lilicorr.factor_input_proj.bias"]) + F.linear(a, wa) + F.linear(x * a, wx)
-        fh = F.silu(pre)
-        out = F.normalize(_linb(fh, W, "lilicorr.out_head"), dim=-1, eps=c.vector_eps)
-        inn = F.normalize(_linb(fh, W, "lilicorr.in_head"), dim=-1, eps=c.vector_eps)
-        ao = F.normalize(_linb(a, W, "lilicorr.anchor_out_head"), dim=-1, eps=c.vector_eps)[0]
-        start = (inn[0] @ ao).float() * c.logit_scale
-        pairs = torch.matmul(out[:-1], inn[1:].transpose(-1, -2)).float() * c.logit_scale
+        return _rms(x, W["lilicorr.output_norm.weight"], eps)
+
+    def _scores(self, x: torch.Tensor, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The nodes' factor vectors and the scores: slot 1 against the anchor, slot s against slot s - 1."""
+        c, W = self.cfg, self.W
+        a = _rms(a, W["lilicorr.anchor_norm.weight"], c.rms_norm_eps)
+        w_x, w_a, w_xa = self.factor_w
+        pre = F.linear(x, w_x, W["lilicorr.factor_input_proj.bias"]) + F.linear(a, w_a) + F.linear(x * a, w_xa)
+        factor = F.silu(pre)
+        outgoing = _unit(_linb(factor, W, "lilicorr.out_head"), c.vector_eps)
+        incoming = _unit(_linb(factor, W, "lilicorr.in_head"), c.vector_eps)
+        anchor_out = _unit(_linb(a, W, "lilicorr.anchor_out_head"), c.vector_eps)[0]
+        start = (incoming[0] @ anchor_out).float() * c.logit_scale
+        pairs = torch.matmul(outgoing[:-1], incoming[1:].transpose(-1, -2)).float() * c.logit_scale
         return start, pairs
 
     @staticmethod
     def walk(ids: torch.Tensor, start: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
-        """The greedy walk on the device: [slots, 4] fp32 rows (token, its score's softmax, the row's
-        second token, its softmax) -- the first slot from `start`, each next one from the row of `pairs`
-        its predecessor picks."""
-        S, T = ids.shape
-        rows = [start]
-        pick = start.argmax().view(1)
-        picks = [pick]
-        for s in range(S - 1):
-            r = pairs[s].index_select(0, pick)[0]
-            pick = r.argmax().view(1)
-            rows.append(r)
-            picks.append(pick)
-        sc = torch.stack(rows)                                                  # [S, k]
-        pr = torch.softmax(sc, -1)
-        top2 = torch.topk(pr, 2, -1)
-        tok = ids.gather(1, top2.indices)
-        return torch.stack([tok[:, 0].float(), top2.values[:, 0], tok[:, 1].float(), top2.values[:, 1]], 1)
+        """The greedy walk on the device: [slots, 4] fp32 rows (token, the softmax of its score over its
+        slot's row, the row's second token, its softmax). Slot 1's row is `start`, every later slot's the
+        row of `pairs` its predecessor's pick selects."""
+        rows, pick = [start], start.argmax().view(1)
+        for s in range(ids.shape[0] - 1):
+            nxt = pairs[s].index_select(0, pick)[0]
+            pick = nxt.argmax().view(1)
+            rows.append(nxt)
+        prob = torch.softmax(torch.stack(rows), -1)                                   # [S, k]
+        two = torch.topk(prob, 2, -1)
+        tok = ids.gather(1, two.indices)
+        return torch.stack([tok[:, 0].float(), two.values[:, 0], tok[:, 1].float(), two.values[:, 1]], 1)
 
     def draft(self, anchor, pos0, ck, cv, ctx_ok, anchor_g, anchor_ok=1.0) -> torch.Tensor:
-        """The block, the target's head on its rows 1.., the candidates, the lattice and the walk:
+        """The block, the target's head on its rows 1 .., the candidates, the lattice and the walk:
         [slots, 4] on the device (`walk`)."""
-        hid = self.block(anchor, pos0, ck, cv, ctx_ok)
-        ids, logp = self.candidates(self.head(hid[1:]))
-        start, pairs = self.lattice(ids, logp, hid[1:], anchor_g, anchor_ok)
+        rows = self.block(anchor, pos0, ck, cv, ctx_ok)[1:]
+        ids, logp = self.candidates(self.head(rows))
+        start, pairs = self.lattice(ids, logp, rows, anchor_g, anchor_ok)
         return self.walk(ids, start, pairs)
 
 

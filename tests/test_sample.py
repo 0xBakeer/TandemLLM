@@ -241,7 +241,7 @@ def test_temperature_zero_is_the_argmax():
 
 
 def test_temperature_zero_is_greedy_whatever_top_p_and_top_k_say():
-    # OpenAI and vLLM both read `temperature: 0` as greedy, and a client that sends a top-p beside
+    # OpenAI reads `temperature: 0` as greedy, and a client that sends a top-p beside
     # it means "greedy". The engine read it as sampling ON with no temperature division, so
     # `{"temperature": 0, "top_p": 0.95}` sampled the RAW logits -- and skipped the response cache,
     # which only runs when the sampler is off.
@@ -369,7 +369,7 @@ def test_min_p_keeps_the_tokens_above_the_fraction_of_the_top():
     assert keep.tolist() == [True, True, True, False]
     assert torch.allclose(p, torch.where(keep, ref, torch.zeros_like(ref)) / ref[keep].sum(),
                           atol=1e-6), p
-    # after the temperature, like vLLM: at 0.5 the row is [4, 2, 0, -6] and token 2 falls out
+    # after the temperature: at 0.5 the row is [4, 2, 0, -6] and token 2 falls out
     p = Sampler(temperature=0.5, min_p=0.1).probs_rows(row[None])[0]
     assert p[2] == 0.0 and p[3] == 0.0 and p[1] > 0.0
 

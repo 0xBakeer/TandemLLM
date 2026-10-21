@@ -1,7 +1,7 @@
 """One record per request: the single source of its usage, its timings and its ledger row.
 
 Open WebUI shows nothing under an answer unless the stream carries `usage`, and it shows speed only
-when it carries llama.cpp's `timings` (Open WebUI 0.11.3). The numbers were all in
+when it carries a `timings` object (Open WebUI 0.11.3). The numbers were all in
 the server already -- the `[req]` line printed most of them -- but in four places and computed
 four ways. `RequestRecord` is filled as the request runs and everything that reports on a request
 reads it: the usage JSON here, the Prometheus observations and the ledger row.
@@ -16,8 +16,8 @@ THE TIME POINTS, all `time.perf_counter()`:
 
 so `queue_ms = t_lock - t_arrival`, `prompt_ms = t_first - t_lock` and `ttft_ms` is exactly their
 sum. `predicted_per_second` is `(completion_tokens - 1) / predicted_ms`: the atlas row's divisor
-and the `[req]` line's `committed/decode_ms`. llama.cpp divides by `predicted_n` instead; the
-first token is the prefill's, not decode's, so this engine does not.
+and the `[req]` line's `committed/decode_ms`, not `predicted_n`: the first token is the
+prefill's, not decode's.
 
 EXACTNESS. `completion_tokens` counts the ids the engine committed -- the generator yields
 committed tokens only, so a drafted-and-rejected token can never be counted -- with the EOS
@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import time
 
-# The timings keys, in order: llama.cpp's names and meanings first (tools/server/server-common.cpp
-# in llama.cpp), then this engine's own. Open WebUI prints every one of them in its tooltip.
+# The timings keys, in order: the shape's common names and meanings first, then this engine's own.
+# Open WebUI prints every one of them in its tooltip.
 LLAMA_KEYS = ("cache_n", "prompt_n", "prompt_ms", "prompt_per_token_ms", "prompt_per_second",
               "predicted_n", "predicted_ms", "predicted_per_token_ms", "predicted_per_second",
               "draft_n", "draft_n_accepted")
@@ -350,7 +350,7 @@ class RequestRecord:
 
     # ----------------------------------------------------------------- the three objects
     def usage(self) -> dict:
-        """VLLM's usage, the details included."""
+        """The OpenAI usage object, the details included."""
         p, c = int(self.prompt_tokens or 0), int(self.completion_tokens)
         details = {"cached_tokens": self.client_cached}
         if self.hidden_prompt:
@@ -401,7 +401,7 @@ class RequestRecord:
         return client_cached_of(self, self.cached_tokens)
 
     def timings(self) -> dict:
-        """Llama.cpp's `timings`, the one speed shape Open WebUI displays, plus the engine's keys."""
+        """The `timings` object, the one speed shape Open WebUI displays, plus the engine's keys."""
         n = self.forwarded
         pms = self.prompt_ms or 0.0
         dms = self.predicted_ms or 0.0
@@ -427,8 +427,8 @@ class RequestRecord:
         }
 
     def metrics(self) -> dict:
-        """VLLM 0.29's per-response `metrics` object. Open WebUI does not read it; vLLM-aware
-        clients do."""
+        """The per-response `metrics` object some OpenAI-compatible clients read; Open WebUI does
+        not."""
         total = self.total_ms or 0.0
         return {
             "time_to_first_token_ms": _r(self.ttft_ms),
@@ -511,7 +511,7 @@ def placement(body: dict, stream: bool, default_on: bool) -> str:
     `include_usage` only when a model's "Usage" capability is ticked, which it is not on the base
     models -- hence the default: with no `stream_options` the finish chunk carries it (a chunk
     with a non-empty `choices`, so a client that indexes `choices[0]` is safe), with
-    `include_usage: true` the separate `choices: []` chunk does, as vLLM sends it, and an explicit
+    `include_usage: true` the separate `choices: []` chunk does, as OpenAI sends it, and an explicit
     `include_usage: false` gets nothing.
     """
     if not stream:

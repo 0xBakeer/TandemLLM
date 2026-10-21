@@ -8,8 +8,7 @@ One step of the head reads the trunk's final normed row h_t and the next token t
   x = x + moe(norm_1(x))                               the latent MoE block with its own router
   o = final_layernorm(x); logits = lm_head(o)          the trunk's head: the token at t+2
 
-One native depth; deeper drafts iterate the step on its own output (o and the drafted token), as
-exllamav3's `nemotronh_mtp.py` does. The head's KV is a view of the caches (`views`), so a restore
+One native depth; deeper drafts iterate the step on its own output (o and the drafted token). The head's KV is a view of the caches (`views`), so a restore
 or a rollback covers it. It drafts only: every drafted token is verified by the trunk, so the head's
 arithmetic (torch, eager) never reaches the text.
 """

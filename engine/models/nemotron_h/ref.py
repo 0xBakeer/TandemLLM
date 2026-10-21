@@ -22,7 +22,7 @@ with (mamba_ssm's `selective_state_update`, `causal_conv1d_update`, the gated `r
   gated norm    y * silu(z) in fp32, RMS over groups of inner / n_groups, times `w` in fp32, one
                 rounding (`norm_before_gate=False`)
   dt            no clamp (`time_step_limit` [0, inf]; transformers' torch path clamps at
-                `time_step_min`, its CUDA path and vLLM do not)
+                `time_step_min`, its CUDA path does not)
   attention     no positional encoding (NoPE), scale 1/sqrt(head_dim), softmax in fp32
   router        logits fp32 from fp32 weights, sigmoid, the correction bias for the choice only, top k
                 (ties to the lower id), the chosen sigmoids / (sum + 1e-20) x routed_scaling_factor

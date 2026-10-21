@@ -51,6 +51,11 @@ same bits as the copy. kernels.py's entry names SRV-673's bytes, LFM2.5's engine
   * LFM2.5's hold 0.13.0's fp4;
   * NemotronH's MTP head (engine/models/nemotron_h/mtp.py) is in no manifest: it drafts only.
 
+OPS-225: comments and docstrings in files of the 27B's, Flash-Next's, Ornith's and NemotronH's manifests, one
+refusal message, and the 27B's DFlash2 grouped convolution written again with the same bits:
+
+  * the 27B's v2 and v3 are 0.9.x's with the entries; every model adopts what main stored before it.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -115,13 +120,16 @@ def test_the_entry_names_this_loader_and_keeps_the_27bs_code_fingerprint():
 
 
 #: SRV-619: engine/grammar.py changed after 0.9 without changing a stored row (a mask on the sampled
-#: token); it is in no model's manifest, so fp4 is untouched, and v2's engine walk reads its 0.9 bytes
-AFTER_09 = {k: v for k, v in mf.SAME_ROWS.items() if k[0] == "engine/grammar.py"}
+#: token); it is in no model's manifest, so fp4 is untouched, and v2's engine walk reads its 0.9 bytes.
+#: OPS-225: comments in the 27B's files (and dflash2.py's grouped convolution, the same bits); v2 and v3
+#: read them as the bytes they replaced
+OPS225 = ("engine/drafters/dflash2.py", "engine/penalty.py", "engine/sample.py", "tools/nvfp4_linear_v2.py")
+AFTER_09 = {k: v for k, v in mf.SAME_ROWS.items() if k[0] == "engine/grammar.py" or k[0] in OPS225}
 
 
 def test_the_27bs_code_fingerprints_are_0_9s():
     v2 = dc.fingerprint(ROOT, {}, skip=sp.NOT_ARITHMETIC, same=AFTER_09)
-    v3 = mf.fingerprint(ROOT, M27, {})
+    v3 = mf.fingerprint(ROOT, M27, {}, same=AFTER_09)
     assert v2.startswith(V2_09), v2
     assert v3.startswith(FP4_09["27b"]), v3
     return f"v2 {v2[:16]}, fp4 {v3[:16]}"
@@ -307,6 +315,27 @@ def test_srv681_ornith_and_lfm25_adopt_their_files():
         out.append(f"{name} {'+'.join(want)}")
     nh = [os.path.relpath(p, ROOT) for p in mf.files(ROOT, nh_serving.manifest())]
     assert "engine/models/nemotron_h/mtp.py" not in nh, nh
+    return ", ".join(out)
+
+
+#: OPS-225: the fp4 of main before it (d4b1d00a, extra {}), by model; LFM2.5's files did not change
+FP4_BEFORE_OPS225 = {"27b": "432dc8e260606f4c", "flashnext": "492e25cc1bf371fa", "ornith": "0b551608c6114eae",
+                     "nemotron_h": "3b249057dcfb562b"}
+
+
+def test_ops225_every_model_adopts_the_files_before_it():
+    """OPS-225 changed comments in files of four models' manifests (and the 27B's DFlash2 grouped
+    convolution, the same bits): with the entries a start adopts what the tree before stored."""
+    from engine.models.nemotron_h import serving as nh_serving
+    from engine.models.qwen3_5_moe import serving as q_serving
+    out = []
+    for name, m in (("27b", M27), ("flashnext", fn_serving.manifest()), ("ornith", q_serving.manifest()),
+                    ("nemotron_h", nh_serving.manifest())):
+        want = FP4_BEFORE_OPS225[name]
+        assert not mf.fingerprint(ROOT, m, {}).startswith(want), (name, "the files are the old tree's: drop the entries")
+        got = [mf.fingerprint(ROOT, m, {}, same=s)[:16] for s in mf.same_variants(ROOT, m)]
+        assert want in got, (name, want, got[:8])
+        out.append(f"{name} {want}")
     return ", ".join(out)
 
 

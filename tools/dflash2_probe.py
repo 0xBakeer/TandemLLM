@@ -107,7 +107,7 @@ def main() -> int:
     check(near_one, "norm weights sit near 1.0, so the weight is the whole scale",
           "  ".join(f"{n.split('.')[-2]}={v:+.3f}" for n, v in means.items()))
     print("       a `(1 + w)` checkpoint would have these near 0.0; they are not, and the "
-          "reference\n       imports Qwen3RMSNorm while sglang initialises this weight to ones.")
+          "reference\n       imports Qwen3RMSNorm, whose weight is initialised to ones.")
 
     # ---------------------------------------------------------------- 3. conv
     print("\n3. grouped dynamic conv")

@@ -1,4 +1,4 @@
-"""A NemotronH GGUF (llama.cpp's `nemotron_h_moe`, NVIDIA's Bolt IQ2 release) into the engine's forms.
+"""A NemotronH GGUF (GGUF architecture `nemotron_h_moe`, NVIDIA's Bolt IQ2 release) into the engine's forms.
 
 The config comes from the GGUF's own metadata (`config_from_gguf`): a layer is attention where its
 `attention.head_count_kv` entry is non-zero, MoE where its `feed_forward_length` entry is, Mamba2
@@ -12,13 +12,13 @@ Tensors, by type:
   IQ2_XXS 2-D        an `IQ2Linear` (tools/iq2_linear.py): decoded on the fly by its own kernel
   IQ2_XXS experts    an `IQ2Bank` when both the up and the down stack are IQ2_XXS
   NVFP4 2-D          an `NVFP4Linear` with the tensor's scale (`<name>.scale`, Bolt's Mamba2 in_proj and
-                     out_proj) applied to the fp32 sum, as llama.cpp's build_lora_mm does
+                     out_proj) applied to the fp32 sum of the matmul
   F32 / F16 / BF16   as bf16 (fp32 for the router's bias, A, dt_bias, D)
   Q8_0 2-D           a `Q8Linear` (the head, the attention and latent projections) on its tile kernel; the
                      embedding dequantised to bf16 at load (the twin, bit for bit with gguf-py), a row a token
   any other type     refused by name (GGUFFile.open): one kernel per type found in a release
 
-llama.cpp stores some Mamba2 tensors in its own forms: `ssm_a` is A itself (-exp(A_log)), `ssm_d` and
+The GGUF format stores some Mamba2 tensors in its own forms: `ssm_a` is A itself (-exp(A_log)), `ssm_d` and
 `ssm_a` are [heads, 1], `ssm_norm` is [groups, group size], `ssm_conv1d` is [conv_dim, K]; they are put
 back in the checkpoint's shapes, A kept as A (`mixer.A`, which the engine reads before A_log).
 """

@@ -69,6 +69,12 @@ FORMULA = "fp4"
 #: (SRV-673's differ from 0.13.0's only after a one-row block). engine/models/lfm2_moe/engine.py's prompt
 #: chunks attend over the KV heads as they are the same way (`chunk_attention`); its output equalled the
 #: copy's bit for bit at Hq 32, Hk 8, D 64 for chunks of 1 to 600 rows after 0 to 5,000 cached rows
+#: OPS-225: comments and docstrings that named other inference engines reworded, no code change (each
+#: file's AST without its docstrings equals the replaced bytes'), in engine/drafters/dflash2.py,
+#: engine/penalty.py, engine/sample.py, engine/models/flashnext/ref.py, engine/models/nemotron_h/{engine,
+#: gguf, gguf_load, ref}.py and tools/nvfp4_linear_v2.py; tools/iq2_linear.py's refusal message for a scale
+#: byte 0xFF reworded; dflash2.py's `_grouped_conv` written again from its formula, whose outputs equal the
+#: replaced function's bit for bit on the CPU and the GPU (fp32, bf16, fp16; 1 to 4 taps; one and two blocks)
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -96,6 +102,28 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              "c7fbee9ad0f1526b7c30df798e8c178c3a2185244ab7a2b29e44eed5ffe50749",
              ("engine/models/flashnext/ref.py", "497c681a0b2e8d33e45a3bb2d4f565b5983ca2edc9da021619048bdb258267c4"):
              "f814ce162695f81e1ff8d7b80eb8c90619837f99e6cebb35f10bcb39983bf3f4",
+             # OPS-225: the files' code unchanged (comments, docstrings, one message); dflash2.py's
+             # grouped convolution the same bits
+             ("engine/drafters/dflash2.py", "62e399ac5e844be6aff9ea49a00da435e379547333ed1e8d02df9c29e9b46f30"):
+             "a371ec2d68005675666fe7613365f9e0b93ae5e1ac5f5e7c8fa78bf8abdcf095",
+             ("engine/penalty.py", "afc9c329b1598b40e091a225eceb6123b2284bf4388cdcd5285c7731da9735d7"):
+             "963b17f583fb80639345702142fe4dac14f9b3dfbe20274e0908d69a20dfebf2",
+             ("engine/sample.py", "8996932fd6652b60a1e7688a478b99d089592e764889e98affc96f1a53e127f3"):
+             "8b14156ed6f3fd858ed6949e69ffcc51830efd03d7291370f3f17a3ce9f0b1bf",
+             ("tools/nvfp4_linear_v2.py", "9b63f4295a0de60c1b1bb49398ef4a2212da93621ae55da9e50b2771000fdf2d"):
+             "6d1277865066910afa61f4ef34d1312677fc6eeaa2e1612d0866c498d1752c5e",
+             ("engine/models/flashnext/ref.py", "78207bf3ffa9bac8dc3e59d3dab3b52999c39b54210cd389a103c98ae66e69ea"):
+             "497c681a0b2e8d33e45a3bb2d4f565b5983ca2edc9da021619048bdb258267c4",
+             ("engine/models/nemotron_h/engine.py", "d124dfdad22a4fdba21385a480d64cc64aeeebc1b95afad49ea189098d5119b0"):
+             "fc05d2ea1ebaa234e26b4385f115e590de7404b68ffc17d0b1d212066b826277",
+             ("engine/models/nemotron_h/gguf.py", "4dde9b6bb626cccc0521533313f31a848b31894430d4f84fe1b5abfb02705d96"):
+             "0af3421c894d88be3b1dc657ec629a4c2853586e51ef71c33f51c02e6f87a91b",
+             ("engine/models/nemotron_h/gguf_load.py", "cd515152dfbb7216fecae20d2f38b3bc3c21cb789a755d04d052be9d3f0136af"):
+             "2e6b8c98a0cc24c93a1a6f11b343590502120b50318064bc392733637f470805",
+             ("engine/models/nemotron_h/ref.py", "9543b02c3e1ba3d0e1292b3742d3b738c145f91ea361e99e1155f18cfeb3d864"):
+             "c1cceb15d0a89d59892a7e1373e232895fd1507dee87139c2bf04e39d066f294",
+             ("tools/iq2_linear.py", "70a766dbf8775e6292ca7aa05051264101e9560ba5b197f87ac1d74cfad761c1"):
+             "863ea0a0fbf36d26d621b5f3467cb6463f26459ee221b6085f59d5acff1e22c0",
              ("engine/models/qwen3_5_moe/engine.py", "77fa0e939417f8a7a3f4402b9e65f9804544f91adbcf752e19c4a055e28b5520"):
              "78fcdad2522b216c6d7f07c7cca8a6a065a79104231544eb01a8e60c839044fd",
              ("engine/models/qwen3_5_moe/kernels.py", "2bc18f6e41b6f483360c5e0215e5df6f30da5ea254bfed026d212164dfc66331"):

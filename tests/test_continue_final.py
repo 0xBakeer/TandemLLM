@@ -86,7 +86,7 @@ def test_other_shapes_render_as_before():
         assert text.endswith(gen_tail) and in_think, (body_extra, repr(text[-80:]))
     text, in_think = _text({"messages": base})
     assert text.endswith(gen_tail) and in_think
-    # vLLM's explicit form continues too
+    # the explicit `continue_final_message` form continues too
     body = {"messages": base + [{"role": "assistant", "content": PARTIAL}],
             "continue_final_message": True, "add_generation_prompt": False}
     assert app.continues_final(body) and _text(body)[0].endswith(PARTIAL)

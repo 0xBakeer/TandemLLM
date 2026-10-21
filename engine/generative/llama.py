@@ -3,7 +3,7 @@
 MiniCPM5-2B and -1B are `LlamaForCausalLM` checkpoints (MiniCPM5-2B's config.json: 42 layers,
 hidden 2,048, 16 query heads and 2 KV heads of 128, MLP 6,144, rope theta 5e6 without scaling, an
 untied head, vocabulary 130,560, BF16). This file is the whole forward: no transformers model, no
-SGLang or vLLM, nothing beside the engine but these tensors.
+other runtime, nothing beside the engine but these tensors.
 
 The arithmetic is transformers' `LlamaForCausalLM` (5.x) step for step, so that greedy text is the
 reference's on the same weights (tests/test_narrator.py compares the logits with transformers' own

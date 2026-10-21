@@ -1,9 +1,8 @@
 """LiLiCorr (SPD-123) on tiny random models: the NemotronH engine's taps (a verify row's taps are the decode
 step's, the ring after a commit is the ring after the decode steps, a prompt chunk's rows land at their
 positions, the graphs write what the eager steps write, the self-check holds them), the drafter's
-arithmetic against an fp32 reference written here from vLLM's `LiLiCorrHead.score` / `forward` and
-llama.cpp's `src/models/dflash.cpp` (the block with its window, sinks and dynamic convolution, the lattice,
-the walk), its NVFP4 checkpoint reader, and the head's context ring (incremental feed, the window, a new
+arithmetic against an fp32 reference written here from the drafter's definition (the block with its
+window, sinks and dynamic convolution, the lattice, the walk), its NVFP4 checkpoint reader, and the head's context ring (incremental feed, the window, a new
 sequence). On the GPU, or on the CPU under TRITON_INTERPRET=1 (the engine's kernels)."""
 
 from __future__ import annotations
@@ -335,110 +334,103 @@ def _rmsn(x, w, eps=1e-6):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * w
 
 
+def _ref_conv(h, coef, base, c):
+    """y[t] = sum over taps j <= t of (base[j] + coef[t, j] per group) * h[t - j], within the block."""
+    B, taps = h.shape[0], c.conv_kernel_size
+    k = base[None] + coef.repeat_interleave(c.conv_group_size, -1)       # [B, taps, H]
+    y = torch.zeros_like(h)
+    for j in range(taps):
+        y[j:] = y[j:] + k[j:, j] * h[:B - j]
+    return y
+
+
 def ref_block(W, c, embed, anchor, n, ctx_pos, ctx_taps):
-    """The block in fp32 (llama.cpp's graph): context rows at `ctx_pos` with their taps; every query row
-    sees the context keys within its window and the whole block; a sink logit a head."""
+    """The block in fp32 from the drafter's definition: context rows at `ctx_pos` with their taps; a
+    block row sees the context keys within its window and every block row, and one sink logit a head
+    joins each softmax's denominator. Returns (the final normed rows, g)."""
     B, nh, nkv, D = c.block_size, c.num_attention_heads, c.num_key_value_heads, c.head_dim
-    gsz, taps = c.conv_group_size, c.conv_kernel_size
     g = _rmsn(ctx_taps.reshape(len(ctx_pos), -1) @ W["fc.weight"].T, W["hidden_norm.weight"])
     x = embed[torch.tensor([anchor] + [c.mask_token_id] * (B - 1))]
     qpos = torch.arange(n, n + B)
-
-    def conv(h, coef, base):
-        # out[t] = sum over taps of (coef[t, tap, group(ch)] + base[tap, ch]) * h[t - tap], inside the block
-        out = torch.zeros_like(h)
-        for t in range(B):
-            for tap in range(taps):
-                if t - tap >= 0:
-                    w = coef[t, tap].repeat_interleave(gsz) + base[tap]
-                    out[t] += w * h[t - tap]
-        return out
+    kpos = torch.cat([ctx_pos, qpos])
+    in_window = (qpos[:, None] - ctx_pos[None, :]) < c.window                # [B, C]
+    seen = torch.cat([in_window, torch.ones(B, B, dtype=torch.bool)], 1)       # [B, C + B]
     for i in range(c.num_hidden_layers):
         p = f"layers.{i}."
-        xn = _rmsn(x, W[p + "input_layernorm.weight"])
-        coef = (xn @ W[p + "attention_conv.kernel_projection.weight"].T).view(B, 2, taps, -1)
-        base = W[p + "attention_conv.base_kernel"]
-        xn = conv(xn, coef[:, 0], base[0])
-        q = _rmsn((xn @ W[p + "self_attn.q_proj.weight"].T).view(B, nh, D), W[p + "self_attn.q_norm.weight"])
-        k = _rmsn((xn @ W[p + "self_attn.k_proj.weight"].T).view(B, nkv, D), W[p + "self_attn.k_norm.weight"])
-        v = (xn @ W[p + "self_attn.v_proj.weight"].T).view(B, nkv, D)
-        ck = _rmsn((g @ W[p + "self_attn.k_proj.weight"].T).view(-1, nkv, D), W[p + "self_attn.k_norm.weight"])
-        cv = (g @ W[p + "self_attn.v_proj.weight"].T).view(-1, nkv, D)
-        q = _rope(q.transpose(0, 1), qpos, c.rope_theta)                       # [nh, B, D]
-        keys = torch.cat([_rope(ck.transpose(0, 1), ctx_pos, c.rope_theta), _rope(k.transpose(0, 1), qpos, c.rope_theta)], 1)
-        vals = torch.cat([cv.transpose(0, 1), v.transpose(0, 1)], 1)
-        kpos = torch.cat([ctx_pos, qpos])
-        is_ctx = torch.cat([torch.ones(len(ctx_pos), dtype=torch.bool), torch.zeros(B, dtype=torch.bool)])
-        o = torch.zeros(B, nh, D)
-        for hh in range(nh):
-            kv = hh // (nh // nkv)
-            for r in range(B):
-                vis = ~is_ctx | (qpos[r] - kpos < c.window)
-                s = (keys[kv][vis] @ q[hh, r]) / math.sqrt(D)
-                s = torch.cat([s, W[p + "self_attn.attention_sink_bias"][hh].view(1)])
-                pr = torch.softmax(s, 0)[:-1]
-                o[r, hh] = pr @ vals[kv][vis]
-        o = o.reshape(B, -1) @ W[p + "self_attn.o_proj.weight"].T
-        o = conv(o, coef[:, 1], base[1])
-        x = x + o
-        xn = _rmsn(x, W[p + "post_attention_layernorm.weight"])
-        coef = (xn @ W[p + "mlp_conv.kernel_projection.weight"].T).view(B, 2, taps, -1)
-        base = W[p + "mlp_conv.base_kernel"]
-        xn = conv(xn, coef[:, 0], base[0])
-        y = (F.silu(xn @ W[p + "mlp.gate_proj.weight"].T) * (xn @ W[p + "mlp.up_proj.weight"].T)) @ W[p + "mlp.down_proj.weight"].T
-        x = x + conv(y, coef[:, 1], base[1])
+
+        def coefs(h, side):
+            return (h @ W[p + side + ".kernel_projection.weight"].T).view(B, 2, c.conv_kernel_size, -1)
+        h = _rmsn(x, W[p + "input_layernorm.weight"])
+        ca = coefs(h, "attention_conv")
+        h = _ref_conv(h, ca[:, 0], W[p + "attention_conv.base_kernel"][0], c)
+        proj = {s: h @ W[p + f"self_attn.{s}_proj.weight"].T for s in "qkv"}
+        q = _rope(_rmsn(proj["q"].view(B, nh, D), W[p + "self_attn.q_norm.weight"]).transpose(0, 1), qpos, c.rope_theta)
+        ctx_k = _rmsn((g @ W[p + "self_attn.k_proj.weight"].T).view(-1, nkv, D), W[p + "self_attn.k_norm.weight"])
+        blk_k = _rmsn(proj["k"].view(B, nkv, D), W[p + "self_attn.k_norm.weight"])
+        keys = _rope(torch.cat([ctx_k, blk_k]).transpose(0, 1), kpos, c.rope_theta)           # [nkv, C + B, D]
+        vals = torch.cat([(g @ W[p + "self_attn.v_proj.weight"].T).view(-1, nkv, D),
+                          proj["v"].view(B, nkv, D)]).transpose(0, 1)
+        kv_of = torch.arange(nh) // (nh // nkv)
+        logits = torch.einsum("hbd,hkd->hbk", q, keys[kv_of]) / math.sqrt(D)
+        logits = logits.masked_fill(~seen[None], float("-inf"))
+        sink = W[p + "self_attn.attention_sink_bias"].view(nh, 1, 1).expand(nh, B, 1)
+        prob = torch.softmax(torch.cat([logits, sink], -1), -1)[..., :-1]
+        o = torch.einsum("hbk,hkd->bhd", prob, vals[kv_of]).reshape(B, -1) @ W[p + "self_attn.o_proj.weight"].T
+        x = x + _ref_conv(o, ca[:, 1], W[p + "attention_conv.base_kernel"][1], c)
+        h = _rmsn(x, W[p + "post_attention_layernorm.weight"])
+        cm = coefs(h, "mlp_conv")
+        h = _ref_conv(h, cm[:, 0], W[p + "mlp_conv.base_kernel"][0], c)
+        y = (F.silu(h @ W[p + "mlp.gate_proj.weight"].T) * (h @ W[p + "mlp.up_proj.weight"].T)) @ W[p + "mlp.down_proj.weight"].T
+        x = x + _ref_conv(y, cm[:, 1], W[p + "mlp_conv.base_kernel"][1], c)
     return _rmsn(x, W["norm.weight"]), g
 
 
 def ref_lattice(W, c, embed, ids, logp, pass_hidden, anchor_g):
-    """vLLM's `LiLiCorrHead.score` and `forward` for one sequence, fp32, the concatenated factor input."""
+    """The lattice's scores in fp32 from the drafter's definition, one sequence: (start [k],
+    pairs [slots - 1, k, k]); the factor's input as one concatenation [x, a, x * a]."""
     S, T, Hc = ids.shape[0], c.topk, c.lc_hidden
-    q = "lilicorr."
+    n = S * T
 
     def lin(x, name):
-        return x @ W[name + ".weight"].T + W[name + ".bias"]
-    x = lin(embed[ids], q + "token_proj") + lin(pass_hidden, q + "pass_hidden_proj").unsqueeze(-2)
-    rank = torch.arange(T, dtype=torch.float32) / (T - 1)
+        return x @ W["lilicorr." + name + ".weight"].T + W["lilicorr." + name + ".bias"]
+    rank = torch.arange(T, dtype=torch.float32)
     feats = torch.stack([logp, logp.exp(), logp - logp.max(-1, keepdim=True).values,
-                         rank.expand_as(logp), (torch.arange(T) == 0).float().expand_as(logp)], -1)
-    feats = F.layer_norm(feats, (5,), W[q + "feature_norm.weight"], W[q + "feature_norm.bias"])
-    x = x + lin(F.silu(lin(feats, q + "feature_mlp.up_proj")), q + "feature_mlp.down_proj")
-    x = x + W[q + "slot_embedding"][0, 0, :S] + W[q + "rank_embedding"][0, 0]
-    x = x.reshape(S * T, Hc)
-    n = S * T
-    bias = torch.zeros(c.lc_heads, n, n)
-    for a in range(n):
-        for b in range(n):
-            sa, sb = a // T, b // T
-            bias[:, a, b] = W[q + "relative_slot_bias"][:, sa - sb + c.block_size - 1] + (W[q + "same_slot_bias"] if sa == sb else 0)
+                         (rank / (T - 1)).expand_as(logp), (rank == 0).float().expand_as(logp)], -1)
+    feats = F.layer_norm(feats, (5,), W["lilicorr.feature_norm.weight"], W["lilicorr.feature_norm.bias"])
+    x = (lin(embed[ids], "token_proj") + lin(pass_hidden, "pass_hidden_proj")[:, None]
+         + lin(F.silu(lin(feats, "feature_mlp.up_proj")), "feature_mlp.down_proj")
+         + W["lilicorr.slot_embedding"][0, 0, :S] + W["lilicorr.rank_embedding"][0, 0]).reshape(n, Hc)
+    slot = torch.arange(n) // T
+    dist = slot[:, None] - slot[None, :]
+    bias = W["lilicorr.relative_slot_bias"][:, dist + c.block_size - 1] \
+        + W["lilicorr.same_slot_bias"][:, None, None] * (dist == 0).float()[None]
     hd = Hc // c.lc_heads
     for j in range(c.lc_layers):
-        p = f"{q}layers.{j}."
-        y = _rmsn(x, W[p + "attn_norm.weight"])
-        qkv = y @ W[p + "attn.in_proj_weight"].T + W[p + "attn.in_proj_bias"]
-        qq, kk, vv = (t.view(n, c.lc_heads, hd).transpose(0, 1) for t in qkv.chunk(3, -1))
-        att = torch.softmax(qq @ kk.transpose(-1, -2) / math.sqrt(hd) + bias, -1) @ vv
+        p = f"layers.{j}."
+        qkv = _rmsn(x, W["lilicorr." + p + "attn_norm.weight"]) @ W["lilicorr." + p + "attn.in_proj_weight"].T \
+            + W["lilicorr." + p + "attn.in_proj_bias"]
+        q, k, v = (t.reshape(n, c.lc_heads, hd).transpose(0, 1) for t in qkv.split(Hc, -1))
+        att = torch.softmax(q @ k.transpose(1, 2) / math.sqrt(hd) + bias, -1) @ v
         x = x + lin(att.transpose(0, 1).reshape(n, Hc), p + "attn.out_proj")
-        x = x + lin(F.silu(lin(_rmsn(x, W[p + "mlp_norm.weight"]), p + "mlp.up_proj")), p + "mlp.down_proj")
-    x = _rmsn(x, W[q + "output_norm.weight"]).view(S, T, Hc)
-    a = _rmsn(lin(anchor_g.view(1, -1), q + "context_proj"), W[q + "anchor_norm.weight"])[0]
-    fh = F.silu(lin(torch.cat([x, a.expand_as(x), x * a], -1), q + "factor_input_proj"))
-    out = F.normalize(lin(fh, q + "out_head"), dim=-1, eps=c.vector_eps)
-    inn = F.normalize(lin(fh, q + "in_head"), dim=-1, eps=c.vector_eps)
-    ao = F.normalize(lin(a, q + "anchor_out_head"), dim=-1, eps=c.vector_eps)
-    start = c.logit_scale * (inn[0] * ao).sum(-1)
-    pairs = c.logit_scale * torch.einsum("sif,sjf->sij", out[:-1], inn[1:])
+        x = x + lin(F.silu(lin(_rmsn(x, W["lilicorr." + p + "mlp_norm.weight"]), p + "mlp.up_proj")), p + "mlp.down_proj")
+    x = _rmsn(x, W["lilicorr.output_norm.weight"]).view(S, T, Hc)
+    a = _rmsn(lin(anchor_g[None], "context_proj"), W["lilicorr.anchor_norm.weight"])[0]
+    factor = F.silu(lin(torch.cat([x, a.expand_as(x), x * a], -1), "factor_input_proj"))
+
+    def unit(v):
+        return v / v.norm(dim=-1, keepdim=True).clamp_min(c.vector_eps)
+    out, inn = unit(lin(factor, "out_head")), unit(lin(factor, "in_head"))
+    start = c.logit_scale * (inn[0] @ unit(lin(a, "anchor_out_head")))
+    pairs = c.logit_scale * (out[:-1] @ inn[1:].transpose(1, 2))
     return start, pairs
 
 
 def ref_walk(ids, start, pairs):
-    """llama.cpp's host walk: slot 1's best start, then the best given the previous pick."""
-    pick = int(start.argmax())
-    toks = [int(ids[0, pick])]
-    for s in range(pairs.shape[0]):
-        pick = int(pairs[s, pick].argmax())
-        toks.append(int(ids[s + 1, pick]))
-    return toks
+    """The greedy walk on the host: slot 1's best, then each slot's best given the previous pick."""
+    picks = [int(start.argmax())]
+    for row in pairs:
+        picks.append(int(row[picks[-1]].argmax()))
+    return [int(ids[s, j]) for s, j in enumerate(picks)]
 
 
 def _model(W, dtype, nvfp4: bool):

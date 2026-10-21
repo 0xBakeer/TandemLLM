@@ -542,7 +542,7 @@ class FlashNextRef:
         that follow them. Returns (logits [T, vocab] for the token after next, the MTP layer's
         own pre-mixer streams for the next draft step) and advances the MTP state `st`.
 
-        The input fusion follows the vLLM and SGLang Qwen4Exp MTP (they agree): one RMS norm
+        The input fusion follows the reference MTP's: one RMS norm
         (1 + w) over all hc*H values of the streams, `fc_hidden` shared by every stream, plus
         `fc_embedding(norm(embed(token)))` added to every stream; then one full-attention layer
         with QSA, MoE and hyper-connections, its own final mixer, and the shared head."""

@@ -5,15 +5,14 @@ token there is nothing in the decoder that can break the loop -- measured 2026-0
 Jump Bros" prompt whose pasted level rows are literal `" C C C …"` strings looped ~7,000 `C`
 tokens inside the reasoning block.
 
-The fix is the one vLLM and SGLang ship: penalties on the TARGET's logits, before the argmax.
+The fix is the standard one: penalties on the TARGET's logits, before the argmax.
 The property that makes that safe here is the one the whole engine already rests on --
 acceptance is everywhere "draft token == target argmax" -- so any deterministic function of the
 committed history applied to the row before argmax keeps the speculative path's output identical
-to the unspeculated one, *under the same rule*. vLLM applies penalties to the target logits before
-the rejection argmax (`v1/sample/rejection_sampler.py`); SGLang does the same in "a relaxed
-version" because its verifier is not argmax-exact. This one is exact:
+to the unspeculated one, *under the same rule*. A verifier that is not argmax-exact can only
+apply them approximately; this one is exact:
 
-  * chain blocks -- vLLM's per-position history: row i of `[anchor] + draft` is conditioned on
+  * chain blocks -- per-position history: row i of `[anchor] + draft` is conditioned on
     the committed history plus `draft[:i]`, so rows are penalized left to right, one draft token
     entering the working counts after the row that precedes it;
   * tree blocks -- ancestor history: a node is conditioned on its ANCESTOR PATH, not its
@@ -28,7 +27,7 @@ it produced before this file existed. The response cache key gains the three val
 greedy-under-penalties is a different function.
 
 `logit_bias` rides on the same machinery: OpenAI's `{token: bias}` added to every target
-row at every decision site, before the penalties (vLLM's order). It depends on nothing at all, so
+row at every decision site, before the penalties. It depends on nothing at all, so
 the argument above holds a fortiori -- every row, chain, tree or single, gets the same addition,
 and "draft == target argmax" stays the acceptance rule.
 
@@ -104,8 +103,8 @@ class PatternStop:
     if the tail is one block repeated `count` times, the generation ends (the server reports
     `finish_reason: "stop"` and annotates its log line). Tokens are never altered; the cost is
     `max_size * count` comparisons a block in pure Python, and the whole thing is off unless asked
-    for. This is vLLM's `RepetitionDetectionParams` shape (`max_pattern_size`, `min_pattern_size`,
-    `min_count`).
+    for. Its three parameters are the usual repetition-detection ones (`max_pattern_size`,
+    `min_pattern_size`, `min_count`).
     """
 
     def __init__(self, max_size: int = 0, min_size: int = 1, count: int = 0):

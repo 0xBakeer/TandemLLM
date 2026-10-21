@@ -1,9 +1,9 @@
-"""A NemotronH GGUF in llama.cpp's layout (`nemotron_h_moe`), written on the CPU with gguf-py from a tiny
+"""A NemotronH GGUF in the format's layout (`nemotron_h_moe`), written on the CPU with gguf-py from a tiny
 random model (IQ2_XXS experts and a 2-D IQ2_XXS weight from random blocks, a Q8_0 projection, Bolt's
-NVFP4 out_proj with its tensor scale, the rest F32/BF16 in llama.cpp's own Mamba2 forms): the reader's config equals the model's, the loader's engine
+NVFP4 out_proj with its tensor scale, the rest F32/BF16 in the format's own Mamba2 forms): the reader's config equals the model's, the loader's engine
 answers near the same model with the packed weights decoded by the twins (bf16 at load), and its
 load-time self-check passes (verify rows = decode steps bit for bit on the packed kernels). Skipped
-without gguf-py (with NVFP4: llama.cpp's, after GGML_TYPE_NVFP4 = 40), or without a GPU / TRITON_INTERPRET=1 for the engine part."""
+without gguf-py (with NVFP4: one that has GGUF type 40), or without a GPU / TRITON_INTERPRET=1 for the engine part."""
 
 from __future__ import annotations
 

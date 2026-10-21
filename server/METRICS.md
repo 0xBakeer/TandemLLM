@@ -8,8 +8,8 @@ it: `prometheus_client` is not on the board and the interpreter there has no pip
 curl -s localhost:8000/metrics | head -40
 ```
 
-Names carry a `qse_` prefix and follow vLLM's names where the quantity is the same one, so a
-dashboard written against vLLM needs a prefix change and not a rewrite. Units are in the name, and
+Names carry a `qse_` prefix and follow the common serving-metric names where the quantity is the
+same one, so an existing serving dashboard needs a prefix change and not a rewrite. Units are in the name, and
 they are seconds and bytes. The contract version is a label of `qse_engine_info`; it is `0.1.0` and
 it moves when a name, a label or a unit changes.
 
@@ -317,8 +317,8 @@ Two alerts are worth having before any dashboard: `rate(qse_errors_total[5m]) > 
 
 ## What is deliberately not here
 
-- **Batch size, KV utilisation, preemptions, swaps.** vLLM reports them because it has a
-  scheduler. This engine holds one sequence and has none of those states.
+- **Batch size, KV utilisation, preemptions, swaps.** A batching scheduler has them. This engine
+  holds one sequence and has none of those states.
   [docs/roadmap.md](../docs/roadmap.md) says what would have to be built first, and it adds the
   metrics it would need.
 - **Per-model and per-user labels.** One process serves one model, and a user label on a counter
@@ -357,7 +357,7 @@ forces, and counting those would put the accepted-tokens counter above the draft
 ## Per-response usage and timings
 
 Not a change to this page's names: the same numbers now travel with every response, so a client
-sees them without a scrape. Open WebUI prints the `usage` of a stream merged with its llama.cpp
+sees them without a scrape. Open WebUI prints the `usage` of a stream merged with its
 `timings` in its (i) tooltip, and adds the token counts of every chunk that carries `usage`,
 so exactly one chunk of a stream carries them (the finish chunk by default, the separate
 `choices: []` chunk when the client sent `include_usage: true`, none on `include_usage: false` or
@@ -388,7 +388,7 @@ consistent numbers.
 | `queue_ms` | arrival to the engine lock |
 | `prompt_ms` | the lock to the first token: template, tokenise, prefill. `ttft_ms = queue_ms + prompt_ms` |
 | `predicted_ms` | first token to last token |
-| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms`; llama.cpp divides by `predicted_n`; the first token is the prefill's |
+| `predicted_per_second` | `(completion_tokens - 1) / predicted_ms`, not `predicted_n`: the first token is the prefill's |
 | `total_ms` | arrival to the `[req]` line, which is logged just before the finish chunk is written |
 | `blocks`, `tokens_per_block` | forwards the decode loop paid (`BlockStats`), and `(completion_tokens - 1) / blocks` |
 | `draft_n`, `draft_n_accepted` | sums over the request's first-miss histogram: tokens proposed and kept |

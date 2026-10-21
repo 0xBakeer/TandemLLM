@@ -5054,7 +5054,7 @@ def continues_final(body: dict, messages: list | None = None) -> bool:
     story again from its title (chatcmpl-9ea66357: 1,613 new tokens, the saved answer twice). A
     last message from the assistant with text and no tool calls is continued: the template's
     `continue_final_message` leaves it open, after its closed (empty) think block, so no new turn
-    and no new reasoning. The body's `continue_final_message` (vLLM's name) or
+    and no new reasoning. The body's `continue_final_message` (the OpenAI-compatible field) or
     `add_generation_prompt` says otherwise when it is given."""
     explicit = body.get("continue_final_message")
     if isinstance(explicit, bool) and not explicit:
@@ -6013,7 +6013,7 @@ def _proxy_backends() -> list | None:
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "TandemLLM"
-    # 2026-10-05: no Nagle, as uvicorn's servers (vLLM, SGLang). The headers and the first frame
+    # 2026-10-05: no Nagle, as uvicorn's servers. The headers and the first frame
     # go out as two writes; on a keep-alive connection (the proxy's pool, an SDK's) Linux holds
     # the second for the reader's delayed ACK, up to 40 ms (the night pass measured that stall
     # on tests/fake_backend.py)
@@ -8752,7 +8752,7 @@ class Handler(BaseHTTPRequestHandler):
             opener = [OPEN_THINK + "\n"] if in_think and fmt in ("tags", "both") else []
             #, the same mistake with the other chunk: the role chunk went out before the
             # loop, and a client that stamps TTFT on the first chunk with a `choices` array
-            # (vLLM's bench client does, whatever the chunk holds) read the HTTP round trip. It
+            # (a common benchmark client does, whatever the chunk holds) read the HTTP round trip. It
             # now goes out in the same write as the first chunk after it -- the first text, or the
             # finish chunk of a stream that has none -- and is still the first chunk, unchanged.
             role = ([_chunk(cid, model, created, {"role": "assistant", "content": ""})]
@@ -9614,7 +9614,7 @@ def parser() -> argparse.ArgumentParser:
                     help="end a generation that repeats one short pattern forever, as MAX:MIN:COUNT "
                          "(e.g. 64:1:8 -- a block of 1..64 tokens repeated 8 times ends the "
                          "generation with finish_reason stop). The backstop for a greedy loop the "
-                         "penalties cannot break, vLLM's RepetitionDetectionParams; empty = off")
+                         "penalties cannot break; empty = off")
     ap.add_argument("--argloop", default="on", choices=("on", "log", "off"),
                     help="the tool-argument loop guard (server/argloop.py): `on` stops a held "
                          "tool call whose arguments loop and tells the model on its next turn; "

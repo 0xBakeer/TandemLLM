@@ -1,7 +1,7 @@
 """GGUF IQ2_XXS, NVFP4 and Q8_0 weights: the dequant twins from the format, and row-invariant GEMMs
 that decode the blocks on the fly.
 
-IQ2_XXS (ggml type 16, 2.0625 bits a weight): a block of 256 weights in 66 bytes, an fp16 scale `d` and
+IQ2_XXS (GGUF type 16, 2.0625 bits a weight): a block of 256 weights in 66 bytes, an fp16 scale `d` and
 eight groups of 32 weights, each group two u32 words:
 
   q0   four bytes, each an index into the 256-entry E8 lattice grid (`iq2xxs_grid`: 8 magnitudes of
@@ -11,27 +11,27 @@ eight groups of 32 weights, each group two u32 words:
 
   w = d * (0.5 + s) * 0.25 * grid[q0 byte l][j] * (sign bit j of ksigns[q1 >> 7 l] ? -1 : 1)
 
-in fp32 in that order (llama.cpp's `dequantize_row_iq2_xxs` and gguf-py's `IQ2_XXS.dequantize_blocks`;
-the grid and sign tables are ggml's, MIT). `dequant_iq2_xxs` is the twin; tests/test_iq2_kernels.py
+in fp32 in that order (the format's dequantisation, as gguf-py's `IQ2_XXS.dequantize_blocks`; the
+grid and sign tables are the format's constants, see NOTICE). `dequant_iq2_xxs` is the twin; tests/test_iq2_kernels.py
 holds it to gguf-py bit for bit. Q8_0 (type 8): 32 int8 with an fp16 scale, w = d * q.
 
-NVFP4 (ggml type 40, 4.5 bits a weight): a block of 64 weights in 36 bytes, four UE4M3 scales (one a
+NVFP4 (GGUF type 40, 4.5 bits a weight): a block of 64 weights in 36 bytes, four UE4M3 scales (one a
 sub-block of 16) and 32 bytes of E2M1 codes; byte j of sub-block s holds weight 16 s + j in its low
 nibble and 16 s + j + 8 in its high one:
 
   w = kvalues[code] * ue4m3(d[s])      kvalues = E2M1 doubled (0, 1, 2, 3, 4, 6, 8, 12, and negatives),
                                        ue4m3 = (1 + m / 8) 2^(e - 7) (m 2^-9 at e = 0, 0 at 0 and 0x7F) / 2
 
-(llama.cpp's `dequantize_row_nvfp4`, gguf-py's `NVFP4.dequantize_blocks`); every product is exact in fp32.
+(the format's dequantisation, as gguf-py's `NVFP4.dequantize_blocks`); every product is exact in fp32.
 A tensor may carry a per-tensor fp32 scale (`<name>.scale`, shape [1]: Bolt's Mamba2 in_proj and
-out_proj), which llama.cpp multiplies into the matmul's fp32 output (`build_lora_mm`); `NVFP4Linear`
-does the same before its one rounding.
+out_proj), which multiplies the matmul's fp32 output; `NVFP4Linear` applies it before its one
+rounding.
 
 These are the values of the checkpoints' NVFP4 (tools/nvfp4_linear.py's `NVFP4Block`: E2M1 codes, an
 E4M3 scale a group of 16, the per-tensor scale), since kvalues = 2 E2M1 and ue4m3 = E4M3 / 2, and the
 code nibbles mean the same values. `repack_nvfp4` moves a GGUF tensor into that layout without changing
 a value (the nibbles reordered to two consecutive weights a byte, the scale bytes kept with bit 7, which
-ggml does not read, cleared, and 0x7F, which ggml reads as zero, written as zero), so on the GPU the
+the format does not read, cleared, and 0x7F, which the format reads as zero, written as zero), so on the GPU the
 rows run on the 27B's row-invariant tensor-core kernel (tools/nvfp4_skinny.py) and a prompt chunk on
 `nvfp4_matmul`; the Triton GEMM below serves the CPU interpreter.
 
@@ -58,7 +58,7 @@ QK = 256
 BLOCK_BYTES = 66
 #: rows up to which a packed weight multiplies on its row-invariant kernel (the engine's ROWS_MAX)
 ROWS_MAX = 32
-# ggml's iq2xxs_grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
+# the format's IQ2_XXS grid, each entry's 8 magnitudes as 2-bit codes of (8, 25, 43), 16 bits an entry (hex,
 # little-endian u16s): the packing gguf-py uses
 _GRID_HEX = (
     b"00000200050008000a00110014002000220028002a0041004400500058006100"
@@ -140,12 +140,12 @@ def dequant_blocks(d: torch.Tensor, qs: torch.Tensor) -> torch.Tensor:
 
 NVFP4_QK = 64
 NVFP4_BLOCK_BYTES = 36
-#: E2M1 doubled (ggml's kvalues_mxfp4)
+#: E2M1 doubled (the format's FP4 value table)
 NVFP4_KVALUES = np.array([0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12], dtype=np.float32)
 
 
 def ue4m3_table() -> np.ndarray:
-    """ggml_ue4m3_to_fp32 of every byte (float32 [256]), the 0.5 of the kvalues convention included."""
+    """The format's UE4M3 scale of every byte (float32 [256]), the 0.5 of the kvalues convention included."""
     x = np.arange(256)
     e, m = (x >> 3) & 0xF, (x & 7).astype(np.float32)
     raw = np.where(e == 0, m * np.float32(2.0 ** -9), (1.0 + m / 8.0) * np.exp2(e - 7.0)).astype(np.float32)
@@ -406,7 +406,7 @@ def repack_nvfp4(raw: torch.Tensor, N: int, K: int, scale: float):
     b = raw.reshape(N, K // NVFP4_QK, NVFP4_BLOCK_BYTES)
     d = b[..., :4]
     if bool((d == 0xFF).any()):
-        raise ValueError("an NVFP4 scale byte 0xFF (480 in ggml) has no E4M3 value")
+        raise ValueError("an NVFP4 scale byte 0xFF (480 in the GGUF format) has no E4M3 value")
     d = torch.where((d & 0x7F) == 0x7F, torch.zeros_like(d), d & 0x7F)
     qs = b[..., 4:].reshape(N, -1, 4, 8)
     codes = torch.cat([qs & 0x0F, qs >> 4], -1).reshape(N, K // 2, 2)

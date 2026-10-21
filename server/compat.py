@@ -369,7 +369,7 @@ def structured_pattern(body: dict) -> str | None:
     """The regex a request constrains its answer to, or None.
 
     `response_format` `json_object` (any object, nested three deep) or `json_schema`; or the
-    engine's own `structured_outputs` (vLLM's field): `{"regex": ...}`, `{"choice": [...]}`,
+    engine's own `structured_outputs` field: `{"regex": ...}`, `{"choice": [...]}`,
     `{"json": <schema>}`. One constraint a request. The document alone: with tools offered,
     `answer_constraint` joins it with the calls (SRV-619).
     """
