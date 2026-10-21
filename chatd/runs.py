@@ -21,8 +21,9 @@ THE LOOP (Claude Code's; plan note Chat 7). One step is one model call:
    run that built or changed a web page or app checks it first (chatd/verify.py): the check is a
    call of the harness's own in that step, and the model reads its result in the next one.
 Limits: `max_steps` model calls (100; the run ends `interrupted` with a notice and Continue goes
-on), the same call with the same arguments three times in a row ends the run with a notice, and
-so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
+on), the same call with the same arguments three times in a row ends the run with a notice; many
+steps on the same few files whose checks show no change get one steering note, then end the run
+`interrupted` (chatd/stall.py, SRV-677); so does the same sandbox failure (no sandbox, not the command's own error) three calls in a row,
 whatever the calls were (live 2026-10-16: 28 calls with other arguments each answered
 `exec failed (404)`).
 
@@ -61,7 +62,7 @@ import re
 import threading
 import time
 
-from chatd import verify
+from chatd import stall as stall_mod, verify
 from chatd.engine import EngineError
 from chatd.ids import iso, now_ms, ulid
 
@@ -207,7 +208,9 @@ class Run:
         # the sandbox's own failures in a row (not the command's): three alike end the run
         self.sandbox_errors: collections.deque = collections.deque(maxlen=3)
         self.sandbox_stuck = False
-        self.interrupt: str | None = None      # why it ends `interrupted`: limit, sandbox (else engine)
+        # SRV-677: the stall rule (chatd/stall.py): the same few files edited, the same outcome
+        self.stall = stall_mod.Watch()
+        self.interrupt: str | None = None      # why it ends `interrupted`: limit, sandbox, stall (else engine)
         self.request_chars = 0
         self.request_images = 0                 # the request's images' tokens (not in the chars)
         self.request_est = 0
@@ -439,6 +442,9 @@ class Run:
             return self._stopped()
         if self.sandbox_stuck:                      # Continue goes on once the sandbox is back
             self.interrupt = "sandbox"
+            return "interrupted"
+        if self.stall.stop:                         # the run monitor: Continue goes on
+            self.interrupt = "stall"
             return "interrupted"
         if self.notice:                             # the same call three times in a row
             return "completed"

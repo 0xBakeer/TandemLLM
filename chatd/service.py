@@ -80,6 +80,9 @@ DEFAULT_SETTINGS = {
 }
 # `max`: a provider's own top level (DeepSeek: low, high, max), offered for its models only
 EFFORTS = ("auto", "low", "medium", "high", "xhigh", "max")
+#: interruptions that are a stop of the harness's own, not an error: the call cap (SRV-665) and
+#: the run monitor's stall rule (SRV-677); the chat reads idle and Continue goes on
+RESUMABLE = ("limit", "stall")
 EMPTY_UI = {"panes": [], "active": None, "split": 0.6}
 TITLE_NEW = "New chat"
 MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -468,8 +471,8 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
                 except ValueError:
                     stats = {}
             if branch[-1]["status"] == "interrupted" and (
-                    (stats or {}).get("interrupted") == "limit" or
-                    getattr(last, "interrupt", None) == "limit"):
+                    (stats or {}).get("interrupted") in RESUMABLE or
+                    getattr(last, "interrupt", None) in RESUMABLE):
                 return "idle"
             return "error"
         return "idle"
@@ -874,6 +877,12 @@ class Service(AgentMixin, PanesMixin, PreviewMixin, TerminalsMixin, SkillsMixin,
             run.agents = bool(settings.get("agents"))
         if continue_mid and conv.live["parts"] and (parent is not None or run.agents):
             self._cut_calls(conv, run)
+        kept = getattr(conv, "stall_watch", None)
+        if continue_mid and kept is not None and kept[0] == mid:
+            # SRV-677: Continue goes on with the answer's stall rule (its pace, its streak); a
+            # stop it made is spent, its level stays until a check makes progress
+            run.stall, run.stall.stop = kept[1], False
+        conv.stall_watch = (mid, run.stall)
         if continue_mid and conv.live["parts"]:
             last = conv.live["parts"][-1]
             run.step = max(int(p.get("step") or 1) for p in conv.live["parts"])

@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from chatd import compaction as comp
 from chatd import egress, render
+from chatd import stall as stall_mod
 from chatd import tools as tools_mod
 from chatd.ids import iso, now_ms, ulid
 from chatd.plans import PLAN_REFUSAL, PLAN_TOOLS
@@ -682,8 +683,28 @@ class AgentMixin:
             res.content = f"{ctx.note}\n{res.content}"
         if tool.sandbox:
             self._sandbox_streak(run, failure, res.content)
+        self._stall(run, tool.name, args, res)
         status = res.status or ("cancelled" if run.cancel.is_set() and run.stop_mode else None)
         self._finish_call(run, part, res, status=status, ctx=ctx)
+
+    def _stall(self, run, name: str, args: dict, res: Result) -> None:
+        """SRV-677: the run monitor's stall rule (chatd/stall.py). Its note goes into the result
+        as stored (the later requests render the same bytes); at its second level the run ends
+        after this step, resumable."""
+        try:
+            note = run.stall.observe(run.step, name, args, res.content, bool(res.is_error),
+                                     res.images)
+        except Exception as exc:                                    # noqa: BLE001
+            self.log(f"[stall] {run.conv.id} observe failed: {type(exc).__name__}")
+            return
+        if not note:
+            return
+        res.content += note
+        ev = run.stall.events[-1]
+        self.log(f"[stall] {run.conv.id} step {run.step}: {ev['level']} after {ev['steps']} "
+                 f"steps, {ev['checks']} checks, {len(ev['files'])} files (span {ev['span']})")
+        if run.stall.stop and not run.notice:
+            run.notice = stall_mod.stop_notice(ev)
 
     def _sandbox_streak(self, run, failure: str | None, words: str) -> None:
         """The same sandbox failure three calls in a row ends the run, whatever the calls were
