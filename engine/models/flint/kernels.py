@@ -171,6 +171,133 @@ if HAVE_TRITON:
         tl.store(N_OUT + r * N + o, (nrm.to(tl.float32) * w.to(tl.float32)).to(tl.bfloat16), mask=m)
 
 
+if HAVE_TRITON:
+
+    @triton.jit
+    def _moe_gemm(X, s_x, ROWS, BEXP, W, S, S2, F4, F8, Y, s_y, OUTROW, N: tl.constexpr, K: tl.constexpr,
+                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr, NVFP4: tl.constexpr, SCATTER: tl.constexpr,
+                  F32OUT: tl.constexpr):
+        # a block of BM rows of one expert (ROWS: the source row of each slot, -1 padding; BEXP: the block's
+        # expert, -1 an empty block) times that expert's weight [N, K]^T, BN outputs
+        b = tl.program_id(0)
+        nb = tl.program_id(1)
+        e = tl.load(BEXP + b)
+        if e >= 0:
+            slots = b * BM + tl.arange(0, BM)
+            rows = tl.load(ROWS + slots)
+            rm = rows >= 0
+            n = nb * BN + tl.arange(0, BN)
+            kk = tl.arange(0, BK)
+            acc = tl.zeros([BM, BN], dtype=tl.float32)
+            e64 = e.to(tl.int64)
+            for k0 in range(0, K, BK):
+                x = tl.load(X + tl.maximum(rows, 0)[:, None].to(tl.int64) * s_x + k0 + kk[None, :], mask=rm[:, None],
+                            other=0.0)
+                if NVFP4:
+                    j = tl.arange(0, BK // 2)
+                    byte = tl.load(W + e64 * (N * (K // 2)) + n[:, None] * (K // 2) + k0 // 2 + j[None, :]).to(tl.int32)
+                    lo = tl.load(F4 + (byte & 15))
+                    hi = tl.load(F4 + (byte >> 4))
+                    w = tl.reshape(tl.join(lo, hi), (BN, BK))
+                    g = tl.arange(0, BK // 16)
+                    sc = tl.load(F8 + tl.load(S + e64 * (N * (K // 16)) + n[:, None] * (K // 16) + k0 // 16 + g[None, :]).to(tl.int32))
+                    w = tl.reshape(tl.reshape(w, (BN, BK // 16, 16)) * sc[:, :, None], (BN, BK))
+                    w = (w * tl.load(S2 + e)).to(tl.bfloat16)
+                else:
+                    w = tl.load(W + e64 * (N * K) + n[:, None] * K + k0 + kk[None, :])
+                acc = tl.dot(x, tl.trans(w), acc=acc)
+            if SCATTER:
+                out = tl.load(OUTROW + slots)
+                tl.store(Y + tl.maximum(out, 0)[:, None].to(tl.int64) * s_y + n[None, :],
+                         acc.to(tl.bfloat16).to(tl.float32), mask=(out >= 0)[:, None])
+            else:
+                if F32OUT:
+                    tl.store(Y + slots[:, None].to(tl.int64) * s_y + n[None, :], acc)
+                else:
+                    tl.store(Y + slots[:, None].to(tl.int64) * s_y + n[None, :], acc.to(tl.bfloat16))
+
+
+#: rows a block of the grouped expert GEMM takes
+GROUP_BM = 64
+
+
+def group_plan(ids: torch.Tensor, E: int, bm: int = GROUP_BM) -> dict:
+    """The (row, slot) pairs of ids [T, S] sorted by expert into blocks of `bm` rows, on the device and with no
+    host sync: `rows` [slots] the pair's source row (-1 padding), `pair` [slots] the pair's index (-1 padding),
+    `bexp` [blocks] each block's expert (-1 past the last), sized for the worst case (every expert padded)."""
+    T, S = ids.shape
+    P = T * S
+    dev = ids.device
+    flat = ids.reshape(-1).long()
+    counts = torch.bincount(flat, minlength=E)
+    padded = (counts + bm - 1) // bm * bm
+    start = torch.cumsum(padded, 0) - padded
+    order = torch.argsort(flat, stable=True)
+    first = torch.cumsum(counts, 0) - counts
+    rank = torch.arange(P, device=dev) - first[flat[order]]
+    dest = start[flat[order]] + rank
+    nblk = (P + bm - 1) // bm + E
+    rows = torch.full((nblk * bm,), -1, dtype=torch.int64, device=dev)
+    pair = torch.full((nblk * bm,), -1, dtype=torch.int64, device=dev)
+    rows[dest] = order // S
+    pair[dest] = order
+    bexp = torch.full((nblk,), -1, dtype=torch.int32, device=dev)
+    blk_of_expert_end = torch.cumsum(padded, 0) // bm
+    blk = torch.arange(nblk, device=dev)
+    e_of_blk = torch.searchsorted(blk_of_expert_end, blk, right=True)
+    bexp = torch.where(e_of_blk < E, e_of_blk, -1).to(torch.int32)
+    return {"rows": rows, "pair": pair, "bexp": bexp, "nblk": nblk, "P": P}
+
+
+#: the grouped GEMM's tiles (BM rows of one expert, BN outputs, BK along K) and launch shape
+GROUP_CFG = {"BN": 64, "BK": 64, "warps": 4, "stages": 2}
+#: from 1,024 tokens a chunk: 128-row blocks (4,096 tokens x 6 slots of 256 NVFP4 experts on the Spark: 10.1 ms a
+#: layer against 15.5 with 64-row blocks; 32-row blocks 23.2)
+GROUP_CFG_WIDE = {"BM": 128, "BN": 128, "BK": 64, "warps": 8, "stages": 3}
+
+
+def moe_grouped_glu(x: torch.Tensor, ids: torch.Tensor, gu, dn, I: int, nvfp4: bool, E: int,
+                    cfg: dict | None = None) -> torch.Tensor:
+    """Every (row, slot) pair of a prompt chunk through its expert's SwiGLU in two grouped launches (no loop over
+    experts on the host): x [T, H] bf16, ids [T, S] -> yd [T S, H] fp32 (bf16 values, unweighted, pair order).
+    `gu` / `dn`: (W, S, S2) of an NVFP4 bank ([E, 2 I, H / 2] codes, e4m3 scale bytes, fp32 tensor scales) or the
+    BF16 stacks ([E, 2 I, H], [E, H, I])."""
+    T, H = x.shape
+    S = ids.shape[1]
+    cfg = cfg or (GROUP_CFG_WIDE if T >= 1024 else GROUP_CFG)
+    BM = cfg.get("BM", GROUP_BM)
+    pl = group_plan(ids, E, BM)
+    dev = x.device
+    f4 = fp4_table(dev) if nvfp4 else x
+    f8 = e4m3_table(dev) if nvfp4 else x
+    BN, BK, nw, ns = cfg["BN"], cfg["BK"], cfg["warps"], cfg["stages"]
+    nslots = pl["nblk"] * BM
+    ygu = torch.empty(nslots, 2 * I, dtype=torch.bfloat16, device=dev)
+    W, Sc, S2 = (gu if nvfp4 else (gu, x, x))
+    _moe_gemm[(pl["nblk"], 2 * I // BN)](x, x.stride(0), pl["rows"], pl["bexp"], W, Sc, S2, f4, f8, ygu, ygu.stride(0),
+                                        pl["rows"], N=2 * I, K=H, BM=BM, BN=BN, BK=BK, NVFP4=nvfp4, SCATTER=False,
+                                        F32OUT=False, num_warps=nw, num_stages=ns)
+    a = glu_act(ygu, I)
+    slots = torch.arange(nslots, device=dev)
+    srows = torch.where(pl["rows"] >= 0, slots, -1)
+    yd = torch.empty(T * S, H, dtype=torch.float32, device=dev)
+    W, Sc, S2 = (dn if nvfp4 else (dn, x, x))
+    _moe_gemm[(pl["nblk"], H // BN)](a, a.stride(0), srows, pl["bexp"], W, Sc, S2, f4, f8, yd, yd.stride(0),
+                                    pl["pair"], N=H, K=I, BM=BM, BN=BN, BK=BK, NVFP4=nvfp4, SCATTER=True, F32OUT=True,
+                                    num_warps=nw, num_stages=ns)
+    return yd
+
+
+def fp4_table(device):
+    from tools.nvfp4_relu2 import fp4_table as f
+    return f(device)
+
+
+def e4m3_table(device):
+    from tools.nvfp4_relu2 import e4m3_table as f
+    return f(device)
+
+
 def glu_act(gu: torch.Tensor, I: int, out: torch.Tensor | None = None) -> torch.Tensor:
     """gu [M, 2 I] bf16 (gate | up) -> bf16(bf16(silu(gate)) * up) [M, I] in one launch: the bits of
     `F.silu(gu[:, :I]) * gu[:, I:]` in bf16."""

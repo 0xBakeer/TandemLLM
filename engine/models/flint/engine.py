@@ -29,6 +29,7 @@ block or a capture writes past the length, so its memory does not grow with the 
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -46,6 +47,9 @@ PREFILL_CHUNK = 4096
 ROWS_MAX = 32
 #: rows a captured step, verify block or commit may write past the length (a block is at most 33 rows)
 CAPTURE_ROWS = 64
+#: SPD-144: a prompt chunk's BF16 and NVFP4 experts in two grouped launches (kernels.moe_grouped_glu); 0 = a loop
+#: over the experts on the host (each one's rows through cuBLAS)
+GROUPED = os.environ.get("QSE_FLINT_GROUPED", "1") != "0"
 #: the bit widths tools/fn_kernels.dense decodes (the half-integer rates as ten times the rate)
 DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
 
@@ -609,6 +613,8 @@ class FlintEngine(FlintRef):
     def _moe_bf16_chunk(self, n, ids, li):
         """The BF16 experts of a chunk: each expert once over its rows -> yd [T S, H] fp32."""
         e = self.experts[li]
+        if n.is_cuda and GROUPED:
+            return K.moe_grouped_glu(n, ids, e.w13, e.w2, e.I2 // 2, False, e.E)
         T, S = ids.shape
         I = e.I2 // 2
         flat = ids.reshape(-1).long()
@@ -627,6 +633,12 @@ class FlintEngine(FlintRef):
         return yd
 
     def _moe_nvfp4_chunk(self, n, ids, bank):
+        if n.is_cuda and GROUPED:
+            return K.moe_grouped_glu(n, ids, (bank.gw, bank.gs, bank.g2), (bank.dw, bank.ds, bank.d2), bank.I, True,
+                                     bank.E)
+        return self._moe_nvfp4_chunk_loop(n, ids, bank)
+
+    def _moe_nvfp4_chunk_loop(self, n, ids, bank):
         """An NVFP4 bank's experts over a chunk: each routed expert's rows through cuBLAS on its weights unpacked
         to bf16 (a few rows, the pair kernel) -> yd [T S, H] fp32."""
         T, S = ids.shape
