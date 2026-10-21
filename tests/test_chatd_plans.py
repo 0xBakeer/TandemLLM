@@ -113,6 +113,69 @@ def test_plan_mode_on_and_off_keeps_the_prompts_head():
         c.close()
 
 
+def _on_our_engine(c, budgets=None):
+    """The chat's model as our engine's card names it: backend engine, the effort levels' caps."""
+    info_of = c.svc.model_info
+
+    def model_info(mid):
+        info = dict(info_of(mid))
+        info.update(backend="engine", effort_budgets=budgets if budgets is not None else {
+            "low": 1024, "medium": 8192, "high": 16384, "xhigh": 0})
+        return info
+    c.svc.model_info = model_info
+
+
+def test_plan_mode_on_our_engine_keeps_the_effort_word():
+    """SRV-663's open item: plan mode sent `reasoning_effort: high` in place of the chat's word.
+    The Qwen3.8 template renders the word as the system turn's first sentence (`high` is no word
+    of the template: the server's default then), so on a chat at `low` or `medium` the turn into
+    plan mode and the turn after Approve changed the prompt's head. On our engine the chat's word
+    stays and plan mode asks for high's reasoning cap as a number, which the template never
+    renders; every request of the chat starts with the one before it, the fields the template
+    reads included."""
+    from server import thinking
+    for effort in ("low", "medium", "auto"):
+        c = Chat()
+        try:
+            _on_our_engine(c)
+            cid = c.new()
+            c.ok("PATCH", f"/conversations/{cid}/settings", {"effort": effort})
+            c.send(cid, "look around")
+            c.wait_idle(cid, 20)
+            c.ok("PATCH", f"/conversations/{cid}/settings", {"plan_mode": True})
+            c.send(cid, "plan it\n1. read the file\n2. change it")
+            c.wait_idle(cid, 20)
+            c.ok("POST", f"/conversations/{cid}/plan/approve", {"items": ["read", "change"]})
+            c.wait_idle(cid, 20)
+            reqs = requests(c)
+            assert len(reqs) >= 3, len(reqs)
+            word = None if effort == "auto" else effort
+            for k, b in enumerate(reqs):
+                if k:
+                    assert _prefix_kept(reqs[k - 1], b), f"request {k} rewrote the head"
+                assert b.get("reasoning_effort") == word, (effort, k, b.get("reasoning_effort"))
+                assert "chat_template_kwargs" not in b
+                # what the server hands the template: the same word in and out of plan mode
+                assert thinking.read(b).template_effort == (word if word != "auto" else None)
+            plan = reqs[1]
+            assert PLAN_RULE in plan["messages"][-1]["content"]
+            assert plan["max_reasoning_tokens"] == 16384
+            assert thinking.read(plan).budget == 16384
+            assert "max_reasoning_tokens" not in reqs[0] and "max_reasoning_tokens" not in reqs[-1]
+        finally:
+            c.close()
+    # a chat at high or more, or with thinking off, is left alone; a card with no caps: 16,384
+    from chatd.agent import PLAN_BUDGET, plan_effort
+    eng = {"backend": "engine", "effort_budgets": {}}
+    assert plan_effort({"plan_mode": True, "effort": "xhigh"}, eng) == \
+        {"plan_mode": True, "effort": "xhigh"}
+    assert plan_effort({"plan_mode": True, "thinking": False}, eng) == \
+        {"plan_mode": True, "thinking": False}
+    assert plan_effort({"plan_mode": True}, eng)["plan_budget"] == PLAN_BUDGET == 16384
+    # another backend keeps the word, as before
+    assert plan_effort({"plan_mode": True, "effort": "low"}, {"backend": "cloud"})["effort"] == "high"
+
+
 def test_approving_a_plan_makes_the_todo_list_and_runs_it():
     c = Chat()
     try:

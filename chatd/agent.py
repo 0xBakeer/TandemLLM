@@ -76,6 +76,30 @@ def too_long_words(est: int, window: int, path: list[dict], body: dict, ratio,
                    f"branch off before it, or start a new chat.")
 
 
+#: plan mode's reasoning cap where the model card names none (the router's `high` level)
+PLAN_BUDGET = 16384
+
+
+def plan_effort(settings: dict, info: dict) -> dict:
+    """The settings a plan-mode call is built with: it thinks at `high` at least.
+
+    On our engine as a reasoning budget (`plan_budget`, the card's `high` cap), never as a new
+    effort word: the Qwen3.8 template renders the word as the system turn's first sentence, so
+    a word that changed with the mode changed the prompt's head and the turn into plan mode and
+    the one after Approve read the whole conversation again (SRV-663's open item). The chat's own
+    word stays as it is. Another backend gets the word `high` as before (its own cache, its own
+    template). A chat at `high` or more, or with thinking off, is left as it is."""
+    if not settings.get("plan_mode") or not settings.get("thinking", True):
+        return settings
+    effort = settings.get("effort") or "auto"
+    if render.EFFORT_RANK.get(effort, 0) >= render.EFFORT_RANK["high"]:
+        return settings
+    if (info.get("backend") or "engine") != "engine":
+        return {**settings, "effort": "high"}
+    cap = (info.get("effort_budgets") or {}).get("high")
+    return {**settings, "plan_budget": int(cap) if cap else PLAN_BUDGET}
+
+
 def st_is_result(status: str | None) -> bool:
     """A call the model gets a result of: it ran (done, failed), not stopped or ignored."""
     return status in (None, "done", "failed")
@@ -793,9 +817,8 @@ class AgentMixin:
         """The body of the chat's next call as `request_for` builds it (the system block, the
         tools, the effort, the skills field), over the branch as it is: what the engine's cache
         peek renders (SRV-349). The head must be the next request's, or the peek finds nothing."""
-        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
-            settings = {**settings, "effort": "high"}
         info = self.model_info(settings.get("model"))
+        settings = plan_effort(settings, info)
         tools = self.tools_for(settings, info, conv.id, listing=False,
                                agents=bool(settings.get("agents")))
         return self._request(settings, info, tools, branch, self._compaction_for(conv.id, branch),
@@ -817,8 +840,6 @@ class AgentMixin:
                              "parts": [dict(p) for p in live["parts"]
                                                              if p.get("step", 1) < run.step or
                                                              run.continue_final]})
-        if settings.get("plan_mode") and settings.get("effort") not in ("xhigh",):
-            settings = {**settings, "effort": "high"}           # a plan turn thinks hard
         user = next((m for m in reversed(path) if m.get("role") == "user"), None)
         if user is not None and not render.text_of(user.get("parts") or []).strip() and \
                 not user.get("attachments"):
@@ -826,6 +847,7 @@ class AgentMixin:
             raise GuardError("The message is empty: nothing was sent to the model. Write the "
                              "message again, or attach a file.")
         info = self.model_info(settings.get("model"))
+        settings = plan_effort(settings, info)                  # a plan turn thinks hard
         tools = self.tools_for(settings, info, conv.id, agents=run.agents)
         head = self._head(conv, run, settings)
         schemas = [t.openai() for t in tools]

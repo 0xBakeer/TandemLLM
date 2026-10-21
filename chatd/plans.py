@@ -4,7 +4,8 @@
 PLAN MODE is a chat setting (`plan_mode`). The model may use the read tools (read_file, glob, grep,
 web_search, web_fetch, the library, present) and `todo_write`; it gets a line on the turn's user
 message that asks for a plan and no changes (`plan_onto`), and effort high unless the chat chose
-more. A call to any other tool is refused with "plan mode: read tools only" and the run goes on.
+more: on our engine as high's reasoning cap, the chat's effort word unchanged (the template renders
+the word in the system turn; chatd/agent.py `plan_effort`). A call to any other tool is refused with "plan mode: read tools only" and the run goes on.
 The request keeps the chat's whole tool list and system block (SRV-663): with them changed by the
 mode, the turn into plan mode and the one after Approve read the whole conversation again. Approve (`POST .../plan/approve`) takes the
 plan's items (the numbered or bulleted lines of the answer, or the list the user edited), makes

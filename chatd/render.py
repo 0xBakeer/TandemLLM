@@ -511,8 +511,12 @@ def body(model: str, settings: dict, branch: list[dict], *, system: str | None =
             out["reasoning_effort"] = effort_off
         else:
             out["chat_template_kwargs"] = {"enable_thinking": False}
-    elif effort != "auto":
-        out["reasoning_effort"] = nearest_effort(effort, levels)
+    else:
+        if effort != "auto":
+            out["reasoning_effort"] = nearest_effort(effort, levels)
+        if settings.get("plan_budget"):
+            # plan mode on our engine: a budget, not a word (chatd/agent.py `plan_effort`)
+            out["max_reasoning_tokens"] = int(settings["plan_budget"])
     if max_tokens:
         out["max_tokens"] = int(max_tokens)
     if continue_final and msgs and msgs[-1]["role"] == "assistant" and \
