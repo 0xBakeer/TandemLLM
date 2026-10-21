@@ -123,6 +123,8 @@ Ornith-1.5-122B, Ornith AI's agentic and coding model, runs from our EXL3 pack a
 |-|-|-|-|-|-|
 | `ornith-1.5-122b-exl3-4.0` (every projection 4 bits, head 6) | 64.6 GB | 0.139 | 86.2 % | 37.6 to 38.4 | 85.3 / 110.0 / 114.2 / 115.9 / 124.8 |
 
+![Decode speed of Ornith-1.5-122B on one DGX Spark, plain and with each draft head](docs/media/ornith-decode-speed.png)
+
 Every drafted text is the plain decode's. On the same pack the engine's top token agrees with exllamav3's own forward at 498 of 512 positions, so the two are close but not equal. [models/ornith-1.5-122b/measurements/0.13.0-summary.json](models/ornith-1.5-122b/measurements/0.13.0-summary.json) has the runs, DFlash2's row and what is not measured.
 
 ### Community weights
