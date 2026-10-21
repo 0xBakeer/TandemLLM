@@ -73,6 +73,8 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--head", default="nvfp4", choices=("nvfp4", "bf16"))
     ap.add_argument("--keep", default="", help="comma-separated parts left in BF16: attn, dense, shared, experts")
+    ap.add_argument("--stats", help="tools/flint_nvfp4_stats.py's activation statistics: the group scales minimise the "
+                    "activation-weighted error")
     ap.add_argument("--bf16-expert-layers", default="",
                     help="comma-separated layers whose routed experts stay BF16 (the top layers' massive activations)")
     a = ap.parse_args()
@@ -112,10 +114,26 @@ def main() -> None:
             flush()
 
     err_sum, err_n = 0.0, 0
+    stats = torch.load(a.stats) if a.stats else {}
+
+    def act_ms(g):
+        # the statistic of a group's input: the fused launch's (q/k/v, gate/up), an expert's own
+        k = g[0][len("model."):] if g[0].startswith("model.") else g[0]
+        if "." not in k:                       # the head
+            return stats.get(k + ".weight")
+        p, last = k.rsplit(".", 1)
+        if ".experts." in k:
+            return stats.get(p + (".gate_up" if last in ("gate_proj", "up_proj") else ".down"))
+        if last in ("q_proj", "k_proj", "v_proj"):
+            return stats.get(p + ".qkv")
+        if last in ("gate_proj", "up_proj"):
+            return stats.get(p + ".gate_up")
+        return stats.get(k + ".weight")
     for i, g in enumerate(gs):
         ws = [src.get(k + ".weight") for k in g]
         W = torch.cat(ws).cuda()
-        blk = quantize_clipped(W, None, ratios=CLIP_RATIOS)
+        ms = act_ms(g) if stats else None
+        blk = quantize_clipped(W, ms.cuda() + 1e-8 if ms is not None else None, ratios=CLIP_RATIOS)
         if i % 997 == 0:
             deq = blk.dequant().float()
             e = float(((deq - W.float()).pow(2).mean() / W.float().pow(2).mean()).sqrt())
@@ -142,7 +160,8 @@ def main() -> None:
         if os.path.isfile(os.path.join(a.model, f)):
             shutil.copy(os.path.join(a.model, f), os.path.join(a.out, f))
     raw["quantization_config"] = {"quant_method": "nvfp4", "group_size": 16, "scale_dtype": "float8_e4m3fn",
-                                  "tensor_scale": "fp32", "head": a.head, "bf16_parts": sorted(keep),
+                                  "tensor_scale": "fp32", "head": a.head,
+                                  "act_weighted": bool(stats), "bf16_parts": sorted(keep),
                                   "bf16_expert_layers": sorted(xl), "scales": "clip search, unweighted",
                                   "producer": "TandemLLM tools/flint_nvfp4.py"}
     json.dump(raw, open(os.path.join(a.out, "config.json"), "w"), indent=2)

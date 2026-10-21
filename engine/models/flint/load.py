@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import torch
@@ -75,6 +76,17 @@ def _fuse(W: dict, base: str, parts: tuple, names: list, fused: str, idx: PackIn
         W[base + fused] = torch.cat(ws).contiguous()
 
 
+#: Flint's own splits of tools/fn_kernels.dense for its EXL3 shapes (tools/fn_tiles.py --dense; a shape not in the file
+#: takes the kernel's default split): a split is a summation order, so the file is in the fingerprint (serving.TABLES)
+DENSE_SPLITS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                            "ops", "flint-dense-splits.json")
+
+
+def apply_splits(path: str = DENSE_SPLITS) -> int:
+    from engine.models.lfm2_moe.load import apply_splits as _apply
+    return _apply(path)
+
+
 def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackIndex | None = None):
     """(idx, W, experts, timing) of the checkpoint or pack at `path`."""
     t0 = time.time()
@@ -86,6 +98,8 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackInd
         idx.check_mul1()
     c = idx.cfg
     timing = {"index_s": round(time.time() - t0, 2), "notes": list(idx.notes)}
+    if idx.is_exl3 and str(device).startswith("cuda"):
+        timing["dense_splits"] = apply_splits()
     W: dict = {}
     t1 = time.time()
     fused_nvfp4 = {b for b, _, _ in projections(c, experts=False)

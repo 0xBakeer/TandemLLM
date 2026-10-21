@@ -236,12 +236,19 @@ def cmd_bundle(a) -> None:
     the converter's logits on the pack, 8 rows): our rows chunk by chunk through the prefill path's head
     (head="all"), then KL and top-1 agreement against the BF16 and against the converter."""
     from safetensors.torch import load_file
+
+    def one(path, key):
+        # this tool's bundles keep one stacked tensor; the converter's model_diff keeps `tensor.N` rows
+        d = load_file(path)
+        if key in d:
+            return d[key]
+        return torch.cat([d[f"tensor.{i}"] for i in range(len(d))])
     idx, eng, info = _engine(a.model, a.max_len)
-    ids = load_file(os.path.join(a.bundle, "input_ids.safetensors"))["input_ids"]
+    ids = one(os.path.join(a.bundle, "input_ids.safetensors"), "input_ids")
     refs = {}
     for name in sorted(os.listdir(a.bundle)):
         if name.startswith("logits_") and name.endswith(".safetensors"):
-            refs[name[len("logits_"):-len(".safetensors")]] = load_file(os.path.join(a.bundle, name))["logits"]
+            refs[name[len("logits_"):-len(".safetensors")]] = one(os.path.join(a.bundle, name), "logits")
     ids = ids.view(-1, ids.shape[-1])
     res = {"model": a.model, "rows": ids.shape[0], "length": ids.shape[1], "against": {}}
     ours = []

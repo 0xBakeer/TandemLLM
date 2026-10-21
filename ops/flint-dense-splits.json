@@ -1,0 +1,101 @@
+{
+ "_about": "Flint's dense EXL3 splits for tools/fn_kernels.dense / dense_rows, one entry a (N, Kin, bits) its 4.0 and 6.0 packs multiply by (tools/fn_tiles.py --dense, M = 1, cold ring, CUDA graph), one DGX Spark, 2026-10-22; applied by engine/models/flint/load.py",
+ "5120x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 24.94,
+  "us_exl3": 29.21,
+  "gb_s": 210.8
+ },
+ "2048x4096x4": {
+  "S": 2,
+  "warps": 8,
+  "us": 23.75,
+  "us_exl3": 24.12,
+  "gb_s": 177.2
+ },
+ "2048x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 12.94,
+  "us_exl3": 15.3,
+  "gb_s": 162.7
+ },
+ "2048x1024x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 8.33,
+  "us_exl3": 11.33,
+  "gb_s": 126.6
+ },
+ "12288x2048x4": {
+  "S": 1,
+  "warps": 8,
+  "us": 54.22,
+  "us_exl3": 62.09,
+  "gb_s": 232.6
+ },
+ "2048x6144x4": {
+  "S": 2,
+  "warps": 8,
+  "us": 31.86,
+  "us_exl3": 32.87,
+  "gb_s": 198.0
+ },
+ "150144x2048x5": {
+  "S": 1,
+  "warps": 4,
+  "us": 814.91,
+  "us_exl3": 807.27,
+  "gb_s": 236.2
+ },
+ "5120x2048x6": {
+  "S": 1,
+  "warps": 8,
+  "us": 35.46,
+  "us_exl3": 38.31,
+  "gb_s": 222.2
+ },
+ "2048x4096x6": {
+  "S": 2,
+  "warps": 4,
+  "us": 31.97,
+  "us_exl3": 32.77,
+  "gb_s": 197.2
+ },
+ "2048x2048x6": {
+  "S": 1,
+  "warps": 8,
+  "us": 17.48,
+  "us_exl3": 19.49,
+  "gb_s": 180.5
+ },
+ "2048x1024x6": {
+  "S": 1,
+  "warps": 8,
+  "us": 9.99,
+  "us_exl3": 13.07,
+  "gb_s": 158.0
+ },
+ "12288x2048x6": {
+  "S": 1,
+  "warps": 8,
+  "us": 80.58,
+  "us_exl3": 87.58,
+  "gb_s": 234.6
+ },
+ "2048x6144x6": {
+  "S": 4,
+  "warps": 4,
+  "us": 46.42,
+  "us_exl3": 46.15,
+  "gb_s": 203.6
+ },
+ "150144x2048x8": {
+  "S": 2,
+  "warps": 8,
+  "us": 1290.14,
+  "us_exl3": 1300.2,
+  "gb_s": 238.6
+ }
+}

@@ -42,8 +42,8 @@ MODEL_ID = "flint"
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
-#: the tables the arithmetic reads (none of its own: the dense kernels' default splits)
-TABLES: tuple = ()
+#: the tables the arithmetic reads (a dense split is a summation order)
+TABLES = ("ops/flint-dense-splits.json",)
 
 
 def manifest() -> Manifest:
