@@ -449,6 +449,7 @@ def lookup_drafter(srv: "FlintServing", path: str, corpus: str | None, log=print
     log(f"[server] Flint lookup drafter: corpus {(corpus or 'none') if ng.corpus is not None else 'none'}")
     d = MTPTreeDrafter(srv, NoHead(), StairCut(prices(path, log), siblings=False), ng)
     d.anchor_backoff = int(_S.get("FLINT_ANCHOR_BACKOFF") or 0)
+    d.look_backoff = int(_S.get("FLINT_LOOK_BACKOFF") or 0)
     return d
 
 

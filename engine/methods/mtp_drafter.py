@@ -113,6 +113,13 @@ class MTPTreeDrafter:
         self.anchor_backoff = 0
         self._anchor_streak = 0
         self._backoff_left = 0
+        # opt-in, no draft head (NoHead): after a round the lookup matched nothing or the cut kept the anchor alone,
+        # the next rounds take the plain step without looking (the lookup and the cut are host work on every
+        # token), 1, 2, 4 .. up to `look_backoff`; a round that drafts rows starts over. 0: off (Flint: on prose
+        # the lookup's rounds cost ~6 % of plain at 1.01 tokens a block, 2026-10-22)
+        self.look_backoff = 0
+        self._look_streak = 0
+        self._look_left = 0
 
     def report(self) -> str:
         """The verbose server's line at each request: rounds, draft ms, StairCut's prices and offset."""
@@ -289,9 +296,15 @@ class MTPTreeDrafter:
         if self.head.depth == 0:
             # no draft head (NoHead): a round the lookup has nothing for is the plain step, priced as
             # one, so the drafted rounds' price is learned from rounds that drafted
+            if self._look_left > 0:
+                self._look_left -= 1
+                self.pending = None
+                self.stats["skipped"] += 1
+                return None
             look = self._look(context)
             if look is None:
                 self.pending = None
+                self._look_miss()
                 return None
         rows, nexts = self.pending
         self.pending = None
@@ -313,6 +326,11 @@ class MTPTreeDrafter:
                 self._backoff_left = min(1 << (self._anchor_streak - 1), self.anchor_backoff)
             else:
                 self._anchor_streak = 0
+        if self.look_backoff and not self.head.depth:
+            if len(toks) <= 1:
+                self._look_miss()
+            else:
+                self._look_streak = 0
         # the draft's own cost: its host work on both sides of the stop, not the streaming between
         # (StairCut priced the gap as drafting and stopped drafting, 2026-10-11)
         # less the backlog's prime (rows a skipped round left: owed whether this round drafts or not);
@@ -341,6 +359,11 @@ class MTPTreeDrafter:
                                          or bool(self.cut.turn(self.cls, unfed, self.answer, extra)))
         if not self._turn:
             self.held, self.queue, self.pending = None, [], None
+
+    def _look_miss(self) -> None:
+        if self.look_backoff:
+            self._look_streak += 1
+            self._look_left = min(1 << (self._look_streak - 1), self.look_backoff)
 
     @property
     def plain_turn(self) -> bool:

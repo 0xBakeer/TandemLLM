@@ -356,6 +356,8 @@ KNOBS: dict[str, tuple] = {
     # step (1, 2, 4 .. up to this; 0 = off)
     'FLINT_LOOKUP': ('1', 'engine/models/flint/serving.py'),
     'FLINT_ANCHOR_BACKOFF': ('0', 'engine/models/flint/serving.py'),
+    # Flint: rounds after a lookup miss (or an anchor-only cut) that take the plain step without looking, 1, 2, 4 ..
+    'FLINT_LOOK_BACKOFF': ('0', 'engine/models/flint/serving.py'),
 }
 
 
