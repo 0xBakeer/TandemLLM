@@ -43,6 +43,14 @@ changed engine/models/qwen3_5_moe/engine.py and kernels.py; with their entries:
 
   * Ornith's legacy fingerprints hold 0.13.0's fp4.
 
+SRV-681: SRV-673's prompt attention took other bits on a block of one query row; such a block now runs as
+two rows and equals 0.13.0's copy, and LFM2.5's prompt chunks attend over the KV heads as they are with the
+same bits as the copy. kernels.py's entry names SRV-673's bytes, LFM2.5's engine.py's names 0.13.0's:
+
+  * Ornith's legacy fingerprints hold 0.13.0's fp4 and SRV-673's (main after batch B);
+  * LFM2.5's hold 0.13.0's fp4;
+  * NemotronH's MTP head (engine/models/nemotron_h/mtp.py) is in no manifest: it drafts only.
+
 Run: python tests/test_fp_same_rows.py
 """
 
@@ -84,6 +92,9 @@ FP4_LFM25_011 = "9049446866c5e4fc"
 FP4_0122 = {"flashnext": "dac45dfe10281b1e", "lfm25": "899978df1e8b979b", "nemotron_h": "8cfead8de4befc19"}
 #: SRV-673: Ornith-1.5-122B's fp4 of 0.13.0 (extra {}), before its prompt attention dropped the repeated KV
 FP4_0130_ORNITH = "78496db10e59d74d"
+#: SRV-681: Ornith's fp4 with SRV-673's kernels.py (main 14a0e045..878276c9), LFM2.5's of 0.13.0 (extra {})
+FP4_SRV673_ORNITH = "a42fa30073b4d606"
+FP4_0130_LFM25 = "c22eadcdddc0e12e"
 
 
 def _sha(path):
@@ -278,6 +289,25 @@ def test_ornith_adopts_0_13_0s_files():
     got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
     assert any(g.startswith(FP4_0130_ORNITH) for g in got), [g[:16] for g in got]
     return f"ornith {FP4_0130_ORNITH} among {len(got)} variants"
+
+
+def test_srv681_ornith_and_lfm25_adopt_their_files():
+    """SRV-681: Ornith adopts what 0.13.0 and SRV-673's tree stored, LFM2.5 what 0.13.0 stored; NemotronH's
+    MTP head is in no manifest, so its change moves no fingerprint."""
+    from engine.models.nemotron_h import serving as nh_serving
+    from engine.models.qwen3_5_moe import serving as q_serving
+    out = []
+    for name, m, want in (("ornith", q_serving.manifest(), (FP4_0130_ORNITH, FP4_SRV673_ORNITH)),
+                          ("lfm25", lfm_serving.manifest(), (FP4_0130_LFM25,))):
+        now = mf.fingerprint(ROOT, m, {})
+        got = [mf.fingerprint(ROOT, m, {}, same=s) for s in mf.same_variants(ROOT, m)]
+        for w in want:
+            assert not now.startswith(w), (name, "the files are the old tree's: drop the entry")
+            assert any(g.startswith(w) for g in got), (name, w, [g[:16] for g in got])
+        out.append(f"{name} {'+'.join(want)}")
+    nh = [os.path.relpath(p, ROOT) for p in mf.files(ROOT, nh_serving.manifest())]
+    assert "engine/models/nemotron_h/mtp.py" not in nh, nh
+    return ", ".join(out)
 
 
 if __name__ == "__main__":

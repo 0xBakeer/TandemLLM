@@ -24,6 +24,34 @@ import torch.nn.functional as F
 from engine.models.nemotron_h import kernels as K
 
 MTP_ROWS_KERNELS = 32
+#: whether SDPA's flash kernel takes the KV heads as they are on this device (None: not asked yet)
+FLASH_GQA = None
+
+
+def gqa_attention(qh: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor | None:
+    """The head's attention with the KV heads as they are (SRV-681): qh [1, Hq, T, D], k / v [1, Hk, S, D]
+    -> [1, Hq, T, D], the rows causal to the lower right, `enable_gqa` on the flash kernel, which SDPA
+    picks for the copy repeated per query head too: the same bits on the Spark (tests/test_prompt_gqa.py).
+    The copy wrote and read the head's context Hq / Hk = 16 times over at every step and prime. One row
+    runs as two, the row twice, with no mask (each sees every key, as the one row does), keeping the
+    second: with one query row the flash kernel folds the query heads into rows (another split, other
+    bits). None where flash refuses (the CPU, a device without it): the caller takes the repeated copy."""
+    global FLASH_GQA
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from torch.nn.attention.bias import causal_lower_right
+    T, S = qh.shape[2], k.shape[2]
+    if qh.shape[1] == k.shape[1] or not qh.is_cuda or FLASH_GQA is False:
+        return None
+    one = T == 1
+    try:
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            o = F.scaled_dot_product_attention(torch.cat([qh, qh], 2) if one else qh, k, v,
+                                               attn_mask=None if one else causal_lower_right(T, S), enable_gqa=True)
+    except RuntimeError:
+        FLASH_GQA = False
+        return None
+    FLASH_GQA = True
+    return o[:, :, 1:] if one else o
 
 
 class NemotronHMTPHead:
@@ -110,14 +138,17 @@ class NemotronHMTPHead:
         q = qkv[:, :Hq * D].reshape(T, Hq, D)
         self.st.k[:, pos0:pos0 + T] = qkv[:, Hq * D:(Hq + Hk) * D].reshape(T, Hk, D).transpose(0, 1)
         self.st.v[:, pos0:pos0 + T] = qkv[:, (Hq + Hk) * D:].reshape(T, Hk, D).transpose(0, 1)
-        k = self.st.k[:, :pos0 + T].unsqueeze(0).repeat_interleave(c.gqa, 1)
-        v = self.st.v[:, :pos0 + T].unsqueeze(0).repeat_interleave(c.gqa, 1)
-        if T == 1:
-            att = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k, v)
-        else:
-            from torch.nn.attention.bias import causal_lower_right
-            att = F.scaled_dot_product_attention(q.transpose(0, 1).unsqueeze(0), k, v,
-                                                 attn_mask=causal_lower_right(T, pos0 + T))
+        k = self.st.k[:, :pos0 + T].unsqueeze(0)
+        v = self.st.v[:, :pos0 + T].unsqueeze(0)
+        qh = q.transpose(0, 1).unsqueeze(0)
+        att = gqa_attention(qh, k, v)
+        if att is None:
+            k, v = k.repeat_interleave(c.gqa, 1), v.repeat_interleave(c.gqa, 1)
+            if T == 1:
+                att = F.scaled_dot_product_attention(qh, k, v)
+            else:
+                from torch.nn.attention.bias import causal_lower_right
+                att = F.scaled_dot_product_attention(qh, k, v, attn_mask=causal_lower_right(T, pos0 + T))
         x = x + e.mm(att[0].transpose(0, 1).reshape(T, -1), W[m + "o_proj.weight"])
         # block 1: the MoE
         n1 = e.rms(x, W["mtp.layers.1.norm.weight"])

@@ -61,6 +61,14 @@ FORMULA = "fp4"
 #: copy repeated per query head (still the path where flash refuses); on the Spark its output equalled the
 #: repeated copy's bit for bit (tests/test_q35m_kernels.py), and a 179,678-token request wrote the same
 #: text plain and drafted, before and after
+#: SRV-681: SRV-673's `prompt_attention` gave other bits for a block of one query row (a chunk of one row,
+#: or one of 1,025, 2,049 or 3,073 rows): with one row the flash kernel folds a KV head's query heads into
+#: rows. Such a block now runs as two rows, the row twice, and keeps the second; every block equals 0.13.0's
+#: repeated copy bit for bit on the Spark (tests/test_prompt_gqa.py, blocks of 1 to 128 rows, 0 to 3,000
+#: cached rows). The entry names SRV-673's bytes, which name 0.13.0's: a start adopts both trees' files
+#: (SRV-673's differ from 0.13.0's only after a one-row block). engine/models/lfm2_moe/engine.py's prompt
+#: chunks attend over the KV heads as they are the same way (`chunk_attention`); its output equalled the
+#: copy's bit for bit at Hq 32, Hk 8, D 64 for chunks of 1 to 600 rows after 0 to 5,000 cached rows
 #: Entries stay when their bytes are replaced again: a key may be another entry's replaced bytes, and
 #: `same_variants` follows the chain (ENG-341)
 SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9dfcad5ee4271f933d97"):
@@ -91,7 +99,11 @@ SAME_ROWS = {("engine/loader.py", "823f9dd4c230ec45d133b52e0a5edc0343098184526d9
              ("engine/models/qwen3_5_moe/engine.py", "77fa0e939417f8a7a3f4402b9e65f9804544f91adbcf752e19c4a055e28b5520"):
              "78fcdad2522b216c6d7f07c7cca8a6a065a79104231544eb01a8e60c839044fd",
              ("engine/models/qwen3_5_moe/kernels.py", "2bc18f6e41b6f483360c5e0215e5df6f30da5ea254bfed026d212164dfc66331"):
-             "d6fa493c51d8746cc8b5a974bbc5e636c034894ffbd86a8e2ef8b4caaf5487d7"}
+             "d6fa493c51d8746cc8b5a974bbc5e636c034894ffbd86a8e2ef8b4caaf5487d7",
+             ("engine/models/qwen3_5_moe/kernels.py", "2ecc9dcb27f12c9a9e4738e3ff9c58016e82039854680304adb22193321167cc"):
+             "2bc18f6e41b6f483360c5e0215e5df6f30da5ea254bfed026d212164dfc66331",
+             ("engine/models/lfm2_moe/engine.py", "ab1a6b3f3d1f73cf8b2ad336c5c486582a0683d94f35d456e9538f61bcc14eac"):
+             "76bfb598fee3b1d731a51bd4f4ceb4afc8bb30ee8388ed4ca9551de82d7d388b"}
 
 
 def adoption() -> str:

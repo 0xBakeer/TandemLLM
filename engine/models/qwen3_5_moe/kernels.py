@@ -163,7 +163,10 @@ def prompt_attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, L: int
     which SDPA picked on the Spark for the copy repeated per query head too: the same bits. The copy wrote and read
     the whole context Hq / Hk = 16 times over (SRV-673): at 174k tokens a 3-row MTP prime took 87 ms a
     layer against 6, a 1,024-row chunk 117 ms a layer against 70. Where the flash kernel refuses (no
-    such kernel on the device, the CPU), the repeated copy as before."""
+    such kernel on the device, the CPU), the repeated copy as before.
+    A block of one row runs as two, the row twice, with no mask (each sees every key, as the one row
+    does), and keeps the second (SRV-681): with one query row the flash kernel folds a KV head's query
+    heads into rows of one head, another split with other bits; two rows give the copy's bits."""
     global FLASH_GQA
     import torch.nn.functional as F
     from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -179,9 +182,14 @@ def prompt_attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, L: int
         mask = causal_lower_right(q1 - q0, L + q1)
         oo = None
         if HQ != HK and q.is_cuda and FLASH_GQA is not False:
+            one = q1 - q0 == 1
             try:
                 with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                    oo = F.scaled_dot_product_attention(qh, k, v, attn_mask=mask, enable_gqa=True)
+                    oo = F.scaled_dot_product_attention(torch.cat([qh, qh], 2) if one else qh, k, v,
+                                                        attn_mask=None if one else mask,
+                                                        enable_gqa=True)
+                if one:
+                    oo = oo[:, :, 1:]
                 FLASH_GQA = True
             except RuntimeError:
                 FLASH_GQA = False

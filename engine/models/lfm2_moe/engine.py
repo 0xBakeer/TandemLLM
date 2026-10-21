@@ -49,6 +49,36 @@ CAPTURE_ROWS = 64
 DENSE_K = (2, 3, 4, 5, 6, 8, 15, 25, 35)
 
 
+#: whether SDPA's flash kernel takes the KV heads as they are on this device (None: not asked yet)
+FLASH_GQA = None
+
+
+def chunk_attention(qh: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor | None:
+    """A prompt chunk's attention with the KV heads as they are (SRV-681): qh [1, Hq, T, D], k / v
+    [1, Hk, S, D] -> [1, Hq, T, D], SDPA with the lower-right causal mask and `enable_gqa` on the flash
+    kernel, which SDPA picks for the copy repeated per query head too: the same bits on the Spark
+    (tests/test_prompt_gqa.py). The copy wrote and read the context Hq / Hk = 4 times over. One query row
+    runs as two, the row twice, with no mask (each sees every key, as the one row does), keeping the
+    second: with one row the flash kernel folds the query heads into rows (another split, other bits).
+    None where flash refuses (the CPU, a device without it): the caller takes the repeated copy."""
+    global FLASH_GQA
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from torch.nn.attention.bias import causal_lower_right
+    T, S = qh.shape[2], k.shape[2]
+    if qh.shape[1] == k.shape[1] or not qh.is_cuda or FLASH_GQA is False:
+        return None
+    one = T == 1
+    try:
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            o = F.scaled_dot_product_attention(torch.cat([qh, qh], 2) if one else qh, k, v,
+                                               attn_mask=None if one else causal_lower_right(T, S), enable_gqa=True)
+    except RuntimeError:
+        FLASH_GQA = False
+        return None
+    FLASH_GQA = True
+    return o[:, :, 1:] if one else o
+
+
 def _is_exl3(w) -> bool:
     return not torch.is_tensor(w)
 
@@ -591,8 +621,10 @@ class Lfm2MoeEngine(Lfm2MoeRef):
         k = st.k[li][:, :L + T].unsqueeze(0)
         v = st.v[li][:, :L + T].unsqueeze(0)
         qh = q.transpose(0, 1).unsqueeze(0)                                  # [1, Hq, T, D]
-        o = F.scaled_dot_product_attention(qh, k.repeat_interleave(c.gqa, 1), v.repeat_interleave(c.gqa, 1),
-                                           attn_mask=causal_lower_right(T, L + T))
+        o = chunk_attention(qh, k, v)
+        if o is None:
+            o = F.scaled_dot_product_attention(qh, k.repeat_interleave(c.gqa, 1), v.repeat_interleave(c.gqa, 1),
+                                               attn_mask=causal_lower_right(T, L + T))
         o = o[0].transpose(0, 1).reshape(T, -1)
         return self.lin(o, self.W[a + "out_proj.weight"])
 
