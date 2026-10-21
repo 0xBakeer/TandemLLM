@@ -7,7 +7,8 @@ Both are safetensors shards with a `model.safetensors.index.json`. `PackIndex.op
   exl3     any other trellis-coded projection: `X.trellis` int16 [Kin/16, N/16, 16 K], `X.suh` / `X.svh`
            fp16 (or the packed sign fields `X.su` / `X.sv`), `X.mul1` (checked to be 0x83DCD12D)
   plain    everything else, as stored: a BF16 checkpoint's projections, the norms, the sink logits, the
-           router's `gate.weight`, the embedding
+           router's `gate.weight`, the embedding; an NVFP4 pack's projections (`X.weight` uint8, `X.weight_scale`
+           e4m3, `X.weight_scale_2` fp32: tools/flint_nvfp4.py)
 
 The layout and its checks are LFM2's (engine/models/lfm2_moe/pack.py); what differs is the names
 (`projections()`, `plain_names()`, the expert pattern) and the decode bytes (KV rows by layer kind: a
@@ -35,8 +36,8 @@ EXPERT_RE = re.compile(r"^layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj
 RATES = (1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 7, 8)
 EXL3_SUFFIX = ("trellis", "suh", "svh", "su", "sv", "mul1", "mcg")
 DT = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "I16": torch.int16,
-      "I32": torch.int32, "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8}
-DSIZE = {"BF16": 2, "F16": 2, "F32": 4, "I16": 2, "I32": 4, "I64": 8, "U8": 1, "I8": 1}
+      "I32": torch.int32, "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8, "F8_E4M3": torch.float8_e4m3fn}
+DSIZE = {"BF16": 2, "F16": 2, "F32": 4, "I16": 2, "I32": 4, "I64": 8, "U8": 1, "I8": 1, "F8_E4M3": 1}
 
 
 def safetensors_header(path: str) -> tuple[int, dict]:
@@ -134,6 +135,10 @@ class PackIndex:
     notes: list[str] = field(default_factory=list)
 
     @property
+    def is_nvfp4(self) -> bool:
+        return str(self.quant.get("quant_method", "")).lower() == "nvfp4"
+
+    @property
     def is_exl3(self) -> bool:
         return str(self.quant.get("quant_method", "")).lower() == "exl3" or any(
             t.name.endswith(".trellis") for t in self.tensors.values())
@@ -200,6 +205,13 @@ class PackIndex:
         for base, N, Kin in projections(c) + [("lm_head", c.vocab_size, c.hidden_size)]:
             if base + ".weight" in self.tensors:
                 t = self.tensors[base + ".weight"]
+                if t.dtype == "U8" and base + ".weight_scale" in self.tensors:
+                    # NVFP4: e2m1 codes two a byte, an e4m3 scale per 16 along K, an fp32 tensor scale
+                    sc = self.tensors[base + ".weight_scale"]
+                    if t.shape != (N, Kin // 2) or sc.shape != (N, Kin // 16) or base + ".weight_scale_2" not in self.tensors:
+                        raise ValueError(f"{base}: NVFP4 {t.shape} / {sc.shape} does not fit {(N, Kin)}")
+                    formats[base] = "nvfp4"
+                    continue
                 if t.shape != (N, Kin):
                     raise ValueError(f"{base}.weight {t.shape}: the config wants {(N, Kin)}")
                 formats[base] = "bf16" if t.dtype == "BF16" else t.dtype.lower()
@@ -269,7 +281,8 @@ class PackIndex:
     def proj_bytes(self, base: str) -> int:
         """Bytes of one projection as stored (its weight, or its trellis and channel factors)."""
         if base + ".weight" in self.tensors:
-            return self.tensors[base + ".weight"].nbytes
+            return self.tensors[base + ".weight"].nbytes + (self.tensors[base + ".weight_scale"].nbytes
+                                                            if base + ".weight_scale" in self.tensors else 0)
         return sum(self.tensors[base + "." + s].nbytes for s in ("trellis", "suh", "svh", "su", "sv")
                    if base + "." + s in self.tensors)
 

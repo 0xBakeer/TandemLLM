@@ -9,7 +9,9 @@
                      layers.L.mlp.shared_expert.gate_up   gate | up of the shared expert
   W["lm_head.weight"]  the pack's head (Flint's is untied)
   experts[L]       the routed experts of MoE layer L: LFM2's `ExpertsEXL3` (each projection's trellis,
-                   suh, svh, for the bank kernels) or `ExpertsBF16` (stacked [E, 2 I, H] / [E, H, I])
+                   suh, svh, for the bank kernels), `NVFP4GLUBank` (engine/models/flint/nvfp4.py) or `ExpertsBF16`
+                   (stacked [E, 2 I, H] / [E, H, I])
+  An NVFP4 pack's projections are tools/nvfp4_relu2.NVFP4Wide (the W4A16 kernels), fused groups one block.
 """
 
 from __future__ import annotations
@@ -27,14 +29,42 @@ def _plain(idx: PackIndex, name: str, device, dtype=torch.bfloat16) -> torch.Ten
     return t.to(device=device, dtype=dtype if t.is_floating_point() else t.dtype).contiguous()
 
 
+def _nvfp4_parts(idx: PackIndex, base: str):
+    """(codes, e4m3 scales, tensor scale) of an NVFP4 projection, host tensors as stored."""
+    return (idx.read(base + ".weight"), idx.read(base + ".weight_scale").view(torch.float8_e4m3fn),
+            float(idx.read(base + ".weight_scale_2").float().view(-1)[0]))
+
+
+def _nvfp4(idx: PackIndex, bases: list, device):
+    """One NVFP4 projection, or several sharing their input and tensor scale as one launch (rows concatenated)."""
+    from tools.nvfp4_linear import NVFP4Block
+    from tools.nvfp4_relu2 import NVFP4Wide
+    parts = [_nvfp4_parts(idx, b) for b in bases]
+    s2 = {p[2] for p in parts}
+    if len(s2) != 1:
+        raise ValueError(f"{bases}: NVFP4 members with different tensor scales cannot share a launch")
+    blk = NVFP4Block(torch.cat([p[0] for p in parts]).to(device), torch.cat([p[1] for p in parts]).to(device), s2.pop())
+    # the dense layers' and the shared experts' SwiGLU activations stay inside fp16 (|silu(g) u| up to 6.8e3 on
+    # 2,048-token text, the fp32 reference): no row scaling, which cost ~1 ms a decode step in small launches. The
+    # routed experts (up to 2.6e5) run on NVFP4GLUBank, fp32 throughout
+    return NVFP4Wide(blk, wide=False)
+
+
 def _proj(idx: PackIndex, base: str, device, dtype, out_fp32: bool = False):
     if idx.formats.get(base) == "exl3":
         return idx.exl3(base, device, out_fp32=out_fp32)
+    if idx.formats.get(base) == "nvfp4":
+        return _nvfp4(idx, [base], device)
     return _plain(idx, base + ".weight", device, dtype)
 
 
-def _fuse(W: dict, base: str, parts: tuple, names: list, fused: str) -> None:
+def _fuse(W: dict, base: str, parts: tuple, names: list, fused: str, idx: PackIndex | None = None, device=None) -> None:
     from tools.exl3_linear import EXL3Block
+    if idx is not None and all(idx.formats.get(base + x) == "nvfp4" for x in parts):
+        W[base + fused] = _nvfp4(idx, [base + x for x in parts], device)
+        for x in parts:                  # the engine reads the fused launch only
+            W.pop(base + x + ".weight", None)
+        return
     ws = [W[base + x + ".weight"] for x in parts]
     if all(isinstance(w, EXL3Block) for w in ws) and len({w.kb for w in ws}) == 1:
         g = EXL3Block.group(ws, names)
@@ -58,8 +88,11 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackInd
     timing = {"index_s": round(time.time() - t0, 2), "notes": list(idx.notes)}
     W: dict = {}
     t1 = time.time()
+    fused_nvfp4 = {b for b, _, _ in projections(c, experts=False)
+                   if idx.formats.get(b) == "nvfp4" and b.rsplit(".", 1)[1] in ("q_proj", "k_proj", "v_proj", "gate_proj", "up_proj")}
     for base, _, _ in projections(c, experts=False):
-        W[base + ".weight"] = _proj(idx, base, device, dtype)
+        if base not in fused_nvfp4:            # an NVFP4 member is read once, as its fused launch
+            W[base + ".weight"] = _proj(idx, base, device, dtype)
     for name, _ in plain_names(c):
         W[name] = _plain(idx, name, device, torch.float32 if name.endswith("softmax_offset") else dtype)
     for li in c.moe_layers:
@@ -70,17 +103,26 @@ def load(path: str, device="cuda", dtype=torch.bfloat16, log=print, idx: PackInd
     timing["dense_s"] = round(time.time() - t1, 2)
     for li in range(c.num_hidden_layers):
         p = f"layers.{li}."
-        _fuse(W, p + "self_attn.", ("q_proj", "k_proj", "v_proj"), ["q", "k", "v"], "qkv")
+        _fuse(W, p + "self_attn.", ("q_proj", "k_proj", "v_proj"), ["q", "k", "v"], "qkv", idx, device)
         if c.is_moe(li):
             if c.shared_expert_intermediate_size:
-                _fuse(W, p + "mlp.shared_expert.", ("gate_proj", "up_proj"), ["gate", "up"], "gate_up")
+                _fuse(W, p + "mlp.shared_expert.", ("gate_proj", "up_proj"), ["gate", "up"], "gate_up", idx, device)
         else:
-            _fuse(W, p + "mlp.", ("gate_proj", "up_proj"), ["gate", "up"], "gate_up")
+            _fuse(W, p + "mlp.", ("gate_proj", "up_proj"), ["gate", "up"], "gate_up", idx, device)
     t1 = time.time()
     experts: dict = {}
     for li in c.moe_layers:
         f = f"layers.{li}.mlp.experts."
-        if idx.formats.get(f + "0.gate_proj") == "exl3":
+        if idx.formats.get(f + "0.gate_proj") == "nvfp4":
+            from engine.models.flint.nvfp4 import NVFP4GLUBank
+            ex = []
+            for e in range(c.num_experts):
+                g, u, d = (_nvfp4_parts(idx, f + f"{e}.{w}") for w in ("gate_proj", "up_proj", "down_proj"))
+                if g[2] != u[2]:
+                    raise ValueError(f"{f}{e}: gate and up need one tensor scale")
+                ex.append(((g[0], g[1]), (u[0], u[1]), g[2], (d[0], d[1]), d[2]))
+            experts[li] = NVFP4GLUBank.stack(ex, device)
+        elif idx.formats.get(f + "0.gate_proj") == "exl3":
             experts[li] = ExpertsEXL3([tuple(idx.exl3(f + f"{e}.{w}", device) for w in ("gate_proj", "up_proj", "down_proj"))
                                        for e in range(c.num_experts)])
         else:

@@ -10,6 +10,7 @@
                                                                    bundle (input ids, BF16 logits and the
                                                                    converter's own logits on the pack): KL and
                                                                    top-1 agreement against each
+    $PY tools/flint_check.py mkbundle --model <bf16 dir> --out <ref>   such a bundle from this engine on BF16
     $PY tools/flint_check.py bench --model <dir>                   greedy decode tok/s on prose, code and chat
     $PY tools/flint_check.py staircase --model <dir>               verify ms for 1..16 rows, the experts a block
                                                                    reads, prefill tok/s
@@ -205,6 +206,31 @@ def cmd_bench(a) -> None:
         json.dump(res, open(a.json, "w"), indent=1)
 
 
+def cmd_mkbundle(a) -> None:
+    """A reference bundle from this engine on the BF16 checkpoint: `rows` rows of `length` tokens of held-out
+    text (bench/heldout_prose.txt, heldout_code.txt, calib.txt, cut where each row starts) and every position's
+    BF16 logits -- what `bundle` compares a pack against, without the converter."""
+    from safetensors.torch import save_file
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(a.model)
+    idx, eng, info = _engine(a.model, a.max_len)
+    root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bench")
+    ids = []
+    for f in ("heldout_prose.txt", "heldout_code.txt", "calib.txt"):
+        t = tok(open(os.path.join(root, f)).read(), add_special_tokens=False)["input_ids"]
+        ids += [t[i:i + a.length] for i in range(0, len(t) - a.length + 1, a.length)]
+    step = max(1, len(ids) // a.rows)
+    ids = torch.tensor(ids[::step][:a.rows])
+    logits = []
+    for r in range(ids.shape[0]):
+        st = eng.new_state(a.max_len)
+        logits.append(eng.prefill(ids[r], st, head="all").to(torch.bfloat16).cpu())
+    os.makedirs(a.out, exist_ok=True)
+    save_file({"input_ids": ids.contiguous()}, os.path.join(a.out, "input_ids.safetensors"))
+    save_file({"logits": torch.stack(logits).contiguous()}, os.path.join(a.out, "logits_bf16.safetensors"))
+    print(json.dumps({"rows": ids.shape[0], "length": ids.shape[1], "out": a.out}))
+
+
 def cmd_bundle(a) -> None:
     """The engine teacher-forced on a reference bundle (the conversion job's: input ids, the BF16 logits and
     the converter's logits on the pack, 8 rows): our rows chunk by chunk through the prefill path's head
@@ -351,6 +377,12 @@ def main() -> None:
     cp.add_argument("--a", required=True)
     cp.add_argument("--b", required=True)
     cp.add_argument("--json")
+    mb = sub.add_parser("mkbundle")
+    mb.add_argument("--model", required=True)
+    mb.add_argument("--out", required=True)
+    mb.add_argument("--rows", type=int, default=8)
+    mb.add_argument("--length", type=int, default=1024)
+    mb.add_argument("--max-len", type=int, default=4096)
     bu = sub.add_parser("bundle")
     bu.add_argument("--model", required=True)
     bu.add_argument("--bundle", required=True)
@@ -377,6 +409,7 @@ def main() -> None:
     pr.add_argument("--max-len", type=int, default=131072)
     a = ap.parse_args()
     {"cmp": cmd_cmp, "audit": cmd_audit, "prices": cmd_prices, "engine": cmd_engine, "bundle": cmd_bundle,
+     "mkbundle": cmd_mkbundle,
      "bench": cmd_bench, "staircase": cmd_staircase}[a.cmd](a)
 
 

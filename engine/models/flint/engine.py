@@ -57,7 +57,11 @@ def ring_rows(window: int) -> int:
 
 
 def _is_exl3(w) -> bool:
-    return not torch.is_tensor(w)
+    return hasattr(w, "kb")
+
+
+def _is_nvfp4_bank(e) -> bool:
+    return hasattr(e, "moe_glu")
 
 
 class _NoEvent:
@@ -150,6 +154,8 @@ class FlintEngine(FlintRef):
             else:
                 y = exl3_matmul(x2, w)
             return y.view(*x.shape[:-1], w.N)
+        if not torch.is_tensor(w):
+            return w.matmul(x2).view(*x.shape[:-1], w.N)      # NVFP4 (tools/nvfp4_relu2.NVFP4Wide)
         if x2.shape[0] <= ROWS_MAX:
             return LK.linear_rows(x2, w).view(*x.shape[:-1], w.shape[0])
         return F.linear(x2, w).view(*x.shape[:-1], w.shape[0])
@@ -166,6 +172,8 @@ class FlintEngine(FlintRef):
         from tools.exl3_linear import exl3_matmul
         w = self.head_weight()
         M = n.shape[0]
+        if not torch.is_tensor(w) and not _is_exl3(w):
+            return w.matmul(n, out=out, f32=True)                # NVFP4
         if _is_exl3(w):
             if not n.is_cuda:
                 y = torch.cat([exl3_matmul(n[i:i + 1], w) for i in range(M)]).float()
@@ -190,7 +198,9 @@ class FlintEngine(FlintRef):
         g16 = self._gate16.get(li)
         logits = FK.gemv(n, g16) if g16 is not None else LK.linear_rows(n, self._gate[li], f32=True)
         ids, wts = K.router(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps, scale=c.route_scale)
-        if li in self.banks:
+        if li in self.banks and _is_nvfp4_bank(self.banks[li]):
+            yd = self.banks[li].moe_glu(n, ids)
+        elif li in self.banks:
             yd = FK.moe_experts(n, ids, self.banks[li], order=self._order1 if n.shape[0] == 1 else None)
         else:
             e = self.experts[li]
@@ -533,7 +543,9 @@ class FlintEngine(FlintRef):
                 else:
                     ids, wts = K.router_reference(logits, self._bias.get(li), c.num_experts_per_tok, c.route_eps,
                                                   c.route_scale)
-                if li in self.banks:
+                if li in self.banks and _is_nvfp4_bank(self.banks[li]):
+                    yd = self._moe_nvfp4_chunk(n, ids, self.banks[li])
+                elif li in self.banks:
                     from tools import fn_prefill_kernels as PK
                     yd = PK.moe_grouped(n, ids, self.banks[li])
                 else:
@@ -611,6 +623,27 @@ class FlintEngine(FlintRef):
             x = n.index_select(0, pairs // S)
             gu = F.linear(x, e.w13[ex])
             yd[pairs] = F.linear(F.silu(gu[:, :I]) * gu[:, I:], e.w2[ex]).float()
+        return yd
+
+    def _moe_nvfp4_chunk(self, n, ids, bank):
+        """An NVFP4 bank's experts over a chunk: each routed expert's rows through cuBLAS on its weights unpacked
+        to bf16 (a few rows, the pair kernel) -> yd [T S, H] fp32."""
+        T, S = ids.shape
+        I = bank.I
+        flat = ids.reshape(-1).long()
+        yd = torch.empty(T * S, n.shape[1], dtype=torch.float32, device=n.device)
+        order = torch.argsort(flat, stable=True)
+        counts = torch.bincount(flat, minlength=bank.E).tolist()
+        o = 0
+        for ex, cnt in enumerate(counts):
+            if not cnt:
+                continue
+            pairs = order[o:o + cnt]
+            o += cnt
+            x = n.index_select(0, pairs // S)
+            gu_w, d_w = bank.expert_bf16(ex)
+            gu = F.linear(x, gu_w)
+            yd[pairs] = F.linear(F.silu(gu[:, :I]) * gu[:, I:], d_w).float()
         return yd
 
     # ------------------------------------------------------------------------- the load-time check
